@@ -25,7 +25,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply exact timing-quorum and Clippy repairs
+      - name: Apply exact source and documentation repairs
         shell: bash
         run: |
           set -euo pipefail
@@ -82,13 +82,66 @@ jobs:
                   raise SystemExit(f"Clippy replacement expected once, found {count}: {old!r}")
               text = text.replace(old, new)
           live.write_text(text)
+
+          changelog = Path("CHANGELOG.md")
+          text = changelog.read_text()
+          marker = "## 2026-09-01 — Wave 12: verifiable GQL certificates and proof-surface repair"
+          if marker in text:
+              raise SystemExit("wave 12 changelog entry already exists")
+          heading = "# Changelog\n\n"
+          if text.count(heading) != 1:
+              raise SystemExit("unexpected changelog heading shape")
+          entry = """## 2026-09-01 — Wave 12: verifiable GQL certificates and proof-surface repair
+
+### Delivered capability
+
+- GQL execution certificates now expose pure verification of the exact statement bytes, canonical relation bind, and MVCC snapshot they name.
+- Bound-plan certificates now verify an exact `BoundPlan` plus snapshot. Transcript v2 binds every current plan field, including `neq`, which the historical v1 transcript omitted; legacy v1 verification is explicit rather than silently accepted as v2.
+- Engine-level tests exercise live and historical execution, wrong statements, wrong binds, wrong snapshots, relation rebinding, frontier advancement, and single-field plan mutation.
+- The runnable certified-query example now states the no-claim boundary correctly: result rows are returned beside certified inputs, but are not themselves attested by this certificate type.
+- The portable AEAD forgery timing lane now requires a 3-of-5 quorum with all production and planted-detector bounds unchanged, tolerating two runner-load episodes without allowing one lucky screen to certify the implementation.
+- The live command-payload verifier adopts the exact Clippy-prescribed `as_chunks` and `?` forms, clearing deterministic `-D warnings` failures without weakening its parser.
+- Connector-only agents receive exact-SHA, credential-free source and bead capsules from a separate macOS utility lane, so observability no longer competes with the Linux proof chain.
+
+### Evidence boundary
+
+The focused formatter, registry Clippy/test, crypto timing detector, GQL certificate tests, and `fgdb` Clippy run before the source commit is published. The authoritative full verdict remains `scripts/check.sh`; no result-row, runtime-cost, optimizer, or operator-tree attestation is claimed here.
+
+---
+
+"""
+          changelog.write_text(text.replace(heading, heading + entry, 1))
+
+          reality = Path("docs/REALITY_CHECK_AND_BRIDGE_PLAN.md")
+          text = reality.read_text()
+          marker = "## Same-day pickup — 2026-09-01: certificate and proof-surface closure"
+          if marker in text:
+              raise SystemExit("2026-09-01 pickup already exists")
+          anchor = "---\n## Current delta — 2026-08-31\n"
+          if text.count(anchor) != 1:
+              raise SystemExit("unexpected reality-check current-delta anchor")
+          pickup = """---
+## Same-day pickup — 2026-09-01: certificate and proof-surface closure
+
+The bounded GQL certificate vertical moved from digest production to externally checkable evidence. Public statement certificates verify exact source bytes, canonical relation bindings, and snapshots. Plan certificates verify the exact bound plan and snapshot under transcript v2; a field census caught and repaired v1's omission of `neq`, while a named legacy verifier makes the migration boundary explicit. The executable example now refuses the earlier overclaim that returned rows were attested: rows remain separate evidence until a result-contract transcript lands.
+
+Recovered CI transcripts also corrected the current gate diagnosis. The historical run was not only load-sensitive: its registry-check Clippy core gate had two deterministic diagnostics in `command_live_payload.rs`. Those are repaired exactly, while the timing screen is strengthened from 2-of-3 to 3-of-5 without changing any statistical bound. Focused formatter, test, and Clippy commands run before publication; `scripts/check.sh` remains the sole full-tree verdict.
+
+The agent context path is now a separate exact-SHA macOS utility workflow. Its capsule is advisory and names the associated gate run and conclusion; it cannot certify the product, but it makes the source, tracked bead state, recent commits, and robot-mode queue legible to connector-only agents without consuming the Linux proof lane.
+
+---
+## Current delta — 2026-08-31
+"""
+          reality.write_text(text.replace(anchor, pickup, 1))
           PY
+
           git diff --check
-          git diff -- crates/fgdb-crypto/tests/constant_time_audit.rs \
-            tools/registry-check/src/command_live_payload.rs
+          git diff --stat
           grep -F 'const SCREENS: usize = 5;' crates/fgdb-crypto/tests/constant_time_audit.rs
           grep -F 'const PRODUCTION_PASS_QUORUM: usize = 3;' crates/fgdb-crypto/tests/constant_time_audit.rs
           grep -F 'quoted.as_chunks::<3>().0' tools/registry-check/src/command_live_payload.rs
+          grep -F 'Wave 12: verifiable GQL certificates' CHANGELOG.md
+          grep -F 'certificate and proof-surface closure' docs/REALITY_CHECK_AND_BRIDGE_PLAN.md
 
       - name: Prove the focused repairs and the GQL certificate vertical
         shell: bash
@@ -97,34 +150,37 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy -p registry-check --all-targets -- -D warnings
           cargo test -p registry-check --test command_live_payload
+          cargo run -p registry-check --bin registry-check -- lint --root .
           cargo test -p fgdb-crypto --test constant_time_audit \
             aead_forgery_timing_probe_is_bounded_and_detector_is_live \
             -- --exact --nocapture
           cargo test -p fgdb --test gql_certificate --test gql_exec_certified_at
           cargo clippy -p fgdb --all-targets -- -D warnings
 
-      - name: Commit the source repair and remove this one-shot workflow
+      - name: Commit the repair and remove this one-shot workflow
         shell: bash
         run: |
           set -euo pipefail
           git diff --binary -- \
             crates/fgdb-crypto/tests/constant_time_audit.rs \
             tools/registry-check/src/command_live_payload.rs \
+            CHANGELOG.md docs/REALITY_CHECK_AND_BRIDGE_PLAN.md \
             > /tmp/proof-surface-repair.patch
           test -s /tmp/proof-surface-repair.patch
 
-          # The user's incremental main commits may advance while this queued
-          # utility waits for a runner. Rebase the already-proved, two-file
-          # source patch onto the then-current main rather than racing it.
+          # Main may advance while this utility waits for a runner. Rebase the
+          # already-proved bounded patch onto the then-current main rather than
+          # racing the user's incremental commits.
           git fetch origin main
           git reset --hard origin/main
           git apply --check /tmp/proof-surface-repair.patch
           git apply /tmp/proof-surface-repair.patch
           git rm .github/workflows/one-shot-crypto-quorum.yml
           git add crates/fgdb-crypto/tests/constant_time_audit.rs \
-            tools/registry-check/src/command_live_payload.rs
+            tools/registry-check/src/command_live_payload.rs \
+            CHANGELOG.md docs/REALITY_CHECK_AND_BRIDGE_PLAN.md
           git config user.name "frankengraphdb proof-surface repair"
           git config user.email "35050222+Dicklesworthstone@users.noreply.github.com"
-          git commit -m "fix(gates): harden timing quorum and clear deterministic Clippy reds" \
-            -m "Require three of five independent forgery-timing screens while leaving every production and planted-detector bound unchanged. Apply Clippy's exact as_chunks and question-mark repairs to the live command-payload verifier. The focused crypto, registry, GQL certificate, fmt, and Clippy gates ran before this commit; this workflow deletes itself in the same source change."
+          git commit -m "fix(gates): close certificate and proof-surface gaps" \
+            -m "Require a 3-of-5 forgery-timing quorum with unchanged bounds, clear two deterministic registry-check Clippy failures, and publish the verified GQL certificate/no-claim state in the changelog and bridge plan. The focused crypto, registry, GQL, prose-lint, formatter, and Clippy gates ran before this self-deleting workflow published the source commit."
           git push origin HEAD:main
