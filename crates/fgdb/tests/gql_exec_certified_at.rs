@@ -93,8 +93,9 @@ fn the_certified_at_certificate_names_the_as_of_seq_not_the_frontier() {
             "the widening commit advanced the frontier"
         );
 
+        let bind = bind_r();
         let (pinned_rows, pinned_cert) = db
-            .execute_gql_certified_at(PINNED, &bind_r(), s1)
+            .execute_gql_certified_at(PINNED, &bind, s1)
             .expect("the pinned certified MATCH executes");
         assert_eq!(
             pinned_rows,
@@ -106,9 +107,30 @@ fn the_certified_at_certificate_names_the_as_of_seq_not_the_frontier() {
             "THE LAW: the certificate names the caller's as_of — a frontier \
              stamping certifies a snapshot that did not answer"
         );
+        assert!(
+            pinned_cert.verifies_at(PINNED, &bind, s1),
+            "the public verifier accepts the exact statement, bind, and snapshot"
+        );
+        assert!(
+            !pinned_cert.verifies_at(PINNED, &bind, live_frontier),
+            "the same execution inputs at the live frontier are not what the pinned certificate names"
+        );
+        assert!(
+            !pinned_cert.verifies_at(
+                "MATCH (a)-[:R]->(b) RETURN b ",
+                &bind,
+                s1,
+            ),
+            "statement bytes are exact inputs; trailing whitespace changes the certificate"
+        );
+        let wrong_bind = RelationBind::new().with_relation("R", RelationId(2));
+        assert!(
+            !pinned_cert.verifies(PINNED, &wrong_bind),
+            "the same source text under a different relation binding is a different execution"
+        );
 
         let (live_rows, live_cert) = db
-            .execute_gql_certified(PINNED, &bind_r())
+            .execute_gql_certified(PINNED, &bind)
             .expect("the live certified MATCH executes");
         assert_eq!(
             live_rows,
@@ -118,6 +140,10 @@ fn the_certified_at_certificate_names_the_as_of_seq_not_the_frontier() {
         assert_eq!(
             live_cert.snapshot_seq, live_frontier,
             "the live certificate names the live frontier"
+        );
+        assert!(
+            live_cert.verifies_at(PINNED, &bind, live_frontier),
+            "the live certificate independently verifies its exact public input tuple"
         );
         assert_ne!(
             live_cert.snapshot_seq, pinned_cert.snapshot_seq,
