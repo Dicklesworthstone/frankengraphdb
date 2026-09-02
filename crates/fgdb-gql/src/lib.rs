@@ -8,6 +8,7 @@
 
 mod evidence_artifact;
 mod evidence_limits;
+mod evidence_page;
 mod overlay_evidence;
 mod parser;
 mod prepared;
@@ -20,6 +21,11 @@ pub use evidence_limits::{
     GqlEvidenceLimitDimension, GqlEvidenceLimitExceeded,
     GqlEvidenceLimitedAuditError, GqlEvidenceLimitedDecodeError,
     GqlEvidenceLimits,
+};
+pub use evidence_page::{
+    GQL_EVIDENCE_PAGE_TOKEN_LEN, GqlEvidencePage, GqlEvidencePageAuditError,
+    GqlEvidencePageError, GqlEvidencePageToken,
+    GqlEvidencePageTokenDecodeError,
 };
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parser::{
