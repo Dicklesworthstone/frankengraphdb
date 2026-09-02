@@ -1,135 +1,152 @@
 # Changelog
 
-This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
+This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, architectural plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
-## Unreleased — 2026-09-02 strict query-evidence envelopes and replay audit
+## Unreleased — 2026-09-02 resource-safe evidence paging
 
-Representative commits: `97d09787`, `57b13803`, `46175c92`, `68111462`, `62a546c7` under `fgdb-gate-genesis-lce.2`.
+Owning workstream: `fgdb-w10-embedded-54r.1`.
 
-### Canonical application envelopes
+Representative commits: `901e4ef5`, `bdff21d9`, `43e1b155`, `61adb1fd`, `bede52c5`, `a277f0ae`, `3ed7ec32`, `49adac5f`.
 
-- Added `GqlPreparedResultArtifact` for exact durable prepared-query results.
-- Added `GqlOverlayResultArtifact` for exact staged-overlay results.
-- Added one explicit v1 framing with eight-byte `FGQEVID1` magic, major/minor version, a closed kind tag, zero-required reserved bytes, exact sequence or basis, input/plan identities, staged-effect identity where applicable, exact row count, ordered `VId` bytes, and the applicable result digest.
-- Artifact fields are private; ordinary `Debug` output exposes public metadata and digests while redacting rows.
-- The strict decoder rejects invalid magic, unsupported versions, wrong artifact kind, nonzero reserved bytes, row-count or length overflow, every truncated prefix, trailing bytes, and a result transcript inconsistent with the included plan/snapshot or staged-overlay identity.
-- Digest comparisons use constant work over all digest bytes.
+### Result-bound continuation tokens
 
-The framing is endian-stable and deterministic but remains an **unreleased application artifact**. It is not an Appendix-A Chronicle object, FGP frame, publisher signature, external-verifier SDK, or compatibility promise.
+- Added `GqlEvidencePageToken`, a fixed-width v1 token using magic `FGQPAGE1`.
+- The token binds artifact kind, exact snapshot sequence or transaction basis, the complete ordered-result digest, and the next row offset.
+- Added strict decoding for exact length, magic, major/minor version, closed kind, zero-required reserved bytes, and checksum.
+- Added every-prefix truncation tests, trailing-byte refusal, checksum mutation controls, and cross-kind/snapshot/result rejection.
+- The checksum comparison uses constant work over all digest bytes.
+- The checksum is unkeyed and is named accordingly: it is not a MAC, signature, authorization decision, capability, or publisher-authenticity proof.
 
-### Product issuance and audit
+### Deterministic materialized pages
 
-- Added `Database::execute_prepared_query_artifact[_at]` and `audit_prepared_query_artifact`.
-- Added the same issuance and audit surface on immutable `EmbeddedReadView`.
-- Durable audit verifies strict framing, exact retained statement/bind identity, the canonical plan certificate at the artifact sequence, and the product certificate's ordered-result digest before re-executing the query at that exact historical sequence and requiring ordered-row equality.
-- The artifact decoder independently recomputes the frozen result transcript; product audit cross-checks it against `GqlPlanCertificate`, preventing silent drift between the application decoder and canonical issuing authority.
-- An artifact remains auditable after later writes advance the live frontier because replay uses the sequence named by the artifact rather than current state.
-- Added `WriteTxn::execute_prepared_query_overlay_artifact` and `audit_prepared_query_overlay_artifact`.
-- Transaction audit additionally verifies the current basis and canonical staged-effect digest. A later staged mutation returns typed `StagedEffectMismatch` for the old artifact before overlay replay.
+- Added `GqlEvidencePage` over both durable and staged evidence artifacts.
+- Pages expose exact `start_offset`, `end_offset`, `total_rows`, `remaining_rows`, terminal status, and an optional next token.
+- Rows remain redacted from ordinary `Debug` output.
+- Page size may change between calls; it is caller policy rather than token identity.
+- Exact end offsets produce an empty terminal page; offsets beyond the result refuse with a typed error.
+- Page size zero refuses explicitly.
 
-### Mutation-sensitive laws and witness
+### Resource-safe product audit-and-page adapters
 
-The new integration law covers:
+Added default-untrusted and caller-limited page APIs on:
 
-- database and immutable-view audit of the same artifact;
-- historical replay after the live frontier advances;
-- rejection of a different prepared input;
-- row-byte corruption and trailing-data refusal;
-- staged-overlay round trip and exact replay;
-- staged row corruption refusal;
-- invalidation after a later canonical staged effect.
+- `Database`;
+- `EmbeddedReadView`;
+- `WriteTxn`.
 
-A runnable witness was added:
+The product order is deliberate:
+
+1. reject zero page size;
+2. strictly decode and checksum-check optional token bytes;
+3. enforce artifact byte and declared-row limits before row allocation;
+4. strictly decode and verify the artifact;
+5. verify input, plan, snapshot/basis, and staged effect where applicable;
+6. re-execute the exact historical or staged query and compare ordered rows;
+7. bind the token to the reproduced result;
+8. return one contiguous slice.
+
+This avoids expensive replay for an intrinsically invalid page request without allowing a valid token to bypass artifact admission or exact replay.
+
+### Cross-surface laws and witness
+
+- Added a durable integration law spanning `Database` and immutable `EmbeddedReadView`.
+- Proved that a token resumes the same historical result after the live frontier advances.
+- Proved that a token cannot resume a newer snapshot, another artifact kind, or a different ordered result.
+- Proved nested resource-limit refusal and request-preflight precedence.
+- Added staged-overlay paging and proved that a later staged effect refuses during audit before a page is returned.
+
+Runnable witness:
 
 ```bash
-cargo run -p fgdb --example gql_evidence_artifact
+cargo run -p fgdb --example gql_evidence_pages
 ```
-
-It issues durable and staged envelopes, audits both, advances durable and staged state, and demonstrates exact historical replay plus staged-effect invalidation.
 
 ### Exact boundary
 
-The durable envelope carries enough information to bind and replay one result against a database that retains the named sequence. The staged envelope remains an identity-and-row package, not standalone transaction replay: it omits the durable snapshot, staged template bytes, read-set state, and conflict state.
+This is stateless pagination over an already materialized exact evidence artifact. Every product-level page call re-admits, decodes, verifies, and replays the complete artifact. It is not a database cursor, streaming operator, bounded-buffer flow-control mechanism, lease, backpressure protocol, authentication token, or lower-cost replay path.
 
-Promoting this internal v1 envelope into a released format requires a deliberate registry/constitution decision, stable size ceilings, frozen golden vectors, compatibility rules, and a separate authenticity layer where publisher provenance matters.
+A genuine cursor still requires explicit session/owner identity, cancellation and lease semantics, bounded buffering, backpressure, and an operator/storage path that can stop before materializing the full result.
 
 ### Validation boundary
 
-Hosted GitHub Actions were not used as evidence. The connector environment did not provide the repository-pinned Rust toolchain, `shellcheck`, or a runnable UBS installation. The changed surface received focused mechanical checks for exact blob identity, source/module ownership, include closure, delimiter balance, whitespace and line width, private-field construction, strict length and reserved-byte checks, every-prefix truncation coverage, diagnostic redaction, constant-work digest comparison, canonical issuer/independent-decoder cross-checking, and mutation-sensitive integration coverage.
+The connector environment used for this continuation did not contain the pinned Rust toolchain, `shellcheck`, or a runnable UBS installation. Hosted GitHub Actions were excluded from evidence.
 
-Checked-in tests state intended laws. This entry does not claim a fresh rustfmt, compile, Clippy, Rust-test, shellcheck, UBS, or complete `scripts/check.sh` verdict for the current tree. The next proof-bearing step is an exact-tree run captured by `scripts/local_proof.sh` on a machine with the pinned toolchain.
+The changed surface received focused checks for exact Git blob identity, fast-forward history, module/include closure, delimiter balance, whitespace and line width, fixed-width token accounting, checked offset arithmetic, reserved/trailing-byte handling, every-prefix truncation laws, diagnostic redaction, checksum mutation, cross-kind/snapshot/result binding, resource-limit nesting, and request-preflight order.
 
-## Unreleased — 2026-09-01 owned preparation, deterministic bounds, and staged results
+Checked-in tests state intended laws. This changelog does not claim a fresh `cargo fmt`, compile, Clippy, Rust-test, shellcheck, UBS, or complete `scripts/check.sh` verdict for the final tree.
 
-### Coherent owned prepared queries
+## Unreleased — 2026-09-02 resource-bounded evidence ingestion
 
-Representative commits: `c7a0558e`, `61970273`, `3f19227b`, `3f85fa61` under `fgdb-w10-embedded-54r.1`.
+Representative commits: `a3441930`, `caf11153`, `ce6a38e9`, `f004bd1c` under `fgdb-gate-genesis-lce.2`.
+
+- Added configurable total-byte and declared-row ceilings for untrusted prepared-result and staged-overlay envelopes.
+- Added preflight screening before the decoder allocates row vectors.
+- Preserved strict decoder error classes for malformed headers.
+- Added exact and one-below encoding and decoding laws.
+- Added resource-aware product audit adapters for database, immutable-view, and staged transaction surfaces.
+- Added a runnable `gql_evidence_limits` witness.
+
+The default limits are application policy, not a format maximum or product SLO.
+
+## Unreleased — 2026-09-02 strict evidence envelopes and replay audit
+
+Representative commits: `97d09787`, `57b13803`, `46175c92`, `68111462`, `62a546c7`, `9cbd554d`, `e54fc251`, `00a52aa7`, `10871100` under `fgdb-gate-genesis-lce.2`.
+
+- Added canonical v1 `GqlPreparedResultArtifact` and `GqlOverlayResultArtifact` envelopes.
+- Added versioned, kind-tagged, endian-stable, self-delimiting framing with zero-required reserved bytes.
+- Added strict refusal for invalid magic, unsupported version, wrong kind, overflow, every truncated prefix, trailing data, and result-transcript mismatch.
+- Added durable issuance and exact historical replay audit on `Database` and `EmbeddedReadView`.
+- Added staged-overlay issuance and audit on `WriteTxn`.
+- Cross-checked the independent artifact decoder against the canonical product certificate before replay acceptance.
+- Added mutation-sensitive integration tests and the `gql_evidence_artifact` witness.
+
+The bytes are an unreleased application envelope, not an Appendix-A Chronicle object, FGP frame, signed attestation, or compatibility promise.
+
+## Unreleased — 2026-09-02 exact staged-overlay result evidence
+
+Representative commits: `b33e1d86`, `80de85a6`, `16309187`, `40b9c09e`, `107bb154`, `cfa6ea43`, `f377562a`, `f499858e`, `d5c1c36f`, `9d8a81c5`, `3e8ff789`.
+
+- Added a canonical staged-effect digest binding transaction basis and canonical staged `LogicalDeltaTemplate`, or an explicit empty overlay.
+- Added `GqlOverlayResultCertificate` binding basis, plan digest, staged-effect digest, exact row count, row order, and every returned `VId`.
+- Added transaction issuance and current-overlay verification APIs.
+- Proved equivalent canonical effects verify across transactions while row or staged-effect mutation refuses.
+- Added the `gql_txn_overlay_result_evidence` witness.
+
+This closes exact in-process staged-result evidence, not standalone staged replay.
+
+## Unreleased — 2026-09-01 owned preparation and deterministic query bounds
+
+Representative commits: `c7a0558e` through `78137cfb` under `fgdb-w10-embedded-54r.1`.
+
+### Coherent owned preparation
 
 - Added `PreparedGqlQuery`, owning exact statement bytes, a cloned canonical `RelationBind`, and the derived `BoundPlan` behind private fields.
-- Moved the existing parser/binder byte-for-byte behind `parser.rs`; no second parser or binder was introduced.
+- Kept one parser, binder, and execution kernel.
+- Added owned preparation and execution across `Database`, historical reads, immutable views, and staged transactions.
 - Added redacted diagnostics and an explicit preparation-coherence audit.
-- Added owned preparation and execution on `Database`, `EmbeddedReadView`, and `WriteTxn`.
-- Added live and exact historical execution without reparsing or rebinding.
-- Added aligned input, plan, and exact ordered-result evidence for durable database and immutable-view reads.
-- Added a cross-surface law proving caller mutation after preparation cannot alter the retained query, durable/view evidence agrees at one sequence, and transactions see staged read-your-own-writes state.
+- Added aligned input, plan, and exact ordered-result evidence for durable reads.
 
-This is not yet the final parameterized prepared-statement protocol. Typed parameters, catalog epochs, authorization, cursor lifecycle, physical planning, invalidation, and released persistence remain open.
+### Deterministic query budgets
 
-### Deterministic prepared-query budgets
+- Added `GqlExecutionBudget`, typed dimensions and refusals, and exact execution statistics.
+- `SnapshotRecords` counts the admitted immutable vertex or edge table.
+- `ResultRows` counts final deterministic rows after predicates, projection, sort/deduplication, `SKIP`, and `LIMIT`.
+- Exact boundaries succeed; one-below limits refuse without partial rows.
+- Added live, historical, immutable-view, and staged-transaction paths.
 
-Representative commits: `6c40d30c`, `4619dd65`, `0b06da07`, `00523439`, `78137cfb`.
+The current budget counts a materialized table before the normal executor reads it. It is not wall-clock cancellation, memory/spill governance, backpressure, or physical-cost evidence.
 
-- Added `GqlExecutionBudget`, typed dimensions and refusals, exact execution stats, and a generic execution-versus-budget error split.
-- `SnapshotRecords` counts the complete immutable vertex table admitted by a node scan or edge table admitted by an edge pattern.
-- `ResultRows` counts final rows after predicates, projection, sorting, deduplication, `SKIP`, and `LIMIT`.
-- Exact boundaries succeed; observations above a limit return the dimension, configured limit, and observed count.
-- Added budgeted execution for live/historical database reads, immutable views, and staged transactions.
-- No partial rows escape a budget refusal.
-- A transaction admission refusal conservatively records read dependencies because counting the overlay is itself a transaction read.
-- Added edge-pattern, node-scan, durable/view parity, and staged-transaction exact/one-below laws.
-
-The current implementation counts a materialized table before ordinary execution reads it. These are deterministic downstream-work/result guards, not wall-clock cancellation, allocation or I/O preemption, memory/spill governance, backpressure, or physical runtime-cost evidence.
-
-### Exact staged-overlay result evidence
-
-Owning workstreams: `fgdb-w4-g1-txn-core-qpmg.4` and `fgdb-gate-genesis-lce.2`.
-
-- Added a canonical staged-effect digest under `fgdb:write-txn-staged-effect:v1`.
-- The staged-effect transcript binds the durable transaction basis and either an explicit empty-overlay tag or the complete canonical `LogicalDeltaTemplate` retained by the prepared write.
-- Added `GqlOverlayResultCertificate` under `fgdb:gql-staged-overlay-result:v1`.
-- The result certificate binds basis, plan digest, staged-effect digest, exact row count, row order, and every returned `VId`.
-- Added `WriteTxn::execute_prepared_query_with_overlay_result_certificate` and `verifies_prepared_query_overlay_result`.
-- Evidence is minted only after successful overlay execution.
-- Equivalent transactions at the same basis with the same canonical semantic effect verify the same evidence.
-- Row reorder, replacement, truncation, a later staged mutation, or a different overlay invalidates the certificate.
-- Digest comparisons use constant work over all digest bytes.
-
-This closes the exact in-process staged-result evidence gap. It does not create standalone replay: the certificate does not carry the durable snapshot, staged template bytes, graph rows, or transaction conflict state.
-
-### Runnable witnesses
+Runnable witness:
 
 ```bash
 cargo run -p fgdb --example gql_owned_prepared
-cargo run -p fgdb --example gql_txn_overlay_result_evidence
 ```
-
-The first demonstrates retained preparation, deterministic counters, typed refusal, and aligned durable-read evidence. The second demonstrates exact staged-result certification and invalidation after a later staged effect.
-
-### Immediate crate-root repair
-
-Commit `0c1be1b3` restored the exact known-good `crates/fgdb/src/lib.rs` blob after a contents-API write replaced that file instead of patching a re-export list. The final tree retains the prior crate root. Prepared-query types remain owned by `fgdb-gql`; embedded methods use those types directly.
-
-### Documentation synchronized
-
-- Rebuilt `IMPLEMENTATION_STATUS.md` around the actual owned-preparation, budget, and staged-result subset.
-- Updated `docs/GQL_RESULT_EVIDENCE.md` to separate durable-read evidence, staged-result evidence, and adjacent deterministic counters.
-- Updated `docs/TRANSACTION_GQL.md` with canonical staged-effect identity, exact in-process result evidence, and the replay boundary.
 
 ## Earlier 2026-09-01 continuation
 
 ### Prepared transaction-overlay GQL
 
-Commit `005a8397` made `WriteTxn::execute_prepared_gql` the plan-only overlay body, changed text/certified execution to bind once and delegate, added plan-only certification, preserved deterministic read-your-own-writes and FCW dependency tracking, and decomposed the large transaction module into responsibility-focused include units.
+Commit `005a8397` made `WriteTxn::execute_prepared_gql` the plan-only overlay body, changed text and certified execution to bind once and delegate, added plan-only certification, preserved deterministic read-your-own-writes and FCW dependency tracking, and decomposed the large transaction module into responsibility-focused include units.
 
 ### Exact-SHA local context and proof packages
 
@@ -141,7 +158,7 @@ Commit `005a8397` made `WriteTxn::execute_prepared_gql` the plan-only overlay bo
 Representative commits: `01f28d39` through `65d3d832`.
 
 - Unified live, historical, and immutable-view execution on one exact-sequence kernel.
-- Added pinned embedded read sessions and reusable `BoundPlan` execution.
+- Added pinned embedded read views and reusable `BoundPlan` execution.
 - Added historical prepared execution and plan certification.
 - Versioned the plan transcript to v2 to bind the historical `neq` omission.
 - Added aligned input-plus-plan evidence and a domain-separated ordered-result digest.
@@ -174,11 +191,12 @@ Representative commits: `01f28d39` through `65d3d832`.
 Still incomplete or absent:
 
 - typed parameters and canonical parameter evidence;
-- typed rows/columns, genuine streaming cursors, and backpressure;
+- typed rows/columns and genuine streaming cursors with backpressure;
 - full session ownership, authorization, renewal/expiry, and synchronous facade;
 - full SSI and predicate/range conflict tracking;
-- standalone staged-overlay replay payloads and verifier;
-- a registered query-evidence compatibility contract and external verifier SDK;
+- standalone staged-overlay replay payloads;
+- a registered compatibility-governed evidence format and external verifier SDK;
+- storage/operator-level early resource enforcement;
 - full ISO GQL, GLA/Loom execution, optimizer, spill, and larger-than-memory queries;
 - Strata tiers I/R/A, Ripple, Beacon, Prism, Warden, Fabric, and Aegis;
 - CLI/robot mode, server, Python bindings, installer, signed releases, and upgrades.
@@ -189,4 +207,4 @@ Still incomplete or absent:
 - Name the exact subset and refusal/no-claim boundary.
 - Separate checked-in tests from executed proof.
 - Preserve red and void evidence; never summarize it as green.
-- Keep Git, live Beads state, derived indexes, context capsules, and proof bundles as separate authorities.
+- Keep Git, live Beads state, derived indexes, context capsules, proof bundles, and application artifacts as separate authorities.
