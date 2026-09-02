@@ -1,4 +1,4 @@
-//! **Audit once, then advance an owned exact-result cursor.**
+//! **Audit once, checkpoint, and resume an owned exact-result cursor.**
 //!
 //! ```text
 //! cargo run -p fgdb --example gql_evidence_cursor
@@ -58,27 +58,38 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
 
         let first = cursor.next_page(2)?;
         assert_eq!(first.rows(), &[VId(2), VId(3)]);
-        assert_eq!(cursor.position(), 2);
-        assert_eq!(cursor.remaining_rows(), 1);
+        let checkpoint = cursor
+            .checkpoint_token()
+            .expect("one historical row remains")
+            .to_bytes();
+        assert!(cursor.close());
 
         let mut later = WriteBatch::new(KNOWS);
         later.create_vertex(VId(5), vec![], vec![]);
         later.add_edge(EId(13), VId(1), VId(5), vec![]);
         database.write(cx, later).await?;
 
-        let terminal = cursor.next_page(8)?;
+        let mut resumed = database
+            .resume_untrusted_prepared_query_artifact_cursor(
+                &query,
+                &bytes,
+                &checkpoint,
+            )?;
+        assert_eq!(resumed.position(), 2);
+        let terminal = resumed.next_page(8)?;
         assert_eq!(terminal.rows(), &[VId(4)]);
-        assert_eq!(cursor.state(), GqlEvidenceCursorState::Exhausted);
+        assert_eq!(resumed.state(), GqlEvidenceCursorState::Exhausted);
         assert!(matches!(
-            cursor.next_page(1),
+            resumed.next_page(1),
             Err(GqlEvidenceCursorError::Exhausted)
         ));
 
         println!("audited snapshot: {snapshot:?}");
         println!("first page: {:?}", first.rows());
-        println!("terminal page after live advance: {:?}", terminal.rows());
-        println!("final state: {:?}", cursor.state());
-        println!("OK: one audit, monotonic paging, explicit exhaustion");
+        println!("checkpoint bytes: {}", checkpoint.len());
+        println!("resumed terminal page after live advance: {:?}", terminal.rows());
+        println!("final state: {:?}", resumed.state());
+        println!("OK: one audit per open, portable checkpoint, explicit exhaustion");
         Ok(())
     })
 }
