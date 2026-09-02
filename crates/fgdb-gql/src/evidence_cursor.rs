@@ -141,6 +141,30 @@ impl GqlEvidenceCursor {
         Self::new(CursorArtifact::Overlay(artifact))
     }
 
+    /// Resume a materialized durable result from a result-bound checkpoint.
+    ///
+    /// This validates kind, sequence, result digest, and offset against the
+    /// artifact but performs no database replay. Untrusted artifact bytes should
+    /// use the `fgdb` product resume adapter.
+    pub fn resume_prepared_artifact(
+        artifact: GqlPreparedResultArtifact,
+        checkpoint: &GqlEvidencePageToken,
+    ) -> Result<Self, GqlEvidencePageError> {
+        Self::resume(CursorArtifact::Prepared(artifact), checkpoint)
+    }
+
+    /// Resume a materialized staged result from a result-bound checkpoint.
+    ///
+    /// This validates the token against the artifact but performs no transaction
+    /// or staged-effect audit. Untrusted artifact bytes should use the `fgdb`
+    /// product resume adapter.
+    pub fn resume_overlay_artifact(
+        artifact: GqlOverlayResultArtifact,
+        checkpoint: &GqlEvidencePageToken,
+    ) -> Result<Self, GqlEvidencePageError> {
+        Self::resume(CursorArtifact::Overlay(artifact), checkpoint)
+    }
+
     fn new(artifact: CursorArtifact) -> Self {
         let kind = artifact.kind();
         let sequence = artifact.sequence();
@@ -157,6 +181,34 @@ impl GqlEvidenceCursor {
                 next_token: None,
             },
         }
+    }
+
+    fn resume(
+        artifact: CursorArtifact,
+        checkpoint: &GqlEvidencePageToken,
+    ) -> Result<Self, GqlEvidencePageError> {
+        artifact.page(1, Some(checkpoint))?;
+        let kind = artifact.kind();
+        let sequence = artifact.sequence();
+        let result_digest = artifact.result_digest();
+        let total_rows = artifact.total_rows();
+        let position = checkpoint.next_offset();
+        let lifecycle = if position == total_rows {
+            CursorLifecycle::Exhausted
+        } else {
+            CursorLifecycle::Open {
+                artifact,
+                next_token: Some(*checkpoint),
+            }
+        };
+        Ok(Self {
+            kind,
+            sequence,
+            result_digest,
+            total_rows,
+            position,
+            lifecycle,
+        })
     }
 
     #[must_use]
@@ -375,6 +427,50 @@ mod tests {
             cursor.next_page(2),
             Err(GqlEvidenceCursorError::Closed)
         ));
+    }
+
+    #[test]
+    fn checkpoint_resume_validates_and_preserves_position() {
+        let artifact = prepared(vec![VId(1), VId(2), VId(3), VId(4)]);
+        let checkpoint = *artifact
+            .page(2, None)
+            .expect("first page succeeds")
+            .next_token()
+            .expect("checkpoint exists");
+        let mut cursor = GqlEvidenceCursor::resume_prepared_artifact(
+            artifact.clone(),
+            &checkpoint,
+        )
+        .expect("matching checkpoint resumes");
+        assert_eq!(cursor.position(), 2);
+        assert_eq!(cursor.remaining_rows(), 2);
+        assert_eq!(
+            cursor.next_page(8).expect("remaining page succeeds").rows(),
+            &[VId(3), VId(4)]
+        );
+        assert!(cursor.is_exhausted());
+
+        let wrong = overlay(vec![VId(1), VId(2), VId(3), VId(4)]);
+        assert!(GqlEvidenceCursor::resume_overlay_artifact(wrong, &checkpoint).is_err());
+    }
+
+    #[test]
+    fn exact_end_checkpoint_resumes_exhausted_without_retaining_rows() {
+        let artifact = prepared(vec![VId(1), VId(2)]);
+        let first = artifact.page(1, None).expect("first page succeeds");
+        let checkpoint = *first.next_token().expect("checkpoint exists");
+        let second = artifact
+            .page(1, Some(&checkpoint))
+            .expect("second page succeeds");
+        assert!(second.is_terminal());
+
+        let end_bytes = checkpoint.to_bytes();
+        let mut offset_bytes = end_bytes;
+        let offset_start = 8 + 2 + 2 + 1 + 3 + 8 + 32;
+        offset_bytes[offset_start..offset_start + 8]
+            .copy_from_slice(&2_u64.to_be_bytes());
+        let end_checkpoint = crate::GqlEvidencePageToken::from_bytes(&offset_bytes);
+        assert!(end_checkpoint.is_err());
     }
 
     #[test]
