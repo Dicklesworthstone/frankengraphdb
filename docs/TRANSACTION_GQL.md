@@ -1,6 +1,6 @@
 # Transaction-Overlay GQL Contract
 
-Status: **live bounded read-your-own-writes query surface with exact in-process evidence and an unreleased application envelope**, not full SSI or the final session transaction protocol.
+Status: **live bounded read-your-own-writes query surface with exact in-process evidence, an unreleased application envelope, resource-safe audit, and stateless materialized-result paging**, not full SSI or the final session/cursor transaction protocol.
 
 ## One execution body
 
@@ -10,7 +10,7 @@ Status: **live bounded read-your-own-writes query surface with exact in-process 
 2. staged vertex and edge mutations in transaction order;
 3. the shared deterministic projection, ordering, `SKIP`, and `LIMIT` discipline.
 
-`execute_prepared_gql` is the plan-only overlay body. Text execution binds once and delegates to it. Certified text execution also binds once and delegates; it does not call a text path that binds again.
+`execute_prepared_gql` is the plan-only overlay body. Text execution binds once and delegates to it. Certified text execution also binds once and delegates; it does not call another text path that binds again.
 
 `PreparedGqlQuery` delegates to the same body through `execute_prepared_query`. There is no second transaction parser, binder, or executor.
 
@@ -29,12 +29,14 @@ Relevant files:
 - `gql_overlay_graph.rs`: staged graph materialization;
 - `gql_edge_match.rs`: edge-pattern evaluation;
 - `gql_api.rs`: plan certification;
-- `owned_prepared.rs`: coherent preparation and deterministic budgets;
+- `owned_prepared.rs`: coherent preparation and deterministic query budgets;
 - `overlay_evidence.rs`: canonical staged-effect identity and exact result evidence;
-- `portable_evidence.rs`: application-envelope issuance and product-level audit;
+- `portable_evidence.rs`: application-envelope issuance and exact audit;
+- `evidence_limits.rs`: byte/row admission before untrusted artifact allocation;
+- `evidence_page.rs`: request preflight and audited stateless paging;
 - `finish.rs`: commit, conflict checks, abort, and helpers.
 
-The common evidence-envelope framing and strict decoder live in `crates/fgdb-gql/src/evidence_artifact.rs`.
+Shared envelope, limit, and page-token vocabulary lives in `crates/fgdb-gql/src/`.
 
 ## Read dependencies
 
@@ -55,9 +57,11 @@ This is a bounded FCW read-set mechanism, not full SSI predicate/range tracking.
 
 `execute_prepared_query` reuses that plan over staged state. Changing the caller's original statement or bind map cannot change the prepared definition.
 
-Finished transactions refuse preparation, execution, evidence issuance, and evidence audit through `WriteTxnError::Finished` or the corresponding `GqlEvidenceAuditError::Execution` wrapper.
+Finished transactions refuse preparation, execution, evidence issuance, artifact audit, and page audit through `WriteTxnError::Finished` or the corresponding nested audit wrapper.
 
-## Deterministic budgets
+Typed statement parameters are not yet part of this surface.
+
+## Deterministic query budgets
 
 `execute_prepared_query_budgeted` checks:
 
@@ -72,7 +76,7 @@ The current implementation materializes and counts the overlay before executing 
 
 ## Canonical staged-effect identity
 
-`WriteTxn::staged_effect_digest` uses the domain:
+`WriteTxn::staged_effect_digest` uses:
 
 ```text
 fgdb:write-txn-staged-effect:v1
@@ -80,13 +84,13 @@ fgdb:write-txn-staged-effect:v1
 
 The transcript binds:
 
-- the transaction basis;
+- transaction basis;
 - an explicit empty-overlay tag, or the complete canonical `LogicalDeltaTemplate` retained by the prepared write;
-- the canonical template byte length and bytes.
+- canonical template byte length and bytes.
 
 It identifies the staged **semantic net effect**. Two API-call sequences that normalize to the same canonical effect have the same identity. Incidental call history is intentionally outside the transcript.
 
-The digest contains no staged bytes. It is therefore an identity, not a replay package.
+The digest contains no staged bytes. It is an identity, not a replay package.
 
 ## Exact staged-result certificate
 
@@ -96,7 +100,7 @@ The digest contains no staged bytes. It is therefore an identity, not a replay p
 2. the ordinary `GqlPlanCertificate` at the transaction basis;
 3. `GqlOverlayResultCertificate`.
 
-The overlay result certificate uses the domain:
+The overlay result certificate uses:
 
 ```text
 fgdb:gql-staged-overlay-result:v1
@@ -104,7 +108,7 @@ fgdb:gql-staged-overlay-result:v1
 
 It binds:
 
-- the transaction basis;
+- transaction basis;
 - plan-certificate digest;
 - canonical staged-effect digest;
 - exact row count;
@@ -127,59 +131,113 @@ Final digest comparisons use constant work over all digest bytes.
 - exact ordered rows;
 - staged-overlay result digest.
 
-`audit_prepared_query_overlay_artifact` refuses in an explicit order:
+The artifact is an unreleased application envelope, not an Appendix-A object or FGP frame.
 
-1. malformed framing or result transcript;
-2. wrong transaction basis;
-3. wrong retained statement or bind;
-4. wrong plan identity;
-5. wrong current staged-effect identity;
-6. re-executed rows that differ from the artifact.
+### Resource-safe audit
 
-The audit order makes failures actionable. In particular, staging another mutation after artifact issuance returns `GqlEvidenceAuditError::StagedEffectMismatch` before the old rows can be treated as belonging to the new overlay.
+`audit_untrusted_prepared_query_overlay_artifact` applies `GqlEvidenceLimits::DEFAULT_UNTRUSTED`. `audit_prepared_query_overlay_artifact_with_limits` accepts caller policy.
 
-The decoder rejects invalid magic, unsupported version, wrong kind, nonzero reserved bytes, row-count or length overflow, every truncated prefix, trailing bytes, and row/result corruption. Rows are redacted from ordinary artifact diagnostics.
+A valid header's encoded length and declared row count are checked before row allocation. Malformed headers retain the strict decoder's own typed errors.
 
-Runnable witness:
+The complete audit order is:
+
+1. encoded-byte and declared-row admission;
+2. strict framing and result-transcript decode;
+3. exact transaction basis;
+4. retained statement and canonical bind;
+5. plan certificate at the basis;
+6. current canonical staged-effect digest;
+7. exact overlay re-execution and ordered rows.
+
+Staging another mutation after issuance returns `GqlEvidenceAuditError::StagedEffectMismatch` before old rows can be accepted against the new overlay.
+
+## Stateless staged-result paging
+
+`GqlOverlayResultArtifact::page` and `page_from_token_bytes` slice an already materialized result. Product-level transaction methods additionally perform complete resource-safe artifact audit and current-overlay re-execution before returning a page.
+
+The public adapters are:
+
+- `audit_untrusted_prepared_query_overlay_artifact_page`;
+- `audit_prepared_query_overlay_artifact_page_with_limits`.
+
+### Request and audit order
+
+The adapter order is explicit:
+
+1. reject zero page size;
+2. strictly decode and checksum-check optional fixed-width token bytes;
+3. apply artifact byte and row admission;
+4. strictly decode the artifact;
+5. verify basis, prepared input, plan, and staged effect;
+6. re-execute the current overlay and compare exact rows;
+7. bind the token to staged artifact kind, basis, result digest, and offset;
+8. return one contiguous page.
+
+A malformed token therefore does not trigger an unnecessary overlay materialization and replay. A syntactically valid token cannot bypass artifact audit.
+
+### Token and page meaning
+
+The page token binds:
+
+- staged-overlay artifact kind;
+- transaction basis;
+- complete staged-overlay result digest;
+- next row offset.
+
+Its checksum is unkeyed. It is not a capability, authentication token, authorization proof, or malicious-tamper guarantee.
+
+A page exposes exact start, end, total, and remaining row counts, plus an optional next token. Page size may change between calls because it is caller policy, not result identity.
+
+### Staged paging boundary
+
+This is not a transaction cursor. The entire staged artifact is decoded and the entire overlay query is re-executed for every product-level page request. It does not hold transaction-owned operator state, apply backpressure, stream rows, renew a lease, or reduce materialization cost.
+
+A later staged mutation invalidates the old artifact during audit before token binding. A durable-result token cannot resume a staged artifact because kind binding refuses it.
+
+Runnable witness for the general paging contract:
 
 ```bash
-cargo run -p fgdb --example gql_evidence_artifact
+cargo run -p fgdb --example gql_evidence_pages
 ```
 
-## Evidence boundary
-
-The certificate and artifact cryptographically bind staged rows to the concrete plan, basis, and canonical staged effect.
-
-They do **not** create standalone or cross-process transaction replay. A verifier holding only the artifact cannot reconstruct:
-
-- the durable snapshot;
-- the staged `LogicalDeltaTemplate` bytes;
-- the graph rows that were read;
-- the transaction's read set or MATCH-expansion set;
-- first-committer-wins conflict state.
-
-The artifact is an unreleased application envelope, not an Appendix-A object or FGP frame. Promotion to a compatibility-governed format requires a registry decision, stable size ceilings, golden vectors, and decoder-evolution rules. Publisher authenticity is a separate signature or transparency layer.
-
-Standalone replay requires a package carrying the exact staged template, required durable snapshot authority or material, and all framing needed to establish that those bytes produce the named staged-effect digest before query execution.
-
-## Mutation-sensitive laws
-
-The focused transaction evidence tests prove:
-
-- identical canonical staged effects at the same basis verify across transactions;
-- row reorder, replacement, or truncation fails;
-- a later staged mutation invalidates old certificate and artifact evidence;
-- the unchanged transaction continues to verify its original certificate;
-- a certificate for the advanced overlay does not verify against the older overlay;
-- artifact row corruption fails strict decoding;
-- the plan certificate still verifies independently at the transaction basis;
-- current artifact audit re-executes and requires exact rows.
-
-Runnable certificate-only witness:
+Runnable certificate-only staged witness:
 
 ```bash
 cargo run -p fgdb --example gql_txn_overlay_result_evidence
 ```
+
+## Evidence and replay boundary
+
+The certificate, artifact, and page token bind staged rows to the concrete plan, basis, canonical staged effect, and exact offset.
+
+They do **not** create standalone or cross-process transaction replay. A verifier holding only these values cannot reconstruct:
+
+- the durable snapshot;
+- staged `LogicalDeltaTemplate` bytes;
+- graph rows that were read;
+- transaction read-set or MATCH-expansion state;
+- first-committer-wins conflict state.
+
+Standalone replay requires a package carrying the exact staged template, required durable snapshot authority or material, and strict framing that establishes those bytes produce the named staged-effect digest before query execution.
+
+Publisher authenticity is a separate signature or transparency layer.
+
+## Mutation-sensitive laws
+
+The focused transaction and page tests prove:
+
+- identical canonical staged effects at the same basis verify across transactions;
+- row reorder, replacement, insertion, or truncation fails;
+- a later staged mutation invalidates old certificate, artifact, and page evidence;
+- the unchanged transaction continues to verify its original evidence;
+- artifact row corruption fails strict decoding;
+- hostile declared row counts refuse before allocation;
+- exact and one-below resource limits retain typed outcomes;
+- fixed-width page tokens reject every truncated prefix, trailing data, invalid headers, and checksum mutation;
+- durable tokens cannot resume staged artifacts;
+- token syntax is preflighted before overlay replay;
+- valid tokens cannot bypass staged-effect verification;
+- page slices are contiguous, repeatable, and terminal at the exact end.
 
 ## Deliberate limitations
 
@@ -189,11 +247,11 @@ The current transaction surface does not provide:
 - general predicate/range conflict tracking;
 - multi-relation staged writes;
 - savepoints or nested transactions;
-- transaction-owned cursors;
+- transaction-owned streaming cursors;
 - typed statement parameters;
 - authorization/session ownership;
 - standalone portable transaction replay;
-- released artifact compatibility;
+- released artifact or page-token compatibility;
 - physical-plan or runtime-cost evidence.
 
 These remain dependency-ordered future work rather than implicit claims of the bounded overlay.
