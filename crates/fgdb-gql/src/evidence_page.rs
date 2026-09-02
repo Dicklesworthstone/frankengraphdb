@@ -515,9 +515,16 @@ fn page_rows(
     let end = usize::try_from(end_offset).map_err(|_| {
         GqlEvidencePageError::OffsetDoesNotFitPlatform { offset: end_offset }
     })?;
-    let next_token = (end_offset < row_count).then(|| {
-        GqlEvidencePageToken::new(kind, sequence, result_digest, end_offset)
-    });
+    let next_token = if end_offset < row_count {
+        Some(GqlEvidencePageToken::new(
+            kind,
+            sequence,
+            result_digest,
+            end_offset,
+        ))
+    } else {
+        None
+    };
 
     Ok(GqlEvidencePage {
         kind,
@@ -649,8 +656,8 @@ mod tests {
 
     #[test]
     fn tokens_bind_kind_sequence_result_and_offset() {
-        let prepared = prepared(vec![VId(1), VId(2), VId(3)]);
-        let token = *prepared
+        let artifact = prepared(vec![VId(1), VId(2), VId(3)]);
+        let token = *artifact
             .page(1, None)
             .expect("page succeeds")
             .next_token()
@@ -686,7 +693,7 @@ mod tests {
             99,
         );
         assert!(matches!(
-            prepared.page(1, Some(&past_end)),
+            artifact.page(1, Some(&past_end)),
             Err(GqlEvidencePageError::OffsetPastEnd {
                 offset: 99,
                 row_count: 3
