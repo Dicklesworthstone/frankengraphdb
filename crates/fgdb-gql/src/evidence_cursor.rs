@@ -101,8 +101,9 @@ enum CursorLifecycle {
 /// The cursor avoids decoding and replaying the same artifact for every page:
 /// callers first obtain or audit an artifact, construct the cursor once, and
 /// then advance monotonically through its exact ordered rows. Reaching the
-/// terminal page releases the retained artifact and enters [`Exhausted`];
-/// [`GqlEvidenceCursor::close`] releases it early and enters [`Closed`].
+/// terminal page releases the retained artifact and enters
+/// [`GqlEvidenceCursorState::Exhausted`]; [`GqlEvidenceCursor::close`] releases
+/// it early and enters [`GqlEvidenceCursorState::Closed`].
 ///
 /// Direct constructors do not audit their artifact. Raw or untrusted bytes
 /// should enter through the `fgdb` product adapters that audit and replay before
