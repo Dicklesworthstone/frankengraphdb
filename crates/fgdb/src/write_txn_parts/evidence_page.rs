@@ -1,9 +1,32 @@
+fn preflight_evidence_page_request<E>(
+    page_size: u64,
+    after: Option<&[u8]>,
+) -> Result<
+    Option<fgdb_gql::GqlEvidencePageToken>,
+    fgdb_gql::GqlEvidencePageAuditError<E>,
+> {
+    if page_size == 0 {
+        return Err(fgdb_gql::GqlEvidencePageAuditError::Page(
+            fgdb_gql::GqlEvidencePageError::ZeroPageSize,
+        ));
+    }
+    after
+        .map(fgdb_gql::GqlEvidencePageToken::from_bytes)
+        .transpose()
+        .map_err(|source| {
+            fgdb_gql::GqlEvidencePageAuditError::Page(
+                fgdb_gql::GqlEvidencePageError::TokenDecode(source),
+            )
+        })
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Resource-safe audit plus deterministic paging for one durable prepared-
     /// result envelope under the default untrusted-input policy.
     ///
-    /// The complete artifact is decoded and historically replayed before the
-    /// requested slice is returned. This is not a streaming cursor.
+    /// Page size and token syntax are checked first. The complete artifact is then
+    /// decoded and historically replayed before token binding and slicing. This
+    /// is not a streaming cursor.
     pub fn audit_untrusted_prepared_query_artifact_page(
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
@@ -36,11 +59,12 @@ impl<V: Vfs + Clone> Database<V> {
         fgdb_gql::GqlEvidencePage,
         fgdb_gql::GqlEvidencePageAuditError<GqlError>,
     > {
+        let token = preflight_evidence_page_request(page_size, after)?;
         let artifact = self
             .audit_prepared_query_artifact_with_limits(query, bytes, limits)
             .map_err(fgdb_gql::GqlEvidencePageAuditError::Audit)?;
         artifact
-            .page_from_token_bytes(page_size, after)
+            .page(page_size, token.as_ref())
             .map_err(fgdb_gql::GqlEvidencePageAuditError::Page)
     }
 }
@@ -80,11 +104,12 @@ impl crate::EmbeddedReadView {
         fgdb_gql::GqlEvidencePage,
         fgdb_gql::GqlEvidencePageAuditError<GqlError>,
     > {
+        let token = preflight_evidence_page_request(page_size, after)?;
         let artifact = self
             .audit_prepared_query_artifact_with_limits(query, bytes, limits)
             .map_err(fgdb_gql::GqlEvidencePageAuditError::Audit)?;
         artifact
-            .page_from_token_bytes(page_size, after)
+            .page(page_size, token.as_ref())
             .map_err(fgdb_gql::GqlEvidencePageAuditError::Page)
     }
 }
@@ -93,9 +118,9 @@ impl WriteTxn {
     /// Resource-safe staged-overlay audit plus deterministic paging under the
     /// default untrusted-input policy.
     ///
-    /// The entire artifact is decoded and the current overlay is re-executed
-    /// before paging. A later staged effect therefore refuses before any page is
-    /// returned.
+    /// Page size and token syntax are checked first. The entire artifact is then
+    /// decoded and the current overlay re-executed before token binding. A later
+    /// staged effect therefore refuses before any page is returned.
     pub fn audit_untrusted_prepared_query_overlay_artifact_page<
         V: Vfs + Clone,
     >(
@@ -135,13 +160,14 @@ impl WriteTxn {
         fgdb_gql::GqlEvidencePage,
         fgdb_gql::GqlEvidencePageAuditError<WriteTxnError>,
     > {
+        let token = preflight_evidence_page_request(page_size, after)?;
         let artifact = self
             .audit_prepared_query_overlay_artifact_with_limits(
                 database, query, bytes, limits,
             )
             .map_err(fgdb_gql::GqlEvidencePageAuditError::Audit)?;
         artifact
-            .page_from_token_bytes(page_size, after)
+            .page(page_size, token.as_ref())
             .map_err(fgdb_gql::GqlEvidencePageAuditError::Page)
     }
 }
