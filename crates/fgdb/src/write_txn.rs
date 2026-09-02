@@ -16,5 +16,6 @@ include!("write_txn_parts/gql_overlay_graph.rs");
 include!("write_txn_parts/gql_edge_match.rs");
 include!("write_txn_parts/gql_api.rs");
 include!("write_txn_parts/owned_prepared.rs");
+include!("write_txn_parts/overlay_evidence.rs");
 include!("write_txn_parts/finish.rs");
 include!("write_txn_parts/traits_and_tests.rs");
