@@ -76,7 +76,7 @@ impl GqlEvidencePageToken {
     }
 
     #[must_use]
-    pub fn verifies_integrity(&self) -> bool {
+    pub fn verifies_checksum(&self) -> bool {
         digest_eq(
             self.checksum,
             token_checksum(
@@ -176,7 +176,7 @@ impl GqlEvidencePageToken {
             next_offset,
             checksum,
         };
-        if !token.verifies_integrity() {
+        if !token.verifies_checksum() {
             return Err(GqlEvidencePageTokenDecodeError::ChecksumMismatch);
         }
         Ok(token)
@@ -305,6 +305,8 @@ pub struct GqlEvidencePage {
     sequence: CommitSeq,
     result_digest: Digest,
     start_offset: u64,
+    end_offset: u64,
+    total_rows: u64,
     rows: Vec<VId>,
     next_token: Option<GqlEvidencePageToken>,
 }
@@ -331,6 +333,21 @@ impl GqlEvidencePage {
     }
 
     #[must_use]
+    pub const fn end_offset(&self) -> u64 {
+        self.end_offset
+    }
+
+    #[must_use]
+    pub const fn total_rows(&self) -> u64 {
+        self.total_rows
+    }
+
+    #[must_use]
+    pub const fn remaining_rows(&self) -> u64 {
+        self.total_rows - self.end_offset
+    }
+
+    #[must_use]
     pub fn rows(&self) -> &[VId] {
         &self.rows
     }
@@ -354,7 +371,10 @@ impl core::fmt::Debug for GqlEvidencePage {
             .field("sequence", &self.sequence)
             .field("result_digest", &self.result_digest)
             .field("start_offset", &self.start_offset)
-            .field("row_count", &self.rows.len())
+            .field("end_offset", &self.end_offset)
+            .field("total_rows", &self.total_rows)
+            .field("remaining_rows", &self.remaining_rows())
+            .field("page_row_count", &self.rows.len())
             .field("rows", &"[REDACTED]")
             .field("next_token", &self.next_token)
             .finish()
@@ -531,6 +551,8 @@ fn page_rows(
         sequence,
         result_digest,
         start_offset,
+        end_offset,
+        total_rows: row_count,
         rows: rows[start..end].to_vec(),
         next_token,
     })
@@ -609,6 +631,9 @@ mod tests {
         let artifact = prepared(vec![VId(1), VId(2), VId(3), VId(4), VId(5)]);
         let first = artifact.page(2, None).expect("first page succeeds");
         assert_eq!(first.start_offset(), 0);
+        assert_eq!(first.end_offset(), 2);
+        assert_eq!(first.total_rows(), 5);
+        assert_eq!(first.remaining_rows(), 3);
         assert_eq!(first.rows(), &[VId(1), VId(2)]);
         let first_token = *first.next_token().expect("more rows remain");
         assert_eq!(first_token.next_offset(), 2);
@@ -617,6 +642,9 @@ mod tests {
             .page(2, Some(&first_token))
             .expect("second page succeeds");
         assert_eq!(second.start_offset(), 2);
+        assert_eq!(second.end_offset(), 4);
+        assert_eq!(second.total_rows(), 5);
+        assert_eq!(second.remaining_rows(), 1);
         assert_eq!(second.rows(), &[VId(3), VId(4)]);
         let second_token = *second.next_token().expect("one row remains");
 
@@ -624,6 +652,9 @@ mod tests {
             .page(2, Some(&second_token))
             .expect("final page succeeds");
         assert_eq!(final_page.start_offset(), 4);
+        assert_eq!(final_page.end_offset(), 5);
+        assert_eq!(final_page.total_rows(), 5);
+        assert_eq!(final_page.remaining_rows(), 0);
         assert_eq!(final_page.rows(), &[VId(5)]);
         assert!(final_page.is_terminal());
 
