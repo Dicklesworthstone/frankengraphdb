@@ -2,7 +2,7 @@
 
 This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
-## Unreleased — 2026-09-01 owned preparation and deterministic bounds
+## Unreleased — 2026-09-01 owned preparation, deterministic bounds, and staged results
 
 ### Coherent owned prepared queries
 
@@ -14,7 +14,6 @@ Representative commits: `c7a0558e`, `61970273`, `3f19227b`, `3f85fa61` under `fg
 - Added owned preparation and execution on `Database`, `EmbeddedReadView`, and `WriteTxn`.
 - Added live and exact historical execution without reparsing or rebinding.
 - Added aligned input, plan, and exact ordered-result evidence for durable database and immutable-view reads.
-- Preserved the transaction boundary: staged-overlay execution returns plan evidence only because staged mutation identity is not yet part of the certificate.
 - Added a cross-surface law proving caller mutation after preparation cannot alter the retained query, durable/view evidence agrees at one sequence, and transactions see staged read-your-own-writes state.
 
 This is not yet the final parameterized prepared-statement protocol. Typed parameters, catalog epochs, authorization, cursor lifecycle, physical planning, invalidation, and portable persistence remain open.
@@ -34,15 +33,30 @@ Representative commits: `6c40d30c`, `4619dd65`, `0b06da07`, `00523439`, `78137cf
 
 The current implementation counts a materialized table before ordinary execution reads it. These are deterministic downstream-work/result guards, not wall-clock cancellation, allocation or I/O preemption, memory/spill governance, backpressure, or physical runtime-cost evidence.
 
-### Runnable witness
+### Exact staged-overlay result evidence
 
-Commit `d9909a49` added:
+Owning workstreams: `fgdb-w4-g1-txn-core-qpmg.4` and `fgdb-gate-genesis-lce.2`.
+
+- Added a canonical staged-effect digest under `fgdb:write-txn-staged-effect:v1`.
+- The staged-effect transcript binds the durable transaction basis and either an explicit empty-overlay tag or the complete canonical `LogicalDeltaTemplate` retained by the prepared write.
+- Added `GqlOverlayResultCertificate` under `fgdb:gql-staged-overlay-result:v1`.
+- The result certificate binds basis, plan digest, staged-effect digest, exact row count, row order, and every returned `VId`.
+- Added `WriteTxn::execute_prepared_query_with_overlay_result_certificate` and `verifies_prepared_query_overlay_result`.
+- Evidence is minted only after successful overlay execution.
+- Equivalent transactions at the same basis with the same canonical semantic effect verify the same evidence.
+- Row reorder, replacement, truncation, a later staged mutation, or a different overlay invalidates the certificate.
+- Digest comparisons use constant work over all digest bytes.
+
+This closes the exact in-process staged-result evidence gap. It does not create standalone replay: the certificate does not carry the durable snapshot, staged template bytes, graph rows, or transaction conflict state. A registered artifact format and payload are still required before portable replay can be claimed.
+
+### Runnable witnesses
 
 ```bash
 cargo run -p fgdb --example gql_owned_prepared
+cargo run -p fgdb --example gql_txn_overlay_result_evidence
 ```
 
-The example demonstrates retained preparation after caller bind mutation, exact counters, a typed zero-record refusal, and aligned input/plan/ordered-result evidence.
+The first demonstrates retained preparation, deterministic counters, typed refusal, and aligned durable-read evidence. The second demonstrates exact staged-result certification and invalidation after a later staged effect.
 
 ### Immediate crate-root repair
 
@@ -50,15 +64,15 @@ Commit `0c1be1b3` restored the exact known-good `crates/fgdb/src/lib.rs` blob af
 
 ### Documentation synchronized
 
-- Rebuilt `IMPLEMENTATION_STATUS.md` around the actual owned-preparation and budget subset.
-- Updated `docs/GQL_RESULT_EVIDENCE.md` to separate cryptographic evidence from adjacent deterministic counters.
-- Updated `docs/TRANSACTION_GQL.md` with owned preparation, conservative budget reads, and the staged-overlay evidence boundary.
+- Rebuilt `IMPLEMENTATION_STATUS.md` around the actual owned-preparation, budget, and staged-result subset.
+- Updated `docs/GQL_RESULT_EVIDENCE.md` to separate durable-read evidence, staged-result evidence, and adjacent deterministic counters.
+- Updated `docs/TRANSACTION_GQL.md` with canonical staged-effect identity, exact in-process result evidence, and the portable-replay boundary.
 
 ### Validation boundary
 
-The connector execution environment did not contain the repository-pinned Rust toolchain, `shellcheck`, or a runnable UBS installation. This wave received mechanical checks for source/module ownership, exact blob identity, delimiter balance, trailing whitespace, line width, duplicate methods, redacted diagnostics, exact-boundary logic, and evidence/no-claim consistency.
+The current connector environment did not provide a completed repository-wide proof for this head. The changed surface received focused mechanical checks for source/module ownership, exact blob identity, delimiter balance, whitespace, duplicate methods, redacted diagnostics, exact-boundary logic, transcript field coverage, constant-work digest comparison, and mutation-sensitive acceptance-test presence.
 
-Checked-in tests state intended laws. This changelog does not claim a fresh rustfmt, compile, Clippy, Rust-test, shellcheck, UBS, or complete `scripts/check.sh` verdict for the current tree. The next proof-bearing step is an exact-tree run captured by `scripts/local_proof.sh` on a machine with the pinned toolchain.
+Checked-in tests state intended laws. This changelog does not promote those checks into a fresh rustfmt, compile, Clippy, Rust-test, shellcheck, UBS, or complete `scripts/check.sh` verdict. The next proof-bearing step is an exact-tree run captured by `scripts/local_proof.sh` on a machine with the pinned toolchain.
 
 ## Earlier 2026-09-01 continuation
 
@@ -112,7 +126,7 @@ Still incomplete or absent:
 - typed rows/columns, genuine streaming cursors, and backpressure;
 - full session ownership, authorization, renewal/expiry, and synchronous facade;
 - full SSI and predicate/range conflict tracking;
-- staged-overlay identity and exact transaction-result evidence;
+- portable staged-overlay replay payloads and verifier;
 - portable query evidence and an external verifier SDK;
 - full ISO GQL, GLA/Loom execution, optimizer, spill, and larger-than-memory queries;
 - Strata tiers I/R/A, Ripple, Beacon, Prism, Warden, Fabric, and Aegis;
