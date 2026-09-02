@@ -2,6 +2,63 @@
 
 This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
+## Unreleased — 2026-09-02 strict query-evidence envelopes and replay audit
+
+Representative commits: `97d09787`, `57b13803`, `46175c92`, `68111462`, `62a546c7` under `fgdb-gate-genesis-lce.2`.
+
+### Canonical application envelopes
+
+- Added `GqlPreparedResultArtifact` for exact durable prepared-query results.
+- Added `GqlOverlayResultArtifact` for exact staged-overlay results.
+- Added one explicit v1 framing with eight-byte `FGQEVID1` magic, major/minor version, a closed kind tag, zero-required reserved bytes, exact sequence or basis, input/plan identities, staged-effect identity where applicable, exact row count, ordered `VId` bytes, and the applicable result digest.
+- Artifact fields are private; ordinary `Debug` output exposes public metadata and digests while redacting rows.
+- The strict decoder rejects invalid magic, unsupported versions, wrong artifact kind, nonzero reserved bytes, row-count or length overflow, every truncated prefix, trailing bytes, and a result transcript inconsistent with the included plan/snapshot or staged-overlay identity.
+- Digest comparisons use constant work over all digest bytes.
+
+The framing is endian-stable and deterministic but remains an **unreleased application artifact**. It is not an Appendix-A Chronicle object, FGP frame, publisher signature, external-verifier SDK, or compatibility promise.
+
+### Product issuance and audit
+
+- Added `Database::execute_prepared_query_artifact[_at]` and `audit_prepared_query_artifact`.
+- Added the same issuance and audit surface on immutable `EmbeddedReadView`.
+- Durable audit verifies strict framing, exact retained statement/bind identity, the canonical plan certificate at the artifact sequence, and the product certificate's ordered-result digest before re-executing the query at that exact historical sequence and requiring ordered-row equality.
+- The artifact decoder independently recomputes the frozen result transcript; product audit cross-checks it against `GqlPlanCertificate`, preventing silent drift between the application decoder and canonical issuing authority.
+- An artifact remains auditable after later writes advance the live frontier because replay uses the sequence named by the artifact rather than current state.
+- Added `WriteTxn::execute_prepared_query_overlay_artifact` and `audit_prepared_query_overlay_artifact`.
+- Transaction audit additionally verifies the current basis and canonical staged-effect digest. A later staged mutation returns typed `StagedEffectMismatch` for the old artifact before overlay replay.
+
+### Mutation-sensitive laws and witness
+
+The new integration law covers:
+
+- database and immutable-view audit of the same artifact;
+- historical replay after the live frontier advances;
+- rejection of a different prepared input;
+- row-byte corruption and trailing-data refusal;
+- staged-overlay round trip and exact replay;
+- staged row corruption refusal;
+- invalidation after a later canonical staged effect.
+
+A runnable witness was added:
+
+```bash
+cargo run -p fgdb --example gql_evidence_artifact
+```
+
+It issues durable and staged envelopes, audits both, advances durable and staged state, and demonstrates exact historical replay plus staged-effect invalidation.
+
+### Exact boundary
+
+The durable envelope carries enough information to bind and replay one result against a database that retains the named sequence. The staged envelope remains an identity-and-row package, not standalone transaction replay: it omits the durable snapshot, staged template bytes, read-set state, and conflict state.
+
+Promoting this internal v1 envelope into a released format requires a deliberate registry/constitution decision, stable size ceilings, frozen golden vectors, compatibility rules, and a separate authenticity layer where publisher provenance matters.
+
+### Validation boundary
+
+Hosted GitHub Actions were not used as evidence. The connector environment did not provide the repository-pinned Rust toolchain, `shellcheck`, or a runnable UBS installation. The changed surface received focused mechanical checks for exact blob identity, source/module ownership, include closure, delimiter balance, whitespace and line width, private-field construction, strict length and reserved-byte checks, every-prefix truncation coverage, diagnostic redaction, constant-work digest comparison, canonical issuer/independent-decoder cross-checking, and mutation-sensitive integration coverage.
+
+Checked-in tests state intended laws. This entry does not claim a fresh rustfmt, compile, Clippy, Rust-test, shellcheck, UBS, or complete `scripts/check.sh` verdict for the current tree. The next proof-bearing step is an exact-tree run captured by `scripts/local_proof.sh` on a machine with the pinned toolchain.
+
 ## Unreleased — 2026-09-01 owned preparation, deterministic bounds, and staged results
 
 ### Coherent owned prepared queries
@@ -16,7 +73,7 @@ Representative commits: `c7a0558e`, `61970273`, `3f19227b`, `3f85fa61` under `fg
 - Added aligned input, plan, and exact ordered-result evidence for durable database and immutable-view reads.
 - Added a cross-surface law proving caller mutation after preparation cannot alter the retained query, durable/view evidence agrees at one sequence, and transactions see staged read-your-own-writes state.
 
-This is not yet the final parameterized prepared-statement protocol. Typed parameters, catalog epochs, authorization, cursor lifecycle, physical planning, invalidation, and portable persistence remain open.
+This is not yet the final parameterized prepared-statement protocol. Typed parameters, catalog epochs, authorization, cursor lifecycle, physical planning, invalidation, and released persistence remain open.
 
 ### Deterministic prepared-query budgets
 
@@ -47,7 +104,7 @@ Owning workstreams: `fgdb-w4-g1-txn-core-qpmg.4` and `fgdb-gate-genesis-lce.2`.
 - Row reorder, replacement, truncation, a later staged mutation, or a different overlay invalidates the certificate.
 - Digest comparisons use constant work over all digest bytes.
 
-This closes the exact in-process staged-result evidence gap. It does not create standalone replay: the certificate does not carry the durable snapshot, staged template bytes, graph rows, or transaction conflict state. A registered artifact format and payload are still required before portable replay can be claimed.
+This closes the exact in-process staged-result evidence gap. It does not create standalone replay: the certificate does not carry the durable snapshot, staged template bytes, graph rows, or transaction conflict state.
 
 ### Runnable witnesses
 
@@ -66,13 +123,7 @@ Commit `0c1be1b3` restored the exact known-good `crates/fgdb/src/lib.rs` blob af
 
 - Rebuilt `IMPLEMENTATION_STATUS.md` around the actual owned-preparation, budget, and staged-result subset.
 - Updated `docs/GQL_RESULT_EVIDENCE.md` to separate durable-read evidence, staged-result evidence, and adjacent deterministic counters.
-- Updated `docs/TRANSACTION_GQL.md` with canonical staged-effect identity, exact in-process result evidence, and the portable-replay boundary.
-
-### Validation boundary
-
-The current connector environment did not provide a completed repository-wide proof for this head. The changed surface received focused mechanical checks for source/module ownership, exact blob identity, delimiter balance, whitespace, duplicate methods, redacted diagnostics, exact-boundary logic, transcript field coverage, constant-work digest comparison, and mutation-sensitive acceptance-test presence.
-
-Checked-in tests state intended laws. This changelog does not promote those checks into a fresh rustfmt, compile, Clippy, Rust-test, shellcheck, UBS, or complete `scripts/check.sh` verdict. The next proof-bearing step is an exact-tree run captured by `scripts/local_proof.sh` on a machine with the pinned toolchain.
+- Updated `docs/TRANSACTION_GQL.md` with canonical staged-effect identity, exact in-process result evidence, and the replay boundary.
 
 ## Earlier 2026-09-01 continuation
 
@@ -126,8 +177,8 @@ Still incomplete or absent:
 - typed rows/columns, genuine streaming cursors, and backpressure;
 - full session ownership, authorization, renewal/expiry, and synchronous facade;
 - full SSI and predicate/range conflict tracking;
-- portable staged-overlay replay payloads and verifier;
-- portable query evidence and an external verifier SDK;
+- standalone staged-overlay replay payloads and verifier;
+- a registered query-evidence compatibility contract and external verifier SDK;
 - full ISO GQL, GLA/Loom execution, optimizer, spill, and larger-than-memory queries;
 - Strata tiers I/R/A, Ripple, Beacon, Prism, Warden, Fabric, and Aegis;
 - CLI/robot mode, server, Python bindings, installer, signed releases, and upgrades.
