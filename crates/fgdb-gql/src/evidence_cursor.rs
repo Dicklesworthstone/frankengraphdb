@@ -1,6 +1,6 @@
 use crate::{
-    GqlEvidenceArtifactKind, GqlEvidencePage, GqlEvidencePageError,
-    GqlEvidencePageToken, GqlOverlayResultArtifact, GqlPreparedResultArtifact,
+    GqlEvidenceArtifactKind, GqlEvidencePage, GqlEvidencePageError, GqlEvidencePageToken,
+    GqlOverlayResultArtifact, GqlPreparedResultArtifact,
 };
 use fgdb_crypto::Digest;
 use fgdb_types::CommitSeq;
@@ -71,11 +71,7 @@ impl GqlEvidenceCursorLimits {
     /// Bound successful pages, rows in any one page, and total emitted rows.
     /// Zero is a valid fail-closed bound for every dimension.
     #[must_use]
-    pub const fn new(
-        max_pages: u64,
-        max_page_rows: u64,
-        max_emitted_rows: u64,
-    ) -> Self {
+    pub const fn new(max_pages: u64, max_page_rows: u64, max_emitted_rows: u64) -> Self {
         Self {
             max_pages: Some(max_pages),
             max_page_rows: Some(max_page_rows),
@@ -254,8 +250,11 @@ impl CursorArtifact {
 }
 
 enum CursorLifecycle {
+    /// The retained artifact is boxed so the two unit variants do not pay for
+    /// the open variant's size (clippy `large_enum_variant`); a cursor is a
+    /// single owned object, so the one allocation is not on any hot path.
     Open {
-        artifact: CursorArtifact,
+        artifact: Box<CursorArtifact>,
         next_token: Option<GqlEvidencePageToken>,
     },
     Exhausted,
@@ -298,10 +297,7 @@ impl GqlEvidenceCursor {
     /// artifact. This constructor performs no database replay.
     #[must_use]
     pub fn from_prepared_artifact(artifact: GqlPreparedResultArtifact) -> Self {
-        Self::from_prepared_artifact_with_limits(
-            artifact,
-            GqlEvidenceCursorLimits::UNLIMITED,
-        )
+        Self::from_prepared_artifact_with_limits(artifact, GqlEvidenceCursorLimits::UNLIMITED)
     }
 
     /// Construct a consumption-bounded cursor over an already materialized
@@ -318,10 +314,7 @@ impl GqlEvidenceCursor {
     /// artifact. This constructor performs no transaction audit.
     #[must_use]
     pub fn from_overlay_artifact(artifact: GqlOverlayResultArtifact) -> Self {
-        Self::from_overlay_artifact_with_limits(
-            artifact,
-            GqlEvidenceCursorLimits::UNLIMITED,
-        )
+        Self::from_overlay_artifact_with_limits(artifact, GqlEvidenceCursorLimits::UNLIMITED)
     }
 
     /// Construct a consumption-bounded cursor over an already materialized
@@ -395,7 +388,7 @@ impl GqlEvidenceCursor {
             pages_emitted: 0,
             rows_emitted: 0,
             lifecycle: CursorLifecycle::Open {
-                artifact,
+                artifact: Box::new(artifact),
                 next_token: None,
             },
         }
@@ -416,7 +409,7 @@ impl GqlEvidenceCursor {
             CursorLifecycle::Exhausted
         } else {
             CursorLifecycle::Open {
-                artifact,
+                artifact: Box::new(artifact),
                 next_token: Some(*checkpoint),
             }
         };
@@ -534,10 +527,7 @@ impl GqlEvidenceCursor {
     /// A successful terminal page transitions to `Exhausted` and releases the
     /// retained artifact. Every refusal leaves position, counters, and lifecycle
     /// unchanged.
-    pub fn next_page(
-        &mut self,
-        page_size: u64,
-    ) -> Result<GqlEvidencePage, GqlEvidenceCursorError> {
+    pub fn next_page(&mut self, page_size: u64) -> Result<GqlEvidencePage, GqlEvidenceCursorError> {
         match &self.lifecycle {
             CursorLifecycle::Exhausted => {
                 return Err(GqlEvidenceCursorError::Exhausted);
@@ -624,14 +614,12 @@ impl core::fmt::Debug for GqlEvidenceCursor {
 #[cfg(test)]
 mod tests {
     use super::{
-        GqlEvidenceCursor, GqlEvidenceCursorError,
-        GqlEvidenceCursorLimitDimension, GqlEvidenceCursorLimits,
-        GqlEvidenceCursorState,
+        GqlEvidenceCursor, GqlEvidenceCursorError, GqlEvidenceCursorLimitDimension,
+        GqlEvidenceCursorLimits, GqlEvidenceCursorState,
     };
     use crate::{
-        GQL_EVIDENCE_PAGE_TOKEN_LEN, GqlEvidenceArtifactKind,
-        GqlEvidencePageToken, GqlOverlayResultArtifact,
-        GqlPreparedResultArtifact, PreparedGqlQuery, RelationBind,
+        GQL_EVIDENCE_PAGE_TOKEN_LEN, GqlEvidenceArtifactKind, GqlEvidencePageToken,
+        GqlOverlayResultArtifact, GqlPreparedResultArtifact, PreparedGqlQuery, RelationBind,
     };
     use fgdb_crypto::{Digest, Hasher};
     use fgdb_delta_types::RelationId;
@@ -649,12 +637,7 @@ mod tests {
     }
 
     fn prepared(rows: Vec<VId>) -> GqlPreparedResultArtifact {
-        GqlPreparedResultArtifact::new(
-            &query(),
-            CommitSeq(11),
-            Digest([0x31; 32]),
-            rows,
-        )
+        GqlPreparedResultArtifact::new(&query(), CommitSeq(11), Digest([0x31; 32]), rows)
     }
 
     fn overlay(rows: Vec<VId>) -> GqlOverlayResultArtifact {
@@ -690,17 +673,13 @@ mod tests {
         bytes[8..10].copy_from_slice(&1_u16.to_be_bytes());
         bytes[10..12].copy_from_slice(&0_u16.to_be_bytes());
         bytes[12] = kind_tag;
-        bytes[TOKEN_HEADER_LEN..TOKEN_HEADER_LEN + 8]
-            .copy_from_slice(&sequence.0.to_be_bytes());
+        bytes[TOKEN_HEADER_LEN..TOKEN_HEADER_LEN + 8].copy_from_slice(&sequence.0.to_be_bytes());
         let result_start = TOKEN_HEADER_LEN + 8;
-        bytes[result_start..result_start + 32]
-            .copy_from_slice(&result_digest.0);
+        bytes[result_start..result_start + 32].copy_from_slice(&result_digest.0);
         let offset_start = result_start + 32;
-        bytes[offset_start..offset_start + 8]
-            .copy_from_slice(&next_offset.to_be_bytes());
+        bytes[offset_start..offset_start + 8].copy_from_slice(&next_offset.to_be_bytes());
         bytes[offset_start + 8..].copy_from_slice(&checksum.0);
-        GqlEvidencePageToken::from_bytes(&bytes)
-            .expect("independent valid token fixture decodes")
+        GqlEvidencePageToken::from_bytes(&bytes).expect("independent valid token fixture decodes")
     }
 
     #[test]
@@ -761,7 +740,10 @@ mod tests {
             prepared(vec![VId(1), VId(2), VId(3), VId(4), VId(5)]),
             limits,
         );
-        assert_eq!(cursor.next_page(2).expect("exact page bound").rows(), &[VId(1), VId(2)]);
+        assert_eq!(
+            cursor.next_page(2).expect("exact page bound").rows(),
+            &[VId(1), VId(2)]
+        );
 
         let row_refusal = cursor
             .next_page(2)
@@ -778,7 +760,10 @@ mod tests {
         assert_eq!(cursor.pages_emitted(), 1);
         assert_eq!(cursor.rows_emitted(), 2);
 
-        assert_eq!(cursor.next_page(1).expect("exact lifetime total").rows(), &[VId(3)]);
+        assert_eq!(
+            cursor.next_page(1).expect("exact lifetime total").rows(),
+            &[VId(3)]
+        );
         assert_eq!(cursor.remaining_page_budget(), Some(0));
         assert_eq!(cursor.remaining_emitted_row_budget(), Some(0));
         let page_refusal = cursor
@@ -851,11 +836,8 @@ mod tests {
             artifact.result_digest(),
             2,
         );
-        let cursor = GqlEvidenceCursor::resume_prepared_artifact(
-            artifact,
-            &checkpoint,
-        )
-        .expect("valid exact-end checkpoint resumes");
+        let cursor = GqlEvidenceCursor::resume_prepared_artifact(artifact, &checkpoint)
+            .expect("valid exact-end checkpoint resumes");
         assert!(cursor.is_exhausted());
         assert_eq!(cursor.position(), 2);
         assert_eq!(cursor.remaining_rows(), 0);
@@ -902,13 +884,8 @@ mod tests {
 
     #[test]
     fn overlay_cursor_preserves_kind_and_redacts_rows() {
-        let mut cursor = GqlEvidenceCursor::from_overlay_artifact(overlay(vec![
-            VId(0xfeed_face),
-        ]));
-        assert_eq!(
-            cursor.kind(),
-            GqlEvidenceArtifactKind::StagedOverlayResult
-        );
+        let mut cursor = GqlEvidenceCursor::from_overlay_artifact(overlay(vec![VId(0xfeed_face)]));
+        assert_eq!(cursor.kind(), GqlEvidenceArtifactKind::StagedOverlayResult);
         let debug = format!("{cursor:?}");
         assert!(!debug.contains("4277009102"));
         assert!(cursor.next_page(1).expect("page succeeds").is_terminal());

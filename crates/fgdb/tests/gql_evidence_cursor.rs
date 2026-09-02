@@ -65,25 +65,17 @@ fn audited_cursors_advance_once_and_own_their_exact_result() {
             .expect("fixture commits");
 
         let query = database
-            .prepare_gql_query(
-                QUERY,
-                &RelationBind::new().with_relation("R", R),
-            )
+            .prepare_gql_query(QUERY, &RelationBind::new().with_relation("R", R))
             .expect("query prepares");
         let view = database.read_session().expect("view pins");
         let artifact = database
             .execute_prepared_query_artifact_at(&query, snapshot)
             .expect("artifact issues");
         let bytes = artifact.to_bytes();
-        let exact_limits =
-            GqlEvidenceLimits::new(bytes.len() as u64, artifact.rows().len() as u64);
+        let exact_limits = GqlEvidenceLimits::new(bytes.len() as u64, artifact.rows().len() as u64);
 
         let mut cursor = database
-            .open_prepared_query_artifact_cursor_with_limits(
-                &query,
-                &bytes,
-                exact_limits,
-            )
+            .open_prepared_query_artifact_cursor_with_limits(&query, &bytes, exact_limits)
             .expect("artifact audits once and cursor opens");
         assert_eq!(cursor.state(), GqlEvidenceCursorState::Open);
         assert_eq!(cursor.sequence(), snapshot);
@@ -186,9 +178,7 @@ fn audited_cursors_advance_once_and_own_their_exact_result() {
             .expect_err("old bytes cannot open against a changed overlay");
         assert!(matches!(
             stale_open,
-            GqlEvidenceLimitedAuditError::Audit(
-                GqlEvidenceAuditError::StagedEffectMismatch
-            )
+            GqlEvidenceLimitedAuditError::Audit(GqlEvidenceAuditError::StagedEffectMismatch)
         ));
 
         let debug = format!("{overlay_cursor:?}");

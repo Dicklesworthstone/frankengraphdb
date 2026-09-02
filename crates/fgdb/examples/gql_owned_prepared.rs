@@ -72,8 +72,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                     && exceeded.observed == 1
         ));
 
-        let (rows, input, plan, result_digest) = db
-            .execute_prepared_query_with_result_digest_at(&prepared, snapshot)?;
+        let (rows, input, plan, result_digest) =
+            db.execute_prepared_query_with_result_digest_at(&prepared, snapshot)?;
         assert_eq!(rows, bounded.value);
         assert!(input.verifies_at(prepared.statement(), prepared.bind(), snapshot));
         assert!(plan.verifies_at(prepared.plan(), snapshot));

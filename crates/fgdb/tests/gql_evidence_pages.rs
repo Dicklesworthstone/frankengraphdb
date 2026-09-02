@@ -2,9 +2,9 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::RelationId;
 use fgdb_gql::{
-    GqlEvidenceAuditError, GqlEvidenceLimitDimension,
-    GqlEvidenceLimitedAuditError, GqlEvidenceLimits, GqlEvidencePageAuditError,
-    GqlEvidencePageError, GqlEvidencePageTokenDecodeError,
+    GqlEvidenceAuditError, GqlEvidenceLimitDimension, GqlEvidenceLimitedAuditError,
+    GqlEvidenceLimits, GqlEvidencePageAuditError, GqlEvidencePageError,
+    GqlEvidencePageTokenDecodeError,
 };
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -66,10 +66,7 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
             .expect("fixture commits");
 
         let query = database
-            .prepare_gql_query(
-                QUERY,
-                &RelationBind::new().with_relation("R", R),
-            )
+            .prepare_gql_query(QUERY, &RelationBind::new().with_relation("R", R))
             .expect("query prepares");
         let view = database.read_session().expect("read view pins");
         let artifact = database
@@ -78,27 +75,17 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
         let bytes = artifact.to_bytes();
 
         let first = database
-            .audit_untrusted_prepared_query_artifact_page(
-                &query, &bytes, 2, None,
-            )
+            .audit_untrusted_prepared_query_artifact_page(&query, &bytes, 2, None)
             .expect("first audited page succeeds");
         assert_eq!(first.rows(), &[VId(2), VId(3)]);
         assert_eq!(first.start_offset(), 0);
         assert_eq!(first.end_offset(), 2);
         assert_eq!(first.total_rows(), 3);
         assert_eq!(first.remaining_rows(), 1);
-        let token = first
-            .next_token()
-            .expect("one row remains")
-            .to_bytes();
+        let token = first.next_token().expect("one row remains").to_bytes();
 
         let second = view
-            .audit_untrusted_prepared_query_artifact_page(
-                &query,
-                &bytes,
-                2,
-                Some(&token),
-            )
+            .audit_untrusted_prepared_query_artifact_page(&query, &bytes, 2, Some(&token))
             .expect("pinned view resumes the same exact result");
         assert_eq!(second.rows(), &[VId(4)]);
         assert_eq!(second.start_offset(), 2);
@@ -112,25 +99,16 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
             .await
             .expect("live database advances");
         let historical = database
-            .audit_untrusted_prepared_query_artifact_page(
-                &query,
-                &bytes,
-                2,
-                Some(&token),
-            )
+            .audit_untrusted_prepared_query_artifact_page(&query, &bytes, 2, Some(&token))
             .expect("old artifact still resumes by historical replay");
         assert_eq!(historical, second);
 
         let zero_page = database
-            .audit_untrusted_prepared_query_artifact_page(
-                &query, b"not an artifact", 0, None,
-            )
+            .audit_untrusted_prepared_query_artifact_page(&query, b"not an artifact", 0, None)
             .expect_err("zero page size refuses before artifact decode");
         assert!(matches!(
             zero_page,
-            GqlEvidencePageAuditError::Page(
-                GqlEvidencePageError::ZeroPageSize
-            )
+            GqlEvidencePageAuditError::Page(GqlEvidencePageError::ZeroPageSize)
         ));
 
         let byte_limit = database
@@ -154,18 +132,11 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
             .expect("current artifact issues");
         let current_bytes = current.to_bytes();
         let cross_snapshot = database
-            .audit_untrusted_prepared_query_artifact_page(
-                &query,
-                &current_bytes,
-                2,
-                Some(&token),
-            )
+            .audit_untrusted_prepared_query_artifact_page(&query, &current_bytes, 2, Some(&token))
             .expect_err("old token cannot resume a newer snapshot");
         assert!(matches!(
             cross_snapshot,
-            GqlEvidencePageAuditError::Page(
-                GqlEvidencePageError::TokenSequenceMismatch { .. }
-            )
+            GqlEvidencePageAuditError::Page(GqlEvidencePageError::TokenSequenceMismatch { .. })
         ));
 
         let mut corrupted_token = token;
@@ -180,11 +151,9 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
             .expect_err("token corruption refuses");
         assert!(matches!(
             token_error,
-            GqlEvidencePageAuditError::Page(
-                GqlEvidencePageError::TokenDecode(
-                    GqlEvidencePageTokenDecodeError::ChecksumMismatch
-                )
-            )
+            GqlEvidencePageAuditError::Page(GqlEvidencePageError::TokenDecode(
+                GqlEvidencePageTokenDecodeError::ChecksumMismatch
+            ))
         ));
 
         let mut transaction = database.begin(&txn_cx).expect("transaction begins");
@@ -230,9 +199,7 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
             .expect_err("durable token cannot resume a staged result");
         assert!(matches!(
             cross_kind,
-            GqlEvidencePageAuditError::Page(
-                GqlEvidencePageError::TokenKindMismatch { .. }
-            )
+            GqlEvidencePageAuditError::Page(GqlEvidencePageError::TokenKindMismatch { .. })
         ));
 
         transaction
@@ -249,11 +216,9 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
             .expect_err("changed staged effect refuses before paging");
         assert!(matches!(
             changed_overlay,
-            GqlEvidencePageAuditError::Audit(
-                GqlEvidenceLimitedAuditError::Audit(
-                    GqlEvidenceAuditError::StagedEffectMismatch
-                )
-            )
+            GqlEvidencePageAuditError::Audit(GqlEvidenceLimitedAuditError::Audit(
+                GqlEvidenceAuditError::StagedEffectMismatch
+            ))
         ));
         transaction.abort();
     });

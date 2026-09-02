@@ -859,6 +859,41 @@ role = "advisory"
 reason = "fgdb-c4ou + fgdb-gate-workdir-lifetime-and-reaper-ruling-1dra: an explicit operator command, not a gate. Default/report mode never mutates artifacts; it classifies /data/tmp/fgdb_swarm paths and separately reports only the two owner-authorized gate pools using strict producer REAPABLE-AFTER records, exclusive child liveness locks, inode-aware hard-link accounting, retention, canonical-path checks, exact tree metadata identities, and fail-closed mountpoint refusal. The destructive mode requires --reap plus the exact SHA-256 emitted by a prior report over the complete current REAPABLE set; it takes both producer-governed parent-namespace leases, pins parent and candidate descriptors, holds every exclusive lock through confirmation, traverses children only through the candidate descriptor, and removes the root through its pinned parent. It expressly does not claim containment against a CAP_SYS_ADMIN mount race or a process that ignores the lifecycle leases. It asserts nothing about this repository and would red on no defect, while executing its operator mode inside check.sh would be unauthorized mutation; advisory is therefore permanent rather than a candidate awaiting promotion"
 
 [[script_disposition]]
+path = "scripts/agent_context.sh"
+role = "advisory"
+reason = "fgdb-l9r3: an explicit operator command that exports an exact-SHA, credential-free context capsule to an out-of-tree directory that must not already exist. It asserts no repository property and its own header says check.sh remains authoritative; executing it inside check.sh would create directories during the gate's frozen-input window while proving nothing"
+
+[[script_disposition]]
+path = "scripts/agent_context_checkout.sh"
+role = "advisory"
+reason = "fgdb-l9r3: an explicit operator command that materializes a verified capsule as a detached checkout at a destination that must not already exist. It is state-creating by design and takes its subject as an argument, so as a checker it would have no in-repository subject and would only mutate scratch state"
+
+[[script_disposition]]
+path = "scripts/agent_context_verify.sh"
+role = "advisory"
+reason = "fgdb-l9r3: verifies a capsule supplied as an argument by importing its bundle into a retained scratch repository. No capsule exists inside this repository for it to verify, so registration would exercise a synthetic invocation rather than a repository property; its mutation-sensitive controls are scripts/agent_context_selftest.sh"
+
+[[script_disposition]]
+path = "scripts/local_proof.sh"
+role = "advisory"
+reason = "fgdb-l9r3: the operator wrapper that captures one exact-tree scripts/check.sh run as an immutable proof bundle. Like the runner row above it, registering it would make check.sh invoke check.sh; its verdict IS check.sh's exit code plus tree stability, so it adds no assertion the chain does not already make"
+
+[[script_disposition]]
+path = "scripts/agent_context_selftest.sh"
+role = "candidate"
+reason = "fgdb-l9r3: mutation-sensitive controls for capsule production, deep verification, and checkout, MEASURED green (exit 0) at 0b2b0702 on 2026-09-02 on the dev box. Not promoted because it creates retained fixture trees under the scratch root on every run and registration would make check.sh do so inside its frozen-input window; promotion needs a retained-fixture budget ruling first"
+
+[[script_disposition]]
+path = "scripts/local_proof_selftest.sh"
+role = "candidate"
+reason = "fgdb-l9r3: retained mutation-sensitive controls for proof production and verification over a fixture check.sh (pass, red, and moving-tree void), MEASURED green (exit 0) at 0b2b0702 on 2026-09-02 on the dev box. Not promoted for the same retained-fixture reason as the agent-context self-test"
+
+[[script_disposition]]
+path = "scripts/local_proof_verify.sh"
+role = "advisory"
+reason = "fgdb-l9r3: verifies a proof bundle supplied as an argument (format, internal consistency, and optionally the commit/tree/blob binding against a repository). No bundle exists inside this repository for it to verify, so registration would exercise a synthetic invocation; its mutation-sensitive controls are scripts/local_proof_selftest.sh"
+
+[[script_disposition]]
 path = "scripts/git_hooks/install.sh"
 role = "advisory"
 reason = "fgdb-eesn: an explicit operator installer/status command for the landing-lease pre-commit hook. Its --install mode mutates the repository's shared Git hook directory, so executing it inside check.sh would be an unauthorized state change rather than an assertion"

@@ -66,11 +66,7 @@ fn owned_preparation_is_stable_across_database_view_and_transaction_surfaces() {
         assert_eq!(rows, vec![VId(2)]);
 
         let bounded = db
-            .execute_prepared_query_budgeted_at(
-                &query,
-                basis,
-                GqlExecutionBudget::new(1, 1),
-            )
+            .execute_prepared_query_budgeted_at(&query, basis, GqlExecutionBudget::new(1, 1))
             .expect("exact deterministic bounds succeed");
         assert_eq!(bounded.value, rows);
         assert_eq!(bounded.stats.snapshot_records, 1);
@@ -92,11 +88,7 @@ fn owned_preparation_is_stable_across_database_view_and_transaction_surfaces() {
         ));
 
         let result_error = db
-            .execute_prepared_query_budgeted_at(
-                &query,
-                basis,
-                GqlExecutionBudget::result_rows(0),
-            )
+            .execute_prepared_query_budgeted_at(&query, basis, GqlExecutionBudget::result_rows(0))
             .expect_err("one final row over the bound refuses");
         assert!(matches!(
             result_error,
@@ -113,11 +105,7 @@ fn owned_preparation_is_stable_across_database_view_and_transaction_surfaces() {
             )
             .expect("labeled node scan prepares");
         let node_bounded = db
-            .execute_prepared_query_budgeted_at(
-                &node_query,
-                basis,
-                GqlExecutionBudget::new(2, 2),
-            )
+            .execute_prepared_query_budgeted_at(&node_query, basis, GqlExecutionBudget::new(2, 2))
             .expect("node scan counts the admitted vertex table");
         assert_eq!(node_bounded.value, vec![VId(1), VId(2)]);
         assert_eq!(node_bounded.stats.snapshot_records, 2);

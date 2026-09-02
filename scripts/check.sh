@@ -115,9 +115,14 @@ CORE_GATE_SHELL_LINT="shell lint (bash -n + shellcheck) over tracked shell deliv
 CORE_GATE_VERDICT_CONTRACT="verdict-contract closure (every gate reports under one token on one stream)"
 CORE_GATE_DOMAIN_CLOSURE="gate-domain closure (every verdict declares its tracked input domain)"
 CORE_GATE_FMT="cargo fmt --check"
-CORE_GATE_CHECK="cargo check --all-targets"
-CORE_GATE_CLIPPY="cargo clippy --all-targets -- -D warnings"
-CORE_GATE_TEST="cargo test --workspace --no-fail-fast"
+# `--locked` on every cargo gate (fgdb-l9r3, 2026-09-02): a manifest edit that
+# lands without regenerating Cargo.lock must red THIS gate with cargo's own
+# "lock file needs to be updated" message. Without it cargo silently rewrote the
+# tracked lockfile mid-run, the gate reported nothing about the cause, and 33
+# commits sat on a tree no `--locked` build could open.
+CORE_GATE_CHECK="cargo check --all-targets --locked"
+CORE_GATE_CLIPPY="cargo clippy --all-targets --locked -- -D warnings"
+CORE_GATE_TEST="cargo test --workspace --locked --no-fail-fast"
 CORE_GATE_UBS="UBS over every tracked Rust source"
 CORE_GATE_ROSTER=(
   "$CORE_GATE_FILE_COVERAGE"
@@ -1797,9 +1802,9 @@ run_cargo_test_once() { # log
 
   if [ "$CARGO_TEST_MODE" = "catalog" ]; then
     : >"$log" || return 1
-    CARGO_TERM_COLOR=never cargo test --color=never -p registry-check --no-fail-fast 2>&1 | tee -a "$log"
+    CARGO_TERM_COLOR=never cargo test --color=never --locked -p registry-check --no-fail-fast 2>&1 | tee -a "$log"
     registry_check_rc="${PIPESTATUS[0]}"
-    CARGO_TERM_COLOR=never cargo test --color=never -p fgdb-codec --test generated_durable_roundtrip 2>&1 | tee -a "$log"
+    CARGO_TERM_COLOR=never cargo test --color=never --locked -p fgdb-codec --test generated_durable_roundtrip 2>&1 | tee -a "$log"
     codec_rc="${PIPESTATUS[0]}"
     if [ "$registry_check_rc" -ne 0 ]; then
       return "$registry_check_rc"
@@ -1807,7 +1812,7 @@ run_cargo_test_once() { # log
     return "$codec_rc"
   fi
 
-  CARGO_TERM_COLOR=never cargo test --color=never --workspace --no-fail-fast 2>&1 | tee "$log"
+  CARGO_TERM_COLOR=never cargo test --color=never --workspace --locked --no-fail-fast 2>&1 | tee "$log"
 }
 
 run_cargo_test_workspace() {
@@ -3475,10 +3480,10 @@ run_core_gate "$CORE_GATE_DOMAIN_CLOSURE" run_gate_domain_closure
 gate_scope_abort_if_tree_moved "$CORE_GATE_DOMAIN_CLOSURE"
 run_core_gate "$CORE_GATE_FMT" cargo fmt --check
 gate_scope_abort_if_tree_moved "$CORE_GATE_FMT"
-run_core_gate "$CORE_GATE_CHECK" cargo check --all-targets
+run_core_gate "$CORE_GATE_CHECK" cargo check --all-targets --locked
 gate_scope_abort_if_tree_moved "$CORE_GATE_CHECK"
 run_core_gate "$CORE_GATE_CLIPPY" \
-  cargo clippy --all-targets -- -D warnings
+  cargo clippy --all-targets --locked -- -D warnings
 gate_scope_abort_if_tree_moved "$CORE_GATE_CLIPPY"
 CARGO_TEST_LOG="$GATE_LOG_DIR/core-cargo-test.log"
 run_core_gate "$CORE_GATE_TEST" run_cargo_test_workspace

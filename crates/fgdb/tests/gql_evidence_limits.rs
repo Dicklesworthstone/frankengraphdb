@@ -2,9 +2,8 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::RelationId;
 use fgdb_gql::{
-    GqlEvidenceAuditError, GqlEvidenceDecodeError,
-    GqlEvidenceLimitDimension, GqlEvidenceLimitedAuditError,
-    GqlEvidenceLimits,
+    GqlEvidenceAuditError, GqlEvidenceDecodeError, GqlEvidenceLimitDimension,
+    GqlEvidenceLimitedAuditError, GqlEvidenceLimits,
 };
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -64,10 +63,7 @@ fn untrusted_evidence_audits_enforce_limits_before_replay() {
             .expect("fixture commits");
 
         let query = database
-            .prepare_gql_query(
-                QUERY,
-                &RelationBind::new().with_relation("R", R),
-            )
+            .prepare_gql_query(QUERY, &RelationBind::new().with_relation("R", R))
             .expect("query prepares");
         let view = database.read_session().expect("view pins");
 
@@ -75,22 +71,17 @@ fn untrusted_evidence_audits_enforce_limits_before_replay() {
             .execute_prepared_query_artifact_at(&query, basis)
             .expect("prepared artifact issues");
         let bytes = artifact.to_bytes();
-        let exact =
-            GqlEvidenceLimits::new(bytes.len() as u64, artifact.rows().len() as u64);
+        let exact = GqlEvidenceLimits::new(bytes.len() as u64, artifact.rows().len() as u64);
 
         assert_eq!(
             database
-                .audit_prepared_query_artifact_with_limits(
-                    &query, &bytes, exact,
-                )
+                .audit_prepared_query_artifact_with_limits(&query, &bytes, exact,)
                 .expect("exact database limits succeed"),
             artifact
         );
         assert_eq!(
-            view.audit_prepared_query_artifact_with_limits(
-                &query, &bytes, exact,
-            )
-            .expect("exact view limits succeed"),
+            view.audit_prepared_query_artifact_with_limits(&query, &bytes, exact,)
+                .expect("exact view limits succeed"),
             artifact
         );
         assert_eq!(
@@ -157,11 +148,9 @@ fn untrusted_evidence_audits_enforce_limits_before_replay() {
             .expect_err("malformed bytes preserve decoder refusal");
         assert!(matches!(
             format_error,
-            GqlEvidenceLimitedAuditError::Audit(
-                GqlEvidenceAuditError::Decode(
-                    GqlEvidenceDecodeError::InvalidMagic
-                )
-            )
+            GqlEvidenceLimitedAuditError::Audit(GqlEvidenceAuditError::Decode(
+                GqlEvidenceDecodeError::InvalidMagic
+            ))
         ));
 
         let mut transaction = database.begin(&txn_cx).expect("transaction begins");
@@ -172,10 +161,8 @@ fn untrusted_evidence_audits_enforce_limits_before_replay() {
             .execute_prepared_query_overlay_artifact(&database, &query)
             .expect("overlay artifact issues");
         let overlay_bytes = overlay.to_bytes();
-        let overlay_exact = GqlEvidenceLimits::new(
-            overlay_bytes.len() as u64,
-            overlay.rows().len() as u64,
-        );
+        let overlay_exact =
+            GqlEvidenceLimits::new(overlay_bytes.len() as u64, overlay.rows().len() as u64);
 
         assert_eq!(
             transaction
@@ -190,11 +177,7 @@ fn untrusted_evidence_audits_enforce_limits_before_replay() {
         );
         assert_eq!(
             transaction
-                .audit_untrusted_prepared_query_overlay_artifact(
-                    &database,
-                    &query,
-                    &overlay_bytes,
-                )
+                .audit_untrusted_prepared_query_overlay_artifact(&database, &query, &overlay_bytes,)
                 .expect("default untrusted overlay audit succeeds"),
             overlay
         );
@@ -218,17 +201,11 @@ fn untrusted_evidence_audits_enforce_limits_before_replay() {
             .write(&mut database, vertex_and_edge(VId(4), EId(12)))
             .expect("overlay advances");
         let staged_error = transaction
-            .audit_untrusted_prepared_query_overlay_artifact(
-                &database,
-                &query,
-                &overlay_bytes,
-            )
+            .audit_untrusted_prepared_query_overlay_artifact(&database, &query, &overlay_bytes)
             .expect_err("changed staged effect invalidates old bytes");
         assert!(matches!(
             staged_error,
-            GqlEvidenceLimitedAuditError::Audit(
-                GqlEvidenceAuditError::StagedEffectMismatch
-            )
+            GqlEvidenceLimitedAuditError::Audit(GqlEvidenceAuditError::StagedEffectMismatch)
         ));
         transaction.abort();
     });

@@ -22,10 +22,7 @@ pub struct PreparedGqlQuery {
 impl PreparedGqlQuery {
     /// Parse and bind one statement while retaining the exact inputs that
     /// produced the resulting plan.
-    pub fn prepare(
-        statement: impl Into<String>,
-        bind: &RelationBind,
-    ) -> Result<Self, BindError> {
+    pub fn prepare(statement: impl Into<String>, bind: &RelationBind) -> Result<Self, BindError> {
         let statement = statement.into();
         let plan = bind.bind(&statement)?;
         Ok(Self {
@@ -245,8 +242,8 @@ mod tests {
         let mut bind = RelationBind::new().with_relation("R", RelationId(7));
         let expected_bind = bind.clone();
 
-        let prepared = PreparedGqlQuery::prepare(statement.clone(), &bind)
-            .expect("the statement binds");
+        let prepared =
+            PreparedGqlQuery::prepare(statement.clone(), &bind).expect("the statement binds");
 
         statement.push_str(" LIMIT 1");
         bind.insert("R", RelationId(99));
@@ -284,11 +281,7 @@ mod tests {
     #[test]
     fn execution_budget_uses_exact_boundaries_and_typed_refusals() {
         let budget = GqlExecutionBudget::new(7, 3);
-        assert!(
-            budget
-                .check(GqlBudgetDimension::SnapshotRecords, 7)
-                .is_ok()
-        );
+        assert!(budget.check(GqlBudgetDimension::SnapshotRecords, 7).is_ok());
         assert!(budget.check(GqlBudgetDimension::ResultRows, 3).is_ok());
 
         let snapshot = budget

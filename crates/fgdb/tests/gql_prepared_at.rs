@@ -74,10 +74,19 @@ fn one_plan_crosses_live_historical_and_pinned_session_surfaces() {
         let second_seq = db.write(cx, second).await.expect("second commit lands");
         let current = db.read_session().expect("pins second generation");
 
-        assert_eq!(db.execute_prepared_gql_at(&plan, first_seq).unwrap(), vec![VId(2)]);
-        assert_eq!(db.execute_prepared_gql(&plan).unwrap(), vec![VId(2), VId(3)]);
+        assert_eq!(
+            db.execute_prepared_gql_at(&plan, first_seq).unwrap(),
+            vec![VId(2)]
+        );
+        assert_eq!(
+            db.execute_prepared_gql(&plan).unwrap(),
+            vec![VId(2), VId(3)]
+        );
         assert_eq!(old.execute_prepared_gql(&plan).unwrap(), vec![VId(2)]);
-        assert_eq!(current.execute_prepared_gql(&plan).unwrap(), vec![VId(2), VId(3)]);
+        assert_eq!(
+            current.execute_prepared_gql(&plan).unwrap(),
+            vec![VId(2), VId(3)]
+        );
         assert_eq!(
             current.execute_prepared_gql_at(&plan, first_seq).unwrap(),
             vec![VId(2)]

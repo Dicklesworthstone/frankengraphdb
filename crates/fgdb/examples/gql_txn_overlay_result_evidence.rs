@@ -45,10 +45,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         initial.add_edge(EId(10), VId(1), VId(2), vec![]);
         database.write(&commit, initial).await?;
 
-        let query = database.prepare_gql_query(
-            QUERY,
-            &RelationBind::new().with_relation("R", R),
-        )?;
+        let query =
+            database.prepare_gql_query(QUERY, &RelationBind::new().with_relation("R", R))?;
         let mut transaction = database.begin(&txn_cx)?;
         let mut staged = WriteBatch::new(R);
         staged.create_vertex(VId(3), vec![], vec![]);
@@ -59,11 +57,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             .execute_prepared_query_with_overlay_result_certificate(&database, &query)?;
         assert_eq!(rows, vec![VId(2), VId(3)]);
         assert!(plan.verifies_at(query.plan(), transaction.basis()));
-        assert!(transaction.verifies_prepared_query_overlay_result(
-            &query,
-            &rows,
-            &certificate,
-        )?);
+        assert!(transaction.verifies_prepared_query_overlay_result(&query, &rows, &certificate,)?);
 
         let mut later = WriteBatch::new(R);
         later.create_vertex(VId(4), vec![], vec![]);

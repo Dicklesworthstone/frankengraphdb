@@ -183,12 +183,7 @@ fn enum_arm_payload(
         if arm_name != target_arm {
             continue;
         }
-        matches.push(target_variant_payload(
-            masked,
-            after_name,
-            end,
-            target_arm,
-        )?);
+        matches.push(target_variant_payload(masked, after_name, end, target_arm)?);
     }
     match matches.len() {
         0 => Err((
@@ -351,12 +346,7 @@ fn normalize_code(code: &[u8]) -> Result<String, (&'static str, String)> {
         .collect())
 }
 
-fn split_top_level(
-    bytes: &[u8],
-    start: usize,
-    end: usize,
-    separator: u8,
-) -> Vec<(usize, usize)> {
+fn split_top_level(bytes: &[u8], start: usize, end: usize, separator: u8) -> Vec<(usize, usize)> {
     let mut pieces = Vec::new();
     let mut piece_start = start;
     let (mut paren, mut bracket, mut brace, mut angle) = (0usize, 0usize, 0usize, 0usize);
@@ -370,13 +360,7 @@ fn split_top_level(
             b'}' => brace = brace.saturating_sub(1),
             b'<' => angle += 1,
             b'>' if angle > 0 => angle -= 1,
-            byte
-                if byte == separator
-                    && paren == 0
-                    && bracket == 0
-                    && brace == 0
-                    && angle == 0 =>
-            {
+            byte if byte == separator && paren == 0 && bracket == 0 && brace == 0 && angle == 0 => {
                 pieces.push((piece_start, index));
                 piece_start = index + 1;
             }
@@ -497,9 +481,7 @@ fn mask_non_code(source: &[u8]) -> Vec<u8> {
         }
         let string_quote = if source[index] == b'"' {
             Some(index)
-        } else if matches!(source[index], b'b' | b'c')
-            && source.get(index + 1) == Some(&b'"')
-        {
+        } else if matches!(source[index], b'b' | b'c') && source.get(index + 1) == Some(&b'"') {
             Some(index + 1)
         } else {
             None
@@ -654,8 +636,7 @@ mod tests {
         let violations = validate_sources(&registry, &source);
         assert!(
             violations.iter().any(|violation| {
-                violation.code == "live_payload_schema_mismatch"
-                    && violation.subject == target_id
+                violation.code == "live_payload_schema_mismatch" && violation.subject == target_id
             }),
             "wrong input-schema mutation was not rejected: {violations:#?}"
         );

@@ -33,13 +33,8 @@ impl GqlOverlayResultCertificate {
         rows: &[VId],
     ) -> Self {
         let row_count = count_as_u64(rows.len());
-        let result_digest = digest_result(
-            basis,
-            plan_digest,
-            staged_effect_digest,
-            row_count,
-            rows,
-        );
+        let result_digest =
+            digest_result(basis, plan_digest, staged_effect_digest, row_count, rows);
         Self {
             basis,
             plan_digest,
@@ -62,13 +57,7 @@ impl GqlOverlayResultCertificate {
         rows: &[VId],
     ) -> bool {
         let row_count = count_as_u64(rows.len());
-        let expected = digest_result(
-            basis,
-            plan_digest,
-            staged_effect_digest,
-            row_count,
-            rows,
-        );
+        let expected = digest_result(basis, plan_digest, staged_effect_digest, row_count, rows);
         self.basis == basis
             && self.row_count == row_count
             && digest_eq(self.plan_digest, plan_digest)
@@ -123,77 +112,24 @@ mod tests {
     #[test]
     fn certificate_binds_basis_plan_overlay_count_order_and_rows() {
         let rows = [VId(2), VId(9)];
-        let certificate = GqlOverlayResultCertificate::new(
-            CommitSeq(7),
-            digest(0x11),
-            digest(0x22),
-            &rows,
-        );
+        let certificate =
+            GqlOverlayResultCertificate::new(CommitSeq(7), digest(0x11), digest(0x22), &rows);
 
-        assert!(certificate.verifies(
-            CommitSeq(7),
-            digest(0x11),
-            digest(0x22),
-            &rows
-        ));
-        assert!(!certificate.verifies(
-            CommitSeq(8),
-            digest(0x11),
-            digest(0x22),
-            &rows
-        ));
-        assert!(!certificate.verifies(
-            CommitSeq(7),
-            digest(0x12),
-            digest(0x22),
-            &rows
-        ));
-        assert!(!certificate.verifies(
-            CommitSeq(7),
-            digest(0x11),
-            digest(0x23),
-            &rows
-        ));
-        assert!(!certificate.verifies(
-            CommitSeq(7),
-            digest(0x11),
-            digest(0x22),
-            &[VId(9), VId(2)]
-        ));
-        assert!(!certificate.verifies(
-            CommitSeq(7),
-            digest(0x11),
-            digest(0x22),
-            &[VId(2)]
-        ));
-        assert!(!certificate.verifies(
-            CommitSeq(7),
-            digest(0x11),
-            digest(0x22),
-            &[VId(2), VId(8)]
-        ));
+        assert!(certificate.verifies(CommitSeq(7), digest(0x11), digest(0x22), &rows));
+        assert!(!certificate.verifies(CommitSeq(8), digest(0x11), digest(0x22), &rows));
+        assert!(!certificate.verifies(CommitSeq(7), digest(0x12), digest(0x22), &rows));
+        assert!(!certificate.verifies(CommitSeq(7), digest(0x11), digest(0x23), &rows));
+        assert!(!certificate.verifies(CommitSeq(7), digest(0x11), digest(0x22), &[VId(9), VId(2)]));
+        assert!(!certificate.verifies(CommitSeq(7), digest(0x11), digest(0x22), &[VId(2)]));
+        assert!(!certificate.verifies(CommitSeq(7), digest(0x11), digest(0x22), &[VId(2), VId(8)]));
     }
 
     #[test]
     fn empty_result_is_stable_and_distinct_from_one_row() {
-        let certificate = GqlOverlayResultCertificate::new(
-            CommitSeq(7),
-            digest(0x11),
-            digest(0x22),
-            &[],
-        );
+        let certificate =
+            GqlOverlayResultCertificate::new(CommitSeq(7), digest(0x11), digest(0x22), &[]);
 
-        assert!(certificate.verifies(
-            CommitSeq(7),
-            digest(0x11),
-            digest(0x22),
-            &[]
-        ));
-        assert!(!certificate.verifies(
-            CommitSeq(7),
-            digest(0x11),
-            digest(0x22),
-            &[VId(0)]
-        ));
+        assert!(certificate.verifies(CommitSeq(7), digest(0x11), digest(0x22), &[]));
+        assert!(!certificate.verifies(CommitSeq(7), digest(0x11), digest(0x22), &[VId(0)]));
     }
 }

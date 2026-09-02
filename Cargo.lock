@@ -575,7 +575,9 @@ dependencies = [
 name = "fgdb-gql"
 version = "0.0.1"
 dependencies = [
+ "fgdb-crypto",
  "fgdb-delta-types",
+ "fgdb-types",
 ]
 
 [[package]]

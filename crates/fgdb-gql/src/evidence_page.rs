@@ -1,6 +1,6 @@
 use crate::{
-    GqlEvidenceArtifactKind, GqlEvidenceLimitedAuditError,
-    GqlOverlayResultArtifact, GqlPreparedResultArtifact,
+    GqlEvidenceArtifactKind, GqlEvidenceLimitedAuditError, GqlOverlayResultArtifact,
+    GqlPreparedResultArtifact,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::{CommitSeq, VId};
@@ -100,11 +100,9 @@ impl GqlEvidencePageToken {
         bytes[TOKEN_HEADER_LEN..TOKEN_HEADER_LEN + 8]
             .copy_from_slice(&self.sequence.0.to_be_bytes());
         let result_start = TOKEN_HEADER_LEN + 8;
-        bytes[result_start..result_start + TOKEN_DIGEST_LEN]
-            .copy_from_slice(&self.result_digest.0);
+        bytes[result_start..result_start + TOKEN_DIGEST_LEN].copy_from_slice(&self.result_digest.0);
         let offset_start = result_start + TOKEN_DIGEST_LEN;
-        bytes[offset_start..offset_start + 8]
-            .copy_from_slice(&self.next_offset.to_be_bytes());
+        bytes[offset_start..offset_start + 8].copy_from_slice(&self.next_offset.to_be_bytes());
         let checksum_start = offset_start + 8;
         bytes[checksum_start..].copy_from_slice(&self.checksum.0);
         bytes
@@ -129,10 +127,7 @@ impl GqlEvidencePageToken {
         let major = u16::from_be_bytes([bytes[8], bytes[9]]);
         let minor = u16::from_be_bytes([bytes[10], bytes[11]]);
         if major != TOKEN_VERSION_MAJOR || minor != TOKEN_VERSION_MINOR {
-            return Err(GqlEvidencePageTokenDecodeError::UnsupportedVersion {
-                major,
-                minor,
-            });
+            return Err(GqlEvidencePageTokenDecodeError::UnsupportedVersion { major, minor });
         }
         let kind = match bytes[12] {
             1 => GqlEvidenceArtifactKind::PreparedResult,
@@ -216,7 +211,10 @@ impl core::fmt::Display for GqlEvidencePageTokenDecodeError {
                 "GQL evidence page token truncated: needed {needed}, remaining {remaining}"
             ),
             Self::TrailingBytes { count } => {
-                write!(formatter, "GQL evidence page token has {count} trailing bytes")
+                write!(
+                    formatter,
+                    "GQL evidence page token has {count} trailing bytes"
+                )
             }
             Self::InvalidMagic => formatter.write_str("invalid GQL evidence page-token magic"),
             Self::UnsupportedVersion { major, minor } => write!(
@@ -252,8 +250,13 @@ pub enum GqlEvidencePageError {
         found: CommitSeq,
     },
     TokenResultMismatch,
-    OffsetPastEnd { offset: u64, row_count: u64 },
-    OffsetDoesNotFitPlatform { offset: u64 },
+    OffsetPastEnd {
+        offset: u64,
+        row_count: u64,
+    },
+    OffsetDoesNotFitPlatform {
+        offset: u64,
+    },
 }
 
 impl core::fmt::Display for GqlEvidencePageError {
@@ -398,9 +401,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GqlEvidencePageAuditError<E> 
     }
 }
 
-impl<E: core::error::Error + 'static> core::error::Error
-    for GqlEvidencePageAuditError<E>
-{
+impl<E: core::error::Error + 'static> core::error::Error for GqlEvidencePageAuditError<E> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Audit(source) => Some(source),
@@ -532,9 +533,8 @@ fn page_rows(
             offset: start_offset,
         }
     })?;
-    let end = usize::try_from(end_offset).map_err(|_| {
-        GqlEvidencePageError::OffsetDoesNotFitPlatform { offset: end_offset }
-    })?;
+    let end = usize::try_from(end_offset)
+        .map_err(|_| GqlEvidencePageError::OffsetDoesNotFitPlatform { offset: end_offset })?;
     let next_token = if end_offset < row_count {
         Some(GqlEvidencePageToken::new(
             kind,
@@ -585,13 +585,9 @@ fn digest_eq(left: Digest, right: Digest) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        GqlEvidencePageError, GqlEvidencePageToken,
-        GqlEvidencePageTokenDecodeError,
-    };
+    use super::{GqlEvidencePageError, GqlEvidencePageToken, GqlEvidencePageTokenDecodeError};
     use crate::{
-        GqlOverlayResultArtifact, GqlPreparedResultArtifact, PreparedGqlQuery,
-        RelationBind,
+        GqlOverlayResultArtifact, GqlPreparedResultArtifact, PreparedGqlQuery, RelationBind,
     };
     use fgdb_crypto::Digest;
     use fgdb_delta_types::RelationId;
@@ -608,12 +604,7 @@ mod tests {
     }
 
     fn prepared(rows: Vec<VId>) -> GqlPreparedResultArtifact {
-        GqlPreparedResultArtifact::new(
-            &query(),
-            CommitSeq(11),
-            Digest([0x31; 32]),
-            rows,
-        )
+        GqlPreparedResultArtifact::new(&query(), CommitSeq(11), Digest([0x31; 32]), rows)
     }
 
     fn overlay(rows: Vec<VId>) -> GqlOverlayResultArtifact {
@@ -717,12 +708,8 @@ mod tests {
             Err(GqlEvidencePageError::TokenResultMismatch)
         ));
 
-        let past_end = GqlEvidencePageToken::new(
-            token.kind(),
-            token.sequence(),
-            token.result_digest(),
-            99,
-        );
+        let past_end =
+            GqlEvidencePageToken::new(token.kind(), token.sequence(), token.result_digest(), 99);
         assert!(matches!(
             artifact.page(1, Some(&past_end)),
             Err(GqlEvidencePageError::OffsetPastEnd {

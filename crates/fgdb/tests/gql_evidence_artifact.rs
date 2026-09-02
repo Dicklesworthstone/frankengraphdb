@@ -60,10 +60,7 @@ fn evidence_artifacts_audit_historical_and_staged_results_fail_closed() {
             .expect("fixture commits");
 
         let query = database
-            .prepare_gql_query(
-                QUERY,
-                &RelationBind::new().with_relation("R", R),
-            )
+            .prepare_gql_query(QUERY, &RelationBind::new().with_relation("R", R))
             .expect("query prepares");
         let pinned = database.read_session().expect("view pins the first basis");
 
@@ -143,11 +140,7 @@ fn evidence_artifacts_audit_historical_and_staged_results_fail_closed() {
         let overlay_bytes = overlay_artifact.to_bytes();
         assert_eq!(
             transaction
-                .audit_prepared_query_overlay_artifact(
-                    &database,
-                    &query,
-                    &overlay_bytes,
-                )
+                .audit_prepared_query_overlay_artifact(&database, &query, &overlay_bytes,)
                 .expect("current overlay audits"),
             overlay_artifact
         );
@@ -169,11 +162,7 @@ fn evidence_artifacts_audit_historical_and_staged_results_fail_closed() {
             .write(&mut database, vertex_and_edge(VId(5), EId(13)))
             .expect("overlay advances");
         assert!(matches!(
-            transaction.audit_prepared_query_overlay_artifact(
-                &database,
-                &query,
-                &overlay_bytes,
-            ),
+            transaction.audit_prepared_query_overlay_artifact(&database, &query, &overlay_bytes,),
             Err(GqlEvidenceAuditError::StagedEffectMismatch)
         ));
         transaction.abort();

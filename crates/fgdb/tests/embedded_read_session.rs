@@ -19,8 +19,7 @@ use std::path::PathBuf;
 const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(3);
 const SCORE: PropertyKeyId = PropertyKeyId(7);
-const QUERY: &str =
-    "MATCH (a:Person)-[:R]->(b) WHERE b.score >= 7 RETURN b SKIP 1 LIMIT 1";
+const QUERY: &str = "MATCH (a:Person)-[:R]->(b) WHERE b.score >= 7 RETURN b SKIP 1 LIMIT 1";
 const K_OID: [u8; 32] = [0x5a; 32];
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
 
@@ -66,16 +65,8 @@ fn one_prepared_plan_reuses_the_exact_kernel_across_pinned_sessions() {
 
         let mut first = WriteBatch::new(R);
         first.create_vertex(VId(1), vec![PERSON], vec![]);
-        first.create_vertex(
-            VId(2),
-            vec![],
-            vec![(SCORE, CanonicalScalar::Int(7))],
-        );
-        first.create_vertex(
-            VId(4),
-            vec![],
-            vec![(SCORE, CanonicalScalar::Int(9))],
-        );
+        first.create_vertex(VId(2), vec![], vec![(SCORE, CanonicalScalar::Int(7))]);
+        first.create_vertex(VId(4), vec![], vec![(SCORE, CanonicalScalar::Int(9))]);
         first.add_edge(EId(10), VId(1), VId(2), vec![]);
         first.add_edge(EId(12), VId(1), VId(4), vec![]);
         let first_seq = db.write(cx, first).await.expect("first generation commits");
@@ -126,11 +117,7 @@ fn one_prepared_plan_reuses_the_exact_kernel_across_pinned_sessions() {
         let old_root = old.partition_root();
         let old_manifest = old.manifest();
         let mut successor = WriteBatch::new(R);
-        successor.create_vertex(
-            VId(3),
-            vec![],
-            vec![(SCORE, CanonicalScalar::Int(8))],
-        );
+        successor.create_vertex(VId(3), vec![], vec![(SCORE, CanonicalScalar::Int(8))]);
         successor.add_edge(EId(11), VId(1), VId(3), vec![]);
         let successor_seq = db
             .write(cx, successor)
@@ -158,7 +145,10 @@ fn one_prepared_plan_reuses_the_exact_kernel_across_pinned_sessions() {
         assert_eq!(current_certificate.snapshot_seq, successor_seq);
         assert!(current_certificate.verifies_at(&prepared, successor_seq));
         assert_ne!(current_certificate.digest, old_certificate.digest);
-        assert_ne!(current_certificate.snapshot_seq, old_certificate.snapshot_seq);
+        assert_ne!(
+            current_certificate.snapshot_seq,
+            old_certificate.snapshot_seq
+        );
     });
 }
 
@@ -174,10 +164,7 @@ fn preparation_preserves_parse_and_bind_refusals() {
         assert!(matches!(parse, GqlError::Parse(_)), "got {parse:?}");
 
         let unbound = db
-            .prepare_gql_plan(
-                "MATCH (a)-[:MISSING]->(b) RETURN b",
-                &RelationBind::new(),
-            )
+            .prepare_gql_plan("MATCH (a)-[:MISSING]->(b) RETURN b", &RelationBind::new())
             .expect_err("unknown relation must remain a bind refusal");
         assert!(matches!(unbound, GqlError::Bind(_)), "got {unbound:?}");
     });

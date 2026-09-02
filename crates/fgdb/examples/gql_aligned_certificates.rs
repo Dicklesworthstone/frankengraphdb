@@ -61,10 +61,12 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert_eq!(historical_rows, vec![VId(2)]);
         assert!(input_certificate.verifies_at(QUERY, &bind, first_seq));
         assert!(plan_certificate.verifies_at(&plan, first_seq));
-        assert_eq!(input_certificate.snapshot_seq, plan_certificate.snapshot_seq);
+        assert_eq!(
+            input_certificate.snapshot_seq,
+            plan_certificate.snapshot_seq
+        );
 
-        let (live_rows, live_input, live_plan) =
-            db.execute_gql_with_certificates(QUERY, &bind)?;
+        let (live_rows, live_input, live_plan) = db.execute_gql_with_certificates(QUERY, &bind)?;
         assert_eq!(live_rows, vec![VId(2), VId(3)]);
         assert!(live_input.verifies_at(QUERY, &bind, second_seq));
         assert!(live_plan.verifies_at(&plan, second_seq));

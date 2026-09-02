@@ -59,10 +59,7 @@ fn exact_overlay_result_evidence_binds_canonical_effect_and_ordered_rows() {
             .expect("fixture commits");
 
         let query = database
-            .prepare_gql_query(
-                QUERY,
-                &RelationBind::new().with_relation("R", R),
-            )
+            .prepare_gql_query(QUERY, &RelationBind::new().with_relation("R", R))
             .expect("query prepares");
         let mut first = database.begin(&txn_cx).expect("first transaction begins");
         let mut equivalent = database
@@ -82,63 +79,70 @@ fn exact_overlay_result_evidence_binds_canonical_effect_and_ordered_rows() {
             .expect("exact overlay evidence issues");
         assert_eq!(rows, vec![VId(2), VId(3)]);
         assert!(plan_certificate.verifies_at(query.plan(), first.basis()));
-        assert!(first
-            .verifies_prepared_query_overlay_result(&query, &rows, &certificate)
-            .expect("first transaction verifies"));
-        assert!(equivalent
-            .verifies_prepared_query_overlay_result(&query, &rows, &certificate)
-            .expect("equal canonical overlay verifies"));
+        assert!(
+            first
+                .verifies_prepared_query_overlay_result(&query, &rows, &certificate)
+                .expect("first transaction verifies")
+        );
+        assert!(
+            equivalent
+                .verifies_prepared_query_overlay_result(&query, &rows, &certificate)
+                .expect("equal canonical overlay verifies")
+        );
 
-        assert!(!first
-            .verifies_prepared_query_overlay_result(
-                &query,
-                &[VId(3), VId(2)],
-                &certificate,
-            )
-            .expect("row reorder is a clean mismatch"));
-        assert!(!first
-            .verifies_prepared_query_overlay_result(
-                &query,
-                &[VId(2), VId(4)],
-                &certificate,
-            )
-            .expect("row replacement is a clean mismatch"));
-        assert!(!first
-            .verifies_prepared_query_overlay_result(&query, &[VId(2)], &certificate)
-            .expect("row truncation is a clean mismatch"));
+        assert!(
+            !first
+                .verifies_prepared_query_overlay_result(&query, &[VId(3), VId(2)], &certificate,)
+                .expect("row reorder is a clean mismatch")
+        );
+        assert!(
+            !first
+                .verifies_prepared_query_overlay_result(&query, &[VId(2), VId(4)], &certificate,)
+                .expect("row replacement is a clean mismatch")
+        );
+        assert!(
+            !first
+                .verifies_prepared_query_overlay_result(&query, &[VId(2)], &certificate)
+                .expect("row truncation is a clean mismatch")
+        );
 
         equivalent
-            .write(
-                &mut database,
-                staged_vertex_and_edge(VId(4), EId(12)),
-            )
+            .write(&mut database, staged_vertex_and_edge(VId(4), EId(12)))
             .expect("later staged mutation succeeds");
-        assert!(!equivalent
-            .verifies_prepared_query_overlay_result(&query, &rows, &certificate)
-            .expect("changed overlay is a clean mismatch"));
-        assert!(first
-            .verifies_prepared_query_overlay_result(&query, &rows, &certificate)
-            .expect("unchanged overlay still verifies"));
+        assert!(
+            !equivalent
+                .verifies_prepared_query_overlay_result(&query, &rows, &certificate)
+                .expect("changed overlay is a clean mismatch")
+        );
+        assert!(
+            first
+                .verifies_prepared_query_overlay_result(&query, &rows, &certificate)
+                .expect("unchanged overlay still verifies")
+        );
 
         let (advanced_rows, advanced_plan, advanced_certificate) = equivalent
             .execute_prepared_query_with_overlay_result_certificate(&database, &query)
             .expect("advanced overlay evidence issues");
         assert_eq!(advanced_rows, vec![VId(2), VId(3), VId(4)]);
         assert!(advanced_plan.verifies_at(query.plan(), equivalent.basis()));
-        assert!(equivalent
-            .verifies_prepared_query_overlay_result(
-                &query,
-                &advanced_rows,
-                &advanced_certificate,
-            )
-            .expect("advanced certificate verifies"));
-        assert!(!first
-            .verifies_prepared_query_overlay_result(
-                &query,
-                &advanced_rows,
-                &advanced_certificate,
-            )
-            .expect("older overlay rejects advanced evidence"));
+        assert!(
+            equivalent
+                .verifies_prepared_query_overlay_result(
+                    &query,
+                    &advanced_rows,
+                    &advanced_certificate,
+                )
+                .expect("advanced certificate verifies")
+        );
+        assert!(
+            !first
+                .verifies_prepared_query_overlay_result(
+                    &query,
+                    &advanced_rows,
+                    &advanced_certificate,
+                )
+                .expect("older overlay rejects advanced evidence")
+        );
 
         first.abort();
         equivalent.abort();

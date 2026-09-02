@@ -90,6 +90,9 @@ perf.data.old
 # Per-machine br fsqlite probes, like -wal/-shm; never canonical tracker state.
 .beads/*.db-wal-cert
 .beads/*.db-wal-cert-head
+# beads_rust migration marker (tool state written by `br` on schema upgrade;
+# unignored it fails scripts/local_proof.sh's clean-worktree preflight).
+.beads/*.fsqlite-migration-state
 
 # Remote compilation helper target trees (worker-local cargo target, gigabytes).
 .rch-target/

@@ -217,8 +217,7 @@ impl<V: Vfs + Clone> Database<V> {
         plan: &BoundPlan,
         as_of: CommitSeq,
     ) -> Result<(Vec<VId>, GqlPlanCertificate, Digest), GqlError> {
-        let (rows, plan_certificate) =
-            self.execute_prepared_gql_certified_at(plan, as_of)?;
+        let (rows, plan_certificate) = self.execute_prepared_gql_certified_at(plan, as_of)?;
         let result_digest = plan_certificate.result_digest(&rows);
         Ok((rows, plan_certificate, result_digest))
     }
@@ -287,8 +286,7 @@ impl EmbeddedReadView {
         plan: &BoundPlan,
         as_of: CommitSeq,
     ) -> Result<(Vec<VId>, GqlPlanCertificate, Digest), GqlError> {
-        let (rows, plan_certificate) =
-            self.execute_prepared_gql_certified_at(plan, as_of)?;
+        let (rows, plan_certificate) = self.execute_prepared_gql_certified_at(plan, as_of)?;
         let result_digest = plan_certificate.result_digest(&rows);
         Ok((rows, plan_certificate, result_digest))
     }
@@ -296,12 +294,7 @@ impl EmbeddedReadView {
 
 /// Recompute the historical v1 transcript for explicit migration checks.
 fn certify_v1_legacy(plan: &BoundPlan, snapshot_seq: CommitSeq) -> GqlPlanCertificate {
-    certify_with_domain(
-        plan,
-        snapshot_seq,
-        GQL_PLAN_CERTIFICATE_DOMAIN_V1,
-        false,
-    )
+    certify_with_domain(plan, snapshot_seq, GQL_PLAN_CERTIFICATE_DOMAIN_V1, false)
 }
 
 fn certify_with_domain(
@@ -378,7 +371,9 @@ fn digest_eq(left: Digest, right: Digest) -> bool {
 
 fn update_relation(hasher: &mut Hasher, relation: Option<RelationId>) {
     match relation {
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
         Some(relation) => {
             hasher.update(&[1]);
             hasher.update(&relation.0.to_be_bytes());
@@ -388,7 +383,9 @@ fn update_relation(hasher: &mut Hasher, relation: Option<RelationId>) {
 
 fn update_label(hasher: &mut Hasher, label: Option<LabelId>) {
     match label {
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
         Some(label) => {
             hasher.update(&[1]);
             hasher.update(&label.0.to_be_bytes());
@@ -398,7 +395,9 @@ fn update_label(hasher: &mut Hasher, label: Option<LabelId>) {
 
 fn update_optional_string(hasher: &mut Hasher, value: Option<&str>) {
     match value {
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
         Some(value) => {
             hasher.update(&[1]);
             update_string(hasher, value);
@@ -408,7 +407,9 @@ fn update_optional_string(hasher: &mut Hasher, value: Option<&str>) {
 
 fn update_string_pair(hasher: &mut Hasher, pair: Option<&(String, String)>) {
     match pair {
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
         Some((left, right)) => {
             hasher.update(&[1]);
             update_string(hasher, left);
@@ -419,7 +420,9 @@ fn update_string_pair(hasher: &mut Hasher, pair: Option<&(String, String)>) {
 
 fn update_property(hasher: &mut Hasher, property: Option<(PropertyKeyId, i64)>) {
     match property {
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
         Some((key, value)) => {
             hasher.update(&[1]);
             hasher.update(&key.0.to_be_bytes());
@@ -430,7 +433,9 @@ fn update_property(hasher: &mut Hasher, property: Option<(PropertyKeyId, i64)>) 
 
 fn update_optional_u64(hasher: &mut Hasher, value: Option<u64>) {
     match value {
-        None => hasher.update(&[0]),
+        None => {
+            hasher.update(&[0]);
+        }
         Some(value) => {
             hasher.update(&[1]);
             hasher.update(&value.to_be_bytes());
@@ -622,27 +627,16 @@ mod tests {
             bind_digest: digest_bind(&bind),
         };
 
-        assert!(certificate.verifies_at(
-            "MATCH (a)-[:KNOWS]->(b) RETURN b",
-            &bind,
-            CommitSeq(11)
-        ));
+        assert!(certificate.verifies_at("MATCH (a)-[:KNOWS]->(b) RETURN b", &bind, CommitSeq(11)));
         assert!(!certificate.verifies_at(
             "MATCH (a)-[:KNOWS]->(b) RETURN b ",
             &bind,
             CommitSeq(11)
         ));
-        assert!(!certificate.verifies_at(
-            "MATCH (a)-[:KNOWS]->(b) RETURN b",
-            &bind,
-            CommitSeq(12)
-        ));
+        assert!(!certificate.verifies_at("MATCH (a)-[:KNOWS]->(b) RETURN b", &bind, CommitSeq(12)));
 
         let other_bind = RelationBind::new().with_relation("KNOWS", RelationId(8));
-        assert!(!certificate.verifies(
-            "MATCH (a)-[:KNOWS]->(b) RETURN b",
-            &other_bind
-        ));
+        assert!(!certificate.verifies("MATCH (a)-[:KNOWS]->(b) RETURN b", &other_bind));
     }
 
     #[test]

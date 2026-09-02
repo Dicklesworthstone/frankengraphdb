@@ -46,24 +46,15 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         }
         let snapshot = database.write(cx, batch).await?;
 
-        let query = database.prepare_gql_query(
-            QUERY,
-            &RelationBind::new().with_relation("KNOWS", KNOWS),
-        )?;
+        let query = database
+            .prepare_gql_query(QUERY, &RelationBind::new().with_relation("KNOWS", KNOWS))?;
         let artifact = database.execute_prepared_query_artifact_at(&query, snapshot)?;
         let bytes = artifact.to_bytes();
 
-        let first = database.audit_untrusted_prepared_query_artifact_page(
-            &query,
-            &bytes,
-            2,
-            None,
-        )?;
+        let first =
+            database.audit_untrusted_prepared_query_artifact_page(&query, &bytes, 2, None)?;
         assert_eq!(first.rows(), &[VId(2), VId(3)]);
-        let token = first
-            .next_token()
-            .expect("one row remains")
-            .to_bytes();
+        let token = first.next_token().expect("one row remains").to_bytes();
 
         let mut later = WriteBatch::new(KNOWS);
         later.create_vertex(VId(5), vec![], vec![]);
@@ -90,9 +81,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             .expect_err("an old token must not resume a different snapshot result");
         assert!(matches!(
             mismatch,
-            GqlEvidencePageAuditError::Page(
-                GqlEvidencePageError::TokenSequenceMismatch { .. }
-            )
+            GqlEvidencePageAuditError::Page(GqlEvidencePageError::TokenSequenceMismatch { .. })
         ));
 
         println!("certified snapshot: {snapshot:?}");

@@ -46,15 +46,11 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         }
         let snapshot = database.write(cx, initial).await?;
 
-        let query = database.prepare_gql_query(
-            QUERY,
-            &RelationBind::new().with_relation("KNOWS", KNOWS),
-        )?;
-        let artifact =
-            database.execute_prepared_query_artifact_at(&query, snapshot)?;
+        let query = database
+            .prepare_gql_query(QUERY, &RelationBind::new().with_relation("KNOWS", KNOWS))?;
+        let artifact = database.execute_prepared_query_artifact_at(&query, snapshot)?;
         let bytes = artifact.to_bytes();
-        let mut cursor = database
-            .open_untrusted_prepared_query_artifact_cursor(&query, &bytes)?;
+        let mut cursor = database.open_untrusted_prepared_query_artifact_cursor(&query, &bytes)?;
 
         let first = cursor.next_page(2)?;
         assert_eq!(first.rows(), &[VId(2), VId(3)]);
@@ -69,12 +65,11 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         later.add_edge(EId(13), VId(1), VId(5), vec![]);
         database.write(cx, later).await?;
 
-        let mut resumed = database
-            .resume_untrusted_prepared_query_artifact_cursor(
-                &query,
-                &bytes,
-                &checkpoint,
-            )?;
+        let mut resumed = database.resume_untrusted_prepared_query_artifact_cursor(
+            &query,
+            &bytes,
+            &checkpoint,
+        )?;
         assert_eq!(resumed.position(), 2);
         let terminal = resumed.next_page(8)?;
         assert_eq!(terminal.rows(), &[VId(4)]);
@@ -87,7 +82,10 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         println!("audited snapshot: {snapshot:?}");
         println!("first page: {:?}", first.rows());
         println!("checkpoint bytes: {}", checkpoint.len());
-        println!("resumed terminal page after live advance: {:?}", terminal.rows());
+        println!(
+            "resumed terminal page after live advance: {:?}",
+            terminal.rows()
+        );
         println!("final state: {:?}", resumed.state());
         println!("OK: one audit per open, portable checkpoint, explicit exhaustion");
         Ok(())

@@ -17,7 +17,9 @@ impl WriteTxn {
         hasher.update(STAGED_EFFECT_DOMAIN_V1);
         hasher.update(&self.basis.0.to_be_bytes());
         match &self.prepared {
-            None => hasher.update(&[0]),
+            None => {
+                hasher.update(&[0]);
+            }
             Some(prepared) => {
                 debug_assert_eq!(prepared.basis(), self.basis);
                 let bytes = prepared

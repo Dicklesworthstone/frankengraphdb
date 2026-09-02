@@ -5,9 +5,12 @@ use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{EId, VId};
 
-#[path = "../src/gql_cert.rs"]
-#[allow(dead_code)]
-mod gql_cert;
+// This suite compares the transaction's plan certificate against the public
+// `Database::gql_plan_certificate_at` face at the transaction's basis. It used
+// to reach the private `gql_cert::certify` through a `#[path]` include of the
+// source file; that include broke the moment `gql_cert.rs` gained crate-private
+// imports (2026-09-02), and a test that compiles the product's source twice is
+// not a test of the product's surface anyway.
 
 #[test]
 fn write_txn_plan_certificate_equals_certify_at_its_basis() {
@@ -35,8 +38,9 @@ fn write_txn_plan_certificate_equals_certify_at_its_basis() {
         let statement = "MATCH (a)-[:R]->(b) RETURN b";
         let bind = RelationBind::new().with_relation("R", relation);
         let transaction = database.begin(&txn_cx).expect("begin transaction");
-        let plan = bind.bind(statement).expect("bind plan");
-        let expected = gql_cert::certify(&plan, transaction.basis());
+        let expected = database
+            .gql_plan_certificate_at(statement, &bind, transaction.basis())
+            .expect("certificate at the transaction basis");
         let actual = transaction
             .gql_plan_certificate(statement, &bind)
             .expect("transaction plan certificate");

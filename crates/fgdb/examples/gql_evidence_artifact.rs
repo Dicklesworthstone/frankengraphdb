@@ -46,10 +46,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         initial.add_edge(EId(10), VId(1), VId(2), vec![]);
         let basis = database.write(&commit, initial).await?;
 
-        let query = database.prepare_gql_query(
-            QUERY,
-            &RelationBind::new().with_relation("R", R),
-        )?;
+        let query =
+            database.prepare_gql_query(QUERY, &RelationBind::new().with_relation("R", R))?;
         let durable = database.execute_prepared_query_artifact_at(&query, basis)?;
         let durable_bytes = durable.to_bytes();
 
@@ -68,15 +66,10 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         staged.create_vertex(VId(4), vec![], vec![]);
         staged.add_edge(EId(12), VId(1), VId(4), vec![]);
         transaction.write(&mut database, staged)?;
-        let overlay = transaction
-            .execute_prepared_query_overlay_artifact(&database, &query)?;
+        let overlay = transaction.execute_prepared_query_overlay_artifact(&database, &query)?;
         let overlay_bytes = overlay.to_bytes();
         assert_eq!(
-            transaction.audit_prepared_query_overlay_artifact(
-                &database,
-                &query,
-                &overlay_bytes,
-            )?,
+            transaction.audit_prepared_query_overlay_artifact(&database, &query, &overlay_bytes,)?,
             overlay
         );
 
@@ -85,11 +78,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         changed.add_edge(EId(13), VId(1), VId(5), vec![]);
         transaction.write(&mut database, changed)?;
         assert!(matches!(
-            transaction.audit_prepared_query_overlay_artifact(
-                &database,
-                &query,
-                &overlay_bytes,
-            ),
+            transaction.audit_prepared_query_overlay_artifact(&database, &query, &overlay_bytes,),
             Err(GqlEvidenceAuditError::StagedEffectMismatch)
         ));
 

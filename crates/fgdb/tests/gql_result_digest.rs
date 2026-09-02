@@ -56,9 +56,7 @@ fn ordered_result_digest_replays_after_the_live_graph_advances() {
         let dir = scratch("historical-replay");
         let mut db = Database::create(&cx, &dir, keys()).await.expect("creates");
         let bind = bind_r();
-        let plan = db
-            .prepare_gql_plan(QUERY, &bind)
-            .expect("statement binds");
+        let plan = db.prepare_gql_plan(QUERY, &bind).expect("statement binds");
 
         let mut first = WriteBatch::new(R);
         first.create_vertex(VId(1), vec![], vec![]);

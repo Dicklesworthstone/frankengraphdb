@@ -125,7 +125,7 @@ The kind-specific body carries:
 - plan-certificate digest;
 - staged-effect digest for overlay artifacts;
 - exact row count;
-- ordered big-endian `VId` values;
+- ordered big-endian `VId` values, 16 bytes each (`VId` is a `u128`);
 - the applicable result digest.
 
 Artifact fields are private. Construction derives input identities from one `PreparedGqlQuery`; overlay construction also derives its result digest through `GqlOverlayResultCertificate`. Ordinary `Debug` output redacts rows.

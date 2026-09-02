@@ -116,11 +116,7 @@ fn the_certified_at_certificate_names_the_as_of_seq_not_the_frontier() {
             "the same execution inputs at the live frontier are not what the pinned certificate names"
         );
         assert!(
-            !pinned_cert.verifies_at(
-                "MATCH (a)-[:R]->(b) RETURN b ",
-                &bind,
-                s1,
-            ),
+            !pinned_cert.verifies_at("MATCH (a)-[:R]->(b) RETURN b ", &bind, s1,),
             "statement bytes are exact inputs; trailing whitespace changes the certificate"
         );
         let wrong_bind = RelationBind::new().with_relation("R", RelationId(2));

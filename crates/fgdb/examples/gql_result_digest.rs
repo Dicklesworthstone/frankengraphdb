@@ -25,10 +25,8 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
-    let path = std::env::temp_dir().join(format!(
-        "fgdb-result-digest-example-{}",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("fgdb-result-digest-example-{}", std::process::id()));
     let keys = DatabaseKeys::new(
         [0x5a; 32],
         DatabaseSecurityNamespaceId([0x77; 32]),

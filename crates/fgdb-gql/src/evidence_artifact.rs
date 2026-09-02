@@ -10,8 +10,12 @@ const KIND_STAGED_OVERLAY_RESULT: u8 = 2;
 const RESERVED_LEN: usize = 3;
 const HEADER_LEN: usize = 16;
 const DIGEST_LEN: usize = 32;
-const GQL_RESULT_DIGEST_DOMAIN_V1: &[u8] =
-    b"fgdb:gql-ordered-result-digest:v1";
+/// Exact encoded width of one result row: a `VId` is a `u128`, written
+/// big-endian. This is a v1 format decision shared with the digest transcript
+/// and with `evidence_limits::ROW_LEN`; the decoder, the encoder, and the byte
+/// arithmetic must all agree on it.
+const ROW_LEN: usize = 16;
+const GQL_RESULT_DIGEST_DOMAIN_V1: &[u8] = b"fgdb:gql-ordered-result-digest:v1";
 
 /// Closed artifact kinds in the first evidence-envelope version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,9 +80,7 @@ impl core::fmt::Display for GqlEvidenceDecodeError {
                 formatter,
                 "GQL evidence row count {row_count} does not fit this platform"
             ),
-            Self::LengthOverflow => {
-                formatter.write_str("GQL evidence encoded length overflows")
-            }
+            Self::LengthOverflow => formatter.write_str("GQL evidence encoded length overflows"),
             Self::TrailingBytes { count } => {
                 write!(formatter, "GQL evidence has {count} trailing bytes")
             }
@@ -111,24 +113,18 @@ impl<E: core::fmt::Display> core::fmt::Display for GqlEvidenceAuditError<E> {
             Self::SnapshotMismatch => {
                 formatter.write_str("GQL evidence snapshot or transaction basis mismatch")
             }
-            Self::InputMismatch => {
-                formatter.write_str("GQL evidence prepared-input mismatch")
-            }
+            Self::InputMismatch => formatter.write_str("GQL evidence prepared-input mismatch"),
             Self::PlanMismatch => formatter.write_str("GQL evidence plan mismatch"),
             Self::StagedEffectMismatch => {
                 formatter.write_str("GQL evidence staged-effect mismatch")
             }
             Self::Execution(source) => core::fmt::Display::fmt(source, formatter),
-            Self::ResultMismatch => {
-                formatter.write_str("GQL evidence rows differ from replay")
-            }
+            Self::ResultMismatch => formatter.write_str("GQL evidence rows differ from replay"),
         }
     }
 }
 
-impl<E: core::error::Error + 'static> core::error::Error
-    for GqlEvidenceAuditError<E>
-{
+impl<E: core::error::Error + 'static> core::error::Error for GqlEvidenceAuditError<E> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Decode(source) => Some(source),
@@ -202,10 +198,8 @@ impl GqlPreparedResultArtifact {
 
     #[must_use]
     pub fn verifies_input(&self, query: &PreparedGqlQuery) -> bool {
-        digest_eq(
-            self.statement_digest,
-            digest_statement(query.statement()),
-        ) && digest_eq(self.bind_digest, digest_bind(query.bind()))
+        digest_eq(self.statement_digest, digest_statement(query.statement()))
+            && digest_eq(self.bind_digest, digest_bind(query.bind()))
     }
 
     #[must_use]
@@ -217,20 +211,15 @@ impl GqlPreparedResultArtifact {
     pub fn verifies_rows(&self) -> bool {
         digest_eq(
             self.result_digest,
-            digest_prepared_result(
-                self.snapshot_seq,
-                self.plan_digest,
-                &self.rows,
-            ),
+            digest_prepared_result(self.snapshot_seq, self.plan_digest, &self.rows),
         )
     }
 
     /// Encode the exact canonical v1 envelope.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(
-            HEADER_LEN + 8 + (DIGEST_LEN * 4) + 8 + (self.rows.len() * 8),
-        );
+        let mut bytes =
+            Vec::with_capacity(HEADER_LEN + 8 + (DIGEST_LEN * 4) + 8 + (self.rows.len() * ROW_LEN));
         encode_header(GqlEvidenceArtifactKind::PreparedResult, &mut bytes);
         bytes.extend_from_slice(&self.snapshot_seq.0.to_be_bytes());
         bytes.extend_from_slice(&self.statement_digest.0);
@@ -312,13 +301,9 @@ impl GqlOverlayResultArtifact {
         staged_effect_digest: Digest,
         rows: Vec<VId>,
     ) -> Self {
-        let result_digest = GqlOverlayResultCertificate::new(
-            basis,
-            plan_digest,
-            staged_effect_digest,
-            &rows,
-        )
-        .result_digest;
+        let result_digest =
+            GqlOverlayResultCertificate::new(basis, plan_digest, staged_effect_digest, &rows)
+                .result_digest;
         Self {
             basis,
             statement_digest: digest_statement(query.statement()),
@@ -357,10 +342,8 @@ impl GqlOverlayResultArtifact {
 
     #[must_use]
     pub fn verifies_input(&self, query: &PreparedGqlQuery) -> bool {
-        digest_eq(
-            self.statement_digest,
-            digest_statement(query.statement()),
-        ) && digest_eq(self.bind_digest, digest_bind(query.bind()))
+        digest_eq(self.statement_digest, digest_statement(query.statement()))
+            && digest_eq(self.bind_digest, digest_bind(query.bind()))
     }
 
     #[must_use]
@@ -392,13 +375,9 @@ impl GqlOverlayResultArtifact {
 
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(
-            HEADER_LEN + 8 + (DIGEST_LEN * 5) + 8 + (self.rows.len() * 8),
-        );
-        encode_header(
-            GqlEvidenceArtifactKind::StagedOverlayResult,
-            &mut bytes,
-        );
+        let mut bytes =
+            Vec::with_capacity(HEADER_LEN + 8 + (DIGEST_LEN * 5) + 8 + (self.rows.len() * ROW_LEN));
+        encode_header(GqlEvidenceArtifactKind::StagedOverlayResult, &mut bytes);
         bytes.extend_from_slice(&self.basis.0.to_be_bytes());
         bytes.extend_from_slice(&self.statement_digest.0);
         bytes.extend_from_slice(&self.bind_digest.0);
@@ -472,11 +451,7 @@ fn digest_bind(bind: &RelationBind) -> Digest {
     hash(&bind.canonical_bytes())
 }
 
-fn digest_prepared_result(
-    snapshot_seq: CommitSeq,
-    plan_digest: Digest,
-    rows: &[VId],
-) -> Digest {
+fn digest_prepared_result(snapshot_seq: CommitSeq, plan_digest: Digest, rows: &[VId]) -> Digest {
     let mut hasher = Hasher::new();
     hasher.update(GQL_RESULT_DIGEST_DOMAIN_V1);
     hasher.update(&plan_digest.0);
@@ -512,27 +487,18 @@ impl<'a> Decoder<'a> {
         Self { bytes, offset: 0 }
     }
 
-    fn header(
-        &mut self,
-        expected: GqlEvidenceArtifactKind,
-    ) -> Result<(), GqlEvidenceDecodeError> {
+    fn header(&mut self, expected: GqlEvidenceArtifactKind) -> Result<(), GqlEvidenceDecodeError> {
         if self.take::<8>()? != MAGIC {
             return Err(GqlEvidenceDecodeError::InvalidMagic);
         }
         let major = self.u16()?;
         let minor = self.u16()?;
         if major != VERSION_MAJOR || minor != VERSION_MINOR {
-            return Err(GqlEvidenceDecodeError::UnsupportedVersion {
-                major,
-                minor,
-            });
+            return Err(GqlEvidenceDecodeError::UnsupportedVersion { major, minor });
         }
         let found = self.u8()?;
         if found != expected as u8 {
-            return Err(GqlEvidenceDecodeError::UnexpectedKind {
-                expected,
-                found,
-            });
+            return Err(GqlEvidenceDecodeError::UnexpectedKind { expected, found });
         }
         if self.take::<RESERVED_LEN>()? != [0; RESERVED_LEN] {
             return Err(GqlEvidenceDecodeError::NonZeroReserved);
@@ -545,7 +511,7 @@ impl<'a> Decoder<'a> {
         let row_count = usize::try_from(row_count)
             .map_err(|_| GqlEvidenceDecodeError::RowCountOverflow { row_count })?;
         let row_bytes = row_count
-            .checked_mul(8)
+            .checked_mul(ROW_LEN)
             .ok_or(GqlEvidenceDecodeError::LengthOverflow)?;
         let required = row_bytes
             .checked_add(DIGEST_LEN)
@@ -561,9 +527,13 @@ impl<'a> Decoder<'a> {
 
         let mut rows = Vec::with_capacity(row_count);
         for _ in 0..row_count {
-            rows.push(VId(self.u64()?));
+            rows.push(VId(self.u128()?));
         }
         Ok(rows)
+    }
+
+    fn u128(&mut self) -> Result<u128, GqlEvidenceDecodeError> {
+        Ok(u128::from_be_bytes(self.take::<ROW_LEN>()?))
     }
 
     fn digest(&mut self) -> Result<Digest, GqlEvidenceDecodeError> {
@@ -611,8 +581,8 @@ impl<'a> Decoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GqlEvidenceArtifactKind, GqlEvidenceDecodeError,
-        GqlOverlayResultArtifact, GqlPreparedResultArtifact,
+        GqlEvidenceArtifactKind, GqlEvidenceDecodeError, GqlOverlayResultArtifact,
+        GqlPreparedResultArtifact,
     };
     use crate::{PreparedGqlQuery, RelationBind};
     use fgdb_crypto::Digest;
@@ -641,8 +611,7 @@ mod tests {
         );
         let bytes = artifact.to_bytes();
         assert_eq!(
-            GqlPreparedResultArtifact::from_bytes(&bytes)
-                .expect("canonical bytes decode"),
+            GqlPreparedResultArtifact::from_bytes(&bytes).expect("canonical bytes decode"),
             artifact
         );
 
@@ -655,13 +624,43 @@ mod tests {
     }
 
     #[test]
-    fn prepared_decoder_rejects_header_trailing_and_result_mutations() {
-        let artifact = GqlPreparedResultArtifact::new(
+    fn rows_are_sixteen_byte_ids_and_full_width_survives_round_trip() {
+        // The format decision under test: a `VId` is a `u128` and occupies
+        // exactly 16 bytes per row. A decoder that read 8 bytes would either
+        // fail to compile against `VId` (the 2026-09-02 defect) or, worse,
+        // decode a truncated id, so both halves are pinned here.
+        let rows = vec![VId(u128::MAX), VId(0), VId(1 << 64), VId(u64::MAX as u128)];
+        let artifact =
+            GqlPreparedResultArtifact::new(&query(), CommitSeq(11), digest(0x31), rows.clone());
+        let bytes = artifact.to_bytes();
+        let fixed = 16 + 8 + (32 * 3) + 8 + 32;
+        assert_eq!(bytes.len(), fixed + rows.len() * 16);
+        let decoded = GqlPreparedResultArtifact::from_bytes(&bytes).expect("full-width ids decode");
+        assert_eq!(decoded.rows(), rows.as_slice());
+        assert_eq!(decoded, artifact);
+
+        let overlay = GqlOverlayResultArtifact::new(
             &query(),
             CommitSeq(11),
             digest(0x31),
-            vec![VId(2)],
+            digest(0x41),
+            rows.clone(),
         );
+        let bytes = overlay.to_bytes();
+        let fixed = 16 + 8 + (32 * 4) + 8 + 32;
+        assert_eq!(bytes.len(), fixed + rows.len() * 16);
+        assert_eq!(
+            GqlOverlayResultArtifact::from_bytes(&bytes)
+                .expect("full-width overlay ids decode")
+                .rows(),
+            rows.as_slice()
+        );
+    }
+
+    #[test]
+    fn prepared_decoder_rejects_header_trailing_and_result_mutations() {
+        let artifact =
+            GqlPreparedResultArtifact::new(&query(), CommitSeq(11), digest(0x31), vec![VId(2)]);
         let bytes = artifact.to_bytes();
 
         let mut wrong_magic = bytes.clone();
@@ -721,11 +720,8 @@ mod tests {
         assert!(artifact.verifies_rows());
         assert!(!artifact.verifies_plan(digest(0x32)));
 
-        let other = PreparedGqlQuery::prepare(
-            "MATCH (a)-[:R]->(b) RETURN a",
-            query.bind(),
-        )
-        .expect("other query binds");
+        let other = PreparedGqlQuery::prepare("MATCH (a)-[:R]->(b) RETURN a", query.bind())
+            .expect("other query binds");
         assert!(!artifact.verifies_input(&other));
 
         let debug = format!("{artifact:?}");
@@ -745,8 +741,7 @@ mod tests {
         );
         let bytes = artifact.to_bytes();
         assert_eq!(
-            GqlOverlayResultArtifact::from_bytes(&bytes)
-                .expect("canonical bytes decode"),
+            GqlOverlayResultArtifact::from_bytes(&bytes).expect("canonical bytes decode"),
             artifact
         );
         assert!(artifact.verifies_input(&query));

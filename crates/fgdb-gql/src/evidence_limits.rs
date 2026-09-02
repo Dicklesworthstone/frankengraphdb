@@ -11,7 +11,10 @@ const PREPARED_ROW_COUNT_OFFSET: usize = HEADER_LEN + 8 + (32 * 3);
 const OVERLAY_ROW_COUNT_OFFSET: usize = HEADER_LEN + 8 + (32 * 4);
 const PREPARED_FIXED_LEN: u64 = 160;
 const OVERLAY_FIXED_LEN: u64 = 192;
-const ROW_LEN: u64 = 8;
+/// One `VId` row is a big-endian `u128`: 16 bytes. Must equal the decoder's
+/// stride in `evidence_artifact.rs`; the `canonical_encoded_len` tests pin the
+/// agreement against real encoded bytes.
+const ROW_LEN: u64 = 16;
 
 /// Conservative resource limits for decoding or encoding untrusted GQL
 /// evidence envelopes.
@@ -51,10 +54,7 @@ impl GqlEvidenceLimits {
     }
 
     /// Screen one prepared-result envelope before the decoder allocates rows.
-    pub fn preflight_prepared(
-        self,
-        bytes: &[u8],
-    ) -> Result<(), GqlEvidenceLimitExceeded> {
+    pub fn preflight_prepared(self, bytes: &[u8]) -> Result<(), GqlEvidenceLimitExceeded> {
         self.check_encoded_bytes(len_as_u64(bytes.len()))?;
         if let Some(row_count) = declared_row_count(
             bytes,
@@ -67,10 +67,7 @@ impl GqlEvidenceLimits {
     }
 
     /// Screen one staged-overlay envelope before the decoder allocates rows.
-    pub fn preflight_overlay(
-        self,
-        bytes: &[u8],
-    ) -> Result<(), GqlEvidenceLimitExceeded> {
+    pub fn preflight_overlay(self, bytes: &[u8]) -> Result<(), GqlEvidenceLimitExceeded> {
         self.check_encoded_bytes(len_as_u64(bytes.len()))?;
         if let Some(row_count) = declared_row_count(
             bytes,
@@ -82,10 +79,7 @@ impl GqlEvidenceLimits {
         Ok(())
     }
 
-    fn check_encoded_bytes(
-        self,
-        observed: u64,
-    ) -> Result<(), GqlEvidenceLimitExceeded> {
+    fn check_encoded_bytes(self, observed: u64) -> Result<(), GqlEvidenceLimitExceeded> {
         check_limit(
             GqlEvidenceLimitDimension::EncodedBytes,
             self.max_encoded_bytes,
@@ -94,11 +88,7 @@ impl GqlEvidenceLimits {
     }
 
     fn check_rows(self, observed: u64) -> Result<(), GqlEvidenceLimitExceeded> {
-        check_limit(
-            GqlEvidenceLimitDimension::Rows,
-            self.max_rows,
-            observed,
-        )
+        check_limit(GqlEvidenceLimitDimension::Rows, self.max_rows, observed)
     }
 }
 
@@ -124,10 +114,7 @@ pub struct GqlEvidenceLimitExceeded {
 }
 
 impl core::fmt::Display for GqlEvidenceLimitExceeded {
-    fn fmt(
-        &self,
-        formatter: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             formatter,
             "GQL evidence {:?} limit exceeded: observed {}, limit {}",
@@ -147,10 +134,7 @@ pub enum GqlEvidenceLimitedDecodeError {
 }
 
 impl core::fmt::Display for GqlEvidenceLimitedDecodeError {
-    fn fmt(
-        &self,
-        formatter: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Limit(source) => core::fmt::Display::fmt(source, formatter),
             Self::Decode(source) => core::fmt::Display::fmt(source, formatter),
@@ -175,13 +159,8 @@ pub enum GqlEvidenceLimitedAuditError<E> {
     Audit(GqlEvidenceAuditError<E>),
 }
 
-impl<E: core::fmt::Display> core::fmt::Display
-    for GqlEvidenceLimitedAuditError<E>
-{
-    fn fmt(
-        &self,
-        formatter: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
+impl<E: core::fmt::Display> core::fmt::Display for GqlEvidenceLimitedAuditError<E> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Limit(source) => core::fmt::Display::fmt(source, formatter),
             Self::Audit(source) => core::fmt::Display::fmt(source, formatter),
@@ -189,9 +168,7 @@ impl<E: core::fmt::Display> core::fmt::Display
     }
 }
 
-impl<E: core::error::Error + 'static> core::error::Error
-    for GqlEvidenceLimitedAuditError<E>
-{
+impl<E: core::error::Error + 'static> core::error::Error for GqlEvidenceLimitedAuditError<E> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Limit(source) => Some(source),
@@ -202,9 +179,7 @@ impl<E: core::error::Error + 'static> core::error::Error
 
 impl GqlPreparedResultArtifact {
     /// Strictly decode bytes under the default untrusted-input policy.
-    pub fn from_untrusted_bytes(
-        bytes: &[u8],
-    ) -> Result<Self, GqlEvidenceLimitedDecodeError> {
+    pub fn from_untrusted_bytes(bytes: &[u8]) -> Result<Self, GqlEvidenceLimitedDecodeError> {
         Self::from_bytes_with_limits(bytes, GqlEvidenceLimits::DEFAULT_UNTRUSTED)
     }
 
@@ -217,8 +192,7 @@ impl GqlPreparedResultArtifact {
         limits
             .preflight_prepared(bytes)
             .map_err(GqlEvidenceLimitedDecodeError::Limit)?;
-        let artifact =
-            Self::from_bytes(bytes).map_err(GqlEvidenceLimitedDecodeError::Decode)?;
+        let artifact = Self::from_bytes(bytes).map_err(GqlEvidenceLimitedDecodeError::Decode)?;
         limits
             .check_rows(len_as_u64(artifact.rows().len()))
             .map_err(GqlEvidenceLimitedDecodeError::Limit)?;
@@ -239,18 +213,13 @@ impl GqlPreparedResultArtifact {
 
     #[must_use]
     pub fn canonical_encoded_len(&self) -> u64 {
-        encoded_len(
-            PREPARED_FIXED_LEN,
-            len_as_u64(self.rows().len()),
-        )
+        encoded_len(PREPARED_FIXED_LEN, len_as_u64(self.rows().len()))
     }
 }
 
 impl GqlOverlayResultArtifact {
     /// Strictly decode staged-overlay bytes under the default untrusted policy.
-    pub fn from_untrusted_bytes(
-        bytes: &[u8],
-    ) -> Result<Self, GqlEvidenceLimitedDecodeError> {
+    pub fn from_untrusted_bytes(bytes: &[u8]) -> Result<Self, GqlEvidenceLimitedDecodeError> {
         Self::from_bytes_with_limits(bytes, GqlEvidenceLimits::DEFAULT_UNTRUSTED)
     }
 
@@ -263,8 +232,7 @@ impl GqlOverlayResultArtifact {
         limits
             .preflight_overlay(bytes)
             .map_err(GqlEvidenceLimitedDecodeError::Limit)?;
-        let artifact =
-            Self::from_bytes(bytes).map_err(GqlEvidenceLimitedDecodeError::Decode)?;
+        let artifact = Self::from_bytes(bytes).map_err(GqlEvidenceLimitedDecodeError::Decode)?;
         limits
             .check_rows(len_as_u64(artifact.rows().len()))
             .map_err(GqlEvidenceLimitedDecodeError::Limit)?;
@@ -285,10 +253,7 @@ impl GqlOverlayResultArtifact {
 
     #[must_use]
     pub fn canonical_encoded_len(&self) -> u64 {
-        encoded_len(
-            OVERLAY_FIXED_LEN,
-            len_as_u64(self.rows().len()),
-        )
+        encoded_len(OVERLAY_FIXED_LEN, len_as_u64(self.rows().len()))
     }
 }
 
@@ -320,10 +285,7 @@ fn declared_row_count(
     Some(u64::from_be_bytes(raw))
 }
 
-fn has_expected_header(
-    bytes: &[u8],
-    expected_kind: GqlEvidenceArtifactKind,
-) -> bool {
+fn has_expected_header(bytes: &[u8], expected_kind: GqlEvidenceArtifactKind) -> bool {
     bytes.len() >= HEADER_LEN
         && bytes[..8] == MAGIC
         && u16::from_be_bytes([bytes[8], bytes[9]]) == VERSION_MAJOR
@@ -333,8 +295,7 @@ fn has_expected_header(
 }
 
 fn encoded_len(fixed: u64, rows: u64) -> u64 {
-    rows
-        .checked_mul(ROW_LEN)
+    rows.checked_mul(ROW_LEN)
         .and_then(|row_bytes| fixed.checked_add(row_bytes))
         .unwrap_or(u64::MAX)
 }
@@ -345,13 +306,10 @@ fn len_as_u64(len: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        GqlEvidenceLimitDimension, GqlEvidenceLimitedDecodeError,
-        GqlEvidenceLimits,
-    };
+    use super::{GqlEvidenceLimitDimension, GqlEvidenceLimitedDecodeError, GqlEvidenceLimits};
     use crate::{
-        GqlEvidenceDecodeError, GqlOverlayResultArtifact,
-        GqlPreparedResultArtifact, PreparedGqlQuery, RelationBind,
+        GqlEvidenceDecodeError, GqlOverlayResultArtifact, GqlPreparedResultArtifact,
+        PreparedGqlQuery, RelationBind,
     };
     use fgdb_crypto::Digest;
     use fgdb_delta_types::RelationId;
@@ -390,13 +348,10 @@ mod tests {
     fn exact_byte_and_row_limits_succeed() {
         let prepared = prepared_artifact();
         let bytes = prepared.to_bytes();
-        let limits =
-            GqlEvidenceLimits::new(bytes.len() as u64, prepared.rows().len() as u64);
+        let limits = GqlEvidenceLimits::new(bytes.len() as u64, prepared.rows().len() as u64);
 
-        let decoded = GqlPreparedResultArtifact::from_bytes_with_limits(
-            &bytes, limits,
-        )
-        .expect("exact limits admit the artifact");
+        let decoded = GqlPreparedResultArtifact::from_bytes_with_limits(&bytes, limits)
+            .expect("exact limits admit the artifact");
         assert_eq!(decoded, prepared);
         assert_eq!(prepared.canonical_encoded_len(), bytes.len() as u64);
         assert_eq!(
@@ -404,6 +359,43 @@ mod tests {
                 .to_bytes_with_limits(limits)
                 .expect("exact encoding limits succeed"),
             bytes
+        );
+    }
+
+    #[test]
+    fn canonical_len_matches_real_bytes_at_full_id_width() {
+        // Pins ROW_LEN against the encoder rather than against itself: an
+        // artifact holding a maximal `VId` must report exactly the length it
+        // actually encodes, for both kinds, and the default untrusted row
+        // ceiling must still fit inside the default byte ceiling at that width.
+        let rows = vec![VId(u128::MAX), VId(1), VId(1 << 100)];
+        let prepared = GqlPreparedResultArtifact::new(
+            &prepared_query(),
+            CommitSeq(11),
+            Digest([0x31; 32]),
+            rows.clone(),
+        );
+        assert_eq!(
+            prepared.canonical_encoded_len(),
+            prepared.to_bytes().len() as u64
+        );
+        let overlay = GqlOverlayResultArtifact::new(
+            &prepared_query(),
+            CommitSeq(11),
+            Digest([0x31; 32]),
+            Digest([0x42; 32]),
+            rows,
+        );
+        assert_eq!(
+            overlay.canonical_encoded_len(),
+            overlay.to_bytes().len() as u64
+        );
+
+        let limits = GqlEvidenceLimits::DEFAULT_UNTRUSTED;
+        assert!(
+            super::encoded_len(super::OVERLAY_FIXED_LEN, limits.max_rows())
+                <= limits.max_encoded_bytes(),
+            "the default row ceiling must fit the default byte ceiling"
         );
     }
 
@@ -471,9 +463,7 @@ mod tests {
         .expect_err("invalid magic remains a format refusal");
         assert!(matches!(
             error,
-            GqlEvidenceLimitedDecodeError::Decode(
-                GqlEvidenceDecodeError::InvalidMagic
-            )
+            GqlEvidenceLimitedDecodeError::Decode(GqlEvidenceDecodeError::InvalidMagic)
         ));
     }
 
@@ -481,13 +471,10 @@ mod tests {
     fn overlay_limits_use_the_overlay_row_count_offset() {
         let artifact = overlay_artifact();
         let bytes = artifact.to_bytes();
-        let limits =
-            GqlEvidenceLimits::new(bytes.len() as u64, artifact.rows().len() as u64);
+        let limits = GqlEvidenceLimits::new(bytes.len() as u64, artifact.rows().len() as u64);
 
-        let decoded = GqlOverlayResultArtifact::from_bytes_with_limits(
-            &bytes, limits,
-        )
-        .expect("exact overlay limits admit the artifact");
+        let decoded = GqlOverlayResultArtifact::from_bytes_with_limits(&bytes, limits)
+            .expect("exact overlay limits admit the artifact");
         assert_eq!(decoded, artifact);
         assert_eq!(artifact.canonical_encoded_len(), bytes.len() as u64);
 
@@ -513,17 +500,13 @@ mod tests {
         let overlay = overlay_artifact();
 
         assert_eq!(
-            GqlPreparedResultArtifact::from_untrusted_bytes(
-                &prepared.to_bytes()
-            )
-            .expect("small prepared artifact passes default policy"),
+            GqlPreparedResultArtifact::from_untrusted_bytes(&prepared.to_bytes())
+                .expect("small prepared artifact passes default policy"),
             prepared
         );
         assert_eq!(
-            GqlOverlayResultArtifact::from_untrusted_bytes(
-                &overlay.to_bytes()
-            )
-            .expect("small overlay artifact passes default policy"),
+            GqlOverlayResultArtifact::from_untrusted_bytes(&overlay.to_bytes())
+                .expect("small overlay artifact passes default policy"),
             overlay
         );
     }

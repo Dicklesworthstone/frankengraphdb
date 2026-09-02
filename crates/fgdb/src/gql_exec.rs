@@ -173,11 +173,7 @@ impl EmbeddedReadView {
     }
 
     /// Parse, bind, and execute once at this view's pinned frontier.
-    pub fn execute_gql(
-        &self,
-        statement: &str,
-        bind: &RelationBind,
-    ) -> Result<Vec<VId>, GqlError> {
+    pub fn execute_gql(&self, statement: &str, bind: &RelationBind) -> Result<Vec<VId>, GqlError> {
         self.execute_gql_at(statement, bind, self.frontier())
     }
 

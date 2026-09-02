@@ -7,10 +7,7 @@
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::RelationId;
-use fgdb_gql::{
-    GqlEvidenceLimitDimension, GqlEvidenceLimitedAuditError,
-    GqlEvidenceLimits,
-};
+use fgdb_gql::{GqlEvidenceLimitDimension, GqlEvidenceLimitedAuditError, GqlEvidenceLimits};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{EId, VId};
@@ -47,20 +44,16 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         batch.add_edge(EId(10), VId(1), VId(2), vec![]);
         let snapshot = database.write(cx, batch).await?;
 
-        let query = database.prepare_gql_query(
-            QUERY,
-            &RelationBind::new().with_relation("KNOWS", KNOWS),
-        )?;
-        let artifact =
-            database.execute_prepared_query_artifact_at(&query, snapshot)?;
+        let query = database
+            .prepare_gql_query(QUERY, &RelationBind::new().with_relation("KNOWS", KNOWS))?;
+        let artifact = database.execute_prepared_query_artifact_at(&query, snapshot)?;
         let exact = GqlEvidenceLimits::new(
             artifact.canonical_encoded_len(),
             artifact.rows().len() as u64,
         );
         let bytes = artifact.to_bytes_with_limits(exact)?;
 
-        let audited = database
-            .audit_untrusted_prepared_query_artifact(&query, &bytes)?;
+        let audited = database.audit_untrusted_prepared_query_artifact(&query, &bytes)?;
         assert_eq!(audited.rows(), &[VId(2)]);
 
         let refusal = database
