@@ -1,6 +1,6 @@
 # Transaction-Overlay GQL Contract
 
-Status: **live bounded read-your-own-writes query surface**, not full SSI or the final session transaction protocol.
+Status: **live bounded read-your-own-writes query surface with exact in-process evidence and an unreleased application envelope**, not full SSI or the final session transaction protocol.
 
 ## One execution body
 
@@ -31,7 +31,10 @@ Relevant files:
 - `gql_api.rs`: plan certification;
 - `owned_prepared.rs`: coherent preparation and deterministic budgets;
 - `overlay_evidence.rs`: canonical staged-effect identity and exact result evidence;
+- `portable_evidence.rs`: application-envelope issuance and product-level audit;
 - `finish.rs`: commit, conflict checks, abort, and helpers.
+
+The common evidence-envelope framing and strict decoder live in `crates/fgdb-gql/src/evidence_artifact.rs`.
 
 ## Read dependencies
 
@@ -52,7 +55,7 @@ This is a bounded FCW read-set mechanism, not full SSI predicate/range tracking.
 
 `execute_prepared_query` reuses that plan over staged state. Changing the caller's original statement or bind map cannot change the prepared definition.
 
-Finished transactions refuse preparation, execution, evidence issuance, and evidence verification through `WriteTxnError::Finished`.
+Finished transactions refuse preparation, execution, evidence issuance, and evidence audit through `WriteTxnError::Finished` or the corresponding `GqlEvidenceAuditError::Execution` wrapper.
 
 ## Deterministic budgets
 
@@ -112,31 +115,67 @@ It binds:
 
 Final digest comparisons use constant work over all digest bytes.
 
+## Staged-overlay evidence artifact
+
+`execute_prepared_query_overlay_artifact` packages one successful staged result as `GqlOverlayResultArtifact`. Its v1 body carries:
+
+- transaction basis;
+- retained statement digest;
+- canonical bind digest;
+- plan-certificate digest;
+- canonical staged-effect digest;
+- exact ordered rows;
+- staged-overlay result digest.
+
+`audit_prepared_query_overlay_artifact` refuses in an explicit order:
+
+1. malformed framing or result transcript;
+2. wrong transaction basis;
+3. wrong retained statement or bind;
+4. wrong plan identity;
+5. wrong current staged-effect identity;
+6. re-executed rows that differ from the artifact.
+
+The audit order makes failures actionable. In particular, staging another mutation after artifact issuance returns `GqlEvidenceAuditError::StagedEffectMismatch` before the old rows can be treated as belonging to the new overlay.
+
+The decoder rejects invalid magic, unsupported version, wrong kind, nonzero reserved bytes, row-count or length overflow, every truncated prefix, trailing bytes, and row/result corruption. Rows are redacted from ordinary artifact diagnostics.
+
+Runnable witness:
+
+```bash
+cargo run -p fgdb --example gql_evidence_artifact
+```
+
 ## Evidence boundary
 
-This closes the earlier in-process evidence gap: staged rows are now cryptographically bound to the concrete plan, basis, and canonical staged effect.
+The certificate and artifact cryptographically bind staged rows to the concrete plan, basis, and canonical staged effect.
 
-It does **not** create standalone or cross-process replay. A verifier holding only the certificate cannot reconstruct:
+They do **not** create standalone or cross-process transaction replay. A verifier holding only the artifact cannot reconstruct:
 
 - the durable snapshot;
-- the staged template bytes;
+- the staged `LogicalDeltaTemplate` bytes;
 - the graph rows that were read;
-- the transaction's conflict state.
+- the transaction's read set or MATCH-expansion set;
+- first-committer-wins conflict state.
 
-Portable replay requires a registered artifact carrying the canonical staged effect, query definition, required snapshot identity or material, and strict framing. Publisher authenticity is a separate signature/attestation layer.
+The artifact is an unreleased application envelope, not an Appendix-A object or FGP frame. Promotion to a compatibility-governed format requires a registry decision, stable size ceilings, golden vectors, and decoder-evolution rules. Publisher authenticity is a separate signature or transparency layer.
+
+Standalone replay requires a package carrying the exact staged template, required durable snapshot authority or material, and all framing needed to establish that those bytes produce the named staged-effect digest before query execution.
 
 ## Mutation-sensitive laws
 
-The focused transaction evidence test proves:
+The focused transaction evidence tests prove:
 
 - identical canonical staged effects at the same basis verify across transactions;
 - row reorder, replacement, or truncation fails;
-- a later staged mutation invalidates old evidence;
-- the unchanged transaction continues to verify its original evidence;
+- a later staged mutation invalidates old certificate and artifact evidence;
+- the unchanged transaction continues to verify its original certificate;
 - a certificate for the advanced overlay does not verify against the older overlay;
-- the plan certificate still verifies independently at the transaction basis.
+- artifact row corruption fails strict decoding;
+- the plan certificate still verifies independently at the transaction basis;
+- current artifact audit re-executes and requires exact rows.
 
-Runnable witness:
+Runnable certificate-only witness:
 
 ```bash
 cargo run -p fgdb --example gql_txn_overlay_result_evidence
@@ -153,7 +192,8 @@ The current transaction surface does not provide:
 - transaction-owned cursors;
 - typed statement parameters;
 - authorization/session ownership;
-- portable transaction replay artifacts;
+- standalone portable transaction replay;
+- released artifact compatibility;
 - physical-plan or runtime-cost evidence.
 
 These remain dependency-ordered future work rather than implicit claims of the bounded overlay.
