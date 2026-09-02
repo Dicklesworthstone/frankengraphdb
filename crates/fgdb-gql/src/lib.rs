@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod evidence_artifact;
+mod evidence_cursor;
 mod evidence_limits;
 mod evidence_page;
 mod overlay_evidence;
@@ -16,6 +17,9 @@ mod prepared;
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,
     GqlOverlayResultArtifact, GqlPreparedResultArtifact,
+};
+pub use evidence_cursor::{
+    GqlEvidenceCursor, GqlEvidenceCursorError, GqlEvidenceCursorState,
 };
 pub use evidence_limits::{
     GqlEvidenceLimitDimension, GqlEvidenceLimitExceeded,
