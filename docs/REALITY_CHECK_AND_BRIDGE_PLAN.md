@@ -1,11 +1,262 @@
 # Reality Check and Bridge Plan
 
-**Current measurement: 2026-08-31** (evidence window 2026-08-31T00:30–04:00Z).
-Previous: 2026-08-29 (pinned `7a398a27`).
+**Current measurement: 2026-09-02** (evidence window 2026-09-02T21:00–21:30Z,
+HEAD `fdd53388`). Previous: 2026-08-31 (pinned `a4bb93c4`).
 This document is revised in place. Older commit-bound assessments are retained
 below as superseded historical snapshots because they explain several decisions;
 their counts and statements about missing seams are not current unless the
-2026-08-31 delta repeats them.
+2026-09-02 delta repeats them.
+
+---
+## Current delta — 2026-09-02
+
+### Product verdict
+
+**The tree does not compile, has not had a green verdict for 141 commits,
+and nothing in the README's "what runs today" section runs at HEAD.** The
+08-31 delta closed "Gap 0′ — CI must complete" on the strength of one green
+run (`f8bf9b40`, 2026-08-31T18:03Z). That run is still the only green run
+in the last 200. Everything after it was landed by a session that, by its
+own CHANGELOG entries, had no Rust toolchain, no shellcheck, and no UBS, and
+whose commits say so ("this changelog does not claim a fresh cargo fmt,
+compile, Clippy, Rust-test, shellcheck, UBS, or complete check.sh verdict").
+Measured today on a `git archive HEAD` copy under the pinned nightly
+(`rustc 1.100.0-nightly e7769602a`, private target dir, rch shim bypassed):
+
+| Verdict | Result at `fdd53388` | Cause |
+|---|---|---|
+| `cargo fetch --locked` | **refused** | `crates/fgdb-gql/Cargo.toml` gained `fgdb-crypto` and `fgdb-types` path deps (`97d09787`); `Cargo.lock` was never regenerated |
+| `cargo check --workspace --all-targets` | **rc=101** | `crates/fgdb-gql/src/evidence_artifact.rs:564` decodes a `VId` as `u64`; `VId` is `u128`, and the encoder at :241/:409 writes 16 bytes. The envelope has never round-tripped; its own unit tests never compiled |
+| `cargo run --example open_a_database` (the README's runnable witness) | **rc=101** | cascade from the above |
+| `cargo run --example gql_time_travel`, `gql_evidence_cursor` | **rc=101** | cascade |
+| `cargo test -p fgdb-gql`, `cargo test -p fgdb` (5 suites) | **rc=101** | cascade |
+| `cargo clippy -p fgdb -p fgdb-gql --all-targets -- -D warnings` | **rc=101** | cascade |
+| `cargo fmt --all --check` | **rc=1** | 21 files unformatted (every `gql_evidence_*` example, `evidence_artifact.rs`) |
+| `bash scripts/g0_claims_e2e.sh` (main tree, read-only) | **rc=1**, 16 pass / 1 fail | `checker_index` reports 7 × `script_undeclared`: the four `scripts/agent_context*.sh` and three `scripts/local_proof*.sh` files landed 09-01 (`0ce6f9c2`, `f4759d95`) with no checker or `[[script_disposition]]` row — NE-0013's class, and the ironic one: the local-proof tooling that would have caught all of the above is itself unregistered |
+
+`fgdb-gql` has been non-compiling since `97d09787` (2026-09-02T01:20 local);
+**33 further commits** — page tokens, evidence cursors, resource limits, six
+examples, the CHANGELOG waves, and the new `IMPLEMENTATION_STATUS.md` — were
+authored on top of a crate that did not build. The day before, `fb47b512`
+(09-01) failed to compile `fgdb` itself (six `E0308` in `gql_cert.rs`, fixed
+the same day by `1175b620`/`2619a17f`). This is a practice, not an accident.
+
+**Hosted CI could not say any of this.** Of the last 200 `check.yml` runs:
+1 success, 32 failures, **166 cancelled** — `concurrency.cancel-in-progress`
+plus a 30–60 push/day cadence means a run is cancelled by the next push before
+it reaches a verdict. The last two *completed* runs were red
+(`33435256302` on `51b9b66c`: fmt/clippy/test/UBS red, 33/33 registered
+gates green; `33469052094` on `fb47b512`: 6 of 9 core gates red, 13
+registered gates UNRUN). HEAD is `queued`. The 08-31 sentence "one full green
+run is a single push away" was structurally false under the push cadence.
+
+**Vision delivery is unchanged at 2 of 20 rows fully working** (closed
+universe; unsafe ledger). The enforcement row that moved *up* on 08-31 moves
+*down* today. Everything a README reader would type remains NOT_STARTED, and
+the one thing a README reader is told *does* run does not compile.
+
+### The five questions this skill asks
+
+1. **What is working right now** (at the last green `f8bf9b40`, and at HEAD
+   once the one-line width fix lands — nothing else in the engine regressed):
+   the two-fsync Chronicle commit path, first-committer-wins validation,
+   Tier-D Strata with VFS injection and durable compaction, checkpoint-selected
+   fast open, `MemVfs` `open_memory`, frontier and `_at` reads for vertices/
+   edges/neighbours/scans, the bounded GQL read slice (one- and two-hop `MATCH`,
+   labels, integer property comparators, variable `=`/`<>`, `SKIP`/`LIMIT`,
+   `RETURN` of one variable's ids), `WriteTxn` with staged overlay and a
+   read-set/expansion first-committer check at commit, pinned `EmbeddedReadView`,
+   owned `PreparedGqlQuery` without parameters, the certificate/digest/artifact
+   evidence stack over that slice, the ~90 oracle-differential suites, the
+   FaultVfs/LDFI/crashpack lab, the registry/gate machinery, and the CI harness
+   *when a run is allowed to finish*.
+2. **What is not working or not yet implemented.** HEAD compile, `--locked`
+   builds, every documented runnable witness. Unchanged from 08-31 and still
+   absent: sessions, typed parameters, typed rows/columns, streaming results,
+   property projection, aggregation, `ORDER BY`, writes through GQL, openCypher,
+   GLA/Loom/optimizer/spill, Tier I/R/A (Tier R "sealed CSR" exists only in a
+   crate-root comment and in an `open_a_database` comment that overclaims what
+   `compact` does), SSI proper and the merge ladder, branches/retention/
+   replication, Ripple/Beacon/Prism/Warden/Fabric/Aegis, CLI/server/Python/
+   installer/releases, 0/20 invariants enforced, 1/183 command contracts live,
+   §17 gates unactivated, one live Lean lane of ten declared.
+3. **What is blocking us.** Three things, in this order. (a) *Verdict-less
+   landing*: sessions without a toolchain landed 141 commits; CI cancels itself
+   before reporting; nothing between the author and `main` ever executed the
+   code. (b) *The G0 wall*: 277 of 286 open beads are blocked, `br ready` is
+   empty, and the blockers are the identity/command-contract registries. (c)
+   *The GQL representation*: `BoundPlan` is a fixed-shape struct with 27
+   optional fields, 18 of them one-per-(position × comparator) integer
+   predicate slots, executed by a hand-written kernel and witnessed by 82
+   per-shape oracle files in `fgdb-sim` and 208 `gql_*` test files in `fgdb`.
+   Every new predicate is a new field, a new kernel arm, and a new oracle file.
+   That representation cannot grow into ISO GQL; it will be replaced by the GLA
+   subset (`fgdb-5vp9`), and the certificate transcript v2 that "binds every
+   `BoundPlan` field" is bound to a throwaway.
+4. **Would implementing all open beads close the gap?** For tracking, yes:
+   every one of the 20 vision rows still has at least one open bead (keyword
+   census over the 274 open titles: CLI 2, server 6, Python 2, releases 9,
+   Ripple 7, Beacon 17, Prism 6, Warden 9, Aegis 6, Loom 10, Cypher/TCK 3, SSI
+   18, branches 11, temporal 6, Tier R 3, spill 1, bench 7, Lean/TLA 3,
+   sessions 6, certificates 13). For delivery, no, for three reasons the beads
+   do not address: the landing practice that produced today's red is not a
+   bead's subject; the CI shape cannot report under the swarm's cadence; and
+   G1 is unreachable through any completion order that does not route through
+   invariant promotion (0/20).
+5. **Vision goals with no bead.** None of the 20. Three *process* seams had
+   no owner and are filed today (below): the stale-lockfile/toolchain-less
+   landing class, the self-cancelling CI, and commit-message provenance
+   (`fgdb-w10-embedded-54r.1` ×39, `fgdb-gate-genesis-lce.2` ×21, `fgdb-3w75`
+   ×9, `fgdb-w4-g1-txn-core-qpmg.24` ×2 — **71 of the last ~130 commits cite a
+   bead ID that does not exist** in `.beads/`; no gate checks that a cited ID
+   resolves).
+
+### Vision checklist — 2026-09-02 refresh (rows that changed since 08-31)
+
+| # | Goal | 08-31 | 09-02 |
+|---|------|-------|-------|
+| 1 | Embedded `Database::open(path\|:memory:)` + sessions + prepared statements | PARTIAL | PARTIAL, plus `EmbeddedReadView`, owned `PreparedGqlQuery`, `WriteTxn` overlay; still async-only, no sessions, no parameters, no typed rows. **The documented example does not compile at HEAD** |
+| 4 | GQL + openCypher + FQL | PARTIAL (bounded MATCH slice) | PARTIAL, same slice; `RETURN` yields one variable's ids only (`Source`/`Destination`/`Hop2Destination`), so the README's own quick example (`RETURN p.name, count(f)`) is out of grammar |
+| 7 | Deterministic STRICT results + plan certificates | PARTIAL | PARTIAL; digests over statement/bind/plan/rows/snapshot now have portable envelopes, page tokens, and cursors — over a materialized result, re-audited per page. Not §8 plan certificates (no operator witnesses, no decision cards), and the envelope format has never round-tripped (width defect) |
+| 13 | SSI / Graph-SSI | STUB in production | PARTIAL-lite: `WriteTxn` refuses on read-set overlap and on a `CreateEdge` into an expanded `(src, relation)` pair since basis. No rw-antidependency graph, no predicate ranges, no merge ladder |
+| 15 | §17 empirical gates | HARNESS LIVE | **REGRESSED**: no completed run since 08-31; harness cannot report under the push cadence |
+| 21 (new) | "CI-enforced" gate on `main` | (implicit in 15) | **REGRESSED**: last green `f8bf9b40`; 141 commits without a verdict; HEAD red on fmt/check/clippy/test and `--locked` |
+| 22 (new) | README "what runs today" | WORKING | **REGRESSED**: `cargo run -p fgdb --example open_a_database` rc=101 at HEAD |
+
+Vision delivery: **2 of 20 fully working** (unchanged). Two enforcement rows
+regressed.
+
+### Inventory
+
+| Measure | 08-29 | 08-31 | 09-02 |
+|---|---|---|---|
+| HEAD | `7a398a27` | `a4bb93c4` | `fdd53388` (141 commits after the last green) |
+| CI (last 200 runs) | 57 runs / 18 fail / 37 cancel / 1 success | "verdicts on every push" | **1 success / 32 fail / 166 cancelled**; last completed run red; HEAD queued |
+| Local exact-tree verdict | — | focused suites green | **check/clippy/test rc=101, fmt rc=1, `--locked` refused** |
+| Tracker | 892 / 607 closed | 892+ / 607+ | 897 / 611 closed / 274 open / 5 in_progress / `br ready` 0 / bv actionable 9 of 286 |
+| Closures per day (JSONL) | ~3 | 1–3 | **0** since 08-31 (JSONL last exported `476bec25`); 4 of 5 in_progress beads untouched 1–6 weeks |
+| Commit provenance | clean | clean | **71 of ~130 commits cite a nonexistent bead ID** |
+| Crates | 22 active / 49 planned | same | same |
+| Command contracts | 1 live / 182 reserved | same | same |
+| FG-INV enforced | 0 / 20 | 0 / 20 | 0 / 20 (42 stub checkers in `checker_index.toml`) |
+| Proof lanes | 1 live | 1 live | 1 live (`lean-version-chain`, 109 lines), 2 checked, 9 declared |
+| GQL grammar | MATCH/WHERE/RETURN/SKIP/LIMIT | same | same; `BoundPlan` 27 optional fields, 18 predicate slots; 82 + 208 per-shape test files |
+| Workspace | ~270k LOC | ~270k | ~270k + 24k inserted / 13k deleted since 08-31 (33 feat, 29 docs, 23 test, 19 fix, 11 example, 11 ci) |
+| Engine `todo!()` | 0 | 0 | 0 |
+
+### Bridge plan updates (order = vision impact)
+
+**Gap 0 — REOPENED, P0: restore a verdict on `main`.** One landing, one
+proof bundle: (1) fix the `VId` width in `evidence_artifact.rs` by reading
+16 bytes to match what the encoder writes — this is a format decision, not a
+`.into()`; the row stride, the `total encoded bytes` limit arithmetic in
+`evidence_limits.rs`, and the page-token offset accounting all assumed 8 —
+re-derive them and re-pin the golden vectors; (2) regenerate `Cargo.lock`;
+(3) `cargo fmt`; (3′) register the seven 09-01 shell scripts in
+`registries/checker_index.toml` (as checkers or `[[script_disposition]]` rows
+with a stated reason) so the claims gate and the file-coverage closure are
+green again; (4) `bash scripts/local_proof.sh` on the exact tree and land
+with the bundle's verdict quoted. Then two structural changes, each its
+own bead below: (5) **no landing from an environment that cannot execute the
+gate** — a CHANGELOG "validation boundary" paragraph is a disclaimer, not a
+verdict, and doctrine 8 does not accept disclaimers; (6) **make CI able to
+report under the swarm's cadence**: keep `cancel-in-progress` for PRs but add
+a non-cancelling `main`-HEAD run (scheduled, or a merge queue), because a gate
+that is always cancelled enforces nothing (NE-0012's family).
+
+**Gap 1 — unchanged:** G0 command universe, 1 live / 182 reserved
+(`fgdb-5uw2`). Still the wall behind 277 blocked beads.
+
+**Gap 2 — moved:** `WriteTxn` is the first production conflict check on the
+validator seam. SSI proper (rw-antidependency structure, predicate/range
+witnesses, `TxnCx` narrowing) remains `fgdb-w4-g1-txn-core-qpmg`.
+
+**Gap 3 — sharpened:** *freeze the evidence tower*. Do not add another
+`*_prop_*` slot, kernel arm, or per-shape oracle file. Land the registered
+GLA subset (`fgdb-5vp9`) and re-bind certificates to a GLA plan transcript
+(v3); the v2 binding to `BoundPlan` fields is throwaway. The evidence machinery
+is worth keeping only if its first *real* consumer is the algebra, not the
+prototype plan struct.
+
+**Gap 4 — unchanged:** Tier R seal, bounded open, first spill-backed operator.
+The `open_a_database` comment claiming `compact` produces "a sealed CSR run"
+should be corrected: compaction consolidates Tier-D blocks.
+
+**Gap 5 — unchanged:** 0 / 20 invariants. Promote FG-INV-08/09/10/18 with a
+live checker plus a distinct negative test in one change.
+
+**Gap 6 — unchanged:** CLI robot mode and the sync `Database` API after Gaps
+2–3.
+
+**Gap 7 — unchanged warning:** later layers stay parked.
+
+**Tracker hygiene (not gaps, but blocking orchestration):** re-attach the 71
+orphan-cited commits to `fgdb-w10-embedded-54r` and `fgdb-gate-genesis-lce`
+(or create the child beads those commits assumed existed, with the commit
+list as provenance); close or release the four stale `in_progress` beads
+(`fgdb-bbqq`, `fgdb-a06-w12-core-zdzx`, `fgdb-w30l`, `fgdb-w1-crypto-y5o`);
+export the deferred records through `scripts/br_sync.sh` once the compile fix
+lands so the JSONL stops lagging the database by three days.
+
+### Ambition rounds applied to this revision
+
+- **Round 1** refused the "one-line fix" framing. The defect is not a `u64`;
+  it is that 141 commits reached `main` without anything executing them, and
+  that the repository's own honesty machinery (CHANGELOG boundary paragraphs,
+  `IMPLEMENTATION_STATUS.md`) documented the absence of a verdict instead of
+  refusing the landing. The bridge therefore lands a *refusal*, not a patch.
+- **Round 2** asked what the evidence tower is for. Certificates, artifacts,
+  limits, tokens, and cursors are the right *shape* for B5 — but bound to a
+  fixed-shape plan struct they certify a prototype. The ambitious move is to
+  make the registered GLA subset the first consumer of that machinery, so the
+  certificate outlives the plan representation it was born on.
+- **Round 3** asked what CI shape survives a 60-push day. Per-commit
+  cancel-in-progress is correct for PRs and wrong for `main`; the deterministic
+  fallback is one non-cancelling verdict per `main` head plus a
+  `local_proof.sh` bundle per landing, which is exactly the two-sided proof
+  discipline the plan already prescribes for everything else.
+
+### Refinement passes on the new state
+
+- **Pass 1** checked each new bead for a success criterion that can fail: the
+  lockfile bead reds on `cargo metadata --locked`; the CI bead reds on "no
+  completed run for HEAD within N hours"; the provenance bead reds on a commit
+  citing an unresolvable ID.
+- **Pass 2** checked ordering: the width fix and the lockfile regeneration are
+  one commit (either alone leaves the tree red); the CI and provenance beads
+  are independent of both and of each other.
+- **Pass 3** checked that no new bead duplicates an owner: `fgdb-5vp9` keeps
+  the GLA move (measurement comment added, no fork); `fgdb-w10-embedded-54r`
+  keeps sessions/cursors (comment added); `fgdb-ci-workflow-check-sh-4csa`
+  keeps CI (comment added; the cancellation seam is filed as its child).
+- **Pass 4** found nothing further.
+
+### Beads filed this measurement
+
+| ID | Seam |
+|---|---|
+| `fgdb-l9r3` (P0 bug) | stale `Cargo.lock` + non-compiling `fgdb-gql` at HEAD (the `VId` width is a format decision, not a cast), and the landing-practice refusal that prevents recurrence |
+| `fgdb-ci-workflow-check-sh-4csa.2` (P1) | `main`-HEAD verdict that cannot be cancelled by the next push |
+| `fgdb-baru` (P1) | commit-message bead-ID resolution gate; 71 orphan-cited commits to re-attach; four stale `in_progress` beads to release |
+
+Measurement comments (no forks) were added to `fgdb-5vp9` (GLA subset owns the
+`BoundPlan` retirement), `fgdb-w10-embedded-54r` (the orphan `.1` commits and
+what they did and did not deliver), `fgdb-ci-workflow-check-sh-4csa`, and
+`fgdb-gate-genesis-lce`. The JSONL was not exported by this measurement; it
+lands with the compile fix through `scripts/br_sync.sh`.
+
+### Evidence boundary
+
+Pinned to `fdd53388` (2026-09-02 13:48 -0400). Method: the same read-only
+audits as prior deltas plus (a) `gh run list` over the last 200 `check.yml`
+runs and the full logs of the two most recent completed runs; (b) a quiet-root
+build of `git archive HEAD` under the pinned toolchain with a private
+`CARGO_TARGET_DIR` and `RCH_CARGO_WRAPPER_BYPASS=1`, so no tracked file in the
+main tree moved (`git status` clean throughout); (c) `cargo update --dry-run
+--offline` and a `Cargo.lock` diff against the copy's unlocked resolution;
+(d) `br show` on every bead ID cited by commits since 08-28. No `scripts/
+check.sh` run was attempted: the tree cannot pass its fourth core gate, and a
+35-minute chain adds nothing to a verdict already decided at `cargo check`.
 
 ---
 ## Current delta — 2026-08-31
