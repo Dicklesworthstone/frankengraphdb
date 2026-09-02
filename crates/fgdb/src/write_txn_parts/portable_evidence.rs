@@ -43,9 +43,8 @@ impl<V: Vfs + Clone> Database<V> {
         fgdb_gql::GqlPreparedResultArtifact,
         fgdb_gql::GqlEvidenceAuditError<GqlError>,
     > {
-        let artifact =
-            fgdb_gql::GqlPreparedResultArtifact::from_bytes(bytes)
-                .map_err(fgdb_gql::GqlEvidenceAuditError::Decode)?;
+        let artifact = fgdb_gql::GqlPreparedResultArtifact::from_bytes(bytes)
+            .map_err(fgdb_gql::GqlEvidenceAuditError::Decode)?;
         if !artifact.verifies_input(query) {
             return Err(fgdb_gql::GqlEvidenceAuditError::InputMismatch);
         }
@@ -53,6 +52,11 @@ impl<V: Vfs + Clone> Database<V> {
             crate::gql_cert::certify(query.plan(), artifact.snapshot_seq());
         if !artifact.verifies_plan(plan_certificate.digest) {
             return Err(fgdb_gql::GqlEvidenceAuditError::PlanMismatch);
+        }
+        if !plan_certificate
+            .verifies_result_digest(artifact.rows(), artifact.result_digest())
+        {
+            return Err(fgdb_gql::GqlEvidenceAuditError::ResultMismatch);
         }
         let replay = self
             .execute_prepared_query_at(query, artifact.snapshot_seq())
@@ -101,9 +105,8 @@ impl crate::EmbeddedReadView {
         fgdb_gql::GqlPreparedResultArtifact,
         fgdb_gql::GqlEvidenceAuditError<GqlError>,
     > {
-        let artifact =
-            fgdb_gql::GqlPreparedResultArtifact::from_bytes(bytes)
-                .map_err(fgdb_gql::GqlEvidenceAuditError::Decode)?;
+        let artifact = fgdb_gql::GqlPreparedResultArtifact::from_bytes(bytes)
+            .map_err(fgdb_gql::GqlEvidenceAuditError::Decode)?;
         if !artifact.verifies_input(query) {
             return Err(fgdb_gql::GqlEvidenceAuditError::InputMismatch);
         }
@@ -111,6 +114,11 @@ impl crate::EmbeddedReadView {
             crate::gql_cert::certify(query.plan(), artifact.snapshot_seq());
         if !artifact.verifies_plan(plan_certificate.digest) {
             return Err(fgdb_gql::GqlEvidenceAuditError::PlanMismatch);
+        }
+        if !plan_certificate
+            .verifies_result_digest(artifact.rows(), artifact.result_digest())
+        {
+            return Err(fgdb_gql::GqlEvidenceAuditError::ResultMismatch);
         }
         let replay = self
             .execute_prepared_query_at(query, artifact.snapshot_seq())
@@ -161,9 +169,8 @@ impl WriteTxn {
         fgdb_gql::GqlOverlayResultArtifact,
         fgdb_gql::GqlEvidenceAuditError<WriteTxnError>,
     > {
-        let artifact =
-            fgdb_gql::GqlOverlayResultArtifact::from_bytes(bytes)
-                .map_err(fgdb_gql::GqlEvidenceAuditError::Decode)?;
+        let artifact = fgdb_gql::GqlOverlayResultArtifact::from_bytes(bytes)
+            .map_err(fgdb_gql::GqlEvidenceAuditError::Decode)?;
         if artifact.basis() != self.basis {
             return Err(fgdb_gql::GqlEvidenceAuditError::SnapshotMismatch);
         }
@@ -180,9 +187,7 @@ impl WriteTxn {
             .staged_effect_digest()
             .map_err(fgdb_gql::GqlEvidenceAuditError::Execution)?;
         if !artifact.verifies_staged_effect(staged_effect_digest) {
-            return Err(
-                fgdb_gql::GqlEvidenceAuditError::StagedEffectMismatch,
-            );
+            return Err(fgdb_gql::GqlEvidenceAuditError::StagedEffectMismatch);
         }
         let replay = self
             .execute_prepared_query(database, query)
