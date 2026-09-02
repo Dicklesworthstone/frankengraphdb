@@ -1,12 +1,12 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main` through the 2026-09-01 owned-preparation, deterministic-budget, and staged-overlay result-evidence continuation.
+Capability baseline: unreleased `main` through the 2026-09-02 strict query-evidence envelope and replay-audit continuation.
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file is the present-tense reality map.
 
 ## Product reality
 
-FrankenGraphDB is not yet a released graph-database product. There are no tagged releases, installer, supported CLI/server distribution, Python package, or compatibility promise. The live product surface is an embedded Rust composition crate over real Chronicle durability and real Strata tier-D storage, with a deliberately bounded GQL read slice and a bounded write-transaction overlay.
+FrankenGraphDB is not yet a released graph-database product. There are no tagged releases, supported installer, CLI/server distribution, Python package, or compatibility promise. The live product surface is an embedded Rust composition crate over real Chronicle durability and real Strata tier-D storage, with a deliberately bounded GQL read slice and a bounded write-transaction overlay.
 
 The repository contains real durable mechanisms and executable cross-layer paths. It does **not** yet contain the complete W10 product surface, full ISO GQL, GLA/Loom physical execution, full SSI, or the distributed and incremental system described by the plan.
 
@@ -68,15 +68,15 @@ This is a real embedded read-session subset. It is not authorization negotiation
 
 Changing the original statement or bind map cannot change the prepared definition. `Debug` redacts statement, bind, and plan contents. `verifies_definition()` reparses and rebinds the retained inputs as an explicit audit; normal execution does not need to do so.
 
-| Surface | Preparation | Execution | Historical | Durable-read result evidence |
+| Surface | Preparation | Execution | Historical | Exact result evidence |
 |---|---|---|---|---|
-| `Database` | `prepare_gql_query` | `execute_prepared_query` | `execute_prepared_query_at` | `execute_prepared_query_with_result_digest[_at]` |
-| `EmbeddedReadView` | `prepare_gql_query` | `execute_prepared_query` | `execute_prepared_query_at` | `execute_prepared_query_with_result_digest[_at]` |
-| `WriteTxn` | `prepare_gql_query` | `execute_prepared_query` | pinned basis only | staged-overlay certificate |
+| `Database` | `prepare_gql_query` | `execute_prepared_query` | `execute_prepared_query_at` | digest and artifact paths |
+| `EmbeddedReadView` | `prepare_gql_query` | `execute_prepared_query` | `execute_prepared_query_at` | digest and artifact paths |
+| `WriteTxn` | `prepare_gql_query` | `execute_prepared_query` | pinned basis only | staged-overlay certificate and artifact |
 
 The definition and budget vocabulary live in `crates/fgdb-gql/src/prepared.rs`. High-level adapters live in `crates/fgdb/src/write_txn_parts/owned_prepared.rs`. They reuse the existing binder and execution bodies rather than creating another query path.
 
-This is not yet the final parameterized prepared-statement protocol. Typed parameters, catalog epochs, authorization context, physical-plan selection, cursor lifecycle, invalidation, and portable persistence remain open.
+This is not yet the final parameterized prepared-statement protocol. Typed parameters, catalog epochs, authorization context, physical-plan selection, cursor lifecycle, invalidation, and a released persistence contract remain open.
 
 ### Deterministic prepared-query budgets
 
@@ -99,15 +99,15 @@ Text execution binds once and delegates to the plan-only overlay executor. Owned
 
 This is not full SSI. Predicate/range conflict tracking, merge-ladder integration, transaction ownership/session policy, and multi-relation writes remain incomplete.
 
-## Query evidence truth table
+## Query evidence tower
 
 | Evidence | Binds | Does not bind |
 |---|---|---|
 | `GqlCertificate` | exact statement bytes, canonical `RelationBind`, snapshot sequence | parsed plan, rows, transaction overlay, physical plan, runtime cost |
 | `GqlPlanCertificate` | every current `BoundPlan` field and snapshot sequence under transcript v2 | statement spelling, rows, transaction overlay, physical plan, runtime cost |
-| durable ordered-result digest | plan-certificate digest, snapshot, exact row count, order, every returned `VId` | physical plan, cost, authorization, portable framing |
+| durable ordered-result digest | plan-certificate digest, snapshot, exact row count, order, every returned `VId` | physical plan, cost, authorization, envelope framing |
 | staged-effect digest | transaction basis and canonical staged `LogicalDeltaTemplate`, or explicit empty overlay | durable snapshot, staged bytes as payload, API-call history |
-| `GqlOverlayResultCertificate` | basis, plan digest, staged-effect digest, exact row count, order, every returned `VId` | durable/staged payloads, conflict state, portable replay |
+| `GqlOverlayResultCertificate` | basis, plan digest, staged-effect digest, exact row count, order, every returned `VId` | durable/staged payloads, conflict state, standalone replay |
 | deterministic budget stats | admitted table count and final row count for one successful call | cryptographic attestation, I/O/allocation cost, operator work, wall time |
 
 The v2 plan transcript includes `BoundPlan::neq`, omitted by historical v1. New certificates use v2; legacy-v1 verification is explicit.
@@ -120,7 +120,68 @@ The v2 plan transcript includes `BoundPlan::neq`, omitted by historical v1. New 
 
 `verifies_prepared_query_overlay_result` derives the current plan and staged-effect identities from the live transaction. A later staged mutation invalidates old evidence. Equivalent transactions at the same basis with the same canonical net effect can verify the same certificate.
 
-This closes the in-process staged-result evidence gap. It is not standalone replay: the certificate does not carry the durable snapshot, staged template bytes, graph rows, or conflict state.
+This is exact in-process evidence. It is not standalone replay because the certificate does not carry the durable snapshot, staged template bytes, graph rows, read-set state, or conflict state.
+
+## Strict evidence envelopes and replay audit
+
+The current tree now has two canonical **unreleased application envelopes**:
+
+- `GqlPreparedResultArtifact` for one durable prepared-query result;
+- `GqlOverlayResultArtifact` for one staged-overlay result.
+
+The common v1 framing is owned by `crates/fgdb-gql/src/evidence_artifact.rs` and contains:
+
+- eight-byte magic `FGQEVID1`;
+- explicit major/minor version;
+- closed artifact-kind tag;
+- zero-required reserved bytes;
+- exact snapshot sequence or transaction basis;
+- statement, canonical bind, and plan digests;
+- staged-effect digest for overlay artifacts;
+- exact row count and ordered `VId` bytes;
+- the applicable exact result digest.
+
+Decoding fails closed on invalid magic, unsupported versions, wrong kind, nonzero reserved bytes, row-count or length overflow, every truncated prefix, trailing bytes, and a result transcript inconsistent with the included plan/snapshot or overlay identity. Artifact fields are private and rows are redacted from `Debug` output.
+
+### Durable artifact APIs
+
+`Database` and `EmbeddedReadView` expose:
+
+- `execute_prepared_query_artifact[_at]`;
+- `audit_prepared_query_artifact`.
+
+A durable audit:
+
+1. decodes the envelope strictly;
+2. verifies the exact retained statement and canonical bind;
+3. recomputes the canonical `GqlPlanCertificate` at the artifact sequence;
+4. cross-checks the envelope's independently recomputed result digest against that product certificate;
+5. re-executes the query at the exact historical sequence;
+6. requires exact ordered-row equality.
+
+A later write may advance the live frontier without invalidating an older artifact: audit reopens the sequence named by the artifact rather than sampling current state.
+
+### Staged-overlay artifact APIs
+
+`WriteTxn` exposes:
+
+- `execute_prepared_query_overlay_artifact`;
+- `audit_prepared_query_overlay_artifact`.
+
+A transaction audit additionally verifies the current transaction basis and canonical staged-effect digest before re-executing the overlay. Staging another mutation after issuance returns a typed `StagedEffectMismatch` for the old artifact.
+
+### Exact boundary of the envelope claim
+
+The framing is versioned and endian-stable, but it is **not yet a released format contract**. It is not:
+
+- an Appendix-A Chronicle object;
+- an FGP wire frame;
+- a signed publisher attestation;
+- a compatibility promise;
+- a standalone transaction replay payload;
+- an external-verifier SDK.
+
+Promotion beyond the current internal application surface requires a deliberate registry/constitution decision, stable size limits, golden vectors, compatibility policy, and—where provenance matters—a separate signature or transparency layer.
 
 Detailed contracts:
 
@@ -150,16 +211,18 @@ Verdicts remain three-valued: stable `pass`, stable `red`, and moving-tree `void
 | parser, binder, `RelationBind`, `BoundPlan` | `crates/fgdb-gql/src/parser.rs` |
 | `PreparedGqlQuery` and deterministic budget vocabulary | `crates/fgdb-gql/src/prepared.rs` |
 | staged-overlay result transcript | `crates/fgdb-gql/src/overlay_evidence.rs` |
+| strict evidence framing and independent transcript decoder | `crates/fgdb-gql/src/evidence_artifact.rs` |
 | owned prepared execution adapters | `crates/fgdb/src/write_txn_parts/owned_prepared.rs` |
 | canonical staged-effect authority | `crates/fgdb/src/write_txn_parts/overlay_evidence.rs` |
-| durable input/plan/result transcripts | `crates/fgdb/src/gql_cert.rs` |
+| artifact issuance and product-level replay audit | `crates/fgdb/src/write_txn_parts/portable_evidence.rs` |
+| durable input/plan/result certificate authority | `crates/fgdb/src/gql_cert.rs` |
 | staged transaction overlay and conflict tracking | `crates/fgdb/src/write_txn_parts/` |
 | advisory local context package | `scripts/agent_context*.sh` |
 | exact-tree local proof package | `scripts/local_proof*.sh` |
 | independent semantic oracle | `crates/fgdb-reference` |
 | crash/differential harness | `crates/fgdb-sim` |
 
-Do not add a second parser, binder, execution kernel, session type, evidence transcript, or authority merely to make a narrow test pass.
+Do not add a second parser, binder, execution kernel, session type, or issuing certificate authority merely to make a narrow test pass. Independent artifact decoding is allowed only while product audit cross-checks the canonical certificate transcript, as the current path does.
 
 ## Focused witnesses and tests
 
@@ -169,6 +232,7 @@ cargo run -p fgdb --example gql_time_travel
 cargo run -p fgdb --example gql_result_digest
 cargo run -p fgdb --example gql_owned_prepared
 cargo run -p fgdb --example gql_txn_overlay_result_evidence
+cargo run -p fgdb --example gql_evidence_artifact
 
 bash scripts/agent_context_selftest.sh
 bash scripts/local_proof_selftest.sh
@@ -184,6 +248,7 @@ Focused integration suites include:
 - `gql_undirected_certified.rs`
 - `gql_owned_prepared.rs`
 - `gql_txn_overlay_result_evidence.rs`
+- `gql_evidence_artifact.rs`
 
 ## Validation status
 
@@ -193,9 +258,9 @@ The repository-wide authority remains:
 bash scripts/check.sh
 ```
 
-The current connector environment does not provide a trustworthy completed repository-wide proof for this head. Checked-in Rust tests state intended laws; only an executed pinned-toolchain proof establishes that the complete tree compiles and passes every registered gate.
+The current connector environment does not provide the repository-pinned Rust toolchain, `shellcheck`, or a runnable UBS installation, and hosted GitHub Actions are intentionally excluded from evidence. Checked-in Rust tests state intended laws; only an executed exact-tree proof establishes that the complete tree compiles and passes every registered gate.
 
-The owned-preparation, budget, and overlay-evidence changes received focused mechanical checks for source ownership, module/include closure, exact blob identity, delimiter balance, whitespace, diagnostic redaction, constant-work digest comparison, transcript field coverage, and mutation-sensitive acceptance-test presence. This document does not promote those checks into a whole-tree green verdict.
+The evidence-envelope change received focused mechanical checks for source/module ownership, include closure, exact Git blob identity, delimiter balance, whitespace, line width, private-field construction, reserved-byte and length checks, every-prefix truncation coverage, redacted diagnostics, constant-work digest comparison, transcript-field coverage, canonical issuer/independent-decoder cross-checking, and mutation-sensitive integration coverage. This document does not promote those checks into a whole-tree green verdict.
 
 ## Major remaining systems
 
@@ -205,8 +270,8 @@ The following remain incomplete or absent:
 - typed rows/columns, genuine streaming cursors, and backpressure;
 - full session ownership, authorization, renew/expiry/reattach, and synchronous facade;
 - full SSI, predicate/range conflicts, merge ladder, and general multi-relation transactions;
-- registered portable query-evidence framing and external verifier SDK;
-- portable staged-overlay replay payloads and verifier;
+- a registered, compatibility-governed query-evidence format and external verifier SDK;
+- standalone staged-overlay replay payloads carrying the staged template and required snapshot authority;
 - full ISO GQL, GLA lowering, Loom operators, optimizer, spill, and larger-than-memory execution;
 - Strata tiers I/R/A and production compaction/migration policy;
 - Ripple, Beacon, Prism, Warden, Fabric, and Aegis;
@@ -216,9 +281,9 @@ The following remain incomplete or absent:
 
 1. Run the pinned toolchain and preserve the exact-tree verdict with `scripts/local_proof.sh`.
 2. Add typed parameters as structural parser operands; never use string substitution.
-3. Bind canonical parameter values into preparation identity and every applicable evidence layer.
-4. Register a portable query-evidence format before persistence or external-verifier APIs.
-5. Package staged template bytes and strict framing before claiming standalone transaction replay.
+3. Bind canonical parameter values into preparation identity, certificates, and both evidence envelopes.
+4. Decide whether the v1 application envelope graduates into a registered compatibility contract; if so, freeze size ceilings and golden vectors first.
+5. Package staged template bytes and exact snapshot authority before claiming standalone transaction replay.
 6. Add genuine cursor/backpressure ownership and earlier resource enforcement in the storage/operator path.
 7. Continue into complete session ownership, SSI, and GLA/Loom lowering.
 
@@ -231,6 +296,7 @@ The following remain incomplete or absent:
 - `005a8397` — prepared transaction-overlay execution without rebinding.
 - `c7a0558e` through `3f85fa61` — coherent owned preparation across durable, view, and transaction surfaces.
 - `6c40d30c` through `78137cfb` — deterministic budget vocabulary and cross-surface laws.
-- Current continuation — canonical staged-effect identity and exact staged-overlay result evidence.
+- `80de85a6` through `3e8ff789` — canonical staged-effect identity and exact staged-overlay result evidence.
+- `97d09787` through `62a546c7` — strict application envelopes, historical/staged audit, mutation laws, runnable witness, and canonical transcript cross-check.
 
 Keep this file synchronized whenever a capability crosses from plan or red-bar acceptance test into an inhabitable public path.
