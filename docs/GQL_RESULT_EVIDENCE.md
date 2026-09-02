@@ -1,8 +1,8 @@
 # Bounded GQL Result Evidence
 
-Status: **live bounded embedded evidence with an unreleased application envelope**, not the final physical-plan, wire, durable-object, or external-verifier protocol.
+Status: **live bounded embedded evidence with unreleased application envelopes and stateless materialized-result paging**, not the final physical-plan, wire, durable-object, cursor, or external-verifier protocol.
 
-This document defines what the current input, plan, durable-result, staged-effect, staged-result, deterministic-budget, and evidence-envelope values prove. It also states what they deliberately do not prove.
+This document defines what each current evidence layer proves, the order in which untrusted bytes are admitted and audited, how result-bound continuation tokens work, and what remains deliberately outside the claim.
 
 ## Durable-read evidence layers
 
@@ -24,7 +24,7 @@ It does not bind the parsed plan or returned rows. Verification uses constant wo
 - one exact `CommitSeq`;
 - the v2 plan-transcript domain.
 
-V2 includes `BoundPlan::neq`, which the historical v1 transcript omitted. Legacy verification is explicitly named; new evidence always uses v2.
+V2 includes `BoundPlan::neq`, which historical v1 omitted. Legacy verification is explicitly named; new evidence uses v2.
 
 The plan certificate does not bind statement spelling. Two statements that bind to an identical plan at an identical snapshot have the same plan identity.
 
@@ -38,7 +38,7 @@ fgdb:gql-ordered-result-digest:v1
 
 It binds:
 
-- complete plan-certificate digest;
+- the complete plan-certificate digest;
 - snapshot sequence;
 - exact row count;
 - row order;
@@ -48,20 +48,20 @@ Equal row sets in a different order do not verify. Equal rows under a different 
 
 ## Coherent owned preparation
 
-`PreparedGqlQuery` owns exact statement bytes, the canonical name-binding map, and the derived plan as one immutable definition. Its fields are private. A caller cannot change the original statement or bind map after preparation and thereby alter the retained query.
+`PreparedGqlQuery` owns exact statement bytes, the canonical name-binding map, and the derived plan as one immutable definition. Its fields are private. Changing the caller's original statement or bind map after preparation cannot alter the retained query.
 
 `verifies_definition()` reparses and rebinds the retained inputs as an explicit audit. Normal execution uses the retained plan directly and does not reparse or rebind.
 
 For `Database` and `EmbeddedReadView`, `execute_prepared_query_with_result_digest[_at]` returns:
 
-1. rows;
+1. exact rows;
 2. input certificate from the retained statement and bind;
 3. plan certificate from the retained plan;
-4. exact ordered-result digest from those rows and that plan certificate.
+4. ordered-result digest from those rows and that plan certificate.
 
 All layers name the same successful exact-sequence read. A read refusal returns no evidence tuple.
 
-The current owned input certificate has no parameter digest because typed parameters are not yet implemented. Canonical parameter values must be bound explicitly when parameter support lands.
+Typed parameters are not yet part of the live preparation or input certificate. When parameter support lands, canonical values must be bound explicitly rather than inferred from the concrete plan alone.
 
 ## Staged transaction evidence
 
@@ -102,12 +102,12 @@ This is exact in-process evidence, not standalone replay. The certificate does n
 
 ## Strict application evidence envelopes
 
-The current tree has two self-contained framing types:
+The tree has two self-contained framing types:
 
 - `GqlPreparedResultArtifact` for a durable prepared-query result;
 - `GqlOverlayResultArtifact` for a staged transaction-overlay result.
 
-They share the v1 envelope prefix:
+They share the v1 prefix:
 
 ```text
 magic[8] = "FGQEVID1"
@@ -117,7 +117,7 @@ kind: u8
 reserved[3] = 0
 ```
 
-The kind-specific body then carries:
+The kind-specific body carries:
 
 - exact snapshot sequence or transaction basis;
 - statement digest;
@@ -142,83 +142,156 @@ Artifact fields are private. Construction derives input identities from one `Pre
 - row counts that do not fit the platform;
 - arithmetic length overflow;
 - a result transcript inconsistent with the included rows and context;
-- any trailing bytes.
+- trailing bytes.
 
 The tests walk every truncated prefix, not only selected cut points.
 
-The durable artifact decoder independently recomputes the frozen v1 ordered-result transcript. Product audit then cross-checks that result digest against the canonical `GqlPlanCertificate` verifier. This deliberately gives the portable decoder an independent implementation while preventing the two implementations from drifting silently.
+The durable artifact decoder independently recomputes the frozen ordered-result transcript. Product audit then cross-checks that result digest against the canonical `GqlPlanCertificate` verifier. This preserves an independent decoder while preventing silent drift from the issuing authority.
 
-### Durable issuance and audit
+## Resource-safe artifact admission
 
-`Database` and `EmbeddedReadView` expose:
+`GqlEvidenceLimits` applies caller policy before untrusted bytes allocate row storage. It has two dimensions:
 
-- `execute_prepared_query_artifact`;
-- `execute_prepared_query_artifact_at`;
-- `audit_prepared_query_artifact`.
+- `EncodedBytes`;
+- `Rows`.
 
-Audit proceeds in this order:
+`GqlEvidenceLimits::DEFAULT_UNTRUSTED` is a conservative application default, not a format maximum or performance promise. Callers may provide an explicit larger or smaller policy.
 
-1. strict decode;
-2. exact retained statement and bind verification;
-3. canonical plan-certificate recomputation at the artifact sequence;
-4. canonical product result-digest verification;
-5. exact-sequence query re-execution;
-6. ordered-row equality.
+For a valid header, the declared row count is read and checked before the strict decoder allocates the row vector. Malformed headers are not reclassified as resource errors; they continue to the strict decoder and retain its existing syntax taxonomy.
 
-The ordering keeps refusal classes legible: malformed bytes, wrong preparation, wrong plan, execution failure, and replay mismatch remain distinct.
+Exact byte and row ceilings succeed. One-below ceilings return `GqlEvidenceLimitExceeded { dimension, limit, observed }`.
 
-An artifact issued at an older sequence remains auditable after later writes advance the live database because replay uses the sequence in the artifact. An immutable read view can audit only sequences retained by its own pinned generation.
+Product APIs expose both default-untrusted and caller-limited audit paths across `Database`, `EmbeddedReadView`, and `WriteTxn`.
 
-### Staged-overlay issuance and audit
+## Product-level replay audit
 
-`WriteTxn` exposes:
+### Durable artifacts
 
-- `execute_prepared_query_overlay_artifact`;
-- `audit_prepared_query_overlay_artifact`.
+A resource-safe durable audit proceeds in this order:
 
-Transaction audit verifies, in order:
+1. enforce encoded-byte and declared-row policy;
+2. strictly decode the envelope;
+3. verify exact retained statement and canonical bind;
+4. recompute the canonical plan certificate at the artifact sequence;
+5. cross-check the result digest against the canonical product certificate;
+6. re-execute the query at the exact historical sequence;
+7. require exact ordered-row equality.
 
-1. strict decode;
-2. exact transaction basis;
-3. retained statement and bind;
-4. plan certificate at the basis;
-5. current canonical staged-effect digest;
-6. exact overlay re-execution and ordered rows.
+An artifact issued at an older sequence remains auditable after later writes advance the live database. An immutable read view can audit only sequences retained by its pinned generation.
 
-Staging another mutation after issuance causes `StagedEffectMismatch` before the old rows can be accepted against the new overlay.
+### Staged-overlay artifacts
 
-### Envelope status and compatibility boundary
+A transaction audit additionally verifies:
 
-The v1 framing is deterministic and endian-stable, but it is an **unreleased application artifact**. It is not currently registered as:
+- exact current transaction basis;
+- exact current canonical staged-effect digest.
 
-- an Appendix-A logical object;
-- a bootstrap or pre-bootstrap frame;
-- an FGP wire type;
-- a signed evidence object;
-- a long-term compatibility contract.
+Staging another mutation after issuance causes `StagedEffectMismatch` before old rows can be accepted against the changed overlay.
 
-This distinction is load-bearing. The repository may revise or replace the framing before release without carrying a compatibility shim. Promotion requires an explicit registry/constitution decision, format size ceilings, frozen golden vectors, decoder compatibility rules, and a separate publisher-authenticity mechanism where provenance matters.
+## Result-bound stateless paging
 
-The staged artifact remains an identity-and-row envelope. It does not carry the staged template or durable snapshot material needed for standalone transaction replay.
+### Token format
+
+`GqlEvidencePageToken` uses the fixed-width v1 encoding:
+
+```text
+magic[8] = "FGQPAGE1"
+version_major: u16be = 1
+version_minor: u16be = 0
+kind: u8
+reserved[3] = 0
+sequence_or_basis: u64be
+result_digest: [u8; 32]
+next_offset: u64be
+checksum: [u8; 32]
+```
+
+The total encoded width is fixed. The token binds:
+
+- artifact kind;
+- exact snapshot sequence or transaction basis;
+- complete ordered-result digest;
+- next row offset.
+
+The checksum uses the domain:
+
+```text
+fgdb:gql-evidence-page-token:v1
+```
+
+It is unkeyed. `verifies_checksum()` means only that the token bytes are internally consistent with that public checksum transcript. It does **not** establish authenticity, authorization, integrity against a malicious writer, capability possession, or publisher provenance.
+
+Strict decoding rejects:
+
+- every truncated prefix;
+- any trailing byte;
+- invalid magic;
+- unsupported version;
+- unknown kind;
+- nonzero reserved bytes;
+- checksum mismatch.
+
+### Page semantics
+
+`GqlEvidencePage` is one contiguous clone from an already materialized exact result. It exposes:
+
+- artifact kind;
+- snapshot sequence or transaction basis;
+- complete result digest;
+- start and end offsets;
+- total and remaining row counts;
+- page rows;
+- optional next token;
+- terminal status.
+
+Rows are redacted from ordinary `Debug` output. Page size is caller policy and is intentionally not part of token identity, so a continuation may request a different positive page size. An exact end offset returns an empty terminal page; an offset past the result refuses.
+
+### Audit-and-page order
+
+The product adapters on `Database`, `EmbeddedReadView`, and `WriteTxn` use this order:
+
+1. reject zero page size;
+2. strictly decode and checksum-check optional token bytes;
+3. enforce artifact byte and declared-row limits before row allocation;
+4. strictly decode and internally verify the artifact;
+5. verify prepared input, plan, snapshot/basis, and staged effect where applicable;
+6. re-execute the exact historical or staged query and compare ordered rows;
+7. bind the token to artifact kind, sequence/basis, result digest, and offset;
+8. return the contiguous page.
+
+Request-local syntax is intentionally preflighted before expensive replay. Token-to-result binding remains after artifact audit, so a valid token cannot bypass evidence admission or re-execution.
+
+### Paging no-claim boundary
+
+Evidence paging is not:
+
+- a database cursor;
+- operator streaming;
+- bounded-buffer flow control;
+- backpressure;
+- a session or lease;
+- cancellation-aware incremental execution;
+- authentication or authorization;
+- a reduction in full artifact decode or replay cost.
+
+Every product-level page call re-admits, decodes, verifies, and replays the complete artifact before returning its slice. A genuine cursor requires explicit owner/session identity, renewal/expiry/cancellation semantics, bounded buffering, backpressure, and an execution/storage path that can stop before materializing the full result.
 
 Runnable witness:
 
 ```bash
-cargo run -p fgdb --example gql_evidence_artifact
+cargo run -p fgdb --example gql_evidence_pages
 ```
 
-## Deterministic execution budgets
+## Deterministic query-execution budgets
 
 `GqlExecutionBudget` is adjacent execution metadata, not cryptographic evidence.
 
 Current dimensions:
 
 - `SnapshotRecords`: complete immutable vertex table admitted by a node scan or edge table admitted by an edge pattern;
-- `ResultRows`: final deterministic rows after filtering, projection, sorting, deduplication, `SKIP`, and `LIMIT`.
+- `ResultRows`: final rows after filtering, projection, sorting, deduplication, `SKIP`, and `LIMIT`.
 
-Exact limits succeed. Exceeded limits return a typed `GqlBudgetExceeded` naming the dimension, configured limit, and observed count. No partial rows escape. Successful calls return `GqlExecutionStats`.
-
-Budget configuration and observed stats are not included in the input, plan, durable-result, staged-effect, staged-result, or artifact transcripts. The evidence stack therefore does not attest that a particular budget was requested or consumed.
+Budget configuration and observed stats are not included in the input, plan, result, staged-effect, artifact, or page-token transcripts. The evidence stack therefore does not attest that a particular execution budget was requested or consumed.
 
 The executor currently materializes and counts the relevant table before ordinary execution reads it. These bounds do not prove wall-clock time, allocations, bytes read, operator work, spill behavior, cancellation latency, or physical cost.
 
@@ -226,23 +299,35 @@ The executor currently materializes and counts the relevant table before ordinar
 
 The focused tests require that:
 
-- statement-byte drift invalidates input evidence;
-- bind drift invalidates input evidence;
-- any `BoundPlan` field mutation changes the v2 plan certificate;
+- statement or bind drift invalidates input evidence;
+- any `BoundPlan` field mutation changes the current plan certificate;
 - snapshot drift invalidates input and plan evidence;
 - row replacement, deletion, insertion, or reorder invalidates result evidence;
 - caller mutation after preparation does not change the owned definition;
 - database and immutable-view execution agree at one exact sequence;
-- exact budget boundaries succeed and one-below boundaries refuse;
-- node scans count admitted vertices while edge patterns count admitted edges;
+- exact execution and artifact-admission boundaries succeed and one-below boundaries refuse;
 - identical canonical staged effects verify across transactions;
-- any later staged effect invalidates prior staged-result evidence;
-- every truncated artifact prefix refuses;
-- magic, version, kind, reserved-byte, row-byte, and trailing-byte mutations refuse;
-- a durable artifact audits historically after the live frontier advances;
-- product audit cross-checks the independent artifact transcript against the canonical plan certificate.
+- a later staged effect invalidates prior staged evidence and artifacts;
+- every truncated artifact and page-token prefix refuses;
+- magic, version, kind, reserved-byte, row-byte, checksum, and trailing-byte mutations refuse;
+- a durable artifact and token resume historically after the live frontier advances;
+- tokens refuse cross-kind, cross-sequence, cross-result, and past-end use;
+- invalid page size and token syntax refuse before artifact replay;
+- valid tokens never bypass artifact resource admission or exact replay.
 
-## No-claim boundary
+## Envelope and token compatibility boundary
+
+The artifact and page-token framings are deterministic and endian-stable, but they are **unreleased application formats**. They are not currently registered as:
+
+- Appendix-A logical objects;
+- bootstrap or pre-bootstrap frames;
+- FGP wire types;
+- signed evidence objects;
+- long-term compatibility contracts.
+
+The repository may revise or replace them before release without carrying a compatibility shim. Promotion requires an explicit registry/constitution decision, stable size ceilings, frozen golden vectors, decoder compatibility rules, and a separate publisher-authenticity mechanism where provenance matters.
+
+## General no-claim boundary
 
 The current evidence does not attest:
 
