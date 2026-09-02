@@ -2,8 +2,9 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::RelationId;
 use fgdb_gql::{
-    GqlEvidenceAuditError, GqlEvidencePageAuditError, GqlEvidencePageError,
-    GqlEvidencePageTokenDecodeError, GqlEvidenceLimitedAuditError,
+    GqlEvidenceAuditError, GqlEvidenceLimitDimension,
+    GqlEvidenceLimitedAuditError, GqlEvidenceLimits, GqlEvidencePageAuditError,
+    GqlEvidencePageError, GqlEvidencePageTokenDecodeError,
 };
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
@@ -83,6 +84,9 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
             .expect("first audited page succeeds");
         assert_eq!(first.rows(), &[VId(2), VId(3)]);
         assert_eq!(first.start_offset(), 0);
+        assert_eq!(first.end_offset(), 2);
+        assert_eq!(first.total_rows(), 3);
+        assert_eq!(first.remaining_rows(), 1);
         let token = first
             .next_token()
             .expect("one row remains")
@@ -98,6 +102,9 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
             .expect("pinned view resumes the same exact result");
         assert_eq!(second.rows(), &[VId(4)]);
         assert_eq!(second.start_offset(), 2);
+        assert_eq!(second.end_offset(), 3);
+        assert_eq!(second.total_rows(), 3);
+        assert_eq!(second.remaining_rows(), 0);
         assert!(second.is_terminal());
 
         database
@@ -113,6 +120,34 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
             )
             .expect("old artifact still resumes by historical replay");
         assert_eq!(historical, second);
+
+        let zero_page = database
+            .audit_untrusted_prepared_query_artifact_page(
+                &query, b"not an artifact", 0, None,
+            )
+            .expect_err("zero page size refuses before artifact decode");
+        assert!(matches!(
+            zero_page,
+            GqlEvidencePageAuditError::Page(
+                GqlEvidencePageError::ZeroPageSize
+            )
+        ));
+
+        let byte_limit = database
+            .audit_prepared_query_artifact_page_with_limits(
+                &query,
+                &bytes,
+                GqlEvidenceLimits::new((bytes.len() - 1) as u64, u64::MAX),
+                2,
+                None,
+            )
+            .expect_err("artifact admission still precedes result paging");
+        assert!(matches!(
+            byte_limit,
+            GqlEvidencePageAuditError::Audit(
+                GqlEvidenceLimitedAuditError::Limit(exceeded)
+            ) if exceeded.dimension == GqlEvidenceLimitDimension::EncodedBytes
+        ));
 
         let current = database
             .execute_prepared_query_artifact(&query)
@@ -138,7 +173,7 @@ fn audited_pages_bind_exact_durable_and_staged_results() {
         let token_error = database
             .audit_untrusted_prepared_query_artifact_page(
                 &query,
-                &bytes,
+                b"not an artifact",
                 2,
                 Some(&corrupted_token),
             )
