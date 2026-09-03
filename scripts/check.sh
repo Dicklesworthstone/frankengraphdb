@@ -450,6 +450,16 @@ coverage_of() {
     #     `markers_seen` unchanged at 162, so admitting it flipped exactly one
     #     verdict and blessed nothing else.
     docs/REALITY_CHECK_AND_BRIDGE_PLAN.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT the narrative content)" ;;
+    # Five agent-facing documents landed 2026-09-01/02 (fgdb-l9r3 registered
+    # them): each is a member of registries/claims_lint.toml's prose closure,
+    # so the lint proves membership and that every claim marker resolves. It
+    # does NOT check that the status map or the evidence contracts describe the
+    # code truthfully — that remains a review property.
+    IMPLEMENTATION_STATUS.md)            echo "registry-check lint (prose-closure membership + claim markers resolve; NOT status content)" ;;
+    docs/AGENT_CONTEXT_CAPSULE.md|\
+    docs/GQL_RESULT_EVIDENCE.md|\
+    docs/LOCAL_PROOF_BUNDLE.md|\
+    docs/TRANSACTION_GQL.md)             echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
     # EXACT, not `formal/lean/*.lean`. The gate runs the artifacts of CHECKED
     # lanes only, so a glob would claim coverage for a future DECLARED lane's
     # artifact that nothing runs — the same fail-open as the `registries/*.toml`
@@ -1263,6 +1273,36 @@ UBS_CRITICAL_BASELINE=(
   "transmute, uninitialized, zeroed, assume_init, forget=1"
 )
 
+# THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
+# meant `scripts/check.sh` could not be green on any developer box with
+# ast-grep on PATH, which made `scripts/local_proof.sh` unable to produce a
+# green bundle anywhere but the hosted runner — the exact-tree proof the
+# landing discipline depends on was structurally red at home. Rather than
+# choose one environment and leave the other red, each mode carries its own
+# exact-equality table and `ubs_critical_ratchet` selects by the mode line ubs
+# itself prints ("ast-grep available" → AST table; otherwise the regex table
+# above). Both tables fail closed on any increase, decrease, or unknown class.
+#
+# AST-GREP MODE PARTITION, measured 2026-09-02 on this tree with UBS v5.3.13:
+# 184/156/123/18 and no transmute class (the regex-only `zeroed(` misread
+# documented above does not fire under AST analysis). Movement since the
+# 9ec76706 measurement (151/-/18/184/122):
+#   panic! 151 -> 156: six panic-class sites added since 9ec76706, none by the
+#     pinning session — `unreachable!` in crates/fgdb-gql/src/evidence_cursor.rs
+#     (connector, e3fd623a) and five `panic!` in
+#     tools/registry-check/src/command_live_payload.rs (499e70c0, fgdb-5uw2
+#     test-only registry lookups). AST mode counts five of the six; the sixth
+#     is the regex table's +6 below.
+#   JWT 122 -> 123: the class fires on `fn decode(` / `decode(` call shapes;
+#     the +1 is attributed by scanning the baseline tree with today's tool
+#     (see the regex-table note below).
+UBS_CRITICAL_BASELINE_ASTGREP=(
+  "Secret/token comparisons without timing-safe equality=184"
+  "panic!/unreachable!/todo!/unimplemented!=156"
+  "JWT decode, validation bypass, or missing claim binding=123"
+  "Security-sensitive non-crypto randomness=18"
+)
+
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
 # transmute row =1, both measured in the CI runner's regex-fallback mode (no
 # ast-grep provisioned there); the tool-control attribution lives in the MOVED
@@ -1339,10 +1379,20 @@ UBS_CRITICAL_BASELINE=(
 ubs_critical_ratchet() {
   local log="$1"
   local -A observed=() expected=()
-  local entry name count check line drift=0 total=0
-  for entry in "${UBS_CRITICAL_BASELINE[@]}"; do
-    expected["${entry%=*}"]="${entry##*=}"
-  done
+  local entry name count check line drift=0 total=0 mode="regex"
+  # The mode is read from ubs's own transcript, never guessed from PATH: the
+  # table must match the analysis that actually ran on this log.
+  if grep -Fq 'ast-grep available' "$log"; then
+    mode="ast-grep"
+    for entry in "${UBS_CRITICAL_BASELINE_ASTGREP[@]}"; do
+      expected["${entry%=*}"]="${entry##*=}"
+    done
+  else
+    for entry in "${UBS_CRITICAL_BASELINE[@]}"; do
+      expected["${entry%=*}"]="${entry##*=}"
+    done
+  fi
+  echo "    ubs analysis mode: ${mode} (table selected from the transcript)"
   # Sections read "• <check name>" followed by "🔥 CRITICAL (<n> found)".
   check=""
   while IFS= read -r line; do

@@ -327,9 +327,9 @@ The repository-wide authority remains:
 bash scripts/check.sh
 ```
 
-The connector environment used for the 2026-09-02 paging continuation did not contain the repository-pinned Rust toolchain, `shellcheck`, or a runnable UBS installation. Hosted GitHub Actions were intentionally excluded from evidence. Checked-in tests state intended laws; only an executed exact-tree proof establishes that the complete tree compiles and passes every registered gate.
+Every cargo gate in that chain runs `--locked`, so a manifest edit landed without regenerating `Cargo.lock` reds the gate with cargo's own message instead of being rewritten silently. The verdict for a tree is the exit code of that chain executed on that exact tree, captured by `scripts/local_proof.sh`; hosted CI additionally runs the chain on a two-hour schedule that the push cadence cannot cancel.
 
-The paging change received focused mechanical checks for exact blob identity, fast-forward history, module/include closure, delimiter balance, whitespace, line width, fixed-width accounting, checked offset arithmetic, every-prefix truncation coverage, reserved/trailing-byte refusal, row redaction, checksum mutation, cross-kind/snapshot/result rejection, resource-admission nesting, and request-preflight order. This document does not promote those checks into a whole-tree green verdict.
+A paragraph in this file or in `CHANGELOG.md` describing checks that were not run is not a verdict and must not be read as one. Between 2026-08-31 and 2026-09-02, 141 commits were landed from an environment without the pinned toolchain; the tree did not compile for 33 of them, and the accompanying prose said so instead of refusing. That is recorded as NE-0045 in `docs/NEGATIVE_EVIDENCE.md`, and the repair is `b51e3232` plus the commit that lands this paragraph.
 
 ## Major remaining systems
 

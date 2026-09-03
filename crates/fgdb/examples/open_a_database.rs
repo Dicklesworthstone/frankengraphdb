@@ -87,7 +87,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         println!("  neighbours(1) before drop: {before:?}");
         println!("  GQL MATCH (1)-[:KNOWS]->(b) RETURN b: {gql_before:?}");
 
-        // ---- compact republishes tier-D blocks into a sealed CSR run -----------
+        // ---- compact consolidates tier-D blocks (Tier R sealed CSR runs do not
+        // exist yet; see IMPLEMENTATION_STATUS.md) --------------------------------
         db.compact(cx).await?;
         let after_compact = db.neighbours(VId(1), KNOWS)?;
         let gql_after_compact = db.execute_gql(

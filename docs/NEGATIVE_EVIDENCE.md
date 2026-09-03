@@ -510,6 +510,16 @@ be a commit reachable in this repository.
 - **caught_by**: the red-proof harness, not review — 12 of 13 mutations fired and this one did not
 - **signature**: NE-0001 through NE-0004, a fifth time, inside the gate that memorializes them. The class is not "checkers written carelessly" — it is that a reader is never proved by reading it. Mutate the input and watch the verdict move, or the law is unwitnessed.
 
+### NE-0045 — 141 commits landed on `main` with no verdict, and the changelog said so instead of refusing
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-l9r3
+- **repair**: b51e3232
+- **claimed**: "CI-enforced" (AGENTS.md, README) and, per commit, a changelog "validation boundary" paragraph
+- **actual**: 166 of the last 200 hosted runs were cancelled by the next push and the last two completed runs were red; `fgdb-gql` did not compile for 33 commits (an 8-byte decode of a 16-byte id), `Cargo.lock` was stale, seven scripts and five documents had no gate, and the landing session wrote that it had no toolchain rather than not landing.
+- **caught_by**: building `git archive HEAD` under the pinned toolchain during the 2026-09-02 reality check
+- **signature**: an honesty paragraph standing in for a verdict. A statement that a check was not run is not a weaker verdict; it is no verdict, and a gate that is always cancelled enforces nothing — NE-0012's family, at the level of the whole chain.
+
 ---
 
 ## Reverts

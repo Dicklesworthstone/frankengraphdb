@@ -139,6 +139,18 @@ artifact = "scripts/g0_spine_e2e.sh"
 status = "live"
 unit = "artifact"
 
+# Owner: fgdb-baru. Every bracketed bead id a commit cites in the last seven
+# days must resolve (tracked export, then the local database, then the
+# adjudication table inside the script). Measured 2026-09-02: 71 of ~130
+# commits cited ids that existed nowhere, and nothing in the chain read commit
+# messages.
+[[checker]]
+symbol = "g0_commit_provenance_e2e"
+kind = "script"
+artifact = "scripts/g0_commit_provenance_e2e.sh"
+status = "live"
+unit = "artifact"
+
 [[checker]]
 symbol = "g0_identity_e2e"
 kind = "script"

@@ -83,7 +83,7 @@ printf 'alpha\n' > tracked.txt
 git add tracked.txt
 git commit -q -m initial
 commit="$(git rev-parse HEAD)"
-tree="$(git rev-parse HEAD^{tree})"
+tree="$(git rev-parse 'HEAD^{tree}')"
 
 bash "$producer" --no-beads --recent 1 --output "$clean_capsule" >/dev/null
 bash "$verifier" --scratch "$base/verify-clean" "$clean_capsule" >/dev/null

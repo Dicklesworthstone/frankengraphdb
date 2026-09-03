@@ -2,6 +2,37 @@
 
 This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, architectural plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
+## Unreleased — 2026-09-02 verdict restored
+
+Owning beads: `fgdb-l9r3` (P0), `fgdb-ci-workflow-check-sh-4csa.2`, `fgdb-baru`. Representative commits: `b51e3232` (the repair) and the commit that lands this entry.
+
+### What was wrong
+
+- `main` had no green hosted verdict for 141 commits after `f8bf9b40`: of the last 200 `check.yml` runs, 166 were cancelled by the next push, 32 failed, 1 succeeded.
+- `crates/fgdb-gql` did not compile from `97d09787`: the evidence envelope decoded a `VId` as 8 bytes while `VId` is a `u128` and the encoder writes 16. The envelope had never round-tripped.
+- `Cargo.lock` was stale (two `fgdb-gql` path dependencies added without regeneration), so every `--locked` build refused.
+- `crates/fgdb` carried seven `E0308` errors (`None => hasher.update(&[0])` arms), one clippy `large_enum_variant`, 32 unformatted files, and a test that included a source module by path to reach a private function.
+- Seven shell scripts and five documents landed on 09-01/02 with no checker, disposition, or coverage inspector; the claims gate, the file-coverage closure, and shell lint were red.
+- 71 commits cited bead ids that did not exist, and nothing in the chain read commit messages.
+
+### What changed
+
+- `VId` rows are an explicit 16-byte v1 format decision (`ROW_LEN`), pinned by a full-width round-trip law and a canonical-length law in `fgdb-gql`.
+- `Cargo.lock` regenerated. `scripts/check.sh` passes `--locked` to cargo check, clippy, and every cargo test, so a stale lock reds the gate with cargo's own message instead of being rewritten silently (negative control measured on a scratch copy).
+- The seven scripts have `[[script_disposition]]` rows (both self-tests executed here, exit 0, recorded as measured candidates) and the five documents have coverage inspectors.
+- The fabricated ids `fgdb-w10-embedded-54r.1`, `fgdb-gate-genesis-lce.2`, and `fgdb-w4-g1-txn-core-qpmg.24` now exist as retroactive records stating exactly what those commits delivered and where they stop; `fgdb-3w75` (unreproducible) is recorded inside `fgdb-gate-genesis-lce.2` and adjudicated in the gate below.
+- New registered gate `scripts/g0_commit_provenance_e2e.sh`: every bracketed bead id in the last seven days of commits must resolve (tracked export, then local database, then the adjudication table), with a 24-hour export grace on hosts without a database and a negative control inside the gate.
+- `.github/workflows/check.yml`: scheduled (every two hours) and manual runs get a concurrency group of their own, so the push cadence cannot cancel every verdict.
+- `IMPLEMENTATION_STATUS.md` no longer carries a "validation boundary" paragraph; NE-0045 records that class.
+
+### Verification
+
+Piecemeal on `b51e3232`: `cargo check`/`clippy --locked -D warnings` rc 0, `fgdb-gql` 72/72, eight `fgdb` evidence suites green, six examples rc 0, `cargo fmt --all --check` rc 0, `g0_claims_e2e.sh` 17/17, the provenance gate 107/107 with 9 adjudicated. The exact-tree `scripts/check.sh` verdict for any tree is established by `scripts/local_proof.sh` on that tree and by the scheduled hosted run; it is deliberately not quoted here, because this file is part of the tree it would describe.
+
+### Exact boundary
+
+This restores the gate. It does not widen the GQL grammar, change the engine, or promote any invariant. The evidence envelope remains an unreleased application artifact.
+
 ## Unreleased — 2026-09-02 resource-safe evidence paging
 
 Owning workstream: `fgdb-w10-embedded-54r.1`.

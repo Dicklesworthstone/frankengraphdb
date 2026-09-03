@@ -43,16 +43,27 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A verdict the next push cannot cancel (fgdb-ci-workflow-check-sh-4csa.2).
+  # Measured 2026-09-02 over the last 200 runs: 166 cancelled by the push
+  # cadence, 32 failed, 1 succeeded — so "CI-enforced" enforced nothing for
+  # 141 commits. Every two hours the current main head gets one run that no
+  # push can supersede; push and pull-request runs keep cancel-in-progress.
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
 
 # Only the current branch head can become the product tree. A superseding
 # push cancels the obsolete run explicitly (never green) and starts one proof
 # for the new head. This reconciles frequent incremental main commits with the
 # rule that only a COMPLETED run's exit code is a verdict: cancellation is an
 # honest non-verdict, while an unbounded backlog can prevent the current tree
-# from ever receiving a verdict at all.
+# from ever receiving a verdict at all. Scheduled and manual runs get a group
+# of their own per run id, so they neither cancel nor are cancelled: under a
+# 30–60 push/day cadence, per-ref cancellation alone means no run ever
+# completes, which is the same as having no gate.
 concurrency:
-  group: check-${{ github.ref }}
-  cancel-in-progress: true
+  group: check-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 permissions:
   contents: read
