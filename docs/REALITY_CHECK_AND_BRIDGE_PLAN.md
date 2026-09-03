@@ -190,6 +190,39 @@ live checker plus a distinct negative test in one change.
 
 **Gap 7 — unchanged warning:** later layers stay parked.
 
+**Gap 8 — NEW, measured 2026-09-03: the engine graph has no entry point.**
+Closing every owner-gated root at once (the G0 decision batch
+`fgdb-g0-format-arms-90z`, the a18 class ruling, the crypto sign-off on
+`fgdb-w1-crypto-y5o`, the tag-width ruling, and the a01 catalog slice) makes
+exactly one bead newly ready, `fgdb-3qq5`, a catalog seam. Every W2 to W5
+engine bead depends on three to seven other engine beads plus whole-spec G0
+beads, and the engine beads depend on each other in a chain whose only
+sources are catalog rows. No ruling opens the engine; no single edge split
+frees more than one bead (measured above); the tracker is offering catalog
+work because that is the only kind of work its graph can reach. Two facts
+sharpen this. First, `fgdb-crypto` already exists as code (7,147 lines,
+seven test files, 71 public functions, six children closed) and the bead
+that blocks the identity pipeline waits only on a constant-time review
+sign-off and an external-audit engagement plan, which are governance items
+attached to a code bead. Second, completing a catalog slice is not a landing
+but a campaign: a01, the slice closest to complete, has zero uncovered
+census keys today (the scratch probe forces it complete and the coverage law
+raises nothing, while the a20 control raises eight), yet completion also
+requires certifying the census universe (an empty list by design), 148 of
+303 field sources disambiguated in the plan text, and an annotation layer
+that holds zero rows anywhere in the catalog at a cost of one hand-authored
+19-field record plus a reciprocal compiled pin per target, over 312 declared
+a01 targets. Bridge: (a) re-cut one engine lane's dependency edges against
+the registered rows it actually consumes, starting with Tier D, whose five
+formats are already active, so that an engine bead can be ready without a
+whole-spec bead closing; (b) split governance residues out of code beads
+(the y5o sign-off and audit plan become their own bead, and the code bead
+closes on its evidence) so a finished crate stops blocking its consumers;
+(c) decide the completion layer explicitly: fund the first a01 campaign or
+record "declared" as the G0 posture and remove the identity-spec bead's
+dependency on slice completion. All three are owner decisions; (a) and (b)
+are re-plans in plan space and cost nothing to reverse.
+
 **Tracker hygiene (not gaps, but blocking orchestration):** re-attach the 71
 orphan-cited commits to `fgdb-w10-embedded-54r` and `fgdb-gate-genesis-lce`
 (or create the child beads those commits assumed existed, with the commit
