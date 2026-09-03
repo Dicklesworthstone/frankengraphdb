@@ -38,12 +38,12 @@ pub const APPENDIX_SHA256: &str =
     "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
-pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 4084;
+pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 4160;
 pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
-    "0d80bf3e6414c004085de49a881e681e3dcf0a5b78beef9ac3c0b53a5de44e55";
-pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 371;
+    "43aeb16dde04b282a05667fe1daec89720d8ca8dedbe0a681bad067159ee94e3";
+pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 446;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
-    "eff49472b85039adc9771899d2bea28368865af29a38ed6dfb9e43d248f1168d";
+    "1bb3a5576608ff764a03ff15f2770a2464aa2be30cbc94cdd2521f34e703f5e3";
 pub const EXPECTED_ANNOTATION_COUNT: usize = 0;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -15276,7 +15276,12 @@ fn render_fields(identity: &IdentityRegistries) -> String {
             // fgdb-atke Ruling 3(a): length-1 renders as the legacy singular
             // key (byte-identical for every row landed before the ruling);
             // longer matrices render as the plural array in parse order.
-            if arm.role_predicates.len() == 1 {
+            // Preserve the SPELLING, not the entry count: a one-line matrix
+            // must round-trip as `role_predicates = [..]`, or the identity
+            // reader would re-classify it as a legacy singular arm and judge
+            // it against the union's plane instead of its target's
+            // (fgdb-bbqq option (a); ReferenceUnionArm::matrix).
+            if !arm.matrix {
                 write_string(&mut out, "role_predicate", &arm.role_predicates[0]);
             } else {
                 write_string_array(&mut out, "role_predicates", &arm.role_predicates);

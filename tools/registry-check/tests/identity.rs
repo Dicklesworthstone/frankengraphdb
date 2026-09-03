@@ -2634,12 +2634,27 @@ fn appendix_a_reference_union_arm_role_matrix_round_trips() {
         "matrix row must render as the plural array"
     );
 
-    // Byte stability: with no mutation, no plural key may appear anywhere.
+    // Byte stability: with no mutation, the plural key appears in the rendered
+    // durable_fields projection exactly as often as the catalog spells it —
+    // the 74 RemoteGrantTargetRef arms (fgdb-bbqq, 2026-09-03), several of
+    // which are ONE-LINE matrices that must not collapse to the singular key —
+    // and nowhere else. Legacy singular rows never gain the plural spelling.
     let baseline = real_appendix_catalog();
+    let plural_in_catalog = source.matches("role_predicates = [").count();
+    assert_eq!(
+        plural_in_catalog, 74,
+        "the plural-spelled arm population moved; re-measure before trusting this suite"
+    );
     for (file, rendered) in appendix_a::generated_projections(&baseline) {
-        assert!(
-            !rendered.contains("role_predicates"),
-            "{file} must not invent plural predicates for legacy rows"
+        let expected = if file == "durable_fields.toml" {
+            plural_in_catalog
+        } else {
+            0
+        };
+        assert_eq!(
+            rendered.matches("role_predicates = [").count(),
+            expected,
+            "{file} must render the plural key exactly for the rows spelled plural"
         );
     }
     // XOR: both spellings on one arm row fail closed.
@@ -2819,9 +2834,12 @@ fn appendix_a_generated_reference_union_targets_have_a_satisfiable_state() {
         .collect();
     // g0 carries three more, structurally exempt because g0 owns no `[[slice]]`
     // row and the completion laws iterate slices.
+    // 10 -> 85 (fgdb-bbqq/fgdb-atke, 2026-09-03): RemoteGrantTargetRef landed
+    // in a01 as one union target plus 74 arm targets (one per exportable
+    // authority-local target kind, a01:1402).
     assert_eq!(
         generated.len(),
-        10,
+        85,
         "the generated reference-union population moved; re-measure before trusting this suite"
     );
 
@@ -2829,9 +2847,10 @@ fn appendix_a_generated_reference_union_targets_have_a_satisfiable_state() {
         .iter()
         .map(|(slice_id, _, _)| slice_id.as_str())
         .collect();
+    // a01 joined on 2026-09-03 with RemoteGrantTargetRef (fgdb-bbqq/fgdb-atke).
     assert_eq!(
         armed_slices,
-        BTreeSet::from(["a04", "a06", "a10"]),
+        BTreeSet::from(["a01", "a04", "a06", "a10"]),
         "generated reference unions moved slices"
     );
     let armed_slices: BTreeSet<String> = armed_slices.iter().map(|id| (*id).to_owned()).collect();
@@ -9905,6 +9924,15 @@ fn post_erratum_k3sa_collection_field(schema: &str, name: &str) -> bool {
 
 /// Two ordinary unions landed after 8a704c2 and were retained in the historical
 /// namespace: MEMBERSHIP drift, so a filter is the correct instrument.
+/// The anchor field of the generated `RemoteGrantTargetRef` reference union
+/// (fgdb-bbqq ruling (a1) / fgdb-atke, landed 2026-09-03): `RemoteRetentionGrantSpec
+/// .target_ref` at field_tag 0x000a. Post-erratum, so the historical witness
+/// must not see it; the union and its 74 arms are claimed separately by
+/// `post_erratum_reference_union`.
+fn post_erratum_bbqq_field(schema: &str, name: &str) -> bool {
+    schema == "RemoteRetentionGrantSpec" && name == "target_ref"
+}
+
 /// Licensed by accounting (fgdb-e55p): of 37 retained non-field transcript
 /// lines, 25 matched 8a704c2 identically, 0 had changed columns, 3 differ only
 /// because rename_logical_command_input_union ran, and these 9 — one union plus
@@ -10054,10 +10082,16 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         .iter()
         .map(|u| u.arms.len())
         .sum();
-    // No reference-union erratum cohort exists yet; keep the named filter and
-    // frozen denominator so the next landed union fails loudly at this assert.
-    let post_erratum_reference_union = |_name: &str| false;
-    let expected_reference_unions_removed = 0usize;
+    // The first reference-union erratum cohort (fgdb-bbqq/fgdb-atke,
+    // 2026-09-03): RemoteGrantTargetRef, the generated closed union over the
+    // 74 exportable authority-local target kinds (a01:1402), is younger than
+    // the witness and is retained out below together with its 74 arms; the
+    // frozen widths (5 unions, 8 arms) stay exactly as pinned.
+    let post_erratum_reference_union = |name: &str| name == "RemoteGrantTargetRef";
+    let expected_reference_unions_removed = 1usize;
+    // Its 74 arms (one per exportable authority-local target kind) leave the
+    // reconstruction with it; the arm cohort assert below subtracts them.
+    let expected_reference_arms_removed = 74usize;
     let current_field_count = pre_erratum.fields.len();
     // Post-erratum ordinary unions, whole-schema and embedded alike.  An
     // embedded union's anchor field row exists only because the union does, so
@@ -10491,6 +10525,13 @@ fn idr_assignment_history_and_epoch_are_frozen() {
     pre_erratum
         .ordinary_unions
         .retain(|union| !post_erratum_union(&union.union_name));
+    // The reference-union cohort is retained out the same way (fgdb-bbqq,
+    // 2026-09-03): before this line nothing retained `pre_erratum.unions`,
+    // which is why the absolute width pins were the only detector of a
+    // landed reference union.
+    pre_erratum
+        .unions
+        .retain(|union| !post_erratum_reference_union(&union.union_name));
     // The A01 2D applied-result fields are typed by `AuthorityAppliedRef`, a
     // wire union that PREDATES the erratum, so `post_erratum_union` cannot
     // recognize them the way it recognizes an embedded union's anchor field.
@@ -12604,6 +12645,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                 &field.stable_name,
             )
             && !post_erratum_a10_wrapper_field(&field.containing_schema)
+            && !post_erratum_bbqq_field(&field.containing_schema, &field.stable_name)
     });
     assert_eq!(
         // 378 -> 379 (fgdb-peyc): the source-backed whole-schema BODY union
@@ -12697,7 +12739,7 @@ fn idr_assignment_history_and_epoch_are_frozen() {
             .iter()
             .map(|u| u.arms.len())
             .sum::<usize>(),
-        current_reference_arm_count,
+        current_reference_arm_count - expected_reference_arms_removed,
         "historical witness reference-union arm cohort drift (unrecognised arm)"
     );
     // ABSOLUTE WIDTH PIN — see the ordinary-union pin above for the mechanism.
@@ -12936,7 +12978,11 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // (GlobalKeyDestroyAckRef / KeyDestructionTarget precedent).
         // Claimed by post_erratum_a06_field and by post_erratum_union via
         // exact_wire_type KeyDestructionTerminalReceiptRef.
-        pre_erratum.fields.len() + 936,
+        // 936 -> 937 (fgdb-bbqq/fgdb-atke, 2026-09-03): RemoteRetentionGrantSpec
+        // .target_ref, the anchor field of the generated RemoteGrantTargetRef
+        // union (a01:1402). Claimed by post_erratum_bbqq_field; the union and
+        // its 74 arms are claimed by post_erratum_reference_union.
+        pre_erratum.fields.len() + 937,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
@@ -14338,7 +14384,10 @@ fn idr_a01_incomplete_activation_cohort_is_reserved() {
         .collect();
     // 114 -> 116 (fgdb-eik0): the two release certificates' landed
     // one_digest_signer_lock_ref rows, reserved like the rest of the cohort.
-    assert_eq!(fields.len(), 116);
+    // 116 -> 117 (fgdb-bbqq/fgdb-atke, 2026-09-03): RemoteRetentionGrantSpec's
+    // target_ref row (field_tag 0x000a), the anchor of the generated
+    // RemoteGrantTargetRef union, reserved like the rest of the cohort.
+    assert_eq!(fields.len(), 117);
     assert!(
         fields.iter().all(|row| row.version_status == "reserved"),
         "incomplete A01 durable fields must not be consumable"
@@ -19684,5 +19733,179 @@ fn idr_a12_exact_source_field_order_and_checkpoint_interval_are_nonvacuous() {
     assert!(
         mismatch_codes.contains(&"field_construction_order_mismatch".to_string()),
         "field-order equality control FIRED: field@29 must equal containing kind@30: {mismatch_codes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// fgdb-bbqq ruling (a1), 2026-09-03: reference-union arms are TYPE ALTERNATIVES,
+// not retention edges. The construction-order law (`dag_future_result`) and the
+// cycle law (`dag_cycle`) bind the anchored FIELD's per-instance edges only;
+// arm expansion is exempt from both. These fixtures witness the carve-out in
+// both directions: an arm to a future or cyclic target no longer fires, while a
+// plain strong field to the same target still fires both laws, a self
+// alternative still fires `dag_self_edge`, and removing the union proves the
+// field was really being read as union-typed (vacuity control).
+// ---------------------------------------------------------------------------
+
+const UNION_ARM_FIXTURE_ANCHOR: &str = "FixtureUnionArmAnchor";
+const UNION_ARM_FIXTURE_TARGET: &str = "FixtureUnionArmTarget";
+const UNION_ARM_FIXTURE_UNION: &str = "FixtureUnionArmTargetRef";
+
+fn union_arm_fixture_codes(r: &IdentityRegistries) -> Vec<String> {
+    identity::validate_identity(r)
+        .into_iter()
+        .filter(|violation| {
+            violation.code.starts_with("dag_") || violation.code == "bare_strong_ref"
+        })
+        .map(|violation| violation.code)
+        .collect()
+}
+
+/// Anchor kind at `anchor_order` whose only field is the union-typed
+/// `target_ref`; target kind at `target_order`; the union with one arm to it.
+fn union_arm_fixture(anchor_order: i64, target_order: i64) -> IdentityRegistries {
+    let mut r = real_identity();
+    r.logical.push(kind(
+        0x7fa1,
+        UNION_ARM_FIXTURE_ANCHOR,
+        "reserved",
+        anchor_order,
+    ));
+    r.logical.push(kind(
+        0x7fa2,
+        UNION_ARM_FIXTURE_TARGET,
+        "reserved",
+        target_order,
+    ));
+    let mut anchor_field = field(UNION_ARM_FIXTURE_ANCHOR, 0x0001, "target_ref", anchor_order);
+    anchor_field.exact_wire_type = UNION_ARM_FIXTURE_UNION.into();
+    anchor_field.version_status = "reserved".into();
+    anchor_field.max_size_bytes = 48;
+    r.fields.push(anchor_field);
+    r.unions.push(identity::ReferenceUnion {
+        union_name: UNION_ARM_FIXTURE_UNION.into(),
+        containing_schema: UNION_ARM_FIXTURE_ANCHOR.into(),
+        field_tag: 0x0001,
+        role: "local".into(),
+        arms: vec![identity::ReferenceUnionArm {
+            union_name: UNION_ARM_FIXTURE_UNION.into(),
+            containing_schema: UNION_ARM_FIXTURE_ANCHOR.into(),
+            field_tag: 0x0001,
+            arm_tag: 0x0001,
+            stable_name: UNION_ARM_FIXTURE_TARGET.into(),
+            target_schema_id: UNION_ARM_FIXTURE_TARGET.into(),
+            role: "local".into(),
+            identity_class: "logical".into(),
+            reference_semantics: "strong".into(),
+            role_predicates: vec!["role-local".into()],
+            matrix: false,
+            retention_and_cut_rule: "fixture arm".into(),
+            version_status: "reserved".into(),
+            max_size_bytes: 40,
+        }],
+    });
+    r
+}
+
+/// The same anchor and target, but joined by a plain strong field instead of a
+/// union arm: the control that proves the laws still exist for real edges.
+fn plain_field_fixture(anchor_order: i64, target_order: i64) -> IdentityRegistries {
+    let mut r = real_identity();
+    r.logical.push(kind(
+        0x7fa1,
+        UNION_ARM_FIXTURE_ANCHOR,
+        "reserved",
+        anchor_order,
+    ));
+    r.logical.push(kind(
+        0x7fa2,
+        UNION_ARM_FIXTURE_TARGET,
+        "reserved",
+        target_order,
+    ));
+    let mut anchor_field = field(UNION_ARM_FIXTURE_ANCHOR, 0x0001, "target_ref", anchor_order);
+    anchor_field.target_schema_id = Some(UNION_ARM_FIXTURE_TARGET.into());
+    anchor_field.version_status = "reserved".into();
+    r.fields.push(anchor_field);
+    r
+}
+
+#[test]
+fn idr_neg_union_arm_cycle_future_arm_target_is_a_type_alternative() {
+    // Shipped baseline is DAG-clean (idr_construction_dag_acyclic); the fixture
+    // must not disturb that.
+    let via_arm = union_arm_fixture(10, 20);
+    let codes = union_arm_fixture_codes(&via_arm);
+    assert!(
+        !codes
+            .iter()
+            .any(|code| code == "dag_future_result" || code == "dag_cycle"),
+        "an arm to a later-constructed target is a type alternative, not a future result: {codes:?}"
+    );
+    assert!(
+        !codes.iter().any(|code| code == "bare_strong_ref"),
+        "the union anchors the field, so it is not a bare polymorphic ref: {codes:?}"
+    );
+
+    // Vacuity control: without the union row the same field is a bare
+    // polymorphic strong ref, proving the field was read as union-typed.
+    let mut without_union = via_arm.clone();
+    without_union
+        .unions
+        .retain(|u| u.union_name != UNION_ARM_FIXTURE_UNION);
+    assert!(
+        union_arm_fixture_codes(&without_union).contains(&"bare_strong_ref".to_owned()),
+        "removing the union must expose the anchor field as a bare strong ref"
+    );
+
+    // Law control: a plain strong field to the same future target still fires.
+    let plain = union_arm_fixture_codes(&plain_field_fixture(10, 20));
+    assert!(
+        plain.contains(&"dag_future_result".to_owned()),
+        "a plain strong field to a later-constructed target must still fire dag_future_result: {plain:?}"
+    );
+}
+
+#[test]
+fn idr_neg_union_arm_cycle_arm_mediated_cycle_is_not_a_construction_cycle() {
+    // Anchor@10 -(arm)-> Target@10 -(plain field)-> Anchor@10. Under (a1) the
+    // arm contributes no edge, so there is no cycle.
+    let mut via_arm = union_arm_fixture(10, 10);
+    let mut back = field(UNION_ARM_FIXTURE_TARGET, 0x0001, "anchor_ref", 10);
+    back.target_schema_id = Some(UNION_ARM_FIXTURE_ANCHOR.into());
+    back.version_status = "reserved".into();
+    via_arm.fields.push(back.clone());
+    let codes = union_arm_fixture_codes(&via_arm);
+    assert!(
+        !codes
+            .iter()
+            .any(|code| code == "dag_cycle" || code == "dag_future_result"),
+        "a cycle that closes only through a union arm is not a construction cycle: {codes:?}"
+    );
+
+    // Law control: the same loop through a plain strong field is a real cycle.
+    let mut plain = plain_field_fixture(10, 10);
+    plain.fields.push(back);
+    let plain_codes = union_arm_fixture_codes(&plain);
+    assert!(
+        plain_codes.contains(&"dag_cycle".to_owned()),
+        "the same loop through plain strong fields must still fire dag_cycle: {plain_codes:?}"
+    );
+}
+
+#[test]
+fn idr_neg_union_arm_cycle_self_alternative_still_fires_dag_self_edge() {
+    let mut r = union_arm_fixture(10, 20);
+    let union = r
+        .unions
+        .iter_mut()
+        .find(|u| u.union_name == UNION_ARM_FIXTURE_UNION)
+        .expect("fixture union");
+    union.arms[0].target_schema_id = UNION_ARM_FIXTURE_ANCHOR.into();
+    union.arms[0].stable_name = UNION_ARM_FIXTURE_ANCHOR.into();
+    let codes = union_arm_fixture_codes(&r);
+    assert!(
+        codes.contains(&"dag_self_edge".to_owned()),
+        "a union arm naming its own containing schema is still a self edge: {codes:?}"
     );
 }

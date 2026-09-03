@@ -1162,6 +1162,15 @@ pub struct ReferenceUnionArm {
     /// `role_predicates` array row carries one entry per matrix line. Both
     /// keys present, neither present, or an empty array are read errors.
     pub role_predicates: Vec<String>,
+    /// `true` when the row was spelled with the `role_predicates` array — a
+    /// MATRIX arm, whose entries authorize against the TARGET's own predicate
+    /// (fgdb-bbqq option (a)); `false` for the legacy singular `role_predicate`
+    /// spelling, which keeps the historical containing-plane law. The
+    /// distinction is a property of the spelling, not of the entry count: a
+    /// one-line matrix is still a matrix (a shard-only target reached from a
+    /// meta-role union is exactly that case), so the length can never stand in
+    /// for this flag, and the projection writer preserves the spelling.
+    pub matrix: bool,
     pub retention_and_cut_rule: String,
     pub version_status: String,
     pub max_size_bytes: i64,
@@ -1696,6 +1705,7 @@ pub fn fields_from(root: &Table) -> Result<DurableFieldsRows, ReadError> {
             identity_class: get_str(t, "identity_class", &ctx)?,
             reference_semantics: get_str(t, "reference_semantics", &ctx)?,
             role_predicates,
+            matrix: has_plural,
             retention_and_cut_rule: get_str(t, "retention_and_cut_rule", &ctx)?,
             version_status: get_str(t, "version_status", &ctx)?,
             max_size_bytes: get_int(t, "max_size_bytes", &ctx)?,
@@ -2406,7 +2416,7 @@ pub fn assignment_pins(r: &IdentityRegistries) -> Vec<AssignmentPin> {
     const BOOTSTRAP: &str = "fnv1a64:c756ad93d4fcbcf7";
     const PREBOOTSTRAP: &str = "fnv1a64:d2a221d86d3adc80";
     const WIRE: &str = "fnv1a64:45c18f8ed7d36c40";
-    const FIELDS: &str = "fnv1a64:9ac1b824c02b7035";
+    const FIELDS: &str = "fnv1a64:b52424b7f1c05461";
 
     let logical = rows_pin(
         r.logical
@@ -4429,8 +4439,13 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
             // must parse under the same closed grammar (role_predicate_roles),
             // and conflation with the union's containing-plane role is not
             // meaningful across group boundaries, so it is not applied.
-            let predicate_lawful = if arm.role_predicates.len() == 1 {
-                predicate_allows_role(&arm.role_predicates[0], &u.role)
+            // The spelling, not the entry count, decides which law applies: a
+            // one-line matrix (a shard-only target reached from a meta-role
+            // union, fgdb-bbqq) is still a matrix.
+            let predicate_lawful = if !arm.matrix {
+                arm.role_predicates
+                    .first()
+                    .is_some_and(|single| predicate_allows_role(single, &u.role))
             } else {
                 arm.role_predicates
                     .iter()
@@ -4511,15 +4526,17 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                         Some(roles) => {
                             // Legacy path: the target's own predicate
                             // authorizes via the containing plane...
-                            let legacy = arm.role_predicates.len() == 1
+                            let legacy = !arm.matrix
                                 && predicate_allows_role(&target_kind.role_predicate, &u.role);
                             // ...or every matrix entry names a role the
                             // target itself admits (cross-group reference,
-                            // fgdb-bbqq option (a)).
-                            let matrix = arm.role_predicates.iter().all(|entry| {
-                                role_predicate_roles(entry)
-                                    .is_some_and(|set| !set.is_empty() && set.is_subset(&roles))
-                            });
+                            // fgdb-bbqq option (a)). Decided by the spelling:
+                            // a one-line matrix is a matrix.
+                            let matrix = arm.matrix
+                                && arm.role_predicates.iter().all(|entry| {
+                                    role_predicate_roles(entry)
+                                        .is_some_and(|set| !set.is_empty() && set.is_subset(&roles))
+                                });
                             legacy || matrix
                         }
                     };
@@ -4534,22 +4551,22 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
                             ),
                         ));
                     }
-                    if let Some(containing) = logical_by_name.get(u.containing_schema.as_str())
-                        && target_kind.construction_order > containing.construction_order
-                    {
-                        out.push(v(
-                            "dag_future_result",
-                            "durable_fields",
-                            &u.union_name,
-                            format!(
-                                "arm target {:?} (order {}) is constructed after containing {:?} (order {}): a future result is never referenceable",
-                                arm.target_schema_id,
-                                target_kind.construction_order,
-                                u.containing_schema,
-                                containing.construction_order
-                            ),
-                        ));
-                    }
+                    // fgdb-bbqq ruling (a1), 2026-09-03: a reference-union arm
+                    // is a TYPE ALTERNATIVE, not a retention edge. The
+                    // construction-order law (`dag_future_result`) and the
+                    // cycle law (`dag_cycle`) bind the anchored FIELD's
+                    // per-instance edges, whose cut rules already govern
+                    // cross-group retention; expanding every arm into a
+                    // schema-level edge closed real cycles the moment an arm
+                    // target's state chain re-entered the grant family
+                    // (`RemoteGrantTargetRef`, 74 arms, a01:1402). Arms are
+                    // therefore exempt from both laws here and in the DAG
+                    // below; `dag_self_edge`, `union_arm_unresolved`,
+                    // `union_arm_lifecycle_mismatch` and `union_role_mismatch`
+                    // are unchanged. Witnessed by
+                    // `idr_neg_union_arm_cycle_*` in tests/identity.rs, which
+                    // also prove a plain strong field to the same target still
+                    // fires both laws.
                 }
             }
         }
@@ -4578,7 +4595,21 @@ pub fn validate_identity(r: &IdentityRegistries) -> Vec<Violation> {
         if let Some(t) = &f.target_schema_id {
             targets.push(t.as_str());
         } else if let Some(u) = union_by_name.get(f.exact_wire_type.as_str()) {
-            targets.extend(u.arms.iter().map(|arm| arm.target_schema_id.as_str()));
+            // fgdb-bbqq ruling (a1): the arms of a reference union are type
+            // alternatives and contribute no schema-level construction edge.
+            // A self-alternative is still nonsensical, so `dag_self_edge`
+            // keeps its arm sweep; `dag_future_result` and `dag_cycle` do not
+            // see arms at all (see the union block above for the reasoning).
+            for arm in &u.arms {
+                if arm.target_schema_id == containing_family {
+                    out.push(v(
+                        "dag_self_edge",
+                        "durable_fields",
+                        &format!("{}#{}", f.containing_schema, f.stable_name),
+                        "a schema may not reference itself, even as a reference-union arm alternative",
+                    ));
+                }
+            }
         }
         for target in targets {
             let Some(target_kind) = logical_by_name.get(target) else {

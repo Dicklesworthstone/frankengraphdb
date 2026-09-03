@@ -10362,6 +10362,20 @@ version_status = "reserved"
 max_size_bytes = 40
 
 [[field]]
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+stable_name = "target_ref"
+exact_wire_type = "RemoteGrantTargetRef"
+cardinality = "one"
+identity_class = "logical"
+reference_semantics = "strong"
+construction_order = 97
+role_predicate = "true"
+retention_and_cut_rule = "the spec names exactly one registered exportable target through the generated closed union (a01:1402: the target ref and identity must be the exact registered pair); retention of that target is the grant's obligation in RemoteRetentionObligationRoot, released only by its ReleaseApplied/AckPublished tombstone (a01:1578; FG-INV-14). Under the fgdb-bbqq (a1) ruling the union's arms are type alternatives: this field, not the arm set, carries the construction-order and retention edge"
+version_status = "reserved"
+max_size_bytes = 48
+
+[[field]]
 containing_schema = "RemoteRetentionObligationRoot"
 field_tag = 0x0001
 stable_name = "grant_record_ref"
@@ -37790,6 +37804,12 @@ containing_schema = "RaftSnapshotShard"
 field_tag = 0x0002
 role = "shard"
 
+[[reference_union]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+role = "meta"
+
 [[reference_union_arm]]
 union_name = "MandatoryInventoryRef"
 containing_schema = "CheckpointStateVector"
@@ -37907,5 +37927,1115 @@ identity_class = "logical"
 reference_semantics = "strong"
 role_predicate = "role-shard"
 retention_and_cut_rule = "shard rows are projections or shard-owned protocol state only; never a second Meta semantic authority"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0001
+stable_name = "CanonicalStatementClassification"
+target_schema_id = "CanonicalStatementClassification"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0002
+stable_name = "GcParticipantCancellationEvidence"
+target_schema_id = "GcParticipantCancellationEvidence"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0003
+stable_name = "GlobalAttemptRegistration"
+target_schema_id = "GlobalAttemptRegistration"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0004
+stable_name = "GlobalAuthorizationDecisionRecord"
+target_schema_id = "GlobalAuthorizationDecisionRecord"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0005
+stable_name = "GlobalBackupAbortAuthorizationCertificate"
+target_schema_id = "GlobalBackupAbortAuthorizationCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0006
+stable_name = "GlobalBackupIntentCertificate"
+target_schema_id = "GlobalBackupIntentCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0007
+stable_name = "GlobalBackupReleaseAuthorizationCertificate"
+target_schema_id = "GlobalBackupReleaseAuthorizationCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0008
+stable_name = "GlobalBranchKeyDistributionPlan"
+target_schema_id = "GlobalBranchKeyDistributionPlan"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0009
+stable_name = "GlobalConstraintReservationCertificate"
+target_schema_id = "GlobalConstraintReservationCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x000a
+stable_name = "GlobalControlRecord"
+target_schema_id = "GlobalControlRecord"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x000b
+stable_name = "GlobalDecisionCertificate"
+target_schema_id = "GlobalDecisionCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x000c
+stable_name = "GlobalGcAuthorizationRecord"
+target_schema_id = "GlobalGcAuthorizationRecord"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x000d
+stable_name = "GlobalGcCancellationAuthorizationCertificate"
+target_schema_id = "GlobalGcCancellationAuthorizationCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x000e
+stable_name = "GlobalKeyDestructionAuthorizationCertificate"
+target_schema_id = "GlobalKeyDestructionAuthorizationCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x000f
+stable_name = "GlobalRestoreAbandonParticipantApplyCertificate"
+target_schema_id = "GlobalRestoreAbandonParticipantApplyCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0010
+stable_name = "GlobalRestoreActivationCertificate"
+target_schema_id = "GlobalRestoreActivationCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0011
+stable_name = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+target_schema_id = "GlobalRestoreParticipantPinReleaseCompletionCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0012
+stable_name = "GlobalRestoreServiceFinalCertificate"
+target_schema_id = "GlobalRestoreServiceFinalCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0013
+stable_name = "GlobalRestoreServicePrepareCertificate"
+target_schema_id = "GlobalRestoreServicePrepareCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0014
+stable_name = "GlobalStatementRegistration"
+target_schema_id = "GlobalStatementRegistration"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0015
+stable_name = "GlobalTxnOutcomePreparationRecord"
+target_schema_id = "GlobalTxnOutcomePreparationRecord"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0016
+stable_name = "GlobalTxnWorkspaceGeneration"
+target_schema_id = "GlobalTxnWorkspaceGeneration"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0017
+stable_name = "GraphIntentBatchProjection"
+target_schema_id = "GraphIntentBatchProjection"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0018
+stable_name = "GroupTimeIssuanceQuiescenceCertificate"
+target_schema_id = "GroupTimeIssuanceQuiescenceCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0019
+stable_name = "LegacyPromiseTerminalAck"
+target_schema_id = "LegacyPromiseTerminalAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x001a
+stable_name = "LegacyRetentionAuthorityTransferCertificate"
+target_schema_id = "LegacyRetentionAuthorityTransferCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x001b
+stable_name = "LogicalDeltaBatch"
+target_schema_id = "LogicalDeltaBatch"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x001c
+stable_name = "MetaAuthorityBindingProjection"
+target_schema_id = "MetaAuthorityBindingProjection"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-meta"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x001d
+stable_name = "MetaControlProjectionCertificate"
+target_schema_id = "MetaControlProjectionCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x001e
+stable_name = "MetaIdRangeGrantCertificate"
+target_schema_id = "MetaIdRangeGrantCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x001f
+stable_name = "MetaSecurityProjectionCertificate"
+target_schema_id = "MetaSecurityProjectionCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0020
+stable_name = "ParticipantRoutingCertificate"
+target_schema_id = "ParticipantRoutingCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0021
+stable_name = "RestoreShardAbandonAck"
+target_schema_id = "RestoreShardAbandonAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0022
+stable_name = "RestoreShardActivationAck"
+target_schema_id = "RestoreShardActivationAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0023
+stable_name = "RestoreShardBootstrapProjectionCertificate"
+target_schema_id = "RestoreShardBootstrapProjectionCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0024
+stable_name = "RestoreShardOperationalAck"
+target_schema_id = "RestoreShardOperationalAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0025
+stable_name = "RestoreShardReadyBarrier"
+target_schema_id = "RestoreShardReadyBarrier"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0026
+stable_name = "RestoreShardServiceReadyAck"
+target_schema_id = "RestoreShardServiceReadyAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0027
+stable_name = "RestoreShardVisibilityAck"
+target_schema_id = "RestoreShardVisibilityAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0028
+stable_name = "RestoreTerminalPinReleaseAuthorization"
+target_schema_id = "RestoreTerminalPinReleaseAuthorization"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0029
+stable_name = "RestoreVisibilityCommitCertificate"
+target_schema_id = "RestoreVisibilityCommitCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x002a
+stable_name = "RoleTransitionServiceFinalCertificate"
+target_schema_id = "RoleTransitionServiceFinalCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x002b
+stable_name = "RoleTransitionShardOperationalAck"
+target_schema_id = "RoleTransitionShardOperationalAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x002c
+stable_name = "ShardActivatedCutAck"
+target_schema_id = "ShardActivatedCutAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x002d
+stable_name = "ShardAppliedAck"
+target_schema_id = "ShardAppliedAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x002e
+stable_name = "ShardBackupAbortAck"
+target_schema_id = "ShardBackupAbortAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x002f
+stable_name = "ShardBackupClosureCertificate"
+target_schema_id = "ShardBackupClosureCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0030
+stable_name = "ShardBackupReleaseAck"
+target_schema_id = "ShardBackupReleaseAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0031
+stable_name = "ShardCheckpointCertificate"
+target_schema_id = "ShardCheckpointCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0032
+stable_name = "ShardConfigurationAdoptionEvidence"
+target_schema_id = "ShardConfigurationAdoptionEvidence"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0033
+stable_name = "ShardConstraintReleaseAck"
+target_schema_id = "ShardConstraintReleaseAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0034
+stable_name = "ShardDerivedComponentCertificate"
+target_schema_id = "ShardDerivedComponentCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0035
+stable_name = "ShardEffectBasis"
+target_schema_id = "ShardEffectBasis"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0036
+stable_name = "ShardEscapingAllocationEvidence"
+target_schema_id = "ShardEscapingAllocationEvidence"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0037
+stable_name = "ShardGcCancelledAck"
+target_schema_id = "ShardGcCancelledAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0038
+stable_name = "ShardGcPreflightEvidence"
+target_schema_id = "ShardGcPreflightEvidence"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0039
+stable_name = "ShardKeyMaterialAvailabilityCertificate"
+target_schema_id = "ShardKeyMaterialAvailabilityCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x003a
+stable_name = "ShardKeyPhysicalDestructionCompletionCertificate"
+target_schema_id = "ShardKeyPhysicalDestructionCompletionCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x003b
+stable_name = "ShardOperationalBootstrapBarrier"
+target_schema_id = "ShardOperationalBootstrapBarrier"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x003c
+stable_name = "ShardPrepareCertificate"
+target_schema_id = "ShardPrepareCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x003d
+stable_name = "ShardReadWitnessBasis"
+target_schema_id = "ShardReadWitnessBasis"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x003e
+stable_name = "ShardReconfigurationAuthorizationRecord"
+target_schema_id = "ShardReconfigurationAuthorizationRecord"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x003f
+stable_name = "ShardRestoreSourceAccessClosure"
+target_schema_id = "ShardRestoreSourceAccessClosure"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0040
+stable_name = "ShardRoleTransitionReadyBarrier"
+target_schema_id = "ShardRoleTransitionReadyBarrier"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0041
+stable_name = "ShardStatementWorkspaceCertificate"
+target_schema_id = "ShardStatementWorkspaceCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0042
+stable_name = "ShardTimeAuthorityRetirementAck"
+target_schema_id = "ShardTimeAuthorityRetirementAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0043
+stable_name = "ShardTimeBoundSubjectInventoryCertificate"
+target_schema_id = "ShardTimeBoundSubjectInventoryCertificate"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0044
+stable_name = "ShardWorkspaceReleaseAck"
+target_schema_id = "ShardWorkspaceReleaseAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0045
+stable_name = "TopologyRetirementAck"
+target_schema_id = "TopologyRetirementAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0046
+stable_name = "TopologyRetirementFloor"
+target_schema_id = "TopologyRetirementFloor"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0047
+stable_name = "TopologyTransferAck"
+target_schema_id = "TopologyTransferAck"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0048
+stable_name = "TopologyTransferPlan"
+target_schema_id = "TopologyTransferPlan"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x0049
+stable_name = "TopologyTransitionRecord"
+target_schema_id = "TopologyTransitionRecord"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[reference_union_arm]]
+union_name = "RemoteGrantTargetRef"
+containing_schema = "RemoteRetentionGrantSpec"
+field_tag = 0x000a
+arm_tag = 0x004a
+stable_name = "TypedCertifiedMetaProjectionPayload"
+target_schema_id = "TypedCertifiedMetaProjectionPayload"
+role = "meta"
+identity_class = "logical"
+reference_semantics = "strong"
+role_predicates = ["role-local", "role-meta", "role-shard"]
+retention_and_cut_rule = "strong while the grant is Active in RemoteRetentionObligationRoot: the authority ledger, not the consumer's evidence, owns the remote target, and the arm is released only by the grant's ReleaseApplied/AckPublished tombstone (a01:1402, a01:1578; FG-INV-14). A reference-union arm is a type alternative under the fgdb-bbqq (a1) ruling: retention and construction order bind the anchored target_ref field, never the arm set"
 version_status = "reserved"
 max_size_bytes = 40

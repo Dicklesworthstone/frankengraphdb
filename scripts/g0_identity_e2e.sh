@@ -1154,8 +1154,15 @@ assert_only_violation_code neg-registry-epoch registry_epoch_mismatch
 
 log "phase 2i: duplicate-free released logical assignment rename/reuse"
 stage_except neg-released-reuse logical_object_kinds.toml
+# The probe renames a RESERVED LEAF kind that nothing references, so the only
+# law that can fire is the released-assignment ratchet. It used to rename
+# MetaAuthorityBindingProjection; since fgdb-bbqq landed RemoteGrantTargetRef
+# (2026-09-03) that kind is one of the union's 74 arm targets, and renaming it
+# correctly fires union_arm_unresolved as well. Its Shard twin has the same
+# shape (reserved, no field, wire, or arm references) and keeps this phase
+# single-purpose.
 awk '
-  !changed && $0 == "name = \"MetaAuthorityBindingProjection\"" {
+  !changed && $0 == "name = \"ShardAuthorityBindingProjection\"" {
     print "name = \"ReleasedAssignmentReuseProbe\""
     changed = 1
     next

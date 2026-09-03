@@ -654,6 +654,10 @@ fn sat_reference_union_arm_role_matrix() {
                 identity_class: "logical".to_owned(),
                 reference_semantics: "strong".to_owned(),
                 role_predicates: entries.iter().map(|s| s.to_string()).collect(),
+                // This fixture models one-entry vectors as the legacy singular
+                // spelling and longer vectors as the matrix spelling, exactly
+                // the distinction the parser now records (fgdb-bbqq).
+                matrix: entries.len() > 1,
                 retention_and_cut_rule: "retained with the owning witness".to_owned(),
                 version_status: "reserved".to_owned(),
                 max_size_bytes: 40,
