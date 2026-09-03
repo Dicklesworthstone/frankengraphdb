@@ -367,22 +367,50 @@ adjudication table, and closure is left to a verifier. 4csa.2 is blocked on
 infrastructure, below. `fgdb-ci-workflow-check-sh-4csa.1` (runner disk) was
 closed on the strength of the 08-31 green run.
 
-**Why no hosted verdict exists, measured.** The workflow is shaped
-correctly but no GitHub-hosted job for this repo has started since
-2026-09-01T04:13Z: a dispatch run has been queued for hours, the push run for
-the latest head is pending, and no scheduled run was created at two cron
-slots. The repo is public, Actions is enabled, GitHub reported Actions
-operational, and there are no self-hosted runners. The cause is the
-account-wide concurrency cap on hosted runners: the same account had 93
-active or queued runs across its 20 most recently pushed repos at the time
-of measurement. Queue latency on the three runs that did complete was 52,
-127 and 141 minutes, longer than the push interval, which is what produced
-the 166 cancellations, and GitHub drops scheduled events under sustained
-load. Those three runs failed on fmt, file-coverage closure and a
-registry-check compile error, all repaired since; the repaired tree has
-only local exact-tree proofs. The remedies are owner-side: a self-hosted
-runner for this repo restricted to push and schedule on `main`, draining the
-other repos' queues, or a higher plan tier.
+**Hosted CI is not the answer here, and the question is closed.** The workflow
+was shaped correctly but no GitHub-hosted job for this repository had started
+since 2026-09-01T04:13Z: a dispatch run queued for hours, the push run for the
+latest head pending, and no scheduled run created at two cron slots. The repo is
+public, Actions was enabled, GitHub reported Actions operational, and there are
+no self-hosted runners. The cause was the account-wide concurrency cap on hosted
+runners: the same account had 93 active or queued runs across its 20 most
+recently pushed repositories at the time of measurement, queue latency on the
+three runs that did complete was 52, 127 and 141 minutes, longer than the push
+interval, which is what produced the 166 cancellations, and GitHub drops
+scheduled events under that load. On 2026-09-03 the owner ruled the question
+away: **this project does not use GitHub Actions for any reason, and releases go
+through the `dsr` self-releaser.** Both workflows are now manual-dispatch only,
+so this repository stops taking slots from a shared pool it never consumed a
+verdict from; `AGENTS.md` no longer claims that CI enforces the gate; and the
+file-coverage exemption for workflow files no longer rests on "a red workflow
+surfaces as a failed run on GitHub". The verdict of record is
+`scripts/local_proof.sh` on the exact committed tree, whose manifest binds
+commit, tree hash and exit code together. `fgdb-ci-workflow-check-sh-4csa.2` is
+closed as premise-void, and the l9r3 narrowing question is answered by the same
+ruling: branch protection with a required status check was the only true
+"refusal" available, and it requires the CI this project does not use.
+
+**Gap 5 moved: the invariant spine has its first live clause.** The registry
+that AGENTS.md calls a hard gate — no subsystem ships against an unenforced
+invariant, and a workstream exit gate cannot pass while an invariant it depends
+on lacks a live checker — held twenty invariants and twenty clauses, every one
+of them `stub`, with every checker entrypoint resolving to a stub row pointing
+at `crates/fgdb-oracles/`, a crate that does not exist. The cross-check
+therefore quantified over an empty set and passed, which is an exit code
+indistinguishable from a fully enforced spine. Meanwhile the canonical-value law
+suite in `fgdb-types` has been proving the first sentence of FG-INV-12 on every
+`cargo test` run. That sentence is now a subordinate clause bound to those
+tests, `status = "live"`, with the declared enforcement ledger raised from zero
+to one in the same change, which the registry itself calls a G-gate event.
+`FG-INV-12.core` stays stub because the rest of its statement has no apparatus,
+and no invariant ID counts as enforced, so the honest ledger reads one enforced
+clause and zero enforced IDs. Four mutation controls in a scratch copy show the
+binding is load-bearing: renaming the bound test, flipping its checker row back
+to stub, pointing the artifact at a file `cargo test` never compiles, and
+restating the declaration as zero each turn the registry red, and reverting them
+returns it to the baseline. The remaining nineteen invariants are unchanged, and
+fourteen of them name owning subsystems that do not exist yet; what changed is
+that the law now quantifies over something real.
 
 ### Evidence boundary
 

@@ -1728,10 +1728,44 @@ fn claims_enforcement_ledger_control() {
         clauses > 0,
         "control: zero clauses would make every count below quantified over nothing"
     );
+    // RE-DERIVED, not re-pinned (fgdb-1sto). The base stopped being empty when
+    // `FG-INV-12.canonical-scalar-coherence` was promoted, so the count alone is
+    // no longer the interesting fact: WHICH clause is enforced is. Asserting the
+    // identity means a future promotion cannot slip in under an unchanged
+    // number, and a regression of this clause to stub names itself here instead
+    // of arriving as an off-by-one.
+    let enforced: Vec<String> = r
+        .invariants
+        .invariants
+        .iter()
+        .flat_map(|invariant| invariant.clauses.iter())
+        .filter(|clause| {
+            validate::clause_status_is_enforced(&clause.status) == Some(true)
+                && registry_check::liveness::assess_clause(
+                    repo_root().as_path(),
+                    clause,
+                    &r.checker_index,
+                )
+                .is_empty()
+        })
+        .map(|clause| clause.key.clone())
+        .collect();
     assert_eq!(
-        r.invariants.expected_enforced_clauses, 0,
-        "the shipped tree enforces nothing; if this changes, the numbers below are \
-         read against a different base and this test must be re-derived, not re-pinned"
+        enforced,
+        vec!["FG-INV-12.canonical-scalar-coherence".to_string()],
+        "the shipped tree enforces exactly one clause; if this changes, the numbers \
+         below are read against a different base and this test must be re-derived, \
+         not re-pinned"
+    );
+    assert_eq!(
+        r.invariants.expected_enforced_clauses as usize,
+        enforced.len(),
+        "the declaration must equal the measured enforced-clause set"
+    );
+    assert_eq!(
+        r.invariants.expected_enforced_invariants, 0,
+        "no ID is fully enforced: FG-INV-12.core is still stub, and an ID counts \
+         only when every clause under it is enforced"
     );
     assert!(
         !codes(&r).contains(&"enforcement_coverage_drift".to_string()),
@@ -1787,11 +1821,23 @@ fn claims_neg_enforcement_coverage_drift() {
     // Too few: the declaration claims enforcement the tree does not have. This
     // is the direction that catches a clause silently regressing to stub.
     let mut overclaimed = real_registries();
-    overclaimed.invariants.expected_enforced_clauses = 1;
+    overclaimed.invariants.expected_enforced_clauses =
+        real_registries().invariants.expected_enforced_clauses + 1;
     assert!(
         codes(&overclaimed).contains(&"enforcement_coverage_drift".to_string()),
-        "a declaration of 1 against a measured 0 must fail: {:?}",
+        "a declaration one above the measured count must fail: {:?}",
         codes(&overclaimed)
+    );
+
+    // And the other side of the same direction: declaring zero while a clause
+    // IS enforced. Before fgdb-1sto the measured base was zero and this mutant
+    // could not be written at all.
+    let mut underclaimed = real_registries();
+    underclaimed.invariants.expected_enforced_clauses = 0;
+    assert!(
+        codes(&underclaimed).contains(&"enforcement_coverage_drift".to_string()),
+        "a declaration of 0 against a measured 1 must fail: {:?}",
+        codes(&underclaimed)
     );
 
     // The ID count is its own fact: promoting a clause moves the clause count,

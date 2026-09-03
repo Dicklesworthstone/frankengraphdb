@@ -538,6 +538,26 @@ kind = "stub"
 artifact = "crates/fgdb-oracles/src/scalar_rewrites.rs"
 status = "stub"
 
+# The live half of FG-INV-12 (bead fgdb-1sto). The two rows above stay stub
+# because `crates/fgdb-oracles/` does not exist; these two name integration
+# tests that `cargo test --workspace` compiles and runs today, and
+# `FG-INV-12.canonical-scalar-coherence` binds them. `unit = "symbol"` is
+# deliberate over `"artifact"`: renaming or deleting either test must turn the
+# registry red, which is the whole point of binding a law to an apparatus.
+[[checker]]
+symbol = "canonical_scalar_byte_order_equals_value_order"
+kind = "cargo-test"
+artifact = "crates/fgdb-types/tests/canonical_value_laws.rs"
+status = "live"
+unit = "symbol"
+
+[[checker]]
+symbol = "non_canonical_float_bits_are_rejected_rather_than_repaired"
+kind = "cargo-test"
+artifact = "crates/fgdb-types/tests/canonical_value_laws.rs"
+status = "live"
+unit = "symbol"
+
 [[checker]]
 symbol = "fg_inv_13_core_checker"
 kind = "stub"

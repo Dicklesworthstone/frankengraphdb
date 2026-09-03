@@ -98,9 +98,22 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 #
 # AGENTS.md: "CI cross-checks that every ID has a live checker", and under it the
 # hard rule "no subsystem ships against an unenforced invariant". Every clause
-# below is stub and every entrypoint resolves to a stub checker_index row, so
+# below WAS stub and every entrypoint resolved to a stub checker_index row, so
 # that cross-check quantified over an EMPTY SET and passed — an exit code
 # indistinguishable from a fully enforced spine.
+#
+# THE SET IS NO LONGER EMPTY. `FG-INV-12.canonical-scalar-coherence` is the
+# first live clause in this registry (bead fgdb-1sto): it binds the one
+# sentence of FG-INV-12 whose apparatus already runs on every
+# `cargo test` — the canonical-scalar law suite in
+# `crates/fgdb-types/tests/canonical_value_laws.rs` — and leaves
+# `FG-INV-12.core` stub, because the rest of that statement (answer-equivalent
+# rewrites, workspace materialization, safe replan, AnswerContract) has no
+# apparatus at all. An ID counts as enforced only when EVERY clause under it
+# does, so FG-INV-12 is still not an enforced ID and
+# `expected_enforced_invariants` stays 0. That asymmetry is the honest shape:
+# the law now quantifies over something real without claiming the subsystem is
+# verified.
 #
 # These two numbers are what make the zero mean "deliberately zero" instead of
 # "nothing was examined", in the same shape sample_capability_manifest.toml's
@@ -116,7 +129,7 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 # entrypoints are live checker rows in the full liveness.rs sense. An ID counts
 # only when every clause under it does. Raising either number is a G-gate event:
 # land the checker, then bump the declaration in the same change.
-expected_enforced_clauses = 0
+expected_enforced_clauses = 1
 expected_enforced_invariants = 0
 
 # The CLOSED vocabulary of capability atoms an activation_predicate or a
@@ -436,6 +449,28 @@ model_or_proof_scope = "Scalar-law property/fuzz suites and rewrite metamorphics
 owner = "fgdb-types"
 first_gate = "G1"
 status = "stub"
+waiver = "forbidden"
+
+# The first live clause in the spine. It carves the sentence of FG-INV-12 that
+# `crates/fgdb-types/tests/canonical_value_laws.rs` already proves on every
+# `cargo test` run, and claims nothing beyond it: the corpus is the shipped
+# canonical scalar arms and their boundaries, and the property is coherence of
+# equality, ordering, and encoding over that corpus. `.core` stays stub and
+# keeps the whole Appendix F statement, so promoting this one cannot be read as
+# retiring that one.
+[[invariant.clause]]
+key = "FG-INV-12.canonical-scalar-coherence"
+claim_class = "invariant"
+exact_statement = '''Canonical scalar equality, hashing, ordering, and encoding are coherent.'''
+enforcement = '''Property suite over the shipped canonical-scalar corpus, every arm and boundary: bytewise lexicographic order equals `Ord`, encoding is injective and byte-deterministic, equal values encode identically (-0.0 and every NaN spelling included), and a non-canonical durable bit pattern is refused rather than silently repaired.'''
+activation_predicate = "canonical-scalars"
+dependencies = []
+checker_entrypoint = "canonical_scalar_byte_order_equals_value_order"
+negative_test_entrypoint = "non_canonical_float_bits_are_rejected_rather_than_repaired"
+model_or_proof_scope = "Exhaustive over the shipped scalar corpus and its boundary values; no formal lane, and no claim about values outside the corpus."
+owner = "fgdb-types"
+first_gate = "G1"
+status = "live"
 waiver = "forbidden"
 
 # -----------------------------------------------------------------------------
