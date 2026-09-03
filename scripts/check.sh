@@ -1265,10 +1265,29 @@ run_ubs() {
 # workflow, or pin its absence) is a workflow decision and is deliberately NOT
 # absorbed here. Equality pinning is unchanged: any future increase OR decrease
 # of any class still fails closed.
+# fgdb-l9r3 re-pin (2026-09-02), REGEX MODE, UBS v5.3.13: panic! 134 -> 139 and
+# JWT 122 -> 123. TOOL CONTROL FIRST: today's ubs, regex mode, on the tree of
+# the baseline-setting commit 9ec76706 reports exactly 184/134/122/18/1 (459)
+# — the table above, number for number — so nothing below is tool drift.
+# ATTRIBUTION by scanning only the 67 tracked *.rs files changed since
+# 9ec76706, at both trees, same tool and mode: 0 criticals at 9ec76706, 6 at
+# HEAD, and the full-tree delta is 459 -> 465 = +6, so the changed files
+# account for every moved finding:
+#   panic! +5, all in tools/registry-check/src/command_live_payload.rs
+#     (:610 :621 :628 :635 :658 — `unwrap_or_else(|e| panic!(..))` loader and
+#     mutation-target assertions in the live-payload checker, 499e70c0,
+#     fgdb-5uw2). Test-harness failure signals, the same adjudicated family as
+#     every panic! counted above.
+#   JWT +1 at crates/fgdb-gql/src/evidence_limits.rs:435 — the heuristic's
+#     `decode(` shape fires on the TEST NAME
+#     `declared_rows_are_screened_before_structural_decode()` (a3441930). No
+#     token is decoded anywhere near it; a name-shaped false positive.
+# Neither this session's own changes (evidence width laws, boxed cursor
+# variant, hasher arms, test include rewrite) contributes a finding.
 UBS_CRITICAL_BASELINE=(
   "Secret/token comparisons without timing-safe equality=184"
-  "panic!/unreachable!/todo!/unimplemented!=134"
-  "JWT decode, validation bypass, or missing claim binding=122"
+  "panic!/unreachable!/todo!/unimplemented!=139"
+  "JWT decode, validation bypass, or missing claim binding=123"
   "Security-sensitive non-crypto randomness=18"
   "transmute, uninitialized, zeroed, assume_init, forget=1"
 )
@@ -1283,19 +1302,16 @@ UBS_CRITICAL_BASELINE=(
 # itself prints ("ast-grep available" → AST table; otherwise the regex table
 # above). Both tables fail closed on any increase, decrease, or unknown class.
 #
-# AST-GREP MODE PARTITION, measured 2026-09-02 on this tree with UBS v5.3.13:
-# 184/156/123/18 and no transmute class (the regex-only `zeroed(` misread
-# documented above does not fire under AST analysis). Movement since the
-# 9ec76706 measurement (151/-/18/184/122):
-#   panic! 151 -> 156: six panic-class sites added since 9ec76706, none by the
-#     pinning session — `unreachable!` in crates/fgdb-gql/src/evidence_cursor.rs
-#     (connector, e3fd623a) and five `panic!` in
-#     tools/registry-check/src/command_live_payload.rs (499e70c0, fgdb-5uw2
-#     test-only registry lookups). AST mode counts five of the six; the sixth
-#     is the regex table's +6 below.
-#   JWT 122 -> 123: the class fires on `fn decode(` / `decode(` call shapes;
-#     the +1 is attributed by scanning the baseline tree with today's tool
-#     (see the regex-table note below).
+# AST-GREP MODE PARTITION, measured 2026-09-02 on this tree with UBS v5.3.13
+# inside the gate's own run (UBS_MODULE_TIMEOUT=1800; a default 300 s budget
+# times the rust module out on this tree and yields a bounded partial that
+# reads "Critical: 1" — not a measurement): 184/156/123/18 and no transmute
+# class (the regex-only `zeroed(` misread documented above does not fire under
+# AST analysis). Movement since the 9ec76706 AST measurement
+# (151/-/18/184/122) is +5 panic! and +1 JWT — the same five
+# command_live_payload.rs sites and the same evidence_limits.rs:435 test-name
+# false positive attributed in the regex-table note above; AST mode agrees
+# with regex mode on every moved finding.
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Secret/token comparisons without timing-safe equality=184"
   "panic!/unreachable!/todo!/unimplemented!=156"
