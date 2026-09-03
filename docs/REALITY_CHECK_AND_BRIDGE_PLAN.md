@@ -245,6 +245,59 @@ what they did and did not deliver), `fgdb-ci-workflow-check-sh-4csa`, and
 `fgdb-gate-genesis-lce`. The JSONL was not exported by this measurement; it
 lands with the compile fix through `scripts/br_sync.sh`.
 
+### Same-night pickup — 2026-09-03T02:00Z
+
+**Gap 0 is closed.** Three landings restored a verdict, and the third
+exact-tree proof is green:
+
+- `b51e3232` — 16-byte `VId` rows as a v1 format decision with two pinning
+  laws; `Cargo.lock` regenerated; seven hasher arms, one boxed variant, one
+  path-included test, 32 unformatted files; seven script dispositions (both
+  self-tests measured green); `--locked` on every cargo gate (negative
+  control: a stale lock reds the gate with cargo's own message).
+- `b744cf82` (operator-committed from the audit session's worktree) — the
+  four pre-existing reds the first exact-tree proof exposed (the adjacency
+  test lost its subject in the write_txn split; five unclaimed docs; SC1083;
+  the UBS ratchet's dev-box/runner mode asymmetry, now one exact table per
+  mode selected from ubs's own transcript), `NE-0045`, the CHANGELOG entry,
+  the status paragraph, `scripts/g0_commit_provenance_e2e.sh` (live), the
+  two-hourly non-cancelling CI run, and the 13-record tracker export
+  including the three retroactive child beads.
+- `4c63a504` + `8af5af1b` — the regex-mode ratchet re-pin, tool-controlled at
+  `9ec76706` (today's tool reproduces the old table there exactly) and
+  attributed by a changed-files scan (0 → 6 criticals: five test-harness
+  `panic!`s in the live-payload checker, one JWT-heuristic hit on a test
+  name); and the bet labels the two new gate beads needed for provenance to
+  be total (proof #2's single remaining cause).
+
+Exact-tree proof on `8af5af1b` (`scripts/local_proof.sh`, started
+2026-09-03T01:03:22Z, finished 01:49:41Z, tree stable): **ALL GATES GREEN —
+core 9/9, registered live 34/34**, including the new provenance gate
+(110/110 in-chain), the architecture suite (42/42), and the negative-evidence
+ledger with NE-0045. First green exact-tree verdict since `f8bf9b40`
+(2026-08-31). Proof #1 on `b51e3232` was red on four pre-existing causes;
+proof #2 on `4c63a504` was red on one (the missing bet labels).
+
+**The ready queue is empty for a structural reason, now quantified.** Of 292
+open records, 279 hang transitively on four roots: `fgdb-bbqq` (an owner
+sitting on union-edge semantics; 278 dependents), `fgdb-a18-restore-union-
+source-gates-a4fq` (a logical-versus-wire class ruling for seven unions;
+276), `fgdb-a06-w12-core-zdzx` (the in-progress W12 catalog core; 276), and
+`fgdb-asupersync-signing-provider-dj4j` (an upstream asupersync capability;
+252). Two of the four are rulings only the owner can issue. The owner ruled
+`fgdb-bbqq` as (a1) on 2026-09-03 (recorded on the bead); the a18 class
+ruling is still open.
+
+**What did not move:** vision delivery (2 of 20), the GQL representation,
+SSI, Tier R, invariants (0 of 20), command contracts (1 of 183). Gap 0 was
+the precondition for knowing any of that; it is not progress on it.
+
+**Bead state:** `fgdb-l9r3`, `fgdb-baru`, `fgdb-ci-workflow-check-sh-4csa.2`
+stay open for independent verification against their acceptance criteria;
+the first scheduled hosted run (cron `17 */2 * * *` UTC) is 4csa.2's
+evidence. `fgdb-ci-workflow-check-sh-4csa.1` (runner disk) was closed on the
+strength of the 08-31 green run.
+
 ### Evidence boundary
 
 Pinned to `fdd53388` (2026-09-02 13:48 -0400). Method: the same read-only
