@@ -285,8 +285,17 @@ source-gates-a4fq` (a logical-versus-wire class ruling for seven unions;
 276), `fgdb-a06-w12-core-zdzx` (the in-progress W12 catalog core; 276), and
 `fgdb-asupersync-signing-provider-dj4j` (an upstream asupersync capability;
 252). Two of the four are rulings only the owner can issue. The owner ruled
-`fgdb-bbqq` as (a1) on 2026-09-03 (recorded on the bead); the a18 class
-ruling is still open.
+`fgdb-bbqq` as (a1) on 2026-09-03 (recorded on the bead), and the ruling was
+implemented and landed the same night as `c91bf04b` (exact-tree proof ALL
+GATES GREEN, core 9/9, registered 34/34): reference-union arms are type
+alternatives exempt from the construction-order and cycle laws, the arm
+predicate spelling is carried through the checker and the projection writer,
+and `RemoteGrantTargetRef` exists as the generated closed union over the 74
+exportable target kinds (one header, the anchor field, 74 matrix arms, 76
+targets). `fgdb-atke` is therefore delivered pending independent
+verification; `fgdb-bbqq`'s deletion condition is met by the catalog-row
+recording (the ADR registry has no category for owner rulings). The a18 class
+ruling and the ordinary-union tag-width ratification are still open.
 
 **What did not move:** vision delivery (2 of 20), the GQL representation,
 SSI, Tier R, invariants (0 of 20), command contracts (1 of 183). Gap 0 was
