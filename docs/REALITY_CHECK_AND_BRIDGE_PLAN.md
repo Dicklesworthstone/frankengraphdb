@@ -292,20 +292,64 @@ alternatives exempt from the construction-order and cycle laws, the arm
 predicate spelling is carried through the checker and the projection writer,
 and `RemoteGrantTargetRef` exists as the generated closed union over the 74
 exportable target kinds (one header, the anchor field, 74 matrix arms, 76
-targets). `fgdb-atke` is therefore delivered pending independent
-verification; `fgdb-bbqq`'s deletion condition is met by the catalog-row
-recording (the ADR registry has no category for owner rulings). The a18 class
-ruling and the ordinary-union tag-width ratification are still open.
+targets). An independent verifier re-executed every cited check at
+`acb65e56` (identity 154/154 inside registry-check 800/800, `g0_identity_e2e`
+94/94, appendix 0 violations, the 74-arm target set identical to the plan
+set, and the mutation control: with the pre-ruling arm expansion restored,
+111 of 154 identity tests fail on the landed catalog) and closed `fgdb-atke`
+and `fgdb-bbqq` on that evidence. The a18 class ruling and the ordinary-union
+tag-width ratification are still open.
+
+**Landing the largest root freed nothing startable, and the number above
+overstated it.** "278 dependents" was the transitive closure. After the
+closure `br ready` is empty: every one of the 276 blocked open beads still
+hangs on the other three roots, and the sole-blocker count of every open
+bead is one or two, so the graph is a chain rather than a fan and no single
+coarse-edge split frees more than one bead (the identity-registry spec
+`fgdb-g0-identity-registries-hrx` has 31 direct dependents and exactly one
+sole dependent). Two edges were examined and recorded on their beads without
+changing them: Tier D's five formats are already active, so its spec edge is
+satisfied in substance while its engine blockers are real; Tier R owns its
+own `AdjRunSegment` rows, handed to it when a09 closed as partially
+delivered. The a18 ask was refined on the bead so it can be ruled in two
+strokes: two of the four whole-schema unions are pure tags that foreclose
+nothing under WIRE, two carry reference members in their arms that WIRE
+forecloses permanently; the rule "carries a StrongRef, therefore not wire"
+is a falsified law and was not used.
 
 **What did not move:** vision delivery (2 of 20), the GQL representation,
 SSI, Tier R, invariants (0 of 20), command contracts (1 of 183). Gap 0 was
 the precondition for knowing any of that; it is not progress on it.
 
-**Bead state:** `fgdb-l9r3`, `fgdb-baru`, `fgdb-ci-workflow-check-sh-4csa.2`
-stay open for independent verification against their acceptance criteria;
-the first scheduled hosted run (cron `17 */2 * * *` UTC) is 4csa.2's
-evidence. `fgdb-ci-workflow-check-sh-4csa.1` (runner disk) was closed on the
-strength of the 08-31 green run.
+**Bead state after verification:** the verifier left `fgdb-l9r3`,
+`fgdb-baru` and `fgdb-ci-workflow-check-sh-4csa.2` open, and each finding
+was accepted. l9r3's title asks for a refusal of toolchain-less landings;
+what landed is a deterministic gate red on a stale lock plus a hosted
+verdict that has not run, so the bead is blocked on the owner either
+accepting that narrowing as the criterion or ordering branch protection
+with the check as a required status once CI is alive. baru's second
+criterion was unsatisfiable as written (a fabricated id cannot be made to
+resolve); it was amended, with the reason on the bead, to accept the gate's
+adjudication table, and closure is left to a verifier. 4csa.2 is blocked on
+infrastructure, below. `fgdb-ci-workflow-check-sh-4csa.1` (runner disk) was
+closed on the strength of the 08-31 green run.
+
+**Why no hosted verdict exists, measured.** The workflow is shaped
+correctly but no GitHub-hosted job for this repo has started since
+2026-09-01T04:13Z: a dispatch run has been queued for hours, the push run for
+the latest head is pending, and no scheduled run was created at two cron
+slots. The repo is public, Actions is enabled, GitHub reported Actions
+operational, and there are no self-hosted runners. The cause is the
+account-wide concurrency cap on hosted runners: the same account had 93
+active or queued runs across its 20 most recently pushed repos at the time
+of measurement. Queue latency on the three runs that did complete was 52,
+127 and 141 minutes, longer than the push interval, which is what produced
+the 166 cancellations, and GitHub drops scheduled events under sustained
+load. Those three runs failed on fmt, file-coverage closure and a
+registry-check compile error, all repaired since; the repaired tree has
+only local exact-tree proofs. The remedies are owner-side: a self-hosted
+runner for this repo restricted to push and schedule on `main`, draining the
+other repos' queues, or a higher plan tier.
 
 ### Evidence boundary
 
