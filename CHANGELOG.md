@@ -2,6 +2,30 @@
 
 This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, architectural plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
+## Unreleased — 2026-09-03 the invariant spine enforces something; GitHub Actions retired
+
+Owning beads: `fgdb-1sto` (P1), `fgdb-ci-workflow-check-sh-4csa.2` (closed premise-void).
+
+### What was wrong
+
+- `registries/invariants.toml` held twenty invariant IDs and twenty clauses, **every one `stub`**, and every `checker_entrypoint` resolved to a `checker_index.toml` row that was itself `stub` and named `crates/fgdb-oracles/`, a crate that does not exist in the workspace. AGENTS.md's *Spec-First* item 2 ("CI cross-checks that every ID has a live checker") and the hard rule under it ("no subsystem ships against an unenforced invariant; a workstream exit gate G1–G4 cannot pass while any invariant it depends on lacks a live checker") therefore quantified over an **empty set** and passed. The declared ledger said so honestly — `expected_enforced_clauses = 0` — but nothing in the tree had ever been bound.
+- `AGENTS.md` claimed "CI exists: `.github/workflows/check.yml` runs `scripts/check.sh` verbatim on every push to `main` and every pull request, so 'CI-enforced' means enforced". No hosted job for this repository had started since 2026-09-01T04:13Z.
+
+### What changed
+
+- **The first live clause.** `FG-INV-12.canonical-scalar-coherence` binds the one sentence of FG-INV-12 whose apparatus already runs on every `cargo test` — "Canonical scalar equality, hashing, ordering, and encoding are coherent" — to two named integration tests in `crates/fgdb-types/tests/canonical_value_laws.rs`: `canonical_scalar_byte_order_equals_value_order` as the checker and `non_canonical_float_bits_are_rejected_rather_than_repaired` as the negative. Both are new `kind = "cargo-test"`, `status = "live"`, `unit = "symbol"` rows in `registries/checker_index.toml`, so renaming or deleting either test turns the registry red. `expected_enforced_clauses` rose 0 → 1 in the same change, which the registry header defines as a G-gate event.
+- **`FG-INV-12.core` stays `stub`** and keeps the whole Appendix F statement; the rest of it (answer-equivalent rewrites, workspace materialization, safe replan, `AnswerContract`) has no apparatus. An ID counts as enforced only when every clause under it does, so `expected_enforced_invariants` stays 0: **one enforced clause, zero enforced IDs.**
+- `tools/registry-check/tests/claims.rs`: `claims_enforcement_ledger_control` was **re-derived, not re-pinned**, as its own message demanded. It now asserts the measured enforced set is exactly `["FG-INV-12.canonical-scalar-coherence"]` through the same readers the ledger uses, that the declaration equals its length, and that no ID is enforced. The drift mutant moved from a hard-coded `1` to `measured + 1` and gained its opposite direction (declare 0 against a measured 1), a mutant that could not be written while the base was empty.
+- **GitHub Actions is retired here** (owner ruling: this project does not use it for any reason; releases go through the `dsr` self-releaser). Both workflows are `workflow_dispatch` only — the recipe is kept and runnable by hand, the automatic `push`/`pull_request`/`schedule`/`workflow_run` triggers are gone. `AGENTS.md` now names `scripts/local_proof.sh` on the exact committed tree as the verdict of record, and `scripts/check.sh`'s file-coverage exemption for workflow files no longer rests on "a red workflow surfaces as a failed run on GitHub".
+
+### Verification
+
+`registry-check all --root .` 0 violations (`spine_clauses` 21); `cargo test -p registry-check` all suites green, `--test claims` 38/38; `fgdb-types --test canonical_value_laws` 28/28; `scripts/g0_claims_e2e.sh` 17/17, `scripts/g0_spine_e2e.sh` 15/15, `scripts/g0_negative_evidence_e2e.sh` 10/10, all ALL GREEN. **Mutation controls** (scratch copy; the copy's own 2-violation noise floor is constant across every arm): renaming the bound test → `checker_symbol_unresolved` + `clause_promoted_without_live_checker` + `enforcement_coverage_drift`; flipping the checker row to `stub` → promotion + drift; pointing the artifact at a file `cargo test` never compiles → `checker_not_invocable` ×2 + promotion ×2 + drift; restating the declaration as 0 → drift. Reverting every mutation returns to the noise floor.
+
+### Not claimed
+
+Nineteen invariants remain wholly `stub`, and fourteen of them name owning subsystems (`fgdb-txn`, `fgdb-ecs`, `fgdb-branch`, `fgdb-ripple`, `fgdb-observatory`, `fgdb-secure-view`) that do not exist. No workstream exit gate passes because of this change. The clause claims coherence over the shipped canonical-scalar corpus and its boundary values, and nothing outside it.
+
 ## Unreleased — 2026-09-02 verdict restored
 
 Owning beads: `fgdb-l9r3` (P0), `fgdb-ci-workflow-check-sh-4csa.2`, `fgdb-baru`. Representative commits: `b51e3232` (the repair) and the commit that lands this entry.
