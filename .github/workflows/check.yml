@@ -39,17 +39,22 @@
 # gate verifies that pin itself), and UBS is fetched at its exact release
 # tag, whose module checksums are enforced by the runner script itself.
 
+# MANUAL ONLY, BY OWNER RULING (2026-09-03): "we do not use gh actions for any
+# reason, ONLY /dsr". This repository does not take its verdict from GitHub
+# Actions and does not release through it; `scripts/local_proof.sh` on the exact
+# tree is the verdict, and dsr is the release path.
+#
+# The automatic triggers are removed rather than the workflow, because the file
+# is still the honest record of how check.sh would be run in a hosted lane, and
+# `workflow_dispatch` keeps it runnable on request. Leaving push/schedule
+# triggers on had a measured cost beyond the noise: this account holds one
+# hosted-runner concurrency budget across every repository, and on 2026-09-03 it
+# was saturated (93 active or queued runs over the 20 most recently pushed
+# repositories; queue waits of 52, 127 and 141 minutes on the last three runs
+# that completed here). Every push from this repo took a slot from that shared
+# pool and was then cancelled by the next push: 166 of 200 runs, no verdict, and
+# other repositories waiting behind them.
 on:
-  push:
-    branches: [main]
-  pull_request:
-  # A verdict the next push cannot cancel (fgdb-ci-workflow-check-sh-4csa.2).
-  # Measured 2026-09-02 over the last 200 runs: 166 cancelled by the push
-  # cadence, 32 failed, 1 succeeded — so "CI-enforced" enforced nothing for
-  # 141 commits. Every two hours the current main head gets one run that no
-  # push can supersede; push and pull-request runs keep cancel-in-progress.
-  schedule:
-    - cron: '17 */2 * * *'
   workflow_dispatch:
 
 # Only the current branch head can become the product tree. A superseding
@@ -61,9 +66,11 @@ on:
 # of their own per run id, so they neither cancel nor are cancelled: under a
 # 30–60 push/day cadence, per-ref cancellation alone means no run ever
 # completes, which is the same as having no gate.
+# One group per run id: a manual run is always deliberate, so it neither
+# cancels an earlier one nor is cancelled by a later one.
 concurrency:
-  group: check-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
+  group: check-${{ github.run_id }}
+  cancel-in-progress: false
 
 permissions:
   contents: read

@@ -498,9 +498,11 @@ coverage_exempt_reason() {
     .beads/.write.lock.stale-*)
       echo "STALE BEADS LOCK, COMMITTED BY ACCIDENT — should be removed from the index" ;;
     .github/workflows/*.yml)
-      echo "CI configuration; nothing local executes it — its own run is the \
-           check, and a broken or red workflow surfaces as a failed run on \
-           GitHub, outside this local chain (fgdb-ci-workflow-check-sh-4csa)" ;;
+      echo "hosted-CI recipe, MANUAL DISPATCH ONLY by owner ruling 2026-09-03 \
+           (this project does not use GitHub Actions; releases go through dsr). \
+           Nothing local executes it and nothing hosted executes it on its own, \
+           so it makes no claim this chain has to check; the verdict is \
+           scripts/local_proof.sh on the exact tree (fgdb-ci-workflow-check-sh-4csa)" ;;
     *)
       echo "" ;;
   esac

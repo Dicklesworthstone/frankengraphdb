@@ -13,15 +13,13 @@
 
 name: Agent context capsule
 
+# MANUAL ONLY, BY OWNER RULING (2026-09-03): "we do not use gh actions for any
+# reason, ONLY /dsr". This workflow chained off a completed check.yml run to
+# report its verdict; check.yml no longer runs automatically, so the chain has
+# no source. See the header of check.yml for the measured cost of leaving the
+# automatic triggers on.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/agent-context.yml
-  workflow_run:
-    workflows: [".github/workflows/check.yml"]
-    types: [completed]
 
 concurrency:
   group: agent-context-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
