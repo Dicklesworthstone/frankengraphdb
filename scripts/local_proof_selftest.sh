@@ -276,6 +276,44 @@ printf 'RED fake gate\nFAIL fake gate\n' > "$red_contract_tamper/check.stdout.lo
 rehash "$red_contract_tamper"
 expect_red "$red_contract_tamper" "a red proof without the check.sh reporting contract"
 
+# Checksums certify bytes, not their scalar types. Both supported formats must
+# reject impossible or noncanonical shell statuses, even after honest rehashing.
+v1_red_proof="$base/v1-red"
+make_v1_proof "$red_proof" "$v1_red_proof"
+bash scripts/local_proof_verify.sh --repository "$fixture" "$v1_red_proof" >/dev/null
+for version in 1 2; do
+  if [ "$version" -eq 1 ]; then status_source="$v1_red_proof"; else status_source="$red_proof"; fi
+  for code in 00 007 256 999 18446744073709551616; do
+    status_tamper="$base/status-v$version-$code"
+    cp -R "$status_source" "$status_tamper"
+    awk -F= -v code="$code" '
+      $1 == "check_exit" { print "check_exit=" code; next }
+      { print }
+    ' "$status_source/manifest.txt" > "$status_tamper/manifest.txt"
+    printf '%s\n' "$code" > "$status_tamper/check-exit.txt"
+    rehash "$status_tamper"
+    expect_red "$status_tamper" "format-v$version shell status $code"
+  done
+done
+
+# VOID records actual movement; it cannot stand in for a missing observation.
+for field in commit-after tree-after; do
+  for kind in empty nonhex multiline; do
+    snapshot_tamper="$base/$field-$kind"
+    cp -R "$move_proof" "$snapshot_tamper"
+    case "$kind" in
+      empty) printf '' > "$snapshot_tamper/$field.txt" ;;
+      nonhex) printf 'not-a-git-object\n' > "$snapshot_tamper/$field.txt" ;;
+      multiline)
+        cat "$move_proof/$field.txt" > "$snapshot_tamper/$field.txt"
+        printf 'extra-line\n' >> "$snapshot_tamper/$field.txt"
+        ;;
+    esac
+    rehash "$snapshot_tamper"
+    expect_red "$snapshot_tamper" "a void proof with $kind $field"
+  done
+done
+
 printf 'PASS local-proof v2 semantic controls\n'
 printf 'fixture=%s\n' "$fixture"
 printf 'pass_proof=%s\n' "$pass_proof"

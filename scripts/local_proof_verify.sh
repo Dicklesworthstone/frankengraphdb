@@ -100,7 +100,8 @@ fi
 commit="$(manifest_value commit)" || fail "manifest lacks commit"
 printf '%s\n' "$commit" | grep -Eq '^[0-9a-f]{40}$' || fail "invalid manifest commit"
 check_exit="$(manifest_value check_exit)" || fail "manifest lacks check_exit"
-printf '%s\n' "$check_exit" | grep -Eq '^[0-9]+$' || fail "check_exit is not an unsigned integer"
+[[ "$check_exit" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$check_exit" -le 255 ] \
+  || fail "check_exit must be a canonical shell status in 0..255"
 stable="$(manifest_value tree_stable)" || fail "manifest lacks tree_stable"
 case "$stable" in true|false) ;; *) fail "tree_stable must be true or false" ;; esac
 verdict="$(manifest_value verdict)" || fail "manifest lacks verdict"
@@ -148,6 +149,7 @@ fi
 
 before_commit="$(cat "$proof/commit-before.txt")"
 after_commit="$(cat "$proof/commit-after.txt")"
+[[ "$after_commit" =~ ^[0-9a-f]{40}$ ]] || fail "invalid after-commit object ID"
 before_status="$(cat "$proof/status-before.txt")"
 after_status="$(cat "$proof/status-after.txt")"
 if [ "$format_version" = 2 ]; then
@@ -161,6 +163,7 @@ if [ "$format_version" = 2 ]; then
   [ "$(cat "$proof/check-script-blob.txt")" = "$script_blob" ] || fail "manifest/check-script-blob mismatch"
   before_tree="$(cat "$proof/tree-before.txt")"
   after_tree="$(cat "$proof/tree-after.txt")"
+  [[ "$after_tree" =~ ^[0-9a-f]{40}$ ]] || fail "invalid after-tree object ID"
 else
   tree=""
   path="scripts/check.sh"
