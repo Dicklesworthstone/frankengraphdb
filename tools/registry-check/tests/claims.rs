@@ -1753,9 +1753,11 @@ fn claims_enforcement_ledger_control() {
     assert_eq!(
         enforced,
         vec![
+            "FG-INV-04.pinned-snapshot-visibility".to_string(),
             "FG-INV-05.first-committer-wins".to_string(),
             "FG-INV-09.four-layer-identity-recomputation".to_string(),
             "FG-INV-12.canonical-scalar-coherence".to_string(),
+            "FG-INV-19.replay-grade-monotonicity".to_string(),
         ],
         "the shipped tree enforces exactly these clauses; if this changes, the \
          numbers below are read against a different base and this test must be \

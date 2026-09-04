@@ -2,6 +2,20 @@
 
 This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, architectural plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
+## Unreleased — 2026-09-04 five live invariant clauses
+
+Owning bead: `fgdb-owrc` (P1), after `fgdb-j6aq` and `fgdb-1sto`.
+
+- **`FG-INV-04.pinned-snapshot-visibility`** (owner `fgdb`, G1) binds the system-time half of MVCC visibility in both directions: `the_pinned_seq_answer_is_unmoved_by_later_commits` (a commit after the captured frontier widens the live answer to `[2, 5]` and must leave the pinned answer at `[2]`, with the pinned call made from the same handle before and after the live scan so a cached answer cannot fake it) and `execute_gql_at_live_frontier_equals_execute_gql` (the paired control against a pinning path that passes by hiding legitimate effects). The two symbols live in different artifacts, which the clause law allows — distinct *symbols* is the rule.
+- **`FG-INV-19.replay-grade-monotonicity`** (owner `fgdb-sim`, G3) binds `a_diverging_replay_is_downgraded_to_structural` with `a_faithful_replay_can_reach_the_top_grade` as its negative — the test the suite itself labels "THE CONTROL … this one proves the grader can return it, so those assertions mean something", which is exactly what a `negative_test_entrypoint` is for.
+- `expected_enforced_clauses` 3 → 5, across five different invariant IDs. `expected_enforced_invariants` stays **0**: every `.core` is still stub.
+
+Both are narrowings and the registry says so above each row. FG-INV-04's statement also covers branch ancestry, valid-time slice sets, create/retire and schema-coordinate rules, workspace overlays, erasure tombstones and the expiry predicate; FG-INV-19's covers the evidence-slot matrix and the lease/trust/authority weakening rules. None of that is bound.
+
+### Verification
+
+`registry-check all` 0 violations; `--test claims` 38/38 with the control re-derived to the exact five-key set; `fgdb --test gql_exec_at` 2/2, `--test gql_exec_at_equals_live` 1/1; `fgdb-sim --test sim_completeness` 9/9; `g0_claims_e2e` and `g0_spine_e2e` ALL GREEN. **Six mutation controls**: renaming any of the four bound symbols fires `checker_symbol_unresolved` + `clause_promoted_without_live_checker` + `enforcement_coverage_drift`; under-claiming the ledger (3 against 5) and over-claiming enforced IDs (2 against 0) each fire drift; the final control returns to the noise floor.
+
 ## Unreleased — 2026-09-04 two more live invariant clauses
 
 Owning bead: `fgdb-j6aq` (P1), following `fgdb-1sto`.

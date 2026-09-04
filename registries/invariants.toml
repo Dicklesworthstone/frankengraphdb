@@ -102,9 +102,12 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 # that cross-check quantified over an EMPTY SET and passed — an exit code
 # indistinguishable from a fully enforced spine.
 #
-# THE SET IS NO LONGER EMPTY. Three clauses are live —
-# `FG-INV-05.first-committer-wins`, `FG-INV-09.four-layer-identity-recomputation`
-# and `FG-INV-12.canonical-scalar-coherence` (beads fgdb-1sto, fgdb-j6aq). Each
+# THE SET IS NO LONGER EMPTY. Five clauses are live —
+# `FG-INV-04.pinned-snapshot-visibility`, `FG-INV-05.first-committer-wins`,
+# `FG-INV-09.four-layer-identity-recomputation`,
+# `FG-INV-12.canonical-scalar-coherence` and
+# `FG-INV-19.replay-grade-monotonicity` (beads fgdb-1sto, fgdb-j6aq,
+# fgdb-owrc). Each
 # binds the one sentence of its invariant whose apparatus already runs on every
 # `cargo test` — the canonical-scalar law suite in
 # `crates/fgdb-types/tests/canonical_value_laws.rs` — and leaves
@@ -130,7 +133,7 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 # entrypoints are live checker rows in the full liveness.rs sense. An ID counts
 # only when every clause under it does. Raising either number is a G-gate event:
 # land the checker, then bump the declaration in the same change.
-expected_enforced_clauses = 3
+expected_enforced_clauses = 5
 expected_enforced_invariants = 0
 
 # The CLOSED vocabulary of capability atoms an activation_predicate or a
@@ -263,6 +266,30 @@ proof_lane = "lean-mvcc-visibility"
 owner = "fgdb-txn"
 first_gate = "G1"
 status = "stub"
+waiver = "forbidden"
+
+# A NARROWING of FG-INV-04, not a quote (bead fgdb-owrc). The Appendix F
+# statement also covers branch ancestry per graph-reference role, valid-time
+# slice-set intersection and boundary normalization, create/retire and
+# schema-coordinate rules, workspace overlays, the erasure-tombstone conjunct
+# (§12.6), the expiry predicate (§4.8), and the non-aliasing of distinct branch
+# heads or valid-time selectors. None of that is bound here. What is bound is
+# the system-time half, in both directions: a pinned read must not widen when a
+# later commit lands, and must not narrow below the live answer at the live
+# frontier. `.core` keeps the whole statement.
+[[invariant.clause]]
+key = "FG-INV-04.pinned-snapshot-visibility"
+claim_class = "invariant"
+exact_statement = '''A read pinned at a system-time sequence sees exactly the effects at or below it: a commit after the captured frontier widens the live answer and leaves the pinned answer unmoved, and a pinned read at the live frontier equals the live read.'''
+enforcement = '''Product read-path witness on the embedded `Database` under the lab runtime: the pinned call is made from the same handle before and after the live scan, so an answer cached from the live scan cannot fake it; the live-frontier equality is the paired control against a pinning path that passes by hiding legitimate effects.'''
+activation_predicate = "mvcc-visibility"
+dependencies = []
+checker_entrypoint = "the_pinned_seq_answer_is_unmoved_by_later_commits"
+negative_test_entrypoint = "execute_gql_at_live_frontier_equals_execute_gql"
+model_or_proof_scope = "System-time snapshot visibility on the embedded GQL read path. NOT branch ancestry, valid-time slice sets, create/retire or schema-coordinate rules, workspace overlays, erasure tombstones, or the expiry predicate: those are the rest of FG-INV-04 and stay with .core."
+owner = "fgdb"
+first_gate = "G1"
+status = "live"
 waiver = "forbidden"
 
 # -----------------------------------------------------------------------------
@@ -683,6 +710,27 @@ model_or_proof_scope = "Slot-grade derivation is generated-resolver scoped; repl
 owner = "fgdb-observatory"
 first_gate = "G3"
 status = "stub"
+waiver = "forbidden"
+
+# A NARROWING of FG-INV-19, not a quote (bead fgdb-owrc). The Appendix F
+# statement is the whole registry-rooted manifest law: the structural maximum
+# derived from the versioned evidence-slot matrix, weakening under lease,
+# resolution, trust, configuration or authority change, and the full semantic
+# slot requirement for Replayable. Bound here is only the divergence-downgrade
+# behaviour and its non-vacuity control. `.core` keeps the rest.
+[[invariant.clause]]
+key = "FG-INV-19.replay-grade-monotonicity"
+claim_class = "invariant"
+exact_statement = '''A replay that does not reproduce its recording cannot hold the top grade: divergence downgrades the manifest, while the grader can still award the top grade to a faithful replay.'''
+enforcement = '''Simulation completeness suite: a replay whose fault log differs from the recording is downgraded, paired with the suite's own stated control that a faithful replay can still reach the top grade, so the downgrade assertions are not vacuous.'''
+activation_predicate = "replay-manifests"
+dependencies = []
+checker_entrypoint = "a_diverging_replay_is_downgraded_to_structural"
+negative_test_entrypoint = "a_faithful_replay_can_reach_the_top_grade"
+model_or_proof_scope = "Lab-runtime replay grading in fgdb-sim. NOT the evidence-slot matrix, the lease/trust/authority weakening rules, or the full semantic-slot requirement for Replayable: those are the rest of FG-INV-19 and stay with .core."
+owner = "fgdb-sim"
+first_gate = "G3"
+status = "live"
 waiver = "forbidden"
 
 # -----------------------------------------------------------------------------

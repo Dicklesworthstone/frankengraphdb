@@ -442,6 +442,23 @@ kind = "stub"
 artifact = "crates/fgdb-oracles/src/visibility.rs"
 status = "stub"
 
+# The live half of FG-INV-04 (bead fgdb-owrc): system-time snapshot visibility
+# in both directions. The two symbols sit in different artifacts, which the
+# clause law allows — distinct SYMBOLS is the rule, not distinct artifacts.
+[[checker]]
+symbol = "the_pinned_seq_answer_is_unmoved_by_later_commits"
+kind = "cargo-test"
+artifact = "crates/fgdb/tests/gql_exec_at.rs"
+status = "live"
+unit = "symbol"
+
+[[checker]]
+symbol = "execute_gql_at_live_frontier_equals_execute_gql"
+kind = "cargo-test"
+artifact = "crates/fgdb/tests/gql_exec_at_equals_live.rs"
+status = "live"
+unit = "symbol"
+
 [[checker]]
 symbol = "fg_inv_05_core_checker"
 kind = "stub"
@@ -674,6 +691,22 @@ symbol = "fg_inv_19_core_negative"
 kind = "stub"
 artifact = "crates/fgdb-observatory/src/replay_grades.rs"
 status = "stub"
+
+# The live half of FG-INV-19 (bead fgdb-owrc): replay divergence downgrades the
+# grade, with the suite's own stated control that the top grade is reachable.
+[[checker]]
+symbol = "a_diverging_replay_is_downgraded_to_structural"
+kind = "cargo-test"
+artifact = "crates/fgdb-sim/tests/sim_completeness.rs"
+status = "live"
+unit = "symbol"
+
+[[checker]]
+symbol = "a_faithful_replay_can_reach_the_top_grade"
+kind = "cargo-test"
+artifact = "crates/fgdb-sim/tests/sim_completeness.rs"
+status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "fg_inv_20_core_checker"
