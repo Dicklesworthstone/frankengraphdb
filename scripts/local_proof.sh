@@ -6,7 +6,7 @@
 # worktree movement voids the run. Output directories are never removed or
 # overwritten.
 
-set -uo pipefail
+set -euo pipefail
 
 usage() {
   cat <<'USAGE'
@@ -41,6 +41,13 @@ while [ "$#" -gt 0 ]; do
 done
 
 command -v git >/dev/null 2>&1 || fail "git is required"
+if command -v sha256sum >/dev/null 2>&1; then
+  hash_command=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then
+  hash_command=(shasum -a 256)
+else
+  fail "sha256sum or shasum is required"
+fi
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "not inside a Git worktree"
 cd "$root"
 [ -f scripts/check.sh ] || fail "scripts/check.sh is missing"
@@ -52,7 +59,8 @@ check_script_blob="$(git rev-parse --verify "${before_commit}:${check_script_pat
   || fail "$check_script_path is not tracked by $before_commit"
 short_sha="$(printf '%s' "$before_commit" | cut -c1-12)"
 ref_name="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || printf 'detached')"
-before_status="$(git status --porcelain=v1 --untracked-files=all)"
+before_status="$(git status --porcelain=v1 --untracked-files=all)" \
+  || fail "could not capture the initial worktree state"
 [ -z "$before_status" ] || {
   printf '%s\n' "$before_status" >&2
   fail "proof runs require a clean worktree"
@@ -67,8 +75,10 @@ parent="$(dirname "$output")"
 parent="$(cd "$parent" && pwd -P)"
 output="$parent/$(basename "$output")"
 case "$output" in "$root"|"$root"/*) fail "output must be outside the repository worktree" ;; esac
-[ ! -e "$output" ] || fail "output already exists: $output"
-mkdir "$output"
+[ ! -e "$output" ] && [ ! -L "$output" ] || fail "output already exists: $output"
+# mkdir is the exclusive claim, not the preceding advisory existence check.
+# Never write into another producer's directory if that claim fails.
+mkdir "$output" || fail "could not claim output directory: $output"
 
 printf '%s\n' "$before_commit" > "$output/commit-before.txt"
 printf '%s\n' "$before_tree" > "$output/tree-before.txt"
@@ -84,15 +94,17 @@ printf 'bash scripts/check.sh\n' > "$output/command.txt"
 } > "$output/tools.txt"
 
 started_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-set +e
-bash scripts/check.sh > "$output/check.stdout.log" 2> "$output/check.stderr.log"
-check_exit=$?
-set -e
+if bash scripts/check.sh > "$output/check.stdout.log" 2> "$output/check.stderr.log"; then
+  check_exit=0
+else
+  check_exit=$?
+fi
 finished_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 after_commit="$(git rev-parse --verify HEAD)"
 after_tree="$(git rev-parse --verify "${after_commit}^{tree}")"
-after_status="$(git status --porcelain=v1 --untracked-files=all)"
+after_status="$(git status --porcelain=v1 --untracked-files=all)" \
+  || fail "could not capture the final worktree state"
 printf '%s\n' "$after_commit" > "$output/commit-after.txt"
 printf '%s\n' "$after_tree" > "$output/tree-after.txt"
 printf '%s' "$after_status" > "$output/status-after.txt"
@@ -133,21 +145,18 @@ fi
   printf 'authority=check.sh exit code on the exact stable tree; void when HEAD, committed tree, or worktree state moves\n'
 } > "$output/manifest.txt"
 
-hash_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1"
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1"
-  else
-    fail "sha256sum or shasum is required"
-  fi
-}
 (
   cd "$output"
+  # Process substitution hides find/sort failures from the consuming loop.
+  # Capture the complete inventory synchronously before publishing checksums.
+  inventory="$(find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort)" \
+    || fail "could not enumerate proof inventory"
+  [ -n "$inventory" ] || fail "proof inventory is empty"
   : > SHA256SUMS
   while IFS= read -r file; do
-    hash_file "$file" >> SHA256SUMS
-  done < <(find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort)
+    "${hash_command[@]}" "$file" >> SHA256SUMS \
+      || fail "could not checksum proof file: $file"
+  done <<< "$inventory"
 )
 
 case "$verdict" in

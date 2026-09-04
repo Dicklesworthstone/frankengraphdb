@@ -19,6 +19,9 @@ cp "$source_root/scripts/local_proof_verify.sh" "$fixture/scripts/local_proof_ve
 cat > "$fixture/scripts/check.sh" <<'CHECK'
 #!/usr/bin/env bash
 set -eu
+if [ -n "${FAKE_PROOF_CHECK_MARKER:-}" ]; then
+  printf 'ran\n' > "$FAKE_PROOF_CHECK_MARKER"
+fi
 case "${FAKE_PROOF_MODE:-pass}" in
   pass)
     printf 'PASS fake gate\n'
@@ -29,7 +32,7 @@ case "${FAKE_PROOF_MODE:-pass}" in
     printf 'FAIL fake gate\n'
     printf 'QUALITY GATE RED\n'
     printf 'QUALITY GATE RED\n' >&2
-    exit 7
+    exit "${FAKE_PROOF_RED_EXIT:-7}"
     ;;
   move)
     printf 'changed\n' >> tracked.txt
@@ -115,6 +118,131 @@ bash scripts/local_proof_verify.sh --repository "$fixture" "$move_proof" >/dev/n
 
 git add tracked.txt
 git commit -q -m stabilize-after-movement
+
+# Exercise producer infrastructure failures without compiling or running Rust.
+# All shims and markers live outside the observed repository. Retain every
+# artifact, including a competing writer's sentinel, for diagnosis.
+fault_bin="$base/fault-bin"
+mkdir "$fault_bin"
+LOCAL_PROOF_REAL_GIT="$(command -v git)"
+LOCAL_PROOF_REAL_MKDIR="$(command -v mkdir)"
+LOCAL_PROOF_REAL_FIND="$(command -v find)"
+LOCAL_PROOF_REAL_SORT="$(command -v sort)"
+LOCAL_PROOF_REAL_HASH="$(command -v sha256sum || command -v shasum)"
+export LOCAL_PROOF_REAL_GIT LOCAL_PROOF_REAL_MKDIR LOCAL_PROOF_REAL_FIND
+export LOCAL_PROOF_REAL_SORT LOCAL_PROOF_REAL_HASH
+
+cat > "$fault_bin/git" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = status ]; then
+  case "${FAKE_PROOF_FAULT:-}" in
+    before-status)
+      if [ ! -e "$FAKE_PROOF_CHECK_MARKER" ]; then
+        printf 'injected status capture failure\n' >&2
+        exit 69
+      fi
+      ;;
+    after-status)
+      if [ -e "$FAKE_PROOF_CHECK_MARKER" ]; then
+        printf 'injected status capture failure\n' >&2
+        exit 69
+      fi
+      ;;
+  esac
+fi
+exec "$LOCAL_PROOF_REAL_GIT" "$@"
+SHIM
+cat > "$fault_bin/mkdir" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+if [ "${FAKE_PROOF_FAULT:-}" = output-claim ]; then
+  "$LOCAL_PROOF_REAL_MKDIR" "$@"
+  printf 'other-writer-evidence\n' > "$1/manifest.txt"
+  printf 'injected output claim failure\n' >&2
+  exit 73
+fi
+exec "$LOCAL_PROOF_REAL_MKDIR" "$@"
+SHIM
+cat > "$fault_bin/find" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+if [ "${FAKE_PROOF_FAULT:-}" = inventory-find ]; then
+  printf './command.txt\n'
+  printf 'injected inventory find failure\n' >&2
+  exit 74
+fi
+exec "$LOCAL_PROOF_REAL_FIND" "$@"
+SHIM
+cat > "$fault_bin/sort" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+if [ "${FAKE_PROOF_FAULT:-}" = inventory-sort ]; then
+  "$LOCAL_PROOF_REAL_SORT" "$@"
+  printf 'injected inventory sort failure\n' >&2
+  exit 75
+fi
+exec "$LOCAL_PROOF_REAL_SORT" "$@"
+SHIM
+cat > "$fault_bin/$(basename "$LOCAL_PROOF_REAL_HASH")" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+if [ "${FAKE_PROOF_FAULT:-}" = checksum ]; then
+  printf 'injected checksum failure\n' >&2
+  exit 76
+fi
+exec "$LOCAL_PROOF_REAL_HASH" "$@"
+SHIM
+chmod +x "$fault_bin/"*
+
+expect_producer_abort() {
+  local fault="$1" check_ran="$2" diagnostic="$3"
+  local proof="$base/fault-$fault" marker="$base/ran-$fault"
+  if PATH="$fault_bin:$PATH" FAKE_PROOF_MODE=pass \
+      FAKE_PROOF_FAULT="$fault" FAKE_PROOF_CHECK_MARKER="$marker" \
+      bash scripts/local_proof.sh --output "$proof" \
+      > "$base/$fault.stdout" 2> "$base/$fault.stderr"; then
+    fail "producer accepted $fault infrastructure failure"
+  fi
+  if grep -Eq '^LOCAL_PROOF_(PASS|RED|VOID)$' "$base/$fault.stdout"; then
+    fail "producer published a completed proof after $fault"
+  fi
+  grep -Fq "$diagnostic" "$base/$fault.stderr" \
+    || fail "producer lost $fault tool diagnostics"
+  if [ "$check_ran" = yes ]; then
+    [ -f "$marker" ] || fail "$fault control did not reach check.sh"
+  else
+    [ ! -e "$marker" ] || fail "producer ran check.sh after $fault"
+  fi
+  if [ "$fault" = output-claim ]; then
+    [ "$(cat "$proof/manifest.txt")" = other-writer-evidence ] \
+      || fail "producer overwrote another writer's proof"
+    [ ! -e "$proof/commit-before.txt" ] \
+      || fail "producer wrote evidence without claiming the directory"
+  fi
+}
+
+expect_producer_abort before-status no 'injected status capture failure'
+expect_producer_abort after-status yes 'injected status capture failure'
+expect_producer_abort output-claim no 'injected output claim failure'
+expect_producer_abort inventory-find yes 'injected inventory find failure'
+expect_producer_abort inventory-sort yes 'injected inventory sort failure'
+expect_producer_abort checksum yes 'injected checksum failure'
+
+# A stable check exit 125 is RED, not VOID; 255 remains a valid shell status.
+for code in 125 255; do
+  boundary_proof="$base/red-$code"
+  if FAKE_PROOF_MODE=red FAKE_PROOF_RED_EXIT="$code" \
+      bash scripts/local_proof.sh --output "$boundary_proof" >/dev/null; then
+    fail "producer accepted check exit $code"
+  else
+    boundary_exit=$?
+  fi
+  [ "$boundary_exit" -eq "$code" ] || fail "producer changed check exit $code"
+  grep -Fxq 'verdict=red' "$boundary_proof/manifest.txt" \
+    || fail "stable check exit $code was not RED"
+  bash scripts/local_proof_verify.sh --repository "$fixture" "$boundary_proof" >/dev/null
+done
 
 checksum_tamper="$base/checksum-tamper"
 cp -R "$pass_proof" "$checksum_tamper"
