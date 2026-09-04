@@ -86,6 +86,22 @@ fn scalar_corpus() -> Vec<CanonicalScalar> {
         }
     }
 
+    // The `Timestamp` arm was MISSING here, and its absence was invisible:
+    // `arm_label` listed it, zero members landed in it, so
+    // `hash_separates_distinct_values_within_every_arm` skipped it silently
+    // while the clause bound to that test says "within every scalar arm".
+    // Measured: a `CanonicalTimestamp::hash` that writes nothing left the whole
+    // `fgdb-types` suite green. `temporal.rs` claims in its own doc comment that
+    // "Equality, hashing, and ordering cover every stored semantic component in
+    // field order: UTC instant, stored offset, then optional zone metadata" —
+    // so the members below differ in the instant AND in the offset at a fixed
+    // instant, which is what makes an offset-blind kernel observable.
+    for (instant, offset) in [(0_i128, 0_i32), (0, 3_600), (1_000_000_000, 0)] {
+        if let Ok(value) = CanonicalTimestamp::offset_only(instant, offset) {
+            values.push(CanonicalScalar::Timestamp(value));
+        }
+    }
+
     values
 }
 
@@ -143,6 +159,18 @@ fn canonical_scalar_byte_order_equals_value_order() {
             assert_eq!(
                 byte_order, value_order,
                 "byte order disagrees with value order for {left:?} vs {right:?}"
+            );
+            // EQUALITY, bound explicitly rather than inferred from `Ord`'s
+            // Equal cells. The clause on this test claims equality, ordering
+            // and encoding are coherent, and `CanonicalF64` carries a
+            // hand-written `PartialEq` AND a hand-written `Ord`, so the two can
+            // disagree while every comparison above still passes. Measured: a
+            // `PartialEq` that ignores the sign bit (making -1.0 == 1.0 while
+            // `cmp` says Less) leaves this test green without this line.
+            assert_eq!(
+                left == right,
+                value_order == core::cmp::Ordering::Equal,
+                "`==` disagrees with `Ord::Equal` for {left:?} vs {right:?}"
             );
         }
     }
@@ -301,18 +329,23 @@ fn equal_values_encode_to_identical_bytes() {
 /// The differently-spelled pairs below are the ones that matter: two spellings
 /// that compare equal but hash apart is the bug this law exists to catch.
 ///
-/// **MEASURED HONESTLY: no mutation of the current kernel makes this test
-/// red.** Every normalisation in this module happens at CONSTRUCTION — `-0.0`
-/// collapses to `+0` bits, every NaN spelling to one pattern, every decimal
-/// scale to one coefficient — so equal values are already bit-identical by the
-/// time any `Hash` sees them, and the forward implication holds for any hash
-/// that is a function of those bits. Three kernel mutations (an empty
-/// `CanonicalF64::hash`, a discriminant-only `CanonicalScalar::hash`, and a
-/// numeric-keyed float hash against a bit-keyed `Eq`) all left it green. It is
-/// therefore a REGRESSION LOCK, not today's constraint: it fixes the property
-/// so that the first type to normalise inside `Eq` rather than at construction
-/// cannot drift its `Hash` silently. The test below is what constrains the
-/// kernel now, and all three of those mutations turn it red.
+/// **MEASURED, and the measurement decides what this test is for.** No mutation
+/// of a `Hash` impl makes it red: every normalisation in this module happens at
+/// CONSTRUCTION — `-0.0` collapses to `+0` bits, every NaN spelling to one
+/// pattern, every decimal scale to one coefficient — so equal values are
+/// already bit-identical by the time any `Hash` sees them, and the forward
+/// implication holds for any hash that is a function of those bits. Three such
+/// mutations (an empty `CanonicalF64::hash`, a discriminant-only
+/// `CanonicalScalar::hash`, and a numeric-keyed float hash against a bit-keyed
+/// `Eq`) all left it green, and the control below reds on all three.
+///
+/// It is NOT inert, and an earlier version of this comment wrongly said no
+/// mutation could red it. It fires on an **`Eq` drift**: a `PartialEq` that
+/// ignores the float sign bit — making `-1.0 == 1.0` while `Ord` still says
+/// `Less` — turns this test red, because the pair then compares equal and
+/// hashes apart. That is the one direction no other bound symbol in the spine
+/// watches, so this is a live constraint on `Eq`, plus a regression lock for
+/// the first type that normalises inside `Eq` rather than at construction.
 #[test]
 fn equal_values_hash_identically() {
     fn hash_of(value: &CanonicalScalar) -> u64 {
