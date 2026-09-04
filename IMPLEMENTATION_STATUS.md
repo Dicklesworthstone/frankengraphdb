@@ -271,6 +271,14 @@ The v2 verifier imports the bundle into an isolated repository and recomputes th
 
 Verdicts remain three-valued: stable `pass`, stable `red`, and moving-tree `void`.
 
+The producer follows one evidence lifecycle: **observe → exclusively claim output → execute → observe → checksum → publish**. Failed state capture, a failed directory claim, incomplete inventory enumeration, or failed checksumming aborts collection with nonzero exit and retained diagnostics. Collection failure is not a fourth completed-proof verdict and cannot be relabeled as `void`: `void` records observed state movement, not a missing observation. No completed `LOCAL_PROOF_*` marker is emitted after a collection failure, and a failed directory claim must not write into another producer's evidence.
+
+`scripts/local_proof_verify.sh` independently validates the complete inventory, checksums, manifest, and reporting contract. Shell statuses must be canonical decimal integers in `0..255`; captured after-state object IDs must be complete single-line Git IDs. Existing format-v1 reading and format-v2 production remain separate from these semantic checks.
+
+**Verified is not green.** A consistent `red` or `void` bundle also passes independent verification. A landing needs a verified `pass` bundle bound to its intended source tree, `check_exit=0`, and `tree_stable=true`. A stable check exiting `125` remains `red`; observed tree movement produces `void` with wrapper exit `125`. Neither wrapper exit `125` nor verifier exit `0`, alone, identifies a green run.
+
+The failure-path witness is `bash scripts/local_proof_selftest.sh`: it uses retained temporary Git repositories and fake check commands to exercise capture and verification without compiling Rust. It is not the repository-wide quality gate. Checksums establish internal consistency, not producer identity; before/after snapshots alone do not prove the absence of every transient edit between observations.
+
 ## Agent source-ownership map
 
 | Concern | Canonical owner |
@@ -292,6 +300,9 @@ Verdicts remain three-valued: stable `pass`, stable `red`, and moving-tree `void
 | staged transaction overlay and conflict tracking | `crates/fgdb/src/write_txn_parts/` |
 | independent semantic oracle | `crates/fgdb-reference` |
 | crash/differential harness | `crates/fgdb-sim` |
+| exact-tree proof capture and publication | `scripts/local_proof.sh` |
+| independent proof-bundle validation | `scripts/local_proof_verify.sh` |
+| proof capture/validation fault witnesses | `scripts/local_proof_selftest.sh` |
 
 Do not add a second parser, binder, execution kernel, session type, or issuing certificate authority merely to make a narrow test pass. Independent artifact decoding is allowed only while product audit cross-checks the canonical certificate transcript, as the current path does.
 
@@ -327,7 +338,7 @@ The repository-wide authority remains:
 bash scripts/check.sh
 ```
 
-Every cargo gate in that chain runs `--locked`, so a manifest edit landed without regenerating `Cargo.lock` reds the gate with cargo's own message instead of being rewritten silently. The verdict for a tree is the exit code of that chain executed on that exact tree, captured by `scripts/local_proof.sh`; hosted CI additionally runs the chain on a two-hour schedule that the push cadence cannot cancel.
+Every cargo gate in that chain runs `--locked`, so a manifest edit landed without regenerating `Cargo.lock` reds the gate with cargo's own message instead of being rewritten silently. The verdict for a tree is the exit code of that chain executed on that exact tree, captured by `scripts/local_proof.sh` and independently checked with `scripts/local_proof_verify.sh --repository <checkout> <proof-directory>`. Per `AGENTS.md`, automatic hosted CI is not a substitute for this local evidence; do not assume a scheduled or push-triggered run supplies a missing verdict.
 
 A paragraph in this file or in `CHANGELOG.md` describing checks that were not run is not a verdict and must not be read as one. Between 2026-08-31 and 2026-09-02, 141 commits were landed from an environment without the pinned toolchain; the tree did not compile for 33 of them, and the accompanying prose said so instead of refusing. That is recorded as NE-0045 in `docs/NEGATIVE_EVIDENCE.md`, and the repair is `b51e3232` plus the commit that lands this paragraph.
 
@@ -349,7 +360,7 @@ The following remain incomplete or absent:
 
 ## Dependency-ordered next work
 
-1. Run the pinned toolchain and preserve the exact-tree verdict with `scripts/local_proof.sh`.
+1. Establish a trustworthy evidence baseline before further feature landings: run the pinned toolchain through `scripts/local_proof.sh`, independently verify the complete bundle against the intended checkout, and distinguish a verified green result from a verified red/void result or aborted collection. Focused proof-wrapper tests do not discharge the whole-tree gate.
 2. Add typed parameters as structural parser operands; never use string substitution.
 3. Bind canonical parameter values into preparation identity, certificates, and evidence envelopes.
 4. Decide whether the application envelope and page token graduate into registered compatibility contracts; freeze ceilings and golden vectors first.
