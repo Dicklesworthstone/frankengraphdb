@@ -427,6 +427,10 @@ fn dedup_does_not_cross_namespaces_or_keys() {
         c.object_id(),
         "K_oid is what stops an offline plaintext dictionary"
     );
+    // The refusal follows from the identity difference, but the registry
+    // clause bound to this test claims BOTH arms refuse deduplication, so
+    // both arms observe it rather than leaving one to inference.
+    assert!(!a.may_deduplicate_against(&c));
 }
 
 /// The object kind is part of full collision verification: two objects with

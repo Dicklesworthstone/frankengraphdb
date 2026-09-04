@@ -2,6 +2,25 @@
 
 This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, architectural plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
+## Unreleased — 2026-09-04 an overclaimed invariant clause, corrected into real coverage
+
+Owning bead: `fgdb-owrc`. Prompted by an independent verifier's finding, not by self-review.
+
+### What was wrong
+
+`FG-INV-12.canonical-scalar-coherence` shipped `status = "live"` with a statement claiming **"equality, hashing, ordering, and encoding are coherent"** — and nothing it bound touched a hash. `CanonicalF64` carries a hand-written `PartialEq` *and* a hand-written `Hash`, which is precisely where `Eq`/`Hash` drift silently, and the module header asserts the forward implication that no test checked. A live clause is counted by the ledger as enforcement, so a statement that reaches past its apparatus is worse than a stub: it converts an honest gap into a false claim.
+
+### What changed
+
+- The word "hashing" is removed from that clause, and the conjunct is carried by a new **`FG-INV-12.hash-coherence`** bound to two tests written for it: `equal_values_hash_identically` (the forward law over the corpus plus the pairs that only compare equal through normalisation — `-0.0` against `0.0`, two NaN spellings, one decimal at two scales) and `hash_separates_distinct_values_within_every_arm` (the non-vacuity control).
+- **The measurement is in the test comments, because it changes what the pair means.** The forward law survives every kernel mutation tried: every normalisation in `fgdb-types` happens at construction, so equal values are bit-identical before any `Hash` sees them. It is a regression lock for the first type that normalises inside `Eq` instead. The control is what constrains today — an empty `CanonicalF64::hash` reds the `Float` arm, a discriminant-only `CanonicalScalar::hash` reds `Bool`, and a numeric-keyed float hash against a bit-keyed `Eq` reds `Float`. A first version of that control asserted only "more than one distinct hash across the whole corpus" and **all three mutations passed it**; that is why it asserts per arm.
+- `FG-INV-12`'s enforcement text no longer claims "byte-deterministic" or "every NaN spelling included" (NaN is not in the corpus; re-encode determinism is an unbound sibling). `FG-INV-09`'s K_oid arm now *observes* the deduplication refusal its clause claims, instead of leaving it to inference. The ledger header, still describing the single-clause state, is rewritten and now carries the narrowing warning.
+- `expected_enforced_clauses` 5 → 6. `expected_enforced_invariants` still 0.
+
+### A limit of the ledger, documented in place
+
+Demoting a live clause to stub **and** lowering `expected_enforced_clauses` in the same edit is self-consistent and passes `registry-check all` with zero violations — a silent regression of enforcement under a green verdict. The registry cannot catch it: it knows what the tree says, not what it ought to say. The exact key set asserted by `claims_enforcement_ledger_control` is the only guard, confirmed by running that test against the mutated tree, where it fails naming the missing key while every registry law stays silent. The registry now says so beside the ledger, with a note never to weaken that assertion back to a count.
+
 ## Unreleased — 2026-09-04 five live invariant clauses
 
 Owning bead: `fgdb-owrc` (P1), after `fgdb-j6aq` and `fgdb-1sto`.

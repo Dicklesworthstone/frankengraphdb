@@ -608,6 +608,23 @@ artifact = "crates/fgdb-types/tests/canonical_value_laws.rs"
 status = "live"
 unit = "symbol"
 
+# The hashing conjunct (bead fgdb-owrc). Written for the clause after an
+# independent verifier found FG-INV-12 claiming hash coherence with nothing
+# bound that touched a hash.
+[[checker]]
+symbol = "equal_values_hash_identically"
+kind = "cargo-test"
+artifact = "crates/fgdb-types/tests/canonical_value_laws.rs"
+status = "live"
+unit = "symbol"
+
+[[checker]]
+symbol = "hash_separates_distinct_values_within_every_arm"
+kind = "cargo-test"
+artifact = "crates/fgdb-types/tests/canonical_value_laws.rs"
+status = "live"
+unit = "symbol"
+
 [[checker]]
 symbol = "fg_inv_13_core_checker"
 kind = "stub"

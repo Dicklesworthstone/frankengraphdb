@@ -1757,6 +1757,7 @@ fn claims_enforcement_ledger_control() {
             "FG-INV-05.first-committer-wins".to_string(),
             "FG-INV-09.four-layer-identity-recomputation".to_string(),
             "FG-INV-12.canonical-scalar-coherence".to_string(),
+            "FG-INV-12.hash-coherence".to_string(),
             "FG-INV-19.replay-grade-monotonicity".to_string(),
         ],
         "the shipped tree enforces exactly these clauses; if this changes, the \

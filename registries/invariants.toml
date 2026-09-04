@@ -102,22 +102,30 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 # that cross-check quantified over an EMPTY SET and passed — an exit code
 # indistinguishable from a fully enforced spine.
 #
-# THE SET IS NO LONGER EMPTY. Five clauses are live —
+# THE SET IS NO LONGER EMPTY. Six clauses are live across five invariant ids —
 # `FG-INV-04.pinned-snapshot-visibility`, `FG-INV-05.first-committer-wins`,
 # `FG-INV-09.four-layer-identity-recomputation`,
-# `FG-INV-12.canonical-scalar-coherence` and
+# `FG-INV-12.canonical-scalar-coherence`, `FG-INV-12.hash-coherence` and
 # `FG-INV-19.replay-grade-monotonicity` (beads fgdb-1sto, fgdb-j6aq,
-# fgdb-owrc). Each
-# binds the one sentence of its invariant whose apparatus already runs on every
-# `cargo test` — the canonical-scalar law suite in
-# `crates/fgdb-types/tests/canonical_value_laws.rs` — and leaves
-# `FG-INV-12.core` stub, because the rest of that statement (answer-equivalent
-# rewrites, workspace materialization, safe replan, AnswerContract) has no
-# apparatus at all. An ID counts as enforced only when EVERY clause under it
-# does, so FG-INV-12 is still not an enforced ID and
-# `expected_enforced_invariants` stays 0. That asymmetry is the honest shape:
-# the law now quantifies over something real without claiming the subsystem is
-# verified.
+# fgdb-owrc). Each binds a property of its invariant whose apparatus already
+# runs on every `cargo test`: the canonical-scalar law suite in `fgdb-types`,
+# the identity pipeline in `fgdb-chronicle`, the first-committer-wins witness
+# and the pinned-snapshot read on the embedded `fgdb` product paths, and the
+# replay grader in `fgdb-sim`.
+#
+# EVERY ONE OF THEM IS A NARROWING, and each carries a comment above its row
+# saying so and naming what stays with its `.core`. That is not politeness. A
+# live clause is counted by the ledger below as enforcement, so a statement
+# that reaches past its apparatus converts a stub into a false claim — which is
+# exactly what happened once here and was caught by an independent verifier:
+# `FG-INV-12.canonical-scalar-coherence` shipped claiming "equality, hashing,
+# ordering, and encoding" while binding nothing that touched a hash. Write the
+# statement to the apparatus, not to the Appendix F sentence.
+#
+# Every `.core` clause is still stub, and an ID counts as enforced only when
+# EVERY clause under it does, so `expected_enforced_invariants` stays 0 while
+# six clauses are enforced. That asymmetry is the honest shape: the law now
+# quantifies over something real without claiming any subsystem is verified.
 #
 # These two numbers are what make the zero mean "deliberately zero" instead of
 # "nothing was examined", in the same shape sample_capability_manifest.toml's
@@ -133,7 +141,23 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 # entrypoints are live checker rows in the full liveness.rs sense. An ID counts
 # only when every clause under it does. Raising either number is a G-gate event:
 # land the checker, then bump the declaration in the same change.
-expected_enforced_clauses = 5
+# WHAT THESE TWO NUMBERS DO NOT CATCH, measured 2026-09-04 (bead fgdb-owrc,
+# reproduced independently after a verifier found it). They check the
+# declaration against the tree, so a change that moves BOTH — demoting a live
+# clause to stub AND lowering the count in the same edit — is self-consistent
+# and passes `registry-check all` with zero violations. That is a silent
+# regression of enforcement under a green verdict.
+#
+# Nothing in this registry can catch it, and that is structural rather than a
+# defect to fix here: the registry knows what the tree says, not what it OUGHT
+# to say. The expectation lives in the one place that can hold it, as an exact
+# key set — `claims_enforcement_ledger_control` in
+# `tools/registry-check/tests/claims.rs`, which asserts the measured enforced
+# clauses BY KEY. Confirmed by mutation: with the demotion above applied, that
+# test fails naming the missing key while every registry law stays silent.
+# Never weaken that assertion back to a count; it is the only guard against
+# this class.
+expected_enforced_clauses = 6
 expected_enforced_invariants = 0
 
 # The CLOSED vocabulary of capability atoms an activation_predicate or a
@@ -525,6 +549,16 @@ first_gate = "G1"
 status = "stub"
 waiver = "forbidden"
 
+# CORRECTED 2026-09-04 (bead fgdb-owrc, on an independent verifier's finding):
+# this clause's statement said "equality, hashing, ordering, and encoding", and
+# NOTHING it binds proves the hashing conjunct — `CanonicalF64` carries a
+# hand-written `Eq` AND a hand-written `Hash`, which is exactly where the two
+# drift apart, and no bound test looked at a hash at all. The word is removed
+# here and the hashing half is carried by `FG-INV-12.hash-coherence` below,
+# which binds tests written for it. A live clause that claims a conjunct its
+# apparatus never touches is worse than a stub one, because the ledger counts
+# it as enforced.
+#
 # The first live clause in the spine. It carves the sentence of FG-INV-12 that
 # `crates/fgdb-types/tests/canonical_value_laws.rs` already proves on every
 # `cargo test` run, and claims nothing beyond it: the corpus is the shipped
@@ -535,13 +569,40 @@ waiver = "forbidden"
 [[invariant.clause]]
 key = "FG-INV-12.canonical-scalar-coherence"
 claim_class = "invariant"
-exact_statement = '''Canonical scalar equality, hashing, ordering, and encoding are coherent.'''
-enforcement = '''Property suite over the shipped canonical-scalar corpus, every arm and boundary: bytewise lexicographic order equals `Ord`, encoding is injective and byte-deterministic, equal values encode identically (-0.0 and every NaN spelling included), and a non-canonical durable bit pattern is refused rather than silently repaired.'''
+exact_statement = '''Canonical scalar equality, ordering, and encoding are coherent.'''
+enforcement = '''Property suite over the shipped canonical-scalar corpus, every arm and boundary: bytewise lexicographic comparison of the encoding equals `Ord` over the corpus, and a non-canonical durable bit pattern is refused rather than silently repaired. Injectivity, re-encode determinism, equal-values-encode-identically, and the -0.0 and NaN normalisations are sibling tests in the same suite, not bound symbols.'''
 activation_predicate = "canonical-scalars"
 dependencies = []
 checker_entrypoint = "canonical_scalar_byte_order_equals_value_order"
 negative_test_entrypoint = "non_canonical_float_bits_are_rejected_rather_than_repaired"
 model_or_proof_scope = "Exhaustive over the shipped scalar corpus and its boundary values; no formal lane, and no claim about values outside the corpus."
+owner = "fgdb-types"
+first_gate = "G1"
+status = "live"
+waiver = "forbidden"
+
+# The hashing conjunct FG-INV-12's statement names, bound to tests written for
+# it (bead fgdb-owrc). The pairing is the FG-INV-19 shape and is disclosed as
+# such: the checker is the forward law, and the negative is the control that
+# makes it mean something. That order is deliberate and MEASURED. Every
+# normalisation in `fgdb-types` happens at construction, so equal values are
+# bit-identical before any `Hash` sees them and the forward law survives every
+# kernel mutation tried — it is a regression lock for the first type that
+# normalises inside `Eq` instead. The control is what constrains the kernel
+# today: an empty `CanonicalF64::hash`, a discriminant-only
+# `CanonicalScalar::hash`, and a numeric-keyed float hash against a bit-keyed
+# `Eq` each turn it red, and the first two are precisely the shapes that
+# satisfy the forward law while destroying every hash map in the database.
+[[invariant.clause]]
+key = "FG-INV-12.hash-coherence"
+claim_class = "invariant"
+exact_statement = '''Canonical scalar hashing is a function of the canonical value: equal values hash identically, and within every scalar arm the hash separates distinct values rather than ignoring its payload.'''
+enforcement = '''Two paired properties over the shipped canonical-scalar corpus. Forward: equal values, including the differently-spelled pairs that only compare equal through normalisation (-0.0 against 0.0, two NaN spellings, one decimal at two scales), must hash identically. Non-vacuity: within each arm holding two or more distinct values, those values must not share a hash — proven to constrain by three reverted kernel mutations, since a hash that writes nothing or writes only the enum discriminant satisfies the forward property for every input in the universe.'''
+activation_predicate = "canonical-scalars"
+dependencies = []
+checker_entrypoint = "equal_values_hash_identically"
+negative_test_entrypoint = "hash_separates_distinct_values_within_every_arm"
+model_or_proof_scope = "The shipped scalar corpus and its boundary values, over at least three arms holding two or more distinct values each. No claim of hash injectivity, no claim about values outside the corpus, and no claim about hash quality or distribution."
 owner = "fgdb-types"
 first_gate = "G1"
 status = "live"

@@ -31,7 +31,7 @@ use fgdb_types::{
     MIN_TIMESTAMP_UTC_NANOS, NonBinaryTextBinding, ObjectId, TzdbResolver,
 };
 use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 
 /// A boundary-heavy scalar set: every arm of the union, and for each numeric
 /// arm the domain edges where sign handling and width handling break.
@@ -285,6 +285,174 @@ fn equal_values_encode_to_identical_bytes() {
             }
         }
     }
+}
+
+/// **Equal values must hash identically** — the half of FG-INV-12's coherence
+/// sentence that `equal_values_encode_to_identical_bytes` does not reach.
+///
+/// This is not a formality. `CanonicalF64` carries a HAND-WRITTEN `PartialEq`
+/// and a HAND-WRITTEN `Hash` (`scalar.rs`), which is exactly the shape where
+/// `Eq`/`Hash` drift apart silently: nothing in the compiler ties them, and a
+/// kernel that compares on the numeric value while hashing on the raw bits
+/// passes every encoding law in this file and still breaks every hash map in
+/// the database. `CanonicalDecimal` has the same exposure through scale
+/// normalisation, and `CanonicalText` through collation.
+///
+/// The differently-spelled pairs below are the ones that matter: two spellings
+/// that compare equal but hash apart is the bug this law exists to catch.
+///
+/// **MEASURED HONESTLY: no mutation of the current kernel makes this test
+/// red.** Every normalisation in this module happens at CONSTRUCTION — `-0.0`
+/// collapses to `+0` bits, every NaN spelling to one pattern, every decimal
+/// scale to one coefficient — so equal values are already bit-identical by the
+/// time any `Hash` sees them, and the forward implication holds for any hash
+/// that is a function of those bits. Three kernel mutations (an empty
+/// `CanonicalF64::hash`, a discriminant-only `CanonicalScalar::hash`, and a
+/// numeric-keyed float hash against a bit-keyed `Eq`) all left it green. It is
+/// therefore a REGRESSION LOCK, not today's constraint: it fixes the property
+/// so that the first type to normalise inside `Eq` rather than at construction
+/// cannot drift its `Hash` silently. The test below is what constrains the
+/// kernel now, and all three of those mutations turn it red.
+#[test]
+fn equal_values_hash_identically() {
+    fn hash_of(value: &CanonicalScalar) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let corpus = scalar_corpus();
+    for left in &corpus {
+        for right in &corpus {
+            if left == right {
+                assert_eq!(
+                    hash_of(left),
+                    hash_of(right),
+                    "equal values {left:?} and {right:?} hash differently"
+                );
+            }
+        }
+    }
+
+    // The spellings a derived Hash would never see, because they only compare
+    // equal through hand-written normalisation.
+    let pairs: Vec<(CanonicalScalar, CanonicalScalar)> = vec![
+        (
+            CanonicalScalar::Float(CanonicalF64::new(-0.0)),
+            CanonicalScalar::Float(CanonicalF64::new(0.0)),
+        ),
+        (
+            CanonicalScalar::Float(CanonicalF64::new(f64::NAN)),
+            CanonicalScalar::Float(CanonicalF64::new(-f64::NAN)),
+        ),
+        (
+            CanonicalScalar::Decimal(
+                CanonicalDecimal::from_scaled_half_even(1, 0).expect("1 at scale 0"),
+            ),
+            CanonicalScalar::Decimal(
+                CanonicalDecimal::from_scaled_half_even(1_000_000, 6).expect("1 at scale 6"),
+            ),
+        ),
+    ];
+    for (left, right) in &pairs {
+        assert_eq!(
+            left, right,
+            "premise of this arm: {left:?} and {right:?} must compare equal"
+        );
+        assert_eq!(
+            hash_of(left),
+            hash_of(right),
+            "equal spellings {left:?} and {right:?} hash differently"
+        );
+    }
+}
+
+/// **THE CONTROL that makes the law above mean something**, and the half that
+/// actually constrains the kernel today.
+///
+/// A `Hash` that writes nothing, or writes only the enum discriminant,
+/// satisfies "equal values hash identically" for every input in the universe.
+/// Measured, not assumed: with only a whole-corpus "more than one distinct
+/// hash" assertion, an empty `CanonicalF64::hash` AND a discriminant-only
+/// `CanonicalScalar::hash` both passed, because distinct arms still differ.
+/// So the assertion is made WITHIN each arm, where a hash that ignores its
+/// payload has nowhere to hide.
+///
+/// This is not an injectivity claim. Hashes may collide, and asserting
+/// otherwise in general would pin an implementation detail. It is a
+/// non-vacuity claim over a fixed, boundary-heavy corpus: these particular
+/// distinct values, which differ only in payload, must not collapse together.
+///
+/// **Proven to constrain, by mutation** (each reverted; the pristine tree is
+/// green before and after): an empty `CanonicalF64::hash` reds the `Float`
+/// arm; a discriminant-only `CanonicalScalar::hash` reds the `Bool` arm; and a
+/// float hash keyed on the numeric value while `Eq` stays on the bits reds
+/// `Float` by collapsing two distinct values that truncate alike. The first
+/// two are exactly the shapes that satisfy "equal values hash identically"
+/// while destroying every hash map in the database.
+#[test]
+fn hash_separates_distinct_values_within_every_arm() {
+    fn hash_of(value: &CanonicalScalar) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    // Exhaustive on purpose, with no wildcard: adding a scalar arm must break
+    // this build so the corpus is extended to cover it rather than silently
+    // leaving the new arm unconstrained.
+    fn arm_label(value: &CanonicalScalar) -> &'static str {
+        match value {
+            CanonicalScalar::Null => "Null",
+            CanonicalScalar::Bool(_) => "Bool",
+            CanonicalScalar::Int(_) => "Int",
+            CanonicalScalar::Decimal(_) => "Decimal",
+            CanonicalScalar::Float(_) => "Float",
+            CanonicalScalar::Text(_) => "Text",
+            CanonicalScalar::Timestamp(_) => "Timestamp",
+            CanonicalScalar::Bytes(_) => "Bytes",
+        }
+    }
+
+    let corpus = scalar_corpus();
+    let mut arms: Vec<(&'static str, Vec<&CanonicalScalar>)> = Vec::new();
+    for value in &corpus {
+        let kind = arm_label(value);
+        match arms.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, members)) => {
+                if !members.iter().any(|other| *other == value) {
+                    members.push(value);
+                }
+            }
+            None => arms.push((kind, vec![value])),
+        }
+    }
+
+    let mut constrained_arms = 0usize;
+    for (kind, members) in &arms {
+        if members.len() < 2 {
+            continue;
+        }
+        constrained_arms += 1;
+        for (left_index, left) in members.iter().enumerate() {
+            for (right_index, right) in members.iter().enumerate() {
+                if left_index >= right_index {
+                    continue;
+                }
+                assert_ne!(
+                    hash_of(left),
+                    hash_of(right),
+                    "{kind}: distinct values {left:?} and {right:?} share a hash, so \
+                     this arm's hash ignores its payload"
+                );
+            }
+        }
+    }
+    assert!(
+        constrained_arms >= 3,
+        "control premise: at least three arms must hold two or more distinct \
+         values, or this law quantifies over almost nothing; got {constrained_arms}"
+    );
 }
 
 #[test]
