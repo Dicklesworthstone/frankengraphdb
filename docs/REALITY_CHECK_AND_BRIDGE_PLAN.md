@@ -390,27 +390,32 @@ closed as premise-void, and the l9r3 narrowing question is answered by the same
 ruling: branch protection with a required status check was the only true
 "refusal" available, and it requires the CI this project does not use.
 
-**Gap 5 moved: the invariant spine has its first live clause.** The registry
-that AGENTS.md calls a hard gate — no subsystem ships against an unenforced
-invariant, and a workstream exit gate cannot pass while an invariant it depends
-on lacks a live checker — held twenty invariants and twenty clauses, every one
-of them `stub`, with every checker entrypoint resolving to a stub row pointing
-at `crates/fgdb-oracles/`, a crate that does not exist. The cross-check
-therefore quantified over an empty set and passed, which is an exit code
-indistinguishable from a fully enforced spine. Meanwhile the canonical-value law
-suite in `fgdb-types` has been proving the first sentence of FG-INV-12 on every
-`cargo test` run. That sentence is now a subordinate clause bound to those
-tests, `status = "live"`, with the declared enforcement ledger raised from zero
-to one in the same change, which the registry itself calls a G-gate event.
-`FG-INV-12.core` stays stub because the rest of its statement has no apparatus,
-and no invariant ID counts as enforced, so the honest ledger reads one enforced
-clause and zero enforced IDs. Four mutation controls in a scratch copy show the
-binding is load-bearing: renaming the bound test, flipping its checker row back
-to stub, pointing the artifact at a file `cargo test` never compiles, and
-restating the declaration as zero each turn the registry red, and reverting them
-returns it to the baseline. The remaining nineteen invariants are unchanged, and
-fourteen of them name owning subsystems that do not exist yet; what changed is
-that the law now quantifies over something real.
+**Gap 5 moved: the invariant spine enforces five clauses across five
+invariants.** The registry that AGENTS.md calls a hard gate — no subsystem
+ships against an unenforced invariant, and a workstream exit gate cannot pass
+while an invariant it depends on lacks a live checker — held twenty invariants
+and twenty clauses, every one `stub`, with every checker entrypoint resolving
+to a stub row pointing at `crates/fgdb-oracles/`, a crate that does not exist.
+The cross-check therefore quantified over an empty set and passed, which is an
+exit code indistinguishable from a fully enforced spine. Five clauses are now
+bound to apparatus that runs on every `cargo test`: canonical scalar coherence
+in `fgdb-types`, four-layer identity recomputation in `fgdb-chronicle`,
+first-committer-wins on the embedded write path, pinned-snapshot visibility on
+the GQL read path, and replay-grade monotonicity in `fgdb-sim`. Each names one
+checker and one negative, and each carries a comment in the registry saying it
+is a narrowing and what stays with its `.core` clause, so a live row cannot be
+read as a claim about the whole invariant. The declared ledger moved from zero
+to five in the same changes as the checkers, which the registry defines as a
+G-gate event, and `expected_enforced_invariants` remains 0: an ID counts only
+when every clause under it is enforced, and every `.core` is still stub.
+Eighteen mutation controls across the three landings — renaming either bound
+test of any clause, flipping a checker row back to stub, pointing an artifact
+at a file `cargo test` never compiles, and misstating the ledger in either
+direction — each turned the registry red against a constant noise floor, with
+clean final controls. Fifteen invariants remain wholly stub, fourteen of them
+naming owning subsystems that do not exist, and no workstream exit gate passes
+because of this. What changed is that the law now quantifies over something
+real, and five of the engine's load-bearing behaviours cannot regress silently.
 
 ### Evidence boundary
 
