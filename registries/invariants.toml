@@ -570,7 +570,7 @@ waiver = "forbidden"
 key = "FG-INV-12.canonical-scalar-coherence"
 claim_class = "invariant"
 exact_statement = '''Canonical scalar equality, ordering, and encoding are coherent.'''
-enforcement = '''Property suite over the shipped canonical-scalar corpus, every arm and boundary: bytewise lexicographic comparison of the encoding equals `Ord` over the corpus, and a non-canonical durable bit pattern is refused rather than silently repaired. Injectivity, re-encode determinism, equal-values-encode-identically, and the -0.0 and NaN normalisations are sibling tests in the same suite, not bound symbols.'''
+enforcement = '''Property suite over the shipped canonical-scalar corpus, every arm and boundary: bytewise lexicographic comparison of the encoding equals `Ord` over the corpus, `==` agrees with `Ord::Equal` on every pair (bound explicitly, because `CanonicalF64` carries a hand-written `PartialEq` AND a hand-written `Ord` that can disagree while every ordering comparison still passes), and a non-canonical durable bit pattern is refused rather than silently repaired. Injectivity, re-encode determinism, equal-values-encode-identically, and the -0.0 and NaN normalisations are sibling tests in the same suite, not bound symbols.'''
 activation_predicate = "canonical-scalars"
 dependencies = []
 checker_entrypoint = "canonical_scalar_byte_order_equals_value_order"
@@ -596,8 +596,8 @@ waiver = "forbidden"
 [[invariant.clause]]
 key = "FG-INV-12.hash-coherence"
 claim_class = "invariant"
-exact_statement = '''Canonical scalar hashing is a function of the canonical value: equal values hash identically, and within every scalar arm the hash separates distinct values rather than ignoring its payload.'''
-enforcement = '''Two paired properties over the shipped canonical-scalar corpus. Forward: equal values, including the differently-spelled pairs that only compare equal through normalisation (-0.0 against 0.0, two NaN spellings, one decimal at two scales), must hash identically. Non-vacuity: within each arm holding two or more distinct values, those values must not share a hash — proven to constrain by three reverted kernel mutations, since a hash that writes nothing or writes only the enum discriminant satisfies the forward property for every input in the universe.'''
+exact_statement = '''Canonical scalar hashing is a function of the canonical value: equal values hash identically, and within every scalar arm that holds more than one distinct value, the hash separates them rather than ignoring its payload.'''
+enforcement = '''Two paired properties over the shipped canonical-scalar corpus, which covers seven of the eight scalar arms with two or more distinct members (`Null` is single-valued, so separation is vacuous there and the test skips it under a floor of at least three constrained arms). Forward: equal values, including the differently-spelled pairs that only compare equal through normalisation (-0.0 against 0.0, two NaN spellings, one decimal at two scales), must hash identically — this fires on an `Eq` drift, measured with a `PartialEq` that ignores the float sign bit. Non-vacuity: within each arm holding two or more distinct values, those values must not share a hash — proven to constrain by four reverted kernel mutations (an empty float hash, a discriminant-only scalar hash, a numeric-keyed float hash against a bit-keyed `Eq`, and a payload-blind `CanonicalTimestamp` hash), since a hash that writes nothing satisfies the forward property for every input in the universe.'''
 activation_predicate = "canonical-scalars"
 dependencies = []
 checker_entrypoint = "equal_values_hash_identically"
