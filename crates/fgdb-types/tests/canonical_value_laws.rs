@@ -420,7 +420,7 @@ fn hash_separates_distinct_values_within_every_arm() {
         let kind = arm_label(value);
         match arms.iter_mut().find(|(k, _)| *k == kind) {
             Some((_, members)) => {
-                if !members.iter().any(|other| *other == value) {
+                if !members.contains(&value) {
                     members.push(value);
                 }
             }
