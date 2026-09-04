@@ -102,9 +102,10 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 # that cross-check quantified over an EMPTY SET and passed — an exit code
 # indistinguishable from a fully enforced spine.
 #
-# THE SET IS NO LONGER EMPTY. `FG-INV-12.canonical-scalar-coherence` is the
-# first live clause in this registry (bead fgdb-1sto): it binds the one
-# sentence of FG-INV-12 whose apparatus already runs on every
+# THE SET IS NO LONGER EMPTY. Three clauses are live —
+# `FG-INV-05.first-committer-wins`, `FG-INV-09.four-layer-identity-recomputation`
+# and `FG-INV-12.canonical-scalar-coherence` (beads fgdb-1sto, fgdb-j6aq). Each
+# binds the one sentence of its invariant whose apparatus already runs on every
 # `cargo test` — the canonical-scalar law suite in
 # `crates/fgdb-types/tests/canonical_value_laws.rs` — and leaves
 # `FG-INV-12.core` stub, because the rest of that statement (answer-equivalent
@@ -129,7 +130,7 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 # entrypoints are live checker rows in the full liveness.rs sense. An ID counts
 # only when every clause under it does. Raising either number is a G-gate event:
 # land the checker, then bump the declaration in the same change.
-expected_enforced_clauses = 1
+expected_enforced_clauses = 3
 expected_enforced_invariants = 0
 
 # The CLOSED vocabulary of capability atoms an activation_predicate or a
@@ -288,6 +289,29 @@ first_gate = "G1"
 status = "stub"
 waiver = "forbidden"
 
+# A NARROWING of FG-INV-05, not a quote (bead fgdb-j6aq). The Appendix F
+# statement is full serializability: an acyclic dependency graph with
+# real-time precedence edges and registered dangerous-structure detection.
+# First-committer-wins is a conservative write-write mechanism, not that
+# graph — it can reject histories serializability would admit, and it says
+# nothing about read-write anomalies. What it does establish, and what Gate
+# G1's Genesis slice actually asks for, is that commit validation is not a
+# pass-through. `.core` keeps the whole statement.
+[[invariant.clause]]
+key = "FG-INV-05.first-committer-wins"
+claim_class = "invariant"
+exact_statement = '''Two write batches prepared against one snapshot cannot both commit when their write sets overlap: the first committer wins and the second receives a typed abort attributable to the first-committer-wins law, leaving nothing of the loser durable.'''
+enforcement = '''Product write-path witness on the embedded `Database`: two `WriteBatch`es prepared against one snapshot and overlapping on a vertex, where the loser's abort must name `FG-LAW-FCW-01` rather than any fold arm (`AlreadyLive`, `IdentitySpent`, `UnknownVertex`, `UnknownEdge`, `DanglingEndpoint`) or the generic commit wrap. Disjoint write sets and sequential advanced-basis writes are held alongside as false-abort controls.'''
+activation_predicate = "serializable-isolation"
+dependencies = []
+checker_entrypoint = "overlapping_prepared_batches_abort_the_second_committer"
+negative_test_entrypoint = "overlapping_abort_is_attributable_to_fcw_not_the_fold"
+model_or_proof_scope = "The embedded product write path under the lab runtime. NOT the dependency-graph law: no DSG is built, no real-time precedence edge is checked, and read-write anomalies are out of scope. Those stay with .core."
+owner = "fgdb"
+first_gate = "G1"
+status = "live"
+waiver = "forbidden"
+
 # -----------------------------------------------------------------------------
 # FG-INV-06
 # -----------------------------------------------------------------------------
@@ -379,6 +403,29 @@ model_or_proof_scope = "Identity/digest recomputation oracles generated from the
 owner = "fgdb-ecs"
 first_gate = "G1"
 status = "stub"
+waiver = "forbidden"
+
+# A NARROWING of FG-INV-09's first Appendix F sentence, not a quote of it
+# (bead fgdb-j6aq). That sentence says identities recompute from "the exact
+# keyed, namespaced canonical logical transcript"; nothing here pins the
+# transcript against a golden vector, and `idr_golden_corpus_replay` and
+# `idr_blake3_identity_recompute` are still stub checker rows. What the bound
+# apparatus does prove is recomputation determinism across all four identity
+# layers, plus the fail-closed separation that shows the namespace and K_oid
+# really are inside the transcript. `.core` keeps the whole statement.
+[[invariant.clause]]
+key = "FG-INV-09.four-layer-identity-recomputation"
+claim_class = "invariant"
+exact_statement = '''`ObjectId`, `CiphertextId`, `EncodingId`, and `PlacementId` recompute deterministically from their registered inputs, and the security namespace and `K_oid` are inside the keyed identity transcript, so identities never deduplicate across namespaces or keys.'''
+enforcement = '''Four-layer recomputation determinism over the registered V1 composition (`IdentifiedObject` -> protect -> encode -> place, run twice, all four identities byte-identical), with the wrong-namespace and wrong-key fail-closed controls: changing either input must move `ObjectId` and must refuse deduplication.'''
+activation_predicate = "content-addressing"
+dependencies = []
+checker_entrypoint = "every_identity_recomputes_from_its_inputs"
+negative_test_entrypoint = "dedup_does_not_cross_namespaces_or_keys"
+model_or_proof_scope = "The registered V1 composition in fgdb-chronicle's in-memory identity pipeline. NOT root-bootstrap reconstruction, symbol-MAC transcript coverage, golden or cross-version corpora, collision-bucket or FEC-wire campaigns, or the digest-class recipe law: those are the rest of FG-INV-09 and stay with .core."
+owner = "fgdb-chronicle"
+first_gate = "G1"
+status = "live"
 waiver = "forbidden"
 
 # -----------------------------------------------------------------------------

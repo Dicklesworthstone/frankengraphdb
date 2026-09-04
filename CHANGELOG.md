@@ -2,6 +2,20 @@
 
 This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, architectural plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
+## Unreleased — 2026-09-04 two more live invariant clauses
+
+Owning bead: `fgdb-j6aq` (P1), following `fgdb-1sto`.
+
+- **`FG-INV-09.four-layer-identity-recomputation`** (owner `fgdb-chronicle`, G1) binds `crates/fgdb-chronicle/tests/identity_pipeline.rs`: `every_identity_recomputes_from_its_inputs` runs `IdentifiedObject → protect → encode → place` twice and requires `ObjectId`, `CiphertextId`, `EncodingId` and `PlacementId` to be byte-identical; `dedup_does_not_cross_namespaces_or_keys` changes the security namespace and then `K_oid` and requires `ObjectId` to move and deduplication to be refused.
+- **`FG-INV-05.first-committer-wins`** (owner `fgdb`, G1) binds `crates/fgdb/tests/first_committer_wins.rs`: `overlapping_prepared_batches_abort_the_second_committer` is the product write-path witness that commit validation is not a pass-through, and `overlapping_abort_is_attributable_to_fcw_not_the_fold` requires the loser's abort to name `FG-LAW-FCW-01` rather than a fold arm or the generic commit wrap, so the checker cannot pass for the wrong reason.
+- `expected_enforced_clauses` 1 → 3. `expected_enforced_invariants` stays **0**: every `.core` clause is still stub, and an ID counts only when all of its clauses are enforced.
+
+**Both are narrowings, and the registry says so in place.** FG-INV-09's Appendix F sentence says identities recompute from "the exact keyed, namespaced canonical logical transcript"; nothing here pins that transcript against a golden vector, and `idr_golden_corpus_replay` and `idr_blake3_identity_recompute` are still stub rows. FG-INV-05's statement is full serializability — an acyclic dependency graph with real-time precedence edges; first-committer-wins is a conservative write-write mechanism that builds no such graph, says nothing about read-write anomalies, and can reject histories serializability would admit.
+
+### Verification
+
+`registry-check all` 0 violations; `-p registry-check --test claims` 38/38 with the control re-derived to the exact three-key set; `fgdb-chronicle --test identity_pipeline` 14/14; `fgdb --test first_committer_wins` 5/5; `g0_claims_e2e` and `g0_spine_e2e` ALL GREEN. **Six mutation controls** (scratch copy, constant 2-violation noise floor, clean final control): renaming either bound test of either clause fires `checker_symbol_unresolved` + `clause_promoted_without_live_checker` + `enforcement_coverage_drift` (four arms, all fired); declaring one enforced clause while three are fires drift; claiming one fully enforced invariant ID while none is fires drift.
+
 ## Unreleased — 2026-09-03 the invariant spine enforces something; GitHub Actions retired
 
 Owning beads: `fgdb-1sto` (P1), `fgdb-ci-workflow-check-sh-4csa.2` (closed premise-void).

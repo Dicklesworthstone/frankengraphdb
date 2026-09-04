@@ -454,6 +454,22 @@ kind = "stub"
 artifact = "crates/fgdb-oracles/src/ssi_history.rs"
 status = "stub"
 
+# The live half of FG-INV-05 (bead fgdb-j6aq): the product write-path
+# first-committer-wins witness, not the dependency-graph law.
+[[checker]]
+symbol = "overlapping_prepared_batches_abort_the_second_committer"
+kind = "cargo-test"
+artifact = "crates/fgdb/tests/first_committer_wins.rs"
+status = "live"
+unit = "symbol"
+
+[[checker]]
+symbol = "overlapping_abort_is_attributable_to_fcw_not_the_fold"
+kind = "cargo-test"
+artifact = "crates/fgdb/tests/first_committer_wins.rs"
+status = "live"
+unit = "symbol"
+
 [[checker]]
 symbol = "fg_inv_06_core_checker"
 kind = "stub"
@@ -501,6 +517,23 @@ symbol = "fg_inv_09_core_negative"
 kind = "stub"
 artifact = "crates/fgdb-oracles/src/identity.rs"
 status = "stub"
+
+# The live half of FG-INV-09 (bead fgdb-j6aq). The two rows above stay stub:
+# crates/fgdb-oracles/ does not exist. These name integration tests that
+# `cargo test --workspace` compiles and runs today.
+[[checker]]
+symbol = "every_identity_recomputes_from_its_inputs"
+kind = "cargo-test"
+artifact = "crates/fgdb-chronicle/tests/identity_pipeline.rs"
+status = "live"
+unit = "symbol"
+
+[[checker]]
+symbol = "dedup_does_not_cross_namespaces_or_keys"
+kind = "cargo-test"
+artifact = "crates/fgdb-chronicle/tests/identity_pipeline.rs"
+status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "fg_inv_10_core_checker"
