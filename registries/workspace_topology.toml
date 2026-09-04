@@ -94,7 +94,7 @@ tooling_members = ["tools/registry-check"]
 unsafe_ledger_registry = "registries/unsafe_boundary_ledger.toml"
 workspace_manifest = "Cargo.toml"
 workspace_unsafe_lint = "forbid"
-toolchain_channel = "nightly-2026-08-25"
+toolchain_channel = "nightly-2026-08-31"
 # Blocks the generated document embeds VERBATIM between markers. The other
 # blocks are pinned and hash-checked but not reproduced: a document that quotes
 # a quarter of the plan is a document nobody reads. These four ARE the contract.
@@ -129,7 +129,7 @@ dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:5276c61561059e3a"
+semantic_contract_hash = "fnv1a64:eecf36f5655317c7"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges

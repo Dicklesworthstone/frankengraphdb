@@ -383,4 +383,4 @@ Compression codecs (EF, delta-varint, bitpacking, snappy, roaring-like), canonic
 ## Pins
 
 * `id_table_hash` = `fnv1a64:b422bc59c3da23ca` — every stable id, sorted.
-* `semantic_contract_hash` = `fnv1a64:5276c61561059e3a` — every normative decision, prose excluded.
+* `semantic_contract_hash` = `fnv1a64:eecf36f5655317c7` — every normative decision, prose excluded.
