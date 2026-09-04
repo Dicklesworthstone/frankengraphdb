@@ -2,6 +2,19 @@
 
 This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, architectural plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
+## Unreleased — 2026-09-04 the same overclaim class, twice more, closed by making the apparatus reach
+
+Owning beads: `fgdb-1sto`, `fgdb-j6aq`, `fgdb-owrc`. Found by a second independent verifier re-checking the first correction, not by self-review. Both residues are the same failure as the original: a statement reaching past what its bound symbols can observe.
+
+- **The `Timestamp` arm did not exist in the corpus.** `scalar_corpus()` built seven arms and stopped, so `hash_separates_distinct_values_within_every_arm` skipped `Timestamp` silently while its clause said "within every scalar arm" — and `temporal.rs` claims in its own doc comment that "Equality, hashing, and ordering cover every stored semantic component in field order". Measured: replacing `CanonicalTimestamp`'s derived `Hash` with one that writes nothing left the **entire `fgdb-types` suite green**. The corpus now carries three timestamps differing in the instant and in the offset at a fixed instant, and that mutation reds the bound control naming the arm and the offset-differing pair.
+- **Equality was claimed and never called.** The clause said "equality, ordering, and encoding are coherent" while the checker compared `Ordering` values and the negative called `from_bits_canonical` — no bound symbol invoked `==`. `CanonicalF64` carries a hand-written `PartialEq` *and* a hand-written `Ord`, so they can disagree while every ordering assertion passes. Measured: a `PartialEq` ignoring the float sign bit (`-1.0 == 1.0`, `cmp` says `Less`) left **both** bound symbols green. Equality is now bound explicitly inside the existing loop, and that mutation reds the bound checker.
+- **A doc comment stated a falsehood that also under-sold its test.** The forward hash law's header said "no mutation of the current kernel makes this test red". The `Eq` drift above reds it, which makes it the one bound symbol in the spine watching `Eq`. Rewritten to say what it does.
+- Statements tightened to the apparatus: "within every scalar arm **that holds more than one distinct value**" (`Null` is single-valued; separation there is vacuous and the test carries a floor of three constrained arms). The enforcement texts now name the equality binding and all four constraining mutations.
+
+### Verification
+
+`fgdb-types --test canonical_value_laws` 30/30; `registry-check all` 0 violations; `--test claims` 38/38; `cargo fmt --check` and workspace clippy clean; `g0_claims_e2e` and `g0_spine_e2e` rc 0. **Both residue mutations reproduced independently of the report**: an `Eq` that ignores the sign bit reds `canonical_scalar_byte_order_equals_value_order` *and* `equal_values_hash_identically`; a payload-blind `CanonicalTimestamp::hash` reds `hash_separates_distinct_values_within_every_arm`. Clean control before and after each.
+
 ## Unreleased — 2026-09-04 an overclaimed invariant clause, corrected into real coverage
 
 Owning bead: `fgdb-owrc`. Prompted by an independent verifier's finding, not by self-review.
