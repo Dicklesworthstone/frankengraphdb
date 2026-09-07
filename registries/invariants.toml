@@ -102,9 +102,11 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 # that cross-check quantified over an EMPTY SET and passed — an exit code
 # indistinguishable from a fully enforced spine.
 #
-# THE SET IS NO LONGER EMPTY. Six clauses are live across five invariant ids —
+# THE SET IS NO LONGER EMPTY. Eight clauses are live across seven invariant ids —
 # `FG-INV-04.pinned-snapshot-visibility`, `FG-INV-05.first-committer-wins`,
+# `FG-INV-08.commit-sequence-contiguity`,
 # `FG-INV-09.four-layer-identity-recomputation`,
+# `FG-INV-18.generated-history-differential`,
 # `FG-INV-12.canonical-scalar-coherence`, `FG-INV-12.hash-coherence` and
 # `FG-INV-19.replay-grade-monotonicity` (beads fgdb-1sto, fgdb-j6aq,
 # fgdb-owrc). Each binds a property of its invariant whose apparatus already
@@ -157,7 +159,7 @@ twenty_id_hash = "fnv1a64:204a4b17c8ecc57f"
 # test fails naming the missing key while every registry law stays silent.
 # Never weaken that assertion back to a count; it is the only guard against
 # this class.
-expected_enforced_clauses = 6
+expected_enforced_clauses = 8
 expected_enforced_invariants = 0
 
 # The CLOSED vocabulary of capability atoms an activation_predicate or a
@@ -431,6 +433,27 @@ proof_lane = "tla-raft-marker-interaction"
 owner = "fgdb-chronicle"
 first_gate = "G1"
 status = "stub"
+waiver = "forbidden"
+
+# A NARROWING of FG-INV-08, not a quote (bead fgdb-apco). The Appendix F
+# statement also covers the transaction-marker subsequence being independently
+# addressable, every retained checkpoint suffix beginning with its exact install
+# command, role-tagged Raft snapshots matching their precise visible cut, and the
+# Local/Meta audit pipeline orders. Bound here is the commit-sequence half and
+# the chain's commitment to its own marker fields. `.core` keeps the rest.
+[[invariant.clause]]
+key = "FG-INV-08.commit-sequence-contiguity"
+claim_class = "invariant"
+exact_statement = '''The commit sequence is contiguous: a gap or a repeat is refused and the refusal changes nothing, and the marker chain commits to every marker field, so altering any one of them invalidates the chain at that sequence.'''
+enforcement = '''Marker-chain suite over an in-memory chain. Contiguity: appending at a sequence behind, at, or far beyond the expected next one is refused with the exact expected-and-found error, the chain length is unchanged after every refusal, and the correct next sequence is then accepted. Chain commitment: a planted single-field mutation over fourteen distinct marker fields — logical_command_seq, commit_seq, effect_source, prev_global, head_updates, merge_record_oid, schema transition digest, topology epoch, policy epoch, revocation index, txn token, commit HLC, final effect digest, authorization decision digest — must each invalidate the chain at that sequence.'''
+activation_predicate = "commit-stream"
+dependencies = []
+checker_entrypoint = "the_commit_sequence_is_gap_free"
+negative_test_entrypoint = "tampering_with_any_marker_field_breaks_the_chain_at_that_sequence"
+model_or_proof_scope = "An in-memory MarkerChain over synthetic markers. NOT the durable append path, checkpoint suffixes, Raft snapshot cuts, or audit pipeline order: those are the rest of FG-INV-08 and stay with .core."
+owner = "fgdb-chronicle"
+first_gate = "G1"
+status = "live"
 waiver = "forbidden"
 
 # -----------------------------------------------------------------------------
@@ -748,6 +771,34 @@ model_or_proof_scope = "Differential against the reference oracle (fgdb-referenc
 owner = "fgdb-reference"
 first_gate = "G1"
 status = "stub"
+waiver = "forbidden"
+
+# A NARROWING of FG-INV-18, not a quote (bead fgdb-apco). The Appendix F
+# statement covers canonical committed effects equalling logical before/after
+# state over normalized valid-time slices, workspace finalization equalling
+# ordered published statements, synchronous constraint/resource/escrow bounds
+# before commit, and bulk ingestion through ordinary transactions. Bound here is
+# the model-generated differential against the reference oracle, plus the
+# control that shows the differential can SEE a divergence — which is the
+# failure mode a differential actually has. `.core` keeps the rest.
+#
+# RESIDUAL, stated because no test can close it: a differential cannot catch a
+# bug both implementations share. The mitigation is that `fgdb-reference` is a
+# deliberately simple, separately written implementation compiled for tests
+# only, not that this law is complete.
+[[invariant.clause]]
+key = "FG-INV-18.generated-history-differential"
+claim_class = "invariant"
+exact_statement = '''Model-generated histories agree with the reference oracle, and the differential that compares them detects a planted divergence rather than passing over it.'''
+enforcement = '''Intent-level generated histories — operations against live model state rather than raw delta rows — run against both the engine and the reference oracle and compared. Paired with a detection control that plants a dropped property row and a dropped valid-time row and requires the differential to NAME the divergence, with the valid-time arm calling the selector oracle directly so exact payload comparison cannot mask a broken half-open or endpoint-liveness projection.'''
+activation_predicate = "base-semantics"
+dependencies = []
+checker_entrypoint = "generated_histories_agree_with_the_oracle"
+negative_test_entrypoint = "branch_differential_detects_dropped_property_and_valid_time_rows"
+model_or_proof_scope = "Generated graph histories and branch forests under the lab runtime, against the in-repo reference oracle. NOT workspace finalization, synchronous constraint/resource/escrow bounds, or bulk ingestion; and no differential covers a defect shared by both implementations."
+owner = "fgdb-sim"
+first_gate = "G1"
+status = "live"
 waiver = "forbidden"
 
 # -----------------------------------------------------------------------------

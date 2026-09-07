@@ -523,6 +523,23 @@ kind = "stub"
 artifact = "crates/fgdb-oracles/src/sequence_contiguity.rs"
 status = "stub"
 
+# The live half of FG-INV-08 (bead fgdb-apco): commit-sequence contiguity and
+# the marker chain's commitment to its own fields. The two rows above stay stub
+# because crates/fgdb-oracles/ does not exist.
+[[checker]]
+symbol = "the_commit_sequence_is_gap_free"
+kind = "cargo-test"
+artifact = "crates/fgdb-chronicle/tests/commit_stream.rs"
+status = "live"
+unit = "symbol"
+
+[[checker]]
+symbol = "tampering_with_any_marker_field_breaks_the_chain_at_that_sequence"
+kind = "cargo-test"
+artifact = "crates/fgdb-chronicle/tests/commit_stream.rs"
+status = "live"
+unit = "symbol"
+
 [[checker]]
 symbol = "fg_inv_09_core_checker"
 kind = "stub"
@@ -696,6 +713,22 @@ symbol = "fg_inv_18_core_negative"
 kind = "stub"
 artifact = "crates/fgdb-reference/src/differential.rs"
 status = "stub"
+
+# The live half of FG-INV-18 (bead fgdb-apco): the model-generated differential
+# against the reference oracle, and the control proving it can see a divergence.
+[[checker]]
+symbol = "generated_histories_agree_with_the_oracle"
+kind = "cargo-test"
+artifact = "crates/fgdb-sim/tests/generated_histories.rs"
+status = "live"
+unit = "symbol"
+
+[[checker]]
+symbol = "branch_differential_detects_dropped_property_and_valid_time_rows"
+kind = "cargo-test"
+artifact = "crates/fgdb-sim/tests/generated_histories.rs"
+status = "live"
+unit = "symbol"
 
 [[checker]]
 symbol = "fg_inv_19_core_checker"
