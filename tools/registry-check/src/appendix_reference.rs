@@ -558,10 +558,16 @@ mod tests {
         // THE PARTITION IS THE POINT: target_count and target_ids_sha256 above are
         // UNCHANGED, so no reference TARGET was added or removed. Only OCCURRENCES of
         // those same 813 targets were added by the exact Meta phase payloads.
-        assert_eq!(census.occurrence_count, 2_454);
+        // MOVED BY fgdb-a01-reference-roots-2k0q when the a01 completion campaign spelled
+        // exact field types and rendered PayloadAvailabilityCertificate and
+        // RemoteRetentionNoOldGrantProof as structural definitions. The partition law is
+        // unchanged: target_count and target_ids_sha256 above are UNCHANGED, so no
+        // reference target was added or removed; the two added occurrences are the two
+        // new structural-definition heads.
+        assert_eq!(census.occurrence_count, 2_456);
         assert_eq!(
             census.occurrence_transcript_sha256,
-            "998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"
+            "95705ad6de7f1cd3599d75381d2aca6c3b1f7bc7b3c4995ce40342ccf7453fa6"
         );
     }
 }

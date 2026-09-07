@@ -7516,10 +7516,12 @@ mod tests {
         // Re-measured on the new source, the population is BYTE-FOR-BYTE UNCHANGED --
         // same four sentences, same lines 1758/2057/2645/2651, same owners, same order.
         // So only the "measured on" sha moves here; the law below is untouched, and this
-        // is a re-measurement rather than a re-pin.
+        // is a re-measurement rather than a re-pin. MOVED AGAIN by
+        // fgdb-a01-reference-roots-2k0q for the a01 completion campaign; the population
+        // assertion was re-verified unchanged on the new source.
         assert_eq!(
             sha256_hex(source.as_bytes()),
-            "c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16",
+            "d965f17dae9e1d86c674b89edd17cbb03d1181a4fe9ea19c974cfe9f117f3bd8",
             "the two-union population was measured on a different Appendix A source"
         );
 

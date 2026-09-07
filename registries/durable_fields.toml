@@ -1,6 +1,6 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16.
+# Appendix A lines 1388-2728; sha256=d965f17dae9e1d86c674b89edd17cbb03d1181a4fe9ea19c974cfe9f117f3bd8.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
@@ -3459,7 +3459,7 @@ max_size_bytes = 16777216
 [[field]]
 containing_schema = "ExportLeaf<T>"
 field_tag = 0x0005
-stable_name = "local_strong_ref_projection"
+stable_name = "local_strong_ref_projections"
 exact_wire_type = "RemoteObjectIdentity"
 cardinality = "many"
 identity_class = "inline"
@@ -8495,6 +8495,95 @@ digest_class = "transcript"
 transcript_recipe = "the Chronicle marker-chain value AFTER the marker at the root's published_at (ChainedMarker.chain_hash, re-derived and verified by chain recovery), or the chain origin for a publication over the empty stream (fgdb-90hw)"
 
 [[field]]
+containing_schema = "PayloadAvailabilityCertificate"
+field_tag = 0x0001
+stable_name = "ciphertext_id"
+exact_wire_type = "id256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "the pinned CiphertextId whose availability this certificate attests (a01:1410); retained while any referring key-envelope edge is live"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "PayloadAvailabilityCertificate"
+field_tag = 0x0002
+stable_name = "recoverability_profile_id"
+exact_wire_type = "u16"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "the named recoverability profile the selected realization set satisfies (a01:1410); profile registry bounds apply"
+version_status = "reserved"
+max_size_bytes = 2
+
+[[field]]
+containing_schema = "PayloadAvailabilityCertificate"
+field_tag = 0x0003
+stable_name = "configuration_oid"
+exact_wire_type = "oid256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "the exact configuration object under which the set was certified (a01:1410); movement or recode requires a successor certificate (a01:1410)"
+version_status = "reserved"
+max_size_bytes = 32
+
+[[field]]
+containing_schema = "PayloadAvailabilityCertificate"
+field_tag = 0x0004
+stable_name = "configuration_canonical_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "canonical digest of the certifying configuration; compared byte-exactly before decode (a01:1410)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "PayloadAvailabilityCertificate"
+field_tag = 0x0005
+stable_name = "selected_encoding_set_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "commitment over the selected recoverable EncodingId set, sorted and transcribed (a01:1410); the set must cover the named profile"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:payload-availability-encodings:v1\" || canonical(selected recoverable EncodingId set in ascending byte order)); reject duplicates and count overflow before hashing"
+
+[[field]]
+containing_schema = "PayloadAvailabilityCertificate"
+field_tag = 0x0006
+stable_name = "selected_placement_set_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 10
+role_predicate = "true"
+retention_and_cut_rule = "commitment over the selected recoverable PlacementId set paired with the encoding set (a01:1410); retirement of any member first requires a successor certificate (a01:1410)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "transcript"
+transcript_recipe = "BLAKE3(\"fgdb:payload-availability-placements:v1\" || canonical(selected recoverable PlacementId set in ascending byte order)); reject duplicates and count overflow before hashing"
+
+[[field]]
 containing_schema = "PlacementRecord"
 field_tag = 0x0001
 stable_name = "placement_id"
@@ -10374,6 +10463,93 @@ role_predicate = "true"
 retention_and_cut_rule = "the spec names exactly one registered exportable target through the generated closed union (a01:1402: the target ref and identity must be the exact registered pair); retention of that target is the grant's obligation in RemoteRetentionObligationRoot, released only by its ReleaseApplied/AckPublished tombstone (a01:1578; FG-INV-14). Under the fgdb-bbqq (a1) ruling the union's arms are type alternatives: this field, not the arm set, carries the construction-order and retention edge"
 version_status = "reserved"
 max_size_bytes = 48
+
+[[field]]
+containing_schema = "RemoteRetentionNoOldGrantProof"
+field_tag = 0x0001
+stable_name = "consumer_domain"
+exact_wire_type = "ConsensusDomain"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 96
+role_predicate = "true"
+retention_and_cut_rule = "full ConsensusDomain of the consumer group whose complete root is proven clean (a01:1404); cross-group schemas never serialize the scalar alone (a01:1396)"
+version_status = "reserved"
+max_size_bytes = 93
+
+[[field]]
+containing_schema = "RemoteRetentionNoOldGrantProof"
+field_tag = 0x0002
+stable_name = "target_identity"
+exact_wire_type = "RemoteObjectIdentity"
+cardinality = "one"
+identity_class = "inline"
+reference_semantics = "none"
+construction_order = 96
+role_predicate = "true"
+retention_and_cut_rule = "comparison-only identity of the released target (a01:1404); proves release without retaining anything (a01:1396)"
+version_status = "reserved"
+max_size_bytes = 159
+
+[[field]]
+containing_schema = "RemoteRetentionNoOldGrantProof"
+field_tag = 0x0003
+stable_name = "grant_id"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 96
+role_predicate = "true"
+retention_and_cut_rule = "derived H(\"fgdb:remote-grant:v1\", authority_domain, consumer_domain, target_identity, grant_nonce) of the retired grant (a01:1402)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "RemoteRetentionNoOldGrantProof"
+field_tag = 0x0004
+stable_name = "complete_consumer_root_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 96
+role_predicate = "true"
+retention_and_cut_rule = "the consumer complete root this proof was computed over; apply rechecks the live root before accepting the ack (a01:1404)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "RemoteRetentionNoOldGrantProof"
+field_tag = 0x0005
+stable_name = "consumer_no_reference_floor_digest"
+exact_wire_type = "digest256"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 96
+role_predicate = "true"
+retention_and_cut_rule = "commits the floor below which the proven root holds no strong edge to the retired grant (a01:1404)"
+version_status = "reserved"
+max_size_bytes = 32
+digest_class = "target"
+
+[[field]]
+containing_schema = "RemoteRetentionNoOldGrantProof"
+field_tag = 0x0006
+stable_name = "consumer_checkpoint_floor"
+exact_wire_type = "u64"
+cardinality = "one"
+identity_class = "scalar"
+reference_semantics = "none"
+construction_order = 96
+role_predicate = "true"
+retention_and_cut_rule = "the consumer checkpoint floor at proof time; retirement of request/grant evidence waits on this floor (a01:1404)"
+version_status = "reserved"
+max_size_bytes = 8
 
 [[field]]
 containing_schema = "RemoteRetentionObligationRoot"
@@ -19722,18 +19898,6 @@ allowed_containing_schemas = ["RecoveryTransformSourceBasis<Role>", "RecoveryInc
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
-
-[[union]]
-union_name = "TrustTransition"
-containing_schema = "RemoteAuthorityConfigurationEvidence"
-union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
-field_tag = 0x0009
-tag_wire_type = "u8"
-encoding_context = "closed-tagged"
-allowed_containing_schemas = ["RemoteAuthorityConfigurationEvidence"]
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 65537
 
 [[union]]
 union_name = "RemoteConfigurationTrustRoot"
@@ -30621,45 +30785,6 @@ payload_sha256 = "93dc8b8d3cfc4448ec18fee81917ef7e75538ed33c562e6a498a2ad9c4298f
 role_predicate = "true"
 version_status = "reserved"
 max_size_bytes = 16777216
-
-[[union_arm]]
-union_name = "TrustTransition"
-containing_schema = "RemoteAuthorityConfigurationEvidence"
-union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
-arm_tag = 0x0001
-source_arm_name = "Genesis"
-stable_name = "genesis"
-payload_kind = "inline-record"
-payload_sha256 = "7aface9d4d3f6e04d01529994ec08c221c7b909ed468c5e268fefda3d856c063"
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[union_arm]]
-union_name = "TrustTransition"
-containing_schema = "RemoteAuthorityConfigurationEvidence"
-union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
-arm_tag = 0x0002
-source_arm_name = "Successor"
-stable_name = "successor"
-payload_kind = "inline-record"
-payload_sha256 = "bdf887bb8354e7c0a444ce07a4bcada43c272180cbbda3ac530ecf6be8694db4"
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 65536
-
-[[union_arm]]
-union_name = "TrustTransition"
-containing_schema = "RemoteAuthorityConfigurationEvidence"
-union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
-arm_tag = 0x0003
-source_arm_name = "ValidatedCheckpointSuccessor"
-stable_name = "validated_checkpoint_successor"
-payload_kind = "inline-record"
-payload_sha256 = "3a2d87d0f381667522afda570d38ae9c32537aede9bb42bee73ef3dbb8d5a749"
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 65536
 
 [[union_arm]]
 union_name = "RemoteConfigurationTrustRoot"

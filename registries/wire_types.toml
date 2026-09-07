@@ -1,6 +1,6 @@
 # GENERATED from registries/appendix_a_catalog.toml; DO NOT EDIT THIS PROJECTION.
 # Normative source: COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md
-# Appendix A lines 1388-2728; sha256=c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16.
+# Appendix A lines 1388-2728; sha256=d965f17dae9e1d86c674b89edd17cbb03d1181a4fe9ea19c974cfe9f117f3bd8.
 # Identity laws and code-space constraints are enforced by registry-check (plan section 5.1).
 schema_version = 1
 
@@ -6159,3 +6159,12 @@ wire_tag = 0x0002
 encoding_context = "arm StorageMember of closed union KeyDestructionTerminalReceiptRef"
 allowed_containing_schemas = ["KeyDestructionTerminalReceiptRef"]
 max_size_bytes = 65536
+
+[[type]]
+wire_type_id = 0x058c
+name = "TrustTransition"
+kind = "union"
+status = "reserved"
+encoding_context = "Appendix A reference-semantics family TrustTransition (a01); exact member layout per plan lines 1388-1444"
+allowed_containing_schemas = ["*"]
+max_size_bytes = 16777216

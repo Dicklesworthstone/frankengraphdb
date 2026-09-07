@@ -1032,3 +1032,31 @@ reason = "fgdb-eesn: source-only landing-lease policy and state machine used by 
 path = "scripts/lib/private_subject.sh"
 role = "library"
 reason = "fgdb-g0-spine-e2e-red-measures-harness-not-spine-iy7e + fgdb-gate-workdir-lifetime-and-reaper-ruling-1dra: source-only content-keyed subject builder used by six registered G0 gates. Each caller owns and executes its freshness and residue controls, retains both the shared parent-namespace lease and child liveness lock for its full process lifetime, and publishes the strict inode-aware REAPABLE-AFTER record; the library itself reports no verdict"
+
+# Owner: fgdb-w2-root-bootstrap-hbf. Planned runtime evidence for the a01 bootstrap frames.
+[[checker]]
+symbol = "w2_root_bootstrap_recovery_matrix"
+kind = "stub"
+artifact = "crates/fgdb-chronicle/tests/root_bootstrap_recovery_matrix.rs"
+status = "stub"
+
+# Owner: fgdb-w2-object-identity-t0f. Planned runtime evidence for the a01 reference wire types.
+[[checker]]
+symbol = "w2_identity_pipeline_roundtrip"
+kind = "stub"
+artifact = "crates/fgdb-types/tests/identity_pipeline_roundtrip.rs"
+status = "stub"
+
+# Owner: fgdb-w12-role-transition-formats-g823. Planned runtime evidence for the a01 role-transition unions.
+[[checker]]
+symbol = "w12_role_transition_sim"
+kind = "stub"
+artifact = "crates/fgdb-chronicle/tests/role_transition_sim.rs"
+status = "stub"
+
+# Owner: fgdb-w12-remote-trust-retention-formats-64s2. Planned runtime evidence for the a01 remote trust/retention formats.
+[[checker]]
+symbol = "w12_remote_release_handshake"
+kind = "stub"
+artifact = "crates/fgdb-chronicle/tests/remote_release_handshake.rs"
+status = "stub"
