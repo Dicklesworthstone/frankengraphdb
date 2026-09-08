@@ -6,9 +6,7 @@ impl WriteTxn {
         database: &Database<V>,
         eid: EId,
     ) -> Result<Option<EdgeRecord>, WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
 
         let overlay = database.edge_at(eid, self.basis)?;
         Ok(self.edge_over_basis(eid, overlay))
@@ -114,9 +112,7 @@ impl WriteTxn {
         &self,
         database: &Database<V>,
     ) -> Result<Vec<EdgeRecord>, WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
 
         // Admit the durable table once. Re-reading each edge through edge_at
         // would validate the entire immutable history again for every EId.
@@ -176,9 +172,7 @@ impl WriteTxn {
         src: VId,
         relation: RelationId,
     ) -> Result<Vec<VId>, WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
 
         let mut destinations: std::collections::BTreeSet<VId> = database
             .neighbours_at(src, relation, self.basis)?
@@ -262,9 +256,7 @@ impl WriteTxn {
         dst: VId,
         relation: RelationId,
     ) -> Result<Vec<VId>, WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
 
         let mut sources: std::collections::BTreeSet<VId> = database
             .in_neighbours_at(dst, relation, self.basis)?

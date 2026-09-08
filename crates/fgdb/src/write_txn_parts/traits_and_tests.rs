@@ -33,6 +33,71 @@ mod tests {
     use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts, VId};
 
     #[test]
+    fn wrong_owner_cannot_change_exact_read_sets_or_staged_state() {
+        let ((), report) = run_async_under_lab(0x7a13, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txn_cx = contexts.txn();
+            let keys = DatabaseKeys::new([1; 32], DatabaseSecurityNamespaceId([2; 32]), [3; 32]);
+            let mut owner = Database::open_memory(&commit, keys.clone())
+                .await
+                .expect("owner");
+            let mut foreign = Database::open_memory(&commit, keys).await.expect("foreign");
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(VId(1), vec![], vec![]);
+            seed.create_vertex(VId(2), vec![], vec![]);
+            seed.add_edge(fgdb_types::EId(3), VId(1), VId(2), vec![]);
+            owner
+                .write(&commit, seed.clone())
+                .await
+                .expect("owner seed");
+            foreign.write(&commit, seed).await.expect("foreign seed");
+            let mut txn = owner.begin(&txn_cx).expect("begin");
+            let mut staged = WriteBatch::new(RelationId(1));
+            staged.create_vertex(VId(4), vec![], vec![]);
+            txn.write(&mut owner, staged).expect("stage");
+            txn.neighbours(&owner, VId(1), RelationId(1))
+                .expect("owner read");
+            let before = (
+                txn.read_set.borrow().clone(),
+                txn.match_expansions.borrow().clone(),
+                txn.staged_effect_digest().expect("digest"),
+                format!("{:?}", txn.prepared),
+                txn.pin.as_ref().expect("pin").id(),
+            );
+            assert!(matches!(
+                txn.vertex(&foreign, VId(99)),
+                Err(WriteTxnError::WrongDatabase)
+            ));
+            assert!(matches!(
+                txn.edge(&foreign, fgdb_types::EId(99)),
+                Err(WriteTxnError::WrongDatabase)
+            ));
+            assert!(matches!(
+                txn.neighbours(&foreign, VId(99), RelationId(99)),
+                Err(WriteTxnError::WrongDatabase)
+            ));
+            assert!(matches!(
+                txn.commit(&mut foreign, &commit).await,
+                Err(WriteTxnError::WrongDatabase)
+            ));
+            assert_eq!(
+                before,
+                (
+                    txn.read_set.borrow().clone(),
+                    txn.match_expansions.borrow().clone(),
+                    txn.staged_effect_digest().expect("unchanged digest"),
+                    format!("{:?}", txn.prepared),
+                    txn.pin.as_ref().expect("same pin").id(),
+                )
+            );
+            drop(txn);
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "lab run failed: {report:?}");
+    }
+
+    #[test]
     fn write_refuses_an_advanced_snapshot_without_preparing() {
         let ((), report) = run_async_under_lab(0x7a_10, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);

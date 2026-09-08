@@ -6,9 +6,7 @@ impl WriteTxn {
         database: &Database<V>,
         vid: VId,
     ) -> Result<Option<VertexRow>, WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
 
         let live = database.frontier()?;
         let overlay = if live == self.basis {
@@ -110,9 +108,7 @@ impl WriteTxn {
         &self,
         database: &Database<V>,
     ) -> Result<Vec<VertexRow>, WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
 
         // Keep the admitted rows rather than discarding them and resolving the
         // same immutable patch history once more for every vertex identity.

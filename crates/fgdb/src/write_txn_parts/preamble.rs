@@ -15,6 +15,9 @@ use fgdb_types::{
 pub enum WriteTxnError {
     NoPreparedWrite,
     Finished,
+    /// The supplied database is not the opened handle that began this txn.
+    /// Refusal preserves the transaction for use with its actual owner.
+    WrongDatabase,
     RelationMismatch {
         expected: RelationId,
         found: RelationId,
@@ -33,6 +36,9 @@ impl core::fmt::Display for WriteTxnError {
         match self {
             Self::NoPreparedWrite => formatter.write_str("write transaction has no batch"),
             Self::Finished => formatter.write_str("write transaction is already finished"),
+            Self::WrongDatabase => {
+                formatter.write_str("write transaction belongs to a different database handle")
+            }
             Self::RelationMismatch { expected, found } => write!(
                 formatter,
                 "write transaction relation mismatch: expected {expected:?}, found {found:?}"
@@ -56,6 +62,7 @@ impl core::error::Error for WriteTxnError {
             Self::Write(source) => Some(source),
             Self::NoPreparedWrite
             | Self::Finished
+            | Self::WrongDatabase
             | Self::RelationMismatch { .. }
             | Self::SnapshotAdvanced { .. } => None,
         }
@@ -87,6 +94,7 @@ impl From<GqlError> for WriteTxnError {
 /// pinned basis. Commit delegates that retained template's verdict to
 /// [`Database::commit_prepared`].
 pub struct WriteTxn {
+    handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,
     staged: Vec<WriteBatch>,
     prepared: Option<PreparedWrite>,
@@ -94,4 +102,3 @@ pub struct WriteTxn {
     match_expansions: std::cell::RefCell<std::collections::BTreeSet<(VId, RelationId)>>,
     pin: Option<PurposeObligation<Acquired>>,
 }
-

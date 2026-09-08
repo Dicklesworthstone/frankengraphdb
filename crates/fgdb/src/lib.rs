@@ -488,6 +488,9 @@ pub enum DatabaseState {
 /// Why a write could not be committed.
 #[derive(Debug)]
 pub enum WriteError {
+    /// A prepared template belongs to a different opened handle lifetime.
+    /// Equal keys, paths or commit sequences cannot transfer its ownership.
+    ForeignPreparedWrite,
     /// The batch was empty. Refused rather than committed as a no-op: an empty
     /// commit consumes a sequence and publishes a marker, and a caller that did
     /// that by accident should be told.
@@ -748,6 +751,9 @@ impl core::fmt::Display for RebuildError {
 impl core::fmt::Display for WriteError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ForeignPreparedWrite => {
+                f.write_str("prepared write belongs to a different database handle")
+            }
             Self::EmptyBatch => write!(f, "an empty batch consumes a commit sequence for nothing"),
             Self::UnknownEdge { eid } => {
                 write!(f, "no live version of {eid:?} to delete")
@@ -1045,10 +1051,13 @@ pub struct WriteBatch {
 /// the basis is the snapshot frontier the preparation read — the fact the
 /// first-committer-wins verdict is about. It carries no handle borrow, so two
 /// prepared writes can coexist against the same `Database`.
+/// Commitment requires that same opened handle lifetime. Moving the handle is
+/// allowed; reopening it does not transfer old prepared writes to the new one.
 #[derive(Clone, Debug)]
 pub struct PreparedWrite {
     template: LogicalDeltaTemplate,
     basis: CommitSeq,
+    handle_owner: Arc<()>,
 }
 
 impl PreparedWrite {
@@ -1837,6 +1846,12 @@ fn chain_commitment_at(chain: &fgdb_chronicle::MarkerChain, at: CommitSeq) -> Op
 /// and retained-shape counts are visible, while keys, pending durability
 /// internals, and the decoded graph snapshot remain redacted.
 pub struct Database<V: Vfs = UnixVfs> {
+    /// In-process ownership of this opened writer lifetime. Retaining this
+    /// opaque allocation prevents prepared writes/transactions from migrating
+    /// to another handle, even with identical keys, paths or frontiers. It
+    /// survives moves and publication, but reopening earns a fresh identity.
+    /// This is not a durable identity or an authorization/session protocol.
+    handle_owner: Arc<()>,
     coordinator: CommitCoordinator<V>,
     store: BlockStore<V>,
     /// The ONE mutable object in the directory (doctrine 5): the dual-slot
@@ -2369,6 +2384,7 @@ impl<V: Vfs + Clone> Database<V> {
             vfs,
             crypto_verification_events,
             next_txn_obligation: 0,
+            handle_owner: Arc::new(()),
         })
     }
 
@@ -2542,7 +2558,13 @@ impl<V: Vfs + Clone> Database<V> {
             .expect("a handle cannot begin 2^64 transactions");
         let id = ObligationId::new(self.next_txn_obligation)
             .expect("the pin counter starts above zero and only increments");
-        WriteTxn::begin(self.snapshot.frontier, txn, id).map_err(WriteError::SnapshotPin)
+        WriteTxn::begin(
+            self.snapshot.frontier,
+            txn,
+            id,
+            Arc::clone(&self.handle_owner),
+        )
+        .map_err(WriteError::SnapshotPin)
     }
 
     /// Build a batch's canonical template against the CURRENT live snapshot
@@ -2563,6 +2585,7 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(PreparedWrite {
             template,
             basis: self.snapshot.frontier,
+            handle_owner: Arc::clone(&self.handle_owner),
         })
     }
 
@@ -2616,6 +2639,9 @@ impl<V: Vfs + Clone> Database<V> {
         prepared: PreparedWrite,
         crash_at: Option<CrashPoint>,
     ) -> Result<CommitSeq, WriteError> {
+        if !Arc::ptr_eq(&self.handle_owner, &prepared.handle_owner) {
+            return Err(WriteError::ForeignPreparedWrite);
+        }
         self.ensure_writable()?;
         if prepared.basis == self.snapshot.frontier {
             self.coordinator

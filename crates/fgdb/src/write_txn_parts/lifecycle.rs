@@ -3,9 +3,11 @@ impl WriteTxn {
         basis: CommitSeq,
         txn: &TxnCx,
         obligation_id: ObligationId,
+        handle_owner: std::sync::Arc<()>,
     ) -> Result<Self, ObligationAcquireError> {
         let pin = txn.pin_snapshot(obligation_id)?;
         Ok(Self {
+            handle_owner,
             basis,
             staged: Vec::new(),
             prepared: None,
@@ -21,15 +23,26 @@ impl WriteTxn {
         self.basis
     }
 
+    /// Validate lifecycle and ownership before observing another handle or
+    /// changing staged/conflict state. A sequence is meaningful only within
+    /// the opened writer lifetime that supplied this transaction's basis.
+    fn ensure_database<V: Vfs>(&self, database: &Database<V>) -> Result<(), WriteTxnError> {
+        if self.pin.is_none() {
+            return Err(WriteTxnError::Finished);
+        }
+        if !std::sync::Arc::ptr_eq(&self.handle_owner, &database.handle_owner) {
+            return Err(WriteTxnError::WrongDatabase);
+        }
+        Ok(())
+    }
+
     /// Stage a same-relation batch against this transaction's pinned snapshot.
     pub fn write<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
         batch: WriteBatch,
     ) -> Result<(), WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
 
         let live = database.frontier()?;
         if live != self.basis {
@@ -61,5 +74,4 @@ impl WriteTxn {
         self.prepared = Some(prepared);
         Ok(())
     }
-
 }

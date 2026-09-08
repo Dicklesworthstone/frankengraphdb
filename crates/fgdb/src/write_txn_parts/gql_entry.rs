@@ -7,9 +7,7 @@ impl WriteTxn {
         src: &str,
         bind: &RelationBind,
     ) -> Result<Vec<VId>, WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
         let plan = Self::bind_gql_plan(src, bind)?;
         self.execute_prepared_gql(database, &plan)
     }
@@ -25,9 +23,7 @@ impl WriteTxn {
         database: &Database<V>,
         plan: &BoundPlan,
     ) -> Result<Vec<VId>, WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
         match plan.relation {
             None => self.execute_prepared_node_scan(database, plan),
             Some(relation) => self.execute_prepared_edge_match(database, plan, relation),

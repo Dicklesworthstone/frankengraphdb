@@ -9,16 +9,15 @@ impl WriteTxn {
     }
 
     /// Commit through the production crash-point path, then release the pin
-    /// regardless of whether the prepared write committed or was refused.
+    /// after an admitted owner's commit succeeds or is refused. A wrong-owner
+    /// call leaves the transaction live and unchanged for its actual owner.
     pub async fn commit_with_crash<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
         cx: &CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
     ) -> Result<CommitSeq, WriteTxnError> {
-        if self.pin.is_none() {
-            return Err(WriteTxnError::Finished);
-        }
+        self.ensure_database(database)?;
         if self.prepared.is_none() {
             self.release_pin();
             return Err(WriteTxnError::NoPreparedWrite);

@@ -32,7 +32,7 @@ use fgdb::{Database, DatabaseKeys, WriteBatch, WriteError, WriteTxn, WriteTxnErr
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::path::PathBuf;
 
 const KNOWS: RelationId = RelationId(1);
@@ -83,6 +83,360 @@ async fn seeded(cx: &fgdb_types::context::CommitCx, dir: &PathBuf) -> Database {
     seed.create_vertex(VId(1), vec![LabelId(3)], vec![(PROP, int(0))]);
     db.write(cx, seed).await.expect("seed commits");
     db
+}
+
+fn wrong_owner<T>(result: Result<T, WriteTxnError>) {
+    let error = result.err().expect("a foreign database must be refused");
+    assert!(
+        matches!(&error, WriteTxnError::WrongDatabase),
+        "expected WrongDatabase, got {error:?}"
+    );
+}
+
+#[test]
+fn foreign_handles_refuse_every_read_and_write_without_consuming_the_owner() {
+    under_lab(0x7a11, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        for same_keys in [true, false] {
+            let mut owner = seeded(&commit, &scratch(&format!("owner-{same_keys}"))).await;
+            let foreign_keys = if same_keys {
+                keys()
+            } else {
+                DatabaseKeys::new([9; 32], DatabaseSecurityNamespaceId([8; 32]), [7; 32])
+            };
+            let mut foreign = Database::create(
+                &commit,
+                &scratch(&format!("foreign-{same_keys}")),
+                foreign_keys,
+            )
+            .await
+            .expect("foreign creates");
+            let mut seed = WriteBatch::new(KNOWS);
+            seed.create_vertex(VId(1), vec![LabelId(3)], vec![(PROP, int(0))]);
+            foreign.write(&commit, seed).await.expect("foreign seeds");
+            assert_eq!(
+                owner.frontier().expect("owner frontier"),
+                foreign.frontier().expect("foreign frontier")
+            );
+
+            let mut direct = WriteBatch::new(KNOWS);
+            direct.create_vertex(VId(8), vec![], vec![]);
+            let prepared_write = owner.prepare_write(direct).expect("owner prepares");
+            assert!(matches!(
+                foreign
+                    .commit_prepared(&commit, prepared_write.clone())
+                    .await,
+                Err(WriteError::ForeignPreparedWrite)
+            ));
+            assert!(matches!(
+                foreign
+                    .commit_prepared_with_crash(&commit, prepared_write.clone(), None)
+                    .await,
+                Err(WriteError::ForeignPreparedWrite)
+            ));
+
+            let mut txn = owner.begin(&txn_cx).expect("owner begins");
+            let mut batch = WriteBatch::new(KNOWS);
+            batch.set_vertex_property(VId(1), PROP, Some(int(5)));
+            batch.create_vertex(VId(2), vec![LabelId(3)], vec![]);
+            txn.write(&mut owner, batch).expect("owner stages");
+            let bind = fgdb::RelationBind::new().with_label("Person", LabelId(3));
+            let query = txn
+                .prepare_gql_query("MATCH (n:Person) RETURN n", &bind)
+                .expect("prepares query");
+            let artifact = txn
+                .execute_prepared_query_overlay_artifact(&owner, &query)
+                .expect("owner issues artifact");
+            let bytes = artifact.to_bytes();
+            assert_eq!(artifact.rows(), &[VId(1), VId(2)]);
+            let mut cursor = txn
+                .open_untrusted_prepared_query_overlay_artifact_cursor(&owner, &query, &bytes)
+                .expect("owner opens an audited cursor");
+            assert_eq!(cursor.next_page(1).expect("first page").rows(), &[VId(1)]);
+            let checkpoint = cursor.checkpoint_token().expect("row remains").to_bytes();
+            let mut resumed = txn
+                .resume_untrusted_prepared_query_overlay_artifact_cursor(
+                    &owner,
+                    &query,
+                    &bytes,
+                    &checkpoint,
+                )
+                .expect("owner resumes the same checkpoint");
+            assert_eq!(resumed.next_page(1).expect("last page").rows(), &[VId(2)]);
+            let before = (
+                format!("{txn:?}"),
+                txn.staged_effect_digest().expect("staged digest"),
+            );
+            let owner_rows = owner.vertices().expect("owner rows");
+            let foreign_rows = foreign.vertices().expect("foreign rows");
+            let owner_frontier = owner.frontier().expect("owner frontier");
+            let foreign_frontier = foreign.frontier().expect("foreign frontier");
+            wrong_owner(txn.vertex(&foreign, VId(1)));
+            wrong_owner(txn.vertices(&foreign));
+            wrong_owner(txn.edge(&foreign, EId(1)));
+            wrong_owner(txn.edges(&foreign));
+            wrong_owner(txn.neighbours(&foreign, VId(1), KNOWS));
+            wrong_owner(txn.in_neighbours(&foreign, VId(1), KNOWS));
+            wrong_owner(txn.execute_gql(&foreign, "MATCH (n:Person) RETURN n", &bind));
+            wrong_owner(txn.execute_prepared_gql(&foreign, query.plan()));
+            wrong_owner(txn.execute_prepared_query(&foreign, &query));
+            wrong_owner(txn.execute_prepared_query_certified(&foreign, &query));
+            wrong_owner(txn.execute_prepared_query_overlay_artifact(&foreign, &query));
+            assert!(matches!(
+                txn.execute_prepared_query_budgeted(
+                    &foreign,
+                    &query,
+                    fgdb_gql::GqlExecutionBudget::new(10, 10)
+                ),
+                Err(fgdb_gql::BudgetedGqlError::Execution(
+                    WriteTxnError::WrongDatabase
+                ))
+            ));
+            assert!(matches!(
+                txn.audit_prepared_query_overlay_artifact(&foreign, &query, &bytes),
+                Err(fgdb_gql::GqlEvidenceAuditError::Execution(
+                    WriteTxnError::WrongDatabase
+                ))
+            ));
+            assert!(matches!(
+                txn.open_untrusted_prepared_query_overlay_artifact_cursor(&foreign, &query, &bytes),
+                Err(fgdb_gql::GqlEvidenceLimitedAuditError::Audit(
+                    fgdb_gql::GqlEvidenceAuditError::Execution(WriteTxnError::WrongDatabase)
+                ))
+            ));
+            assert!(matches!(
+                txn.resume_untrusted_prepared_query_overlay_artifact_cursor(
+                    &foreign,
+                    &query,
+                    &bytes,
+                    &checkpoint,
+                ),
+                Err(fgdb_gql::GqlEvidencePageAuditError::Audit(
+                    fgdb_gql::GqlEvidenceLimitedAuditError::Audit(
+                        fgdb_gql::GqlEvidenceAuditError::Execution(WriteTxnError::WrongDatabase)
+                    )
+                ))
+            ));
+            let mut rejected = WriteBatch::new(KNOWS);
+            rejected.set_vertex_property(VId(1), PROP, Some(int(99)));
+            wrong_owner(txn.write(&mut foreign, rejected));
+            wrong_owner(txn.commit(&mut foreign, &commit).await);
+            wrong_owner(txn.commit_with_crash(&mut foreign, &commit, None).await);
+            assert_eq!(
+                before,
+                (
+                    format!("{txn:?}"),
+                    txn.staged_effect_digest().expect("unchanged staged digest")
+                )
+            );
+            assert_eq!(owner.vertices().expect("owner unchanged"), owner_rows);
+            assert_eq!(foreign.vertices().expect("foreign unchanged"), foreign_rows);
+            assert_eq!(
+                owner.frontier().expect("owner frontier unchanged"),
+                owner_frontier
+            );
+            assert_eq!(
+                foreign.frontier().expect("foreign frontier unchanged"),
+                foreign_frontier
+            );
+            assert_eq!(txn_cx.outstanding_obligations(), 1);
+
+            // Moving the Rust value and publishing a disjoint row retain the
+            // opened writer identity while the transaction keeps its old basis.
+            let mut owner = Box::new(owner);
+            let mut advancing = WriteBatch::new(KNOWS);
+            advancing.create_vertex(VId(7), vec![], vec![]);
+            owner
+                .write(&commit, advancing)
+                .await
+                .expect("owner advances");
+            assert_eq!(
+                txn.vertex(&owner, VId(1))
+                    .expect("pinned owner read")
+                    .expect("row")
+                    .props,
+                vec![(PROP, int(5))]
+            );
+            txn.commit(&mut owner, &commit)
+                .await
+                .expect("actual owner still commits");
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+            owner
+                .commit_prepared(&commit, prepared_write.clone())
+                .await
+                .expect("original prepared owner still commits");
+            assert!(owner.vertex(VId(8)).expect("prepared row").is_some());
+            assert!(foreign.vertex(VId(8)).expect("foreign row").is_none());
+            assert_eq!(
+                foreign.frontier().expect("foreign stays unchanged"),
+                foreign_frontier
+            );
+        }
+    });
+}
+
+#[test]
+fn reopened_handle_refuses_old_transactions_and_prepared_clones() {
+    under_lab(0x7a12, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let dir = scratch("reopened-owner");
+        let mut owner = seeded(&commit, &dir).await;
+        let mut txn = owner.begin(&txn_cx).expect("begins");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(VId(2), vec![], vec![]);
+        txn.write(&mut owner, batch.clone()).expect("stages");
+        let prepared = owner.prepare_write(batch).expect("prepares");
+        let frontier = owner.frontier().expect("frontier");
+        drop(owner);
+        let mut reopened = Database::open(&commit, &dir, keys())
+            .await
+            .expect("same database reopens");
+        assert_eq!(reopened.frontier().expect("same frontier"), frontier);
+        wrong_owner(txn.vertices(&reopened));
+        wrong_owner(txn.commit(&mut reopened, &commit).await);
+        assert!(matches!(
+            reopened.commit_prepared(&commit, prepared.clone()).await,
+            Err(WriteError::ForeignPreparedWrite)
+        ));
+        assert_eq!(txn_cx.outstanding_obligations(), 1);
+        txn.abort();
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+        assert_eq!(
+            reopened.frontier().expect("refusal consumed no sequence"),
+            frontier
+        );
+        assert!(reopened.vertex(VId(2)).expect("old write absent").is_none());
+        let mut fresh = reopened.begin(&txn_cx).expect("new owner begins");
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(VId(2), vec![], vec![]);
+        fresh.write(&mut reopened, batch).expect("new owner stages");
+        fresh
+            .commit(&mut reopened, &commit)
+            .await
+            .expect("new owner commits");
+        assert!(reopened.vertex(VId(2)).expect("new owner row").is_some());
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn authoritative_recovery_replaces_ownership_but_healthy_recovery_keeps_it() {
+    under_lab(0x7a14, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let mut owner = seeded(&commit, &scratch("recovery-owner")).await;
+        let mut txn = owner.begin(&txn_cx).expect("begin");
+        let mut staged = WriteBatch::new(KNOWS);
+        staged.create_vertex(VId(2), vec![], vec![]);
+        txn.write(&mut owner, staged.clone()).expect("stage");
+        let prepared = owner.prepare_write(staged).expect("prepare");
+        let mut owner = owner
+            .recover_authoritatively(&commit)
+            .await
+            .expect("healthy no-op recovery");
+        assert!(
+            txn.vertex(&owner, VId(2))
+                .expect("same owner overlay")
+                .is_some()
+        );
+        let mut advancing = WriteBatch::new(KNOWS);
+        advancing.create_vertex(VId(3), vec![], vec![]);
+        assert!(matches!(
+            owner
+                .write_with_publication_failure(
+                    &commit,
+                    advancing,
+                    fgdb::DerivedPublicationStage::SealPartition
+                )
+                .await,
+            Err(WriteError::CommittedNeedsRecovery { .. })
+        ));
+        let mut recovered = owner
+            .recover_authoritatively(&commit)
+            .await
+            .expect("authoritative reopen");
+        wrong_owner(txn.vertex(&recovered, VId(1)));
+        wrong_owner(txn.commit(&mut recovered, &commit).await);
+        assert!(matches!(
+            recovered.commit_prepared(&commit, prepared).await,
+            Err(WriteError::ForeignPreparedWrite)
+        ));
+        assert!(
+            recovered
+                .vertex(VId(3))
+                .expect("durable write recovered")
+                .is_some()
+        );
+        assert!(
+            recovered
+                .vertex(VId(2))
+                .expect("old staged row absent")
+                .is_none()
+        );
+        txn.abort();
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
+fn foreign_prepared_refusal_preserves_the_receivers_fcw_history() {
+    under_lab(0x7a15, |contexts| async move {
+        let commit = contexts.commit();
+        let mut owner = seeded(&commit, &scratch("fcw-owner")).await;
+        let mut receiver = seeded(&commit, &scratch("fcw-receiver")).await;
+        let mut winner = WriteBatch::new(KNOWS);
+        winner.set_vertex_property(VId(1), PROP, Some(int(1)));
+        let winner = receiver.prepare_write(winner).expect("winner prepares");
+        let mut loser = WriteBatch::new(KNOWS);
+        loser.set_vertex_property(VId(1), PROP, Some(int(2)));
+        let loser = receiver
+            .prepare_write(loser)
+            .expect("loser prepares at same basis");
+        receiver
+            .commit_prepared(&commit, winner)
+            .await
+            .expect("winner commits");
+
+        let mut advance = WriteBatch::new(KNOWS);
+        advance.create_vertex(VId(7), vec![], vec![]);
+        owner
+            .write(&commit, advance)
+            .await
+            .expect("owner reaches receiver frontier");
+        let mut foreign = WriteBatch::new(KNOWS);
+        foreign.create_vertex(VId(8), vec![], vec![]);
+        let foreign = owner.prepare_write(foreign).expect("foreign prepares");
+        assert_eq!(
+            foreign.basis(),
+            receiver.frontier().expect("receiver frontier")
+        );
+        // A guard placed after the basis-current validator reset would appear
+        // to refuse correctly but erase the winner needed to reject the loser.
+        assert!(matches!(
+            receiver.commit_prepared(&commit, foreign).await,
+            Err(WriteError::ForeignPreparedWrite)
+        ));
+        assert!(matches!(
+            receiver.commit_prepared(&commit, loser).await,
+            Err(WriteError::FirstCommitterWins { .. })
+        ));
+        assert_eq!(
+            receiver
+                .vertex(VId(1))
+                .expect("receiver row")
+                .expect("present")
+                .props,
+            vec![(PROP, int(1))]
+        );
+        assert!(
+            receiver
+                .vertex(VId(8))
+                .expect("foreign row absent")
+                .is_none()
+        );
+    });
 }
 
 /// Two txns begun against one basis, overlapping property updates on
