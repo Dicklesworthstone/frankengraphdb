@@ -2,8 +2,11 @@
 //!
 //! Requested relation/orientation pairs are indexed once. Binding rows stream
 //! through Select/Expand; the terminal projection/order/distinct is fused.
-//! The control seam runs before each admitted row, operator visit and scratch
-//! insertion. It can stop a computation without releasing partial result rows.
+//! The control seam runs before each admitted row, operator visit, scratch
+//! insertion and returned row. Refusals never release partial result rows.
+
+mod policy;
+pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 
 use crate::algebra::{GlaDirection, GlaOperator, GlaPlan, VertexPredicate};
 use fgdb_delta_types::RelationId;
@@ -15,6 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum GlaExecutionEvent {
     Work,
     ScratchEntry,
+    /// One final ordered, distinct, paginated row, before copying it into the
+    /// result vector. This is not a path occurrence or a pre-SKIP candidate.
+    ResultRow,
 }
 
 /// Limits on the evaluator, after the caller admits its snapshot/overlay.
@@ -344,7 +350,8 @@ impl GlaPlan {
 
     /// The one evaluator body. A caller can return its own cancellation or
     /// resource error from control; the same typed error propagates unchanged.
-    /// Control runs before admitted-row work, operator work and scratch growth.
+    /// Control runs before admitted-row work, operator work, scratch growth
+    /// and every final row copied into the returned vector.
     pub fn execute_with_control<E>(
         &self,
         vertices: impl IntoIterator<Item = VId>,
@@ -400,12 +407,15 @@ impl GlaPlan {
             ),
             _ => (0, usize::MAX),
         };
-        Ok(execution
-            .projected
-            .into_iter()
-            .skip(offset)
-            .take(count)
-            .collect())
+        // Do not reserve the full result or copy a row before its guard runs.
+        // Projected scratch is separately governed; this is the final output
+        // copy, after the bounded API's distinct/order/SKIP/LIMIT contract.
+        let mut value = Vec::new();
+        for vid in execution.projected.into_iter().skip(offset).take(count) {
+            (execution.control)(GlaExecutionEvent::ResultRow)?;
+            value.push(vid);
+        }
+        Ok(value)
     }
 }
 

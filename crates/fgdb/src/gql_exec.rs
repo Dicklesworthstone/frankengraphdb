@@ -273,6 +273,21 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
             limits,
         )
     }
+
+    pub(crate) fn execute_governed<C>(
+        self,
+        policy: fgdb_gql::GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<ReadError, C>> {
+        self.logical.execute_governed(
+            self.snapshot_records,
+            self.vertices.keys().copied(),
+            self.edges.iter().map(edge_triple),
+            |vid, predicates| self.matches(vid, predicates),
+            policy,
+            checkpoint,
+        )
+    }
 }
 
 fn edge_triple(record: &EdgeRecord) -> (VId, RelationId, VId) {

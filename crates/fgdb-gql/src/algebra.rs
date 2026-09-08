@@ -174,6 +174,24 @@ fn select(operators: &mut Vec<GlaOperator>, slot: BindingSlot, predicates: Vec<V
     }
 }
 
+/// Reusing a variable names the SAME vertex, not a fresh binding. Attach the
+/// constraint only after both slots exist, and use the first matching slot as
+/// the equivalence-class representative. Spelling is erased; aliasing is not.
+fn bind_alias(
+    operators: &mut Vec<GlaOperator>,
+    previous: &[(BindingSlot, &str)],
+    slot: BindingSlot,
+    name: &str,
+) {
+    if let Some((representative, _)) = previous.iter().find(|(_, bound)| *bound == name) {
+        operators.push(GlaOperator::VertexIdentity {
+            left: *representative,
+            right: slot,
+            equal: true,
+        });
+    }
+}
+
 impl GlaPlan {
     /// Lower every currently executable BoundPlan field exactly once. Positional
     /// predicate slots exist only at this legacy adapter, never in the executor.
@@ -205,6 +223,12 @@ impl GlaPlan {
                 relation,
                 direction,
             });
+            bind_alias(
+                &mut operators,
+                &[(source, plan.src_var.as_str())],
+                destination,
+                &plan.dst_var,
+            );
             let destination_properties = predicates(
                 None,
                 [
@@ -241,6 +265,17 @@ impl GlaPlan {
                     relation,
                     direction,
                 });
+                if let Some(name) = &plan.hop2_dst_var {
+                    bind_alias(
+                        &mut operators,
+                        &[
+                            (source, plan.src_var.as_str()),
+                            (destination, plan.dst_var.as_str()),
+                        ],
+                        far_end,
+                        name,
+                    );
+                }
                 select(
                     &mut operators,
                     far_end,
@@ -292,7 +327,7 @@ impl GlaPlan {
 
     /// Canonical, domain-separated logical transcript. This is an unreleased
     /// application transcript, not an Appendix A durable format or certificate.
-    /// Syntax spelling and variable names are deliberately not logical identity.
+    /// Renaming variables preserves identity only when it preserves aliasing.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:bounded-gla:v1\0".to_vec();
@@ -482,5 +517,139 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn self_loops_and_closed_walks_preserve_binding_identity() {
+        use fgdb_types::VId;
+        let edges = [
+            (VId(1), RelationId(1), VId(2)),
+            (VId(2), RelationId(1), VId(2)),
+            (VId(2), RelationId(2), VId(1)),
+            (VId(2), RelationId(2), VId(3)),
+        ];
+        for statement in [
+            "MATCH (a)-[:R]->(a) RETURN a",
+            "MATCH (a)<-[:R]-(a) RETURN a",
+            "MATCH (a)-[:R]-(a) RETURN a",
+        ] {
+            let plan = bind().bind(statement).unwrap();
+            let rows = GlaPlan::lower(&plan)
+                .execute([], edges, |_, _| Ok::<_, ()>(true))
+                .unwrap();
+            assert_eq!(rows, vec![VId(2)], "{statement}");
+        }
+        for statement in [
+            "MATCH (a)-[:R]->(b)-[:S]->(a) RETURN a",
+            "MATCH (a)<-[:R]-(b)<-[:S]-(a) RETURN a",
+            "MATCH (a)-[:R]-(b)-[:S]-(a) RETURN a",
+        ] {
+            let plan = bind().bind(statement).unwrap();
+            let rows = GlaPlan::lower(&plan)
+                .execute([], edges, |_, _| Ok::<_, ()>(true))
+                .unwrap();
+            let expected = if plan.direction == EdgeDirection::Undirected {
+                vec![VId(1), VId(2)]
+            } else if plan.direction == EdgeDirection::Incoming {
+                vec![VId(2)]
+            } else {
+                vec![VId(1)]
+            };
+            assert_eq!(rows, expected, "{statement}");
+        }
+    }
+
+    #[test]
+    fn alias_checks_follow_binding_and_precede_property_observation() {
+        use fgdb_types::VId;
+        let plan = bind()
+            .bind("MATCH (a)-[:R]->(a) WHERE a.n = 7 RETURN a")
+            .unwrap();
+        let rows = GlaPlan::lower(&plan)
+            .execute([], [(VId(1), RelationId(1), VId(2))], |_, _| {
+                Err::<bool, _>("a non-loop must not reach its property read")
+            })
+            .unwrap();
+        assert!(rows.is_empty());
+        let closed = bind()
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(a) RETURN a")
+            .unwrap();
+        let renamed = bind()
+            .bind("MATCH (x)-[:R]->(y)-[:S]->(x) RETURN x")
+            .unwrap();
+        let open = bind()
+            .bind("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN c")
+            .unwrap();
+        assert_eq!(
+            GlaPlan::lower(&closed).canonical_bytes(),
+            GlaPlan::lower(&renamed).canonical_bytes()
+        );
+        assert_ne!(
+            GlaPlan::lower(&closed).canonical_bytes(),
+            GlaPlan::lower(&open).canonical_bytes()
+        );
+    }
+
+    #[test]
+    fn every_three_position_alias_partition_matches_direct_enumeration() {
+        use fgdb_types::VId;
+        let universe = [
+            (VId(1), RelationId(1), VId(1)),
+            (VId(1), RelationId(1), VId(2)),
+            (VId(2), RelationId(1), VId(1)),
+            (VId(2), RelationId(2), VId(1)),
+            (VId(1), RelationId(2), VId(2)),
+            (VId(2), RelationId(2), VId(2)),
+        ];
+        for mask in 0..(1_u32 << universe.len()) {
+            let edges: Vec<_> = universe.iter().enumerate()
+                .filter(|(i, _)| mask & (1_u32 << *i) != 0)
+                .map(|(_, row)| *row).collect();
+            for names in [["a", "b", "c"], ["a", "a", "b"], ["a", "b", "a"],
+                ["a", "b", "b"], ["a", "a", "a"]]
+            {
+                for (arrow, direction) in [("->", EdgeDirection::Outgoing),
+                    ("-", EdgeDirection::Undirected), ("<-", EdgeDirection::Incoming)]
+                {
+                    let [a, b, c] = names;
+                    let pattern = match direction {
+                        EdgeDirection::Incoming => format!("MATCH ({a})<-[:R]-({b})<-[:S]-({c})"),
+                        _ => format!("MATCH ({a})-[:R]{arrow}({b})-[:S]{arrow}({c})"),
+                    };
+                    let orient = |s, d| match direction {
+                        EdgeDirection::Incoming => vec![(d, s)],
+                        EdgeDirection::Undirected if s != d => vec![(s, d), (d, s)],
+                        _ => vec![(s, d)],
+                    };
+                    for returned in names {
+                        let statement = format!("{pattern} RETURN {returned}");
+                        let plan = bind().bind(&statement).unwrap();
+                        let mut expected = Vec::new();
+                        for &(s, r, d) in &edges {
+                            if r != RelationId(1) { continue; }
+                            for (x, y) in orient(s, d) {
+                                for &(s2, r2, d2) in &edges {
+                                    if r2 != RelationId(2) { continue; }
+                                    for (via, z) in orient(s2, d2) {
+                                        let values = [x, y, z];
+                                        let consistent = (0..3).all(|i| (0..i)
+                                            .all(|j| names[i] != names[j] || values[i] == values[j]));
+                                        if via == y && consistent {
+                                            let at = names.iter().position(|name| *name == returned).unwrap();
+                                            expected.push(values[at]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        expected.sort_unstable();
+                        expected.dedup();
+                        let actual = GlaPlan::lower(&plan)
+                            .execute([], edges.iter().copied(), |_, _| Ok::<_, ()>(true)).unwrap();
+                        assert_eq!(actual, expected, "mask={mask}, {statement}");
+                    }
+                }
+            }
+        }
     }
 }
