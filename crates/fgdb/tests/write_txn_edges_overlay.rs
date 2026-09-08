@@ -54,6 +54,104 @@ fn edge_ids(edges: &[fgdb::EdgeRecord]) -> Vec<EId> {
 }
 
 #[test]
+fn bulk_edges_reuse_the_pinned_basis_and_preserve_ordered_staged_effects() {
+    under_lab(0x8a04, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let mut database = seeded_edge(&commit, &scratch("batch-basis-parity")).await;
+        let mut transaction = database.begin(&txn_cx).expect("transaction begins");
+        let basis = transaction.basis();
+        let mut staged = WriteBatch::new(R);
+        staged.set_edge_property(EId(10), PROPERTY, Some(CanonicalScalar::Int(5)));
+        staged.compare_and_set_edge_property(
+            EId(10),
+            PROPERTY,
+            Some(CanonicalScalar::Int(5)),
+            CanonicalScalar::Int(7),
+            fgdb::WriteMismatchPolicy::AbortWrite,
+        );
+        staged.compare_and_set_edge_property(
+            EId(10),
+            PROPERTY,
+            Some(CanonicalScalar::Int(-1)),
+            CanonicalScalar::Int(99),
+            fgdb::WriteMismatchPolicy::NoOp,
+        );
+        staged.add_edge(EId(11), VId(2), VId(3), vec![]);
+        transaction
+            .write(&mut database, staged)
+            .expect("first batch stages");
+        let mut later = WriteBatch::new(R);
+        later.delete_vertex(VId(3));
+        later.create_vertex(VId(4), vec![], vec![]);
+        later.add_edge(
+            EId(12),
+            VId(1),
+            VId(4),
+            vec![(PROPERTY, CanonicalScalar::Int(9))],
+        );
+        transaction
+            .write(&mut database, later)
+            .expect("ordered second batch stages");
+
+        let before = transaction
+            .edges(&database)
+            .expect("bulk reads staged effects");
+        assert_eq!(edge_ids(&before), vec![EId(10), EId(12)]);
+        assert_eq!(before[0].props, vec![(PROPERTY, CanonicalScalar::Int(7))]);
+        assert_eq!(before[1].props, vec![(PROPERTY, CanonicalScalar::Int(9))]);
+        assert_eq!(before[1].entry.created_at, basis);
+        let points: Vec<_> = [EId(10), EId(11), EId(12)]
+            .into_iter()
+            .filter_map(|eid| {
+                transaction
+                    .edge(&database, eid)
+                    .expect("point overlay reads")
+            })
+            .collect();
+        assert_eq!(before, points);
+
+        let mut advancing = WriteBatch::new(R);
+        advancing.set_edge_property(EId(10), PROPERTY, Some(CanonicalScalar::Int(42)));
+        advancing.add_edge(EId(13), VId(2), VId(3), vec![]);
+        let live = database
+            .write(&commit, advancing)
+            .await
+            .expect("another writer advances");
+        assert!(live > basis);
+        let after = transaction
+            .edges(&database)
+            .expect("bulk read keeps historical basis");
+        // The visible old statement gains its known future retirement when a
+        // successor commits. Its historical value and staged overlay stay the
+        // same; both bulk and point reads expose the complete lifetime.
+        let mut expected = before;
+        assert_eq!(expected[0].entry.retired_at, None);
+        expected[0].entry.retired_at = Some(live);
+        assert_eq!(after, expected);
+        let historical_points: Vec<_> = [EId(10), EId(11), EId(12), EId(13)]
+            .into_iter()
+            .filter_map(|eid| {
+                transaction
+                    .edge(&database, eid)
+                    .expect("historical point overlay")
+            })
+            .collect();
+        assert_eq!(after, historical_points);
+        assert_eq!(
+            database
+                .edge(EId(10))
+                .expect("live edge")
+                .expect("present")
+                .props,
+            vec![(PROPERTY, CanonicalScalar::Int(42))]
+        );
+        transaction.abort();
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn staged_addition_appears_only_in_transaction_edges_and_abort_discards_it() {
     under_lab(0x8a_01, |contexts| async move {
         let commit_cx = contexts.commit();

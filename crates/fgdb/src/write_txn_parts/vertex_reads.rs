@@ -11,12 +11,16 @@ impl WriteTxn {
         }
 
         let live = database.frontier()?;
-        let mut overlay = if live == self.basis {
+        let overlay = if live == self.basis {
             database.vertex(vid)?
         } else {
             database.vertex_at(vid, self.basis)?
         };
+        Ok(self.vertex_over_basis(vid, overlay))
+    }
 
+    /// Reuse the same ordered staged evaluator for point and table reads.
+    fn vertex_over_basis(&self, vid: VId, mut overlay: Option<VertexRow>) -> Option<VertexRow> {
         let mut intent_ordinal = 0u64;
         for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
             intent_ordinal = intent_ordinal
@@ -97,7 +101,7 @@ impl WriteTxn {
             }
         }
         self.read_set.borrow_mut().insert(ElementId::Vertex(vid));
-        Ok(overlay)
+        overlay
     }
 
     /// Read every vertex from the pinned basis through this transaction's
@@ -110,11 +114,14 @@ impl WriteTxn {
             return Err(WriteTxnError::Finished);
         }
 
-        let mut vids: std::collections::BTreeSet<VId> = database
+        // Keep the admitted rows rather than discarding them and resolving the
+        // same immutable patch history once more for every vertex identity.
+        let mut basis: std::collections::BTreeMap<VId, VertexRow> = database
             .vertices_at(self.basis)?
             .into_iter()
-            .map(|row| row.vid)
+            .map(|row| (row.vid, row))
             .collect();
+        let mut vids: std::collections::BTreeSet<VId> = basis.keys().copied().collect();
         for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
             match pending {
                 PendingRow::Vertex { vid, .. } | PendingRow::DeleteVertex { vid, .. } => {
@@ -131,7 +138,7 @@ impl WriteTxn {
 
         let mut rows = Vec::new();
         for vid in vids {
-            if let Some(row) = self.vertex(database, vid)? {
+            if let Some(row) = self.vertex_over_basis(vid, basis.remove(&vid)) {
                 rows.push(row);
             }
         }
@@ -141,5 +148,4 @@ impl WriteTxn {
             .extend(rows.iter().map(|row| ElementId::Vertex(row.vid)));
         Ok(rows)
     }
-
 }

@@ -50,6 +50,99 @@ fn vertex_ids(vertices: &[fgdb::VertexRow]) -> Vec<VId> {
 }
 
 #[test]
+fn bulk_vertices_preserve_staged_labels_properties_and_historical_birth_rows() {
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
+    use fgdb_types::CanonicalScalar;
+
+    under_lab(0x8c04, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let mut database = seeded_vertex(&commit, &scratch("batch-basis-parity")).await;
+        let mut second = WriteBatch::new(R);
+        second.create_vertex(VId(2), vec![], vec![]);
+        database
+            .write(&commit, second)
+            .await
+            .expect("second vertex commits");
+        let mut transaction = database.begin(&txn_cx).expect("transaction begins");
+        let basis = transaction.basis();
+        let key = PropertyKeyId(7);
+        let mut staged = WriteBatch::new(R);
+        staged.ensure_vertex(VId(1), vec![LabelId(99)], vec![]);
+        staged.set_vertex_label(VId(1), LabelId(8), true);
+        staged.set_vertex_label(VId(1), LabelId(7), true);
+        staged.set_vertex_label(VId(1), LabelId(7), false);
+        staged.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(3)));
+        staged.compare_and_set_vertex_property(
+            VId(1),
+            key,
+            Some(CanonicalScalar::Int(3)),
+            CanonicalScalar::Int(5),
+            fgdb::WriteMismatchPolicy::AbortWrite,
+        );
+        staged.compare_and_set_vertex_property(
+            VId(1),
+            key,
+            Some(CanonicalScalar::Int(-1)),
+            CanonicalScalar::Int(99),
+            fgdb::WriteMismatchPolicy::NoOp,
+        );
+        staged.delete_vertex(VId(2));
+        staged.create_vertex(
+            VId(3),
+            vec![LabelId(9), LabelId(4)],
+            vec![(key, CanonicalScalar::Int(8))],
+        );
+        transaction
+            .write(&mut database, staged)
+            .expect("ordered effects stage");
+        let before = transaction.vertices(&database).expect("bulk overlay reads");
+        assert_eq!(vertex_ids(&before), vec![VId(1), VId(3)]);
+        assert_eq!(before[0].labels, vec![LabelId(8)]);
+        assert_eq!(before[0].props, vec![(key, CanonicalScalar::Int(5))]);
+        assert_eq!(before[1].labels, vec![LabelId(4), LabelId(9)]);
+        assert_eq!(before[1].birth_ordinal, 9);
+        assert_eq!(before[1].created_at, basis);
+        let points: Vec<_> = [VId(1), VId(2), VId(3)]
+            .into_iter()
+            .filter_map(|vid| {
+                transaction
+                    .vertex(&database, vid)
+                    .expect("point overlay reads")
+            })
+            .collect();
+        assert_eq!(before, points);
+
+        let mut advancing = WriteBatch::new(R);
+        advancing.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(42)));
+        advancing.create_vertex(VId(4), vec![], vec![]);
+        let live = database
+            .write(&commit, advancing)
+            .await
+            .expect("another writer advances");
+        assert!(live > basis);
+        let after = transaction
+            .vertices(&database)
+            .expect("bulk read keeps pinned basis");
+        let mut expected = before;
+        assert_eq!(expected[0].retired_at, None);
+        expected[0].retired_at = Some(live);
+        assert_eq!(after, expected, "only the known future retirement changes");
+        let historical_points: Vec<_> = [VId(1), VId(2), VId(3), VId(4)]
+            .into_iter()
+            .filter_map(|vid| {
+                transaction
+                    .vertex(&database, vid)
+                    .expect("historical point overlay")
+            })
+            .collect();
+        assert_eq!(after, historical_points);
+        transaction.abort();
+        assert_eq!(txn_cx.outstanding_obligations(), 0);
+    });
+}
+
+#[test]
 fn staged_creation_appears_only_in_transaction_vertices_and_abort_discards_it() {
     under_lab(0x8c_01, |contexts| async move {
         let commit_cx = contexts.commit();

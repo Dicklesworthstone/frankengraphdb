@@ -10,7 +10,13 @@ impl WriteTxn {
             return Err(WriteTxnError::Finished);
         }
 
-        let mut overlay = database.edge_at(eid, self.basis)?;
+        let overlay = database.edge_at(eid, self.basis)?;
+        Ok(self.edge_over_basis(eid, overlay))
+    }
+
+    /// Apply the staged evaluator to one already admitted basis row. Point and
+    /// table reads share this body so row order and conflict tracking agree.
+    fn edge_over_basis(&self, eid: EId, mut overlay: Option<EdgeRecord>) -> Option<EdgeRecord> {
         let mut observed_sources = std::collections::BTreeSet::new();
         let mut deleted_vertices = std::collections::BTreeSet::new();
         if let Some(record) = &overlay {
@@ -99,7 +105,7 @@ impl WriteTxn {
         read_set.insert(ElementId::Edge(eid));
         read_set.extend(observed_sources.into_iter().map(ElementId::Vertex));
         read_set.extend(deleted_vertices.into_iter().map(ElementId::Vertex));
-        Ok(overlay)
+        overlay
     }
 
     /// Read every edge from the pinned basis through this transaction's
@@ -112,11 +118,14 @@ impl WriteTxn {
             return Err(WriteTxnError::Finished);
         }
 
-        let mut eids: std::collections::BTreeSet<EId> = database
+        // Admit the durable table once. Re-reading each edge through edge_at
+        // would validate the entire immutable history again for every EId.
+        let mut basis: std::collections::BTreeMap<EId, EdgeRecord> = database
             .edges_at(self.basis)?
             .into_iter()
-            .map(|record| record.entry.eid)
+            .map(|record| (record.entry.eid, record))
             .collect();
+        let mut eids: std::collections::BTreeSet<EId> = basis.keys().copied().collect();
         for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
             match pending {
                 PendingRow::Edge { eid, .. }
@@ -138,7 +147,7 @@ impl WriteTxn {
 
         let mut rows = Vec::new();
         for eid in eids {
-            if let Some(record) = self.edge(database, eid)? {
+            if let Some(record) = self.edge_over_basis(eid, basis.remove(&eid)) {
                 rows.push(record);
             }
         }
@@ -322,5 +331,4 @@ impl WriteTxn {
         read_set.extend(deleted_sources.into_iter().map(ElementId::Vertex));
         Ok(sources.into_iter().collect())
     }
-
 }
