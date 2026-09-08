@@ -10,7 +10,7 @@ use fgdb_types::{
     PurposeObligation, TxnCx, VId,
 };
 
-/// Failure to prepare or finish the bounded one-batch write transaction.
+/// Failure to prepare an atomic write or stage/finish a bounded transaction.
 #[derive(Debug)]
 pub enum WriteTxnError {
     NoPreparedWrite,
@@ -110,10 +110,11 @@ impl From<GqlError> for WriteTxnError {
 
 /// Write batches staged against a snapshot pinned by a [`TxnCx`].
 ///
-/// This is deliberately not SSI: after each write it combines same-relation
-/// batches in call order and refreshes one prepared template against the
-/// pinned basis. Commit validates observed rows and conservative table-scan
-/// insertion witnesses before delegating publication to the coordinator.
+/// This is deliberately not SSI. Same-relation prefixes retain call order;
+/// `write_atomic` explicitly admits independent relation groups at the same
+/// pinned basis. Each successful staging refreshes one canonical template.
+/// Commit validates observations and conservative scan witnesses before
+/// delegating the whole template to the existing publication coordinator.
 pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,
