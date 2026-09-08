@@ -222,9 +222,8 @@ fn pack_retained(
     let mut packed: Vec<(Vec<AdjacencyEntry>, Option<BlockProps>)> = Vec::new();
     for pairs in by_descriptor.values_mut() {
         pairs.sort_by_key(|(entry, _)| (entry.dst, entry.eid, entry.created_at));
-        // Cut a block at entry capacity OR at the hosted patch's row ceiling,
-        // whichever binds first — a block hosts at most one patch, so packing
-        // past the row ceiling would emit an unencodable block.
+        // A block hosts at most one patch. Split at the first entry, patch
+        // row, or stored-byte ceiling, using the writer's admission measure.
         let mut chunk: Vec<(AdjacencyEntry, EdgePropertyRow)> = Vec::new();
         let mut propertied = 0usize;
         let mut patch_bytes = PROPERTY_PATCH_HEADER_BYTES;

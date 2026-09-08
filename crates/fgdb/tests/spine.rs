@@ -1261,6 +1261,8 @@ fn oversized_property_refuses_before_commit_and_preserves_reopen() {
         let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
         let mut seed = WriteBatch::new(KNOWS);
         seed.create_vertex(VId(1), vec![], vec![(key, CanonicalScalar::Int(1))]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
         let first = db.write(cx, seed).await.expect("supported seed commits");
         let manifest = db.manifest().expect("published manifest");
 
@@ -1271,13 +1273,33 @@ fn oversized_property_refuses_before_commit_and_preserves_reopen() {
             Some(CanonicalScalar::bytes(vec![0x5a; 20_000]).expect("valid scalar")),
         );
         let result = db.write(cx, oversized).await;
-        assert!(result.is_err(), "unsupported row must refuse");
+        assert!(matches!(result, Err(WriteError::VertexStorageAdmission { vid: VId(1), .. })), "unsupported row must refuse: {result:?}");
         assert_eq!(
             db.frontier().expect("size refusal leaves the handle healthy"),
             first,
             "size admission must precede durable commitment: {result:?}"
         );
         assert_eq!(db.manifest().expect("manifest remains callable"), manifest);
+        for create in [false, true] {
+            let oversized = CanonicalScalar::bytes(vec![0x5a; 20_000]).expect("valid scalar");
+            let mut vertices = WriteBatch::new(KNOWS);
+            if create {
+                vertices.create_vertex(VId(3), vec![], vec![(key, oversized.clone())]);
+            } else {
+                vertices.set_vertex_property(VId(1), key, Some(oversized.clone()));
+            }
+            assert!(matches!(db.prepare_write(vertices), Err(WriteError::VertexStorageAdmission { .. })));
+            let mut edges = WriteBatch::new(KNOWS);
+            if create {
+                edges.add_edge(EId(11), VId(1), VId(2), vec![(key, oversized)]);
+            } else {
+                edges.set_edge_property(EId(10), key, Some(oversized));
+            }
+            assert!(matches!(db.prepare_write(edges.clone()), Err(WriteError::EdgeStorageAdmission { .. })));
+            assert!(matches!(db.write(cx, edges).await, Err(WriteError::EdgeStorageAdmission { .. })));
+            assert_eq!(db.frontier().expect("healthy after each refusal"), first);
+            assert_eq!(db.manifest().expect("unchanged manifest"), manifest);
+        }
         assert_eq!(
             db.vertex(VId(1)).expect("read after refusal").expect("seed").props,
             vec![(key, CanonicalScalar::Int(1))]
@@ -1294,6 +1316,57 @@ fn oversized_property_refuses_before_commit_and_preserves_reopen() {
             db.vertex(VId(1)).expect("rebuilt row").expect("seed").props,
             vec![(key, CanonicalScalar::Int(2))]
         );
+    });
+}
+
+#[test]
+fn edge_property_byte_packing_preserves_history_across_compact_and_rebuild() {
+    let dir = scratch("edge-property-byte-packing");
+    under_lab(8237, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let before = CanonicalScalar::bytes(vec![0x41; 8_000]).expect("valid scalar");
+        let after = CanonicalScalar::bytes(vec![0x42; 8_000]).expect("valid scalar");
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![(key, before.clone())]);
+        seed.create_vertex(VId(2), vec![], vec![]);
+        for eid in 10..13 {
+            seed.add_edge(EId(eid), VId(1), VId(2), vec![(key, before.clone())]);
+        }
+        let prepared = db.prepare_write(seed).expect("large supported rows prepare");
+        let first = db.commit_prepared(cx, prepared).await.expect("splits a 24 KB sidecar");
+        let mut update = WriteBatch::new(KNOWS);
+        update.set_vertex_property(VId(1), key, Some(after.clone()));
+        for eid in 10..13 {
+            update.set_edge_property(EId(eid), key, Some(after.clone()));
+        }
+        let second = db.write(cx, update).await.expect("packs property versions");
+        let historical = db.edges_at(first).expect("historical edges");
+        let current = db.edges().expect("live edges");
+        assert_eq!(historical.len(), 3);
+        assert_eq!(current.len(), 3);
+        for row in &historical {
+            assert_eq!(row.props, vec![(key, before.clone())]);
+        }
+        for row in &current {
+            assert_eq!(row.props, vec![(key, after.clone())]);
+        }
+        db.compact(cx).await.expect("compaction respects sidecar bytes");
+        assert_eq!(db.edges_at(first).expect("compacted history"), historical);
+        assert_eq!(db.edges().expect("compacted current"), current);
+        drop(db);
+        for rebuild in [false, true] {
+            let db = if rebuild {
+                Database::open_rebuilding(cx, &dir, keys()).await
+            } else {
+                Database::open(cx, &dir, keys()).await
+            }.expect("reopen supported property history");
+            assert_eq!(db.frontier().expect("frontier"), second);
+            assert_eq!(db.edges_at(first).expect("reopened history"), historical);
+            assert_eq!(db.edges().expect("reopened current"), current);
+            assert_eq!(db.vertex(VId(1)).expect("vertex").expect("live").props, vec![(key, after.clone())]);
+        }
     });
 }
 
