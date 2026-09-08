@@ -7521,7 +7521,7 @@ mod tests {
         // assertion was re-verified unchanged on the new source.
         assert_eq!(
             sha256_hex(source.as_bytes()),
-            "d965f17dae9e1d86c674b89edd17cbb03d1181a4fe9ea19c974cfe9f117f3bd8",
+            "30584e1f0e2afb5bb54105472403709c463dc693836542beb856ce173850b4e0",
             "the two-union population was measured on a different Appendix A source"
         );
 

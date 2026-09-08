@@ -2213,13 +2213,18 @@ fn appendix_source_census_laws() -> Vec<SourceLaw> {
         SourceLaw {
             code: "source_annotation_contract_ambiguous",
             fact: "a complete field annotation stands over a field whose ambiguity discharge was revoked, so no single unambiguous source exact_type backs it",
+            // fgdb-a01-reference-roots-2k0q: the original a01 ExportLeaf
+            // authority_ledger_floor pair retired when the completion campaign
+            // spelled the field's exact type in the source; the living witness
+            // pair is a02's CiphertextRecord.ciphertext_digest, still a
+            // shorthand field discharged by adjudication.
             mutate_catalog: Some(|c| {
                 let adj = c
                     .ambiguity_adjudications
                     .iter_mut()
                     .find(|row| {
                         row.row_id
-                            == "a01:ambiguity-adjudication:9902cb5d9fadf41a985fd54c1bc021af6ff2e124af9886e02fb808aac5c05459"
+                            == "a02:ambiguity-adjudication:21b51c04904bd6d0f06771ddd3fcff1e8f7dc47b406c10d1d817b81ceee93536"
                     })
                     .expect("discharging adjudication exists");
                 adj.resolution = "corrupted".into();
@@ -2228,9 +2233,9 @@ fn appendix_source_census_laws() -> Vec<SourceLaw> {
                     .iter_mut()
                     .find(|t| {
                         t.source_key
-                            == "field|ExportLeaf<T>|ExportLeaf<T>.authority_ledger_floor|authority_ledger_floor"
+                            == "field|CiphertextRecord|CiphertextRecord.ciphertext_digest|ciphertext_digest"
                     })
-                    .expect("ExportLeaf floor field target exists");
+                    .expect("CiphertextRecord ciphertext_digest field target exists");
                 target.definition_status = "complete".into();
                 let projection_row_id = target.target_row_id.clone();
                 c.annotations.push(appendix_a::Annotation {
@@ -2510,7 +2515,10 @@ fn appendix_source_union_laws() -> Vec<SourceLaw> {
     vec![
         SourceLaw {
             code: "source_union_annotation_mismatch",
-            fact: "a complete union target has no matching annotation (annotations are empty)",
+            fact: "a complete union target has no matching annotation (its slice carries none)",
+            // fgdb-a01-reference-roots-2k0q: a01's unions now carry approved
+            // annotations, so the witness completes the first union target that
+            // has none instead of relying on a globally empty layer.
             mutate_catalog: Some(|c| {
                 let mut symbols: Vec<String> = c
                     .identity
@@ -2523,8 +2531,12 @@ fn appendix_source_union_laws() -> Vec<SourceLaw> {
                 let row_id = c
                     .projection_rows
                     .iter()
-                    .find(|p| p.row_kind == "union" && symbols.contains(&p.canonical_symbol))
-                    .expect("projected union row exists")
+                    .find(|p| {
+                        p.row_kind == "union"
+                            && symbols.contains(&p.canonical_symbol)
+                            && !c.annotations.iter().any(|a| a.target_row_id == p.row_id)
+                    })
+                    .expect("projected union row without annotation exists")
                     .row_id
                     .clone();
                 c.targets
@@ -2557,8 +2569,12 @@ fn appendix_source_union_laws() -> Vec<SourceLaw> {
                 let row_id = c
                     .projection_rows
                     .iter()
-                    .find(|p| p.row_kind == "union-arm" && symbols.contains(&p.canonical_symbol))
-                    .expect("projected union-arm row exists")
+                    .find(|p| {
+                        p.row_kind == "union-arm"
+                            && symbols.contains(&p.canonical_symbol)
+                            && !c.annotations.iter().any(|a| a.target_row_id == p.row_id)
+                    })
+                    .expect("projected union-arm row without annotation exists")
                     .row_id
                     .clone();
                 c.targets

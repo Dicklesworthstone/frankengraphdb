@@ -1417,8 +1417,13 @@ fn appendix_a_catalog_maintenance_and_semantic_binding_contracts_are_distinct() 
 #[test]
 fn appendix_a_annotations_reject_placeholders_and_unknown_schema_ids() {
     let mut catalog = real_appendix_catalog();
+    // The a01 completion campaign landed real annotations; clear them so the
+    // fixture row is alone against the compiled contract.
+    catalog.annotations.clear();
     let valid = appendix_a::Annotation {
-        row_id: "a01:annotation:bootstrap-frame-root-slot".to_owned(),
+        // Off-contract row_id on purpose: every landed a01 annotation is pinned, so
+        // only an off-contract row exercises the unapproved path.
+        row_id: "a01:annotation:bootstrap-frame-root-slot-rogue-fixture".to_owned(),
         target_row_id: "a01:bootstrap-frame:root-slot".to_owned(),
         exact_type: "RootSlot".to_owned(),
         cardinality: "one".to_owned(),
@@ -1816,6 +1821,9 @@ fn appendix_a_field_annotations_match_source_type_and_cardinality() {
 #[test]
 fn appendix_a_field_annotations_match_identity_reference_contract() {
     let mut catalog = real_appendix_catalog();
+    // The a01 completion campaign landed real annotations; clear them so the
+    // fixture row is alone against the compiled contract.
+    catalog.annotations.clear();
     let root_manifest_schema_id = catalog
         .reservations
         .iter()
@@ -1915,6 +1923,8 @@ fn appendix_a_field_annotations_match_identity_reference_contract() {
 #[test]
 fn appendix_a_top_level_generic_annotations_discharge_source_formals() {
     let mut catalog = real_appendix_catalog();
+    // As above: clear the landed a01 annotations so the fixture is alone.
+    catalog.annotations.clear();
     catalog.annotations.push(appendix_a::Annotation {
         row_id: "a19:annotation:logical-kind-recovery-bridge-spec".to_owned(),
         target_row_id: "a19:logical-kind:recovery-bridge-spec".to_owned(),
@@ -1971,6 +1981,9 @@ fn appendix_a_top_level_generic_annotations_discharge_source_formals() {
     }
 
     let mut definition = real_appendix_catalog();
+    // The a01 completion campaign landed a real StrongRef definition annotation;
+    // clear the landed annotations so the fixture is alone against the contract.
+    definition.annotations.clear();
     definition.annotations.push(appendix_a::Annotation {
         row_id: "a01:annotation:wire-type-strong-ref".to_owned(),
         target_row_id: "a01:wire-type:strong-ref".to_owned(),
@@ -2029,6 +2042,7 @@ fn appendix_a_top_level_generic_annotations_discharge_source_formals() {
     );
 
     let mut weak_definition = real_appendix_catalog();
+    weak_definition.annotations.clear();
     let mut weak_annotation = definition.annotations[0].clone();
     weak_annotation.row_id = "a01:annotation:wire-type-weak-digest".to_owned();
     weak_annotation.target_row_id = "a01:wire-type:weak-digest".to_owned();
@@ -2045,6 +2059,7 @@ fn appendix_a_top_level_generic_annotations_discharge_source_formals() {
     );
 
     let mut marker_definition = real_appendix_catalog();
+    marker_definition.annotations.clear();
     let mut marker_annotation = definition.annotations[0].clone();
     marker_annotation.row_id = "a01:annotation:wire-type-marker-ref".to_owned();
     marker_annotation.target_row_id = "a01:wire-type:marker-ref".to_owned();
@@ -2188,9 +2203,13 @@ fn appendix_a_target_source_key_drift_is_seen_to_fire() {
 #[test]
 fn appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events() {
     let mut catalog = real_appendix_catalog();
+    // As above: clear the landed a01 completion rows so the fixture is alone.
+    catalog.semantic_bindings.clear();
+    catalog.evidence.clear();
     let owner = "fgdb-durable-capability-validation-evidence-dqym";
     catalog.semantic_bindings.push(appendix_a::SemanticBinding {
-        row_id: "a01:semantic-binding:bootstrap-frame-root-slot".to_owned(),
+        // Off-contract row_id as above: landed bindings are all pinned.
+        row_id: "a01:semantic-binding:bootstrap-frame-root-slot-rogue-fixture".to_owned(),
         target_row_id: "a01:bootstrap-frame:root-slot".to_owned(),
         owner_bead_id: owner.to_owned(),
         owner_crate: "fgdb-types".to_owned(),
@@ -2198,7 +2217,7 @@ fn appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events() {
         consumer_crates: vec!["fgdb".to_owned(), "fgdb-server".to_owned()],
     });
     catalog.evidence.push(appendix_a::EvidenceBinding {
-        row_id: "a01:evidence:bootstrap-frame-root-slot-static-contract".to_owned(),
+        row_id: "a01:evidence:bootstrap-frame-root-slot-rogue-fixture".to_owned(),
         target_row_id: "a01:bootstrap-frame:root-slot".to_owned(),
         evidence_id: "static-contract".to_owned(),
         phase: "static".to_owned(),
@@ -2452,7 +2471,11 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
     // no structural body anywhere and was previously censused by zero rows.
     // The mutation-proved corpus-delta source test pins the exact
     // one-candidate recovery.
-    assert_eq!(baseline.top_level_candidates.len(), 1_259);
+    // 1_259 -> 1_261: fgdb-a01-reference-roots-2k0q rendered
+    // PayloadAvailabilityCertificate (a01:1410) and RemoteRetentionNoOldGrantProof
+    // (a01:1404) as structural definitions with typed bodies, turning two
+    // projection-fallback symbols into confirmed census candidates.
+    assert_eq!(baseline.top_level_candidates.len(), 1_261);
     assert_eq!(
         baseline.targets.len(),
         appendix_a::EXPECTED_PROJECTION_ROW_COUNT
@@ -2486,8 +2509,25 @@ fn appendix_a_catalog_reservation_and_source_census_is_exact() {
         appendix_a::EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256,
         "target/source transcript must sort by target_row_id, not file order"
     );
-    assert!(baseline.semantic_bindings.is_empty());
-    assert!(baseline.evidence.is_empty());
+    // fgdb-a01-reference-roots-2k0q: the layers were deliberately empty until the
+    // a01 completion campaign landed them; the doctrine is unchanged, so the
+    // exact landed counts are pinned instead of the emptiness.
+    assert_eq!(
+        baseline.annotations.len(),
+        appendix_a::EXPECTED_ANNOTATION_COUNT
+    );
+    assert_eq!(
+        baseline.semantic_bindings.len(),
+        appendix_a::EXPECTED_SEMANTIC_BINDING_COUNT
+    );
+    assert_eq!(
+        baseline.expansion_bindings.len(),
+        appendix_a::EXPECTED_EXPANSION_BINDING_COUNT
+    );
+    assert_eq!(
+        baseline.evidence.len(),
+        appendix_a::EXPECTED_EVIDENCE_BINDING_COUNT
+    );
     assert_eq!(
         appendix_a::reservation_assignment_sha256(&baseline.reservations),
         appendix_a::EXPECTED_RESERVATION_ASSIGNMENT_SHA256
@@ -10560,12 +10600,30 @@ fn idr_assignment_history_and_epoch_are_frozen() {
                     "one_digest_signer_lock_ref"
                 )
                 | ("ExportLeaf<T>", "target_identity")
-                | ("ExportLeaf<T>", "local_strong_ref_projection")
+                // fgdb-a01-reference-roots-2k0q: the completion campaign pluralised
+                // the projection list (census-many law); the cohort tracks the rename.
+                | ("ExportLeaf<T>", "local_strong_ref_projections")
                 | ("ExportLeaf<T>", "export_projection_version")
                 | ("ExportLeaf<T>", "object_specific_scalar_projection")
                 | ("ExportLeaf<T>", "target_closure_inventory_digest")
                 | ("ExportLeaf<T>", "authority_ledger_floor")
                 | ("ExportLeaf<T>", "quorum_signatures")
+                // fgdb-a01-reference-roots-2k0q: the a01 completion campaign rendered
+                // PayloadAvailabilityCertificate and RemoteRetentionNoOldGrantProof as
+                // structural definitions; their twelve source-exact fields are younger
+                // than the witness and claimed here.
+                | ("PayloadAvailabilityCertificate", "ciphertext_id")
+                | ("PayloadAvailabilityCertificate", "recoverability_profile_id")
+                | ("PayloadAvailabilityCertificate", "configuration_oid")
+                | ("PayloadAvailabilityCertificate", "configuration_canonical_digest")
+                | ("PayloadAvailabilityCertificate", "selected_encoding_set_digest")
+                | ("PayloadAvailabilityCertificate", "selected_placement_set_digest")
+                | ("RemoteRetentionNoOldGrantProof", "consumer_domain")
+                | ("RemoteRetentionNoOldGrantProof", "target_identity")
+                | ("RemoteRetentionNoOldGrantProof", "grant_id")
+                | ("RemoteRetentionNoOldGrantProof", "complete_consumer_root_digest")
+                | ("RemoteRetentionNoOldGrantProof", "consumer_no_reference_floor_digest")
+                | ("RemoteRetentionNoOldGrantProof", "consumer_checkpoint_floor")
         )
     };
     // The a16 field-coverage closure lands plain `StrongRef` rows, which carry
@@ -12982,7 +13040,12 @@ fn idr_assignment_history_and_epoch_are_frozen() {
         // .target_ref, the anchor field of the generated RemoteGrantTargetRef
         // union (a01:1402). Claimed by post_erratum_bbqq_field; the union and
         // its 74 arms are claimed by post_erratum_reference_union.
-        pre_erratum.fields.len() + 937,
+        // 937 -> 949 (fgdb-a01-reference-roots-2k0q): the twelve source-exact
+        // fields of the two newly rendered a01 schemas (PayloadAvailabilityCertificate,
+        // RemoteRetentionNoOldGrantProof), claimed by post_erratum_a01_applied_field.
+        // The local_strong_ref_projection -> projections rename is count-neutral:
+        // the same row stays in the same cohort under its new name.
+        pre_erratum.fields.len() + 949,
         current_field_count,
         "the historical witness must remove every post-erratum field cohort through the A13 branch-reference tranche"
     );
@@ -13298,6 +13361,60 @@ fn idr_ymqm_fourteen_source_self_edges_are_nonretaining() {
             "owner-ruling remainder must remain explicit: {marker}"
         );
     }
+}
+
+/// fgdb-a01-reference-roots-2k0q: the union-expression delegation law. A
+/// durable field whose exact_type is an inline closed union expression and
+/// whose (schema, tag) owns a registered ordinary union delegates its
+/// reference contract to the union's arm contracts (the arm-payload interior
+/// doctrine), so the a01 TrustTransition field annotation carries
+/// reference_semantics = "none" and no targets. A field that spells reference
+/// wrappers WITHOUT an owning union at its tag must still be caught.
+#[test]
+fn appendix_a_union_expression_field_delegation_is_exact_and_bounded() {
+    let catalog = real_appendix_catalog();
+    // CONFORMANT: the landed TrustTransition field annotation exercises the
+    // delegation and is accepted.
+    let trust = catalog
+        .annotations
+        .iter()
+        .find(|row| {
+            row.target_row_id
+                == "a01:field:remote-authority-configuration-evidence-trust-transition"
+        })
+        .expect("the landed TrustTransition field annotation exists");
+    assert!(
+        trust.exact_type.contains('|'),
+        "the census type is the union expression"
+    );
+    assert_eq!(trust.reference_semantics, "none");
+    assert!(trust.target_schema_ids.is_empty());
+    let violations = appendix_a::validate_catalog(&catalog);
+    assert!(
+        !violations
+            .iter()
+            .any(|violation| violation.row_id == trust.row_id
+                && violation.code == "catalog_annotation_reference_semantics_mismatch"),
+        "the delegated union-expression field was rejected: {violations:?}"
+    );
+
+    // RED: strip the owning union so the same annotation text no longer has a
+    // delegate; the wrapper scan must observe the embedded StrongRefs again.
+    let mut undelegated = catalog.clone();
+    undelegated
+        .identity
+        .ordinary_unions
+        .retain(|union| union.union_name != "TrustTransition");
+    let violations = appendix_a::validate_catalog(&undelegated);
+    assert!(
+        violations.iter().any(|violation| {
+            violation.row_id == trust.row_id
+                && (violation.code == "catalog_annotation_reference_semantics_mismatch"
+                    || violation.code == "catalog_annotation_reference_target_mismatch"
+                    || violation.code == "catalog_annotation_reference_invalid")
+        }),
+        "without the owning union the same annotation text must be rejected: {violations:?}"
+    );
 }
 
 #[test]

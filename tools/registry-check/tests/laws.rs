@@ -434,19 +434,26 @@ fn citation_census_is_not_vacuous() {
     // u64 citations were repaired away and FG-LAW-05/06 registered, leaving 89
     // citations of 7 distinct names, all licensed, ceiling empty. These are
     // floors, not pins: a repair may lawfully shrink them, an extractor that
-    // stops seeing the corpus may not.
+    // stops seeing the corpus may not. RE-MEASURED 2026-09-07 after the a01
+    // completion campaign (fgdb-a01-reference-roots-2k0q): the campaign
+    // disambiguated the a01 source prose, dissolving 74 field-type ambiguities
+    // and retiring their 85 adjudication rows — whose rationale citations were
+    // 73 of the 92. What remains is 21 law tokens, 19 citations of 6 distinct
+    // names, all licensed, ceiling still empty. The shrink is the repair
+    // working as designed: the citations left the corpus because the
+    // ambiguities they adjudicated left the source.
     assert!(
-        cited.len() >= 80,
-        "citation extraction collapsed: {} citations found, expected the ~92 measured at HEAD",
+        cited.len() >= 15,
+        "citation extraction collapsed: {} citations found, expected the ~19 measured at HEAD",
         cited.len()
     );
     assert!(
-        licensed >= 80,
+        licensed >= 15,
         "only {licensed} of {} citations resolve to a registered law",
         cited.len()
     );
     assert!(
-        distinct.len() >= 7,
+        distinct.len() >= 5,
         "distinct cited law names collapsed to {}: {distinct:?}",
         distinct.len()
     );

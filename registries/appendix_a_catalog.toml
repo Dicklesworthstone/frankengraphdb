@@ -27,8 +27,8 @@ plan_path = "COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENGRAPHDB.md"
 start_line = 1388
 end_line = 2728
 line_count = 1341
-byte_count = 1029182
-sha256 = "d965f17dae9e1d86c674b89edd17cbb03d1181a4fe9ea19c974cfe9f117f3bd8"
+byte_count = 1028879
+sha256 = "30584e1f0e2afb5bb54105472403709c463dc693836542beb856ce173850b4e0"
 heading = "## Appendix A — On-Disk Object Formats (normative contract)"
 next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 
@@ -36,7 +36,7 @@ next_heading = "## Appendix B — Graph Intent Log (the semantic vocabulary)"
 target_count = 813
 target_ids_sha256 = "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"
 occurrence_count = 2456
-occurrence_transcript_sha256 = "95705ad6de7f1cd3599d75381d2aca6c3b1f7bc7b3c4995ce40342ccf7453fa6"
+occurrence_transcript_sha256 = "f797542209a7411cde460324bcfa1d6b9be65c9ee536059c520dccae9844c822"
 
 [target_manifest]
 target_count = 4172
@@ -106,8 +106,8 @@ title = "Appendix A exact catalog: Reference semantics, RootSlot, and RootBootst
 start_line = 1388
 end_line = 1444
 line_count = 57
-byte_count = 24782
-sha256 = "72b627994d8b5c84d59d10ec4b377783de3f9bc697a16d620a5fd462c0994ba5"
+byte_count = 24479
+sha256 = "bdc1c18bf4cb9a382066cbc202da074f5bf4df6fe3e5b3b98c100b02e4f68676"
 predecessor = ""
 successor = "a02"
 expected_projection_classes = ["logical_object_kinds", "bootstrap_frames", "wire_types", "durable_fields"]
@@ -120,8 +120,8 @@ union_candidate_count = 13
 union_candidate_ids_sha256 = "c291df0246e0b4c854ddda816d11c7775aa7cda05abc89150989e73f2cedd4ba"
 arm_candidate_count = 36
 arm_candidate_ids_sha256 = "acf50cd4bcfcf5b76f39877ba3db70701a4458323a6988115b76e2949e28bf21"
-ambiguity_count = 100
-ambiguity_ids_sha256 = "5af2f4696346db8375d98f899917ddb0d02ab66f71220c0898006169898d7db3"
+ambiguity_count = 108
+ambiguity_ids_sha256 = "62a3fab1eae904107af7aba7877f3b3d794564b184e06630296b92e1fde63696"
 
 [[slice]]
 ordinal = 2
@@ -13902,7 +13902,7 @@ target_row_id = "a12:field:resource-ledger-transition-role-authority-owning-role
 slice_id = "a12"
 source_key = "field|ResourceLedgerTransition<Role:AuthorityOwningRole>|ResourceLedgerTransition<Role:AuthorityOwningRole>.idempotency_key_digest|idempotency_key_digest"
 target_kind = "field"
-definition_status = "complete"
+definition_status = "declared"
 
 
 [[field]]
@@ -92846,7 +92846,7 @@ target_row_id = "a16:field:time-subject-issuance-reservation-role-nonretaining-p
 slice_id = "a16"
 source_key = "field|TimeSubjectIssuanceReservation<Role>|TimeSubjectIssuanceReservation<Role>.nonretaining_predecessor_digest|nonretaining_predecessor_digest"
 target_kind = "field"
-definition_status = "complete"
+definition_status = "declared"
 
 [[source_symbol_disposition]]
 row_id = "a01:source-symbol-disposition:export-leaf"
@@ -125168,7 +125168,7 @@ target_row_id = "a20:field:local-restore-ready-certificate-one-digest-signer-loc
 slice_id = "a20"
 source_key = "field|LocalRestoreReadyCertificate|LocalRestoreReadyCertificate.one_digest_signer_lock_ref|one_digest_signer_lock_ref"
 target_kind = "field"
-definition_status = "complete"
+definition_status = "declared"
 
 
 [[field]]
@@ -129990,7 +129990,7 @@ target_row_id = "a07:union:global-sequence-neutral-spec-tag-f1f0eeb9eab4a1fc"
 slice_id = "a07"
 source_key = "projection|durable_fields|GlobalSequenceNeutralSpec<Tag>.GlobalSequenceNeutralSpec<Tag>"
 target_kind = "union"
-definition_status = "complete"
+definition_status = "declared"
 
 
 [[ambiguity_adjudication]]
@@ -130407,6 +130407,169 @@ slice_id = "a01"
 source_key = "field|RemoteRetentionNoOldGrantProof|RemoteRetentionNoOldGrantProof.consumer_checkpoint_floor|consumer_checkpoint_floor"
 target_kind = "field"
 definition_status = "complete"
+
+[[target]]
+row_id = "a01:target:union-trust-transition-4ea83dcfc5dc8021"
+target_row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
+slice_id = "a01"
+source_key = "union|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition"
+target_kind = "union"
+definition_status = "complete"
+
+[[target]]
+row_id = "a01:target:union-arm-trust-transition-genesis-7d05462fa7162820"
+target_row_id = "a01:union-arm:trust-transition-genesis-7d05462fa7162820"
+slice_id = "a01"
+source_key = "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Genesis"
+target_kind = "union-arm"
+definition_status = "complete"
+
+[[target]]
+row_id = "a01:target:union-arm-trust-transition-successor-5598693a4eda3135"
+target_row_id = "a01:union-arm:trust-transition-successor-5598693a4eda3135"
+slice_id = "a01"
+source_key = "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Successor"
+target_kind = "union-arm"
+definition_status = "complete"
+
+[[target]]
+row_id = "a01:target:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
+target_row_id = "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
+slice_id = "a01"
+source_key = "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|ValidatedCheckpointSuccessor"
+target_kind = "union-arm"
+definition_status = "complete"
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:08cbc807047e544cd6c1e2598630e187feb142c28fc295cc0a7696e8d36dc68f"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures|4d3d631c393e2608fc220dc9ccc5b46c2ccf2f5adeee9792c26fe42cdae2eff3|1|74220eeea6d3b639145b77c67549571b2ed637d340b8c74474f1f76b0d9db17e|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures|old_configuration_quorum_signatures"]
+rationale = "a01:1398: shorthand member `old_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:299ee60ab1337573ea4994c60bdbe86a53c9be1ecf08fd2f189e0a4f025be75e"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest|0d19b9043ba1e24e570c9ddb7f4952666ee2a7d62116d617b987fb4a75d0ac4f|1|1b2384171b391a46d17735555abbd4c7d6734f3d2b3c0539a90069ea6782324a|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest|final_retirement_floor_digest"]
+rationale = "a01:1398: shorthand member `final_retirement_floor_digest` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:3543ce46e3d146757ff29ca8552c7c2c03766d34c11e9c4b2e70e47446a29da2"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript|3a5b732b143e059fa75e5e80c97a6391ec5d5ba9b14e780d2b45b0d92e4f5c78|1|3baab0cda94ea5af5cd9fd2d99923856924760ac9a5703f7d876d0404f122cb4|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript|joint_transition_transcript"]
+rationale = "a01:1398: shorthand member `joint_transition_transcript` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:404a1f5ffca0b239e6d6304f019a320bfbb2f771e8d8f75075ea4aa41d31fbc6"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript|3a5b732b143e059fa75e5e80c97a6391ec5d5ba9b14e780d2b45b0d92e4f5c78|1|a6c99b864aa1ae5d26e3b7f26bd3c2c19c359c8ce07579d8919793f47ec4d476|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript|joint_transition_transcript"]
+rationale = "a01:1398: shorthand member `joint_transition_transcript` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:6150ede1e1b9372211d8fcedffd089371e78f6ef8bdf839499417b25f27d9e22"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures|274b2dfe7211b3a80c9d1a48ae7215b3a4e08741d73544a3c68555075e759568|1|15edeb75aa867f73d56562652894b4b13d03cc4fa747ee6ea6d470f97905be0c|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures|new_configuration_quorum_signatures"]
+rationale = "a01:1398: shorthand member `new_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:9bac05f943c14519aa377b05808e57bfa117279607768581f79fb2720b221f99"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures|274b2dfe7211b3a80c9d1a48ae7215b3a4e08741d73544a3c68555075e759568|1|547c7a0fd6a457595fa224c7f5b6a20d8ca308b182fd6270ed8097129182b109|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures|new_configuration_quorum_signatures"]
+rationale = "a01:1398: shorthand member `new_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:af2b5edb93577dd590386a385295f80a7ae01d42de718097a430f50357d49612"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures|4d3d631c393e2608fc220dc9ccc5b46c2ccf2f5adeee9792c26fe42cdae2eff3|1|8826373f9b0b5f49b16452b1d2ea787a1624cda9faa348937d0e6cec7f3540d1|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures|old_configuration_quorum_signatures"]
+rationale = "a01:1398: shorthand member `old_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[ambiguity_adjudication]]
+row_id = "a01:ambiguity-adjudication:e1c52d6dcbd8885faf4eba1c8406864266ea081cd420b677c5467c4a97d9100b"
+slice_id = "a01"
+ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest|0d19b9043ba1e24e570c9ddb7f4952666ee2a7d62116d617b987fb4a75d0ac4f|1|b83c51729087fffa1fe3e3b3452234e78f5d92ec86b35d7df4fe1979b46f5fc5|shorthand field has no exact type"
+source_locations = ["a01:1398"]
+resolution = "maps-to-source"
+resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest|final_retirement_floor_digest"]
+rationale = "a01:1398: shorthand member `final_retirement_floor_digest` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
+
+[[union]]
+slice_id = "a01"
+row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
+union_name = "TrustTransition"
+containing_schema = "RemoteAuthorityConfigurationEvidence"
+union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
+field_tag = 0x0009
+tag_wire_type = "u8"
+encoding_context = "closed-tagged"
+allowed_containing_schemas = ["RemoteAuthorityConfigurationEvidence"]
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65537
+
+[[union_arm]]
+slice_id = "a01"
+row_id = "a01:union-arm:trust-transition-genesis-7d05462fa7162820"
+union_name = "TrustTransition"
+containing_schema = "RemoteAuthorityConfigurationEvidence"
+union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
+arm_tag = 0x0001
+source_arm_name = "Genesis"
+stable_name = "genesis"
+payload_kind = "inline-record"
+payload_sha256 = "7aface9d4d3f6e04d01529994ec08c221c7b909ed468c5e268fefda3d856c063"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 40
+
+[[union_arm]]
+slice_id = "a01"
+row_id = "a01:union-arm:trust-transition-successor-5598693a4eda3135"
+union_name = "TrustTransition"
+containing_schema = "RemoteAuthorityConfigurationEvidence"
+union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
+arm_tag = 0x0002
+source_arm_name = "Successor"
+stable_name = "successor"
+payload_kind = "inline-record"
+payload_sha256 = "bdf887bb8354e7c0a444ce07a4bcada43c272180cbbda3ac530ecf6be8694db4"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
+
+[[union_arm]]
+slice_id = "a01"
+row_id = "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
+union_name = "TrustTransition"
+containing_schema = "RemoteAuthorityConfigurationEvidence"
+union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
+arm_tag = 0x0003
+source_arm_name = "ValidatedCheckpointSuccessor"
+stable_name = "validated_checkpoint_successor"
+payload_kind = "inline-record"
+payload_sha256 = "3a2d87d0f381667522afda570d38ae9c32537aede9bb42bee73ef3dbb8d5a749"
+role_predicate = "true"
+version_status = "reserved"
+max_size_bytes = 65536
 
 [[annotation]]
 row_id = "a01:annotation:bootstrap-frame-root-bootstrap"
@@ -131842,14 +132005,14 @@ gate_ids = ["G4"]
 [[annotation]]
 row_id = "a01:annotation:field-remote-authority-configuration-evidence-trust-transition"
 target_row_id = "a01:field:remote-authority-configuration-evidence-trust-transition"
-exact_type = "TrustTransition"
+exact_type = "Genesis{root_authority_trust_artifact_ref:StrongRef<RootAuthorityTrustArtifact>}|Successor{predecessor_evidence_digest:WeakDigest,joint_transition_transcript,old_configuration_quorum_signatures,new_configuration_quorum_signatures,final_retirement_floor_digest}|ValidatedCheckpointSuccessor{predecessor_anchor_ref:StrongRef<ValidatedRemoteConfigurationAnchor>,joint_transition_transcript,old_configuration_quorum_signatures,new_configuration_quorum_signatures,final_retirement_floor_digest}"
 cardinality = "one"
-layout = "inline-record"
+layout = "closed-tagged"
 role = "local+meta+shard"
 posture = "all-postures"
 authority = "owner-group"
 locality = "cross-group-transferable"
-generic_expansions = []
+generic_expansions = ["RootAuthorityTrustArtifact", "ValidatedRemoteConfigurationAnchor"]
 role_expansions = []
 reference_semantics = "none"
 target_schema_ids = []
@@ -145788,6 +145951,165 @@ event_ids = ["remote_release_verdict"]
 gate_ids = ["G4"]
 
 [[annotation]]
+row_id = "a01:annotation:union-arm-trust-transition-genesis-7d05462fa7162820"
+target_row_id = "a01:union-arm:trust-transition-genesis-7d05462fa7162820"
+exact_type = "Genesis"
+cardinality = "one"
+layout = "inline-record"
+role = "local+meta+shard"
+posture = "all-postures"
+authority = "owner-group"
+locality = "owner-group-local"
+generic_expansions = []
+role_expansions = []
+reference_semantics = "none"
+target_schema_ids = []
+construction_order = "0"
+retention_and_cut_rule = "arm of TrustTransition; payload shape committed by the arm contract"
+digest_recipe = "none"
+redaction_class = "none"
+resource_bounds = "max 40 bytes"
+compatibility = "reserved; additive-minor within declared format major on activation"
+
+[[semantic_binding]]
+row_id = "a01:semantic-binding:union-arm-trust-transition-genesis-7d05462fa7162820"
+target_row_id = "a01:union-arm:trust-transition-genesis-7d05462fa7162820"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+owner_crate = "fgdb-chronicle"
+owner_status = "planned"
+consumer_crates = ["fgdb", "fgdb-chronicle"]
+
+[[evidence]]
+row_id = "a01:evidence:union-arm-trust-transition-genesis-7d05462fa7162820-appendix-closure-static"
+target_row_id = "a01:union-arm:trust-transition-genesis-7d05462fa7162820"
+evidence_id = "appendix-closure-static"
+phase = "static"
+status = "live"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+checker_ids = ["appendix_a_catalog_closure", "appendix_a_catalog_projection_diff", "appendix_a_catalog_source"]
+scenario_ids = ["g0_identity_e2e"]
+event_ids = ["appendix_closure_checked"]
+gate_ids = ["G0"]
+
+[[evidence]]
+row_id = "a01:evidence:union-arm-trust-transition-genesis-7d05462fa7162820-w12-remote-release-handshake-sim"
+target_row_id = "a01:union-arm:trust-transition-genesis-7d05462fa7162820"
+evidence_id = "w12-remote-release-handshake-sim"
+phase = "runtime"
+status = "planned"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+checker_ids = ["w12_remote_release_handshake"]
+scenario_ids = ["w12_remote_release_handshake"]
+event_ids = ["remote_release_verdict"]
+gate_ids = ["G4"]
+
+[[annotation]]
+row_id = "a01:annotation:union-arm-trust-transition-successor-5598693a4eda3135"
+target_row_id = "a01:union-arm:trust-transition-successor-5598693a4eda3135"
+exact_type = "Successor"
+cardinality = "one"
+layout = "inline-record"
+role = "local+meta+shard"
+posture = "all-postures"
+authority = "owner-group"
+locality = "owner-group-local"
+generic_expansions = []
+role_expansions = []
+reference_semantics = "none"
+target_schema_ids = []
+construction_order = "0"
+retention_and_cut_rule = "arm of TrustTransition; payload shape committed by the arm contract"
+digest_recipe = "none"
+redaction_class = "none"
+resource_bounds = "max 65536 bytes"
+compatibility = "reserved; additive-minor within declared format major on activation"
+
+[[semantic_binding]]
+row_id = "a01:semantic-binding:union-arm-trust-transition-successor-5598693a4eda3135"
+target_row_id = "a01:union-arm:trust-transition-successor-5598693a4eda3135"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+owner_crate = "fgdb-chronicle"
+owner_status = "planned"
+consumer_crates = ["fgdb", "fgdb-chronicle"]
+
+[[evidence]]
+row_id = "a01:evidence:union-arm-trust-transition-successor-5598693a4eda3135-appendix-closure-static"
+target_row_id = "a01:union-arm:trust-transition-successor-5598693a4eda3135"
+evidence_id = "appendix-closure-static"
+phase = "static"
+status = "live"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+checker_ids = ["appendix_a_catalog_closure", "appendix_a_catalog_projection_diff", "appendix_a_catalog_source"]
+scenario_ids = ["g0_identity_e2e"]
+event_ids = ["appendix_closure_checked"]
+gate_ids = ["G0"]
+
+[[evidence]]
+row_id = "a01:evidence:union-arm-trust-transition-successor-5598693a4eda3135-w12-remote-release-handshake-sim"
+target_row_id = "a01:union-arm:trust-transition-successor-5598693a4eda3135"
+evidence_id = "w12-remote-release-handshake-sim"
+phase = "runtime"
+status = "planned"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+checker_ids = ["w12_remote_release_handshake"]
+scenario_ids = ["w12_remote_release_handshake"]
+event_ids = ["remote_release_verdict"]
+gate_ids = ["G4"]
+
+[[annotation]]
+row_id = "a01:annotation:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
+target_row_id = "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
+exact_type = "ValidatedCheckpointSuccessor"
+cardinality = "one"
+layout = "inline-record"
+role = "local+meta+shard"
+posture = "all-postures"
+authority = "owner-group"
+locality = "owner-group-local"
+generic_expansions = []
+role_expansions = []
+reference_semantics = "none"
+target_schema_ids = []
+construction_order = "0"
+retention_and_cut_rule = "arm of TrustTransition; payload shape committed by the arm contract"
+digest_recipe = "none"
+redaction_class = "none"
+resource_bounds = "max 65536 bytes"
+compatibility = "reserved; additive-minor within declared format major on activation"
+
+[[semantic_binding]]
+row_id = "a01:semantic-binding:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
+target_row_id = "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+owner_crate = "fgdb-chronicle"
+owner_status = "planned"
+consumer_crates = ["fgdb", "fgdb-chronicle"]
+
+[[evidence]]
+row_id = "a01:evidence:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041-appendix-closure-static"
+target_row_id = "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
+evidence_id = "appendix-closure-static"
+phase = "static"
+status = "live"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+checker_ids = ["appendix_a_catalog_closure", "appendix_a_catalog_projection_diff", "appendix_a_catalog_source"]
+scenario_ids = ["g0_identity_e2e"]
+event_ids = ["appendix_closure_checked"]
+gate_ids = ["G0"]
+
+[[evidence]]
+row_id = "a01:evidence:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041-w12-remote-release-handshake-sim"
+target_row_id = "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
+evidence_id = "w12-remote-release-handshake-sim"
+phase = "runtime"
+status = "planned"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+checker_ids = ["w12_remote_release_handshake"]
+scenario_ids = ["w12_remote_release_handshake"]
+event_ids = ["remote_release_verdict"]
+gate_ids = ["G4"]
+
+[[annotation]]
 row_id = "a01:annotation:union-role-transition-activation-state-b697734229d2f385"
 target_row_id = "a01:union:role-transition-activation-state-b697734229d2f385"
 exact_type = "RoleTransitionActivationState"
@@ -145990,6 +146312,59 @@ gate_ids = ["G0"]
 [[evidence]]
 row_id = "a01:evidence:union-root-authority-trust-artifact-kind-b66d666db888ca16-w12-remote-release-handshake-sim"
 target_row_id = "a01:union:root-authority-trust-artifact-kind-b66d666db888ca16"
+evidence_id = "w12-remote-release-handshake-sim"
+phase = "runtime"
+status = "planned"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+checker_ids = ["w12_remote_release_handshake"]
+scenario_ids = ["w12_remote_release_handshake"]
+event_ids = ["remote_release_verdict"]
+gate_ids = ["G4"]
+
+[[annotation]]
+row_id = "a01:annotation:union-trust-transition-4ea83dcfc5dc8021"
+target_row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
+exact_type = "TrustTransition"
+cardinality = "one"
+layout = "closed-tagged"
+role = "local+meta+shard"
+posture = "all-postures"
+authority = "owner-group"
+locality = "owner-group-local"
+generic_expansions = []
+role_expansions = []
+reference_semantics = "none"
+target_schema_ids = []
+construction_order = "0"
+retention_and_cut_rule = "closed union encoding of RemoteAuthorityConfigurationEvidence; arms retire only with their owning schema row"
+digest_recipe = "none"
+redaction_class = "none"
+resource_bounds = "max 65537 bytes"
+compatibility = "reserved; additive-minor within declared format major on activation"
+
+[[semantic_binding]]
+row_id = "a01:semantic-binding:union-trust-transition-4ea83dcfc5dc8021"
+target_row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+owner_crate = "fgdb-chronicle"
+owner_status = "planned"
+consumer_crates = ["fgdb", "fgdb-chronicle"]
+
+[[evidence]]
+row_id = "a01:evidence:union-trust-transition-4ea83dcfc5dc8021-appendix-closure-static"
+target_row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
+evidence_id = "appendix-closure-static"
+phase = "static"
+status = "live"
+owner_bead_id = "fgdb-w12-remote-trust-retention-formats-64s2"
+checker_ids = ["appendix_a_catalog_closure", "appendix_a_catalog_projection_diff", "appendix_a_catalog_source"]
+scenario_ids = ["g0_identity_e2e"]
+event_ids = ["appendix_closure_checked"]
+gate_ids = ["G0"]
+
+[[evidence]]
+row_id = "a01:evidence:union-trust-transition-4ea83dcfc5dc8021-w12-remote-release-handshake-sim"
+target_row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
 evidence_id = "w12-remote-release-handshake-sim"
 phase = "runtime"
 status = "planned"
@@ -147394,166 +147769,3 @@ checker_ids = ["w2_identity_pipeline_roundtrip"]
 scenario_ids = ["w2_identity_pipeline_roundtrip"]
 event_ids = ["identity_pipeline_verdict"]
 gate_ids = ["G1"]
-
-[[union]]
-slice_id = "a01"
-row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
-union_name = "TrustTransition"
-containing_schema = "RemoteAuthorityConfigurationEvidence"
-union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
-field_tag = 0x0009
-tag_wire_type = "u8"
-encoding_context = "closed-tagged"
-allowed_containing_schemas = ["RemoteAuthorityConfigurationEvidence"]
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 65537
-
-[[union_arm]]
-slice_id = "a01"
-row_id = "a01:union-arm:trust-transition-genesis-7d05462fa7162820"
-union_name = "TrustTransition"
-containing_schema = "RemoteAuthorityConfigurationEvidence"
-union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
-arm_tag = 0x0001
-source_arm_name = "Genesis"
-stable_name = "genesis"
-payload_kind = "inline-record"
-payload_sha256 = "7aface9d4d3f6e04d01529994ec08c221c7b909ed468c5e268fefda3d856c063"
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 40
-
-[[union_arm]]
-slice_id = "a01"
-row_id = "a01:union-arm:trust-transition-successor-5598693a4eda3135"
-union_name = "TrustTransition"
-containing_schema = "RemoteAuthorityConfigurationEvidence"
-union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
-arm_tag = 0x0002
-source_arm_name = "Successor"
-stable_name = "successor"
-payload_kind = "inline-record"
-payload_sha256 = "bdf887bb8354e7c0a444ce07a4bcada43c272180cbbda3ac530ecf6be8694db4"
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 65536
-
-[[union_arm]]
-slice_id = "a01"
-row_id = "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
-union_name = "TrustTransition"
-containing_schema = "RemoteAuthorityConfigurationEvidence"
-union_path = "RemoteAuthorityConfigurationEvidence.trust_transition"
-arm_tag = 0x0003
-source_arm_name = "ValidatedCheckpointSuccessor"
-stable_name = "validated_checkpoint_successor"
-payload_kind = "inline-record"
-payload_sha256 = "3a2d87d0f381667522afda570d38ae9c32537aede9bb42bee73ef3dbb8d5a749"
-role_predicate = "true"
-version_status = "reserved"
-max_size_bytes = 65536
-
-[[target]]
-row_id = "a01:target:union-trust-transition-4ea83dcfc5dc8021"
-target_row_id = "a01:union:trust-transition-4ea83dcfc5dc8021"
-slice_id = "a01"
-source_key = "union|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition"
-target_kind = "union"
-definition_status = "complete"
-
-[[target]]
-row_id = "a01:target:union-arm-trust-transition-genesis-7d05462fa7162820"
-target_row_id = "a01:union-arm:trust-transition-genesis-7d05462fa7162820"
-slice_id = "a01"
-source_key = "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Genesis"
-target_kind = "union-arm"
-definition_status = "complete"
-
-[[target]]
-row_id = "a01:target:union-arm-trust-transition-successor-5598693a4eda3135"
-target_row_id = "a01:union-arm:trust-transition-successor-5598693a4eda3135"
-slice_id = "a01"
-source_key = "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Successor"
-target_kind = "union-arm"
-definition_status = "complete"
-
-[[target]]
-row_id = "a01:target:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
-target_row_id = "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041"
-slice_id = "a01"
-source_key = "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|ValidatedCheckpointSuccessor"
-target_kind = "union-arm"
-definition_status = "complete"
-
-[[ambiguity_adjudication]]
-row_id = "a01:ambiguity-adjudication:08cbc807047e544cd6c1e2598630e187feb142c28fc295cc0a7696e8d36dc68f"
-slice_id = "a01"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures|4d3d631c393e2608fc220dc9ccc5b46c2ccf2f5adeee9792c26fe42cdae2eff3|1|74220eeea6d3b639145b77c67549571b2ed637d340b8c74474f1f76b0d9db17e|shorthand field has no exact type"
-source_locations = ["a01:1398"]
-resolution = "maps-to-source"
-resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures|old_configuration_quorum_signatures"]
-rationale = "a01:1398: shorthand member `old_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.old_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
-
-[[ambiguity_adjudication]]
-row_id = "a01:ambiguity-adjudication:299ee60ab1337573ea4994c60bdbe86a53c9be1ecf08fd2f189e0a4f025be75e"
-slice_id = "a01"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest|0d19b9043ba1e24e570c9ddb7f4952666ee2a7d62116d617b987fb4a75d0ac4f|1|1b2384171b391a46d17735555abbd4c7d6734f3d2b3c0539a90069ea6782324a|shorthand field has no exact type"
-source_locations = ["a01:1398"]
-resolution = "maps-to-source"
-resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest|final_retirement_floor_digest"]
-rationale = "a01:1398: shorthand member `final_retirement_floor_digest` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.final_retirement_floor_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
-
-[[ambiguity_adjudication]]
-row_id = "a01:ambiguity-adjudication:3543ce46e3d146757ff29ca8552c7c2c03766d34c11e9c4b2e70e47446a29da2"
-slice_id = "a01"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript|3a5b732b143e059fa75e5e80c97a6391ec5d5ba9b14e780d2b45b0d92e4f5c78|1|3baab0cda94ea5af5cd9fd2d99923856924760ac9a5703f7d876d0404f122cb4|shorthand field has no exact type"
-source_locations = ["a01:1398"]
-resolution = "maps-to-source"
-resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript|joint_transition_transcript"]
-rationale = "a01:1398: shorthand member `joint_transition_transcript` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.joint_transition_transcript` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
-
-[[ambiguity_adjudication]]
-row_id = "a01:ambiguity-adjudication:404a1f5ffca0b239e6d6304f019a320bfbb2f771e8d8f75075ea4aa41d31fbc6"
-slice_id = "a01"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript|3a5b732b143e059fa75e5e80c97a6391ec5d5ba9b14e780d2b45b0d92e4f5c78|1|a6c99b864aa1ae5d26e3b7f26bd3c2c19c359c8ce07579d8919793f47ec4d476|shorthand field has no exact type"
-source_locations = ["a01:1398"]
-resolution = "maps-to-source"
-resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript|joint_transition_transcript"]
-rationale = "a01:1398: shorthand member `joint_transition_transcript` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.joint_transition_transcript` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
-
-[[ambiguity_adjudication]]
-row_id = "a01:ambiguity-adjudication:6150ede1e1b9372211d8fcedffd089371e78f6ef8bdf839499417b25f27d9e22"
-slice_id = "a01"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures|274b2dfe7211b3a80c9d1a48ae7215b3a4e08741d73544a3c68555075e759568|1|15edeb75aa867f73d56562652894b4b13d03cc4fa747ee6ea6d470f97905be0c|shorthand field has no exact type"
-source_locations = ["a01:1398"]
-resolution = "maps-to-source"
-resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures|new_configuration_quorum_signatures"]
-rationale = "a01:1398: shorthand member `new_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.new_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
-
-[[ambiguity_adjudication]]
-row_id = "a01:ambiguity-adjudication:9bac05f943c14519aa377b05808e57bfa117279607768581f79fb2720b221f99"
-slice_id = "a01"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures|274b2dfe7211b3a80c9d1a48ae7215b3a4e08741d73544a3c68555075e759568|1|547c7a0fd6a457595fa224c7f5b6a20d8ca308b182fd6270ed8097129182b109|shorthand field has no exact type"
-source_locations = ["a01:1398"]
-resolution = "maps-to-source"
-resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures|new_configuration_quorum_signatures"]
-rationale = "a01:1398: shorthand member `new_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.ValidatedCheckpointSuccessor.new_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
-
-[[ambiguity_adjudication]]
-row_id = "a01:ambiguity-adjudication:af2b5edb93577dd590386a385295f80a7ae01d42de718097a430f50357d49612"
-slice_id = "a01"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures|4d3d631c393e2608fc220dc9ccc5b46c2ccf2f5adeee9792c26fe42cdae2eff3|1|8826373f9b0b5f49b16452b1d2ea787a1624cda9faa348937d0e6cec7f3540d1|shorthand field has no exact type"
-source_locations = ["a01:1398"]
-resolution = "maps-to-source"
-resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures|old_configuration_quorum_signatures"]
-rationale = "a01:1398: shorthand member `old_configuration_quorum_signatures` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.old_configuration_quorum_signatures` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."
-
-[[ambiguity_adjudication]]
-row_id = "a01:ambiguity-adjudication:e1c52d6dcbd8885faf4eba1c8406864266ea081cd420b677c5467c4a97d9100b"
-slice_id = "a01"
-ambiguity_source_key = "ambiguity|field-type-ambiguous|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest|0d19b9043ba1e24e570c9ddb7f4952666ee2a7d62116d617b987fb4a75d0ac4f|1|b83c51729087fffa1fe3e3b3452234e78f5d92ec86b35d7df4fe1979b46f5fc5|shorthand field has no exact type"
-source_locations = ["a01:1398"]
-resolution = "maps-to-source"
-resolved_source_keys = ["field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest|final_retirement_floor_digest"]
-rationale = "a01:1398: shorthand member `final_retirement_floor_digest` at census path `RemoteAuthorityConfigurationEvidence.trust_transition.Successor.final_retirement_floor_digest` carries no inline exact type; the span is committed byte-exactly by the covering union-arm payload digest of its RemoteAuthorityConfigurationEvidence arm body, and the single affected census key maps to that source form."

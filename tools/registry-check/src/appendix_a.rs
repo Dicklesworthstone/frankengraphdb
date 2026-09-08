@@ -33,9 +33,9 @@ pub const HASH_ALGORITHM: &str = "sha256";
 pub const APPENDIX_START_LINE: i64 = 1388;
 pub const APPENDIX_END_LINE: i64 = 2728;
 pub const APPENDIX_LINE_COUNT: i64 = 1341;
-pub const APPENDIX_BYTE_COUNT: i64 = 1_029_182;
+pub const APPENDIX_BYTE_COUNT: i64 = 1_028_879;
 pub const APPENDIX_SHA256: &str =
-    "d965f17dae9e1d86c674b89edd17cbb03d1181a4fe9ea19c974cfe9f117f3bd8";
+    "30584e1f0e2afb5bb54105472403709c463dc693836542beb856ce173850b4e0";
 pub const APPENDIX_HEADING: &str = "## Appendix A — On-Disk Object Formats (normative contract)";
 pub const NEXT_HEADING: &str = "## Appendix B — Graph Intent Log (the semantic vocabulary)";
 pub const EXPECTED_PROJECTION_ROW_COUNT: usize = 4172;
@@ -44,25 +44,25 @@ pub const EXPECTED_PROJECTION_ROW_IDS_SHA256: &str =
 pub const EXPECTED_PROJECTION_FALLBACK_COUNT: usize = 444;
 pub const EXPECTED_TARGET_SOURCE_ASSIGNMENT_SHA256: &str =
     "4724502dc001e54ee8d801cc23b01277e05b6346189d2f3cf9a44a6b82b3d5b1";
-pub const EXPECTED_ANNOTATION_COUNT: usize = 321;
+pub const EXPECTED_ANNOTATION_COUNT: usize = 324;
 pub const EXPECTED_ANNOTATION_SHA256: &str =
-    "d50920fbeedb6d0039ce50ef9bc4c34269ecc4c6c4319de1dbb964b47fbdd650";
-pub const EXPECTED_SEMANTIC_BINDING_COUNT: usize = 321;
+    "739ec3e2c2c2c2bbeb91cb10d510f521437284b043b0483a55e19851d0da2b26";
+pub const EXPECTED_SEMANTIC_BINDING_COUNT: usize = 324;
 pub const EXPECTED_SEMANTIC_BINDING_SHA256: &str =
-    "e03c3da182fcbee30521d75422c0ff342259c1379b18bf76fe58edaa8bbbd006";
+    "c206ad8cab76eb328edd1953d3ae2e42dd5d9694a6a9e1db4a96ff361d6c19d8";
 pub const EXPECTED_EXPANSION_BINDING_COUNT: usize = 3;
 pub const EXPECTED_EXPANSION_BINDING_SHA256: &str =
     "4328ea0906b25dae474ca25b69b309e43083473069dca9e58e8ee1db9d08abe0";
-pub const EXPECTED_EVIDENCE_BINDING_COUNT: usize = 642;
+pub const EXPECTED_EVIDENCE_BINDING_COUNT: usize = 648;
 pub const EXPECTED_EVIDENCE_BINDING_SHA256: &str =
-    "8d195b8e49a255fc8246ed11ff5e49d693f5203014101bd11514520fa3d79d57";
+    "05dab60d514af2e5caf71cf000fe4d00ec25d282846325b31adc24f62bb34cea";
 pub const COMPLETION_LAYER_SCHEMA_VERSION: i64 = 1;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_COUNT: usize = 4;
 pub const EXPECTED_COMPLETION_LAYER_SCHEMA_SHA256: &str =
     "ee52b411cccac39b2189bf42aaaeb7d5e08c9de4ac59f313e26471ab05f525be";
-pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 373;
+pub const EXPECTED_AMBIGUITY_ADJUDICATION_COUNT: usize = 381;
 pub const EXPECTED_AMBIGUITY_ADJUDICATION_SHA256: &str =
-    "f2cdaa758392905ba72b320bbe75deabb177d666a62d2ef64f97c75e7c3ae241";
+    "7e69fe92242160539eafb4eefc3c0c3160a2d52b2f223793bf8563803ca08cfe";
 pub const EXPECTED_TYPE_RESERVATION_COUNT: usize = 813;
 pub const EXPECTED_EXISTING_TYPE_RESERVATION_COUNT: usize = 488;
 pub const EXPECTED_RESERVED_TYPE_RESERVATION_COUNT: usize = 325;
@@ -73,7 +73,7 @@ pub const EXPECTED_REFERENCE_TARGET_IDS_SHA256: &str =
     "84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e";
 pub const EXPECTED_REFERENCE_OCCURRENCE_COUNT: usize = 2_456;
 pub const EXPECTED_REFERENCE_OCCURRENCE_SHA256: &str =
-    "95705ad6de7f1cd3599d75381d2aca6c3b1f7bc7b3c4995ce40342ccf7453fa6";
+    "f797542209a7411cde460324bcfa1d6b9be65c9ee536059c520dccae9844c822";
 pub const EXPECTED_G0_PROJECTION_ROW_COUNT: usize = 35;
 pub const EXPECTED_G0_PROJECTION_ROW_IDS_SHA256: &str =
     "ff344794c0f061e83016f9f4844591a75d07bff597d439258d2b2632fc810d61";
@@ -436,7 +436,7 @@ const COMPLETION_LAYER_SCHEMA_CONTRACT: [CompletionLayerSchemaContractPin; 4] = 
 // exact reciprocal target/source/schema/owner/evidence contract here in
 // reviewed code; changing the opaque transcript digest alone is never
 // authorization.
-const ANNOTATION_CONTRACT: [AnnotationContractPin; 321] = [
+static ANNOTATION_CONTRACT: [AnnotationContractPin; 324] = [
     AnnotationContractPin {
         row_id: "a01:annotation:bootstrap-frame-root-bootstrap",
         target_row_id: "a01:bootstrap-frame:root-bootstrap",
@@ -1035,14 +1035,17 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 321] = [
         row_id: "a01:annotation:field-remote-authority-configuration-evidence-trust-transition",
         target_row_id: "a01:field:remote-authority-configuration-evidence-trust-transition",
         target_source_key: "field|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|trust_transition",
-        exact_type: "TrustTransition",
+        exact_type: "Genesis{root_authority_trust_artifact_ref:StrongRef<RootAuthorityTrustArtifact>}|Successor{predecessor_evidence_digest:WeakDigest,joint_transition_transcript,old_configuration_quorum_signatures,new_configuration_quorum_signatures,final_retirement_floor_digest}|ValidatedCheckpointSuccessor{predecessor_anchor_ref:StrongRef<ValidatedRemoteConfigurationAnchor>,joint_transition_transcript,old_configuration_quorum_signatures,new_configuration_quorum_signatures,final_retirement_floor_digest}",
         cardinality: "one",
-        layout: "inline-record",
+        layout: "closed-tagged",
         role: "local+meta+shard",
         posture: "all-postures",
         authority: "owner-group",
         locality: "cross-group-transferable",
-        generic_expansions: &[],
+        generic_expansions: &[
+            "RootAuthorityTrustArtifact",
+            "ValidatedRemoteConfigurationAnchor",
+        ],
         role_expansions: &[],
         reference_semantics: "none",
         target_schema_ids: &[],
@@ -7049,6 +7052,72 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 321] = [
         compatibility: "reserved; additive-minor within declared format major on activation",
     },
     AnnotationContractPin {
+        row_id: "a01:annotation:union-arm-trust-transition-genesis-7d05462fa7162820",
+        target_row_id: "a01:union-arm:trust-transition-genesis-7d05462fa7162820",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Genesis",
+        exact_type: "Genesis",
+        cardinality: "one",
+        layout: "inline-record",
+        role: "local+meta+shard",
+        posture: "all-postures",
+        authority: "owner-group",
+        locality: "owner-group-local",
+        generic_expansions: &[],
+        role_expansions: &[],
+        reference_semantics: "none",
+        target_schema_ids: &[],
+        construction_order: "0",
+        retention_and_cut_rule: "arm of TrustTransition; payload shape committed by the arm contract",
+        digest_recipe: "none",
+        redaction_class: "none",
+        resource_bounds: "max 40 bytes",
+        compatibility: "reserved; additive-minor within declared format major on activation",
+    },
+    AnnotationContractPin {
+        row_id: "a01:annotation:union-arm-trust-transition-successor-5598693a4eda3135",
+        target_row_id: "a01:union-arm:trust-transition-successor-5598693a4eda3135",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Successor",
+        exact_type: "Successor",
+        cardinality: "one",
+        layout: "inline-record",
+        role: "local+meta+shard",
+        posture: "all-postures",
+        authority: "owner-group",
+        locality: "owner-group-local",
+        generic_expansions: &[],
+        role_expansions: &[],
+        reference_semantics: "none",
+        target_schema_ids: &[],
+        construction_order: "0",
+        retention_and_cut_rule: "arm of TrustTransition; payload shape committed by the arm contract",
+        digest_recipe: "none",
+        redaction_class: "none",
+        resource_bounds: "max 65536 bytes",
+        compatibility: "reserved; additive-minor within declared format major on activation",
+    },
+    AnnotationContractPin {
+        row_id: "a01:annotation:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041",
+        target_row_id: "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|ValidatedCheckpointSuccessor",
+        exact_type: "ValidatedCheckpointSuccessor",
+        cardinality: "one",
+        layout: "inline-record",
+        role: "local+meta+shard",
+        posture: "all-postures",
+        authority: "owner-group",
+        locality: "owner-group-local",
+        generic_expansions: &[],
+        role_expansions: &[],
+        reference_semantics: "none",
+        target_schema_ids: &[],
+        construction_order: "0",
+        retention_and_cut_rule: "arm of TrustTransition; payload shape committed by the arm contract",
+        digest_recipe: "none",
+        redaction_class: "none",
+        resource_bounds: "max 65536 bytes",
+        compatibility: "reserved; additive-minor within declared format major on activation",
+    },
+    AnnotationContractPin {
         row_id: "a01:annotation:union-role-transition-activation-state-b697734229d2f385",
         target_row_id: "a01:union:role-transition-activation-state-b697734229d2f385",
         target_source_key: "union|RoleTransitionActivationState|RoleTransitionActivationState",
@@ -7134,6 +7203,28 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 321] = [
         digest_recipe: "none",
         redaction_class: "none",
         resource_bounds: "max 1 bytes",
+        compatibility: "reserved; additive-minor within declared format major on activation",
+    },
+    AnnotationContractPin {
+        row_id: "a01:annotation:union-trust-transition-4ea83dcfc5dc8021",
+        target_row_id: "a01:union:trust-transition-4ea83dcfc5dc8021",
+        target_source_key: "union|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition",
+        exact_type: "TrustTransition",
+        cardinality: "one",
+        layout: "closed-tagged",
+        role: "local+meta+shard",
+        posture: "all-postures",
+        authority: "owner-group",
+        locality: "owner-group-local",
+        generic_expansions: &[],
+        role_expansions: &[],
+        reference_semantics: "none",
+        target_schema_ids: &[],
+        construction_order: "0",
+        retention_and_cut_rule: "closed union encoding of RemoteAuthorityConfigurationEvidence; arms retire only with their owning schema row",
+        digest_recipe: "none",
+        redaction_class: "none",
+        resource_bounds: "max 65537 bytes",
         compatibility: "reserved; additive-minor within declared format major on activation",
     },
     AnnotationContractPin {
@@ -8304,28 +8395,6 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 321] = [
         compatibility: "reserved; additive-minor within declared format major on activation",
     },
     AnnotationContractPin {
-        row_id: "a01:annotation:wire-type-trust-transition",
-        target_row_id: "a01:wire-type:trust-transition",
-        target_source_key: "top|TrustTransition",
-        exact_type: "TrustTransition",
-        cardinality: "one",
-        layout: "closed-tagged",
-        role: "local+meta+shard",
-        posture: "all-postures",
-        authority: "owner-group",
-        locality: "location-independent",
-        generic_expansions: &[],
-        role_expansions: &[],
-        reference_semantics: "none",
-        target_schema_ids: &[],
-        construction_order: "0",
-        retention_and_cut_rule: "retained under the retention tier of its owning group; cuts follow the registered cut objects",
-        digest_recipe: "none",
-        redaction_class: "none",
-        resource_bounds: "max 16777216 bytes",
-        compatibility: "reserved; additive-minor within declared format major on activation",
-    },
-    AnnotationContractPin {
         row_id: "a01:annotation:wire-type-weak-digest",
         target_row_id: "a01:wire-type:weak-digest",
         target_source_key: "top|WeakDigest",
@@ -8414,7 +8483,7 @@ const ANNOTATION_CONTRACT: [AnnotationContractPin; 321] = [
         compatibility: "reserved; additive-minor within declared format major on activation",
     },
 ];
-const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 321] = [
+static SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 324] = [
     SemanticBindingContractPin {
         row_id: "a01:semantic-binding:bootstrap-frame-root-bootstrap",
         target_row_id: "a01:bootstrap-frame:root-bootstrap",
@@ -11026,6 +11095,33 @@ const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 321] = [
         consumer_crates: &["fgdb", "fgdb-chronicle"],
     },
     SemanticBindingContractPin {
+        row_id: "a01:semantic-binding:union-arm-trust-transition-genesis-7d05462fa7162820",
+        target_row_id: "a01:union-arm:trust-transition-genesis-7d05462fa7162820",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Genesis",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        owner_crate: "fgdb-chronicle",
+        owner_status: "planned",
+        consumer_crates: &["fgdb", "fgdb-chronicle"],
+    },
+    SemanticBindingContractPin {
+        row_id: "a01:semantic-binding:union-arm-trust-transition-successor-5598693a4eda3135",
+        target_row_id: "a01:union-arm:trust-transition-successor-5598693a4eda3135",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Successor",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        owner_crate: "fgdb-chronicle",
+        owner_status: "planned",
+        consumer_crates: &["fgdb", "fgdb-chronicle"],
+    },
+    SemanticBindingContractPin {
+        row_id: "a01:semantic-binding:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041",
+        target_row_id: "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|ValidatedCheckpointSuccessor",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        owner_crate: "fgdb-chronicle",
+        owner_status: "planned",
+        consumer_crates: &["fgdb", "fgdb-chronicle"],
+    },
+    SemanticBindingContractPin {
         row_id: "a01:semantic-binding:union-role-transition-activation-state-b697734229d2f385",
         target_row_id: "a01:union:role-transition-activation-state-b697734229d2f385",
         target_source_key: "union|RoleTransitionActivationState|RoleTransitionActivationState",
@@ -11056,6 +11152,15 @@ const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 321] = [
         row_id: "a01:semantic-binding:union-root-authority-trust-artifact-kind-b66d666db888ca16",
         target_row_id: "a01:union:root-authority-trust-artifact-kind-b66d666db888ca16",
         target_source_key: "union|RootAuthorityTrustBody|RootAuthorityTrustBody.artifact_kind",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        owner_crate: "fgdb-chronicle",
+        owner_status: "planned",
+        consumer_crates: &["fgdb", "fgdb-chronicle"],
+    },
+    SemanticBindingContractPin {
+        row_id: "a01:semantic-binding:union-trust-transition-4ea83dcfc5dc8021",
+        target_row_id: "a01:union:trust-transition-4ea83dcfc5dc8021",
+        target_source_key: "union|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition",
         owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
         owner_crate: "fgdb-chronicle",
         owner_status: "planned",
@@ -11254,15 +11359,6 @@ const SEMANTIC_BINDING_CONTRACT: [SemanticBindingContractPin; 321] = [
         row_id: "a01:semantic-binding:wire-type-strong-shard-command-ref",
         target_row_id: "a01:wire-type:strong-shard-command-ref",
         target_source_key: "top|StrongShardCommandRef",
-        owner_bead_id: "fgdb-w2-object-identity-t0f",
-        owner_crate: "fgdb-types",
-        owner_status: "planned",
-        consumer_crates: &["fgdb", "fgdb-chronicle", "fgdb-strata", "fgdb-txn"],
-    },
-    SemanticBindingContractPin {
-        row_id: "a01:semantic-binding:wire-type-trust-transition",
-        target_row_id: "a01:wire-type:trust-transition",
-        target_source_key: "top|TrustTransition",
         owner_bead_id: "fgdb-w2-object-identity-t0f",
         owner_crate: "fgdb-types",
         owner_status: "planned",
@@ -12095,7 +12191,7 @@ const EXPANSION_BINDING_CONTRACT: [ExpansionBindingContractPin; 3] = [
         rationale: "at-rest encryption envelops any durable logical object under the one object-level AEAD pipeline (a01:1410); the source constrains no subset, so T is the registered logical-kind universe at this catalog epoch",
     },
 ];
-const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 642] = [
+static EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 648] = [
     EvidenceBindingContractPin {
         row_id: "a01:evidence:bootstrap-frame-root-bootstrap-appendix-closure-static",
         target_row_id: "a01:bootstrap-frame:root-bootstrap",
@@ -20797,6 +20893,96 @@ const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 642] = [
         gate_ids: &["G4"],
     },
     EvidenceBindingContractPin {
+        row_id: "a01:evidence:union-arm-trust-transition-genesis-7d05462fa7162820-appendix-closure-static",
+        target_row_id: "a01:union-arm:trust-transition-genesis-7d05462fa7162820",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Genesis",
+        evidence_id: "appendix-closure-static",
+        phase: "static",
+        status: "live",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        checker_ids: &[
+            "appendix_a_catalog_closure",
+            "appendix_a_catalog_projection_diff",
+            "appendix_a_catalog_source",
+        ],
+        scenario_ids: &["g0_identity_e2e"],
+        event_ids: &["appendix_closure_checked"],
+        gate_ids: &["G0"],
+    },
+    EvidenceBindingContractPin {
+        row_id: "a01:evidence:union-arm-trust-transition-genesis-7d05462fa7162820-w12-remote-release-handshake-sim",
+        target_row_id: "a01:union-arm:trust-transition-genesis-7d05462fa7162820",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Genesis",
+        evidence_id: "w12-remote-release-handshake-sim",
+        phase: "runtime",
+        status: "planned",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        checker_ids: &["w12_remote_release_handshake"],
+        scenario_ids: &["w12_remote_release_handshake"],
+        event_ids: &["remote_release_verdict"],
+        gate_ids: &["G4"],
+    },
+    EvidenceBindingContractPin {
+        row_id: "a01:evidence:union-arm-trust-transition-successor-5598693a4eda3135-appendix-closure-static",
+        target_row_id: "a01:union-arm:trust-transition-successor-5598693a4eda3135",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Successor",
+        evidence_id: "appendix-closure-static",
+        phase: "static",
+        status: "live",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        checker_ids: &[
+            "appendix_a_catalog_closure",
+            "appendix_a_catalog_projection_diff",
+            "appendix_a_catalog_source",
+        ],
+        scenario_ids: &["g0_identity_e2e"],
+        event_ids: &["appendix_closure_checked"],
+        gate_ids: &["G0"],
+    },
+    EvidenceBindingContractPin {
+        row_id: "a01:evidence:union-arm-trust-transition-successor-5598693a4eda3135-w12-remote-release-handshake-sim",
+        target_row_id: "a01:union-arm:trust-transition-successor-5598693a4eda3135",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|Successor",
+        evidence_id: "w12-remote-release-handshake-sim",
+        phase: "runtime",
+        status: "planned",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        checker_ids: &["w12_remote_release_handshake"],
+        scenario_ids: &["w12_remote_release_handshake"],
+        event_ids: &["remote_release_verdict"],
+        gate_ids: &["G4"],
+    },
+    EvidenceBindingContractPin {
+        row_id: "a01:evidence:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041-appendix-closure-static",
+        target_row_id: "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|ValidatedCheckpointSuccessor",
+        evidence_id: "appendix-closure-static",
+        phase: "static",
+        status: "live",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        checker_ids: &[
+            "appendix_a_catalog_closure",
+            "appendix_a_catalog_projection_diff",
+            "appendix_a_catalog_source",
+        ],
+        scenario_ids: &["g0_identity_e2e"],
+        event_ids: &["appendix_closure_checked"],
+        gate_ids: &["G0"],
+    },
+    EvidenceBindingContractPin {
+        row_id: "a01:evidence:union-arm-trust-transition-validated-checkpoint-successor-44f5cf01cf91e041-w12-remote-release-handshake-sim",
+        target_row_id: "a01:union-arm:trust-transition-validated-checkpoint-successor-44f5cf01cf91e041",
+        target_source_key: "arm|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition|ValidatedCheckpointSuccessor",
+        evidence_id: "w12-remote-release-handshake-sim",
+        phase: "runtime",
+        status: "planned",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        checker_ids: &["w12_remote_release_handshake"],
+        scenario_ids: &["w12_remote_release_handshake"],
+        event_ids: &["remote_release_verdict"],
+        gate_ids: &["G4"],
+    },
+    EvidenceBindingContractPin {
         row_id: "a01:evidence:union-role-transition-activation-state-b697734229d2f385-appendix-closure-static",
         target_row_id: "a01:union:role-transition-activation-state-b697734229d2f385",
         target_source_key: "union|RoleTransitionActivationState|RoleTransitionActivationState",
@@ -20907,6 +21093,36 @@ const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 642] = [
         row_id: "a01:evidence:union-root-authority-trust-artifact-kind-b66d666db888ca16-w12-remote-release-handshake-sim",
         target_row_id: "a01:union:root-authority-trust-artifact-kind-b66d666db888ca16",
         target_source_key: "union|RootAuthorityTrustBody|RootAuthorityTrustBody.artifact_kind",
+        evidence_id: "w12-remote-release-handshake-sim",
+        phase: "runtime",
+        status: "planned",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        checker_ids: &["w12_remote_release_handshake"],
+        scenario_ids: &["w12_remote_release_handshake"],
+        event_ids: &["remote_release_verdict"],
+        gate_ids: &["G4"],
+    },
+    EvidenceBindingContractPin {
+        row_id: "a01:evidence:union-trust-transition-4ea83dcfc5dc8021-appendix-closure-static",
+        target_row_id: "a01:union:trust-transition-4ea83dcfc5dc8021",
+        target_source_key: "union|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition",
+        evidence_id: "appendix-closure-static",
+        phase: "static",
+        status: "live",
+        owner_bead_id: "fgdb-w12-remote-trust-retention-formats-64s2",
+        checker_ids: &[
+            "appendix_a_catalog_closure",
+            "appendix_a_catalog_projection_diff",
+            "appendix_a_catalog_source",
+        ],
+        scenario_ids: &["g0_identity_e2e"],
+        event_ids: &["appendix_closure_checked"],
+        gate_ids: &["G0"],
+    },
+    EvidenceBindingContractPin {
+        row_id: "a01:evidence:union-trust-transition-4ea83dcfc5dc8021-w12-remote-release-handshake-sim",
+        target_row_id: "a01:union:trust-transition-4ea83dcfc5dc8021",
+        target_source_key: "union|RemoteAuthorityConfigurationEvidence|RemoteAuthorityConfigurationEvidence.trust_transition",
         evidence_id: "w12-remote-release-handshake-sim",
         phase: "runtime",
         status: "planned",
@@ -21567,36 +21783,6 @@ const EVIDENCE_BINDING_CONTRACT: [EvidenceBindingContractPin; 642] = [
         row_id: "a01:evidence:wire-type-strong-shard-command-ref-w2-identity-pipeline-roundtrip",
         target_row_id: "a01:wire-type:strong-shard-command-ref",
         target_source_key: "top|StrongShardCommandRef",
-        evidence_id: "w2-identity-pipeline-roundtrip",
-        phase: "runtime",
-        status: "planned",
-        owner_bead_id: "fgdb-w2-object-identity-t0f",
-        checker_ids: &["w2_identity_pipeline_roundtrip"],
-        scenario_ids: &["w2_identity_pipeline_roundtrip"],
-        event_ids: &["identity_pipeline_verdict"],
-        gate_ids: &["G1"],
-    },
-    EvidenceBindingContractPin {
-        row_id: "a01:evidence:wire-type-trust-transition-appendix-closure-static",
-        target_row_id: "a01:wire-type:trust-transition",
-        target_source_key: "top|TrustTransition",
-        evidence_id: "appendix-closure-static",
-        phase: "static",
-        status: "live",
-        owner_bead_id: "fgdb-w2-object-identity-t0f",
-        checker_ids: &[
-            "appendix_a_catalog_closure",
-            "appendix_a_catalog_projection_diff",
-            "appendix_a_catalog_source",
-        ],
-        scenario_ids: &["g0_identity_e2e"],
-        event_ids: &["appendix_closure_checked"],
-        gate_ids: &["G0"],
-    },
-    EvidenceBindingContractPin {
-        row_id: "a01:evidence:wire-type-trust-transition-w2-identity-pipeline-roundtrip",
-        target_row_id: "a01:wire-type:trust-transition",
-        target_source_key: "top|TrustTransition",
         evidence_id: "w2-identity-pipeline-roundtrip",
         phase: "runtime",
         status: "planned",
@@ -25675,7 +25861,6 @@ static AMBIGUITY_ADJUDICATION_CONTRACT: [AmbiguityAdjudicationContractPin; 381] 
         rationale_sha256: "2c5f8983d5139853e849f15576f77bf6e749093e2169a59290be68b33b02ab63",
         cited_laws: &[],
     },
-
     AmbiguityAdjudicationContractPin {
         row_id: "a01:ambiguity-adjudication:08cbc807047e544cd6c1e2598630e187feb142c28fc295cc0a7696e8d36dc68f",
         slice_id: "a01",
@@ -26266,8 +26451,8 @@ pub const SLICE_PINS: [SlicePin; 21] = [
         start_line: 1388,
         end_line: 1444,
         line_count: 57,
-        byte_count: 24_782,
-        sha256: "72b627994d8b5c84d59d10ec4b377783de3f9bc697a16d620a5fd462c0994ba5",
+        byte_count: 24_479,
+        sha256: "bdc1c18bf4cb9a382066cbc202da074f5bf4df6fe3e5b3b98c100b02e4f68676",
     },
     SlicePin {
         ordinal: 2,
@@ -33298,12 +33483,35 @@ fn validate_catalog_metadata(catalog: &Catalog, out: &mut Vec<Violation>) {
                 "every target_schema_id must resolve to the one canonical permanent reservation row ID for that schema family",
             ));
         }
+        // Union-expression delegation: a durable field whose exact_type is an
+        // inline closed union expression and whose (schema, tag) owns a
+        // registered ordinary union carries no field-level reference contract
+        // of its own; the arm contracts commit the payload byte-exactly.
+        let union_expression_delegate = projection_by_row_id
+            .get(row.target_row_id.as_str())
+            .filter(|projection| {
+                projection.projection == "durable_fields" && projection.row_kind == "field"
+            })
+            .and_then(|projection| {
+                catalog.identity.fields.iter().find(|field| {
+                    format!("{}.{}", field.containing_schema, field.stable_name)
+                        == projection.canonical_symbol
+                })
+            })
+            .is_some_and(|field| {
+                row.exact_type.contains('|')
+                    && catalog.identity.ordinary_unions.iter().any(|union| {
+                        union.containing_schema == field.containing_schema
+                            && union.field_tag == Some(field.field_tag)
+                    })
+            });
         let reference_families = validate_annotation_reference_shape(
             AnnotationReferenceRequest {
                 row_id: &row.row_id,
                 exact_type: &row.exact_type,
                 reference_semantics: &row.reference_semantics,
                 top_level_definition_family,
+                union_expression_delegate,
             },
             &reference_alias_semantics,
             &reservation_symbols,
@@ -34944,7 +35152,9 @@ fn validate_annotation_reference_shape(
         exact_type,
         reference_semantics,
         top_level_definition_family,
+        union_expression_delegate,
     } = request;
+
     const GENERIC_STRONG_WRAPPERS: [&str; 4] = [
         "CertifiedRemoteStrongRef",
         "RegisteredStrongRef",
@@ -34981,7 +35191,7 @@ fn validate_annotation_reference_shape(
     let mut cursor = 0usize;
     let mut shape = AnnotationReferenceShape::default();
     let mut observed_semantics = BTreeSet::new();
-    while cursor < bytes.len() {
+    while !union_expression_delegate && cursor < bytes.len() {
         if !bytes[cursor].is_ascii_alphabetic() && bytes[cursor] != b'_' {
             cursor += 1;
             continue;
@@ -37159,6 +37369,12 @@ name = "Probe"
             repair: "test-only",
             owning_bead: "fgdb-test",
         };
+        // Read the licence's content fields so they stay live after retirement:
+        // a licence without its measured-empty evidence or named repair is not
+        // a licence, and a fabricated one must not smuggle that past review.
+        assert!(synthetic.evidence.contains("0 of 21"));
+        assert!(!synthetic.repair.is_empty());
+        assert!(synthetic.owning_bead.starts_with("fgdb-"));
         let violations = run_coverage(&forced, &census, &[synthetic], &["a20"]);
         assert!(
             codes(&violations).contains(&"source_complete_census_domain_waiver_stale"),
@@ -37676,7 +37892,8 @@ name = "Probe"
         // The landed a01 expansion bindings occupy the early indexes; mutate the
         // fixture row pushed above (now last), never a landed row.
         let fixture_index = catalog.expansion_bindings.len() - 1;
-        catalog.expansion_bindings[fixture_index].values = vec!["Local".to_owned(), "Shard".to_owned()];
+        catalog.expansion_bindings[fixture_index].values =
+            vec!["Local".to_owned(), "Shard".to_owned()];
         assert!(
             !top_level_annotation_expansions_match_with(
                 &contract,
