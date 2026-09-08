@@ -67,25 +67,4 @@ impl WriteTxn {
             edges,
         })
     }
-
-    fn label_holders<V: Vfs + Clone>(
-        &self,
-        database: &Database<V>,
-        vertices: &OverlayVertexSet,
-        label: Option<fgdb_delta_types::LabelId>,
-    ) -> Result<Option<OverlayVertexSet>, WriteTxnError> {
-        let Some(label) = label else {
-            return Ok(None);
-        };
-        let mut holders = OverlayVertexSet::new();
-        for vid in vertices.iter().copied() {
-            if self
-                .vertex(database, vid)?
-                .is_some_and(|row| row.labels.contains(&label))
-            {
-                holders.insert(vid);
-            }
-        }
-        Ok(Some(holders))
-    }
 }

@@ -7,27 +7,25 @@ impl WriteTxn {
         database: &Database<V>,
         plan: &BoundPlan,
     ) -> Result<Vec<VId>, WriteTxnError> {
-        let Some(label) = plan.src_label else {
+        if plan.src_label.is_none() {
             return Ok(Vec::new());
-        };
-        let predicates = [
-            plan.src_prop,
-            plan.src_prop_ne,
-            plan.src_prop_gt,
-            plan.src_prop_lt,
-            plan.src_prop_ge,
-            plan.src_prop_le,
-        ];
-        let mut vids: Vec<VId> = self
+        }
+        let logical = fgdb_gql::algebra::GlaPlan::lower(plan);
+        // Bulk admission observes each retained/staged vertex through the
+        // existing transaction path. Predicate evaluation reuses those exact
+        // rows instead of replaying the basis for each property comparison.
+        let rows: std::collections::BTreeMap<VId, VertexRow> = self
             .vertices(database)?
             .into_iter()
-            .filter(|row| row.labels.contains(&label))
-            .filter(|row| row_matches_property_predicates(row, predicates))
-            .map(|row| row.vid)
+            .map(|row| (row.vid, row))
             .collect();
-        vids.sort_unstable();
-        vids.dedup();
-        let vids = crate::apply_limit(plan, vids);
+        let vids = logical.execute(rows.keys().copied(), [], |vid, predicates| {
+            Ok::<_, WriteTxnError>(rows.get(&vid).is_some_and(|row| {
+                predicates
+                    .iter()
+                    .all(|predicate| predicate.matches(&row.labels, &row.props))
+            }))
+        })?;
         self.read_set
             .borrow_mut()
             .extend(vids.iter().copied().map(ElementId::Vertex));
