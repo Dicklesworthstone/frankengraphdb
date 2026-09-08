@@ -91,8 +91,8 @@ impl From<GqlError> for WriteTxnError {
 ///
 /// This is deliberately not SSI: after each write it combines same-relation
 /// batches in call order and refreshes one prepared template against the
-/// pinned basis. Commit delegates that retained template's verdict to
-/// [`Database::commit_prepared`].
+/// pinned basis. Commit validates observed rows and conservative table-scan
+/// insertion witnesses before delegating publication to the coordinator.
 pub struct WriteTxn {
     handle_owner: std::sync::Arc<()>,
     basis: CommitSeq,
@@ -100,5 +100,10 @@ pub struct WriteTxn {
     prepared: Option<PreparedWrite>,
     read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
     match_expansions: std::cell::RefCell<std::collections::BTreeSet<(VId, RelationId)>>,
+    /// A scan depends on absent rows too, even if it returned nothing or its
+    /// result was discarded by a budget check. These witnesses are deliberately
+    /// table-wide until predicate/range SSI witnesses are implemented.
+    scanned_vertices: std::cell::Cell<bool>,
+    scanned_edges: std::cell::Cell<bool>,
     pin: Option<PurposeObligation<Acquired>>,
 }

@@ -103,20 +103,20 @@ impl WriteTxn {
     }
 
     /// Read every vertex from the pinned basis through this transaction's
-    /// staged row-order overlay, sorted by vertex identity.
+    /// staged row-order overlay, sorted by vertex identity. An empty result
+    /// still records a table-scan dependency on subsequent vertex insertions.
     pub fn vertices<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
     ) -> Result<Vec<VertexRow>, WriteTxnError> {
         self.ensure_database(database)?;
 
-        // Keep the admitted rows rather than discarding them and resolving the
-        // same immutable patch history once more for every vertex identity.
         let mut basis: std::collections::BTreeMap<VId, VertexRow> = database
             .vertices_at(self.basis)?
             .into_iter()
             .map(|row| (row.vid, row))
             .collect();
+        self.scanned_vertices.set(true);
         let mut vids: std::collections::BTreeSet<VId> = basis.keys().copied().collect();
         for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
             match pending {

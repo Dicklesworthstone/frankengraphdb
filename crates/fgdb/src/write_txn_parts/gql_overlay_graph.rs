@@ -20,6 +20,10 @@ impl WriteTxn {
                 )
             })
             .collect();
+        // Record admission before predicates or result budgets can fail. An
+        // empty edge table still witnesses absence of disconnected new paths.
+        self.scanned_edges.set(true);
+        self.read_set.borrow_mut().extend(observed.iter().copied());
 
         for batch in &self.staged {
             for pending in &batch.rows {
@@ -61,6 +65,7 @@ impl WriteTxn {
                 }
             }
         }
+        self.read_set.borrow_mut().extend(observed.iter().copied());
         Ok(OverlayGraph {
             observed,
             vertices,

@@ -34,7 +34,7 @@ impl WriteTxn {
             return Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
                 law: "FG-LAW-FCW-READ-01",
                 detail: format!(
-                    "read-set element {element:?} was written at {committed_at:?} after pinned basis {:?}",
+                    "observed element or scan phantom {element:?} was written at {committed_at:?} after pinned basis {:?}",
                     self.basis
                 ),
             }));
@@ -96,20 +96,34 @@ impl WriteTxn {
     ) -> Result<Option<(ElementId, CommitSeq)>, ReadError> {
         let read_set = self.read_set.borrow();
         let match_expansions = self.match_expansions.borrow();
-        if read_set.is_empty() && match_expansions.is_empty() {
+        let scanned_vertices = self.scanned_vertices.get();
+        let scanned_edges = self.scanned_edges.get();
+        if read_set.is_empty()
+            && match_expansions.is_empty()
+            && !scanned_vertices
+            && !scanned_edges
+        {
             return Ok(None);
         }
+        // delta_since checks that the complete suffix is retained. A missing
+        // conflict-history prefix is an error, never evidence of no conflict.
         for batch in database.delta_since(self.basis)? {
             let mut touched = std::collections::BTreeSet::new();
             let mut endpoints = std::collections::BTreeSet::new();
             for coordinate in batch.coordinate_entries() {
                 for row in &coordinate.rows {
-                    if let fgdb_delta_types::DeltaRow::CreateEdge {
-                        eid, src, relation, ..
-                    } = row
-                        && match_expansions.contains(&(*src, *relation))
-                    {
-                        return Ok(Some((ElementId::Edge(*eid), batch.commit_seq())));
+                    match row {
+                        fgdb_delta_types::DeltaRow::CreateVertex { vid, .. }
+                            if scanned_vertices =>
+                        {
+                            return Ok(Some((ElementId::Vertex(*vid), batch.commit_seq())));
+                        }
+                        fgdb_delta_types::DeltaRow::CreateEdge {
+                            eid, src, relation, ..
+                        } if scanned_edges || match_expansions.contains(&(*src, *relation)) => {
+                            return Ok(Some((ElementId::Edge(*eid), batch.commit_seq())));
+                        }
+                        _ => {}
                     }
                     crate::adjacency_endpoints(row, &mut endpoints);
                     crate::touched_elements(row, &mut touched);

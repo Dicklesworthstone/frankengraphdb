@@ -107,7 +107,8 @@ impl WriteTxn {
     }
 
     /// Read every edge from the pinned basis through this transaction's
-    /// staged row-order overlay, sorted by edge identity.
+    /// staged row-order overlay, sorted by edge identity. Empty scans retain
+    /// an insertion witness rather than becoming an empty read footprint.
     pub fn edges<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -121,6 +122,7 @@ impl WriteTxn {
             .into_iter()
             .map(|record| (record.entry.eid, record))
             .collect();
+        self.scanned_edges.set(true);
         let mut eids: std::collections::BTreeSet<EId> = basis.keys().copied().collect();
         for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
             match pending {
