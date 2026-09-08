@@ -66,6 +66,10 @@ catalog_closure_census() {
     /^\[\[reservation\]\]/               { blk = "res"; next }
     /^\[\[source_symbol_disposition\]\]/ { blk = "ssd"; ssd++; slice = ""; next }
     /^\[\[top_level_candidate\]\]/       { blk = "tlc"; tlc++; next }
+    /^\[\[annotation\]\]/                { blk = "other"; annotations++; next }
+    /^\[\[semantic_binding\]\]/          { blk = "other"; semantics++; next }
+    /^\[\[expansion_binding\]\]/         { blk = "other"; expansions++; next }
+    /^\[\[evidence\]\]/                  { blk = "other"; evidence++; next }
     /^\[\[/                              { blk = "other"; next }
     blk == "res" && $1 == "disposition" { gsub(/"/, "", $3); res[$3]++ }
     blk == "ssd" && $1 == "slice_id"    { gsub(/"/, "", $3); slice = $3 }
@@ -89,6 +93,10 @@ catalog_closure_census() {
       value["appendix_structural_symbols"] = \
         ssd_disposition["appendix-structural-definition"] + 0
       value["source_location_pairs"]       = pairs + 0
+      value["annotations"]                 = annotations + 0
+      value["semantic_bindings"]           = semantics + 0
+      value["expansion_bindings"]          = expansions + 0
+      value["evidence_rows"]               = evidence + 0
       if (!(key in value)) {
         print "closure census key " key " is not one this reader derives" > "/dev/stderr"
         exit 44
@@ -354,12 +362,12 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"start_line":1388' \
     '"end_line":2728' \
     '"line_count":1341' \
-    '"byte_count":1027538' \
-    '"sha256":"c293d41d1021d2c40f808373c4f3153e6d70adfc476ea65ac805e2d283baed16"' \
+    '"byte_count":1028879' \
+    '"sha256":"30584e1f0e2afb5bb54105472403709c463dc693836542beb856ce173850b4e0"' \
     '"outcome":"pass"'; then
   ok "Appendix A exact source manifest is pinned"
 else
-  die "Appendix A source-manifest event is missing or drifted"
+  die "Appendix A source-manifest drift; expected lines=1388..2728 bytes=1028879 sha256=30584e1f0e2afb5bb54105472403709c463dc693836542beb856ce173850b4e0; observed $(jsonl_event_or_missing "$WORK/appendix-baseline.jsonl" appendix_source_manifest)"
 fi
 # The reference manifest's target_count is the same reservation total the
 # closure event reports -- appendix_a.rs:9887 compares it to
@@ -373,12 +381,12 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_reference_manifest"' \
     '"target_count":'"$EXPECT_RESERVATION_COUNT" \
     '"target_ids_sha256":"84276b6d97342e9ec1619424ddacb5b429e98e1862e03359afc837b65bb3392e"' \
-    '"occurrence_count":2454' \
-    '"occurrence_transcript_sha256":"998b08eee705f5e31ab75a311642ad818c2a810ec1afaab9199efd14c5df892f"' \
+    '"occurrence_count":2456' \
+    '"occurrence_transcript_sha256":"f797542209a7411cde460324bcfa1d6b9be65c9ee536059c520dccae9844c822"' \
     '"outcome":"pass"'; then
   ok "full-plan Appendix A reference census is pinned"
 else
-  die "Appendix A reference-manifest event is missing or drifted"
+  die "Appendix A reference-manifest drift; expected targets=$EXPECT_RESERVATION_COUNT occurrences=2456 sha256=f797542209a7411cde460324bcfa1d6b9be65c9ee536059c520dccae9844c822; observed $(jsonl_event_or_missing "$WORK/appendix-baseline.jsonl" appendix_reference_manifest)"
 fi
 EXPECT_TARGET_COUNT="$(catalog_manifest_value target_count)"
 EXPECT_FALLBACK_COUNT="$(catalog_manifest_value projection_fallback_count)"
@@ -390,6 +398,10 @@ EXPECT_TOP_LEVEL_CANDIDATE_COUNT="$(catalog_closure_census top_level_candidates)
 EXPECT_REFERENCE_ONLY_SYMBOL_COUNT="$(catalog_closure_census reference_only_symbols)"
 EXPECT_APPENDIX_STRUCTURAL_SYMBOL_COUNT="$(catalog_closure_census appendix_structural_symbols)"
 EXPECT_SOURCE_LOCATION_PAIR_COUNT="$(catalog_closure_census source_location_pairs)"
+EXPECT_ANNOTATION_COUNT="$(catalog_closure_census annotations)"
+EXPECT_SEMANTIC_BINDING_COUNT="$(catalog_closure_census semantic_bindings)"
+EXPECT_EXPANSION_BINDING_COUNT="$(catalog_closure_census expansion_bindings)"
+EXPECT_EVIDENCE_ROW_COUNT="$(catalog_closure_census evidence_rows)"
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_target_manifest"' \
     '"target_count":'"$EXPECT_TARGET_COUNT" \
@@ -423,11 +435,11 @@ fi
 # THE RULE FOR THIS EVENT, so the next author does not have to re-derive it:
 # a field whose value is the size of a growing catalog is DERIVED above, and a
 # field whose correct value is a law is written here. The laws are the four
-# empty completion layers, the empty outside-structural bucket, the four
-# completion-layer schemas, and the 35-row G0 projection slice -- none of which
-# moved across the 40 Appendix A commits before this one, while every derived
-# field did. A law that moves is an event and should red this gate; a census
-# that moves is Tuesday.
+# completion-layer schemas, the empty outside-structural bucket, and the 35-row
+# G0 projection slice. Completion rows are census values: a01 landed 324
+# annotations, 324 semantic bindings, three expansions and 648 evidence rows in
+# e4aaa9a3. Recount them independently of the emitter; the compiled readable
+# contracts still pin their content. Empty completion layers are no longer a law.
 if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"event":"appendix_closure_checked"' \
     '"reservations":'"$EXPECT_RESERVATION_COUNT" \
@@ -437,10 +449,10 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"top_level_candidates":'"$EXPECT_TOP_LEVEL_CANDIDATE_COUNT" \
     '"targets":'"$EXPECT_TARGET_COUNT" \
     '"completion_layer_schemas":4' \
-    '"annotations":0' \
-    '"semantic_bindings":0' \
-    '"expansion_bindings":0' \
-    '"evidence_rows":0' \
+    '"annotations":'"$EXPECT_ANNOTATION_COUNT"',' \
+    '"semantic_bindings":'"$EXPECT_SEMANTIC_BINDING_COUNT"',' \
+    '"expansion_bindings":'"$EXPECT_EXPANSION_BINDING_COUNT"',' \
+    '"evidence_rows":'"$EXPECT_EVIDENCE_ROW_COUNT"',' \
     '"reference_only_symbols":'"$EXPECT_REFERENCE_ONLY_SYMBOL_COUNT" \
     '"appendix_structural_symbols":'"$EXPECT_APPENDIX_STRUCTURAL_SYMBOL_COUNT" \
     '"outside_structural_symbols":0' \
@@ -452,7 +464,7 @@ else
   OBSERVED_APPENDIX_CLOSURE="$(
     jsonl_event_or_missing "$WORK/appendix-baseline.jsonl" appendix_closure_checked
   )"
-  die "Appendix A closure event is missing or drifted; expected reservations=$EXPECT_RESERVATION_COUNT existing=$EXPECT_EXISTING_RESERVATION_COUNT reserved=$EXPECT_RESERVED_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT; observed $OBSERVED_APPENDIX_CLOSURE"
+  die "Appendix A closure event is missing or drifted; expected reservations=$EXPECT_RESERVATION_COUNT existing=$EXPECT_EXISTING_RESERVATION_COUNT reserved=$EXPECT_RESERVED_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT annotations=$EXPECT_ANNOTATION_COUNT semantic_bindings=$EXPECT_SEMANTIC_BINDING_COUNT expansion_bindings=$EXPECT_EXPANSION_BINDING_COUNT evidence_rows=$EXPECT_EVIDENCE_ROW_COUNT; observed $OBSERVED_APPENDIX_CLOSURE"
 fi
 # THE UNCLASSIFIED RESIDUE, AS A CEILING THAT CAN ONLY CLOSE.
 #
@@ -502,10 +514,10 @@ if jsonl_line_has_all "$WORK/appendix-baseline.jsonl" \
     '"top_level_candidates":'"$EXPECT_TOP_LEVEL_CANDIDATE_COUNT" \
     '"targets":'"$EXPECT_TARGET_COUNT" \
     '"completion_layer_schemas":4' \
-    '"annotations":0' \
-    '"semantic_bindings":0' \
-    '"expansion_bindings":0' \
-    '"evidence_rows":0' \
+    '"annotations":'"$EXPECT_ANNOTATION_COUNT"',' \
+    '"semantic_bindings":'"$EXPECT_SEMANTIC_BINDING_COUNT"',' \
+    '"expansion_bindings":'"$EXPECT_EXPANSION_BINDING_COUNT"',' \
+    '"evidence_rows":'"$EXPECT_EVIDENCE_ROW_COUNT"',' \
     '"reference_only_symbols":'"$EXPECT_REFERENCE_ONLY_SYMBOL_COUNT" \
     '"violations":0' \
     '"outcome":"pass"'; then
@@ -514,7 +526,7 @@ else
   OBSERVED_APPENDIX_COMPLETION="$(
     jsonl_event_or_missing "$WORK/appendix-baseline.jsonl" appendix_completed
   )"
-  die "Appendix A completion event is missing or incomplete; expected projection_rows=$EXPECT_TARGET_COUNT reservations=$EXPECT_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT; observed $OBSERVED_APPENDIX_COMPLETION"
+  die "Appendix A completion event is missing or incomplete; expected projection_rows=$EXPECT_TARGET_COUNT reservations=$EXPECT_RESERVATION_COUNT targets=$EXPECT_TARGET_COUNT annotations=$EXPECT_ANNOTATION_COUNT semantic_bindings=$EXPECT_SEMANTIC_BINDING_COUNT expansion_bindings=$EXPECT_EXPANSION_BINDING_COUNT evidence_rows=$EXPECT_EVIDENCE_ROW_COUNT; observed $OBSERVED_APPENDIX_COMPLETION"
 fi
 SHA_SUITE_RC=0
 (cd "$ROOT" && cargo test -p registry-check hash::tests --lib --quiet) \
@@ -836,7 +848,7 @@ expect_appendix_violation() { # fixture code row_id
       "\"row_id\":\"$expected_row_id\""; then
     ok "$fixture rejected with $expected_code at $expected_row_id"
   else
-    die "$fixture omitted $expected_code at $expected_row_id"
+    die "$fixture omitted $expected_code at $expected_row_id; observed $(jsonl_event_or_missing "$WORK/$fixture.jsonl" violation); full diagnostics: $WORK/$fixture.jsonl and $WORK/$fixture.err"
   fi
 }
 
@@ -1874,7 +1886,7 @@ stage_appendix neg-appendix-unrelated-bindings linked appendix_a_catalog.toml
 cat >> "$WORK/neg-appendix-unrelated-bindings/registries/appendix_a_catalog.toml" <<'EOF'
 
 [[semantic_binding]]
-row_id = "a01:semantic-binding:bootstrap-frame-root-slot"
+row_id = "a01:semantic-binding:bootstrap-frame-root-slot-rogue-fixture"
 target_row_id = "a01:bootstrap-frame:root-slot"
 owner_bead_id = "fgdb-durable-capability-validation-evidence-dqym"
 owner_crate = "fgdb-types"
@@ -1882,7 +1894,7 @@ owner_status = "live"
 consumer_crates = ["fgdb", "fgdb-server"]
 
 [[evidence]]
-row_id = "a01:evidence:bootstrap-frame-root-slot-static-contract"
+row_id = "a01:evidence:bootstrap-frame-root-slot-rogue-fixture"
 target_row_id = "a01:bootstrap-frame:root-slot"
 evidence_id = "static-contract"
 phase = "static"
@@ -1896,15 +1908,53 @@ EOF
 expect_appendix_violation \
   neg-appendix-unrelated-bindings catalog_semantic_binding_contract_drift \
   semantic_binding
-if grep -q '"code":"catalog_evidence_binding_contract_drift"' \
-    "$WORK/neg-appendix-unrelated-bindings.jsonl" &&
-   grep -q '"code":"catalog_semantic_binding_contract_unapproved"' \
-    "$WORK/neg-appendix-unrelated-bindings.jsonl" &&
-   grep -q '"code":"catalog_evidence_binding_contract_unapproved"' \
-    "$WORK/neg-appendix-unrelated-bindings.jsonl"; then
-  ok "real but unrelated metadata rejected by readable reciprocal pins"
+if jsonl_line_has_all "$WORK/neg-appendix-unrelated-bindings.jsonl" \
+    '"event":"violation"' '"code":"catalog_evidence_binding_contract_drift"' &&
+   jsonl_line_has_all "$WORK/neg-appendix-unrelated-bindings.jsonl" \
+    '"event":"violation"' '"code":"catalog_semantic_binding_contract_unapproved"' \
+    '"row_id":"catalog_row"' &&
+   jsonl_line_has_all "$WORK/neg-appendix-unrelated-bindings.jsonl" \
+    '"event":"violation"' '"code":"catalog_evidence_binding_contract_unapproved"' \
+    '"row_id":"catalog_row"'; then
+  ok "unapproved metadata rejected by readable reciprocal pins"
 else
-  die "real but unrelated metadata bypassed readable reciprocal pins"
+  die "unapproved metadata omitted an expected binding diagnostic; observed $(jsonl_event_or_missing "$WORK/neg-appendix-unrelated-bindings.jsonl" violation); full diagnostics: $WORK/neg-appendix-unrelated-bindings.jsonl"
+fi
+
+log "phase 3j-binding-mismatch: approved rows cannot substitute unrelated owners"
+stage_appendix neg-appendix-mismatched-bindings linked appendix_a_catalog.toml
+# Mutate existing rows in the fixture, retaining their IDs and row counts. A
+# duplicate or unknown row cannot supply the rejection witness for this case.
+awk '
+  /^\[\[/ { selected = 0 }
+  $0 == "row_id = \"a01:semantic-binding:bootstrap-frame-root-slot\"" ||
+  $0 == "row_id = \"a01:evidence:bootstrap-frame-root-slot-appendix-closure-static\"" {
+    selected = 1
+  }
+  selected && $1 == "owner_bead_id" {
+    print "owner_bead_id = \"fgdb-durable-capability-validation-evidence-dqym\""
+    changed++
+    next
+  }
+  { print }
+  END { if (changed != 2) exit 42 }
+' "$ROOT/registries/appendix_a_catalog.toml" \
+  > "$WORK/neg-appendix-mismatched-bindings/registries/appendix_a_catalog.toml"
+expect_appendix_violation \
+  neg-appendix-mismatched-bindings catalog_semantic_binding_contract_mismatch \
+  catalog_row
+# The public diagnostic redactor emits catalog_row for binding IDs. Fixture
+# selection above is exact; require the typed law without exposing those IDs.
+if jsonl_line_has_all "$WORK/neg-appendix-mismatched-bindings.jsonl" \
+    '"event":"violation"' '"code":"catalog_evidence_binding_contract_mismatch"' \
+    '"row_id":"catalog_row"' &&
+   jsonl_line_has_all "$WORK/neg-appendix-mismatched-bindings.jsonl" \
+    '"event":"violation"' '"code":"catalog_semantic_binding_contract_drift"' &&
+   jsonl_line_has_all "$WORK/neg-appendix-mismatched-bindings.jsonl" \
+    '"event":"violation"' '"code":"catalog_evidence_binding_contract_drift"'; then
+  ok "approved binding rows reject unrelated owners without duplicate rows"
+else
+  die "mismatched approved metadata omitted an expected binding diagnostic; observed $(jsonl_event_or_missing "$WORK/neg-appendix-mismatched-bindings.jsonl" violation); full diagnostics: $WORK/neg-appendix-mismatched-bindings.jsonl"
 fi
 
 log "phase 3j-annotation: placeholder annotations cannot self-assert"
