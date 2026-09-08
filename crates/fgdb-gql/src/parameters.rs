@@ -1,17 +1,17 @@
 //! Typed numeric parameters for the existing bounded MATCH language.
 //!
-//! Preparation lexes parameter uses, then delegates grammar and name binding to
-//! the canonical binder exactly once with inert numeric literals. Only slots
-//! proven to exist in that bound plan can become parameters. Instantiation
-//! checks the complete argument set and patches those numeric slots directly;
-//! no caller-supplied text is ever evaluated and execution never reparses.
+//! The canonical parser reads `$name` as a structural numeric operand. Its AST
+//! determines the bound slot and original source span, with no lexical role
+//! inference or preparation-time text substitution. Instantiation checks the
+//! complete argument set and fills those numeric slots directly; neither binding
+//! values nor execution reparses or rebinds names.
 //!
 //! A concrete statement is also rendered for the existing prepared-query and
 //! evidence contracts. It contains only decimal encodings of typed numbers at
 //! previously validated token spans. Existing evidence binds this concrete
 //! definition, not the original template or an authenticated parameter receipt.
 
-use crate::{BindError, BoundPlan, EdgeDirection, PreparedGqlQuery, RelationBind};
+use crate::{BindError, BoundPlan, ParseErrorKind, PreparedGqlQuery, RelationBind};
 use fgdb_delta_types::PropertyKeyId;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -252,7 +252,7 @@ impl core::error::Error for GqlParameterError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Comparison {
+pub(crate) enum Comparison {
     Equal,
     NotEqual,
     Greater,
@@ -261,35 +261,28 @@ enum Comparison {
     LessOrEqual,
 }
 
-impl Comparison {
-    fn parse(token: &str) -> Option<Self> {
-        Some(match token {
-            "=" => Self::Equal,
-            "<>" | "!=" => Self::NotEqual,
-            ">" => Self::Greater,
-            "<" => Self::Less,
-            ">=" => Self::GreaterOrEqual,
-            "<=" => Self::LessOrEqual,
-            _ => return None,
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Role {
+pub(crate) enum Role {
     Source,
     Destination,
     FarEnd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Target {
+pub(crate) enum Target {
     Property(Role, Comparison),
     Skip,
     Limit,
 }
 
 impl Target {
+    fn parameter_type(self) -> GqlParameterType {
+        match self {
+            Self::Property(_, _) => GqlParameterType::Int64,
+            Self::Skip | Self::Limit => GqlParameterType::UInt64,
+        }
+    }
+
     fn property(self, plan: &mut BoundPlan) -> Option<&mut Option<(PropertyKeyId, i64)>> {
         use Comparison::{Equal, Greater, GreaterOrEqual, Less, LessOrEqual, NotEqual};
         use Role::{Destination, FarEnd, Source};
@@ -342,58 +335,10 @@ impl Target {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Use {
-    Property {
-        variable: String,
-        comparison: Comparison,
-    },
-    Skip,
-    Limit,
-}
-
-impl Use {
-    fn parameter_type(&self) -> GqlParameterType {
-        match self {
-            Self::Property { .. } => GqlParameterType::Int64,
-            Self::Skip | Self::Limit => GqlParameterType::UInt64,
-        }
-    }
-
-    fn target(&self, plan: &BoundPlan) -> Option<Target> {
-        match self {
-            Self::Skip => Some(Target::Skip),
-            Self::Limit => Some(Target::Limit),
-            Self::Property {
-                variable,
-                comparison,
-            } => {
-                // Match the canonical binder's precedence, including its
-                // incoming two-hop near-end predicate normalization.
-                let role = if plan.hop2_dst_var.as_ref() == Some(variable) {
-                    Role::FarEnd
-                } else if *variable == plan.src_var {
-                    if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
-                        Role::Destination
-                    } else {
-                        Role::Source
-                    }
-                } else if *variable == plan.dst_var {
-                    Role::Destination
-                } else {
-                    return None;
-                };
-                Some(Target::Property(role, *comparison))
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Occurrence {
-    span: Range<usize>,
-    name: String,
-    usage: Use,
-    target: Option<Target>,
+pub(crate) struct Occurrence {
+    pub(crate) span: Range<usize>,
+    pub(crate) name: String,
+    pub(crate) target: Target,
 }
 
 /// Immutable, reusable numeric-parameter definition for the bounded grammar.
@@ -415,41 +360,26 @@ impl PreparedGqlTemplate {
         bind: &RelationBind,
     ) -> Result<Self, GqlParameterError> {
         let statement = statement.into();
-        let mut occurrences = parameter_uses(&statement)?;
-        let (normalized, mapping) = render(&statement, &occurrences, |_| "1".to_owned());
-        let mut prototype = bind.bind(&normalized).map_err(|error| {
-            let error = match error {
-                BindError::Parse(mut error) => {
-                    error.offset = original_offset(error.offset, &mapping);
-                    BindError::Parse(error)
+        let (prototype, occurrences) =
+            bind.bind_parameter_template(&statement).map_err(|error| match error {
+                BindError::Parse(error)
+                    if error.kind == ParseErrorKind::ExpectedToken("parameter name") =>
+                {
+                    GqlParameterError::InvalidParameterName { offset: error.offset }
                 }
-                other => other,
-            };
-            GqlParameterError::Bind(error)
-        })?;
+                other => GqlParameterError::Bind(other),
+            })?;
         let mut schema: BTreeMap<String, GqlParameterSpec> = BTreeMap::new();
         let mut targets = Vec::new();
-        for occurrence in &mut occurrences {
-            let target = occurrence.usage.target(&prototype).ok_or(
-                GqlParameterError::DefinitionMismatch {
-                    offset: occurrence.span.start,
-                },
-            )?;
-            let inert = match target {
-                Target::Skip => prototype.skip == Some(1),
-                Target::Limit => prototype.limit == Some(1),
-                Target::Property(_, _) => target
-                    .property(&mut prototype)
-                    .is_some_and(|slot| slot.as_ref().is_some_and(|(_, value)| *value == 1)),
-            };
-            if !inert || targets.contains(&target) {
+        for occurrence in &occurrences {
+            let target = occurrence.target;
+            if targets.contains(&target) {
                 return Err(GqlParameterError::DefinitionMismatch {
                     offset: occurrence.span.start,
                 });
             }
             targets.push(target);
-            occurrence.target = Some(target);
-            let kind = occurrence.usage.parameter_type();
+            let kind = target.parameter_type();
             let spec = schema
                 .entry(occurrence.name.clone())
                 .or_insert_with(|| GqlParameterSpec {
@@ -465,7 +395,7 @@ impl PreparedGqlTemplate {
                     second: kind,
                 });
             }
-            spec.requires_positive |= occurrence.usage == Use::Limit;
+            spec.requires_positive |= target == Target::Limit;
             spec.occurrences += 1;
         }
         Ok(Self {
@@ -536,16 +466,13 @@ impl PreparedGqlTemplate {
                     .ok_or_else(|| GqlParameterError::Missing {
                         name: occurrence.name.clone(),
                     })?;
-            if !occurrence
-                .target
-                .is_some_and(|target| target.assign(&mut plan, value))
-            {
+            if !occurrence.target.assign(&mut plan, value) {
                 return Err(GqlParameterError::DefinitionMismatch {
                     offset: occurrence.span.start,
                 });
             }
         }
-        let (statement, _) = render(&self.statement, &self.occurrences, |occurrence| {
+        let statement = render(&self.statement, &self.occurrences, |occurrence| {
             // All occurrences were checked above against the same immutable map.
             parameters.values[&occurrence.name].decimal()
         });
@@ -583,11 +510,6 @@ impl core::fmt::Debug for PreparedGqlTemplate {
     }
 }
 
-#[derive(Clone)]
-struct Token<'a> {
-    text: &'a str,
-}
-
 fn identifier_start(byte: u8) -> bool {
     byte == b'_' || byte.is_ascii_alphabetic()
 }
@@ -601,150 +523,25 @@ fn valid_name(name: &str) -> bool {
         && name.bytes().all(identifier_continue)
 }
 
-/// Only numeric parameter positions are recognized here. The canonical parser
-/// remains the authority on every pattern, comparator and conjunction rule.
-fn parameter_uses(statement: &str) -> Result<Vec<Occurrence>, GqlParameterError> {
-    let mut previous: Vec<Token<'_>> = Vec::new();
-    let mut occurrences = Vec::new();
-    let mut offset = 0;
-    while offset < statement.len() {
-        let character = statement[offset..]
-            .chars()
-            .next()
-            .expect("offset is inside the source");
-        if character.is_whitespace() {
-            offset += character.len_utf8();
-            continue;
-        }
-        let start = offset;
-        let byte = statement.as_bytes()[offset];
-        if byte == b'$' {
-            offset += 1;
-            if !statement
-                .as_bytes()
-                .get(offset)
-                .is_some_and(|byte| identifier_start(*byte))
-            {
-                return Err(GqlParameterError::InvalidParameterName { offset: start });
-            }
-            while statement
-                .as_bytes()
-                .get(offset)
-                .is_some_and(|byte| identifier_continue(*byte))
-            {
-                offset += 1;
-            }
-            let last = previous.last().map(|token| token.text);
-            let usage = match last {
-                Some("SKIP") => Use::Skip,
-                Some("LIMIT") => Use::Limit,
-                _ => {
-                    let recent = previous.as_slice();
-                    let Some(comparison) = last.and_then(Comparison::parse) else {
-                        return Err(GqlParameterError::UnsupportedPosition { offset: start });
-                    };
-                    if recent.len() < 4
-                        || recent[recent.len() - 3].text != "."
-                        || !valid_name(recent[recent.len() - 4].text)
-                        || !valid_name(recent[recent.len() - 2].text)
-                    {
-                        return Err(GqlParameterError::UnsupportedPosition { offset: start });
-                    }
-                    Use::Property {
-                        variable: recent[recent.len() - 4].text.to_owned(),
-                        comparison,
-                    }
-                }
-            };
-            occurrences.push(Occurrence {
-                span: start..offset,
-                name: statement[start + 1..offset].to_owned(),
-                usage,
-                target: None,
-            });
-        } else if identifier_start(byte) {
-            offset += 1;
-            while statement
-                .as_bytes()
-                .get(offset)
-                .is_some_and(|byte| identifier_continue(*byte))
-            {
-                offset += 1;
-            }
-        } else if byte.is_ascii_digit() {
-            offset += 1;
-            while statement
-                .as_bytes()
-                .get(offset)
-                .is_some_and(u8::is_ascii_digit)
-            {
-                offset += 1;
-            }
-        } else {
-            offset += character.len_utf8();
-            if matches!(&statement[start..offset], "<" | ">" | "!")
-                && statement
-                    .as_bytes()
-                    .get(offset)
-                    .is_some_and(|next| *next == b'=' || (byte == b'<' && *next == b'>'))
-            {
-                offset += 1;
-            }
-        }
-        previous.push(Token {
-            text: &statement[start..offset],
-        });
-        if previous.len() > 4 {
-            previous.remove(0);
-        }
-    }
-    Ok(occurrences)
-}
-
-struct RenderedSpan {
-    original: Range<usize>,
-    rendered: Range<usize>,
-}
-
+/// Serialization for existing concrete-query evidence only. The executable
+/// plan is already fully instantiated; this string is never its input.
 fn render(
     statement: &str,
     occurrences: &[Occurrence],
     mut decimal: impl FnMut(&Occurrence) -> String,
-) -> (String, Vec<RenderedSpan>) {
+) -> String {
     let mut result = String::new();
-    let mut mapping = Vec::with_capacity(occurrences.len());
     let mut cursor = 0;
     for occurrence in occurrences {
         result.push_str(&statement[cursor..occurrence.span.start]);
-        let start = result.len();
         // Preserve token boundaries even for `LIMIT$n` or `=$value` spellings.
         result.push(' ');
         result.push_str(&decimal(occurrence));
         result.push(' ');
-        mapping.push(RenderedSpan {
-            original: occurrence.span.clone(),
-            rendered: start..result.len(),
-        });
         cursor = occurrence.span.end;
     }
     result.push_str(&statement[cursor..]);
-    (result, mapping)
-}
-
-fn original_offset(offset: usize, mapping: &[RenderedSpan]) -> usize {
-    let mut previous_original_end = 0;
-    let mut previous_rendered_end = 0;
-    for span in mapping {
-        if offset < span.rendered.start {
-            break;
-        }
-        if offset < span.rendered.end {
-            return span.original.start;
-        }
-        previous_original_end = span.original.end;
-        previous_rendered_end = span.rendered.end;
-    }
-    previous_original_end + offset.saturating_sub(previous_rendered_end)
+    result
 }
 
 fn append_bytes(output: &mut Vec<u8>, value: &[u8]) {

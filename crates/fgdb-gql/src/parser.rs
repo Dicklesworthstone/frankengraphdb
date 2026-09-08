@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use crate::parameters::{Comparison, Occurrence, Role, Target};
 use std::collections::BTreeMap;
 
 /// A syntax error in the bounded GQL grammar.
@@ -239,6 +240,25 @@ impl RelationBind {
     /// Parse and bind one statement without exposing the internal AST.
     pub fn bind(&self, statement: &str) -> Result<BoundPlan, BindError> {
         let ast = Parser::new(statement).parse()?;
+        self.bind_ast(ast, &mut Vec::new())
+    }
+
+    /// Parse original parameter tokens as numeric operands. The AST selects
+    /// their bound slots; there is no text substitution or second role parser.
+    pub(crate) fn bind_parameter_template(
+        &self,
+        statement: &str,
+    ) -> Result<(BoundPlan, Vec<Occurrence>), BindError> {
+        let ast = Parser { source: statement, offset: 0, parameters: true }.parse()?;
+        let mut occurrences = Vec::new();
+        let plan = self.bind_ast(ast, &mut occurrences)?;
+        occurrences.sort_by_key(|occurrence| occurrence.span.start);
+        Ok((plan, occurrences))
+    }
+
+    fn bind_ast(&self, ast: MatchAst, parameters: &mut Vec<Occurrence>) -> Result<BoundPlan, BindError> {
+        use Comparison::{Equal, Greater, GreaterOrEqual, Less, LessOrEqual, NotEqual};
+        use Role::{Destination, FarEnd, Source};
         let relation = ast
             .relation
             .as_ref()
@@ -261,24 +281,24 @@ impl RelationBind {
             .transpose()?;
         let src_label = bind_label(&self.labels, ast.src_label)?;
         let dst_label = bind_label(&self.labels, ast.dst_label)?;
-        let src_prop = bind_property(&self.properties, ast.src_prop)?;
-        let src_prop_ne = bind_property(&self.properties, ast.src_prop_ne)?;
-        let src_prop_gt = bind_property(&self.properties, ast.src_prop_gt)?;
-        let src_prop_lt = bind_property(&self.properties, ast.src_prop_lt)?;
-        let src_prop_ge = bind_property(&self.properties, ast.src_prop_ge)?;
-        let src_prop_le = bind_property(&self.properties, ast.src_prop_le)?;
-        let dst_prop = bind_property(&self.properties, ast.dst_prop)?;
-        let dst_prop_ne = bind_property(&self.properties, ast.dst_prop_ne)?;
-        let dst_prop_gt = bind_property(&self.properties, ast.dst_prop_gt)?;
-        let dst_prop_lt = bind_property(&self.properties, ast.dst_prop_lt)?;
-        let dst_prop_ge = bind_property(&self.properties, ast.dst_prop_ge)?;
-        let dst_prop_le = bind_property(&self.properties, ast.dst_prop_le)?;
-        let hop2_dst_prop = bind_property(&self.properties, ast.hop2_dst_prop)?;
-        let hop2_dst_prop_ne = bind_property(&self.properties, ast.hop2_dst_prop_ne)?;
-        let hop2_dst_prop_gt = bind_property(&self.properties, ast.hop2_dst_prop_gt)?;
-        let hop2_dst_prop_lt = bind_property(&self.properties, ast.hop2_dst_prop_lt)?;
-        let hop2_dst_prop_ge = bind_property(&self.properties, ast.hop2_dst_prop_ge)?;
-        let hop2_dst_prop_le = bind_property(&self.properties, ast.hop2_dst_prop_le)?;
+        let src_prop = bind_property(&self.properties, ast.src_prop, Target::Property(Source, Equal), parameters)?;
+        let src_prop_ne = bind_property(&self.properties, ast.src_prop_ne, Target::Property(Source, NotEqual), parameters)?;
+        let src_prop_gt = bind_property(&self.properties, ast.src_prop_gt, Target::Property(Source, Greater), parameters)?;
+        let src_prop_lt = bind_property(&self.properties, ast.src_prop_lt, Target::Property(Source, Less), parameters)?;
+        let src_prop_ge = bind_property(&self.properties, ast.src_prop_ge, Target::Property(Source, GreaterOrEqual), parameters)?;
+        let src_prop_le = bind_property(&self.properties, ast.src_prop_le, Target::Property(Source, LessOrEqual), parameters)?;
+        let dst_prop = bind_property(&self.properties, ast.dst_prop, Target::Property(Destination, Equal), parameters)?;
+        let dst_prop_ne = bind_property(&self.properties, ast.dst_prop_ne, Target::Property(Destination, NotEqual), parameters)?;
+        let dst_prop_gt = bind_property(&self.properties, ast.dst_prop_gt, Target::Property(Destination, Greater), parameters)?;
+        let dst_prop_lt = bind_property(&self.properties, ast.dst_prop_lt, Target::Property(Destination, Less), parameters)?;
+        let dst_prop_ge = bind_property(&self.properties, ast.dst_prop_ge, Target::Property(Destination, GreaterOrEqual), parameters)?;
+        let dst_prop_le = bind_property(&self.properties, ast.dst_prop_le, Target::Property(Destination, LessOrEqual), parameters)?;
+        let hop2_dst_prop = bind_property(&self.properties, ast.hop2_dst_prop, Target::Property(FarEnd, Equal), parameters)?;
+        let hop2_dst_prop_ne = bind_property(&self.properties, ast.hop2_dst_prop_ne, Target::Property(FarEnd, NotEqual), parameters)?;
+        let hop2_dst_prop_gt = bind_property(&self.properties, ast.hop2_dst_prop_gt, Target::Property(FarEnd, Greater), parameters)?;
+        let hop2_dst_prop_lt = bind_property(&self.properties, ast.hop2_dst_prop_lt, Target::Property(FarEnd, Less), parameters)?;
+        let hop2_dst_prop_ge = bind_property(&self.properties, ast.hop2_dst_prop_ge, Target::Property(FarEnd, GreaterOrEqual), parameters)?;
+        let hop2_dst_prop_le = bind_property(&self.properties, ast.hop2_dst_prop_le, Target::Property(FarEnd, LessOrEqual), parameters)?;
         Ok(BoundPlan {
             relation,
             src_var: ast.src_var,
@@ -304,8 +324,8 @@ impl RelationBind {
             dst_prop_lt,
             dst_prop_ge,
             dst_prop_le,
-            limit: ast.limit,
-            skip: ast.skip,
+            limit: ast.limit.map(|operand| operand.bind(Target::Limit, parameters)),
+            skip: ast.skip.map(|operand| operand.bind(Target::Skip, parameters)),
             hop2_dst_prop,
             hop2_dst_prop_ne,
             hop2_dst_prop_gt,
@@ -331,17 +351,40 @@ fn bind_label(
 
 fn bind_property(
     properties: &BTreeMap<String, PropertyKeyId>,
-    predicate: Option<(String, i64)>,
+    predicate: Option<(String, NumericOperand<i64>)>,
+    target: Target,
+    parameters: &mut Vec<Occurrence>,
 ) -> Result<Option<(PropertyKeyId, i64)>, BindError> {
     predicate
         .map(|(name, value)| {
             properties
                 .get(&name)
                 .copied()
-                .map(|property| (property, value))
+                .map(|property| (property, value.bind(target, parameters)))
                 .ok_or(BindError::UnknownProperty { name })
         })
         .transpose()
+}
+
+/// A numeric grammar operand retains parameter identity and original source
+/// span until the binder assigns its structural target. Prototype literals
+/// cannot escape: only a fully instantiated PreparedGqlQuery is executable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NumericOperand<T> {
+    Literal(T),
+    Parameter { name: String, span: std::ops::Range<usize> },
+}
+
+impl<T: From<u8>> NumericOperand<T> {
+    fn bind(self, target: Target, parameters: &mut Vec<Occurrence>) -> T {
+        match self {
+            Self::Literal(value) => value,
+            Self::Parameter { name, span } => {
+                parameters.push(Occurrence { name, span, target });
+                T::from(1)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -358,36 +401,37 @@ struct MatchAst {
     direction: EdgeDirection,
     neq: Option<(String, String)>,
     eq: Option<(String, String)>,
-    src_prop: Option<(String, i64)>,
-    src_prop_ne: Option<(String, i64)>,
-    src_prop_gt: Option<(String, i64)>,
-    src_prop_lt: Option<(String, i64)>,
-    src_prop_ge: Option<(String, i64)>,
-    src_prop_le: Option<(String, i64)>,
-    dst_prop: Option<(String, i64)>,
-    dst_prop_ne: Option<(String, i64)>,
-    dst_prop_gt: Option<(String, i64)>,
-    dst_prop_lt: Option<(String, i64)>,
-    dst_prop_ge: Option<(String, i64)>,
-    dst_prop_le: Option<(String, i64)>,
-    limit: Option<u64>,
-    skip: Option<u64>,
-    hop2_dst_prop: Option<(String, i64)>,
-    hop2_dst_prop_ne: Option<(String, i64)>,
-    hop2_dst_prop_gt: Option<(String, i64)>,
-    hop2_dst_prop_lt: Option<(String, i64)>,
-    hop2_dst_prop_ge: Option<(String, i64)>,
-    hop2_dst_prop_le: Option<(String, i64)>,
+    src_prop: Option<(String, NumericOperand<i64>)>,
+    src_prop_ne: Option<(String, NumericOperand<i64>)>,
+    src_prop_gt: Option<(String, NumericOperand<i64>)>,
+    src_prop_lt: Option<(String, NumericOperand<i64>)>,
+    src_prop_ge: Option<(String, NumericOperand<i64>)>,
+    src_prop_le: Option<(String, NumericOperand<i64>)>,
+    dst_prop: Option<(String, NumericOperand<i64>)>,
+    dst_prop_ne: Option<(String, NumericOperand<i64>)>,
+    dst_prop_gt: Option<(String, NumericOperand<i64>)>,
+    dst_prop_lt: Option<(String, NumericOperand<i64>)>,
+    dst_prop_ge: Option<(String, NumericOperand<i64>)>,
+    dst_prop_le: Option<(String, NumericOperand<i64>)>,
+    limit: Option<NumericOperand<u64>>,
+    skip: Option<NumericOperand<u64>>,
+    hop2_dst_prop: Option<(String, NumericOperand<i64>)>,
+    hop2_dst_prop_ne: Option<(String, NumericOperand<i64>)>,
+    hop2_dst_prop_gt: Option<(String, NumericOperand<i64>)>,
+    hop2_dst_prop_lt: Option<(String, NumericOperand<i64>)>,
+    hop2_dst_prop_ge: Option<(String, NumericOperand<i64>)>,
+    hop2_dst_prop_le: Option<(String, NumericOperand<i64>)>,
 }
 
 struct Parser<'a> {
     source: &'a str,
     offset: usize,
+    parameters: bool,
 }
 
 impl<'a> Parser<'a> {
     fn new(source: &'a str) -> Self {
-        Self { source, offset: 0 }
+        Self { source, offset: 0, parameters: false }
     }
 
     fn parse(mut self) -> Result<MatchAst, ParseError> {
@@ -1391,8 +1435,11 @@ impl<'a> Parser<'a> {
         Ok(self.source[start..self.offset].to_owned())
     }
 
-    fn integer(&mut self) -> Result<i64, ParseError> {
+    fn integer(&mut self) -> Result<NumericOperand<i64>, ParseError> {
         self.skip_whitespace();
+        if self.parameters && self.source[self.offset..].starts_with('$') {
+            return self.parameter();
+        }
         let start = self.offset;
         if self.source[self.offset..].starts_with('-') {
             self.offset += 1;
@@ -1412,7 +1459,8 @@ impl<'a> Parser<'a> {
             });
         }
         self.source[start..self.offset]
-            .parse()
+            .parse::<i64>()
+            .map(NumericOperand::Literal)
             .map_err(|_| ParseError {
                 offset: start,
                 kind: ParseErrorKind::ExpectedToken("i64 integer"),
@@ -1423,13 +1471,16 @@ impl<'a> Parser<'a> {
     /// optional `LIMIT` (fgdb-w5-parsers-nje.13). Unlike `LIMIT`, zero is
     /// legal — `SKIP 0` is the identity and binds `Some(0)`. `OFFSET` is
     /// deliberately not a spelling this slice accepts.
-    fn optional_skip(&mut self) -> Result<Option<u64>, ParseError> {
+    fn optional_skip(&mut self) -> Result<Option<NumericOperand<u64>>, ParseError> {
         self.skip_whitespace();
         if !self.source[self.offset..].starts_with("SKIP") {
             return Ok(None);
         }
         self.keyword("SKIP")?;
         self.skip_whitespace();
+        if self.parameters && self.source[self.offset..].starts_with('$') {
+            return self.parameter().map(Some);
+        }
         let start = self.offset;
         while self.source[self.offset..]
             .chars()
@@ -1444,16 +1495,19 @@ impl<'a> Parser<'a> {
                 offset: start,
                 kind: ParseErrorKind::ExpectedToken("unsigned SKIP"),
             })?;
-        Ok(Some(value))
+        Ok(Some(NumericOperand::Literal(value)))
     }
 
-    fn optional_limit(&mut self) -> Result<Option<u64>, ParseError> {
+    fn optional_limit(&mut self) -> Result<Option<NumericOperand<u64>>, ParseError> {
         self.skip_whitespace();
         if !self.source[self.offset..].starts_with("LIMIT") {
             return Ok(None);
         }
         self.keyword("LIMIT")?;
         self.skip_whitespace();
+        if self.parameters && self.source[self.offset..].starts_with('$') {
+            return self.parameter().map(Some);
+        }
         let start = self.offset;
         while self.source[self.offset..]
             .chars()
@@ -1474,7 +1528,22 @@ impl<'a> Parser<'a> {
                 kind: ParseErrorKind::ExpectedToken("positive LIMIT"),
             });
         }
-        Ok(Some(value))
+        Ok(Some(NumericOperand::Literal(value)))
+    }
+
+    /// Called only by numeric grammar productions, never by identifier parsing.
+    /// A name must immediately follow `$`; all offsets refer to original bytes.
+    fn parameter<T>(&mut self) -> Result<NumericOperand<T>, ParseError> {
+        let start = self.offset;
+        self.offset += 1;
+        if !self.source[self.offset..].chars().next().is_some_and(is_identifier_start) {
+            return Err(ParseError {
+                offset: start,
+                kind: ParseErrorKind::ExpectedToken("parameter name"),
+            });
+        }
+        let name = self.identifier()?;
+        Ok(NumericOperand::Parameter { name, span: start..self.offset })
     }
 
     fn optional_label(&mut self) -> Result<Option<String>, ParseError> {
@@ -3198,5 +3267,70 @@ mod tests {
 
         assert_ne!(left.canonical_bytes(), different_id.canonical_bytes());
         assert_ne!(left.canonical_bytes(), different_name.canonical_bytes());
+    }
+}
+
+#[cfg(test)]
+mod parameter_operand_tests {
+    use super::*;
+
+    fn binder() -> RelationBind {
+        RelationBind::new()
+            .with_relation("R", RelationId(1))
+            .with_relation("S", RelationId(2))
+            .with_label("L", LabelId(3))
+            .with_property("n", PropertyKeyId(4))
+    }
+
+    #[test]
+    fn original_parameter_tokens_are_structural_ast_operands() {
+        let source = "\u{2003}MATCH (a:L) WHERE a.n=$threshold RETURN a SKIP$offset LIMIT$cap";
+        let ast = Parser { source, offset: 0, parameters: true }.parse().unwrap();
+        assert!(matches!(ast.src_prop, Some((ref key, NumericOperand::Parameter { ref name, ref span }))
+            if key == "n" && name == "threshold" && &source[span.clone()] == "$threshold"));
+        assert!(matches!(ast.skip, Some(NumericOperand::Parameter { ref name, ref span })
+            if name == "offset" && &source[span.clone()] == "$offset"));
+        assert!(matches!(ast.limit, Some(NumericOperand::Parameter { ref name, ref span })
+            if name == "cap" && &source[span.clone()] == "$cap"));
+        assert!(binder().bind(source).is_err(), "unbound operands must not be executable literals");
+    }
+
+    #[test]
+    fn ast_normalization_assigns_incoming_near_end_parameters() {
+        let source = "MATCH (a)<-[:R]-(b)<-[:S]-(c) WHERE a.n>=$near RETURN c";
+        let ast = Parser { source, offset: 0, parameters: true }.parse().unwrap();
+        assert!(ast.src_prop_ge.is_none());
+        assert!(matches!(ast.dst_prop_ge, Some((_, NumericOperand::Parameter { .. }))));
+        let (plan, parameters) = binder().bind_parameter_template(source).unwrap();
+        assert_eq!(plan.dst_prop_ge, Some((PropertyKeyId(4), 1)));
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(parameters[0].target, Target::Property(Role::Destination, Comparison::GreaterOrEqual));
+        assert_eq!(&source[parameters[0].span.clone()], "$near");
+    }
+
+    #[test]
+    fn occurrences_keep_source_order_not_bound_field_visit_order() {
+        let source = "MATCH (a)-[:R]->(b) WHERE b.n=$destination AND a.n=$source RETURN b SKIP$skip LIMIT$limit";
+        let (_, parameters) = binder().bind_parameter_template(source).unwrap();
+        assert_eq!(parameters.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["destination", "source", "skip", "limit"]);
+        assert_eq!(parameters.iter().map(|p| p.target).collect::<Vec<_>>(), vec![
+            Target::Property(Role::Destination, Comparison::Equal),
+            Target::Property(Role::Source, Comparison::Equal), Target::Skip, Target::Limit,
+        ]);
+        for parameter in parameters {
+            assert_eq!(&source[parameter.span], format!("${}", parameter.name));
+        }
+    }
+
+    #[test]
+    fn malformed_parameter_is_rejected_at_its_original_dollar() {
+        for suffix in ["$", "$9bad", "$ cap", "$雪", "$$cap"] {
+            let source = format!("MATCH (a:L) WHERE a.n=$long_first_name RETURN a LIMIT {suffix}");
+            let offset = source.rfind("LIMIT ").unwrap() + "LIMIT ".len();
+            assert!(matches!(binder().bind_parameter_template(&source),
+                Err(BindError::Parse(ParseError { offset: found, kind: ParseErrorKind::ExpectedToken("parameter name") }))
+                if found == offset));
+        }
     }
 }
