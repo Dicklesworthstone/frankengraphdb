@@ -1,14 +1,354 @@
 # Reality Check and Bridge Plan
 
-**Current measurement: 2026-09-02** (evidence window 2026-09-02T21:00–21:30Z,
-HEAD `fdd53388`). Previous: 2026-08-31 (pinned `a4bb93c4`).
-This document is revised in place. Older commit-bound assessments are retained
-below as superseded historical snapshots because they explain several decisions;
-their counts and statements about missing seams are not current unless the
-2026-09-02 delta repeats them.
+**Current measurement: 2026-09-07 (America/New_York; execution on 2026-09-08 UTC)**,
+at clean baseline commit `fcc39e5b28e04264f28488878d36372cb5934ab9`.
+This document is revised in place. The September 2 and earlier assessments below
+are historical evidence, not current claims. In particular, the previous
+blanket statement that the tree cannot compile and no example runs is obsolete.
+
+## Current delta — 2026-09-07
+
+### Product verdict
+
+**FrankenGraphDB has a working, unreleased embedded graph-database subset and
+substantial verification machinery. It does not yet deliver the database
+described by the six bets, and it is not at Genesis/G1. Its complete repository
+gate is currently red.**
+
+The distinction matters in both directions. Durable writes, reopen, historical
+reads, bounded GQL, pinned read views, owned preparation, staged overlays, and
+result-evidence operations execute through real code. They are not empty APIs.
+Conversely, these operations do not establish full GQL, strict serializability,
+larger-than-memory execution, a general replay contract, capability isolation,
+or any server/CLI posture. Most of the differentiating subsystems still have
+contracts and implementation owners rather than integrated implementations.
+
+The immediate red is narrower than September 2's compile failure:
+`scripts/g0_identity_e2e.sh` has stale source/reference/completion expectations
+and a stale negative fixture. Its own terminal tally is **89 passed, 5 failed,
+0 unrun**. The underlying checker accepts the canonical catalog and rejects the
+forged binding; the evidence does **not** establish an actual binding bypass.
+The repair must retain independent pins and targeted negative coverage.
+
+### Evidence and reproducibility
+
+The retained audit directory is
+`/data/tmp/fgdb-reality-20260907-5al0t4bi`. It contains the metadata and tracker
+snapshots, runnable-example outputs and exit codes, independent external
+consumer, failure diagnostics, and the committed-tree proof bundle.
+
+| Check | Observed result | What it establishes |
+|---|---|---|
+| Locked Cargo metadata | Exit 0; 22 workspace packages | 21 `fgdb-*` packages plus registry tooling resolve; no `fgdb` or `fgdbd` product binary target |
+| Eight public examples | All exit 0; start/end HEAD identical | The specific embedded operations below run at this commit |
+| Unsupported-language consumer | Exit 0 after asserting eight parser refusals | Property projection, aggregation, typed parameters, `ORDER BY`, mutation, branch creation, subscription, and analytics examples exceed the current grammar |
+| Cursor-policy consumer | Exit 101, E0432 | An external application cannot import `fgdb_gql::GqlEvidenceCursorLimits` |
+| Full local proof | Exit 1; stable tree; 9/9 core and 39/40 registered gates passed; zero unrun | Whole-chain verdict for the unchanged committed baseline |
+| Proof-bundle verification | Exit 0; verified manifest remains red | Bundle integrity and repository binding; successful verification of a red bundle does not make its gate green |
+
+The proof command was:
+
+```bash
+RCH_CARGO_WRAPPER_BYPASS=1 CARGO_BUILD_JOBS=8 RUST_LOG=error \
+  bash scripts/local_proof.sh \
+  --output /data/tmp/fgdb-reality-20260907-5al0t4bi/local-proof
+```
+
+It ran locally with `.beads/` present. Read `local-proof/manifest.txt`,
+`check-exit.txt`, and the separate stdout/stderr transcripts. Rust formatting,
+all-target compilation, Clippy, workspace tests, and UBS passed. The identity
+script's failures are recorded in
+`/data/tmp/fgdb-check-gates.H6vZQ1/registered-11.log`; copies of its baseline
+and forged-binding JSONL are retained in the audit directory.
+
+The eight examples are `open_a_database`, `open_a_memory_database`,
+`gql_time_travel`, `gql_prepared_read_session`, `gql_owned_prepared`,
+`gql_txn_overlay_result_evidence`, `gql_evidence_artifact`, and
+`gql_evidence_cursor`. They demonstrate durable write/compact/drop/reopen,
+memory posture, retained-sequence queries, pinned preparation, reusable owned
+queries, stale-overlay evidence rejection, artifact audit, and cursor
+checkpoint/resume after the live database advances. Their elapsed times include
+build/runtime overhead and are **not benchmark results**.
+
+The inspection included all of AGENTS and README, the current master plan's
+architecture and normative contracts, implementation/status/transaction/evidence
+documents, source-to-public-API tracing, relevant oracle and gate code, registry
+censuses, and the complete tracker snapshot. This is a comprehensive capability
+audit, not a recertification of every historical closed bead or an execution of
+the future conformance and performance campaigns.
+
+### Vision checklist and existing ownership
+
+“Partial” means a real subset exists, not that the full row's acceptance
+criteria have passed. Planned registry rows and reference-only models do not
+count as shipped product implementations.
+
+| # | Testable promise and source | Current reality | Existing bridge owners |
+|---|---|---|---|
+| 1 | Embedded open, authorized sessions, typed preparation, transactions, streaming rows (§13) | **Partial.** Async generic-VFS Database, caller-supplied runtime/context/keys, pinned read views and parameterless owned queries work. Full sessions, typed row/parameter interfaces, UDF/procedure capability surface and result lifecycle remain open. | `fgdb-w10-embedded-54r`, `fgdb-w10-embedded-54r.1`, `fgdb-w10-result-machines-eh7` |
+| 2 | Multi-database server with FGP, HTTP/2, gRPC, WebSocket and Bolt subset (§13) | **Not implemented as a product.** No `fgdbd` target. Foundation networking is not a wired database server. | `fgdb-epic-w10-mhq` and its protocol/session children |
+| 3 | Human and versioned NDJSON CLI, robot schema, installable artifacts (§13) | **Not implemented as a product.** No `fgdb` CLI target, installation/release path or Python distribution proved. | `fgdb-huu9`, `fgdb-epic-w10-mhq.1`, Python/packaging children |
+| 4 | GQL/openCypher and FQL extensions (§8.1–8.3) | **Partial.** Fixed-shape node/one-hop/two-hop reads, labels, integer predicates, variable comparisons, SKIP/LIMIT, one variable's IDs. Eight target forms are parser-refused. | `fgdb-w5-parsers-nje`, `fgdb-w5-binder-bt5`, `fgdb-g0-language-contracts-54g` |
+| 5 | One Chronicle mechanism for durability, retained history, branches, merge, replication and subscriptions (B1, §5) | **Partial.** Real capsule/marker durability, recovery, FCW, checkpoint-selected reconstruction and historical reads. Production serves graph 1, branch 1, partition 0. No public branch lifecycle, retention/GC protocol or replicated order. | `fgdb-w2-g1-engine-core-yosi`, `fgdb-w2-order-raft-0a90`, `fgdb-w2-retention-checkpoints-cn1l` and branch owners |
+| 6 | Strata tiers, compressed CSR scans and larger-than-memory storage (B2, §6) | **Partial; current memory path requires replacement.** Tier-D blocks and compaction work. Full decoded snapshots/retained encoded bytes and query-wide edge vectors remain resident. No integrated extent buffer/spill or Tier-R/A path establishes the promise. | `fgdb-w3-tier-d-ctj`, `fgdb-w3-tier-r-0tj`, `fgdb-w3-buffer-g2v`, `fgdb-w3-properties-gou` |
+| 7 | GLA → factorized/FreeJoin/WCO execution, optimizer, vectorization and morsels (B3, §8) | **Not integrated.** The bounded parser produces BoundPlan; a bespoke executor rebuilds adjacency. It is a migration target, not Loom. | `fgdb-w5-gla-algebra-lj2`, `fgdb-w5-operator-matrix-j8x`, `fgdb-5vp9`, `fgdb-rz12`, `fgdb-boundplan-gla-lowering-seam-r2kd` |
+| 8 | Recursive incremental queries, views and subscriptions over ordered deltas (B4, §9) | **Not integrated.** Delta vocabulary/reference semantics exist; no production Ripple circuit and durable baseline/delta delivery loop. | `fgdb-epic-w6-65w`, `fgdb-w6-zset-circuits-kjv`, `fgdb-w6-delta-consumption-iyc` |
+| 9 | Strict serializability, complete witnesses and deterministic merge ladder (§7) | **Partial.** FCW and staged transaction read/expansion conflict checks work. No full dependency graph, complete negative/gap/path witnesses, real-time certification or merge ladder. | `fgdb-w4-g1-txn-core-qpmg` and its witness/SSI/lifecycle/merge children |
+| 10 | Byte-reproducible STRICT queries and executable replay closure (B5, §8.6) | **Partial.** Input/plan/result hashes, artifact admission and replay of the bounded slice work. Full operator witnesses, registry-rooted ReplayManifest resolution, authority/trust/lease weakening and executable closure remain open. | `fgdb-w5-replay-r2k`, `fgdb-w10-replay-public-bundles-aqcv`, replay/registry owners |
+| 11 | Classified adaptive decisions, decision cards, conservative fallback and anti-thrash (§1, §8) | **Partial foundations.** Calibration/resource primitives are not evidence that all future optimizer/tiering/ANN decisions emit and replay complete cards. | Calibration, operator, tiering and `fgdb-epic-perf-4xe` owners |
+| 12 | Zero-copy Prism to the fnx algorithm universe (§11) | **Not integrated.** Foundation availability is not a production SnapshotGraphView bridge. | `fgdb-epic-w8-syz`, projection, cursor and bounded-materialization children |
+| 13 | Beacon vector + text + graph retrieval, indexes and hybrid operator (§10) | **Not integrated.** Codecs/sketches are foundations; they do not implement the ANN/text/security/tail-consistency product. | `fgdb-epic-w7-xmk0` and hybrid/index/build children |
+| 14 | Warden authorization before any observation, capability-scoped isolation (§12) | **Not integrated.** Caller-supplied keys and crypto are real; mandatory secure graph views, masking, session authority and full noninterference are absent from the product path. | `fgdb-w4-secure-view-v87`, `fgdb-w9-enforcement-j0fg`, `fgdb-epic-w9-lcy` |
+| 15 | Agent branches, provenance and isolated GraphRAG memory (B6) | **Not delivered.** Depends on real branches, authorization, retrieval and public surfaces together. | W2 branch, W7 Beacon, W9 Warden and W10 surface owners |
+| 16 | Replication, backup/restore, repair and safe upgrades (§14) | **Partial storage primitives; product protocols missing.** Encoding/recovery alone is not Aegis, distributed consensus, backup restoration or operational cutover. | `fgdb-epic-w11-5r8`, `fgdb-w11-backup-7aq`, restore/transition owners |
+| 17 | Runtime exposed as a secured temporal property graph | **Not integrated.** Audit/gate logs and reference metadata are not the queryable operational system graph. | `fgdb-epic-obs-38b`, `fgdb-obs-system-graph-tki` |
+| 18 | Closed direct dependency universe, safe ordinary crates, explicit unsafe boundaries (§1, §18) | **Working for the current workspace.** Dedicated unsafe boundary crates and live policy/ledger checks exist. Foundation transitive dependencies do not imply unauthorized direct engine dependencies. This does not prove future crates. | Existing dependency/topology/unsafe-ledger gates and W1 owners |
+| 19 | Lab, independent reference, fault campaigns, formal anchors and enforced invariants (§15) | **Substantial but partial.** Real FaultVfs, differential histories, crashpacks and negative controls; eight live clauses, twenty stub core clauses; one checked formal lane. Future full-system semantic/concurrency/security campaigns cannot have run on absent subsystems. | `fgdb-sim`, `fgdb-reference`, proof-lane owners, `fgdb-gate-genesis-lce`, G1–G4 |
+| 20 | Published, durable, scale-qualified performance meeting §17 | **Unproven.** A real benchmark harness exists, but its five shapes declare empirical gates inactive. No pinned result set establishes the advertised rates, latency, above-RAM behavior or competitor comparisons. | `fgdb-perf-bench-core-0t0`, `fgdb-perf-bench-scale-kcc`, `fgdb-perf-bench-history-sfe`, `fgdb-epic-perf-4xe` |
+
+The table groups cross-cutting promises for review; it is not a percentage
+complete calculation. The topology registry has 70 crate rows: 21 active,
+48 planned and one reserved. Active counts include support and verification
+crates, not 21 completed production subsystems. Live GitHub API reads returned
+empty release and tag lists, agreeing with the empty local tag list; see
+`github-releases.json` and `github-tags.json` in the evidence directory and
+the [repository releases](https://github.com/Dicklesworthstone/frankengraphdb/releases).
+
+### Three architectural facts that should govern the next implementation work
+
+**The current query shape cannot be the growth architecture.**
+[`parser.rs`](../crates/fgdb-gql/src/parser.rs) has explicit
+position/comparator slots and three ID-return projections.
+[`gql_exec.rs`](../crates/fgdb/src/gql_exec.rs) consumes the full admitted
+edge table and builds per-relation adjacency maps. The parse/bind boundary is
+real, but physical execution is not the registered GLA family. Adding each new
+language feature to this representation increases the migration obligation.
+Use the shipped subset and its independent oracles as GLA's first customers.
+The same cutover must reach live, historical, pinned, prepared, staged-overlay
+and evidence-replay APIs. Preserve current bounded semantics explicitly;
+deduplicated IDs cannot silently become the universal multiset semantics of GQL.
+
+**A row budget is not a memory bound.**
+[`write_txn_parts/owned_prepared.rs`](../crates/fgdb/src/write_txn_parts/owned_prepared.rs)
+materializes records to count them, checks SnapshotRecords, executes through
+another materialization, then checks ResultRows. It can refuse a result after
+doing the expensive work. Database reopen also retains decoded blocks and
+sealed bytes. Neither final-row caps nor paging an artifact establishes
+larger-than-memory execution. The existing buffer/ScratchStore owner must
+replace those actual paths, with admission before allocation, eviction/refault
+under live snapshots, cancellation drain and independent above-cap results.
+A disconnected buffer implementation would leave this gap untouched.
+
+**The evidence cursor is useful, but its boundary must stay precise.**
+Stateless audit-and-page calls replay per call. The owned GqlEvidenceCursor
+audits at open/resume, then traverses a materialized artifact and tracks
+Open/Exhausted/Closed state. Neither is a streaming query executor, durable
+server result lease, authentication capability, or cross-resume resource
+quota. The consumer build found a separate public API defect: the private
+`evidence_cursor` module defines finite consumption limits, but
+[`fgdb-gql/src/lib.rs`](../crates/fgdb-gql/src/lib.rs) does not re-export
+their type. Internal tests can pass while applications cannot construct it.
+That defect now has a narrow child bead and an external-crate acceptance test.
+
+### Verification claims: what is live and what is still only declared
+
+| Registry | Current census | Interpretation |
+|---|---|---|
+| Invariants | 20 IDs, 28 clauses: 8 live, 20 stub | All broad `.core` clauses remain stub; eight narrow clauses span seven IDs |
+| Checker index | 120 rows: 74 live, 46 stub | Live rows share 40 distinct artifacts; existence is not whole-vision proof |
+| Proof lanes | 10: 1 checked, 9 declared | The checked Lean lane proves finite/acyclic chain consequences from explicit ordering/generation hypotheses |
+| Logical command contracts | 182: 1 live, 181 reserved | The live command is the local autocommit write slice |
+| Logical kinds | 607: 23 active, 584 reserved | Reserved vocabulary is design coverage, not an implemented format reader |
+| Wire types | 604: 32 active, 572 reserved | The same distinction applies to protocol schemas |
+| SLO registry | 4 configuration-model rows | Configuration contracts are not empirical performance results |
+
+The live invariant clauses are pinned snapshot visibility (04),
+first-committer-wins (05), commit-sequence contiguity (08), four-layer identity
+recomputation (09), scalar comparison and hash coherence (two clauses under 12),
+generated-history differential with planted-divergence detection (18), and
+replay-grade monotonicity (19). Their stated exclusions are load-bearing:
+FCW does not prove the serializability graph; lab replay grading does not prove
+the complete public replay closure; a reference differential cannot expose a
+defect shared by both implementations.
+
+[`VersionChain.lean`](../formal/lean/VersionChain.lean) derives termination,
+acyclicity and a length bound from strictly decreasing older links, while
+same-generation links are an explicit hypothesis. It does not establish that
+every physical decoder/storage mutation creates such links. Therefore the
+checked lane and the still-stub FG-INV-03 core row are consistent.
+
+The §17 benchmark harness includes durable operations, but its fixture is
+small and its empirical activation is false. Its footer can report harness
+completion while individual shapes report ENGINE_LIMIT. The old 16-KiB
+RootManifest ceiling is already repaired; do not resurrect that closed defect
+from a stale benchmark comment. The missing evidence is the complete admitted,
+scale-qualified benchmark matrix, not a debug timing from this audit.
+
+### Tracker coverage and the five reality-check questions
+
+The initial database census was **907 beads: 615 closed, 275 open,
+8 in progress, 9 blocked**, or 292 unfinished. BV reported five actionable
+items and 287 non-actionable unfinished items, with no dependency cycles.
+`br ready` was empty: the actionable frontier was already claimed. “Blocked”
+status and graph-level “not actionable” are different counts.
+
+The visible frontier is concentrated on Appendix A catalog completion,
+supporting gate/provenance work and foundational evidence. Completing a high
+number of schema rows or closing another historical integration record does
+not by itself deliver a new usable database capability.
+
+1. **What works?** The concrete embedded operations and verification machinery
+   in the evidence table, at the pinned commit. The September 2 “nothing runs”
+   conclusion is superseded.
+2. **What is missing?** The full product and its differentiators, enumerated
+   row by row above. Missing implementations are mostly absent subsystems,
+   not TODO macros hiding in a supposedly finished engine.
+3. **What blocks progress?** An immediately red identity gate; the G0
+   catalog/contract dependency frontier; the BoundPlan-to-GLA transition; the
+   resident-snapshot/materialization model; and composition of transactions,
+   authorization, durability and result ownership under their full invariants.
+4. **Would all unfinished beads close the vision gap?** At the feature level,
+   coverage is broad and the intended gates preserve the full ambition. If
+   their complete acceptance criteria and dependent gates were actually met,
+   they are intended to deliver the vision. Counts or status changes alone
+   cannot establish that. Cross-surface cutovers, external consumers, exact
+   memory behavior and complete proof bindings must remain in the owners'
+   acceptance criteria; this audit refined those concrete points.
+5. **What had no precise owner?** No major vision row lacked a workstream.
+   Two newly reproduced defects lacked a matching bounded repair task:
+   the cursor consumption-policy export and the current five identity-E2E
+   failures. Both now have child bug records. Broad “add Loom/server/security”
+   epics would duplicate the existing plan.
+
+### Dependency-ordered bridge to the full vision
+
+This is integration sequencing, not permission to reduce G1 or introduce an
+interim transaction model. Existing security, format and invariant dependencies
+remain in force; post-1.0 sharding stays behind its separate proof gates.
+
+1. **Restore an attributable complete gate.** Repair the five identity E2E
+   assertions under `fgdb-a01-reference-roots-2k0q.2`; distinguish approved-row
+   mismatch from unapproved-row absence and keep both negative witnesses.
+   Obtain a stable exact-tree local proof. Preserve `fgdb-l9r3`'s separate
+   landing-refusal scope: the installed pre-commit hook holds an active lease,
+   but does not require a green candidate-tree proof. The proof verifier must
+   reject absent/red/void/tampered/wrong-tree/stale-script evidence without a
+   circular requirement for a final commit that does not yet exist.
+2. **Finish the current G0 contract frontier.** Complete and independently
+   review the owned a01/a06 catalog slices, generated projection and semantic
+   bindings, identity/command/language contracts, and documentation generation.
+   Promote only the exact clauses with live positive and negative witnesses.
+   Acceptance is the normative G0 closure, not a larger catalog count or a
+   permissive dependency edit. Owners include
+   `fgdb-a01-reference-roots-2k0q`, `fgdb-a06-w12-core-zdzx`,
+   `fgdb-g0-identity-registries-hrx`, `fgdb-g0-doc-sync-usq`.
+3. **Compose the actual Genesis/G1 path.** Root bootstrap, D1 ownership,
+   quorum-one ordering, logical-command recovery, snapshot leases,
+   authorization before observation, complete SSI witnesses and result
+   ownership must be exercised through the public embedded path. Reopen,
+   cancellation and every durability/visibility cut must preserve the same
+   committed effects and typed terminal outcome. Owners are the existing W2
+   and W4 G1 clusters and `fgdb-gate-genesis-lce` /
+   `fgdb-gate-g1-6vc`; the current simple open/write/reopen example does not
+   replace this gate.
+4. **Make the shipped language slice the first GLA workload and make storage
+   genuinely bounded.** Follow `fgdb-5vp9` into
+   `fgdb-boundplan-gla-lowering-seam-r2kd`, with
+   `fgdb-w3-buffer-g2v` and Strata cursor/tier owners supplying real access
+   paths. Keep all existing independent semantic oracles; add cross-adapter
+   plan/certificate tests, multiplicity cases, counted physical work, capped
+   resident memory, spill, refault and cancellation. Then expand parser/binder,
+   typed parameters, projection/aggregation/path semantics and full conformance
+   through the canonical algebra. Do not establish a second executor.
+5. **Build the remaining bets on the same authoritative state.** Ripple must
+   prove integrate(delta) equals batch and correct baseline/ACK/gap behavior;
+   Beacon must prove index generation/tail closure, exact fallback and
+   authorization before candidate observation; Prism must prove direct fnx
+   parity and bounded projections; branches/merge and Aegis must prove shared
+   history, fencing, recovery and retention. Reuse the W6–W11 owners, with
+   G2/G3 and their complete failure/cancellation campaigns.
+6. **Deliver all public postures and operational evidence.** Finish the
+   library session/result/UDF contract, native/server protocol adapters,
+   NDJSON CLI, Python/package artifacts, backup/restore/upgrade and the secured
+   temporal system graph. Execute installation and public-consumer journeys
+   on supported platforms. Bind §17 results to admitted durable datasets,
+   machine/toolchain/plan/profile manifests and named gates; activate a
+   performance claim only after its own measured pass. This is the G4/release
+   obligation, with no automatic GitHub Actions requirement under the current
+   owner ruling.
+
+The first product-bearing milestone should prove the composed embedded path
+under these full contracts. New protocol adapters or additional evidence
+wrappers around the present materializing kernel do not resolve its central
+execution and memory gaps.
+
+### In-place refinement and recorded follow-up
+
+Three ambition passes were applied to the same bridge: preserve the full
+three-posture/six-bet target; make the current embedded subset seed the shared
+algebra/storage architecture; and require the mathematical and operational
+contracts together (multiplicity, delta/batch equivalence, complete dependency
+histories, pre-observation authorization, conservative resource admission and
+replay closure).
+
+Five refinement passes checked (1) non-duplication and ownership,
+(2) dependency/gate preservation, (3) public-consumer and memory-bound tests,
+(4) negative controls and actual full-gate failures, and (5) scope, historical
+claim corrections and the final dependency graph. The last pass found no
+additional unowned actionable gap within this audit's capability matrix.
+That is a bounded review result, not a claim that the project contains no
+other defects.
+
+Changes were made through `br`, preserving existing descriptions, statuses
+and dependencies:
+
+- Created P1 `fgdb-a01-reference-roots-2k0q.2`: exact diagnosis, independent
+  pin derivation, separate negative fixtures and complete-gate acceptance.
+- Created P2 `fgdb-w10-embedded-54r.1.1`: public cursor-policy exports, an
+  external-crate test, zero/exact/one-over limits, refusal state preservation
+  and explicit checkpoint/resume semantics.
+- Refined `fgdb-boundplan-gla-lowering-seam-r2kd` and
+  `fgdb-w3-buffer-g2v` with current integration paths and measurable
+  cross-adapter/admission/above-cap acceptance.
+- Updated `fgdb-g0-doc-sync-usq`, `fgdb-w10-embedded-54r.1` and
+  `fgdb-l9r3` with measured scope corrections and remaining obligations.
+
+The final live database census is **909 beads: 615 closed, 277 open,
+8 in progress, 9 blocked**. BV reports 294 unfinished, six actionable and
+288 non-actionable, with no dependency cycles. The new P1 identity-gate repair
+is the sole unclaimed item returned by `br ready`.
+
+The exact-ID export named the seven records above and exited **65**: eight
+dirty database records cannot fit seven declared IDs. The extra pending record,
+`fgdb-apco`, already existed before this audit. No export ran;
+`.beads/issues.jsonl` remained byte-identical (SHA-256
+`b7fd29ca914a4211d6504fb3a3c9c18149e7247aeebd053f66572e034b774767`).
+The audit's records remain live in the shared database. Their eventual export
+requires attribution of that pre-existing record; it was not silently included.
+See `beads-export-result.json` and its stdout/stderr in the audit directory.
+No bead was closed.
+
+The summary documents still need their owning generation repair. README
+currently understates prepared/read-view support and carries normative
+shorthand superseded by the master plan: Trunc128 object identity, only one
+mutable root, abbreviated replay inputs, retention/default tie-break details,
+and sharding activation language. The current plan's keyed namespaced identity,
+logical commands/checkpoints, full replay closure and post-1.0 sharding gates
+are the measuring stick. Historical claims below are retained only with their
+original dates.
+
+The baseline proof ran from **2026-09-08T01:09:27Z to 02:06:29Z** and binds
+tree `7ed1d1945437e23e612547bd4d5a8ebfa4b76967` and check-script blob
+`d3a08b1f616a6bac49bf766d3ed8bae71fa25fe9`. It precedes this documentation
+revision. Validation of the uncommitted report is recorded separately in
+`report-check.stdout.log`, `report-check.stderr.log`, and
+`report-check.exit` in the audit directory; it is not a committed-tree proof
+for this report. An audit recording a red baseline is not a green landing or
+permission to close its remaining implementation/gate obligations.
 
 ---
-## Current delta — 2026-09-02
+
+## Historical delta — 2026-09-02 (superseded)
 
 ### Product verdict
 
