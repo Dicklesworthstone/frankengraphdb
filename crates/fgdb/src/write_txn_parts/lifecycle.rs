@@ -39,6 +39,8 @@ impl WriteTxn {
     }
 
     /// Stage a same-relation batch against this transaction's pinned snapshot.
+    /// Once `write_atomic` has explicitly staged several relation groups,
+    /// subsequent writes are admitted under that same independence contract.
     pub fn write<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -53,7 +55,11 @@ impl WriteTxn {
                 live,
             });
         }
-
+        if let Some(first) = self.staged.first()
+            && self.staged.iter().any(|staged| staged.relation != first.relation)
+        {
+            return self.write_atomic(database, vec![batch]);
+        }
         if let Some(expected) = self.staged.first().map(|staged| staged.relation)
             && batch.relation != expected
         {
@@ -63,13 +69,8 @@ impl WriteTxn {
             });
         }
         if batch.rows.iter().any(|row| matches!(row, PendingRow::Edge { ensure: true, .. })) {
-            // Ensure-by-triple can succeed through an existing EId different
-            // from the requested EId and emit no delta at all. Observe the
-            // actual candidate table before preparation, retaining both its
-            // existing identities and insertion witness. Target/endpoints alone
-            // cannot detect deletion of an alias whose ID was never requested.
-            // The current scan is conservative; a keyed predicate witness can
-            // narrow it when the real constraint/index access path is available.
+            // Keep actual ensure aliases and insertion witnesses even if
+            // subsequent preparation fails or normalizes the ensure to no-op.
             drop(self.edges(database)?);
         }
         self.staged.push(batch);
@@ -78,8 +79,51 @@ impl WriteTxn {
         let prepared = match database.prepare_write(combined) {
             Ok(prepared) => prepared,
             Err(source) => {
-                self.staged.pop();
+                let _ = self.staged.pop();
                 return Err(WriteTxnError::Write(source));
+            }
+        };
+        debug_assert_eq!(prepared.basis(), self.basis);
+        self.prepared = Some(prepared);
+        Ok(())
+    }
+
+    /// Atomically stage independent relation groups, including prior batches.
+    ///
+    /// Each relation retains its ordered prefix. Other relations must be
+    /// independent at the pinned basis, exactly as `prepare_atomic_writes`
+    /// requires. This does not permit one relation to consume another's new
+    /// vertex. A refusal preserves the old staged effects and prepared write;
+    /// any reads already made still participate in conflict validation.
+    /// No capsule or marker is published until the ordinary `commit` method.
+    pub fn write_atomic<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        batches: Vec<WriteBatch>,
+    ) -> Result<(), WriteTxnError> {
+        self.ensure_database(database)?;
+        let live = database.frontier()?;
+        if live != self.basis {
+            return Err(WriteTxnError::SnapshotAdvanced {
+                pinned: self.basis,
+                live,
+            });
+        }
+        if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
+            return Err(WriteError::EmptyBatch.into());
+        }
+        if batches.iter().flat_map(|batch| &batch.rows)
+            .any(|row| matches!(row, PendingRow::Edge { ensure: true, .. }))
+        {
+            drop(self.edges(database)?);
+        }
+        let previous_len = self.staged.len();
+        self.staged.extend(batches);
+        let prepared = match database.prepare_atomic_writes(self.staged.clone()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.staged.truncate(previous_len);
+                return Err(error);
             }
         };
         debug_assert_eq!(prepared.basis(), self.basis);
