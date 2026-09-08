@@ -1,5 +1,6 @@
 impl WriteTxn {
-    /// Commit the prepared batch exactly as derived, then release the pin.
+    /// Validate the pinned read/mutation footprints, commit the prepared batch
+    /// exactly as derived, then release the pin.
     pub async fn commit<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -8,9 +9,9 @@ impl WriteTxn {
         self.commit_with_crash(database, cx, None).await
     }
 
-    /// Commit through the production crash-point path, then release the pin
-    /// after an admitted owner's commit succeeds or is refused. A wrong-owner
-    /// call leaves the transaction live and unchanged for its actual owner.
+    /// Commit through the production crash-point path. Wrong-owner calls leave
+    /// the transaction unchanged. An admitted owner's terminal attempt releases
+    /// the pin whether validation/publication succeeds or fails.
     pub async fn commit_with_crash<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -22,19 +23,19 @@ impl WriteTxn {
             self.release_pin();
             return Err(WriteTxnError::NoPreparedWrite);
         }
-        let conflict = match self.read_conflict(database) {
+        let conflict = match self.transaction_conflict(database) {
             Ok(conflict) => conflict,
             Err(source) => {
                 self.release_pin();
                 return Err(WriteTxnError::Read(source));
             }
         };
-        if let Some((element, committed_at)) = conflict {
+        if let Some((law, element, committed_at)) = conflict {
             self.release_pin();
             return Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                law: "FG-LAW-FCW-READ-01",
+                law,
                 detail: format!(
-                    "observed element or scan phantom {element:?} was written at {committed_at:?} after pinned basis {:?}",
+                    "transaction dependency {element:?} changed at {committed_at:?} after pinned basis {:?}",
                     self.basis
                 ),
             }));
@@ -90,24 +91,69 @@ impl WriteTxn {
         }
     }
 
-    fn read_conflict<V: Vfs + Clone>(
+    /// Preparation observes more than its net writes: conditional no-ops and
+    /// ensure-existing operations still depend on their targets, and edge
+    /// creation depends on its endpoints. Keep those dependencies even when
+    /// canonicalization removes the corresponding mutation from the template.
+    fn mutation_footprint(&self) -> std::collections::BTreeSet<ElementId> {
+        let mut footprint = std::collections::BTreeSet::new();
+        for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
+            match pending {
+                PendingRow::Vertex { vid, .. }
+                | PendingRow::DeleteVertex { vid, .. }
+                | PendingRow::SetLabel { vid, .. }
+                | PendingRow::SetProperty { vid, .. } => {
+                    footprint.insert(ElementId::Vertex(*vid));
+                }
+                PendingRow::Edge { eid, src, dst, .. } => {
+                    footprint.insert(ElementId::Edge(*eid));
+                    footprint.insert(ElementId::Vertex(*src));
+                    footprint.insert(ElementId::Vertex(*dst));
+                }
+                PendingRow::DeleteEdge { eid, .. }
+                | PendingRow::SetEdgeProperty { eid, .. } => {
+                    footprint.insert(ElementId::Edge(*eid));
+                }
+                PendingRow::CompareAndSet { elem, .. } => {
+                    footprint.insert(*elem);
+                }
+            }
+        }
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                for row in &coordinate.rows {
+                    // Include engine-derived cascade targets, not only the
+                    // identifiers the caller happened to name explicitly.
+                    crate::touched_elements(row, &mut footprint);
+                }
+            }
+        }
+        footprint
+    }
+
+    fn transaction_conflict<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
-    ) -> Result<Option<(ElementId, CommitSeq)>, ReadError> {
+    ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, ReadError> {
         let read_set = self.read_set.borrow();
         let match_expansions = self.match_expansions.borrow();
+        let mutation_footprint = self.mutation_footprint();
         let scanned_vertices = self.scanned_vertices.get();
         let scanned_edges = self.scanned_edges.get();
         if read_set.is_empty()
             && match_expansions.is_empty()
+            && mutation_footprint.is_empty()
             && !scanned_vertices
             && !scanned_edges
         {
             return Ok(None);
         }
-        // delta_since checks that the complete suffix is retained. A missing
-        // conflict-history prefix is an error, never evidence of no conflict.
+        // One complete suffix serves both read and mutation validation. Do not
+        // trust the coordinator's resettable in-memory FCW map for an old basis.
+        // delta_since refuses a retired prefix instead of silently validating
+        // against only the surviving tail. Validation precedes prepared.take().
         for batch in database.delta_since(self.basis)? {
+            let seq = batch.commit_seq();
             let mut touched = std::collections::BTreeSet::new();
             let mut endpoints = std::collections::BTreeSet::new();
             for coordinate in batch.coordinate_entries() {
@@ -116,12 +162,12 @@ impl WriteTxn {
                         fgdb_delta_types::DeltaRow::CreateVertex { vid, .. }
                             if scanned_vertices =>
                         {
-                            return Ok(Some((ElementId::Vertex(*vid), batch.commit_seq())));
+                            return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
                         }
                         fgdb_delta_types::DeltaRow::CreateEdge {
                             eid, src, relation, ..
                         } if scanned_edges || match_expansions.contains(&(*src, *relation)) => {
-                            return Ok(Some((ElementId::Edge(*eid), batch.commit_seq())));
+                            return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Edge(*eid), seq)));
                         }
                         _ => {}
                     }
@@ -130,16 +176,18 @@ impl WriteTxn {
                 }
             }
             if let Some(element) = endpoints
-                .into_iter()
-                .find(|element| read_set.contains(element))
+                .iter()
+                .chain(touched.iter())
+                .find(|element| read_set.contains(*element))
             {
-                return Ok(Some((element, batch.commit_seq())));
+                return Ok(Some(("FG-LAW-FCW-READ-01", *element, seq)));
             }
-            if let Some(element) = touched
-                .into_iter()
-                .find(|element| read_set.contains(element))
+            if let Some(element) = endpoints
+                .iter()
+                .chain(touched.iter())
+                .find(|element| mutation_footprint.contains(*element))
             {
-                return Ok(Some((element, batch.commit_seq())));
+                return Ok(Some(("FG-LAW-FCW-01", *element, seq)));
             }
         }
         Ok(None)
