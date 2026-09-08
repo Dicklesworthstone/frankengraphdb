@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod algebra;
 mod evidence_artifact;
 mod evidence_cursor;
 mod evidence_limits;
