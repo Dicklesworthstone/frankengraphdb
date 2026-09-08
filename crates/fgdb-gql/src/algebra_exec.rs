@@ -20,7 +20,11 @@ fn build_index(
     let mut index = Index::new();
     for operator in operators {
         if let GlaOperator::ScanEdges { relation, direction }
-        | GlaOperator::Expand { relation, direction, .. } = operator
+        | GlaOperator::Expand {
+            relation,
+            direction,
+            ..
+        } = operator
         {
             index.entry((*relation, *direction)).or_default();
         }
@@ -99,10 +103,9 @@ impl<F> Execution<F> {
                 if let (Some(left), Some(right)) = (
                     bindings.get(left.ordinal() as usize),
                     bindings.get(right.ordinal() as usize),
-                ) {
-                    if (left == right) == *equal {
-                        self.visit(operators, ordinal + 1, bindings, index)?;
-                    }
+                ) && (left == right) == *equal
+                {
+                    self.visit(operators, ordinal + 1, bindings, index)?;
                 }
             }
             GlaOperator::Expand {
@@ -120,7 +123,7 @@ impl<F> Execution<F> {
                     for destination in neighbors {
                         bindings.push(*destination);
                         let result = self.visit(operators, ordinal + 1, bindings, index);
-                        bindings.pop();
+                        let _ = bindings.pop();
                         result?;
                     }
                 }
@@ -259,7 +262,12 @@ mod tests {
             if Some(relation) != plan.relation {
                 continue;
             }
-            for (a, b) in orient(source, destination, plan.direction, plan.hop2_relation.is_some()) {
+            for (a, b) in orient(
+                source,
+                destination,
+                plan.direction,
+                plan.hop2_relation.is_some(),
+            ) {
                 if plan.neq.is_some() && a == b || plan.eq.is_some() && a != b {
                     continue;
                 }
@@ -279,7 +287,11 @@ mod tests {
                         }
                     }
                 } else {
-                    bag.push(if plan.projection == ReturnProjection::Source { a } else { b });
+                    bag.push(if plan.projection == ReturnProjection::Source {
+                        a
+                    } else {
+                        b
+                    });
                 }
             }
         }
@@ -372,7 +384,11 @@ mod tests {
                 (VId(1), RelationId(1), VId(3)),
             ],
             |vid, _| {
-                if vid == VId(3) { Err("unreadable vertex") } else { Ok(true) }
+                if vid == VId(3) {
+                    Err("unreadable vertex")
+                } else {
+                    Ok(true)
+                }
             },
         );
         assert_eq!(result, Err("unreadable vertex"));
@@ -389,13 +405,17 @@ mod tests {
             (VId(1), RelationId(1), VId(2)),
         ];
         assert_eq!(
-            GlaPlan::lower(&plan).execute([], edges, |_, _| Ok::<_, ()>(true)).unwrap(),
+            GlaPlan::lower(&plan)
+                .execute([], edges, |_, _| Ok::<_, ()>(true))
+                .unwrap(),
             vec![VId(3)]
         );
         plan.skip = Some(u64::MAX);
-        assert!(GlaPlan::lower(&plan)
-            .execute([], edges, |_, _| Ok::<_, ()>(true))
-            .unwrap()
-            .is_empty());
+        assert!(
+            GlaPlan::lower(&plan)
+                .execute([], edges, |_, _| Ok::<_, ()>(true))
+                .unwrap()
+                .is_empty()
+        );
     }
 }

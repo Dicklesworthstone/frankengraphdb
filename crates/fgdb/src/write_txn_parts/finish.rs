@@ -71,9 +71,9 @@ impl WriteTxn {
     }
 
     fn overlay_property(
-        props: &mut Vec<(fgdb_delta_types::PropertyKeyId, fgdb_types::CanonicalScalar)>,
+        props: &mut Vec<(fgdb_delta_types::PropertyKeyId, CanonicalScalar)>,
         key: fgdb_delta_types::PropertyKeyId,
-        value: Option<&fgdb_types::CanonicalScalar>,
+        value: Option<&CanonicalScalar>,
     ) {
         match props.binary_search_by_key(&key, |(property, _)| *property) {
             Ok(at) => match value {
