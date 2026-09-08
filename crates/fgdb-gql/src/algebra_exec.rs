@@ -1,52 +1,171 @@
 //! Scan-backed execution of the immutable bounded GLA pipeline.
 //!
-//! There is no BoundPlan match tree here. Sources admit one snapshot/overlay;
-//! this module indexes requested relation/orientation pairs once, streams
-//! binding rows through Select/Expand, and fuses the explicit terminal
-//! Project/Distinct/OrderBy operators. No Cartesian intermediate is retained.
+//! Requested relation/orientation pairs are indexed once. Binding rows stream
+//! through Select/Expand; the terminal projection/order/distinct is fused.
+//! The control seam runs before each admitted row, operator visit and scratch
+//! insertion. It can stop a computation without releasing partial result rows.
 
 use crate::algebra::{GlaDirection, GlaOperator, GlaPlan, VertexPredicate};
 use fgdb_delta_types::RelationId;
 use fgdb_types::VId;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Deterministic evaluator events, also usable as cancellation checkpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlaExecutionEvent {
+    Work,
+    ScratchEntry,
+}
+
+/// Limits on the evaluator, after the caller admits its snapshot/overlay.
+/// Scratch counts adjacency occurrences, predicate-cache entries and distinct
+/// output IDs. It is not an allocator-byte limit or a storage-I/O budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlaExecutionLimits {
+    pub max_work_units: u64,
+    pub max_scratch_entries: u64,
+}
+
+impl GlaExecutionLimits {
+    #[must_use]
+    pub const fn new(max_work_units: u64, max_scratch_entries: u64) -> Self {
+        Self { max_work_units, max_scratch_entries }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlaLimitDimension {
+    WorkUnits,
+    ScratchEntries,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlaLimitExceeded {
+    pub dimension: GlaLimitDimension,
+    pub limit: u64,
+    /// u128 represents one past u64::MAX without wrapping or saturating.
+    pub observed: u128,
+}
+
+impl core::fmt::Display for GlaLimitExceeded {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "GLA {:?} limit exceeded: observed {}, limit {}", self.dimension, self.observed, self.limit)
+    }
+}
+
+impl core::error::Error for GlaLimitExceeded {}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GlaExecutionStats {
+    pub work_units: u64,
+    pub scratch_entries: u64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct GlaExecution {
+    pub value: Vec<VId>,
+    pub stats: GlaExecutionStats,
+}
+
+impl core::fmt::Debug for GlaExecution {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GlaExecution")
+            .field("value", &"[REDACTED]")
+            .field("row_count", &self.value.len())
+            .field("stats", &self.stats)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum GlaExecutionError<E> {
+    Source(E),
+    Limit(GlaLimitExceeded),
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for GlaExecutionError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Source(error) => error.fmt(f),
+            Self::Limit(error) => error.fmt(f),
+        }
+    }
+}
+
+impl<E: core::error::Error + 'static> core::error::Error for GlaExecutionError<E> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Source(error) => Some(error),
+            Self::Limit(error) => Some(error),
+        }
+    }
+}
+
+fn increment(value: u64, limit: u64, dimension: GlaLimitDimension) -> Result<u64, GlaLimitExceeded> {
+    let observed = u128::from(value) + 1;
+    if observed > u128::from(limit) {
+        return Err(GlaLimitExceeded { dimension, limit, observed });
+    }
+    // The comparison above proves this fits the u64 limit.
+    Ok(observed as u64)
+}
+
+fn charge(
+    stats: &mut GlaExecutionStats,
+    limits: GlaExecutionLimits,
+    event: GlaExecutionEvent,
+) -> Result<(), GlaLimitExceeded> {
+    let mut next = *stats;
+    next.work_units = increment(next.work_units, limits.max_work_units, GlaLimitDimension::WorkUnits)?;
+    if event == GlaExecutionEvent::ScratchEntry {
+        next.scratch_entries = increment(
+            next.scratch_entries, limits.max_scratch_entries, GlaLimitDimension::ScratchEntries,
+        )?;
+    }
+    *stats = next;
+    Ok(())
+}
+
 type Adjacency = BTreeMap<VId, Vec<VId>>;
 type Index = BTreeMap<(RelationId, GlaDirection), Adjacency>;
 
-fn build_index(
+fn push_neighbor<E>(
+    adjacency: &mut Adjacency,
+    source: VId,
+    destination: VId,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    control(GlaExecutionEvent::ScratchEntry)?;
+    adjacency.entry(source).or_default().push(destination);
+    Ok(())
+}
+
+fn build_index<E>(
     operators: &[GlaOperator],
     edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
-) -> Index {
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Index, E> {
     let mut index = Index::new();
     for operator in operators {
         if let GlaOperator::ScanEdges { relation, direction }
-        | GlaOperator::Expand {
-            relation,
-            direction,
-            ..
-        } = operator
+        | GlaOperator::Expand { relation, direction, .. } = operator
         {
             index.entry((*relation, *direction)).or_default();
         }
     }
-    // Only requested pairs are indexed. A same-relation two-hop uses one index.
-    // Each input edge is admitted once, regardless of the number of expansions.
     for (source, relation, destination) in edges {
-        for direction in [
-            GlaDirection::Forward,
-            GlaDirection::Reverse,
-            GlaDirection::Undirected,
-        ] {
+        control(GlaExecutionEvent::Work)?;
+        for direction in [GlaDirection::Forward, GlaDirection::Reverse, GlaDirection::Undirected] {
             let Some(adjacency) = index.get_mut(&(relation, direction)) else {
                 continue;
             };
             match direction {
-                GlaDirection::Forward => adjacency.entry(source).or_default().push(destination),
-                GlaDirection::Reverse => adjacency.entry(destination).or_default().push(source),
+                GlaDirection::Forward => push_neighbor(adjacency, source, destination, control)?,
+                GlaDirection::Reverse => push_neighbor(adjacency, destination, source, control)?,
                 GlaDirection::Undirected => {
-                    adjacency.entry(source).or_default().push(destination);
+                    push_neighbor(adjacency, source, destination, control)?;
                     if source != destination {
-                        adjacency.entry(destination).or_default().push(source);
+                        push_neighbor(adjacency, destination, source, control)?;
                     }
                 }
             }
@@ -54,21 +173,22 @@ fn build_index(
     }
     for adjacency in index.values_mut() {
         for neighbors in adjacency.values_mut() {
-            // Preserve parallel-edge multiplicity; only the final Distinct owns
-            // duplicate elimination. Sorting makes visits input-order independent.
+            control(GlaExecutionEvent::Work)?;
+            // Parallel occurrences survive until the explicit final Distinct.
             neighbors.sort_unstable();
         }
     }
-    index
+    Ok(index)
 }
 
-struct Execution<F> {
+struct Execution<F, C> {
     test_vertex: F,
+    control: C,
     predicate_cache: BTreeMap<(usize, VId), bool>,
     projected: BTreeSet<VId>,
 }
 
-impl<F> Execution<F> {
+impl<F, C> Execution<F, C> {
     fn visit<E>(
         &mut self,
         operators: &[GlaOperator],
@@ -78,10 +198,12 @@ impl<F> Execution<F> {
     ) -> Result<(), E>
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
     {
         let Some(operator) = operators.get(ordinal) else {
             return Ok(());
         };
+        (self.control)(GlaExecutionEvent::Work)?;
         match operator {
             GlaOperator::Select { slot, predicates } => {
                 let Some(vid) = bindings.get(slot.ordinal() as usize).copied() else {
@@ -91,6 +213,7 @@ impl<F> Execution<F> {
                 let keep = if let Some(keep) = self.predicate_cache.get(&key) {
                     *keep
                 } else {
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
                     let keep = (self.test_vertex)(vid, predicates)?;
                     self.predicate_cache.insert(key, keep);
                     keep
@@ -108,11 +231,7 @@ impl<F> Execution<F> {
                     self.visit(operators, ordinal + 1, bindings, index)?;
                 }
             }
-            GlaOperator::Expand {
-                source,
-                relation,
-                direction,
-            } => {
+            GlaOperator::Expand { source, relation, direction } => {
                 let Some(source) = bindings.get(source.ordinal() as usize).copied() else {
                     return Ok(());
                 };
@@ -129,13 +248,13 @@ impl<F> Execution<F> {
                 }
             }
             GlaOperator::Project { slot } => {
-                if let Some(vid) = bindings.get(slot.ordinal() as usize) {
+                if let Some(vid) = bindings.get(slot.ordinal() as usize)
+                    && !self.projected.contains(vid)
+                {
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
                     self.projected.insert(*vid);
                 }
             }
-            // Only lower() can construct a GlaPlan. Scans occur at its root;
-            // Project terminates its binding pipeline; the fixed distinct/order/
-            // limit suffix is fused by the collector and execute() below.
             GlaOperator::Empty
             | GlaOperator::ScanVertices
             | GlaOperator::ScanEdges { .. }
@@ -148,34 +267,61 @@ impl<F> Execution<F> {
 }
 
 impl GlaPlan {
-    /// Whether admission needs the edge table rather than the vertex table.
     #[must_use]
     pub fn scans_edges(&self) -> bool {
         matches!(self.operators().first(), Some(GlaOperator::ScanEdges { .. }))
     }
 
-    /// Execute over already-admitted, immutable inputs. `test_vertex` evaluates
-    /// the entire conjunction against ONE vertex version and propagates its
-    /// original error. It is called at most once per Select/vertex pair.
-    ///
-    /// The caller owns snapshot admission, authorization, resource limits and
-    /// transaction read-dependency tracking. These in-memory scratch indexes
-    /// are not a spill-capable or authorized Strata/FreeJoin implementation.
-    /// No result is returned if any requested predicate read fails.
+    /// Execute with no evaluator limit, preserving the source's original error.
     pub fn execute<E>(
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
     ) -> Result<Vec<VId>, E> {
+        self.execute_with_control(vertices, edges, test_vertex, |_| Ok(()))
+    }
+
+    /// Check work and scratch before processing/inserting, not after a result is
+    /// materialized. Exact limits succeed. Refusal returns no partial rows or
+    /// success statistics. Source-table admission and predicate-source internals
+    /// remain the caller's responsibility; these are not byte or wall-time caps.
+    pub fn execute_with_limits<E>(
+        &self,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+        mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        limits: GlaExecutionLimits,
+    ) -> Result<GlaExecution, GlaExecutionError<E>> {
+        let mut stats = GlaExecutionStats::default();
+        let value = self.execute_with_control(
+            vertices,
+            edges,
+            |vid, predicates| test_vertex(vid, predicates).map_err(GlaExecutionError::Source),
+            |event| charge(&mut stats, limits, event).map_err(GlaExecutionError::Limit),
+        )?;
+        Ok(GlaExecution { value, stats })
+    }
+
+    /// The one evaluator body. A caller can return its own cancellation or
+    /// resource error from control; the same typed error propagates unchanged.
+    /// Control runs before admitted-row work, operator work and scratch growth.
+    pub fn execute_with_control<E>(
+        &self,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<VId>, E> {
         let operators = self.operators();
         let index = if self.scans_edges() {
-            build_index(operators, edges)
+            build_index(operators, edges, &mut control)?
         } else {
             Index::new()
         };
         let mut execution = Execution {
             test_vertex,
+            control,
             predicate_cache: BTreeMap::new(),
             projected: BTreeSet::new(),
         };
@@ -183,6 +329,7 @@ impl GlaPlan {
         match operators.first() {
             Some(GlaOperator::ScanVertices) => {
                 for vid in vertices {
+                    (execution.control)(GlaExecutionEvent::Work)?;
                     bindings.clear();
                     bindings.push(vid);
                     execution.visit(operators, 1, &mut bindings, &index)?;
@@ -192,6 +339,7 @@ impl GlaPlan {
                 if let Some(adjacency) = index.get(&(*relation, *direction)) {
                     for (source, destinations) in adjacency {
                         for destination in destinations {
+                            (execution.control)(GlaExecutionEvent::Work)?;
                             bindings.clear();
                             bindings.extend([*source, *destination]);
                             execution.visit(operators, 1, &mut bindings, &index)?;
@@ -204,18 +352,11 @@ impl GlaPlan {
         let (offset, count) = match operators.last() {
             Some(GlaOperator::Limit { offset, count }) => (
                 usize::try_from(*offset).unwrap_or(usize::MAX),
-                count
-                    .and_then(|count| usize::try_from(count).ok())
-                    .unwrap_or(usize::MAX),
+                count.and_then(|count| usize::try_from(count).ok()).unwrap_or(usize::MAX),
             ),
             _ => (0, usize::MAX),
         };
-        Ok(execution
-            .projected
-            .into_iter()
-            .skip(offset)
-            .take(count)
-            .collect())
+        Ok(execution.projected.into_iter().skip(offset).take(count).collect())
     }
 }
 
@@ -235,16 +376,10 @@ mod tests {
             "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN c"
         } else {
             "MATCH (a)-[:R]->(b) RETURN b"
-        })
-        .unwrap()
+        }).unwrap()
     }
 
-    fn orient(
-        source: VId,
-        destination: VId,
-        direction: EdgeDirection,
-        two: bool,
-    ) -> Vec<(VId, VId)> {
+    fn orient(source: VId, destination: VId, direction: EdgeDirection, two: bool) -> Vec<(VId, VId)> {
         match direction {
             EdgeDirection::Incoming if two => vec![(destination, source)],
             EdgeDirection::Undirected if source != destination => {
@@ -254,20 +389,14 @@ mod tests {
         }
     }
 
-    // Independent nested-loop bag oracle; it never uses the index, lowered
-    // operators, predicate cache, or execution collector.
+    // Independent nested-loop bag oracle, not the index or lowering evaluator.
     fn reference(plan: &BoundPlan, edges: &[(VId, RelationId, VId)]) -> Vec<VId> {
         let mut bag = Vec::new();
         for &(source, relation, destination) in edges {
             if Some(relation) != plan.relation {
                 continue;
             }
-            for (a, b) in orient(
-                source,
-                destination,
-                plan.direction,
-                plan.hop2_relation.is_some(),
-            ) {
+            for (a, b) in orient(source, destination, plan.direction, plan.hop2_relation.is_some()) {
                 if plan.neq.is_some() && a == b || plan.eq.is_some() && a != b {
                     continue;
                 }
@@ -287,20 +416,14 @@ mod tests {
                         }
                     }
                 } else {
-                    bag.push(if plan.projection == ReturnProjection::Source {
-                        a
-                    } else {
-                        b
-                    });
+                    bag.push(if plan.projection == ReturnProjection::Source { a } else { b });
                 }
             }
         }
         bag.sort_unstable();
         bag.dedup();
-        bag.into_iter()
-            .skip(plan.skip.unwrap_or(0) as usize)
-            .take(plan.limit.unwrap_or(u64::MAX) as usize)
-            .collect()
+        bag.into_iter().skip(plan.skip.unwrap_or(0) as usize)
+            .take(plan.limit.unwrap_or(u64::MAX) as usize).collect()
     }
 
     #[test]
@@ -315,23 +438,11 @@ mod tests {
             (VId(3), RelationId(2), VId(3)),
         ];
         for mask in 0..(1_u32 << universe.len()) {
-            let edges: Vec<_> = universe
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| mask & (1_u32 << *i) != 0)
-                .map(|(_, edge)| *edge)
-                .collect();
+            let edges: Vec<_> = universe.iter().enumerate()
+                .filter(|(i, _)| mask & (1_u32 << *i) != 0).map(|(_, edge)| *edge).collect();
             for two_hops in [false, true] {
-                for direction in [
-                    EdgeDirection::Outgoing,
-                    EdgeDirection::Incoming,
-                    EdgeDirection::Undirected,
-                ] {
-                    for projection in [
-                        ReturnProjection::Source,
-                        ReturnProjection::Destination,
-                        ReturnProjection::Hop2Destination,
-                    ] {
+                for direction in [EdgeDirection::Outgoing, EdgeDirection::Incoming, EdgeDirection::Undirected] {
+                    for projection in [ReturnProjection::Source, ReturnProjection::Destination, ReturnProjection::Hop2Destination] {
                         let mut plan = bound(two_hops);
                         plan.direction = direction;
                         plan.projection = projection;
@@ -339,8 +450,7 @@ mod tests {
                             plan.eq = (identity == 1).then(|| ("a".into(), "b".into()));
                             plan.neq = (identity == 2).then(|| ("a".into(), "b".into()));
                             let actual = GlaPlan::lower(&plan)
-                                .execute([], edges.iter().copied(), |_, _| Ok::<_, ()>(true))
-                                .unwrap();
+                                .execute([], edges.iter().copied(), |_, _| Ok::<_, ()>(true)).unwrap();
                             assert_eq!(actual, reference(&plan, &edges), "mask={mask}, plan={plan:?}");
                         }
                     }
@@ -359,15 +469,13 @@ mod tests {
             admitted.set(admitted.get() + 1);
             (VId(1), RelationId(1), VId(2))
         });
-        let rows = GlaPlan::lower(&plan)
-            .execute([], edges, |vid, predicates| {
-                reads.set(reads.get() + 1);
-                assert_eq!(vid, VId(2));
-                Ok::<_, ()>(predicates.iter().all(|predicate| {
-                    predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(7))])
-                }))
-            })
-            .unwrap();
+        let rows = GlaPlan::lower(&plan).execute([], edges, |vid, predicates| {
+            reads.set(reads.get() + 1);
+            assert_eq!(vid, VId(2));
+            Ok::<_, ()>(predicates.iter().all(|predicate| {
+                predicate.matches(&[], &[(PropertyKeyId(4), CanonicalScalar::Int(7))])
+            }))
+        }).unwrap();
         assert_eq!(rows, vec![VId(2)]);
         assert_eq!(admitted.get(), 100);
         assert_eq!(reads.get(), 1);
@@ -377,20 +485,12 @@ mod tests {
     fn a_late_source_failure_never_returns_partial_results() {
         let mut plan = bound(false);
         plan.dst_label = Some(LabelId(1));
-        let result = GlaPlan::lower(&plan).execute(
-            [],
-            [
-                (VId(1), RelationId(1), VId(2)),
-                (VId(1), RelationId(1), VId(3)),
-            ],
-            |vid, _| {
-                if vid == VId(3) {
-                    Err("unreadable vertex")
-                } else {
-                    Ok(true)
-                }
-            },
-        );
+        let result = GlaPlan::lower(&plan).execute([], [
+            (VId(1), RelationId(1), VId(2)),
+            (VId(1), RelationId(1), VId(3)),
+        ], |vid, _| {
+            if vid == VId(3) { Err("unreadable vertex") } else { Ok(true) }
+        });
         assert_eq!(result, Err("unreadable vertex"));
     }
 
@@ -404,18 +504,90 @@ mod tests {
             (VId(1), RelationId(1), VId(2)),
             (VId(1), RelationId(1), VId(2)),
         ];
-        assert_eq!(
-            GlaPlan::lower(&plan)
-                .execute([], edges, |_, _| Ok::<_, ()>(true))
-                .unwrap(),
-            vec![VId(3)]
-        );
+        assert_eq!(GlaPlan::lower(&plan).execute([], edges, |_, _| Ok::<_, ()>(true)).unwrap(), vec![VId(3)]);
         plan.skip = Some(u64::MAX);
-        assert!(
-            GlaPlan::lower(&plan)
-                .execute([], edges, |_, _| Ok::<_, ()>(true))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(GlaPlan::lower(&plan).execute([], edges, |_, _| Ok::<_, ()>(true)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn exact_limits_succeed_and_one_below_each_dimension_refuses() {
+        let logical = GlaPlan::lower(&bound(true));
+        let edges = [
+            (VId(1), RelationId(1), VId(2)),
+            (VId(2), RelationId(2), VId(3)),
+        ];
+        let run = |limits| logical.execute_with_limits([], edges, |_, _| Ok::<_, ()>(true), limits);
+        let measured = run(GlaExecutionLimits::new(u64::MAX, u64::MAX)).unwrap();
+        assert_eq!(measured.value, vec![VId(3)]);
+        let exact = GlaExecutionLimits::new(measured.stats.work_units, measured.stats.scratch_entries);
+        assert_eq!(run(exact).unwrap(), measured);
+        assert!(matches!(
+            run(GlaExecutionLimits::new(exact.max_work_units - 1, exact.max_scratch_entries)),
+            Err(GlaExecutionError::Limit(GlaLimitExceeded { dimension: GlaLimitDimension::WorkUnits, .. }))
+        ));
+        assert!(matches!(
+            run(GlaExecutionLimits::new(exact.max_work_units, exact.max_scratch_entries - 1)),
+            Err(GlaExecutionError::Limit(GlaLimitExceeded { dimension: GlaLimitDimension::ScratchEntries, .. }))
+        ));
+    }
+
+    #[test]
+    fn work_limit_interrupts_path_fanout_even_when_limit_is_one() {
+        let mut plan = bound(true);
+        plan.limit = Some(1);
+        let logical = GlaPlan::lower(&plan);
+        let mut edges = Vec::new();
+        for i in 2..22 {
+            edges.push((VId(1), RelationId(1), VId(i)));
+            for j in 100..120 {
+                edges.push((VId(i), RelationId(2), VId(j)));
+            }
+        }
+        let wide = logical.execute_with_limits([], edges.iter().copied(), |_, _| Ok::<_, ()>(true),
+            GlaExecutionLimits::new(u64::MAX, u64::MAX)).unwrap();
+        assert_eq!(wide.value, vec![VId(100)]);
+        assert!(matches!(logical.execute_with_limits([], edges, |_, _| Ok::<_, ()>(true),
+            GlaExecutionLimits::new(wide.stats.work_units - 1, u64::MAX)),
+            Err(GlaExecutionError::Limit(_))));
+    }
+
+    #[test]
+    fn zero_scratch_refuses_before_predicate_reads_and_growth() {
+        let mut plan = bound(false);
+        plan.dst_label = Some(LabelId(1));
+        let reads = Cell::new(0);
+        let result = GlaPlan::lower(&plan).execute_with_limits([], [
+            (VId(1), RelationId(1), VId(2)),
+        ], |_, _| { reads.set(reads.get() + 1); Ok::<_, ()>(true) },
+            GlaExecutionLimits::new(100, 0));
+        assert!(matches!(result, Err(GlaExecutionError::Limit(GlaLimitExceeded {
+            dimension: GlaLimitDimension::ScratchEntries, observed: 1, ..
+        }))));
+        assert_eq!(reads.get(), 0);
+    }
+
+    #[test]
+    fn cancellation_propagates_unchanged_during_expansion() {
+        let logical = GlaPlan::lower(&bound(true));
+        let calls = Cell::new(0);
+        let result = logical.execute_with_control([], [
+            (VId(1), RelationId(1), VId(2)),
+            (VId(2), RelationId(2), VId(3)),
+        ], |_, _| Ok(true), |_| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 8 { Err("cancelled") } else { Ok(()) }
+        });
+        assert_eq!(result, Err("cancelled"));
+        assert_eq!(calls.get(), 8);
+    }
+
+    #[test]
+    fn accounting_never_wraps_at_u64_max() {
+        let mut stats = GlaExecutionStats { work_units: u64::MAX, scratch_entries: 0 };
+        let before = stats;
+        let error = charge(&mut stats, GlaExecutionLimits::new(u64::MAX, u64::MAX),
+            GlaExecutionEvent::Work).unwrap_err();
+        assert_eq!(error.observed, u128::from(u64::MAX) + 1);
+        assert_eq!(stats, before);
     }
 }

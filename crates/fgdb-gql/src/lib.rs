@@ -1,8 +1,6 @@
 //! Bounded GQL parsing, binding, preparation, and evidence vocabulary.
 //!
-//! [`PreparedGqlQuery`] is the coherent reusable form: exact statement bytes,
-//! the canonical caller-supplied [`RelationBind`], and the executor-ready
-//! [`BoundPlan`] are created together and cannot be mutated independently.
+//! [`PreparedGqlQuery`] owns one coherent statement, bind map and bound plan.
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +14,10 @@ mod overlay_evidence;
 mod parser;
 mod prepared;
 
+pub use algebra_exec::{
+    GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits,
+    GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
+};
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,
     GqlOverlayResultArtifact, GqlPreparedResultArtifact,
