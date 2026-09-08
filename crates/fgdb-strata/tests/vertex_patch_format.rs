@@ -81,18 +81,21 @@ fn same_rows_encode_to_the_same_bytes_and_identity() {
 
 #[test]
 fn storage_admission_matches_exact_encoded_row_boundary_without_changing_format() {
-    let limit = fgdb_strata::store::MAX_STORED_OBJECT_BYTES;
+    // Pin the bounded-store contract independently of its private constant.
+    let limit = 16_384_u64;
     let mut row = distinct_rows().remove(0);
-    row.props = vec![(
-        PropertyKeyId(41),
-        CanonicalScalar::bytes(vec![]).expect("bytes"),
-    )];
-    let overhead = encode_patch(core::slice::from_ref(&row))
-        .expect("encodes")
-        .len();
+    row.props = (0..776)
+        .map(|key| (PropertyKeyId(key), CanonicalScalar::Int(1)))
+        .collect();
+    row.props
+        .push((PropertyKeyId(776), CanonicalScalar::Bool(true)));
     for excess in [0, 1] {
-        row.props[0].1 =
-            CanonicalScalar::bytes(vec![0x41; limit as usize - overhead + excess]).expect("bytes");
+        if excess == 1 {
+            // An empty byte scalar encodes one byte longer than an integer.
+            // Measure the full patch below rather than assuming payload size
+            // grows linearly through canonical byte-group framing.
+            row.props[0].1 = CanonicalScalar::bytes(vec![]).expect("bytes");
+        }
         let encoded =
             encode_patch(core::slice::from_ref(&row)).expect("format still permits this row");
         assert_eq!(encoded.len() as u64, limit + excess as u64);
