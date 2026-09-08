@@ -62,6 +62,16 @@ impl WriteTxn {
                 found: batch.relation,
             });
         }
+        if batch.rows.iter().any(|row| matches!(row, PendingRow::Edge { ensure: true, .. })) {
+            // Ensure-by-triple can succeed through an existing EId different
+            // from the requested EId and emit no delta at all. Observe the
+            // actual candidate table before preparation, retaining both its
+            // existing identities and insertion witness. Target/endpoints alone
+            // cannot detect deletion of an alias whose ID was never requested.
+            // The current scan is conservative; a keyed predicate witness can
+            // narrow it when the real constraint/index access path is available.
+            drop(self.edges(database)?);
+        }
         self.staged.push(batch);
         let combined = Self::combined_batch(&self.staged)
             .expect("a batch was staged immediately before combination");
