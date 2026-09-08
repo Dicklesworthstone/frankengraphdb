@@ -1,104 +1,69 @@
 impl WriteTxn {
-    /// Read one edge from the pinned durable basis plus this transaction's
-    /// staged create/delete overlay, without publishing the transaction.
+    /// Read the pinned durable edge plus the exact prepared net effects.
     pub fn edge<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         eid: EId,
     ) -> Result<Option<EdgeRecord>, WriteTxnError> {
         self.ensure_database(database)?;
-
         let overlay = database.edge_at(eid, self.basis)?;
         Ok(self.edge_over_basis(eid, overlay))
     }
 
-    /// Apply the staged evaluator to one already admitted basis row. Point and
-    /// table reads share this body so row order and conflict tracking agree.
+    /// Preparation already resolved ensure-by-triple, conditional no-ops and
+    /// row-order semantics. Applying raw PendingRow::Edge as an unconditional
+    /// create would invent unused ensure aliases or overwrite existing props.
+    /// Point and bulk reads therefore overlay the same canonical net template
+    /// that commit will publish, never a second interpretation of intentions.
     fn edge_over_basis(&self, eid: EId, mut overlay: Option<EdgeRecord>) -> Option<EdgeRecord> {
         let mut observed_sources = std::collections::BTreeSet::new();
         let mut deleted_vertices = std::collections::BTreeSet::new();
         if let Some(record) = &overlay {
             observed_sources.insert(record.entry.src);
         }
-
-        for batch in &self.staged {
-            for pending in &batch.rows {
-                match pending {
-                    PendingRow::Edge {
-                        eid: row_eid,
-                        src,
-                        dst,
-                        props,
-                        ensure: _,
-                    } if *row_eid == eid => {
-                        let mut props = props.clone();
-                        crate::sort_write_props(&mut props);
-                        observed_sources.insert(*src);
-                        overlay = Some(EdgeRecord {
-                            entry: AdjacencyEntry {
-                                src: *src,
-                                relation: batch.relation,
-                                dst: *dst,
-                                eid,
-                                created_at: self.basis,
-                                retired_at: None,
-                            },
-                            props,
-                        });
-                    }
-                    PendingRow::DeleteEdge { eid: row_eid, .. } if *row_eid == eid => {
-                        overlay = None;
-                    }
-                    PendingRow::SetEdgeProperty {
-                        eid: row_eid,
-                        key,
-                        value,
-                    } if *row_eid == eid => {
-                        if let Some(record) = overlay.as_mut() {
-                            Self::overlay_property(&mut record.props, *key, value.as_ref());
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                for row in &coordinate.rows {
+                    match row {
+                        fgdb_delta_types::DeltaRow::CreateEdge {
+                            eid: row_eid, src, relation, dst, props, ..
+                        } if *row_eid == eid => {
+                            observed_sources.insert(*src);
+                            overlay = Some(EdgeRecord {
+                                entry: AdjacencyEntry {
+                                    src: *src,
+                                    relation: *relation,
+                                    dst: *dst,
+                                    eid,
+                                    created_at: self.basis,
+                                    retired_at: None,
+                                },
+                                props: props.clone(),
+                            });
                         }
-                    }
-                    PendingRow::CompareAndSet {
-                        elem: ElementId::Edge(row_eid),
-                        key,
-                        expected,
-                        value,
-                        ..
-                    } if *row_eid == eid => {
-                        if let Some(record) = overlay.as_mut() {
-                            let actual = record
-                                .props
-                                .binary_search_by_key(key, |(property, _)| *property)
-                                .ok()
-                                .map(|at| &record.props[at].1);
-                            if actual == expected.as_deref() {
-                                Self::overlay_property(
-                                    &mut record.props,
-                                    *key,
-                                    Some(value.as_ref()),
-                                );
+                        fgdb_delta_types::DeltaRow::DeleteEdge { eid: row_eid, .. }
+                            if *row_eid == eid =>
+                        {
+                            overlay = None;
+                        }
+                        fgdb_delta_types::DeltaRow::Property {
+                            elem: ElementId::Edge(row_eid), property, after, ..
+                        } if *row_eid == eid => {
+                            if let Some(record) = overlay.as_mut() {
+                                Self::overlay_property(&mut record.props, *property, after.as_ref());
                             }
                         }
-                    }
-                    PendingRow::DeleteVertex { vid, .. } => {
-                        if overlay.as_ref().is_some_and(|record| {
-                            record.entry.src == *vid || record.entry.dst == *vid
-                        }) {
+                        fgdb_delta_types::DeltaRow::DeleteVertex {
+                            vid, sorted_retired_incident_edges, ..
+                        } if sorted_retired_incident_edges.binary_search(&eid).is_ok() => {
                             deleted_vertices.insert(*vid);
                             overlay = None;
                         }
+                        _ => {}
                     }
-                    PendingRow::Vertex { .. }
-                    | PendingRow::Edge { .. }
-                    | PendingRow::DeleteEdge { .. }
-                    | PendingRow::SetLabel { .. }
-                    | PendingRow::SetEdgeProperty { .. }
-                    | PendingRow::SetProperty { .. }
-                    | PendingRow::CompareAndSet { .. } => {}
                 }
             }
         }
-
         let mut read_set = self.read_set.borrow_mut();
         read_set.insert(ElementId::Edge(eid));
         read_set.extend(observed_sources.into_iter().map(ElementId::Vertex));
@@ -106,17 +71,13 @@ impl WriteTxn {
         overlay
     }
 
-    /// Read every edge from the pinned basis through this transaction's
-    /// staged row-order overlay, sorted by edge identity. Empty scans retain
-    /// an insertion witness rather than becoming an empty read footprint.
+    /// Read all pinned edges with their prepared net effects. Empty scans
+    /// retain an insertion witness even when every observed row is deleted.
     pub fn edges<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
     ) -> Result<Vec<EdgeRecord>, WriteTxnError> {
         self.ensure_database(database)?;
-
-        // Admit the durable table once. Re-reading each edge through edge_at
-        // would validate the entire immutable history again for every EId.
         let mut basis: std::collections::BTreeMap<EId, EdgeRecord> = database
             .edges_at(self.basis)?
             .into_iter()
@@ -129,10 +90,9 @@ impl WriteTxn {
                 PendingRow::Edge { eid, .. }
                 | PendingRow::DeleteEdge { eid, .. }
                 | PendingRow::SetEdgeProperty { eid, .. }
-                | PendingRow::CompareAndSet {
-                    elem: ElementId::Edge(eid),
-                    ..
-                } => {
+                | PendingRow::CompareAndSet { elem: ElementId::Edge(eid), .. } => {
+                    // Retain absent identities as negative-read dependencies,
+                    // but only actual prepared creations can materialize rows.
                     eids.insert(*eid);
                 }
                 PendingRow::Vertex { .. }
@@ -142,7 +102,6 @@ impl WriteTxn {
                 | PendingRow::CompareAndSet { .. } => {}
             }
         }
-
         let mut rows = Vec::new();
         for eid in eids {
             if let Some(record) = self.edge_over_basis(eid, basis.remove(&eid)) {
@@ -150,17 +109,12 @@ impl WriteTxn {
             }
         }
         rows.sort_by_key(|record| record.entry.eid);
-
         let mut read_set = self.read_set.borrow_mut();
         read_set.extend(rows.iter().map(|record| ElementId::Edge(record.entry.eid)));
-        read_set.extend(
-            rows.iter()
-                .map(|record| ElementId::Vertex(record.entry.src)),
-        );
+        read_set.extend(rows.iter().map(|record| ElementId::Vertex(record.entry.src)));
         drop(read_set);
         self.match_expansions.borrow_mut().extend(
-            rows.iter()
-                .map(|record| (record.entry.src, record.entry.relation)),
+            rows.iter().map(|record| (record.entry.src, record.entry.relation)),
         );
         Ok(rows)
     }
