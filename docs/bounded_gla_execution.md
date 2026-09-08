@@ -1,122 +1,150 @@
-# Bounded GLA execution and transaction validation
+# Bounded GLA execution and prepared-write validation
 
-Status at 2026-09-08: source implemented on `main`; Rust build and tests remain
-**unverified** in the connector environment. Owners:
-`fgdb-boundplan-gla-lowering-seam-r2kd` and `fgdb-w4-g1-txn-core-qpmg` remain open.
+Status at 2026-09-08: the source changes below are on `main`. Rust compilation,
+tests and repository gates for this continuation remain **unverified**.
+Owners `fgdb-boundplan-gla-lowering-seam-r2kd` and
+`fgdb-w4-g1-txn-core-qpmg` remain open pending their complete acceptance proof.
 
-## Logical execution
+## One bounded logical evaluator across the read surfaces
 
 `fgdb_gql::algebra::GlaPlan::lower` translates the existing `BoundPlan` into
 immutable scan, select, vertex-identity, expand, project, distinct, order and
-limit operators. Positional integer-comparison fields are consumed at lowering.
-Predicates have one position-independent evaluator. The canonical logical
-transcript is application data, not a registered durable format or a replacement
-for existing result certificates.
+limit operators. Positional integer-comparison fields are consumed at lowering;
+predicates have one position-independent evaluator.
+
+Ordinary live, historical, immutable pinned, bound/prepared, budgeted, limited
+and transaction MATCH execution now use this evaluator. Certificate and replay
+adapters reach it through their existing execution entrypoints. The legacy
+inline adjacency/predicate engine and the root-level `execute_bound_plan_over`,
+`apply_skip` and `apply_limit` helpers have been removed. The bounded read cutover
+is no longer an opt-in limited-query path or a transaction-only migration.
 
 Requested relation/orientation pairs are indexed once. Binding rows stream
-through expansion; predicate conjunctions are cached per operator/vertex. The
-executor retains distinct projected IDs rather than a Cartesian path result.
-Parallel edge occurrences remain until the terminal set projection. This is the
-bounded API's sorted, unique vertex-ID contract, not general GQL multiset or
-path-identity semantics.
+through expansion, predicate conjunctions are cached per operator/vertex, and
+projected IDs are collected without retaining a Cartesian path result. Parallel
+edge occurrences survive until the explicit final distinct operation. This
+preserves the bounded API's sorted, unique vertex-ID contract; it is not general
+GQL multiset or path-identity semantics.
 
-`WriteTxn` node and edge MATCH execution use this evaluator, including text,
-bound, owned-prepared and overlay-evidence/cursor adapters that converge there.
+The logical transcript remains application data, not a registered durable
+format. Existing statement, bind, plan, result and overlay certificate formats
+were not changed by this cutover. It does not add executable-plan cost evidence
+or make those certificates attest the full registered physical operator family.
 
-## Early evaluator limits and cancellation
+## Admit durable input once, then execute that exact input
+
+`fgdb::gql_exec::AdmittedGqlSnapshot` owns the admitted source table together
+with its lowered plan, reader and exact sequence. Ordinary, limited and budgeted
+durable adapters share this admission owner. Budgeted execution checks its
+record count and then executes those same rows; it no longer discards a counting
+scan and reads the table again. Node predicates reuse admitted vertex rows.
+
+Even a logically empty forged plan crosses the source's ordinary admission
+checks. Future or fenced snapshots therefore cannot become successful empty
+reads or be masked by evaluator limits. A transaction's foreign-handle check
+still precedes data observation and witness mutation.
+
+The transaction admission/final-row budget API still has its existing overlay
+counting step. Its traversal is shared GLA, but this change does not claim to
+have eliminated every repeated overlay materialization or staged-row visit.
+
+## Evaluator limits and cancellation
 
 `GlaPlan::execute_with_control` is the shared execution body. Its callback runs
-before admitted-row work, operator visits and scratch insertions. It may return
-a caller-defined cancellation/resource error; that exact error propagates
-without returning partial rows. Ordinary unlimited execution uses this same
-body with an inert control callback.
+before admitted-row work, operator visits and scratch insertions, and propagates
+a caller-defined cancellation/resource error without returning partial rows.
+Unlimited execution uses the same body with an inert control callback.
 
-`GlaPlan::execute_with_limits` supplies deterministic accounting:
+`GlaExecutionLimits::new(max_work_units, max_scratch_entries)` bounds evaluator
+events and accumulated adjacency occurrences, predicate-cache entries and
+distinct-result entries. Successful `GlaExecution` returns rows and exact
+`GlaExecutionStats`; Debug redacts the rows. Typed errors distinguish source
+failure from a work/scratch refusal. Exact limits succeed, one-over refuses, and
+the observed count uses u128 to represent one past u64::MAX without wrapping.
+A final `LIMIT 1` does not excuse unlimited work finding that answer.
 
-- `GlaExecutionLimits::new(max_work_units, max_scratch_entries)` bounds evaluator
-  events and the accumulated adjacency, predicate-cache and distinct-result
-  entries before they grow.
-- `GlaExecution` returns rows plus exact `GlaExecutionStats` on success. Debug
-  output redacts rows.
-- `GlaExecutionError::Source` preserves the source error;
-  `GlaExecutionError::Limit` carries dimension, configured limit and observed
-  count. Exact limits succeed; one-over refuses. The observed field is u128 so
-  one past u64::MAX is representable rather than wrapped or saturated.
-
-A final `LIMIT 1` does not excuse unbounded work finding that answer. Evaluator
-limits can interrupt index construction or path expansion even when the final
-projected result would be small.
+`Database` and `EmbeddedReadView` expose `execute_prepared_query_limited` and
+`execute_prepared_query_limited_at`; `WriteTxn` exposes the corresponding
+`execute_prepared_query_limited(database, query, limits)` method. They accept the
+existing coherent `PreparedGqlQuery` rather than a second preparation format.
 
 These are **not allocator-byte, storage-I/O, wall-clock or spill limits**.
-Snapshot materialization, transaction overlay construction and predicate-source
-internals are outside this accounting. The control hook is not by itself an
-end-to-end QueryCx deadline, runtime task cancellation or resource-ledger proof.
-The existing `GqlExecutionBudget` admission/final-row API remains separate.
+Source materialization, overlay construction and predicate-source internals
+remain outside the evaluator accounting. The control hook is not an end-to-end
+QueryCx deadline, runtime-task cancellation contract or resource-ledger proof.
+The existing `GqlExecutionBudget` admission/final-row API remains distinct.
 
-## Product entrypoints
+## Prepared writes validate their own committed history
 
-`Database` and `EmbeddedReadView` expose:
+`Database::prepare_write` now captures compact element and adjacency dependencies
+before canonicalization removes conditional no-ops or ensure operations. Those
+observations include explicit targets, required edge endpoints, actual existing
+ensure aliases, absent-triple insertion witnesses and engine-derived cascade
+targets. They are retained privately with the immutable template and its basis;
+the dependency Debug representation redacts identities.
 
-- `execute_prepared_query_limited(query, limits)`;
-- `execute_prepared_query_limited_at(query, sequence, limits)`.
+Every `commit_prepared` attempt reconstructs its validator from the complete
+retained committed suffix strictly after that prepared basis. An unrelated
+ordinary write resetting the coordinator's prior validator cannot erase the
+conflict. Writes at or before the basis are excluded. This protection applies
+to **standalone PreparedWrite callers as well as WriteTxn publication**.
 
-`WriteTxn` exposes `execute_prepared_query_limited(database, query, limits)`.
-All five use the same controlled GLA evaluator. The durable adapters admit their
-source table once rather than counting it, discarding it and reading it again;
-node predicates reuse admitted rows. A future/fenced snapshot is refused before
-an evaluator limit can mask the source error. A foreign transaction handle is
-refused before observing its data or changing the owner's witnesses.
+The template is committed exactly as prepared, never silently rebased. A foreign
+opened-handle owner is refused before installing a validator. An unavailable
+history prefix becomes `WriteError::PreparedHistory`, not an empty conflict map.
+Observed conflicts retain the existing first-committer-wins error family. The
+production Chronicle crash/publication tail is unchanged.
 
-These methods accept the existing coherent `PreparedGqlQuery`; preparation and
-binding are not duplicated. Limited execution does not issue a certificate or
-partial artifact on refusal.
+The validator distinguishes adjacency insertion witnesses from vertex writes:
+independent unconstrained parallel-edge creations need not conflict merely
+because they share endpoints. Ensure-by-triple and vertex deletion do retain
+adjacency witnesses because insertions can invalidate those operations.
 
-**The general unbounded durable cutover is still incomplete.** Ordinary live,
-historical and immutable read-view GQL calls still use `fgdb/src/gql_exec.rs`.
-They remain an independent comparison path for the new limited GLA adapters.
-The registered FreeJoin/authorized-Strata/spill integration has not landed.
+`WriteTxn` retains its existing additional read/mutation validation and explicit
+vertex/edge table-scan insertion witnesses. Empty, filtered, skipped and refused
+queries cannot erase the admitted dependencies. These remain conservative
+scan-backed guards, not a complete predicate/range SSI implementation.
 
-## Transaction conflict gaps addressed
+## Overlay edge reads use actual net effects
 
-Empty scans now retain explicit table-insertion witnesses. This covers bulk
-vertex/edge reads, node/edge MATCH, skipped/filtered output and budget refusals.
-A newly inserted disconnected vertex or path can no longer escape merely
-because its identity was absent from the original read set. The witnesses are
-conservative: a vertex scan conflicts with vertex insertions, and an edge scan
-with edge insertions. Point reads are not upgraded to a global commit fence.
+Transaction point and bulk edge reads now apply the exact canonical prepared
+net template, not raw edge-create intentions with the ensure flag ignored.
+An ensure resolved by an existing edge cannot invent the unused requested EId
+or overwrite the existing edge's properties. Bulk admission counts consequently
+do not include such imaginary aliases.
 
-`WriteTxn` validates both its read and mutation footprints against one complete
-retained delta suffix before consuming the prepared write. Intervening ordinary
-writes resetting the coordinator's FCW map no longer erase an older transaction's
-mutation conflicts. The footprint includes explicit targets, edge endpoints,
-engine-derived cascade targets and conditional no-op dependencies. A retired
-conflict-history prefix remains a typed error rather than a false no-conflict
-verdict. This additional guard is **WriteTxn-specific**; the standalone
-`PreparedWrite` API has not received the same suffix validation here.
+Ordered ensure/delete/re-ensure batches, property updates and canonical cascades
+are reflected through the same prepared effects that commit publishes. Negative
+read identities and the table insertion witness remain recorded even when the
+result contains no edges. This is still ensure-by-triple, not the registered
+constraint-keyed EnsureEdge contract.
 
-Ensure-by-triple needs an extra observation: an existing edge may satisfy the
-triple under an EId different from the requested alias. Before preparing such a
-batch, the transaction observes actual edge identities and the table insertion
-witness through its existing edge-read path. Deleting that actual edge therefore
-conflicts even if canonicalization emitted no ensure delta. This is conservative
-scan-backed behavior, not constraint-keyed EnsureEdge or full predicate SSI.
+## Verification state and remaining work
 
-## Verification state
+This continuation adds 12 Rust tests: four validator laws, one shared-admission
+check, four standalone prepared-write integration tests, two canonical edge
+overlay tests and one independent query-oracle matrix. The last enumerates
+649 plan variants and compares live, historical and pinned results before and
+after graph updates and compaction. It shares neither GLA lowering nor predicate
+implementation with production.
 
-The original small-multigraph oracle and 118-plan transaction/durable comparison
-suite remain. This continuation adds 18 Rust tests covering scan phantoms,
-interleaved blind writes, conditional no-ops, cascade races, ensure aliases,
-exact/one-below evaluator limits, path fanout, cancellation, accounting overflow,
-single source admission and limited execution across the product read surfaces.
-They are **added but not executed** in this environment.
+The older 118-plan transaction/durable suite remains useful for cross-surface
+agreement, but its two production surfaces now share GLA: it is no longer an
+independent executor oracle. The new nested-loop test and the existing
+small-multigraph enumeration provide the independent algorithmic checks.
 
-Independent Python specification checks executed successfully: 5,456 modeled
-write-history interleavings, 11,843 metering boundary cases and the existing
-32,400-case old/new query-semantics comparison. These are model checks, not
-execution or compilation of the Rust implementation, and do not close a bead.
+All newly added Rust tests are **UNRUN** here. Source diffs and token delimiters
+were inspected, and the separate existing Python query-semantics specification
+was rerun successfully for 32,400 cases. That model does not compile, execute
+or prove the committed Rust implementation. Earlier Python interleaving/metering
+results are likewise only model checks, not a product-build verdict.
 
-Cargo, rustc and rustfmt are absent locally; external DNS/network access failed.
-`cargo test`, Clippy, formatting and `scripts/check.sh`/committed-tree local proof
-are therefore **UNRUN**, not passing. No GitHub Actions workflow was dispatched.
-No runtime performance measurement, full SSI, full GQL, replay-completeness or
-Genesis-gate claim is made.
+Cargo, rustc and rustfmt are unavailable in this environment; external network
+access also failed. Cargo tests, formatting, Clippy and the committed-tree
+repository proof are therefore unrun, not passing. No GitHub Actions workflow
+was dispatched and no bead was closed on unexecuted tests.
+
+The registered FreeJoin/authorized-Strata access path, whole-operation resource
+and spill governance, typed parameters, general GQL semantics and full SSI
+remain outstanding. No runtime speedup, complete replay proof or Genesis-gate
+completion is claimed by this source-level continuation.
