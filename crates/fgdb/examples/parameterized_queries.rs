@@ -1,13 +1,13 @@
-//! Reuse native typed parameters with the ordinary embedded query APIs.
+//! Reuse native typed parameters with bounded execution and artifact replay.
 //!
 //! cargo run -p fgdb --example parameterized_queries
 
-use asupersync::{Budget, runtime::RuntimeBuilder};
+use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
-    GlaExecutionLimits, GqlEvidenceAuditError, GqlExecutionBudget, GqlParameterError,
-    GqlParameters, PreparedGqlTemplate,
+    GlaExecutionLimits, GqlEvidenceAuditError, GqlEvidenceLimits, GqlExecutionBudget,
+    GqlParameterError, GqlParameters, GqlQueryError, GqlQueryPolicy, PreparedGqlTemplate,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
@@ -34,6 +34,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     let cx = contexts.commit();
+    let query_cx = contexts.query();
+    let cancellation = root.clone();
     runtime.block_on(async move {
         // Fixed fixture keys for a private, transient example database only.
         let keys = DatabaseKeys::new(
@@ -76,10 +78,23 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 .value,
             limited.value,
         );
-        println!(
-            "age >= 40: {:?}; evaluator stats: {:?}",
-            limited.value, limited.stats
-        );
+
+        // One execution checks admitted records, final rows, evaluator work
+        // and scratch, and observes QueryCx cancellation at its checkpoints.
+        // Source materialization and allocator bytes are not bounded by this.
+        let policy = GqlQueryPolicy::new(2, 1, 1_000, 1_000);
+        let governed = db.execute_prepared_query_governed(&query_cx, &older, policy)?;
+        assert_eq!(governed.value, limited.value);
+        assert_eq!(governed.rows.snapshot_records, 2);
+        assert_eq!(governed.rows.result_rows, 1);
+        assert_eq!(governed.evaluator, limited.stats);
+        println!("age >= 40: {:?}; governed counters: {:?}", governed.value, governed);
+        assert!(matches!(
+            db.execute_prepared_query_governed(
+                &query_cx, &older, GqlQueryPolicy::new(2, 0, 1_000, 1_000),
+            ),
+            Err(GqlQueryError::Rows(_))
+        ));
 
         let incorrect_type = GqlParameters::new()
             .with_uint64("min_age", 40)?
@@ -94,6 +109,12 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let bytes = artifact.to_bytes();
         assert_eq!(
             db.audit_prepared_query_artifact(&older, &bytes)?.rows(),
+            &[VId(3)]
+        );
+        assert_eq!(
+            db.audit_prepared_query_artifact_governed(
+                &query_cx, &older, &bytes, GqlEvidenceLimits::DEFAULT_UNTRUSTED, policy,
+            )?.rows(),
             &[VId(3)]
         );
         let same_rows_different_binding = template.bind_parameters(&arguments(41)?)?;
@@ -113,10 +134,24 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert_eq!(db.execute_prepared_query(&older)?, vec![VId(2), VId(3)]);
         assert_eq!(pinned.execute_prepared_query(&older)?, vec![VId(3)]);
         assert_eq!(
-            db.audit_prepared_query_artifact(&older, &bytes)?.rows(),
+            pinned.execute_prepared_query_governed(&query_cx, &older, policy)?.value,
+            vec![VId(3)]
+        );
+        assert_eq!(
+            db.audit_prepared_query_artifact_governed(
+                &query_cx, &older, &bytes, GqlEvidenceLimits::DEFAULT_UNTRUSTED, policy,
+            )?.rows(),
             &[VId(3)]
         );
-        println!("OK: typed rebinding, limits, evidence replay, and pinned reads agree");
+
+        // The original runtime context owns cancellation; the purpose wrapper
+        // observes it without exposing the root or creating another token.
+        cancellation.cancel_with(CancelKind::User, Some("example query shutdown"));
+        assert!(matches!(
+            db.execute_prepared_query_governed(&query_cx, &older, policy),
+            Err(GqlQueryError::Interrupted(_))
+        ));
+        println!("OK: typed rebinding, combined limits, bounded replay, pinned reads and cancellation");
         Ok(())
     })
 }
