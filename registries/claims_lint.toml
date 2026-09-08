@@ -81,6 +81,7 @@ scan = [
   "docs/THREAT_AND_TRUST_MODEL.md",
   "docs/TRANSACTION_GQL.md",
   "docs/WORKSPACE_TOPOLOGY.md",
+  "docs/bounded_gla_execution.md",
 ]
 
 # Directories whose prose must be wholly accounted for by `scan` + `[[exclude]]`.
