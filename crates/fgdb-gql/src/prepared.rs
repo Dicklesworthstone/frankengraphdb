@@ -41,7 +41,11 @@ impl PreparedGqlQuery {
         bind: RelationBind,
         plan: BoundPlan,
     ) -> Self {
-        Self { statement, bind, plan }
+        Self {
+            statement,
+            bind,
+            plan,
+        }
     }
 
     /// The exact concrete statement bytes represented by this definition.

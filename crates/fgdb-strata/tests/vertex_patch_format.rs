@@ -83,19 +83,35 @@ fn same_rows_encode_to_the_same_bytes_and_identity() {
 fn storage_admission_matches_exact_encoded_row_boundary_without_changing_format() {
     let limit = fgdb_strata::store::MAX_STORED_OBJECT_BYTES;
     let mut row = distinct_rows().remove(0);
-    row.props = vec![(PropertyKeyId(41), CanonicalScalar::bytes(vec![]).expect("bytes"))];
-    let overhead = encode_patch(core::slice::from_ref(&row)).expect("encodes").len();
+    row.props = vec![(
+        PropertyKeyId(41),
+        CanonicalScalar::bytes(vec![]).expect("bytes"),
+    )];
+    let overhead = encode_patch(core::slice::from_ref(&row))
+        .expect("encodes")
+        .len();
     for excess in [0, 1] {
-        row.props[0].1 = CanonicalScalar::bytes(vec![0x41; limit as usize - overhead + excess]).expect("bytes");
-        let encoded = encode_patch(core::slice::from_ref(&row)).expect("format still permits this row");
+        row.props[0].1 =
+            CanonicalScalar::bytes(vec![0x41; limit as usize - overhead + excess]).expect("bytes");
+        let encoded =
+            encode_patch(core::slice::from_ref(&row)).expect("format still permits this row");
         assert_eq!(encoded.len() as u64, limit + excess as u64);
         let admission = fgdb_strata::vertex::admit_row_content(&row.labels, &row.props);
         if excess == 0 {
             admission.expect("exact store boundary fits");
         } else {
-            assert_eq!(admission, Err(VertexPatchError::RowExceedsStorageLimit { bytes: limit + 1, limit }));
+            assert_eq!(
+                admission,
+                Err(VertexPatchError::RowExceedsStorageLimit {
+                    bytes: limit + 1,
+                    limit
+                })
+            );
         }
-        assert_eq!(decode_patch(&encoded).expect("format remains decodable")[0], row);
+        assert_eq!(
+            decode_patch(&encoded).expect("format remains decodable")[0],
+            row
+        );
     }
 }
 

@@ -1324,7 +1324,13 @@ fn oversized_property_refuses_before_commit_and_preserves_reopen() {
             vec![(key, CanonicalScalar::Int(1))]
         );
         let mut supported = WriteBatch::new(KNOWS);
+        let transient = CanonicalScalar::bytes(vec![0x41; 20_000]).expect("canonical scalar");
+        supported.create_vertex(VId(3), vec![], vec![(key, transient.clone())]);
+        supported.delete_vertex(VId(3));
+        supported.set_vertex_property(VId(1), key, Some(transient.clone()));
         supported.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(2)));
+        supported.set_edge_property(EId(10), key, Some(transient));
+        supported.set_edge_property(EId(10), key, None);
         assert_eq!(
             db.write(cx, supported).await.expect("reuse handle"),
             CommitSeq(2)
@@ -1400,6 +1406,122 @@ fn edge_property_byte_packing_preserves_history_across_compact_and_rebuild() {
                 vec![(key, after.clone())]
             );
         }
+    });
+}
+
+/// Admission is not a format migration. A previously committed unsupported
+/// row must remain authoritative and intact, with an explicit replay refusal.
+#[test]
+fn legacy_oversized_property_history_is_preserved_on_rebuild_refusal() {
+    use fgdb_chronicle::commit::{COMMIT_LOG_NAME, CommitCoordinator};
+    use fgdb_delta_types::{CoordinateEntry, DeltaRow, LogicalDeltaTemplate, SchemaEpoch};
+    use fgdb_types::{BranchId, GraphId};
+
+    let dir = scratch("legacy-oversized-property");
+    under_lab(8238, move |cx| async move {
+        let cx = &cx;
+        let db = Database::create(cx, &dir, keys()).await.expect("creates");
+        drop(db);
+        // Exercise the actual Chronicle protocol to reproduce a history
+        // written before storage admission existed; no edited disk fixture.
+        let template = LogicalDeltaTemplate::build(
+            ObjectId([0x11; 32]),
+            [0; 32],
+            vec![CoordinateEntry {
+                graph: GraphId(1),
+                branch: BranchId(1),
+                relation: KNOWS,
+                schema_epoch: SchemaEpoch(0),
+                schema_transition: None,
+                rows: vec![DeltaRow::CreateVertex {
+                    vid: VId(1),
+                    birth_ordinal: 1,
+                    labels: vec![],
+                    valid_time: None,
+                    props: vec![(
+                        PropertyKeyId(7),
+                        CanonicalScalar::bytes(vec![0x41; 20_000]).expect("canonical scalar"),
+                    )],
+                }],
+            }],
+        )
+        .expect("canonical template");
+        let capsule = fgdb::prepare_capsule(&K_OID, NAMESPACE, &template).expect("capsule");
+        let mut coordinator = CommitCoordinator::open(cx, &dir, keys().capsule_keys())
+            .await
+            .expect("coordinator");
+        coordinator
+            .commit(cx, &capsule.bytes, |seq, oid| {
+                fgdb::marker_for_capsule(seq, oid, &capsule, vec![])
+            })
+            .await
+            .expect("legacy history reaches D2");
+        drop(coordinator);
+        let log_path = dir.join(COMMIT_LOG_NAME);
+        let log = std::fs::read(&log_path).expect("durable marker bytes");
+        assert!(!log.is_empty());
+        for rebuild in [false, true] {
+            let result = if rebuild {
+                Database::open_rebuilding(cx, &dir, keys()).await
+            } else {
+                Database::open(cx, &dir, keys()).await
+            };
+            assert!(
+                matches!(
+                    result,
+                    Err(OpenError::Rebuild(RebuildError::Fold {
+                        commit_seq: 1,
+                        error: fgdb_strata::writer::WriteError::Vertex(
+                            fgdb_strata::vertex::VertexPatchError::RowExceedsStorageLimit { .. }
+                        ),
+                    }))
+                ),
+                "old unsupported history must name its failure: {result:?}"
+            );
+            assert_eq!(std::fs::read(&log_path).expect("retained markers"), log);
+        }
+    });
+}
+
+#[test]
+fn admitted_property_rows_rebuild_after_post_d2_publication_failure() {
+    let dir = scratch("property-admission-post-d2");
+    under_lab(8239, move |cx| async move {
+        let cx = &cx;
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let value = CanonicalScalar::bytes(vec![0x41; 8_000]).expect("canonical scalar");
+        let key = PropertyKeyId(7);
+        let mut batch = WriteBatch::new(KNOWS);
+        batch.create_vertex(VId(1), vec![], vec![(key, value.clone())]);
+        batch.create_vertex(VId(2), vec![], vec![]);
+        for eid in 10..13 {
+            batch.add_edge(EId(eid), VId(1), VId(2), vec![(key, value.clone())]);
+        }
+        assert!(matches!(
+            db.write_with_publication_failure(
+                cx,
+                batch,
+                fgdb::DerivedPublicationStage::PublishVertexPatches
+            )
+            .await,
+            Err(WriteError::CommittedNeedsRecovery { .. })
+        ));
+        drop(db);
+        let db = Database::open_rebuilding(cx, &dir, keys())
+            .await
+            .expect("admitted rows rebuild after D2");
+        assert_eq!(db.frontier().expect("frontier"), CommitSeq(1));
+        assert_eq!(
+            db.vertex(VId(1)).expect("read").expect("live").props,
+            vec![(key, value.clone())]
+        );
+        let edges = db.edges().expect("recovered edges");
+        assert_eq!(edges.len(), 3);
+        assert!(
+            edges
+                .iter()
+                .all(|edge| edge.props == vec![(key, value.clone())])
+        );
     });
 }
 

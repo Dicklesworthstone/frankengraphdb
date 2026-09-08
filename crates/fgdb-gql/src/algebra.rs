@@ -195,14 +195,16 @@ impl GlaPlan {
         );
         let mut operators = Vec::new();
         let projection = if let Some(relation) = plan.relation {
-            let reverse =
-                plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some();
+            let reverse = plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some();
             let direction = match plan.direction {
                 EdgeDirection::Undirected => GlaDirection::Undirected,
                 EdgeDirection::Incoming if reverse => GlaDirection::Reverse,
                 EdgeDirection::Incoming | EdgeDirection::Outgoing => GlaDirection::Forward,
             };
-            operators.push(GlaOperator::ScanEdges { relation, direction });
+            operators.push(GlaOperator::ScanEdges {
+                relation,
+                direction,
+            });
             let destination_properties = predicates(
                 None,
                 [
@@ -299,7 +301,10 @@ impl GlaPlan {
             match operator {
                 GlaOperator::Empty => bytes.push(0),
                 GlaOperator::ScanVertices => bytes.push(1),
-                GlaOperator::ScanEdges { relation, direction } => {
+                GlaOperator::ScanEdges {
+                    relation,
+                    direction,
+                } => {
                     bytes.push(2);
                     bytes.extend_from_slice(&relation.0.to_be_bytes());
                     bytes.push(direction_tag(*direction));
@@ -390,14 +395,24 @@ mod tests {
             .bind("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN b SKIP 1 LIMIT 2")
             .unwrap();
         let lowered = GlaPlan::lower(&bound);
-        assert!(lowered.operators().iter().any(|op| matches!(op, GlaOperator::Expand { .. })));
+        assert!(
+            lowered
+                .operators()
+                .iter()
+                .any(|op| matches!(op, GlaOperator::Expand { .. }))
+        );
         assert_eq!(
             &lowered.operators()[lowered.operators().len() - 4..],
             &[
-                GlaOperator::Project { slot: BindingSlot(1) },
+                GlaOperator::Project {
+                    slot: BindingSlot(1)
+                },
                 GlaOperator::Distinct,
                 GlaOperator::OrderByVertexId,
-                GlaOperator::Limit { offset: 1, count: Some(2) },
+                GlaOperator::Limit {
+                    offset: 1,
+                    count: Some(2)
+                },
             ]
         );
     }
@@ -406,13 +421,22 @@ mod tests {
     fn normalized_names_do_not_change_the_logical_transcript() {
         let a = bind().bind("MATCH (a)-[:R]->(b) RETURN b").unwrap();
         let b = bind().bind("MATCH (x)-[:R]->(y) RETURN y").unwrap();
-        assert_eq!(GlaPlan::lower(&a).canonical_bytes(), GlaPlan::lower(&b).canonical_bytes());
+        assert_eq!(
+            GlaPlan::lower(&a).canonical_bytes(),
+            GlaPlan::lower(&b).canonical_bytes()
+        );
         let mut changed = a.clone();
         changed.neq = Some(("a".into(), "b".into()));
-        assert_ne!(GlaPlan::lower(&a).canonical_bytes(), GlaPlan::lower(&changed).canonical_bytes());
+        assert_ne!(
+            GlaPlan::lower(&a).canonical_bytes(),
+            GlaPlan::lower(&changed).canonical_bytes()
+        );
         changed = a.clone();
         changed.dst_prop_le = Some((PropertyKeyId(4), i64::MIN));
-        assert_ne!(GlaPlan::lower(&a).canonical_bytes(), GlaPlan::lower(&changed).canonical_bytes());
+        assert_ne!(
+            GlaPlan::lower(&a).canonical_bytes(),
+            GlaPlan::lower(&changed).canonical_bytes()
+        );
     }
 
     #[test]
@@ -441,14 +465,22 @@ mod tests {
     #[test]
     fn incoming_normalization_is_explicit() {
         let one = bind().bind("MATCH (a)<-[:R]-(b) RETURN b").unwrap();
-        let two = bind().bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) RETURN c").unwrap();
+        let two = bind()
+            .bind("MATCH (a)<-[:R]-(b)<-[:S]-(c) RETURN c")
+            .unwrap();
         assert!(matches!(
             GlaPlan::lower(&one).operators().first(),
-            Some(GlaOperator::ScanEdges { direction: GlaDirection::Forward, .. })
+            Some(GlaOperator::ScanEdges {
+                direction: GlaDirection::Forward,
+                ..
+            })
         ));
         assert!(matches!(
             GlaPlan::lower(&two).operators().first(),
-            Some(GlaOperator::ScanEdges { direction: GlaDirection::Reverse, .. })
+            Some(GlaOperator::ScanEdges {
+                direction: GlaDirection::Reverse,
+                ..
+            })
         ));
     }
 }

@@ -1,8 +1,8 @@
 //! Prepared writes retain their observations, not a resettable validator epoch.
 
 use crate::{
-    CommitCx, CommitSeq, CrashPoint, Database, ElementId, FirstCommitterWinsValidator,
-    PendingRow, PreparedWrite, VId, WriteBatch, WriteError,
+    CommitCx, CommitSeq, CrashPoint, Database, ElementId, FirstCommitterWinsValidator, PendingRow,
+    PreparedWrite, VId, WriteBatch, WriteError,
 };
 use asupersync::fs::Vfs;
 use fgdb_strata::writer::BlockWriter;
@@ -39,10 +39,19 @@ impl PreparedDependencies {
                     result.elements.insert(ElementId::Vertex(*vid));
                     result.adjacency.insert(*vid);
                     result.elements.extend(
-                        writer.live_incident_edges(*vid).into_iter().map(ElementId::Edge),
+                        writer
+                            .live_incident_edges(*vid)
+                            .into_iter()
+                            .map(ElementId::Edge),
                     );
                 }
-                PendingRow::Edge { eid, src, dst, ensure, .. } => {
+                PendingRow::Edge {
+                    eid,
+                    src,
+                    dst,
+                    ensure,
+                    ..
+                } => {
                     result.elements.insert(ElementId::Edge(*eid));
                     result.elements.insert(ElementId::Vertex(*src));
                     result.elements.insert(ElementId::Vertex(*dst));
@@ -53,15 +62,16 @@ impl PreparedDependencies {
                         result.adjacency.insert(*src);
                         for existing in writer.live_incident_edges(*src) {
                             if let Some((s, relation, d, _)) = writer.live_edge(existing)
-                                && s == *src && d == *dst && relation == batch.relation
+                                && s == *src
+                                && d == *dst
+                                && relation == batch.relation
                             {
                                 result.elements.insert(ElementId::Edge(existing));
                             }
                         }
                     }
                 }
-                PendingRow::DeleteEdge { eid, .. }
-                | PendingRow::SetEdgeProperty { eid, .. } => {
+                PendingRow::DeleteEdge { eid, .. } | PendingRow::SetEdgeProperty { eid, .. } => {
                     result.elements.insert(ElementId::Edge(*eid));
                 }
                 PendingRow::CompareAndSet { elem, .. } => {
@@ -106,15 +116,17 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(WriteError::ForeignPreparedWrite);
         }
         self.ensure_writable()?;
-        let validator = FirstCommitterWinsValidator::from_history(
-            prepared.basis,
-            &self.snapshot.delta_index,
-        )
-        .map_err(WriteError::PreparedHistory)?
-        .with_dependencies(prepared.dependencies.elements, prepared.dependencies.adjacency);
+        let validator =
+            FirstCommitterWinsValidator::from_history(prepared.basis, &self.snapshot.delta_index)
+                .map_err(WriteError::PreparedHistory)?
+                .with_dependencies(
+                    prepared.dependencies.elements,
+                    prepared.dependencies.adjacency,
+                );
         // Always install the validator for THIS basis, even if another prepared
         // write just committed or failed. Prior attempted drafts are not history.
         self.coordinator.set_validator(Box::new(validator));
-        self.commit_template(cx, prepared.template, crash_at, None, None).await
+        self.commit_template(cx, prepared.template, crash_at, None, None)
+            .await
     }
 }

@@ -1,7 +1,9 @@
 //! First-committer-wins validation for the live `WriteBatch` write set.
 
 use fgdb_chronicle::{CommitDraft, CommitValidator, ValidationRejection};
-use fgdb_delta_types::{DeltaRow, ElementId, IndexError, LocalDeltaBatchIndex, LogicalDeltaTemplate};
+use fgdb_delta_types::{
+    DeltaRow, ElementId, IndexError, LocalDeltaBatchIndex, LogicalDeltaTemplate,
+};
 use fgdb_types::{CommitSeq, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -113,7 +115,11 @@ impl CommitValidator for FirstCommitterWinsValidator {
         if let Some((vertex, previous_seq)) = deleted_vertices
             .iter()
             .chain(self.adjacency_dependencies.iter())
-            .find_map(|vertex| self.adjacency_insertions.get(vertex).map(|seq| (vertex, seq)))
+            .find_map(|vertex| {
+                self.adjacency_insertions
+                    .get(vertex)
+                    .map(|seq| (vertex, seq))
+            })
         {
             return Err(ValidationRejection {
                 law: FCW_LAW,
@@ -194,15 +200,29 @@ mod tests {
     }
 
     fn template(vertices: &[u128]) -> Vec<u8> {
-        rows_template(vertices.iter().map(|vertex| DeltaRow::LabelMembership {
-            vid: VId(*vertex), label: LabelId(1), before: false, after: true,
-        }).collect())
+        rows_template(
+            vertices
+                .iter()
+                .map(|vertex| DeltaRow::LabelMembership {
+                    vid: VId(*vertex),
+                    label: LabelId(1),
+                    before: false,
+                    after: true,
+                })
+                .collect(),
+        )
     }
 
     fn edge(eid: u128, src: u128, dst: u128) -> DeltaRow {
         DeltaRow::CreateEdge {
-            eid: EId(eid), birth_ordinal: 1, src: VId(src), relation: RelationId(1),
-            dst: VId(dst), canonical_key: None, props: vec![], valid_time: None,
+            eid: EId(eid),
+            birth_ordinal: 1,
+            src: VId(src),
+            relation: RelationId(1),
+            dst: VId(dst),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
         }
     }
 
@@ -267,26 +287,43 @@ mod tests {
         assert_eq!(validate(&mut validator, &template(&[7]), 1), Ok(()));
         validate(&mut validator, &template(&[7, 8]), 2)
             .expect_err("overlap rejects the whole draft");
-        assert_eq!(validator.last_writer.get(&ElementId::Vertex(VId(7))), Some(&CommitSeq(1)));
-        assert_eq!(validator.last_writer.get(&ElementId::Vertex(VId(8))), None,
-            "a rejected draft must not partially install disjoint keys");
+        assert_eq!(
+            validator.last_writer.get(&ElementId::Vertex(VId(7))),
+            Some(&CommitSeq(1))
+        );
+        assert_eq!(
+            validator.last_writer.get(&ElementId::Vertex(VId(8))),
+            None,
+            "a rejected draft must not partially install disjoint keys"
+        );
     }
 
     #[test]
     fn history_constructor_refuses_a_future_basis_instead_of_empty_state() {
         let history = LocalDeltaBatchIndex::new();
         assert!(FirstCommitterWinsValidator::from_history(CommitSeq(0), &history).is_ok());
-        assert!(matches!(FirstCommitterWinsValidator::from_history(CommitSeq(1), &history),
-            Err(IndexError::BeyondFrontier { asked: CommitSeq(1), frontier: CommitSeq(0) })));
+        assert!(matches!(
+            FirstCommitterWinsValidator::from_history(CommitSeq(1), &history),
+            Err(IndexError::BeyondFrontier {
+                asked: CommitSeq(1),
+                frontier: CommitSeq(0)
+            })
+        ));
     }
 
     #[test]
     fn retained_dependency_conflicts_even_when_absent_from_the_template() {
         let mut validator = FirstCommitterWinsValidator::default()
             .with_dependencies([ElementId::Vertex(VId(7))], []);
-        validator.observe(&DeltaRow::LabelMembership {
-            vid: VId(7), label: LabelId(1), before: false, after: true,
-        }, CommitSeq(2));
+        validator.observe(
+            &DeltaRow::LabelMembership {
+                vid: VId(7),
+                label: LabelId(1),
+                before: false,
+                after: true,
+            },
+            CommitSeq(2),
+        );
         let before = validator.last_writer.clone();
         assert!(validate(&mut validator, &template(&[9]), 3).is_err());
         assert_eq!(validator.last_writer, before);
@@ -297,20 +334,38 @@ mod tests {
         let mut validator = FirstCommitterWinsValidator::default();
         assert!(validate(&mut validator, &rows_template(vec![edge(10, 1, 2)]), 1).is_ok());
         assert!(validate(&mut validator, &rows_template(vec![edge(11, 1, 2)]), 2).is_ok());
-        validator.observe(&DeltaRow::DeleteVertex {
-            vid: VId(2), before_version: ObjectId([1; 32]), sorted_retired_incident_edges: vec![EId(10), EId(11)],
-        }, CommitSeq(3));
+        validator.observe(
+            &DeltaRow::DeleteVertex {
+                vid: VId(2),
+                before_version: ObjectId([1; 32]),
+                sorted_retired_incident_edges: vec![EId(10), EId(11)],
+            },
+            CommitSeq(3),
+        );
         assert!(validate(&mut validator, &rows_template(vec![edge(12, 1, 2)]), 4).is_err());
-        assert!(!validator.last_writer.contains_key(&ElementId::Edge(EId(12))));
+        assert!(
+            !validator
+                .last_writer
+                .contains_key(&ElementId::Edge(EId(12)))
+        );
     }
 
     #[test]
     fn cascade_and_absent_ensure_witness_incoming_insertions() {
         let mut validator = FirstCommitterWinsValidator::default();
         validator.observe(&edge(10, 2, 1), CommitSeq(2));
-        assert!(validate(&mut validator, &rows_template(vec![DeltaRow::DeleteVertex {
-            vid: VId(1), before_version: ObjectId([1; 32]), sorted_retired_incident_edges: vec![],
-        }]), 3).is_err());
+        assert!(
+            validate(
+                &mut validator,
+                &rows_template(vec![DeltaRow::DeleteVertex {
+                    vid: VId(1),
+                    before_version: ObjectId([1; 32]),
+                    sorted_retired_incident_edges: vec![],
+                }]),
+                3
+            )
+            .is_err()
+        );
         let mut ensure = validator.with_dependencies([], [VId(1)]);
         assert!(validate(&mut ensure, &template(&[9]), 3).is_err());
     }

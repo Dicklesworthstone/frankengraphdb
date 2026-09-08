@@ -60,7 +60,11 @@ fn bind_plan(statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError
 
 impl<V: Vfs + Clone> Database<V> {
     /// Prepare the bounded language without retaining mutable parser state.
-    pub fn prepare_gql_plan(&self, statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError> {
+    pub fn prepare_gql_plan(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<BoundPlan, GqlError> {
         bind_plan(statement, bind)
     }
 
@@ -71,12 +75,19 @@ impl<V: Vfs + Clone> Database<V> {
     }
 
     /// Execute at an exact retained sequence, preserving ordinary read refusals.
-    pub fn execute_prepared_gql_at(&self, plan: &BoundPlan, as_of: CommitSeq) -> Result<Vec<VId>, GqlError> {
+    pub fn execute_prepared_gql_at(
+        &self,
+        plan: &BoundPlan,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, GqlError> {
         execute_at(plan, self, as_of).map_err(GqlError::Read)
     }
 
     /// Execute and certify at the same live frontier. No certificate on failure.
-    pub fn execute_prepared_gql_certified(&self, plan: &BoundPlan) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
+    pub fn execute_prepared_gql_certified(
+        &self,
+        plan: &BoundPlan,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
         let as_of = self.frontier().map_err(GqlError::Read)?;
         self.execute_prepared_gql_certified_at(plan, as_of)
     }
@@ -97,7 +108,11 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 impl EmbeddedReadView {
-    pub fn prepare_gql_plan(&self, statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError> {
+    pub fn prepare_gql_plan(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<BoundPlan, GqlError> {
         bind_plan(statement, bind)
     }
 
@@ -106,7 +121,11 @@ impl EmbeddedReadView {
     }
 
     /// The pinned generation refuses sequences beyond its own frontier.
-    pub fn execute_prepared_gql_at(&self, plan: &BoundPlan, as_of: CommitSeq) -> Result<Vec<VId>, GqlError> {
+    pub fn execute_prepared_gql_at(
+        &self,
+        plan: &BoundPlan,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, GqlError> {
         execute_at(plan, self, as_of).map_err(GqlError::Read)
     }
 
@@ -114,12 +133,21 @@ impl EmbeddedReadView {
         self.execute_gql_at(statement, bind, self.frontier())
     }
 
-    pub fn execute_gql_at(&self, statement: &str, bind: &RelationBind, as_of: CommitSeq) -> Result<Vec<VId>, GqlError> {
+    pub fn execute_gql_at(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+        as_of: CommitSeq,
+    ) -> Result<Vec<VId>, GqlError> {
         let plan = bind_plan(statement, bind)?;
         self.execute_prepared_gql_at(&plan, as_of)
     }
 
-    pub fn execute_gql_certified(&self, statement: &str, bind: &RelationBind) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
+    pub fn execute_gql_certified(
+        &self,
+        statement: &str,
+        bind: &RelationBind,
+    ) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
         self.execute_gql_certified_at(statement, bind, self.frontier())
     }
 
@@ -130,14 +158,20 @@ impl EmbeddedReadView {
         as_of: CommitSeq,
     ) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
         let rows = self.execute_gql_at(statement, bind, as_of)?;
-        Ok((rows, GqlCertificate {
-            snapshot_seq: as_of,
-            statement_digest: crate::gql_cert::digest_statement(statement),
-            bind_digest: crate::gql_cert::digest_bind(bind),
-        }))
+        Ok((
+            rows,
+            GqlCertificate {
+                snapshot_seq: as_of,
+                statement_digest: crate::gql_cert::digest_statement(statement),
+                bind_digest: crate::gql_cert::digest_bind(bind),
+            },
+        ))
     }
 
-    pub fn execute_prepared_gql_certified(&self, plan: &BoundPlan) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
+    pub fn execute_prepared_gql_certified(
+        &self,
+        plan: &BoundPlan,
+    ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
         self.execute_prepared_gql_certified_at(plan, self.frontier())
     }
 
@@ -170,7 +204,11 @@ pub(crate) struct AdmittedGqlSnapshot<'a, R: ?Sized> {
 }
 
 impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
-    pub(crate) fn admit(plan: &BoundPlan, reader: &'a R, as_of: CommitSeq) -> Result<Self, ReadError> {
+    pub(crate) fn admit(
+        plan: &BoundPlan,
+        reader: &'a R,
+        as_of: CommitSeq,
+    ) -> Result<Self, ReadError> {
         let logical = GlaPlan::lower(plan);
         let mut vertices = BTreeMap::new();
         let mut edges = Vec::new();
@@ -186,7 +224,11 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
             count
         };
         Ok(Self {
-            reader, as_of, logical, vertices, edges,
+            reader,
+            as_of,
+            logical,
+            vertices,
+            edges,
             snapshot_records: u64::try_from(count).unwrap_or(u64::MAX),
         })
     }
@@ -198,10 +240,16 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
     fn matches(&self, vid: VId, predicates: &[VertexPredicate]) -> Result<bool, ReadError> {
         if self.logical.scans_edges() {
             let row = self.reader.gql_vertex_at(vid, self.as_of)?;
-            Ok(row.is_some_and(|row| predicates.iter().all(|p| p.matches(&row.labels, &row.props))))
+            Ok(row.is_some_and(|row| {
+                predicates
+                    .iter()
+                    .all(|p| p.matches(&row.labels, &row.props))
+            }))
         } else {
             Ok(self.vertices.get(&vid).is_some_and(|row| {
-                predicates.iter().all(|p| p.matches(&row.labels, &row.props))
+                predicates
+                    .iter()
+                    .all(|p| p.matches(&row.labels, &row.props))
             }))
         }
     }
@@ -214,7 +262,10 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
         )
     }
 
-    pub(crate) fn execute_limited(self, limits: GlaExecutionLimits) -> Result<GlaExecution, GlaExecutionError<ReadError>> {
+    pub(crate) fn execute_limited(
+        self,
+        limits: GlaExecutionLimits,
+    ) -> Result<GlaExecution, GlaExecutionError<ReadError>> {
         self.logical.execute_with_limits(
             self.vertices.keys().copied(),
             self.edges.iter().map(edge_triple),
@@ -228,7 +279,10 @@ fn edge_triple(record: &EdgeRecord) -> (VId, RelationId, VId) {
     (record.entry.src, record.entry.relation, record.entry.dst)
 }
 
-pub(crate) fn execute<V: Vfs + Clone>(plan: &BoundPlan, db: &Database<V>) -> Result<Vec<VId>, ReadError> {
+pub(crate) fn execute<V: Vfs + Clone>(
+    plan: &BoundPlan,
+    db: &Database<V>,
+) -> Result<Vec<VId>, ReadError> {
     execute_at(plan, db, db.frontier()?)
 }
 

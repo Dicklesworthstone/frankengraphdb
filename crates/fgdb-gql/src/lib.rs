@@ -16,8 +16,8 @@ mod parser;
 mod prepared;
 
 pub use algebra_exec::{
-    GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits,
-    GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
+    GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
+    GlaLimitDimension, GlaLimitExceeded,
 };
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,
@@ -37,8 +37,8 @@ pub use evidence_page::{
 };
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
-    GqlParameterError, GqlParameterSpec, GqlParameterType, GqlParameterValue,
-    GqlParameters, PreparedGqlTemplate,
+    GqlParameterError, GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters,
+    PreparedGqlTemplate,
 };
 pub use parser::{
     BindError, BoundPlan, EdgeDirection, ParseError, ParseErrorKind, RelationBind, ReturnProjection,

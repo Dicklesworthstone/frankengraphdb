@@ -8,7 +8,11 @@ use fgdb_gql::GqlExecutionBudget;
 use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x41; 32], DatabaseSecurityNamespaceId([0x42; 32]), [0x43; 32])
+    DatabaseKeys::new(
+        [0x41; 32],
+        DatabaseSecurityNamespaceId([0x42; 32]),
+        [0x43; 32],
+    )
 }
 
 fn assert_read_conflict(result: Result<fgdb_types::CommitSeq, WriteTxnError>) {
@@ -60,7 +64,11 @@ fn empty_node_and_edge_scans_reject_new_disconnected_rows() {
             let frontier = db.frontier().expect("winner frontier");
             assert_read_conflict(txn.commit(&mut db, &cx).await);
             assert_eq!(db.frontier().expect("no loser commit"), frontier);
-            assert!(db.vertex(VId(99)).expect("unpublished staged vertex").is_none());
+            assert!(
+                db.vertex(VId(99))
+                    .expect("unpublished staged vertex")
+                    .is_none()
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -77,18 +85,27 @@ fn prepared_scan_keeps_its_witness_when_skip_discards_every_row() {
         seed.create_vertex(VId(1), vec![LabelId(1)], vec![]);
         db.write(&cx, seed).await.expect("seed");
         let mut txn = db.begin(&txn_cx).expect("begin");
-        let query = txn.prepare_gql_query(
-            "MATCH (a:L) RETURN a SKIP 1 LIMIT 1",
-            &RelationBind::new().with_label("L", LabelId(1)),
-        ).expect("prepare");
-        assert!(txn.execute_prepared_query(&db, &query).expect("all skipped").is_empty());
+        let query = txn
+            .prepare_gql_query(
+                "MATCH (a:L) RETURN a SKIP 1 LIMIT 1",
+                &RelationBind::new().with_label("L", LabelId(1)),
+            )
+            .expect("prepare");
+        assert!(
+            txn.execute_prepared_query(&db, &query)
+                .expect("all skipped")
+                .is_empty()
+        );
         let mut staged = WriteBatch::new(RelationId(1));
         staged.create_vertex(VId(99), vec![], vec![]);
         txn.write(&mut db, staged).expect("stage");
         let mut winner = WriteBatch::new(RelationId(1));
         winner.create_vertex(VId(2), vec![LabelId(1)], vec![]);
         db.write(&cx, winner).await.expect("insert matching vertex");
-        assert_eq!(db.execute_prepared_query(&query).expect("new answer"), vec![VId(2)]);
+        assert_eq!(
+            db.execute_prepared_query(&query).expect("new answer"),
+            vec![VId(2)]
+        );
         assert_read_conflict(txn.commit(&mut db, &cx).await);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -105,12 +122,18 @@ fn budget_refusal_keeps_the_scan_dependency() {
         seed.create_vertex(VId(1), vec![LabelId(1)], vec![]);
         db.write(&cx, seed).await.expect("seed");
         let mut txn = db.begin(&txn_cx).expect("begin");
-        let query = txn.prepare_gql_query(
-            "MATCH (a:L) RETURN a",
-            &RelationBind::new().with_label("L", LabelId(1)),
-        ).expect("prepare");
+        let query = txn
+            .prepare_gql_query(
+                "MATCH (a:L) RETURN a",
+                &RelationBind::new().with_label("L", LabelId(1)),
+            )
+            .expect("prepare");
         assert!(matches!(
-            txn.execute_prepared_query_budgeted(&db, &query, GqlExecutionBudget::snapshot_records(0)),
+            txn.execute_prepared_query_budgeted(
+                &db,
+                &query,
+                GqlExecutionBudget::snapshot_records(0)
+            ),
             Err(fgdb_gql::BudgetedGqlError::Budget(_))
         ));
         let mut staged = WriteBatch::new(RelationId(1));
@@ -136,7 +159,11 @@ fn point_reads_and_edge_scans_do_not_become_global_commit_fences() {
             if edge_scan {
                 assert!(txn.edges(&db).expect("empty edge scan").is_empty());
             } else {
-                assert!(txn.vertex(&db, VId(7)).expect("absent point read").is_none());
+                assert!(
+                    txn.vertex(&db, VId(7))
+                        .expect("absent point read")
+                        .is_none()
+                );
             }
             let mut staged = WriteBatch::new(RelationId(1));
             staged.create_vertex(VId(99), vec![], vec![]);
