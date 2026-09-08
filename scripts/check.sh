@@ -460,6 +460,11 @@ coverage_of() {
     docs/GQL_RESULT_EVIDENCE.md|\
     docs/LOCAL_PROOF_BUNDLE.md|\
     docs/TRANSACTION_GQL.md)             echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
+    # Measured 2026-09-08: current checker exits 0 on these registered docs,
+    # then exits 1 with unregistered_marker for each appended FG-ZZZ-99 in
+    # an isolated source copy. This covers marker resolution, not prose truth.
+    docs/atomic_relation_writes.md|\
+    docs/bounded_gla_execution.md)       echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
     # EXACT, not `formal/lean/*.lean`. The gate runs the artifacts of CHECKED
     # lanes only, so a glob would claim coverage for a future DECLARED lane's
     # artifact that nothing runs — the same fail-open as the `registries/*.toml`
