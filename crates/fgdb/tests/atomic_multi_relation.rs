@@ -6,14 +6,20 @@ use fgdb::{
     WriteTxnError,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 
 const R: RelationId = RelationId(1);
 const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x81; 32], DatabaseSecurityNamespaceId([0x82; 32]), [0x83; 32])
+    DatabaseKeys::new(
+        [0x81; 32],
+        DatabaseSecurityNamespaceId([0x82; 32]),
+        [0x83; 32],
+    )
 }
 
 async fn seeded(cx: &CommitCx) -> Database<MemVfs> {
@@ -45,14 +51,23 @@ fn two_relation_groups_publish_one_sequence_and_one_delta() {
         let pinned = db.read_session().unwrap();
         let seq = db.write_atomic(&cx, edges()).await.expect("atomic write");
         assert_eq!(seq, CommitSeq(basis.0 + 1));
-        let bind = RelationBind::new().with_relation("R", R).with_relation("S", S);
+        let bind = RelationBind::new()
+            .with_relation("R", R)
+            .with_relation("S", S);
         let query = "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN c";
         assert_eq!(db.execute_gql(query, &bind).unwrap(), vec![VId(3)]);
         assert!(pinned.execute_gql(query, &bind).unwrap().is_empty());
         assert!(db.execute_gql_at(query, &bind, basis).unwrap().is_empty());
         let batches: Vec<_> = db.delta_since(basis).unwrap().collect();
         assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].coordinate_entries().iter().map(|c| c.relation).collect::<Vec<_>>(), vec![R, S]);
+        assert_eq!(
+            batches[0]
+                .coordinate_entries()
+                .iter()
+                .map(|c| c.relation)
+                .collect::<Vec<_>>(),
+            vec![R, S]
+        );
         assert_eq!(db.edge(EId(10)).unwrap().unwrap().entry.created_at, seq);
         assert_eq!(db.edge(EId(11)).unwrap().unwrap().entry.created_at, seq);
     });
@@ -71,10 +86,17 @@ fn per_relation_prefixes_are_preserved_and_birth_ordinals_do_not_collide() {
         s.create_vertex(VId(5), vec![], vec![]);
         s.add_edge(EId(50), VId(5), VId(3), vec![]);
         let mut r2 = WriteBatch::new(R);
-        r2.compare_and_set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(1)),
-            CanonicalScalar::Int(2), WriteMismatchPolicy::AbortWrite);
+        r2.compare_and_set_vertex_property(
+            VId(4),
+            P,
+            Some(CanonicalScalar::Int(1)),
+            CanonicalScalar::Int(2),
+            WriteMismatchPolicy::AbortWrite,
+        );
         r2.add_edge(EId(40), VId(4), VId(1), vec![]);
-        db.write_atomic(&cx, vec![s, r1, r2]).await.expect("independent groups with ordered prefixes");
+        db.write_atomic(&cx, vec![s, r1, r2])
+            .await
+            .expect("independent groups with ordered prefixes");
         let four = db.vertex(VId(4)).unwrap().unwrap();
         let five = db.vertex(VId(5)).unwrap().unwrap();
         assert_eq!(four.props, vec![(P, CanonicalScalar::Int(2))]);
@@ -106,20 +128,34 @@ fn invalid_or_dependent_group_never_publishes_a_valid_prefix() {
                     s.add_edge(EId(11), VId(2), VId(1), vec![]);
                 }
                 _ => {
-                    r.compare_and_set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(99)),
-                        CanonicalScalar::Int(10), WriteMismatchPolicy::NoOp);
+                    r.compare_and_set_vertex_property(
+                        VId(1),
+                        P,
+                        Some(CanonicalScalar::Int(99)),
+                        CanonicalScalar::Int(10),
+                        WriteMismatchPolicy::NoOp,
+                    );
                     s.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(1)));
                 }
             }
             let result = db.write_atomic(&cx, vec![r, s]).await;
             if mode == 0 {
-                assert!(matches!(result, Err(WriteTxnError::Write(WriteError::DanglingEndpoint { .. }))));
+                assert!(matches!(
+                    result,
+                    Err(WriteTxnError::Write(WriteError::DanglingEndpoint { .. }))
+                ));
             } else {
-                assert!(matches!(result, Err(WriteTxnError::AtomicRelationConflict { .. })));
+                assert!(matches!(
+                    result,
+                    Err(WriteTxnError::AtomicRelationConflict { .. })
+                ));
             }
             assert_eq!(db.frontier().unwrap(), before);
             assert!(db.edges().unwrap().is_empty());
-            assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(0))]);
+            assert_eq!(
+                db.vertex(VId(1)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(0))]
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -152,12 +188,24 @@ fn compound_prepared_write_keeps_all_groups_history_dependencies() {
             if conflicts {
                 assert!(matches!(result, Err(WriteError::FirstCommitterWins { .. })));
                 assert_eq!(db.frontier().unwrap(), frontier);
-                assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(0))]);
-                assert_eq!(db.vertex(VId(2)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(99))]);
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(0))]
+                );
+                assert_eq!(
+                    db.vertex(VId(2)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(99))]
+                );
             } else {
                 result.expect("disjoint history permits the whole compound write");
-                assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(10))]);
-                assert_eq!(db.vertex(VId(2)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(20))]);
+                assert_eq!(
+                    db.vertex(VId(1)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(10))]
+                );
+                assert_eq!(
+                    db.vertex(VId(2)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(20))]
+                );
             }
         }
     });
@@ -171,13 +219,24 @@ fn empty_groups_and_foreign_prepared_owners_are_refused() {
         let cx = contexts.commit();
         let mut db = seeded(&cx).await;
         let mut foreign = seeded(&cx).await;
-        assert!(matches!(db.prepare_atomic_writes(vec![]), Err(WriteTxnError::Write(WriteError::EmptyBatch))));
+        assert!(matches!(
+            db.prepare_atomic_writes(vec![]),
+            Err(WriteTxnError::Write(WriteError::EmptyBatch))
+        ));
         let mut groups = edges();
         groups.push(WriteBatch::new(RelationId(3)));
-        assert!(matches!(db.prepare_atomic_writes(groups), Err(WriteTxnError::Write(WriteError::EmptyBatch))));
+        assert!(matches!(
+            db.prepare_atomic_writes(groups),
+            Err(WriteTxnError::Write(WriteError::EmptyBatch))
+        ));
         let prepared = db.prepare_atomic_writes(edges()).unwrap();
-        assert!(matches!(foreign.commit_prepared(&cx, prepared.clone()).await, Err(WriteError::ForeignPreparedWrite)));
-        db.commit_prepared(&cx, prepared).await.expect("owner still accepts unchanged definition");
+        assert!(matches!(
+            foreign.commit_prepared(&cx, prepared.clone()).await,
+            Err(WriteError::ForeignPreparedWrite)
+        ));
+        db.commit_prepared(&cx, prepared)
+            .await
+            .expect("owner still accepts unchanged definition");
         assert!(foreign.edges().unwrap().is_empty());
     });
     assert!(report.lab_test_passed(), "{report:?}");

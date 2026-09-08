@@ -31,7 +31,11 @@ impl Independence {
         reads: &BTreeSet<ElementId>,
         writes: &BTreeSet<ElementId>,
     ) -> Result<(), WriteTxnError> {
-        for (elements, previous) in [(reads, &self.writers), (writes, &self.readers), (writes, &self.writers)] {
+        for (elements, previous) in [
+            (reads, &self.writers),
+            (writes, &self.readers),
+            (writes, &self.writers),
+        ] {
             for element in elements {
                 if let Some(other) = previous.get(element) {
                     return Err(WriteTxnError::AtomicRelationConflict {
@@ -108,8 +112,8 @@ impl<V: Vfs + Clone> Database<V> {
         let mut coordinates = Vec::with_capacity(groups.len());
         let mut ordinal_offset = 0_u64;
         for (relation, batch) in groups {
-            let visits = u64::try_from(batch.len())
-                .map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?;
+            let visits =
+                u64::try_from(batch.len()).map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?;
             let next_offset = ordinal_offset
                 .checked_add(visits)
                 .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
@@ -135,17 +139,16 @@ impl<V: Vfs + Clone> Database<V> {
                 coordinates.push(coordinate);
             }
             dependencies.elements.extend(prepared.dependencies.elements);
-            dependencies.adjacency.extend(prepared.dependencies.adjacency);
+            dependencies
+                .adjacency
+                .extend(prepared.dependencies.adjacency);
             ordinal_offset = next_offset;
         }
         // Coordinate and row canonicalization remain owned by the existing
         // format; no new durable encoding or compatibility profile is invented.
-        let template = LogicalDeltaTemplate::build(
-            crate::intent_semantics_oid(),
-            [0_u8; 32],
-            coordinates,
-        )
-        .map_err(WriteError::Canonical)?;
+        let template =
+            LogicalDeltaTemplate::build(crate::intent_semantics_oid(), [0_u8; 32], coordinates)
+                .map_err(WriteError::Canonical)?;
         Ok(PreparedWrite {
             template,
             basis: self.snapshot.frontier,
@@ -178,16 +181,26 @@ mod tests {
         let edge_a = ElementId::Edge(EId(10));
         let edge_b = ElementId::Edge(EId(11));
         let mut check = Independence::default();
-        check.admit(RelationId(1), &[endpoint, edge_a].into(), &[edge_a].into()).unwrap();
-        check.admit(RelationId(2), &[endpoint, edge_b].into(), &[edge_b].into()).unwrap();
+        check
+            .admit(RelationId(1), &[endpoint, edge_a].into(), &[edge_a].into())
+            .unwrap();
+        check
+            .admit(RelationId(2), &[endpoint, edge_b].into(), &[edge_b].into())
+            .unwrap();
         let before_readers = check.readers.clone();
         let before_writers = check.writers.clone();
         let rejected = check.admit(RelationId(3), &[endpoint].into(), &[endpoint].into());
-        assert!(matches!(rejected, Err(WriteTxnError::AtomicRelationConflict { .. })));
+        assert!(matches!(
+            rejected,
+            Err(WriteTxnError::AtomicRelationConflict { .. })
+        ));
         assert_eq!(check.readers, before_readers);
         assert_eq!(check.writers, before_writers);
         let rejected = check.admit(RelationId(4), &[edge_a].into(), &BTreeSet::new());
-        assert!(matches!(rejected, Err(WriteTxnError::AtomicRelationConflict { .. })));
+        assert!(matches!(
+            rejected,
+            Err(WriteTxnError::AtomicRelationConflict { .. })
+        ));
         assert_eq!(check.readers, before_readers);
         assert_eq!(check.writers, before_writers);
     }

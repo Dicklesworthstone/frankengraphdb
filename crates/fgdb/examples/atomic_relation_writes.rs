@@ -20,7 +20,9 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     let txn_cx = contexts.txn();
     runtime.block_on(async move {
         let keys = DatabaseKeys::new(
-            [0xb1; 32], DatabaseSecurityNamespaceId([0xb2; 32]), [0xb3; 32],
+            [0xb1; 32],
+            DatabaseSecurityNamespaceId([0xb2; 32]),
+            [0xb3; 32],
         );
         let mut db = Database::open_memory(&commit, keys).await?;
         let knows = RelationId(1);

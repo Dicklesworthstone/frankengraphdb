@@ -361,14 +361,17 @@ impl PreparedGqlTemplate {
     ) -> Result<Self, GqlParameterError> {
         let statement = statement.into();
         let (prototype, occurrences) =
-            bind.bind_parameter_template(&statement).map_err(|error| match error {
-                BindError::Parse(error)
-                    if error.kind == ParseErrorKind::ExpectedToken("parameter name") =>
-                {
-                    GqlParameterError::InvalidParameterName { offset: error.offset }
-                }
-                other => GqlParameterError::Bind(other),
-            })?;
+            bind.bind_parameter_template(&statement)
+                .map_err(|error| match error {
+                    BindError::Parse(error)
+                        if error.kind == ParseErrorKind::ExpectedToken("parameter name") =>
+                    {
+                        GqlParameterError::InvalidParameterName {
+                            offset: error.offset,
+                        }
+                    }
+                    other => GqlParameterError::Bind(other),
+                })?;
         let mut schema: BTreeMap<String, GqlParameterSpec> = BTreeMap::new();
         let mut targets = Vec::new();
         for occurrence in &occurrences {

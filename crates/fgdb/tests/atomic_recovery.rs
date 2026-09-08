@@ -5,7 +5,9 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{CrashPoint, Database, DatabaseKeys, WriteBatch, WriteError, WriteTxnError};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 use std::path::Path;
 
 const R: RelationId = RelationId(1);
@@ -13,7 +15,11 @@ const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xa1; 32], DatabaseSecurityNamespaceId([0xa2; 32]), [0xa3; 32])
+    DatabaseKeys::new(
+        [0xa1; 32],
+        DatabaseSecurityNamespaceId([0xa2; 32]),
+        [0xa3; 32],
+    )
 }
 
 async fn seeded(cx: &CommitCx, path: &Path) -> Database {
@@ -41,22 +47,58 @@ fn marker_boundary_recovers_both_relations_or_neither_including_torn_tail() {
         let cx = contexts.commit();
         for (name, point, tear, committed) in [
             ("before", Some(CrashPoint::BeforeCapsule), false, false),
-            ("capsule", Some(CrashPoint::AfterCapsuleBeforeD1), false, false),
+            (
+                "capsule",
+                Some(CrashPoint::AfterCapsuleBeforeD1),
+                false,
+                false,
+            ),
             ("d1", Some(CrashPoint::AfterD1), false, false),
-            ("marker-survived", Some(CrashPoint::AfterMarkerBeforeD2), false, true),
-            ("marker-torn", Some(CrashPoint::AfterMarkerBeforeD2), true, false),
-            ("marker-synced", Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync), false, true),
+            (
+                "marker-survived",
+                Some(CrashPoint::AfterMarkerBeforeD2),
+                false,
+                true,
+            ),
+            (
+                "marker-torn",
+                Some(CrashPoint::AfterMarkerBeforeD2),
+                true,
+                false,
+            ),
+            (
+                "marker-synced",
+                Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync),
+                false,
+                true,
+            ),
             ("complete", None, false, true),
         ] {
-            let path = std::env::temp_dir().join(format!("fgdb-atomic-recovery-{}-{name}", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "fgdb-atomic-recovery-{}-{name}",
+                std::process::id()
+            ));
             let mut db = seeded(&cx, &path).await;
             let basis = db.frontier().unwrap();
             let pinned = db.read_session().unwrap();
             let prepared = db.prepare_atomic_writes(path_edges()).unwrap();
             let result = db.commit_prepared_with_crash(&cx, prepared, point).await;
-            assert_eq!(result.is_ok(), point.is_none(), "crash point must be reached: {name}");
-            if matches!(point, Some(CrashPoint::AfterMarkerBeforeD2 | CrashPoint::AfterMarkerFileSyncBeforeDirectorySync)) {
-                assert!(matches!(result, Err(WriteError::CommitOutcomeUnknown { .. })));
+            assert_eq!(
+                result.is_ok(),
+                point.is_none(),
+                "crash point must be reached: {name}"
+            );
+            if matches!(
+                point,
+                Some(
+                    CrashPoint::AfterMarkerBeforeD2
+                        | CrashPoint::AfterMarkerFileSyncBeforeDirectorySync
+                )
+            ) {
+                assert!(matches!(
+                    result,
+                    Err(WriteError::CommitOutcomeUnknown { .. })
+                ));
                 assert!(db.frontier().is_err());
             }
             assert!(pinned.edges().unwrap().is_empty());
@@ -67,9 +109,20 @@ fn marker_boundary_recovers_both_relations_or_neither_including_torn_tail() {
             let reopened = Database::open(&cx, &path, keys()).await.unwrap();
             let expected_seq = CommitSeq(basis.0 + u64::from(committed));
             assert_eq!(reopened.frontier().unwrap(), expected_seq, "{name}");
-            assert_eq!(reopened.edge(EId(10)).unwrap().is_some(), committed, "{name}");
-            assert_eq!(reopened.edge(EId(20)).unwrap().is_some(), committed, "{name}");
-            assert_eq!(reopened.delta_since(basis).unwrap().count(), usize::from(committed));
+            assert_eq!(
+                reopened.edge(EId(10)).unwrap().is_some(),
+                committed,
+                "{name}"
+            );
+            assert_eq!(
+                reopened.edge(EId(20)).unwrap().is_some(),
+                committed,
+                "{name}"
+            );
+            assert_eq!(
+                reopened.delta_since(basis).unwrap().count(),
+                usize::from(committed)
+            );
             let vertices = reopened.vertices().unwrap();
             let edges = reopened.edges().unwrap();
             let versions = reopened.element_versions().unwrap().clone();
@@ -112,10 +165,15 @@ fn grouped_birth_ordinals_versions_and_history_survive_compaction_and_rebuild() 
         let current = db.vertices().unwrap();
         // A later generation knows the retirement time of an older row;
         // compare snapshot-visible content rather than that future metadata.
-        let visible = |rows: Vec<fgdb::VertexRow>| rows.into_iter()
-            .map(|row| (row.vid, row.birth_ordinal, row.labels, row.props))
-            .collect::<Vec<_>>();
-        assert_eq!(visible(historical.clone()), visible(pinned.vertices().unwrap()));
+        let visible = |rows: Vec<fgdb::VertexRow>| {
+            rows.into_iter()
+                .map(|row| (row.vid, row.birth_ordinal, row.labels, row.props))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            visible(historical.clone()),
+            visible(pinned.vertices().unwrap())
+        );
         assert_ne!(historical, current);
         drop(db);
         let reopened = Database::open(&cx, &path, keys()).await.unwrap();
@@ -153,10 +211,22 @@ fn oversized_group_cannot_publish_an_independently_valid_group() {
         let mut r = WriteBatch::new(R);
         r.create_vertex(VId(99), vec![], vec![]);
         let mut s = WriteBatch::new(S);
-        s.set_vertex_property(VId(1), P, Some(CanonicalScalar::bytes(vec![0x41; 8000]).unwrap()));
-        s.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::bytes(vec![0x42; 9000]).unwrap()));
-        assert!(matches!(db.write_atomic(&cx, vec![r, s]).await,
-            Err(WriteTxnError::Write(WriteError::VertexStorageAdmission { .. }))));
+        s.set_vertex_property(
+            VId(1),
+            P,
+            Some(CanonicalScalar::bytes(vec![0x41; 8000]).unwrap()),
+        );
+        s.set_vertex_property(
+            VId(1),
+            PropertyKeyId(2),
+            Some(CanonicalScalar::bytes(vec![0x42; 9000]).unwrap()),
+        );
+        assert!(matches!(
+            db.write_atomic(&cx, vec![r, s]).await,
+            Err(WriteTxnError::Write(
+                WriteError::VertexStorageAdmission { .. }
+            ))
+        ));
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertex(VId(99)).unwrap().is_none());
         assert!(db.vertex(VId(1)).unwrap().unwrap().props.is_empty());

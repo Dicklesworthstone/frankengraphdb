@@ -68,17 +68,18 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let everyone = template.bind_parameters(&arguments(20)?)?;
         let older = template.bind_parameters(&arguments(40)?)?;
         assert_eq!(db.execute_prepared_query(&everyone)?, vec![VId(2), VId(3)]);
-        let limited = db.execute_prepared_query_limited(
-            &older,
-            GlaExecutionLimits::new(1_000, 1_000),
-        )?;
+        let limited =
+            db.execute_prepared_query_limited(&older, GlaExecutionLimits::new(1_000, 1_000))?;
         assert_eq!(limited.value, vec![VId(3)]);
         assert_eq!(
             db.execute_prepared_query_budgeted(&older, GqlExecutionBudget::new(2, 1))?
                 .value,
             limited.value,
         );
-        println!("age >= 40: {:?}; evaluator stats: {:?}", limited.value, limited.stats);
+        println!(
+            "age >= 40: {:?}; evaluator stats: {:?}",
+            limited.value, limited.stats
+        );
 
         let incorrect_type = GqlParameters::new()
             .with_uint64("min_age", 40)?
@@ -91,9 +92,15 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
 
         let artifact = db.execute_prepared_query_artifact(&older)?;
         let bytes = artifact.to_bytes();
-        assert_eq!(db.audit_prepared_query_artifact(&older, &bytes)?.rows(), &[VId(3)]);
+        assert_eq!(
+            db.audit_prepared_query_artifact(&older, &bytes)?.rows(),
+            &[VId(3)]
+        );
         let same_rows_different_binding = template.bind_parameters(&arguments(41)?)?;
-        assert_eq!(db.execute_prepared_query(&same_rows_different_binding)?, vec![VId(3)]);
+        assert_eq!(
+            db.execute_prepared_query(&same_rows_different_binding)?,
+            vec![VId(3)]
+        );
         assert!(matches!(
             db.audit_prepared_query_artifact(&same_rows_different_binding, &bytes),
             Err(GqlEvidenceAuditError::InputMismatch)
@@ -105,7 +112,10 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         db.write(&cx, change).await?;
         assert_eq!(db.execute_prepared_query(&older)?, vec![VId(2), VId(3)]);
         assert_eq!(pinned.execute_prepared_query(&older)?, vec![VId(3)]);
-        assert_eq!(db.audit_prepared_query_artifact(&older, &bytes)?.rows(), &[VId(3)]);
+        assert_eq!(
+            db.audit_prepared_query_artifact(&older, &bytes)?.rows(),
+            &[VId(3)]
+        );
         println!("OK: typed rebinding, limits, evidence replay, and pinned reads agree");
         Ok(())
     })
