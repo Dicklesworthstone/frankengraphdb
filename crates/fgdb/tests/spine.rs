@@ -1273,9 +1273,16 @@ fn oversized_property_refuses_before_commit_and_preserves_reopen() {
             Some(CanonicalScalar::bytes(vec![0x5a; 20_000]).expect("valid scalar")),
         );
         let result = db.write(cx, oversized).await;
-        assert!(matches!(result, Err(WriteError::VertexStorageAdmission { vid: VId(1), .. })), "unsupported row must refuse: {result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(WriteError::VertexStorageAdmission { vid: VId(1), .. })
+            ),
+            "unsupported row must refuse: {result:?}"
+        );
         assert_eq!(
-            db.frontier().expect("size refusal leaves the handle healthy"),
+            db.frontier()
+                .expect("size refusal leaves the handle healthy"),
             first,
             "size admission must precede durable commitment: {result:?}"
         );
@@ -1288,25 +1295,40 @@ fn oversized_property_refuses_before_commit_and_preserves_reopen() {
             } else {
                 vertices.set_vertex_property(VId(1), key, Some(oversized.clone()));
             }
-            assert!(matches!(db.prepare_write(vertices), Err(WriteError::VertexStorageAdmission { .. })));
+            assert!(matches!(
+                db.prepare_write(vertices),
+                Err(WriteError::VertexStorageAdmission { .. })
+            ));
             let mut edges = WriteBatch::new(KNOWS);
             if create {
                 edges.add_edge(EId(11), VId(1), VId(2), vec![(key, oversized)]);
             } else {
                 edges.set_edge_property(EId(10), key, Some(oversized));
             }
-            assert!(matches!(db.prepare_write(edges.clone()), Err(WriteError::EdgeStorageAdmission { .. })));
-            assert!(matches!(db.write(cx, edges).await, Err(WriteError::EdgeStorageAdmission { .. })));
+            assert!(matches!(
+                db.prepare_write(edges.clone()),
+                Err(WriteError::EdgeStorageAdmission { .. })
+            ));
+            assert!(matches!(
+                db.write(cx, edges).await,
+                Err(WriteError::EdgeStorageAdmission { .. })
+            ));
             assert_eq!(db.frontier().expect("healthy after each refusal"), first);
             assert_eq!(db.manifest().expect("unchanged manifest"), manifest);
         }
         assert_eq!(
-            db.vertex(VId(1)).expect("read after refusal").expect("seed").props,
+            db.vertex(VId(1))
+                .expect("read after refusal")
+                .expect("seed")
+                .props,
             vec![(key, CanonicalScalar::Int(1))]
         );
         let mut supported = WriteBatch::new(KNOWS);
         supported.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(2)));
-        assert_eq!(db.write(cx, supported).await.expect("reuse handle"), CommitSeq(2));
+        assert_eq!(
+            db.write(cx, supported).await.expect("reuse handle"),
+            CommitSeq(2)
+        );
         drop(db);
         let db = Database::open_rebuilding(cx, &dir, keys())
             .await
@@ -1334,8 +1356,13 @@ fn edge_property_byte_packing_preserves_history_across_compact_and_rebuild() {
         for eid in 10..13 {
             seed.add_edge(EId(eid), VId(1), VId(2), vec![(key, before.clone())]);
         }
-        let prepared = db.prepare_write(seed).expect("large supported rows prepare");
-        let first = db.commit_prepared(cx, prepared).await.expect("splits a 24 KB sidecar");
+        let prepared = db
+            .prepare_write(seed)
+            .expect("large supported rows prepare");
+        let first = db
+            .commit_prepared(cx, prepared)
+            .await
+            .expect("splits a 24 KB sidecar");
         let mut update = WriteBatch::new(KNOWS);
         update.set_vertex_property(VId(1), key, Some(after.clone()));
         for eid in 10..13 {
@@ -1352,7 +1379,9 @@ fn edge_property_byte_packing_preserves_history_across_compact_and_rebuild() {
         for row in &current {
             assert_eq!(row.props, vec![(key, after.clone())]);
         }
-        db.compact(cx).await.expect("compaction respects sidecar bytes");
+        db.compact(cx)
+            .await
+            .expect("compaction respects sidecar bytes");
         assert_eq!(db.edges_at(first).expect("compacted history"), historical);
         assert_eq!(db.edges().expect("compacted current"), current);
         drop(db);
@@ -1361,11 +1390,15 @@ fn edge_property_byte_packing_preserves_history_across_compact_and_rebuild() {
                 Database::open_rebuilding(cx, &dir, keys()).await
             } else {
                 Database::open(cx, &dir, keys()).await
-            }.expect("reopen supported property history");
+            }
+            .expect("reopen supported property history");
             assert_eq!(db.frontier().expect("frontier"), second);
             assert_eq!(db.edges_at(first).expect("reopened history"), historical);
             assert_eq!(db.edges().expect("reopened current"), current);
-            assert_eq!(db.vertex(VId(1)).expect("vertex").expect("live").props, vec![(key, after.clone())]);
+            assert_eq!(
+                db.vertex(VId(1)).expect("vertex").expect("live").props,
+                vec![(key, after.clone())]
+            );
         }
     });
 }

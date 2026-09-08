@@ -537,6 +537,20 @@ pub enum WriteError {
     /// [`WriteMismatchPolicy::AbortWrite`]. Nothing durable happened.
     CompareAndSetMismatch(Box<CompareAndSetMismatch>),
     Canonical(CanonicalError),
+    /// The final vertex row cannot fit the current stored-patch budget.
+    /// Refused during preparation, before Chronicle can consume a sequence.
+    /// Larger scalars remain canonical; this storage representation cannot
+    /// materialize them as an indivisible row.
+    VertexStorageAdmission {
+        vid: VId,
+        source: fgdb_strata::vertex::VertexPatchError,
+    },
+    /// The final edge property row cannot fit one stored sidecar. The handle
+    /// and its published frontier remain unchanged, as for vertex admission.
+    EdgeStorageAdmission {
+        eid: EId,
+        source: fgdb_strata::edge_props::EdgePropertyPatchError,
+    },
     /// [`WriteBatch::extend`] was handed a batch over a different relation
     /// (fgdb-w4-g1-txn-core-qpmg.2). The relation is the batch's template
     /// coordinate; concatenation must not silently re-home rows onto another
@@ -791,6 +805,12 @@ impl core::fmt::Display for WriteError {
                 mismatch.elem, mismatch.name
             ),
             Self::Canonical(error) => write!(f, "canonical form: {error}"),
+            Self::VertexStorageAdmission { vid, source } => {
+                write!(f, "vertex {vid:?} storage admission: {source}")
+            }
+            Self::EdgeStorageAdmission { eid, source } => {
+                write!(f, "edge {eid:?} storage admission: {source}")
+            }
             Self::MixedRelation { expected, found } => write!(
                 f,
                 "cannot extend a batch over {expected:?} with rows over {found:?}; \
@@ -3109,6 +3129,21 @@ impl<V: Vfs + Clone> Database<V> {
                 rows,
             }],
         )?;
+        // Admit final after-images, not transient evaluation-order values:
+        // set-then-remove and create-then-delete need no oversized durable
+        // row. Preparation is shared by ordinary, prepared and transaction
+        // writes. FCW protects these after-images across intervening commits;
+        // fixed-width lifetime fields cannot change their encoded size.
+        for (vid, (labels, props)) in &prefix_content {
+            fgdb_strata::vertex::admit_row_content(labels, props)
+                .map_err(|source| WriteError::VertexStorageAdmission { vid: *vid, source })?;
+        }
+        for (eid, props) in &prefix_edge_rows {
+            if !prefix_deleted_edges.contains(eid) {
+                fgdb_strata::edge_props::admitted_row_bytes(props)
+                    .map_err(|source| WriteError::EdgeStorageAdmission { eid: *eid, source })?;
+            }
+        }
         Ok(template)
     }
 

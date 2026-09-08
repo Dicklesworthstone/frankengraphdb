@@ -253,7 +253,10 @@ impl core::fmt::Display for VertexPatchError {
                 write!(f, "row {at} property value refused encoding: {error:?}")
             }
             Self::RowExceedsStorageLimit { bytes, limit } => {
-                write!(f, "vertex row needs {bytes} stored bytes; admission limit is {limit}")
+                write!(
+                    f,
+                    "vertex row needs {bytes} stored bytes; admission limit is {limit}"
+                )
             }
             Self::ScalarDecode { at, error } => {
                 write!(f, "row {at} property value refused decoding: {error:?}")
@@ -327,7 +330,8 @@ fn encode_content(
     props: &[(PropertyKeyId, CanonicalScalar)],
     out: &mut Vec<u8>,
 ) -> Result<(), VertexPatchError> {
-    let label_count = u32::try_from(labels.len()).expect("label count bounded by canonical admission");
+    let label_count =
+        u32::try_from(labels.len()).expect("label count bounded by canonical admission");
     out.extend_from_slice(&label_count.to_le_bytes());
     for label in labels {
         out.extend_from_slice(&label.0.to_le_bytes());

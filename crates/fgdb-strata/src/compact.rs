@@ -24,7 +24,10 @@
 //! policy. `compact` takes the floor as an argument and refuses to guess.
 
 use crate::AdjacencyEntry;
-use crate::edge_props::{BlockProps, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, PROPERTY_PATCH_HEADER_BYTES, admitted_row_bytes};
+use crate::edge_props::{
+    BlockProps, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, PROPERTY_PATCH_HEADER_BYTES,
+    admitted_row_bytes,
+};
 use crate::root::{RootError, collapse_edge_history};
 use fgdb_types::CommitSeq;
 use std::collections::BTreeMap;
@@ -511,7 +514,8 @@ mod tests {
             retained,
             usize::try_from(crate::MAX_BLOCK_ENTRIES).expect("fits"),
             usize::try_from(MAX_PROPERTY_PATCH_ROWS).expect("fits"),
-        ).expect("fits");
+        )
+        .expect("fits");
         assert_eq!(
             packed.len(),
             2,

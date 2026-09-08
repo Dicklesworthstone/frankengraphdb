@@ -160,7 +160,10 @@ impl core::fmt::Display for EdgePropertyPatchError {
                 write!(f, "row {at} property value refused encoding: {error:?}")
             }
             Self::RowExceedsStorageLimit { bytes, limit } => {
-                write!(f, "edge property row needs {bytes} stored bytes; admission limit is {limit}")
+                write!(
+                    f,
+                    "edge property row needs {bytes} stored bytes; admission limit is {limit}"
+                )
             }
             Self::ScalarDecode { at, error } => {
                 write!(f, "row {at} property value refused decoding: {error:?}")

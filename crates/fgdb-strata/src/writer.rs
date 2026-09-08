@@ -28,8 +28,8 @@
 //! partition-local writer.
 
 use crate::edge_props::{
-    EdgePropertyPatchError, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, encode_property_patch,
-    property_patch_id, admitted_row_bytes, PROPERTY_PATCH_HEADER_BYTES,
+    EdgePropertyPatchError, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, PROPERTY_PATCH_HEADER_BYTES,
+    admitted_row_bytes, encode_property_patch, property_patch_id,
 };
 use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
 use crate::vertex::{
@@ -1010,7 +1010,8 @@ impl BlockWriter {
             let mut chunks: Vec<Vec<PendingStatement>> = Vec::new();
             for statement in statements {
                 let propertied = usize::from(!statement.props.is_empty());
-                let row_bytes = admitted_row_bytes(&statement.props).map_err(WriteError::EdgeProps)?;
+                let row_bytes =
+                    admitted_row_bytes(&statement.props).map_err(WriteError::EdgeProps)?;
                 if !chunk.is_empty()
                     && (chunk.len() == entry_ceiling
                         || chunk_propertied + propertied > property_ceiling

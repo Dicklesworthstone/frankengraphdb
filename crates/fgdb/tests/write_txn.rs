@@ -98,15 +98,28 @@ fn property_storage_admission_checks_combined_transaction_rows() {
         );
         assert!(matches!(
             txn.write(&mut db, second),
-            Err(WriteTxnError::Write(WriteError::VertexStorageAdmission { vid: VId(1), .. }))
+            Err(WriteTxnError::Write(WriteError::VertexStorageAdmission {
+                vid: VId(1),
+                ..
+            }))
         ));
         assert_eq!(db.frontier().expect("healthy after refusal"), frontier);
-        txn.commit(&mut db, &commit).await.expect("first staged write survives refusal");
+        txn.commit(&mut db, &commit)
+            .await
+            .expect("first staged write survives refusal");
         assert_eq!(txn_cx.outstanding_obligations(), baseline);
-        assert_eq!(db.vertex(VId(1)).expect("read").expect("live").props, vec![(PROP, admitted.clone())]);
+        assert_eq!(
+            db.vertex(VId(1)).expect("read").expect("live").props,
+            vec![(PROP, admitted.clone())]
+        );
         drop(db);
-        let db = Database::open_rebuilding(&commit, &dir, keys()).await.expect("replay admitted transaction");
-        assert_eq!(db.vertex(VId(1)).expect("read").expect("live").props, vec![(PROP, admitted)]);
+        let db = Database::open_rebuilding(&commit, &dir, keys())
+            .await
+            .expect("replay admitted transaction");
+        assert_eq!(
+            db.vertex(VId(1)).expect("read").expect("live").props,
+            vec![(PROP, admitted)]
+        );
     });
 }
 
