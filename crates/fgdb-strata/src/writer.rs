@@ -29,7 +29,7 @@
 
 use crate::edge_props::{
     EdgePropertyPatchError, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, encode_property_patch,
-    property_patch_id,
+    property_patch_id, admitted_row_bytes, PROPERTY_PATCH_HEADER_BYTES,
 };
 use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
 use crate::vertex::{
@@ -997,26 +997,31 @@ impl BlockWriter {
         }
         let mut staged: Vec<StagedChunk> = Vec::with_capacity(by_descriptor.len());
         for statements in by_descriptor.into_values() {
-            // Cut a family at the entry-count ceiling OR the hosted-patch
-            // row ceiling, whichever binds first — the same pair of format
-            // limits `compact::pack_retained` uses. Early-seal may leave
+            // Cut a family at the entry-count, hosted-patch row, or stored
+            // byte ceiling, whichever binds first — the same limits
+            // `compact::pack_retained` uses. Early-seal may leave
             // more than MAX_BLOCK_ENTRIES pending so a later same-seq
             // delete can still fold away (fgdb-wlxe / fgdb-otcw).
             let entry_ceiling = usize::try_from(MAX_BLOCK_ENTRIES).unwrap_or(usize::MAX);
             let property_ceiling = usize::try_from(MAX_PROPERTY_PATCH_ROWS).unwrap_or(usize::MAX);
             let mut chunk: Vec<PendingStatement> = Vec::new();
             let mut chunk_propertied = 0usize;
+            let mut patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
             let mut chunks: Vec<Vec<PendingStatement>> = Vec::new();
             for statement in statements {
                 let propertied = usize::from(!statement.props.is_empty());
+                let row_bytes = admitted_row_bytes(&statement.props).map_err(WriteError::EdgeProps)?;
                 if !chunk.is_empty()
                     && (chunk.len() == entry_ceiling
-                        || chunk_propertied + propertied > property_ceiling)
+                        || chunk_propertied + propertied > property_ceiling
+                        || patch_bytes + row_bytes > crate::store::MAX_STORED_OBJECT_BYTES)
                 {
                     chunks.push(std::mem::take(&mut chunk));
                     chunk_propertied = 0;
+                    patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
                 }
                 chunk_propertied += propertied;
+                patch_bytes += row_bytes;
                 chunk.push(statement);
             }
             if !chunk.is_empty() {

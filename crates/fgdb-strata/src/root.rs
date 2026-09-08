@@ -321,6 +321,8 @@ pub enum RootError {
         blocks: usize,
         props: usize,
     },
+    /// A retained edge property row cannot be packed for publication.
+    PropertyPatch(crate::edge_props::EdgePropertyPatchError),
     /// A root names a block whose durable `partition_id` disagrees with the
     /// root's own partition (V5, fgdb-da6b) — a transplanted block, refused
     /// at admission rather than silently merged into a foreign partition.
@@ -481,6 +483,7 @@ impl core::fmt::Display for RootError {
                 f,
                 "a property column for {props} blocks cannot align with {blocks} blocks"
             ),
+            Self::PropertyPatch(error) => write!(f, "edge property packing: {error}"),
             Self::BlockPartitionMismatch {
                 at,
                 root_partition,

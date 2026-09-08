@@ -43,6 +43,8 @@ pub const PROPERTY_PATCH_OBJECT_KIND: u16 = 0x0580;
 /// would exceed it seals early, exactly like the entry-count ceiling.
 pub const MAX_PROPERTY_PATCH_ROWS: u32 = 255;
 
+pub(crate) const PROPERTY_PATCH_HEADER_BYTES: u64 = 10;
+
 /// The content identity of one immutable edge property patch — the same
 /// semantic type boundary as `DeltaBlockVersion` and `VertexPatchVersion`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -95,6 +97,9 @@ pub enum EdgePropertyPatchError {
     EmptyRow { at: usize },
     /// More rows than the locator column can address.
     ImplausibleRowCount { declared: u32 },
+    /// A single row cannot fit the store's current materialization budget.
+    /// This is resource admission, not a durable-format maximum.
+    RowExceedsStorageLimit { bytes: u64, limit: u64 },
     /// A property value refused canonical encoding.
     ScalarEncode {
         at: usize,
@@ -154,6 +159,9 @@ impl core::fmt::Display for EdgePropertyPatchError {
             Self::ScalarEncode { at, error } => {
                 write!(f, "row {at} property value refused encoding: {error:?}")
             }
+            Self::RowExceedsStorageLimit { bytes, limit } => {
+                write!(f, "edge property row needs {bytes} stored bytes; admission limit is {limit}")
+            }
             Self::ScalarDecode { at, error } => {
                 write!(f, "row {at} property value refused decoding: {error:?}")
             }
@@ -182,6 +190,22 @@ impl core::fmt::Display for EdgePropertyPatchError {
 }
 
 impl core::error::Error for EdgePropertyPatchError {}
+
+/// Canonically measure a row once for both sealing and compaction. A
+/// propertyless entry uses no patch row. Indivisible rows must fit alone.
+/// Returns the row bytes excluding the shared patch header. Write preparation
+/// uses the same admission before its effects can enter Chronicle.
+pub fn admitted_row_bytes(row: &EdgePropertyRow) -> Result<u64, EdgePropertyPatchError> {
+    if row.is_empty() {
+        return Ok(0);
+    }
+    let bytes = encode_property_patch(core::slice::from_ref(row))?.len() as u64;
+    let limit = crate::store::MAX_STORED_OBJECT_BYTES;
+    if bytes > limit {
+        return Err(EdgePropertyPatchError::RowExceedsStorageLimit { bytes, limit });
+    }
+    Ok(bytes - PROPERTY_PATCH_HEADER_BYTES)
+}
 
 fn validate_row(at: usize, row: &EdgePropertyRow) -> Result<(), EdgePropertyPatchError> {
     if row.is_empty() {

@@ -180,6 +180,8 @@ pub enum VertexPatchError {
     NonCanonicalProps { at: usize },
     /// More rows than this build will materialize from one patch.
     ImplausibleRowCount { declared: u32 },
+    /// An indivisible row exceeds current store admission, not the format.
+    RowExceedsStorageLimit { bytes: u64, limit: u64 },
     /// A property value refused canonical encoding.
     ScalarEncode { at: usize, error: ScalarEncodeError },
     /// A property value's bytes refused canonical decoding.
@@ -250,6 +252,9 @@ impl core::fmt::Display for VertexPatchError {
             Self::ScalarEncode { at, error } => {
                 write!(f, "row {at} property value refused encoding: {error:?}")
             }
+            Self::RowExceedsStorageLimit { bytes, limit } => {
+                write!(f, "vertex row needs {bytes} stored bytes; admission limit is {limit}")
+            }
             Self::ScalarDecode { at, error } => {
                 write!(f, "row {at} property value refused decoding: {error:?}")
             }
@@ -277,11 +282,66 @@ pub(crate) fn validate_patch_row(at: usize, row: &VertexRow) -> Result<(), Verte
             retired_at,
         });
     }
-    if row.labels.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+    validate_content(at, &row.labels, &row.props)
+}
+
+fn validate_content(
+    at: usize,
+    labels: &[LabelId],
+    props: &[(PropertyKeyId, CanonicalScalar)],
+) -> Result<(), VertexPatchError> {
+    if labels.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
         return Err(VertexPatchError::NonCanonicalLabels { at });
     }
-    if row.props.windows(2).any(|pair| pair[0].0.0 >= pair[1].0.0) {
+    if props.windows(2).any(|pair| pair[0].0.0 >= pair[1].0.0) {
         return Err(VertexPatchError::NonCanonicalProps { at });
+    }
+    Ok(())
+}
+
+/// Admit one final vertex after-image under the current store budget, before
+/// a commit sequence is assigned. Identity, birth and visibility occupy fixed
+/// width fields; content uses the very same encoder as the durable row.
+/// This resource limit does not narrow the canonical scalar or patch format.
+pub fn admit_row_content(
+    labels: &[LabelId],
+    props: &[(PropertyKeyId, CanonicalScalar)],
+) -> Result<(), VertexPatchError> {
+    validate_content(0, labels, props)?;
+    let mut content = Vec::new();
+    encode_content(0, labels, props, &mut content)?;
+    let bytes = (encode_patch(&[])?.len()
+        + VId(0).0.to_le_bytes().len()
+        + 3 * 0u64.to_le_bytes().len()
+        + content.len()) as u64;
+    let limit = crate::store::MAX_STORED_OBJECT_BYTES;
+    if bytes > limit {
+        return Err(VertexPatchError::RowExceedsStorageLimit { bytes, limit });
+    }
+    Ok(())
+}
+
+fn encode_content(
+    at: usize,
+    labels: &[LabelId],
+    props: &[(PropertyKeyId, CanonicalScalar)],
+    out: &mut Vec<u8>,
+) -> Result<(), VertexPatchError> {
+    let label_count = u32::try_from(labels.len()).expect("label count bounded by canonical admission");
+    out.extend_from_slice(&label_count.to_le_bytes());
+    for label in labels {
+        out.extend_from_slice(&label.0.to_le_bytes());
+    }
+    let prop_count = u32::try_from(props.len()).expect("prop count bounded by canonical admission");
+    out.extend_from_slice(&prop_count.to_le_bytes());
+    for (key, value) in props {
+        let encoded = value
+            .encode()
+            .map_err(|error| VertexPatchError::ScalarEncode { at, error })?;
+        out.extend_from_slice(&key.0.to_le_bytes());
+        let len = u32::try_from(encoded.len()).expect("scalar profile bounds its encoding");
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&encoded);
     }
     Ok(())
 }
@@ -335,24 +395,7 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
         out.extend_from_slice(&row.birth_ordinal.to_le_bytes());
         out.extend_from_slice(&row.created_at.0.to_le_bytes());
         out.extend_from_slice(&row.retired_at.map_or(0, |r| r.0).to_le_bytes());
-        let labels =
-            u32::try_from(row.labels.len()).expect("label count bounded by canonical admission");
-        out.extend_from_slice(&labels.to_le_bytes());
-        for label in &row.labels {
-            out.extend_from_slice(&label.0.to_le_bytes());
-        }
-        let props =
-            u32::try_from(row.props.len()).expect("prop count bounded by canonical admission");
-        out.extend_from_slice(&props.to_le_bytes());
-        for (key, value) in &row.props {
-            let encoded = value
-                .encode()
-                .map_err(|error| VertexPatchError::ScalarEncode { at, error })?;
-            out.extend_from_slice(&key.0.to_le_bytes());
-            let len = u32::try_from(encoded.len()).expect("scalar profile bounds its encoding");
-            out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(&encoded);
-        }
+        encode_content(at, &row.labels, &row.props, &mut out)?;
     }
     Ok(out)
 }
@@ -362,9 +405,9 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
 /// scalar encodings cannot drift from a second size formula. Sealing and
 /// compaction share this rule; neither changes the row bytes or their order.
 ///
-/// An individually oversized row is kept alone: splitting a logical row is
-/// not part of this format. The store still refuses it under its existing
-/// limit; this packing policy does not grant large-object admission.
+/// An individually oversized row is refused: splitting a logical row is
+/// not part of this format. Callers can therefore establish admission before
+/// committing effects that would require an unsupported representation.
 pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, VertexPatchError> {
     let header_bytes = encode_patch(&[])?.len();
     let mut packed = Vec::new();
@@ -372,6 +415,12 @@ pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, Ve
     let mut pending_bytes = header_bytes as u64;
     for row in rows {
         let single_bytes = encode_patch(core::slice::from_ref(&row))?.len();
+        if single_bytes as u64 > crate::store::MAX_STORED_OBJECT_BYTES {
+            return Err(VertexPatchError::RowExceedsStorageLimit {
+                bytes: single_bytes as u64,
+                limit: crate::store::MAX_STORED_OBJECT_BYTES,
+            });
+        }
         let row_bytes = (single_bytes - header_bytes) as u64;
         if !pending.is_empty()
             && (pending.len() == MAX_PATCH_ROWS as usize

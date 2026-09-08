@@ -24,7 +24,7 @@
 //! policy. `compact` takes the floor as an argument and refuses to guess.
 
 use crate::AdjacencyEntry;
-use crate::edge_props::{BlockProps, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS};
+use crate::edge_props::{BlockProps, EdgePropertyRow, MAX_PROPERTY_PATCH_ROWS, PROPERTY_PATCH_HEADER_BYTES, admitted_row_bytes};
 use crate::root::{RootError, collapse_edge_history};
 use fgdb_types::CommitSeq;
 use std::collections::BTreeMap;
@@ -146,7 +146,7 @@ fn compact_with_limit(
         .collect();
     let dropped = before_floor - retained.len();
 
-    let (packed, packed_props) = pack_retained(retained, max_entries, max_patch_rows);
+    let (packed, packed_props) = pack_retained(retained, max_entries, max_patch_rows)?;
     Ok(Compaction {
         blocks: packed,
         block_props: packed_props,
@@ -202,9 +202,9 @@ fn pack_retained(
     mut retained: Vec<(AdjacencyEntry, EdgePropertyRow)>,
     max_entries: usize,
     max_patch_rows: usize,
-) -> PackedBlocks {
+) -> Result<PackedBlocks, RootError> {
     if retained.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     debug_assert!(max_entries > 0, "the durable block capacity is nonzero");
     debug_assert!(max_patch_rows > 0, "the hosted patch capacity is nonzero");
@@ -227,12 +227,19 @@ fn pack_retained(
         // past the row ceiling would emit an unencodable block.
         let mut chunk: Vec<(AdjacencyEntry, EdgePropertyRow)> = Vec::new();
         let mut propertied = 0usize;
+        let mut patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
         for pair in pairs.drain(..) {
-            if chunk.len() == max_entries || (!pair.1.is_empty() && propertied == max_patch_rows) {
+            let row_bytes = admitted_row_bytes(&pair.1).map_err(RootError::PropertyPatch)?;
+            if chunk.len() == max_entries
+                || (!pair.1.is_empty() && propertied == max_patch_rows)
+                || patch_bytes + row_bytes > crate::store::MAX_STORED_OBJECT_BYTES
+            {
                 packed.push(seal_chunk(std::mem::take(&mut chunk)));
                 propertied = 0;
+                patch_bytes = PROPERTY_PATCH_HEADER_BYTES;
             }
             propertied += usize::from(!pair.1.is_empty());
+            patch_bytes += row_bytes;
             chunk.push(pair);
         }
         if !chunk.is_empty() {
@@ -254,7 +261,7 @@ fn pack_retained(
             // avoids a production panic if that construction is ever refactored.
             .unwrap_or((CommitSeq(0), CommitSeq(0)))
     });
-    packed.into_iter().unzip()
+    Ok(packed.into_iter().unzip())
 }
 
 /// One packed chunk becomes a block and, when any entry owns a row, the
@@ -420,7 +427,7 @@ mod tests {
             for max_entries in 1usize..=4 {
                 let expected_blocks = retained.len().div_ceil(max_entries);
                 let (packed, packed_props) =
-                    pack_retained(retained.clone(), max_entries, max_entries);
+                    pack_retained(retained.clone(), max_entries, max_entries).expect("fits");
 
                 assert_eq!(
                     packed.len(),
@@ -431,7 +438,7 @@ mod tests {
                 assert_packing_laws(&packed, max_entries);
                 assert_eq!(
                     pack_retained(retained.clone(), max_entries, max_entries),
-                    (packed, packed_props),
+                    Ok((packed, packed_props)),
                     "packing is not deterministic for {cardinality} identities at capacity \
                      {max_entries}"
                 );
@@ -457,7 +464,7 @@ mod tests {
                 (entry(dst), props)
             })
             .collect();
-        let (packed, packed_props) = pack_retained(retained, 5, 2);
+        let (packed, packed_props) = pack_retained(retained, 5, 2).expect("fits");
 
         assert_eq!(
             packed.len(),
@@ -505,7 +512,7 @@ mod tests {
             retained,
             usize::try_from(crate::MAX_BLOCK_ENTRIES).expect("fits"),
             usize::try_from(MAX_PROPERTY_PATCH_ROWS).expect("fits"),
-        );
+        ).expect("fits");
         assert_eq!(
             packed.len(),
             2,

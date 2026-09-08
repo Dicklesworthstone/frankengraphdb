@@ -1250,6 +1250,53 @@ fn vertex_patch_byte_packing_preserves_history_across_compact_and_rebuild() {
     });
 }
 
+/// A canonical scalar may exceed a persisted row's admission. Reject that
+/// write before the commit becomes authoritative, keeping the handle reusable.
+#[test]
+fn oversized_property_refuses_before_commit_and_preserves_reopen() {
+    let dir = scratch("oversized-property-admission");
+    under_lab(8236, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        seed.create_vertex(VId(1), vec![], vec![(key, CanonicalScalar::Int(1))]);
+        let first = db.write(cx, seed).await.expect("supported seed commits");
+        let manifest = db.manifest().expect("published manifest");
+
+        let mut oversized = WriteBatch::new(KNOWS);
+        oversized.set_vertex_property(
+            VId(1),
+            key,
+            Some(CanonicalScalar::bytes(vec![0x5a; 20_000]).expect("valid scalar")),
+        );
+        let result = db.write(cx, oversized).await;
+        assert!(result.is_err(), "unsupported row must refuse");
+        assert_eq!(
+            db.frontier().expect("size refusal leaves the handle healthy"),
+            first,
+            "size admission must precede durable commitment: {result:?}"
+        );
+        assert_eq!(db.manifest().expect("manifest remains callable"), manifest);
+        assert_eq!(
+            db.vertex(VId(1)).expect("read after refusal").expect("seed").props,
+            vec![(key, CanonicalScalar::Int(1))]
+        );
+        let mut supported = WriteBatch::new(KNOWS);
+        supported.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(2)));
+        assert_eq!(db.write(cx, supported).await.expect("reuse handle"), CommitSeq(2));
+        drop(db);
+        let db = Database::open_rebuilding(cx, &dir, keys())
+            .await
+            .expect("authoritative stream remains replayable");
+        assert_eq!(db.frontier().expect("reopened frontier"), CommitSeq(2));
+        assert_eq!(
+            db.vertex(VId(1)).expect("rebuilt row").expect("seed").props,
+            vec![(key, CanonicalScalar::Int(2))]
+        );
+    });
+}
+
 /// Compact keeps tombstones (floor 0). Spent must survive the
 /// from_published rebuild — recreate of a committed-deleted id is
 /// IdentitySpent, not a resurrection.
