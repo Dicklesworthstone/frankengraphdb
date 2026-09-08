@@ -75,6 +75,41 @@ fn int(value: i64) -> CanonicalScalar {
     CanonicalScalar::Int(value)
 }
 
+#[test]
+fn property_storage_admission_checks_combined_transaction_rows() {
+    under_lab(0x7a12, |contexts| async move {
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let dir = scratch("property-storage-admission");
+        let mut db = seeded(&commit, &dir).await;
+        let frontier = db.frontier().expect("seed frontier");
+        let baseline = txn_cx.outstanding_obligations();
+        let mut txn = db.begin(&txn_cx).expect("begin");
+        let admitted = CanonicalScalar::bytes(vec![0x41; 8_000]).expect("valid scalar");
+        let mut first = WriteBatch::new(KNOWS);
+        first.set_vertex_property(VId(1), PROP, Some(admitted.clone()));
+        txn.write(&mut db, first).expect("one supported row stages");
+
+        let mut second = WriteBatch::new(KNOWS);
+        second.set_vertex_property(
+            VId(1),
+            PropertyKeyId(8),
+            Some(CanonicalScalar::bytes(vec![0x42; 9_000]).expect("valid scalar")),
+        );
+        assert!(matches!(
+            txn.write(&mut db, second),
+            Err(WriteTxnError::Write(WriteError::VertexStorageAdmission { vid: VId(1), .. }))
+        ));
+        assert_eq!(db.frontier().expect("healthy after refusal"), frontier);
+        txn.commit(&mut db, &commit).await.expect("first staged write survives refusal");
+        assert_eq!(txn_cx.outstanding_obligations(), baseline);
+        assert_eq!(db.vertex(VId(1)).expect("read").expect("live").props, vec![(PROP, admitted.clone())]);
+        drop(db);
+        let db = Database::open_rebuilding(&commit, &dir, keys()).await.expect("replay admitted transaction");
+        assert_eq!(db.vertex(VId(1)).expect("read").expect("live").props, vec![(PROP, admitted)]);
+    });
+}
+
 /// Seed one live vertex carrying `PROP = 0`, so every conflict below is a
 /// pure property-family update — the shape only FCW can refuse.
 async fn seeded(cx: &fgdb_types::context::CommitCx, dir: &PathBuf) -> Database {
