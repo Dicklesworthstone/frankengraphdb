@@ -87,7 +87,8 @@ impl WriteTxn {
                 }))
             }, limits)
         } else {
-            let rows: std::collections::BTreeMap<VId, VertexRow> = self.vertices(database)
+            let rows: std::collections::BTreeMap<VId, VertexRow> = self
+                .vertices_for_scan(database, query.plan().src_label)
                 .map_err(fgdb_gql::GlaExecutionError::Source)?
                 .into_iter().map(|row| (row.vid, row)).collect();
             logical.execute_with_limits(rows.keys().copied(), [], |vid, predicates| {

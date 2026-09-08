@@ -82,6 +82,17 @@ impl WriteTxn {
         &self,
         database: &Database<V>,
     ) -> Result<Vec<VertexRow>, WriteTxnError> {
+        self.vertices_for_scan(database, None)
+    }
+
+    /// Read the same complete overlay for evaluation and budget accounting,
+    /// but scope insertion dependencies to a node plan's required label.
+    /// Existing rows remain conservatively observed, including filtered rows.
+    fn vertices_for_scan<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        label: Option<LabelId>,
+    ) -> Result<Vec<VertexRow>, WriteTxnError> {
         self.ensure_database(database)?;
 
         let mut basis: std::collections::BTreeMap<VId, VertexRow> = database
@@ -89,7 +100,11 @@ impl WriteTxn {
             .into_iter()
             .map(|row| (row.vid, row))
             .collect();
-        self.scanned_vertices.set(true);
+        if let Some(label) = label {
+            self.scanned_vertex_labels.borrow_mut().insert(label);
+        } else {
+            self.scanned_vertices.set(true);
+        }
         let mut vids: std::collections::BTreeSet<VId> = basis.keys().copied().collect();
         for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
             match pending {

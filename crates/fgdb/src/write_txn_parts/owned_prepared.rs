@@ -247,7 +247,8 @@ impl WriteTxn {
         let snapshot_records = if query.plan().relation.is_some() {
             self.edges(database).map(|rows| count_as_u64(rows.len()))
         } else {
-            self.vertices(database).map(|rows| count_as_u64(rows.len()))
+            self.vertices_for_scan(database, query.plan().src_label)
+                .map(|rows| count_as_u64(rows.len()))
         }.map_err(fgdb_gql::BudgetedGqlError::Execution)?;
         budget.check(fgdb_gql::GqlBudgetDimension::SnapshotRecords, snapshot_records)
             .map_err(fgdb_gql::BudgetedGqlError::Budget)?;

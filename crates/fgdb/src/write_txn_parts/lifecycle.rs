@@ -13,6 +13,7 @@ impl WriteTxn {
             prepared: None,
             read_set: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             match_expansions: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            scanned_vertex_labels: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             scanned_vertices: std::cell::Cell::new(false),
             scanned_edges: std::cell::Cell::new(false),
             pin: Some(pin),

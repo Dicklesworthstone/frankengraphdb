@@ -1471,7 +1471,7 @@ fn legacy_oversized_property_history_is_preserved_on_rebuild_refusal() {
                     result,
                     Err(OpenError::Rebuild(RebuildError::Fold {
                         commit_seq: 1,
-                        error: fgdb_strata::writer::WriteError::Vertex(
+                        error: fgdb_strata::writer::WriteError::Patch(
                             fgdb_strata::vertex::VertexPatchError::RowExceedsStorageLimit { .. }
                         ),
                     }))

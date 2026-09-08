@@ -137,11 +137,13 @@ impl WriteTxn {
     ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, ReadError> {
         let read_set = self.read_set.borrow();
         let match_expansions = self.match_expansions.borrow();
+        let scanned_vertex_labels = self.scanned_vertex_labels.borrow();
         let mutation_footprint = self.mutation_footprint();
         let scanned_vertices = self.scanned_vertices.get();
         let scanned_edges = self.scanned_edges.get();
         if read_set.is_empty()
             && match_expansions.is_empty()
+            && scanned_vertex_labels.is_empty()
             && mutation_footprint.is_empty()
             && !scanned_vertices
             && !scanned_edges
@@ -159,9 +161,20 @@ impl WriteTxn {
             for coordinate in batch.coordinate_entries() {
                 for row in &coordinate.rows {
                     match row {
-                        fgdb_delta_types::DeltaRow::CreateVertex { vid, .. }
-                            if scanned_vertices =>
+                        fgdb_delta_types::DeltaRow::CreateVertex { vid, labels, .. }
+                            if scanned_vertices
+                                || labels
+                                    .iter()
+                                    .any(|label| scanned_vertex_labels.contains(label)) =>
                         {
+                            return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
+                        }
+                        fgdb_delta_types::DeltaRow::LabelMembership {
+                            vid,
+                            label,
+                            after: true,
+                            ..
+                        } if scanned_vertex_labels.contains(label) => {
                             return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
                         }
                         fgdb_delta_types::DeltaRow::CreateEdge {

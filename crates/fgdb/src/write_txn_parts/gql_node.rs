@@ -15,7 +15,7 @@ impl WriteTxn {
         // existing transaction path. Predicate evaluation reuses those exact
         // rows instead of replaying the basis for each property comparison.
         let rows: std::collections::BTreeMap<VId, VertexRow> = self
-            .vertices(database)?
+            .vertices_for_scan(database, plan.src_label)?
             .into_iter()
             .map(|row| (row.vid, row))
             .collect();

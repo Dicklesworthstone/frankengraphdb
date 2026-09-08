@@ -3,7 +3,7 @@ use crate::{
     VertexRow, WriteBatch, WriteError,
 };
 use asupersync::fs::Vfs;
-use fgdb_delta_types::{ElementId, RelationId};
+use fgdb_delta_types::{ElementId, LabelId, RelationId};
 use fgdb_strata::AdjacencyEntry;
 use fgdb_types::{
     Acquired, CanonicalScalar, CommitCx, CommitSeq, EId, ObligationAcquireError, ObligationId,
@@ -122,9 +122,11 @@ pub struct WriteTxn {
     prepared: Option<PreparedWrite>,
     read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
     match_expansions: std::cell::RefCell<std::collections::BTreeSet<(VId, RelationId)>>,
+    scanned_vertex_labels: std::cell::RefCell<std::collections::BTreeSet<LabelId>>,
     /// A scan depends on absent rows too, even if it returned nothing or its
-    /// result was discarded by a budget check. These witnesses are deliberately
-    /// table-wide until predicate/range SSI witnesses are implemented.
+    /// result was discarded by a budget check. Raw scans remain table-wide;
+    /// labelled node scans separately retain their required label. Neither
+    /// witness models arbitrary property predicates or full predicate SSI.
     scanned_vertices: std::cell::Cell<bool>,
     scanned_edges: std::cell::Cell<bool>,
     pin: Option<PurposeObligation<Acquired>>,
