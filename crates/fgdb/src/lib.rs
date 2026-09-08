@@ -55,11 +55,12 @@
 //! slice is to be ABSORBED into it — not left beside it as a second API.
 //!
 //! **Deliberately absent**, each because it belongs to a workstream that has not
-//! landed: sessions and prepared statements; any query language; the explicit
-//! transaction ownership contract, its epoch guard and reattach/renew/expiry
+//! landed: the final parameterized session protocol; full GQL; the explicit
+//! transaction ownership epoch guard and reattach/renew/expiry
 //! (`fgdb-w10-txn-ownership-eab`); capability narrowing and secure views; result
 //! stream lifecycle; multiple graphs, branches or partitions; and the server and
-//! CLI postures.
+//! CLI postures. Bounded MATCH, owned preparation, pinned views and staged
+//! transactions are implemented subsets. All MATCH reads lower through GLA.
 //!
 //! **Thin in SURFACE, real in MECHANISM.** What is here is not a model of the
 //! database: [`Database::write`] goes through `CommitCoordinator::commit`, which
@@ -118,6 +119,7 @@ pub use fcw::FirstCommitterWinsValidator;
 mod gql_cert;
 mod gql_exec;
 mod memvfs;
+mod prepared_write;
 mod write_txn;
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
@@ -491,6 +493,9 @@ pub enum WriteError {
     /// A prepared template belongs to a different opened handle lifetime.
     /// Equal keys, paths or commit sequences cannot transfer its ownership.
     ForeignPreparedWrite,
+    /// The complete committed suffix needed to validate a prepared basis is
+    /// unavailable. Never interpret a missing prefix as no conflicting writes.
+    PreparedHistory(IndexError),
     /// The batch was empty. Refused rather than committed as a no-op: an empty
     /// commit consumes a sequence and publishes a marker, and a caller that did
     /// that by accident should be told.
@@ -754,6 +759,9 @@ impl core::fmt::Display for WriteError {
             Self::ForeignPreparedWrite => {
                 f.write_str("prepared write belongs to a different database handle")
             }
+            Self::PreparedHistory(error) => {
+                write!(f, "prepared-write conflict history is unavailable: {error}")
+            }
             Self::EmptyBatch => write!(f, "an empty batch consumes a commit sequence for nothing"),
             Self::UnknownEdge { eid } => {
                 write!(f, "no live version of {eid:?} to delete")
@@ -902,68 +910,6 @@ impl core::error::Error for GqlError {
     }
 }
 
-/// The pinned MATCH kernel over a SUPPLIED expansion
-/// (fgdb-w4-g1-txn-core-qpmg.4): `WriteTxn::execute_gql` runs it with the
-/// staged-overlay-plus-basis view, which `gql_exec::execute`'s live-fold
-/// `&Database` binding cannot express. Still plan-only — a [`BoundPlan`] in,
-/// no parse-shaped input — and still the CGSE row contract: projected vertex
-/// identifiers ascending, deduplicated.
-///
-/// Kept behaviorally identical to `gql_exec::execute`'s expansion loop (that
-/// entry remains the autocommit product path); the pairing is a mirror
-/// contract like `touched_elements` — if one kernel's row discipline
-/// changes, both must.
-pub(crate) fn execute_bound_plan_over<E>(
-    plan: &BoundPlan,
-    sources: impl IntoIterator<Item = VId>,
-    mut expand: E,
-) -> Result<Vec<VId>, ReadError>
-where
-    E: FnMut(VId, RelationId) -> Result<Vec<VId>, ReadError>,
-{
-    let mut rows = Vec::new();
-    // Node-only plans never reach the edge kernel — their scan face answers
-    // directly — so a relationless plan here fails closed to no rows rather
-    // than inventing an all-relations expansion.
-    let Some(relation) = plan.relation else {
-        return Ok(rows);
-    };
-    for src in sources {
-        let destinations = expand(src, relation)?;
-        match plan.projection {
-            fgdb_gql::ReturnProjection::Source if !destinations.is_empty() => rows.push(src),
-            fgdb_gql::ReturnProjection::Destination => rows.extend(destinations),
-            fgdb_gql::ReturnProjection::Hop2Destination => rows.extend(destinations),
-            fgdb_gql::ReturnProjection::Source => {}
-        }
-    }
-    rows.sort_unstable();
-    rows.dedup();
-    Ok(apply_limit(plan, rows))
-}
-
-/// SKIP n (fgdb-w5-parsers-nje.13) drops rows only AFTER CGSE sort+dedup.
-/// A missing skip or SKIP 0 is the identity; an oversized skip yields no rows.
-pub(crate) fn apply_skip(plan: &BoundPlan, mut rows: Vec<VId>) -> Vec<VId> {
-    if let Some(skip) = plan.skip {
-        let n = skip.min(rows.len() as u64) as usize;
-        rows.drain(..n);
-    }
-    rows
-}
-
-/// Apply SKIP, then LIMIT, after CGSE sort+dedup. LIMIT 1 therefore keeps
-/// the smallest projected VId remaining after SKIP, never a different match
-/// set. Parser refuses LIMIT 0, so Some always means a positive cap.
-pub(crate) fn apply_limit(plan: &BoundPlan, rows: Vec<VId>) -> Vec<VId> {
-    let mut rows = apply_skip(plan, rows);
-    if let Some(limit) = plan.limit {
-        let n = limit.min(usize::MAX as u64) as usize;
-        rows.truncate(n);
-    }
-    rows
-}
-
 /// What a failed CompareAndSet means on a [`WriteBatch`].
 ///
 /// WriteBatch is one atomic write, not a multi-statement transaction.
@@ -1058,6 +1004,7 @@ pub struct PreparedWrite {
     template: LogicalDeltaTemplate,
     basis: CommitSeq,
     handle_owner: Arc<()>,
+    dependencies: prepared_write::PreparedDependencies,
 }
 
 impl PreparedWrite {
@@ -2567,54 +2514,17 @@ impl<V: Vfs + Clone> Database<V> {
         .map_err(WriteError::SnapshotPin)
     }
 
-    /// Build a batch's canonical template against the CURRENT live snapshot
-    /// and retain it for a later [`Database::commit_prepared`], without
-    /// committing anything or advancing any state.
-    ///
-    /// Two batches prepared back to back therefore share one basis: the
-    /// second's preflights and before-images are derived from the same fold
-    /// the first saw, not from the first's effects. That is exactly the
-    /// "two concurrent writers" shape the single-writer handle can express
-    /// (fgdb-fcw-writebatch-6cxf) — and what makes first-committer-wins
-    /// decidable at commit time: the first prepared batch to commit wins, an
-    /// overlapping second aborts with [`WriteError::FirstCommitterWins`],
-    /// and a disjoint second commits.
+    /// Prepare one immutable canonical template and retain the compact
+    /// dependencies that its evaluation observed, including conditional no-ops.
+    /// This performs no publication and never silently rebases an older write.
     pub fn prepare_write(&mut self, batch: WriteBatch) -> Result<PreparedWrite, WriteError> {
-        self.ensure_writable()?;
-        let template = self.build_write_template(batch)?;
-        Ok(PreparedWrite {
-            template,
-            basis: self.snapshot.frontier,
-            handle_owner: Arc::clone(&self.handle_owner),
-        })
+        self.prepare_write_checked(batch)
     }
 
-    /// Commit a batch prepared earlier by [`Database::prepare_write`].
-    ///
-    /// The template's rows are committed EXACTLY as prepared — no rebuild, so
-    /// the second of two same-basis prepares never silently absorbs the
-    /// first's fold. Which validator instance judges the draft is this
-    /// method's basis statement:
-    ///
-    /// - a prepared batch whose basis is still the current frontier is in the
-    ///   same position as an ordinary [`Database::write`] — nothing committed
-    ///   since its snapshot — so a fresh first-committer-wins validator
-    ///   (empty write-set memory) is installed, and this commit seeds it with
-    ///   the batch's own write-set;
-    /// - a prepared batch whose basis went stale keeps the ACCUMULATED
-    ///   validator, whose memory is precisely the write-sets committed since
-    ///   the last basis-current commit — i.e. since this batch's snapshot —
-    ///   so an overlap with any of those first committers aborts as
-    ///   [`WriteError::FirstCommitterWins`], and a disjoint batch commits.
-    ///
-    /// No-claim boundary (deliberate, bounded slice — not SSI): the
-    /// accumulated memory reaches back exactly to the last basis-current
-    /// commit. Interleaving an ordinary `write` BETWEEN a prepare and its
-    /// stale commit resets that memory at the write's own (current) basis, so
-    /// conflicts against commits older than the reset are not re-detected.
-    /// The canonical prepare/prepare/commit/commit group the bead specifies
-    /// is exact; closing the general interleaving needs a basis-seeded
-    /// validator constructor and is named in the bead thread.
+    /// Commit exactly the template prepared at its original basis. Validation
+    /// reconstructs the complete intervening committed history for this write;
+    /// unrelated ordinary writes cannot erase its conflict memory. A retired
+    /// history prefix is a typed refusal, not permission to commit stale data.
     pub async fn commit_prepared(
         &mut self,
         cx: &CommitCx,
@@ -2623,15 +2533,9 @@ impl<V: Vfs + Clone> Database<V> {
         self.commit_prepared_with_crash(cx, prepared, None).await
     }
 
-    /// [`Database::commit_prepared`], optionally stopping the durable
-    /// protocol at `crash_at` (fgdb-writetxn-crash-k6cw). The ordinary path
-    /// delegates HERE with no crash point — one code path, not a twin
-    /// protocol — for the same crash-matrix reason `write_with_crash` and
-    /// Chronicle's `commit_with_crash` are public: the crash path must be
-    /// the SAME code as the durable path up to the stopping instant. The
-    /// basis-picked FCW validator discipline is unchanged: a basis-current
-    /// prepared batch installs a fresh validator, a stale one keeps the
-    /// accumulated write-set memory.
+    /// The same prepared-write validation and publication path with an optional
+    /// production crash point. Foreign-owner and missing-history refusals occur
+    /// before installing a validator or changing the handle's durability state.
     #[doc(hidden)]
     pub async fn commit_prepared_with_crash(
         &mut self,
@@ -2639,16 +2543,7 @@ impl<V: Vfs + Clone> Database<V> {
         prepared: PreparedWrite,
         crash_at: Option<CrashPoint>,
     ) -> Result<CommitSeq, WriteError> {
-        if !Arc::ptr_eq(&self.handle_owner, &prepared.handle_owner) {
-            return Err(WriteError::ForeignPreparedWrite);
-        }
-        self.ensure_writable()?;
-        if prepared.basis == self.snapshot.frontier {
-            self.coordinator
-                .set_validator(Box::new(FirstCommitterWinsValidator::default()));
-        }
-        self.commit_template(cx, prepared.template, crash_at, None, None)
-            .await
+        self.commit_prepared_checked(cx, prepared, crash_at).await
     }
 
     /// Commit a batch, optionally stopping the durable protocol at `crash_at`.
@@ -2719,13 +2614,9 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<CommitSeq, WriteError> {
         self.ensure_writable()?;
         let template = self.build_write_template(batch)?;
-        // FCW basis discipline (fgdb-fcw-writebatch-6cxf): this batch's rows
-        // were derived against the LIVE fold under a single-writer handle, so
-        // its basis IS the current frontier — nothing can have committed past
-        // it. Installing a fresh validator (empty write-set memory) states
-        // exactly that: a sequential write is never a first-committer-wins
-        // abort. A prepared batch whose basis went stale deliberately does
-        // NOT reinstall — see [`Database::commit_prepared`].
+        // An immediate write was prepared under this same exclusive borrow at
+        // the current frontier. Prepared writes instead reconstruct their own
+        // committed suffix in prepared_write before choosing the validator.
         self.coordinator
             .set_validator(Box::new(FirstCommitterWinsValidator::default()));
         self.commit_template(
@@ -4268,26 +4159,10 @@ fn statement_successor(previous: Option<ObjectId>, transcript: &[u8]) -> ObjectI
     ObjectId(hasher.finalize().0)
 }
 
-/// The elements one row touches for the version chain — deletes touch to
-/// REMOVE, everything else to advance; the cascade names its members.
-/// The endpoint vertices whose ADJACENCY a row changes, in the same
-/// [`ElementId`] vocabulary as [`touched_elements`] — the phantom side of the
-/// read-set intersection (fgdb-w4-g1-txn-core-qpmg.7).
-///
-/// Deliberately a SIBLING of `touched_elements`, never merged into it: that
-/// walk is the write-set law's conflict vocabulary (FG-LAW-FCW-01, mirrored
-/// in `fcw.rs`) and must keep meaning "this element's own row changed". A
-/// `CreateEdge` touches only its fresh `EId` there — an id no reader can
-/// have observed — yet it changes what a MATCH expansion from `src` (and
-/// toward `dst`) answers, which is exactly the phantom a read-set of
-/// observed elements would otherwise miss. Only `CreateEdge` emits here:
-/// every other row kind already intersects through `touched_elements`
-/// (deletes touch the traversed edge ids and cascade vids readers recorded).
-///
-/// No-claim: a commit that creates a NEW vertex and an edge from it in one
-/// batch is a scan-level phantom no `ElementId` read-set can express;
-/// catching it needs predicate/range reads and is deliberately out of this
-/// bounded slice.
+/// Endpoint insertion witnesses complement the element write-set vocabulary.
+/// Existing edge deletions/updates are witnessed by observed EIds; a newly
+/// inserted edge has no previously observable EId, so both endpoints matter.
+/// Table-scan phantoms are separately tracked by WriteTxn's scan witnesses.
 pub(crate) fn adjacency_endpoints(
     row: &DeltaRow,
     endpoints: &mut std::collections::BTreeSet<ElementId>,

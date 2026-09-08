@@ -1,37 +1,22 @@
-//! The product MATCH executors, all riding ONE kernel
-//! (fgdb-gql-one-kernel-7y17): live, as-of, and the transaction overlay
-//! (`write_txn.rs`) each hand `crate::execute_bound_plan_over` their own
-//! source set and expansion, so the row discipline — projected vertex IDs
-//! ascending, deduplicated — has exactly one owner and cannot drift between
-//! faces. The parser normalizes either arrow spelling into edge source and
-//! destination variables, so execution always builds source-to-destinations
-//! adjacency in one pass over the admitted edge table.
+//! Snapshot admission for the one bounded GLA executor.
 //!
-//! A two-hop pattern (fgdb-gql-two-hop-8pfw) composes TWO per-relation
-//! adjacency maps, both filled by the same single scan of the admitted edge
-//! table — never a neighbours scan, never a second table read. The expansion
-//! handed to the kernel is projection-shaped: hop-2 destinations for the
-//! path's far end, the intermediates that continue for the via variable, and
-//! either serves the source projection since the kernel only asks "did this
-//! source reach anything".
+//! Text, bound, owned-prepared, historical, pinned and limited reads converge
+//! here. Traversal, predicates, projection, distinct ordering and pagination
+//! belong to fgdb-gql's lowered operators, never a second inline MATCH engine.
 
 use crate::{
     Database, EdgeRecord, EmbeddedReadView, GqlCertificate, GqlError, GqlPlanCertificate,
     ReadError, VertexRow,
 };
 use asupersync::fs::Vfs;
-use fgdb_delta_types::{LabelId, RelationId};
-use fgdb_gql::{BoundPlan, EdgeDirection, RelationBind, ReturnProjection};
-use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+use fgdb_delta_types::RelationId;
+use fgdb_gql::algebra::{GlaPlan, VertexPredicate};
+use fgdb_gql::{BoundPlan, GlaExecution, GlaExecutionError, GlaExecutionLimits, RelationBind};
+use fgdb_types::{CommitSeq, VId};
 use std::collections::BTreeMap;
 
-/// The minimal immutable read contract consumed by the bounded GQL kernel.
-///
-/// Keeping this trait inside the composition crate makes the parser/executor
-/// boundary explicit while allowing both the live database handle and an
-/// already-pinned [`EmbeddedReadView`] to share one execution body. It is not
-/// a public storage abstraction and carries no authorization or retention
-/// semantics beyond those of the implementing read surface.
+/// Immutable read contract. The implementing surface owns retention and handle
+/// fences; this trait does not manufacture authorization or a storage backend.
 pub(crate) trait GqlSnapshotReader {
     fn gql_vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError>;
     fn gql_vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError>;
@@ -74,16 +59,8 @@ fn bind_plan(statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Parse and bind one reusable immutable plan for the bounded GQL slice.
-    ///
-    /// The returned [`BoundPlan`] is the executor-ready prepared form: later
-    /// executions do not parse or bind again. This is deliberately a plan API,
-    /// not W10's final parameterized `PreparedStatement` protocol.
-    pub fn prepare_gql_plan(
-        &self,
-        statement: &str,
-        bind: &RelationBind,
-    ) -> Result<BoundPlan, GqlError> {
+    /// Prepare the bounded language without retaining mutable parser state.
+    pub fn prepare_gql_plan(&self, statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError> {
         bind_plan(statement, bind)
     }
 
@@ -93,36 +70,17 @@ impl<V: Vfs + Clone> Database<V> {
         self.execute_prepared_gql_at(plan, as_of)
     }
 
-    /// Execute an already prepared plan at one exact historical sequence.
-    ///
-    /// This is the prepared-plan twin of [`Database::execute_gql_at`]: no
-    /// parsing or binding occurs, and the ordinary `_at` read path owns the
-    /// typed future-frontier and fenced-handle refusals.
-    pub fn execute_prepared_gql_at(
-        &self,
-        plan: &BoundPlan,
-        as_of: CommitSeq,
-    ) -> Result<Vec<VId>, GqlError> {
+    /// Execute at an exact retained sequence, preserving ordinary read refusals.
+    pub fn execute_prepared_gql_at(&self, plan: &BoundPlan, as_of: CommitSeq) -> Result<Vec<VId>, GqlError> {
         execute_at(plan, self, as_of).map_err(GqlError::Read)
     }
 
-    /// Execute and certify an already prepared plan at the same live frontier.
-    ///
-    /// The certificate binds the complete current `BoundPlan` transcript and
-    /// snapshot. It does not attest result rows or runtime cost.
-    pub fn execute_prepared_gql_certified(
-        &self,
-        plan: &BoundPlan,
-    ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
+    /// Execute and certify at the same live frontier. No certificate on failure.
+    pub fn execute_prepared_gql_certified(&self, plan: &BoundPlan) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
         let as_of = self.frontier().map_err(GqlError::Read)?;
         self.execute_prepared_gql_certified_at(plan, as_of)
     }
 
-    /// Execute and plan-certify one prepared query at `as_of`.
-    ///
-    /// Rows are produced before evidence is minted. A refused read therefore
-    /// returns only its typed [`GqlError::Read`] and no certificate. On success,
-    /// execution and the certificate name the same caller-selected sequence.
     pub fn execute_prepared_gql_certified_at(
         &self,
         plan: &BoundPlan,
@@ -132,76 +90,39 @@ impl<V: Vfs + Clone> Database<V> {
         Ok((rows, crate::gql_cert::certify(plan, as_of)))
     }
 
-    /// Acquire an immutable read session pinned to the current published root.
-    ///
-    /// The returned [`EmbeddedReadView`] owns its decoded generation and can be
-    /// cloned or retained across later writes. It is a read-only embedded
-    /// session subset, not an authorization, transaction, cursor, or reattach
-    /// protocol.
+    /// Acquire one read-only immutable generation, not a new authority context.
     pub fn read_session(&self) -> Result<EmbeddedReadView, ReadError> {
         self.pinned_read_view()
     }
 }
 
 impl EmbeddedReadView {
-    /// Parse and bind one reusable immutable plan for this read session.
-    pub fn prepare_gql_plan(
-        &self,
-        statement: &str,
-        bind: &RelationBind,
-    ) -> Result<BoundPlan, GqlError> {
+    pub fn prepare_gql_plan(&self, statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError> {
         bind_plan(statement, bind)
     }
 
-    /// Execute an already prepared plan at this view's pinned frontier.
     pub fn execute_prepared_gql(&self, plan: &BoundPlan) -> Result<Vec<VId>, GqlError> {
         self.execute_prepared_gql_at(plan, self.frontier())
     }
 
-    /// Execute an already prepared plan at a sequence retained by this view.
-    ///
-    /// The view's immutable generation remains the sole read source; `as_of`
-    /// may select older history within it but can never observe a later
-    /// generation. A sequence beyond the view's frontier is a typed
-    /// [`ReadError::BeyondFrontier`] refusal.
-    pub fn execute_prepared_gql_at(
-        &self,
-        plan: &BoundPlan,
-        as_of: CommitSeq,
-    ) -> Result<Vec<VId>, GqlError> {
+    /// The pinned generation refuses sequences beyond its own frontier.
+    pub fn execute_prepared_gql_at(&self, plan: &BoundPlan, as_of: CommitSeq) -> Result<Vec<VId>, GqlError> {
         execute_at(plan, self, as_of).map_err(GqlError::Read)
     }
 
-    /// Parse, bind, and execute once at this view's pinned frontier.
     pub fn execute_gql(&self, statement: &str, bind: &RelationBind) -> Result<Vec<VId>, GqlError> {
         self.execute_gql_at(statement, bind, self.frontier())
     }
 
-    /// Parse, bind, and execute once at a sequence retained by this view.
-    pub fn execute_gql_at(
-        &self,
-        statement: &str,
-        bind: &RelationBind,
-        as_of: CommitSeq,
-    ) -> Result<Vec<VId>, GqlError> {
+    pub fn execute_gql_at(&self, statement: &str, bind: &RelationBind, as_of: CommitSeq) -> Result<Vec<VId>, GqlError> {
         let plan = bind_plan(statement, bind)?;
         self.execute_prepared_gql_at(&plan, as_of)
     }
 
-    /// Execute and input-certify one statement at this view's frontier.
-    ///
-    /// This mirrors [`Database::execute_gql_certified`] while making the
-    /// session's immutable frontier explicit. The certificate binds statement
-    /// and canonical bind inputs; it does not attest result rows.
-    pub fn execute_gql_certified(
-        &self,
-        statement: &str,
-        bind: &RelationBind,
-    ) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
+    pub fn execute_gql_certified(&self, statement: &str, bind: &RelationBind) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
         self.execute_gql_certified_at(statement, bind, self.frontier())
     }
 
-    /// Execute and input-certify one statement at a retained sequence.
     pub fn execute_gql_certified_at(
         &self,
         statement: &str,
@@ -209,28 +130,17 @@ impl EmbeddedReadView {
         as_of: CommitSeq,
     ) -> Result<(Vec<VId>, GqlCertificate), GqlError> {
         let rows = self.execute_gql_at(statement, bind, as_of)?;
-        Ok((
-            rows,
-            GqlCertificate {
-                snapshot_seq: as_of,
-                statement_digest: crate::gql_cert::digest_statement(statement),
-                bind_digest: crate::gql_cert::digest_bind(bind),
-            },
-        ))
+        Ok((rows, GqlCertificate {
+            snapshot_seq: as_of,
+            statement_digest: crate::gql_cert::digest_statement(statement),
+            bind_digest: crate::gql_cert::digest_bind(bind),
+        }))
     }
 
-    /// Execute and plan-certify at this view's pinned frontier.
-    ///
-    /// Reusing the same plan across two sessions therefore preserves plan
-    /// identity while producing different snapshot-bound certificates.
-    pub fn execute_prepared_gql_certified(
-        &self,
-        plan: &BoundPlan,
-    ) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
+    pub fn execute_prepared_gql_certified(&self, plan: &BoundPlan) -> Result<(Vec<VId>, GqlPlanCertificate), GqlError> {
         self.execute_prepared_gql_certified_at(plan, self.frontier())
     }
 
-    /// Execute and plan-certify at a sequence retained by this view.
     pub fn execute_prepared_gql_certified_at(
         &self,
         plan: &BoundPlan,
@@ -240,556 +150,92 @@ impl EmbeddedReadView {
         Ok((rows, crate::gql_cert::certify(plan, as_of)))
     }
 
-    /// Certify one prepared plan at this view's pinned frontier without running it.
     #[must_use]
     pub fn prepared_gql_plan_certificate(&self, plan: &BoundPlan) -> GqlPlanCertificate {
         crate::gql_cert::certify(plan, self.frontier())
     }
 }
 
-/// Both-orientation adjacency for the hop-1 relation AND the optional hop-2
-/// relation, filled by ONE loop over the fetched edge table
-/// (fgdb-w5-parsers-nje.2 one-hop, fgdb-gql-undir-2hop-7mrc two-hop) — the
-/// undirected twin of [`relation_adjacencies`]. Each edge lists its dst
-/// under its src AND its src under its dst, so a vertex's expansion is the
-/// union of outgoing dests and incoming srcs, and the hop-1 key set is
-/// every incident vertex (a dest-only vertex is still a `RETURN a` row).
-/// The composition downstream is map-agnostic, so feeding it these maps IS
-/// the undirected two-hop: vias are undirected hop-1 neighbours, and their
-/// undirected hop-2 neighbours (or the vias that have any) are the rows.
-fn undirected_adjacencies(
-    records: &[EdgeRecord],
-    hop1: RelationId,
-    hop2: Option<RelationId>,
-) -> (BTreeMap<VId, Vec<VId>>, BTreeMap<VId, Vec<VId>>) {
-    let mut hop1_adjacency = BTreeMap::<VId, Vec<VId>>::new();
-    let mut hop2_adjacency = BTreeMap::<VId, Vec<VId>>::new();
-    for record in records {
-        if record.entry.relation == hop1 {
-            hop1_adjacency
-                .entry(record.entry.src)
-                .or_default()
-                .push(record.entry.dst);
-            hop1_adjacency
-                .entry(record.entry.dst)
-                .or_default()
-                .push(record.entry.src);
-        }
-        if hop2 == Some(record.entry.relation) {
-            hop2_adjacency
-                .entry(record.entry.src)
-                .or_default()
-                .push(record.entry.dst);
-            hop2_adjacency
-                .entry(record.entry.dst)
-                .or_default()
-                .push(record.entry.src);
-        }
-    }
-    (hop1_adjacency, hop2_adjacency)
+/// Own the admitted table and bind it to the exact plan, reader and sequence.
+/// A budget check can inspect the count and then execute these SAME rows;
+/// it cannot substitute another plan or accidentally re-read a different cut.
+/// At most one of vertices and edges contains data.
+pub(crate) struct AdmittedGqlSnapshot<'a, R: ?Sized> {
+    reader: &'a R,
+    as_of: CommitSeq,
+    logical: GlaPlan,
+    vertices: BTreeMap<VId, VertexRow>,
+    edges: Vec<EdgeRecord>,
+    snapshot_records: u64,
 }
 
-/// dst → srcs adjacency for the hop-1 relation AND the optional hop-2
-/// relation, filled by ONE loop over the fetched edge table
-/// (fgdb-w5-parsers-nje.4) — the inverted twin of [`relation_adjacencies`]
-/// for the incoming TWO-hop chain `(a)<-[:R]-(b)<-[:S]-(c)`: walking from
-/// the anchor means walking every edge against its flow, so both hops
-/// invert and the existing composition then IS the reverse composition.
-/// Incoming ONE-hop never comes here — the parser normalizes its variable
-/// roles, so it executes on the uninverted maps.
-fn inverted_adjacencies(
-    records: &[EdgeRecord],
-    hop1: RelationId,
-    hop2: Option<RelationId>,
-) -> (BTreeMap<VId, Vec<VId>>, BTreeMap<VId, Vec<VId>>) {
-    let mut hop1_adjacency = BTreeMap::<VId, Vec<VId>>::new();
-    let mut hop2_adjacency = BTreeMap::<VId, Vec<VId>>::new();
-    for record in records {
-        if record.entry.relation == hop1 {
-            hop1_adjacency
-                .entry(record.entry.dst)
-                .or_default()
-                .push(record.entry.src);
-        }
-        if hop2 == Some(record.entry.relation) {
-            hop2_adjacency
-                .entry(record.entry.dst)
-                .or_default()
-                .push(record.entry.src);
-        }
-    }
-    (hop1_adjacency, hop2_adjacency)
-}
-
-/// src → dsts adjacency for one relation, and the same for the optional
-/// hop-2 relation, filled by ONE scan of the fetched edge table.
-fn relation_adjacencies(
-    records: Vec<EdgeRecord>,
-    hop1: RelationId,
-    hop2: Option<RelationId>,
-) -> (BTreeMap<VId, Vec<VId>>, BTreeMap<VId, Vec<VId>>) {
-    let mut hop1_adjacency = BTreeMap::<VId, Vec<VId>>::new();
-    let mut hop2_adjacency = BTreeMap::<VId, Vec<VId>>::new();
-    for record in records {
-        if record.entry.relation == hop1 {
-            hop1_adjacency
-                .entry(record.entry.src)
-                .or_default()
-                .push(record.entry.dst);
-        }
-        if hop2 == Some(record.entry.relation) {
-            hop2_adjacency
-                .entry(record.entry.src)
-                .or_default()
-                .push(record.entry.dst);
-        }
-    }
-    (hop1_adjacency, hop2_adjacency)
-}
-
-/// Run the shared kernel over the prepared adjacency maps — the one body
-/// behind the live and as-of faces.
-fn execute_over_adjacencies(
-    plan: &BoundPlan,
-    hop1: BTreeMap<VId, Vec<VId>>,
-    hop2: BTreeMap<VId, Vec<VId>>,
-) -> Result<Vec<VId>, ReadError> {
-    let sources: Vec<_> = hop1.keys().copied().collect();
-    // WHERE a <> b (fgdb-gql-where-neq-v476) and WHERE a = b
-    // (fgdb-w5-parsers-nje.6): both predicates bind the two hop-1 pattern
-    // variables, so both filter exactly the hop-1 step — before any
-    // projection or hop-2 composition. Inequality drops the self-loop
-    // edges; equality keeps ONLY them (src == dst). Filtering the KERNEL's
-    // composed expansion instead would express a-vs-c predicates on a
-    // two-hop plan, which are different (unrequested) predicates.
-    let hop1_kept = |src: VId, via: &VId| {
-        if plan.neq.is_some() && *via == src {
-            return false;
-        }
-        if plan.eq.is_some() && *via != src {
-            return false;
-        }
-        true
-    };
-    if plan.hop2_relation.is_none() {
-        return crate::execute_bound_plan_over(plan, sources, |src, _| {
-            let mut dests = hop1.get(&src).cloned().unwrap_or_default();
-            dests.retain(|dst| hop1_kept(src, dst));
-            Ok(dests)
-        });
-    }
-    crate::execute_bound_plan_over(plan, sources, |src, _| {
-        let vias: Vec<VId> = hop1
-            .get(&src)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-            .iter()
-            .filter(|via| hop1_kept(src, via))
-            .copied()
-            .collect();
-        let vias = vias.as_slice();
-        Ok(match plan.projection {
-            // RETURN of the via variable: the intermediates that actually
-            // continue — a hop-1 destination with no hop-2 edge is not on
-            // any two-hop path.
-            ReturnProjection::Destination => vias
-                .iter()
-                .filter(|via| hop2.contains_key(via))
-                .copied()
-                .collect(),
-            // The path's far end — and the source projection, whose kernel
-            // arm only asks whether this source reached anything, which for
-            // a two-hop pattern means reaching a composed destination.
-            ReturnProjection::Source | ReturnProjection::Hop2Destination => vias
-                .iter()
-                .flat_map(|via| hop2.get(via).cloned().unwrap_or_default())
-                .collect(),
+impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
+    pub(crate) fn admit(plan: &BoundPlan, reader: &'a R, as_of: CommitSeq) -> Result<Self, ReadError> {
+        let logical = GlaPlan::lower(plan);
+        let mut vertices = BTreeMap::new();
+        let mut edges = Vec::new();
+        // Even a logically empty forged plan must cross the ordinary source
+        // fence. Future/fenced snapshots cannot become successful empty reads.
+        let count = if logical.scans_edges() {
+            edges = reader.gql_edges_at(as_of)?;
+            edges.len()
+        } else {
+            let rows = reader.gql_vertices_at(as_of)?;
+            let count = rows.len();
+            vertices.extend(rows.into_iter().map(|row| (row.vid, row)));
+            count
+        };
+        Ok(Self {
+            reader, as_of, logical, vertices, edges,
+            snapshot_records: u64::try_from(count).unwrap_or(u64::MAX),
         })
-    })
-}
+    }
 
-/// Apply the plan's node-label predicates to the hop-1 adjacency BEFORE the
-/// kernel runs (fgdb-w5-parsers-nje.5, corrected law): labels constrain the
-/// MATCH itself, independent of projection. `src_label` drops anchors — map
-/// keys — that lack it, so their whole expansions vanish (RETURN b of
-/// `(a:Person)-[:R]->(b)` answers only Person sources' dests); `dst_label`
-/// drops hop-1 destinations inside each expansion (RETURN a of
-/// `(a)-[:R]->(b:L)` keeps only sources still reaching an L dest, because
-/// the kernel's Source arm asks for a non-empty expansion). The parser
-/// already assigned each label to its edge-flow role — the incoming swap
-/// included — so no direction special-casing happens here. An unlabeled
-/// plan consults no vertex row at all.
-fn filter_hop1_by_labels<R: GqlSnapshotReader + ?Sized>(
-    plan: &BoundPlan,
-    reader: &R,
-    as_of: CommitSeq,
-    hop1: &mut BTreeMap<VId, Vec<VId>>,
-) -> Result<(), ReadError> {
-    if plan.src_label.is_none() && plan.dst_label.is_none() {
-        return Ok(());
+    pub(crate) fn snapshot_records(&self) -> u64 {
+        self.snapshot_records
     }
-    let has_label = |vid: VId, label: LabelId| -> Result<bool, ReadError> {
-        let row = reader.gql_vertex_at(vid, as_of)?;
-        Ok(row.is_some_and(|row| row.labels.contains(&label)))
-    };
-    if let Some(label) = plan.src_label {
-        let keys: Vec<VId> = hop1.keys().copied().collect();
-        let mut labeled = std::collections::BTreeSet::new();
-        for vid in keys {
-            if has_label(vid, label)? {
-                labeled.insert(vid);
-            }
-        }
-        hop1.retain(|anchor, _| labeled.contains(anchor));
-    }
-    if let Some(label) = plan.dst_label {
-        let dests: std::collections::BTreeSet<VId> = hop1.values().flatten().copied().collect();
-        let mut labeled = std::collections::BTreeSet::new();
-        for vid in dests {
-            if has_label(vid, label)? {
-                labeled.insert(vid);
-            }
-        }
-        for expansion in hop1.values_mut() {
-            expansion.retain(|dst| labeled.contains(dst));
+
+    fn matches(&self, vid: VId, predicates: &[VertexPredicate]) -> Result<bool, ReadError> {
+        if self.logical.scans_edges() {
+            let row = self.reader.gql_vertex_at(vid, self.as_of)?;
+            Ok(row.is_some_and(|row| predicates.iter().all(|p| p.matches(&row.labels, &row.props))))
+        } else {
+            Ok(self.vertices.get(&vid).is_some_and(|row| {
+                predicates.iter().all(|p| p.matches(&row.labels, &row.props))
+            }))
         }
     }
-    Ok(())
+
+    pub(crate) fn execute(self) -> Result<Vec<VId>, ReadError> {
+        self.logical.execute(
+            self.vertices.keys().copied(),
+            self.edges.iter().map(edge_triple),
+            |vid, predicates| self.matches(vid, predicates),
+        )
+    }
+
+    pub(crate) fn execute_limited(self, limits: GlaExecutionLimits) -> Result<GlaExecution, GlaExecutionError<ReadError>> {
+        self.logical.execute_with_limits(
+            self.vertices.keys().copied(),
+            self.edges.iter().map(edge_triple),
+            |vid, predicates| self.matches(vid, predicates),
+            limits,
+        )
+    }
 }
 
-/// Source-property integer predicates drop hop-1 SOURCE keys whose vertex
-/// props do not satisfy the bound comparison. Equality requires
-/// `(key, Int(n))`; inequality requires the key to be present as an integer
-/// other than `n` (fgdb-w5-parsers-nje.15); strict comparisons require an
-/// integer above or below `n` (fgdb-w5-parsers-nje.22/23). No-WHERE plans
-/// consult no property row. Node-only labeled WHERE applies the same tests
-/// inside [`node_scan`] (fgdb-w5-parsers-nje.11).
-fn filter_hop1_by_src_prop<R: GqlSnapshotReader + ?Sized>(
-    plan: &BoundPlan,
-    reader: &R,
-    as_of: CommitSeq,
-    hop1: &mut BTreeMap<VId, Vec<VId>>,
-) -> Result<(), ReadError> {
-    if plan.src_prop.is_none()
-        && plan.src_prop_ne.is_none()
-        && plan.src_prop_gt.is_none()
-        && plan.src_prop_lt.is_none()
-        && plan.src_prop_ge.is_none()
-        && plan.src_prop_le.is_none()
-    {
-        return Ok(());
-    }
-    let carries = |vid: VId| -> Result<bool, ReadError> {
-        let row = reader.gql_vertex_at(vid, as_of)?;
-        Ok(row.is_some_and(|row| {
-            let equal = plan.src_prop.is_none_or(|(key, value)| {
-                let wanted = CanonicalScalar::Int(value);
-                row.props
-                    .iter()
-                    .any(|(property, scalar)| *property == key && *scalar == wanted)
-            });
-            let not_equal = plan.src_prop_ne.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
-                })
-            });
-            let greater = plan.src_prop_gt.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual > value)
-                })
-            });
-            let less = plan.src_prop_lt.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual < value)
-                })
-            });
-            let greater_or_equal = plan.src_prop_ge.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual >= value)
-                })
-            });
-            let less_or_equal = plan.src_prop_le.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual <= value)
-                })
-            });
-            equal && not_equal && greater && less && greater_or_equal && less_or_equal
-        }))
-    };
-    let keys: Vec<VId> = hop1.keys().copied().collect();
-    let mut kept = std::collections::BTreeSet::new();
-    for vid in keys {
-        if carries(vid)? {
-            kept.insert(vid);
-        }
-    }
-    hop1.retain(|anchor, _| kept.contains(anchor));
-    Ok(())
+fn edge_triple(record: &EdgeRecord) -> (VId, RelationId, VId) {
+    (record.entry.src, record.entry.relation, record.entry.dst)
 }
 
-/// Dest-property integer predicates drop hop-1 DESTINATIONS whose vertex
-/// props do not satisfy the bound comparison. Incoming two-hop adjacency is
-/// inverted, so its pattern destination is the map key rather than a value.
-/// Equality requires
-/// `(key, Int(n))`; inequality and strict greater-than require the key to be
-/// present as an integer satisfying the comparison (fgdb-w5-parsers-nje.16,
-/// fgdb-w5-parsers-nje.24). No-WHERE plans consult no property row.
-fn filter_hop1_by_dst_prop<R: GqlSnapshotReader + ?Sized>(
-    plan: &BoundPlan,
-    reader: &R,
-    as_of: CommitSeq,
-    hop1: &mut BTreeMap<VId, Vec<VId>>,
-) -> Result<(), ReadError> {
-    if plan.dst_prop.is_none()
-        && plan.dst_prop_ne.is_none()
-        && plan.dst_prop_gt.is_none()
-        && plan.dst_prop_lt.is_none()
-        && plan.dst_prop_ge.is_none()
-        && plan.dst_prop_le.is_none()
-    {
-        return Ok(());
-    }
-    let filter_keys = plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some();
-    let dests: std::collections::BTreeSet<VId> = if filter_keys {
-        hop1.keys().copied().collect()
-    } else {
-        hop1.values().flatten().copied().collect()
-    };
-    let mut kept = std::collections::BTreeSet::new();
-    for vid in dests {
-        let row = reader.gql_vertex_at(vid, as_of)?;
-        if row.is_some_and(|row| {
-            let equal = plan.dst_prop.is_none_or(|(key, value)| {
-                let wanted = CanonicalScalar::Int(value);
-                row.props
-                    .iter()
-                    .any(|(property, scalar)| *property == key && *scalar == wanted)
-            });
-            let not_equal = plan.dst_prop_ne.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
-                })
-            });
-            let greater = plan.dst_prop_gt.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual > value)
-                })
-            });
-            let less = plan.dst_prop_lt.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual < value)
-                })
-            });
-            let greater_or_equal = plan.dst_prop_ge.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual >= value)
-                })
-            });
-            let less_or_equal = plan.dst_prop_le.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual <= value)
-                })
-            });
-            equal && not_equal && greater && less && greater_or_equal && less_or_equal
-        }) {
-            kept.insert(vid);
-        }
-    }
-    if filter_keys {
-        hop1.retain(|dst, _| kept.contains(dst));
-    } else {
-        for expansion in hop1.values_mut() {
-            expansion.retain(|dst| kept.contains(dst));
-        }
-    }
-    Ok(())
+pub(crate) fn execute<V: Vfs + Clone>(plan: &BoundPlan, db: &Database<V>) -> Result<Vec<VId>, ReadError> {
+    execute_at(plan, db, db.frontier()?)
 }
 
-/// A two-hop far-end predicate filters hop-2 adjacency VALUES, never the
-/// hop-1 via vertices governed by `dst_prop`.
-fn filter_hop2_by_dst_prop<R: GqlSnapshotReader + ?Sized>(
-    plan: &BoundPlan,
-    reader: &R,
-    as_of: CommitSeq,
-    hop2: &mut BTreeMap<VId, Vec<VId>>,
-) -> Result<(), ReadError> {
-    if plan.hop2_dst_prop.is_none()
-        && plan.hop2_dst_prop_ne.is_none()
-        && plan.hop2_dst_prop_gt.is_none()
-        && plan.hop2_dst_prop_lt.is_none()
-        && plan.hop2_dst_prop_ge.is_none()
-        && plan.hop2_dst_prop_le.is_none()
-    {
-        return Ok(());
-    }
-    let far_ends: std::collections::BTreeSet<VId> = hop2.values().flatten().copied().collect();
-    let mut kept = std::collections::BTreeSet::new();
-    for vid in far_ends {
-        let row = reader.gql_vertex_at(vid, as_of)?;
-        if row.is_some_and(|row| {
-            let equal = plan.hop2_dst_prop.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key && *scalar == CanonicalScalar::Int(value)
-                })
-            });
-            let not_equal = plan.hop2_dst_prop_ne.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
-                })
-            });
-            let greater = plan.hop2_dst_prop_gt.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual > value)
-                })
-            });
-            let less = plan.hop2_dst_prop_lt.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual < value)
-                })
-            });
-            let greater_or_equal = plan.hop2_dst_prop_ge.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual >= value)
-                })
-            });
-            let less_or_equal = plan.hop2_dst_prop_le.is_none_or(|(key, value)| {
-                row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual <= value)
-                })
-            });
-            equal && not_equal && greater && less && greater_or_equal && less_or_equal
-        }) {
-            kept.insert(vid);
-        }
-    }
-    hop2.retain(|_, expansion| {
-        expansion.retain(|far_end| kept.contains(far_end));
-        !expansion.is_empty()
-    });
-    Ok(())
-}
-
-/// The node-only scan face (fgdb-w5-parsers-nje.7): a plan with no edge
-/// relation never touches the edge table — its rows are the vids whose
-/// labels carry the pattern's label, under the same CGSE row contract
-/// (ascending, deduplicated). The binder makes an unlabeled node-only plan
-/// unrepresentable (it is a Parse refusal), so the missing-label arm fails
-/// closed to no rows instead of inventing an all-vertices scan.
-///
-/// When a source-property predicate is present, the same vertex row must also
-/// satisfy it; no-WHERE node-only plans still consult no property field.
-fn node_scan(plan: &BoundPlan, rows: Vec<VertexRow>) -> Vec<VId> {
-    let Some(label) = plan.src_label else {
-        return Vec::new();
-    };
-    let mut vids: Vec<VId> = rows
-        .into_iter()
-        .filter(|row| row.labels.contains(&label))
-        .filter(|row| {
-            let equal = match plan.src_prop {
-                None => true,
-                Some((key, value)) => {
-                    let wanted = CanonicalScalar::Int(value);
-                    row.props
-                        .iter()
-                        .any(|(property, scalar)| *property == key && *scalar == wanted)
-                }
-            };
-            let not_equal = match plan.src_prop_ne {
-                None => true,
-                Some((key, value)) => row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual != value)
-                }),
-            };
-            let greater = match plan.src_prop_gt {
-                None => true,
-                Some((key, value)) => row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual > value)
-                }),
-            };
-            let less = match plan.src_prop_lt {
-                None => true,
-                Some((key, value)) => row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual < value)
-                }),
-            };
-            let greater_or_equal = match plan.src_prop_ge {
-                None => true,
-                Some((key, value)) => row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual >= value)
-                }),
-            };
-            let less_or_equal = match plan.src_prop_le {
-                None => true,
-                Some((key, value)) => row.props.iter().any(|(property, scalar)| {
-                    *property == key
-                        && matches!(scalar, CanonicalScalar::Int(actual) if *actual <= value)
-                }),
-            };
-            equal && not_equal && greater && less && greater_or_equal && less_or_equal
-        })
-        .map(|row| row.vid)
-        .collect();
-    vids.sort_unstable();
-    vids.dedup();
-    crate::apply_limit(plan, vids)
-}
-
-/// Execute the pinned bound MATCH expansion over the database's live Strata
-/// view. The frontier is read once and then passed into the same snapshot
-/// kernel used by historical and pinned-session execution.
-pub(crate) fn execute<V: Vfs + Clone>(
-    plan: &BoundPlan,
-    db: &Database<V>,
-) -> Result<Vec<VId>, ReadError> {
-    let as_of = db.frontier()?;
-    execute_at(plan, db, as_of)
-}
-
-/// Execute the pinned bound MATCH expansion at one exact snapshot frontier.
-///
-/// `reader` may be the live database or an immutable [`EmbeddedReadView`];
-/// every path uses this one body, so labels, properties, directions, SKIP,
-/// LIMIT, and deterministic row ordering cannot drift between surfaces.
 pub(crate) fn execute_at<R: GqlSnapshotReader + ?Sized>(
     plan: &BoundPlan,
     reader: &R,
     as_of: CommitSeq,
 ) -> Result<Vec<VId>, ReadError> {
-    let Some(relation) = plan.relation else {
-        return Ok(node_scan(plan, reader.gql_vertices_at(as_of)?));
-    };
-    let records = reader.gql_edges_at(as_of)?;
-    let (mut hop1, mut hop2) = if plan.direction == EdgeDirection::Undirected {
-        undirected_adjacencies(&records, relation, plan.hop2_relation)
-    } else if plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some() {
-        inverted_adjacencies(&records, relation, plan.hop2_relation)
-    } else {
-        relation_adjacencies(records, relation, plan.hop2_relation)
-    };
-    filter_hop1_by_labels(plan, reader, as_of, &mut hop1)?;
-    filter_hop1_by_src_prop(plan, reader, as_of, &mut hop1)?;
-    // nje.17 AND is parser-only: dual `Some` slots retain this same hop-1 map in sequence.
-    filter_hop1_by_dst_prop(plan, reader, as_of, &mut hop1)?;
-    filter_hop2_by_dst_prop(plan, reader, as_of, &mut hop2)?;
-    execute_over_adjacencies(plan, hop1, hop2)
+    AdmittedGqlSnapshot::admit(plan, reader, as_of)?.execute()
 }
