@@ -317,6 +317,40 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
     Ok(out)
 }
 
+/// Pack staging rows under both the format's row ceiling and the store's
+/// byte admission. Measure with the canonical encoder so variable labels and
+/// scalar encodings cannot drift from a second size formula. Sealing and
+/// compaction share this rule; neither changes the row bytes or their order.
+///
+/// An individually oversized row is kept alone: splitting a logical row is
+/// not part of this format. The store still refuses it under its existing
+/// limit; this packing policy does not grant large-object admission.
+pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<Vec<VertexRow>>, VertexPatchError> {
+    let header_bytes = encode_patch(&[])?.len();
+    let mut packed = Vec::new();
+    let mut pending = Vec::new();
+    let mut pending_bytes = header_bytes as u64;
+    for row in rows {
+        let single_bytes = encode_patch(core::slice::from_ref(&row))?.len();
+        let row_bytes = (single_bytes - header_bytes) as u64;
+        if !pending.is_empty()
+            && (pending.len() == MAX_PATCH_ROWS as usize
+                || pending_bytes
+                    .checked_add(row_bytes)
+                    .is_none_or(|bytes| bytes > crate::store::MAX_STORED_OBJECT_BYTES))
+        {
+            packed.push(core::mem::take(&mut pending));
+            pending_bytes = header_bytes as u64;
+        }
+        pending_bytes += row_bytes;
+        pending.push(row);
+    }
+    if !pending.is_empty() {
+        packed.push(pending);
+    }
+    Ok(packed)
+}
+
 /// A little-endian cursor that refuses to read past the end, so every
 /// truncation is a typed refusal at a named offset rather than a panic.
 struct Cursor<'bytes> {

@@ -162,13 +162,14 @@ fn compact_with_limit(
 /// retirement, and the later statement wins — exactly the block model, per
 /// statement. The floor licenses dropping nothing here until the transaction
 /// layer owns snapshot tracking, so this collapses RESTATEMENTS only; the
-/// result repacks in canonical `(vid, created_at)` order at the format's
-/// row ceiling, which [`crate::vertex::validate_succession`]'s chain laws
+/// result repacks in canonical `(vid, created_at)` order under both the
+/// format's row ceiling and store byte admission, which
+/// [`crate::vertex::validate_succession`]'s chain laws
 /// admit because collapse preserves every surviving statement byte-for-byte.
 pub fn compact_vertex_patches(
     patches: &[Vec<crate::vertex::VertexRow>],
     floor: CommitSeq,
-) -> (Vec<Vec<crate::vertex::VertexRow>>, usize) {
+) -> Result<(Vec<Vec<crate::vertex::VertexRow>>, usize), crate::vertex::VertexPatchError> {
     let mut statements: BTreeMap<(fgdb_types::VId, CommitSeq), crate::vertex::VertexRow> =
         BTreeMap::new();
     let mut seen = 0usize;
@@ -183,11 +184,7 @@ pub fn compact_vertex_patches(
         .filter(|row| row.retired_at.is_none_or(|r| r.0 > floor.0))
         .collect();
     let superseded = seen - retained.len();
-    let ceiling = usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX);
-    let mut packed: Vec<Vec<crate::vertex::VertexRow>> = retained
-        .chunks(ceiling)
-        .map(<[crate::vertex::VertexRow]>::to_vec)
-        .collect();
+    let mut packed = crate::vertex::pack_rows(retained)?;
     // A root's patch list is publication order, witnessed by nondecreasing
     // frontiers — canonical row packing does not preserve it, so sort by the
     // truthful span exactly as the block packer does.
@@ -196,7 +193,7 @@ pub fn compact_vertex_patches(
             .map(|(first_seq, last_seq)| (last_seq, first_seq))
             .unwrap_or((CommitSeq(0), CommitSeq(0)))
     });
-    (packed, superseded)
+    Ok((packed, superseded))
 }
 
 type PackedBlocks = (Vec<Vec<AdjacencyEntry>>, Vec<Option<BlockProps>>);

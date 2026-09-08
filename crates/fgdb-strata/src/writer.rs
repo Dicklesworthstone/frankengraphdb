@@ -1411,9 +1411,7 @@ impl BlockWriter {
         // chunk before committing so a mid-seal refusal leaves the map
         // untouched — the same atomicity the single-patch path had.
         let rows: Vec<VertexRow> = self.pending_vertices.values().cloned().collect();
-        let ceiling = usize::try_from(crate::vertex::MAX_PATCH_ROWS).unwrap_or(usize::MAX);
-        let mut staged: Vec<Vec<VertexRow>> =
-            rows.chunks(ceiling).map(<[VertexRow]>::to_vec).collect();
+        let mut staged = crate::vertex::pack_rows(rows).map_err(WriteError::Patch)?;
         staged.sort_by_key(|chunk| {
             span_of_rows(chunk)
                 .map(|(first_seq, last_seq)| (last_seq, first_seq))

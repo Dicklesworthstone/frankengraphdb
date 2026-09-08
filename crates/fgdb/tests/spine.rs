@@ -1184,6 +1184,72 @@ fn set_property_after_compact_updates_the_live_row() {
     });
 }
 
+/// Row cardinality alone cannot bound a variable-width property patch.
+#[test]
+fn vertex_patch_byte_packing_preserves_history_across_compact_and_rebuild() {
+    let dir = scratch("vertex-patch-byte-packing");
+    under_lab(8235, move |cx| async move {
+        let cx = &cx;
+        let key = PropertyKeyId(7);
+        let mut db = Database::create(cx, &dir, keys()).await.expect("creates");
+        let mut seed = WriteBatch::new(KNOWS);
+        for id in 1..=256 {
+            seed.create_vertex(
+                VId(id),
+                vec![LabelId(3)],
+                vec![(key, CanonicalScalar::Int(1))],
+            );
+        }
+        // 256 individually small rows encode to 19722 bytes, exceeding the
+        // store's 16 KiB admission despite satisfying the patch row ceiling.
+        let first = db.write(cx, seed).await.expect("packs before publication");
+        let original = db.vertices().expect("original rows");
+        assert_eq!(original.len(), 256);
+        for row in &original {
+            assert_eq!(row.labels, vec![LabelId(3)]);
+            assert_eq!(row.props, vec![(key, CanonicalScalar::Int(1))]);
+        }
+        let mut update = WriteBatch::new(KNOWS);
+        for id in 1..=256 {
+            update.set_vertex_property(VId(id), key, Some(CanonicalScalar::Int(2)));
+        }
+        let second = db.write(cx, update).await.expect("packs version chains");
+        let current = db.vertices().expect("updated rows");
+        assert_eq!(current.len(), 256);
+        for row in &current {
+            assert_eq!(row.props, vec![(key, CanonicalScalar::Int(2))]);
+        }
+        let historical = db.vertices_at(first).expect("historical rows");
+        for (before, after) in original.iter().zip(&historical) {
+            assert_eq!(before.vid, after.vid);
+            assert_eq!(before.birth_ordinal, after.birth_ordinal);
+            assert_eq!(before.labels, after.labels);
+            assert_eq!(before.props, after.props);
+            assert_eq!(after.created_at, first);
+            assert_eq!(after.retired_at, Some(second));
+        }
+        assert_eq!(historical.len(), 256);
+        db.compact(cx)
+            .await
+            .expect("compaction also packs by bytes");
+        assert_eq!(db.vertices().expect("compacted live rows"), current);
+        assert_eq!(
+            db.vertices_at(first).expect("compacted history"),
+            historical
+        );
+        drop(db);
+        let db = Database::open(cx, &dir, keys()).await.expect("cold reopen");
+        assert_eq!(db.vertices().expect("reopened live rows"), current);
+        assert_eq!(db.vertices_at(first).expect("reopened history"), historical);
+        drop(db);
+        let db = Database::open_rebuilding(cx, &dir, keys())
+            .await
+            .expect("authoritative replay uses the same packing rule");
+        assert_eq!(db.vertices().expect("rebuilt live rows"), current);
+        assert_eq!(db.vertices_at(first).expect("rebuilt history"), historical);
+    });
+}
+
 /// Compact keeps tombstones (floor 0). Spent must survive the
 /// from_published rebuild — recreate of a committed-deleted id is
 /// IdentitySpent, not a resurrection.

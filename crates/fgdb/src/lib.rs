@@ -4037,7 +4037,8 @@ impl<V: Vfs + Clone> Database<V> {
         // The vertex half consolidates the same way: restatements collapse,
         // canonical repack, spans re-derived from the rows themselves.
         let (compacted_patches, _superseded) =
-            fgdb_strata::compact::compact_vertex_patches(&self.snapshot.patches, CommitSeq(0));
+            fgdb_strata::compact::compact_vertex_patches(&self.snapshot.patches, CommitSeq(0))
+                .map_err(|error| RebuildError::Store(StoreError::MalformedPatch(error)))?;
         let mut sealed_patches = Vec::with_capacity(compacted_patches.len());
         for rows in &compacted_patches {
             let bytes = fgdb_strata::vertex::encode_patch(rows)

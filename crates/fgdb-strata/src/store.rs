@@ -102,7 +102,7 @@ const PUBLICATION_STAGING_FILE: &str = ".block-publication.staging";
 /// enumeration outgrew 16 KiB, with rebuild re-offering the same lawful root
 /// forever (fgdb-a7sz). Admission is per-family: see
 /// put_object_with_steps.
-const MAX_STORED_OBJECT_BYTES: u64 = (crate::MAX_BLOCK_ENTRIES as u64) * 64;
+pub(crate) const MAX_STORED_OBJECT_BYTES: u64 = (crate::MAX_BLOCK_ENTRIES as u64) * 64;
 
 /// The largest manifest this store will materialize: header plus the record
 /// ceiling, derived beside the format exactly as the root ceiling is.
