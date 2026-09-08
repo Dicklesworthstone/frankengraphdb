@@ -1228,7 +1228,7 @@ pub(crate) fn resolve_patch_ref(
     at: usize,
     reference: &PatchRef,
     bytes: &[u8],
-) -> Result<Vec<crate::vertex::VertexRow>, RootError> {
+) -> Result<crate::vertex::VertexPatchRows, RootError> {
     let rows = crate::vertex::read_patch(
         k_oid,
         namespace,

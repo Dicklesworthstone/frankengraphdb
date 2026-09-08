@@ -167,9 +167,9 @@ fn compact_with_limit(
 /// [`crate::vertex::validate_succession`]'s chain laws
 /// admit because collapse preserves every surviving statement byte-for-byte.
 pub fn compact_vertex_patches(
-    patches: &[Vec<crate::vertex::VertexRow>],
+    patches: &[crate::vertex::VertexPatchRows],
     floor: CommitSeq,
-) -> Result<(Vec<Vec<crate::vertex::VertexRow>>, usize), crate::vertex::VertexPatchError> {
+) -> Result<(Vec<crate::vertex::VertexPatchRows>, usize), crate::vertex::VertexPatchError> {
     let mut statements: BTreeMap<(fgdb_types::VId, CommitSeq), crate::vertex::VertexRow> =
         BTreeMap::new();
     let mut seen = 0usize;

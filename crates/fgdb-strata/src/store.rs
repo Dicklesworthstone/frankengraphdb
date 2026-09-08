@@ -63,7 +63,7 @@
 use crate::edge_props::{
     BlockProps, EdgePropertyPatchVersion, read_property_patch, validate_block_patch_consistency,
 };
-use crate::vertex::{VertexPatchVersion, VertexRow, decode_patch, vertex_patch_id};
+use crate::vertex::{VertexPatchRows, VertexPatchVersion, decode_patch, vertex_patch_id};
 use crate::{BlockError, DeltaBlockVersion, PartitionRootVersion, block_id, decode_block};
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
@@ -493,7 +493,7 @@ impl<V: Vfs> AdmittedPartitionRoot<'_, V> {
         &self,
         cx: &impl StorageReadCx,
         as_of: CommitSeq,
-    ) -> Result<Vec<Vec<VertexRow>>, StoreError> {
+    ) -> Result<Vec<VertexPatchRows>, StoreError> {
         self.store
             .resolve_admitted_root_patches_at(cx, &self.root, as_of)
             .await
@@ -1053,7 +1053,7 @@ impl<V: Vfs> BlockStore<V> {
         &self,
         cx: &impl StorageReadCx,
         id: VertexPatchVersion,
-    ) -> Result<Vec<VertexRow>, StoreError> {
+    ) -> Result<VertexPatchRows, StoreError> {
         let bytes = self.get_patch_bytes(cx, id).await?;
         decode_patch(&bytes).map_err(StoreError::MalformedPatch)
     }
@@ -1210,7 +1210,7 @@ impl<V: Vfs> BlockStore<V> {
         cx: &impl StorageReadCx,
         at: usize,
         reference: &crate::root::PatchRef,
-    ) -> Result<Vec<VertexRow>, StoreError> {
+    ) -> Result<VertexPatchRows, StoreError> {
         let bytes = self
             .get_patch_bytes(cx, VertexPatchVersion(reference.patch_id))
             .await
@@ -1232,7 +1232,7 @@ impl<V: Vfs> BlockStore<V> {
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
         mut retain: impl FnMut(usize, &crate::root::PatchRef) -> bool,
-    ) -> Result<Vec<Vec<VertexRow>>, StoreError> {
+    ) -> Result<Vec<VertexPatchRows>, StoreError> {
         let mut patches = Vec::new();
         let mut history = crate::root::VertexHistoryValidator::default();
         for (at, reference) in root.vertex_patches.iter().enumerate() {
@@ -1285,7 +1285,7 @@ impl<V: Vfs> BlockStore<V> {
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
         as_of: CommitSeq,
-    ) -> Result<Vec<Vec<VertexRow>>, StoreError> {
+    ) -> Result<Vec<VertexPatchRows>, StoreError> {
         crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
         let selected = crate::root::patches_visible_at(root, as_of);
         let mut selected = selected.into_iter().peekable();
@@ -1600,7 +1600,7 @@ impl<V: Vfs> BlockStore<V> {
             crate::root::PartitionRoot,
             Vec<Vec<crate::AdjacencyEntry>>,
             Vec<Option<BlockProps>>,
-            Vec<Vec<VertexRow>>,
+            Vec<VertexPatchRows>,
         ),
         StoreError,
     > {
@@ -1650,7 +1650,7 @@ impl<V: Vfs> BlockStore<V> {
         (
             AdmittedPartitionRoot<'_, V>,
             Vec<Vec<crate::AdjacencyEntry>>,
-            Vec<Vec<VertexRow>>,
+            Vec<VertexPatchRows>,
         ),
         StoreError,
     > {

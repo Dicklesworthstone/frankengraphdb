@@ -61,7 +61,10 @@ fn distinct_rows() -> Vec<VertexRow> {
 fn round_trip_preserves_every_field_with_distinct_values() {
     let rows = distinct_rows();
     let bytes = encode_patch(&rows).expect("canonical rows encode");
-    assert_eq!(decode_patch(&bytes).expect("bytes decode"), rows);
+    assert_eq!(
+        &*decode_patch(&bytes).expect("bytes decode"),
+        rows.as_slice()
+    );
 }
 
 #[test]
@@ -243,8 +246,8 @@ fn read_patch_refuses_bytes_that_are_not_the_named_patch() {
     let id = VertexPatchVersion(vertex_patch_id(&K_OID, namespace(), &bytes));
 
     assert_eq!(
-        read_patch(&K_OID, namespace(), &bytes, id).expect("identity matches"),
-        rows
+        &*read_patch(&K_OID, namespace(), &bytes, id).expect("identity matches"),
+        rows.as_slice()
     );
 
     // A single flipped bit in a property value is well-formed damage: the
@@ -313,7 +316,7 @@ fn a_version_chain_round_trips_and_merges_by_visibility() {
     let rows = chained_rows();
     let bytes = encode_patch(&rows).expect("a lawful chain encodes");
     let decoded = decode_patch(&bytes).expect("and decodes");
-    assert_eq!(decoded, rows);
+    assert_eq!(&*decoded, rows.as_slice());
 
     let patches = vec![decoded];
     use fgdb_strata::vertex::merge_vertex;
@@ -333,6 +336,59 @@ fn a_version_chain_round_trips_and_merges_by_visibility() {
             .props,
         vec![(PropertyKeyId(41), CanonicalScalar::Int(2))]
     );
+}
+
+#[test]
+fn point_search_matches_full_scan_across_gaps_and_restatements() {
+    use fgdb_strata::vertex::{merge_all_vertices, merge_vertex};
+
+    let rows: Vec<_> = (1..=256u64)
+        .map(|id| VertexRow {
+            vid: VId(u128::from(id) * 2),
+            birth_ordinal: id,
+            created_at: CommitSeq(1),
+            retired_at: None,
+            labels: vec![],
+            props: vec![(PropertyKeyId(41), CanonicalScalar::Int(1))],
+        })
+        .collect();
+    let mut updates = Vec::new();
+    for row in rows.iter().step_by(3) {
+        let mut retired = row.clone();
+        retired.retired_at = Some(CommitSeq(5));
+        updates.push(retired);
+        let mut successor = row.clone();
+        successor.created_at = CommitSeq(5);
+        successor.props[0].1 = CanonicalScalar::Int(2);
+        updates.push(successor);
+    }
+    let mut deleted = updates[1].clone();
+    deleted.retired_at = Some(CommitSeq(7));
+    let patches = [vec![], rows, updates, vec![deleted]]
+        .into_iter()
+        .map(|rows| {
+            decode_patch(&encode_patch(&rows).expect("canonical rows")).expect("canonical bytes")
+        })
+        .collect::<Vec<_>>();
+
+    for seq in 0..=8 {
+        let all = merge_all_vertices(&patches, CommitSeq(seq));
+        assert_eq!(
+            all.len(),
+            match seq {
+                0 => 0,
+                1..=6 => 256,
+                _ => 255,
+            }
+        );
+        for vid in (0..=520).map(VId).chain([VId(u128::MAX)]) {
+            assert_eq!(
+                merge_vertex(&patches, vid, CommitSeq(seq)),
+                all.iter().find(|row| row.vid == vid).cloned(),
+                "point/full-scan disagreement for {vid:?} at {seq}"
+            );
+        }
+    }
 }
 
 #[test]

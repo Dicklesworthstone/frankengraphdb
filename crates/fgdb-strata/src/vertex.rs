@@ -21,7 +21,7 @@
 //! numbering caveat of [`crate::DELTA_BLOCK_OBJECT_KIND`].
 //!
 //! **CANONICAL MEANS EXACTLY ONE BYTE STRING PER VALUE.** Rows are strictly
-//! ascending by `VId`; labels are strictly ascending; property keys are
+//! ascending by `(VId, created_at)`; labels are strictly ascending; property keys are
 //! strictly ascending; property values are encoded through
 //! [`CanonicalScalar::encode`], the single definition of what a value's bytes
 //! are. The ENCODER refuses non-canonical input rather than repairing it, and
@@ -96,6 +96,46 @@ impl VertexRow {
     /// shared verbatim with [`crate::AdjacencyEntry::visible_at`].
     pub fn visible_at(&self, as_of: CommitSeq) -> bool {
         self.created_at.0 <= as_of.0 && self.retired_at.is_none_or(|r| as_of.0 < r.0)
+    }
+}
+
+/// Canonical patch rows, retaining the ordering proved by decoding or packing.
+/// Immutable access keeps `(vid, created_at)` ordering valid for point search.
+/// This proves row shape, not content identity, root admission or authorization.
+///
+/// ```compile_fail
+/// use fgdb_strata::vertex::VertexPatchRows;
+/// use fgdb_types::VId;
+/// fn reorder(rows: &mut VertexPatchRows) {
+///     rows[0].vid = VId(0);
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VertexPatchRows(Vec<VertexRow>);
+
+impl core::ops::Deref for VertexPatchRows {
+    type Target = [VertexRow];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a VertexPatchRows {
+    type Item = &'a VertexRow;
+    type IntoIter = core::slice::Iter<'a, VertexRow>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for VertexPatchRows {
+    type Item = VertexRow;
+    type IntoIter = std::vec::IntoIter<VertexRow>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
@@ -325,7 +365,7 @@ pub fn encode_patch(rows: &[VertexRow]) -> Result<Vec<u8>, VertexPatchError> {
 /// An individually oversized row is kept alone: splitting a logical row is
 /// not part of this format. The store still refuses it under its existing
 /// limit; this packing policy does not grant large-object admission.
-pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<Vec<VertexRow>>, VertexPatchError> {
+pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<VertexPatchRows>, VertexPatchError> {
     let header_bytes = encode_patch(&[])?.len();
     let mut packed = Vec::new();
     let mut pending = Vec::new();
@@ -339,14 +379,15 @@ pub(crate) fn pack_rows(rows: Vec<VertexRow>) -> Result<Vec<Vec<VertexRow>>, Ver
                     .checked_add(row_bytes)
                     .is_none_or(|bytes| bytes > crate::store::MAX_STORED_OBJECT_BYTES))
         {
-            packed.push(core::mem::take(&mut pending));
+            packed.push(VertexPatchRows(core::mem::take(&mut pending)));
             pending_bytes = header_bytes as u64;
         }
+        validate_succession(pending.len(), pending.last(), &row)?;
         pending_bytes += row_bytes;
         pending.push(row);
     }
     if !pending.is_empty() {
-        packed.push(pending);
+        packed.push(VertexPatchRows(pending));
     }
     Ok(packed)
 }
@@ -401,7 +442,7 @@ impl<'bytes> Cursor<'bytes> {
 
 /// Decode a patch, independently re-checking every canonical law the encoder
 /// enforces.
-pub fn decode_patch(bytes: &[u8]) -> Result<Vec<VertexRow>, VertexPatchError> {
+pub fn decode_patch(bytes: &[u8]) -> Result<VertexPatchRows, VertexPatchError> {
     let mut cursor = Cursor { bytes, at: 0 };
     if cursor.take::<4>()? != VERTEX_PATCH_MAGIC {
         return Err(VertexPatchError::NotAVertexPatch);
@@ -455,7 +496,7 @@ pub fn decode_patch(bytes: &[u8]) -> Result<Vec<VertexRow>, VertexPatchError> {
             extra: bytes.len() - cursor.at,
         });
     }
-    Ok(rows)
+    Ok(VertexPatchRows(rows))
 }
 
 /// The §5.1 logical object identity of a patch's canonical bytes, namespaced
@@ -502,14 +543,21 @@ pub fn span_of_rows(rows: &[VertexRow]) -> Option<(CommitSeq, CommitSeq)> {
 /// patch may restate one exact statement to add its retirement — the later
 /// statement of that key is the truth. The chain-contiguity law makes the
 /// winning statements non-overlapping, so at most one is visible at `as_of`.
-pub fn merge_vertex(patches: &[Vec<VertexRow>], vid: VId, as_of: CommitSeq) -> Option<VertexRow> {
+pub fn merge_vertex(patches: &[VertexPatchRows], vid: VId, as_of: CommitSeq) -> Option<VertexRow> {
     let mut statements: std::collections::BTreeMap<u64, &VertexRow> =
         std::collections::BTreeMap::new();
     for rows in patches {
-        for row in rows {
-            if row.vid == vid {
-                statements.insert(row.created_at.0, row);
-            }
+        // All versions of this vid are contiguous under the retained
+        // canonical ordering. Only those statements participate in the
+        // same publication-order retirement merge used by the full scan.
+        if rows.first().is_none_or(|row| row.vid > vid)
+            || rows.last().is_some_and(|row| row.vid < vid)
+        {
+            continue;
+        }
+        let first = rows.partition_point(|row| row.vid < vid);
+        for row in rows[first..].iter().take_while(|row| row.vid == vid) {
+            statements.insert(row.created_at.0, row);
         }
     }
     statements
@@ -522,7 +570,7 @@ pub fn merge_vertex(patches: &[Vec<VertexRow>], vid: VId, as_of: CommitSeq) -> O
 /// [`merge_vertex`] over the whole patch family in one pass (fgdb-9k5w). The
 /// chain-contiguity law makes the winning statements per VId non-overlapping,
 /// so the visibility filter selects at most one row per vertex.
-pub fn merge_all_vertices(patches: &[Vec<VertexRow>], as_of: CommitSeq) -> Vec<VertexRow> {
+pub fn merge_all_vertices(patches: &[VertexPatchRows], as_of: CommitSeq) -> Vec<VertexRow> {
     let mut statements: std::collections::BTreeMap<(VId, u64), &VertexRow> =
         std::collections::BTreeMap::new();
     for rows in patches {
@@ -543,7 +591,7 @@ pub fn read_patch(
     namespace: DatabaseSecurityNamespaceId,
     bytes: &[u8],
     expected: VertexPatchVersion,
-) -> Result<Vec<VertexRow>, VertexPatchError> {
+) -> Result<VertexPatchRows, VertexPatchError> {
     let actual = vertex_patch_id(k_oid, namespace, bytes);
     if actual != expected.0 {
         return Err(VertexPatchError::IdentityMismatch {

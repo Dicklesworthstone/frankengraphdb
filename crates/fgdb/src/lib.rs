@@ -173,7 +173,7 @@ use fgdb_strata::root::{
     merge_in_neighbours, merge_neighbours,
 };
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
-use fgdb_strata::vertex::{merge_all_vertices, merge_vertex};
+use fgdb_strata::vertex::{VertexPatchRows, merge_all_vertices, merge_vertex};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
 use fgdb_strata::{AdjacencyEntry, DeltaBlockVersion, PartitionRootVersion};
 
@@ -1437,7 +1437,7 @@ struct Snapshot {
     block_props: Vec<Option<BlockProps>>,
     /// The decoded vertex row patches, aligned with `patch_refs` — the vertex
     /// half of the snapshot (fgdb-3xoi), under the same carry-forward rule.
-    patches: Vec<Vec<VertexRow>>,
+    patches: Vec<VertexPatchRows>,
     patch_refs: Vec<PatchRef>,
     frontier: CommitSeq,
     root: PartitionRootVersion,
@@ -3578,7 +3578,7 @@ impl<V: Vfs + Clone> Database<V> {
             DerivedPublicationStage::RefreshVertexSnapshot,
         );
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        let mut fresh_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> =
+        let mut fresh_patches: std::collections::BTreeMap<ObjectId, VertexPatchRows> =
             std::collections::BTreeMap::new();
         let carried_patch_ids: std::collections::BTreeSet<ObjectId> = self
             .snapshot
@@ -3607,7 +3607,7 @@ impl<V: Vfs + Clone> Database<V> {
             );
         }
         let previous = Arc::make_mut(&mut self.snapshot);
-        let mut carried_patches: std::collections::BTreeMap<ObjectId, Vec<VertexRow>> = previous
+        let mut carried_patches: std::collections::BTreeMap<ObjectId, VertexPatchRows> = previous
             .patch_refs
             .iter()
             .map(|r| r.patch_id)
@@ -4540,7 +4540,7 @@ pub fn marker_for_capsule(
 fn derive_versions_and_ordinal(
     blocks: &[Vec<AdjacencyEntry>],
     block_props: &[Option<BlockProps>],
-    patches: &[Vec<VertexRow>],
+    patches: &[VertexPatchRows],
     frontier: CommitSeq,
 ) -> Result<(std::collections::BTreeMap<ElementId, ObjectId>, u64), CanonicalError> {
     let mut versions = std::collections::BTreeMap::new();

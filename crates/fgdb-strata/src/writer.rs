@@ -32,7 +32,9 @@ use crate::edge_props::{
     property_patch_id,
 };
 use crate::root::{BlockRef, PartitionRoot, PatchRef, RootError, span_of, validate_root};
-use crate::vertex::{VertexPatchError, VertexRow, encode_patch, span_of_rows, vertex_patch_id};
+use crate::vertex::{
+    VertexPatchError, VertexPatchRows, VertexRow, encode_patch, span_of_rows, vertex_patch_id,
+};
 use crate::{
     AdjacencyEntry, BlockError, DeltaBlockVersion, MAX_BLOCK_ENTRIES, block_id, encode_block,
     encode_block_with_properties, validate_entry,
@@ -337,7 +339,7 @@ impl BlockWriter {
         sealed_patches: Vec<SealedPatch>,
         blocks: &[Vec<AdjacencyEntry>],
         block_props: &[Option<crate::edge_props::BlockProps>],
-        patches: &[Vec<VertexRow>],
+        patches: &[VertexPatchRows],
         frontier: CommitSeq,
     ) -> Result<Self, RootError> {
         let mut live = BTreeMap::new();
