@@ -1,9 +1,67 @@
 # Reality Check and Bridge Plan
 
 **Latest implementation verification: 2026-09-08**, at clean source commit
-`ac0751f2bd5fc4a637233aec0bb515a77074c05b`.
+`9adf484d3b9a521b22f171b42e62eaccf02726c3`.
 
-## Implementation follow-through — 2026-09-08
+## Continued implementation — 2026-09-08 afternoon
+
+**Two more product repairs and the coverage-footer correction are implemented,
+proved and closed as bounded Beads.** The complete local proof exits 0 on source
+`9adf484d`, tree `7cec506e07731ab167579b403c346b7d9819fdab`: 9/9 core and
+40/40 registered gates passed, zero red/unrun, and a stable tree. The two
+workspace reruns agree across 3,449 test outcomes; all nine Miri tests pass.
+The repository-bound bundle verifier also exits 0. These results establish the
+current embedded subset, not Genesis/G1 or the larger architectural promises.
+
+| Repair | Delivered behavior | Source commit and Bead |
+|---|---|---|
+| Vertex patch packing | Sealing, replay and compaction share a canonical byte-aware packer. Batches of individually fitting labelled/property rows stay within both the existing byte and row ceilings. The original failed durable directory recovers all 8,192 vertices and 512 edges, with exact data through compaction and authoritative replay. | `12ff7c9b`; `fgdb-w3-properties-gou.1` |
+| Shared vertex point reads | Validated patch ordering remains immutable through decode, store, snapshots and compaction. Point lookup skips disjoint patches and searches only the target's versions while preserving MVCC restatements and visibility. Full-scan differential, malformed-format, compile-fail mutation and existing reference tests pass. | `9adf484d`; `fgdb-w3-properties-gou.3` |
+| Coverage footer | Removes the contradictory duplicate zero counts. The authoritative coverage census, enforcement and exit logic are unchanged. | `2f88de83` (committed by another process); `fgdb-rksz` |
+
+The read comparison uses a real durable two-commit fixture with 8,192 vertices
+and 512 edges, three warmup processes, then ten measured processes with ten
+repetitions each. It runs the supported certified label/property query and
+512 historical point reads per repetition. Every complete ordered output,
+including certificates and historical rows, matches the baseline SHA-256
+`356ec84dee1d760d13c4fc2ef9a076e13b3f0dcef3b9c97a125b534085ce38eb`.
+
+| Diagnostic | Before | After |
+|---|---:|---:|
+| Certified query median / p95 | 73.832 / 78.093 ms | 7.591 / 8.039 ms |
+| 512 historical points median / p95 | 23.261 / 24.656 ms | 1.267 / 2.373 ms |
+| Whole-process mean | 10.336 s | 8.838 s |
+| Maximum observed RSS | 36,752 KiB | 36,540 KiB |
+
+These are sequential shared-host, unoptimized development-build diagnostics,
+not Section 17 release benchmarks or bounded-memory evidence. The original
+post-commit packing failure, remotely executed before-code regression,
+parser-refused first profiling query and intermediate optimization variant are
+retained. The supported-query correction preceded every valid baseline sample.
+No original format/oracle assertion was removed or weakened. Focused changed
+Rust scans report zero critical findings; the complete-source UBS ratchet passes
+against its unchanged baseline of 481 critical findings, not a zero-finding
+repository. Fresh acceptance review was solo; bundle verification establishes
+integrity and attribution rather than independent authorship review.
+
+The new evidence root is `/data/tmp/fgdb-followthrough-20260908-AYUerc`.
+`implementation-proof/manifest.txt` binds the complete source verdict above;
+`before-summary.json` and `after2-summary.json` record the final comparison.
+The original detailed TODO remains
+`/data/tmp/fgdb-reality-20260907-5al0t4bi/implementation-todo.md`.
+The proof ran locally with `.beads/` present and
+`RCH_CARGO_WRAPPER_BYPASS=1 CARGO_BUILD_JOBS=8 RUST_LOG=error`.
+
+**Large individual rows and edge-property admission remain open as
+`fgdb-w3-properties-gou.2`.** That follow-up is source-derived: the current
+commit path can reach durable publication before a too-large row is refused.
+This wave does not claim an executed oversized-single-row reproduction or a
+complete large-property representation/admission solution. The parent properties
+contract remains open. GLA/FreeJoin, buffer/lease/filesystem, full GQL/SSI,
+authorization and server/CLI owners retain their dependencies; no finished
+GLA, FreeJoin or buffer crate was found waiting only to be wired in.
+
+## Earlier implementation follow-through — 2026-09-08 morning
 
 **The complete repository gate now passes. Four bounded repairs are implemented
 and their Beads are closed.** The product remains an unreleased embedded subset;
@@ -42,9 +100,9 @@ The unchanged external wrong-handle reproduction now observes typed refusals,
 no misdirected rows in either database, and zero outstanding obligations.
 
 The actual coverage census is **760 tracked = 747 inspected + 13 declared
-exemptions**. A separate P3 reporting defect, `fgdb-rksz`, makes the redundant
-success footer print `0/0`; the coverage function did execute. Do not use those
-footer counts as the census or infer an unrun coverage gate from them.
+exemptions**. At this earlier revision, `fgdb-rksz` made the redundant success
+footer print `0/0`; the coverage function did execute. The afternoon repair
+removes the false duplicate counts while preserving that authoritative census.
 
 The highest-impact remaining paths retain their original dependencies: GLA
 cutover (`fgdb-boundplan-gla-lowering-seam-r2kd`) awaits FreeJoin; the buffer and
