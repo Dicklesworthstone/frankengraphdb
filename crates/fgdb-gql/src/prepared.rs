@@ -8,9 +8,10 @@ use crate::{BindError, BoundPlan, RelationBind};
 /// inputs exactly once. Private fields prevent a caller from pairing statement
 /// or binding evidence with a plan produced from different inputs.
 ///
-/// This is not yet the final parameterized prepared-statement protocol. It has
-/// no typed parameters, catalog epoch, authorization context, cursor lifetime,
-/// physical plan, or invalidation policy.
+/// Numeric template binding can also construct this concrete definition without
+/// reparsing. Its statement contains the same typed numeric values as its plan.
+/// Catalog epochs, authorization, cursor lifetime, physical-plan invalidation
+/// and the final prepared-statement protocol remain separate work.
 #[derive(Clone, PartialEq, Eq)]
 #[must_use = "a prepared GQL query has no effect until it is executed or inspected"]
 pub struct PreparedGqlQuery {
@@ -32,7 +33,18 @@ impl PreparedGqlQuery {
         })
     }
 
-    /// The exact statement bytes supplied at preparation time.
+    /// The numeric template compiler calls this only after validating every
+    /// argument and installing its values in proven numeric slots. Rendering
+    /// places the same numbers at the corresponding validated token spans.
+    pub(crate) fn from_parameter_instantiation(
+        statement: String,
+        bind: RelationBind,
+        plan: BoundPlan,
+    ) -> Self {
+        Self { statement, bind, plan }
+    }
+
+    /// The exact concrete statement bytes represented by this definition.
     #[must_use]
     pub fn statement(&self) -> &str {
         &self.statement

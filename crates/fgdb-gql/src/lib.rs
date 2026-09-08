@@ -11,6 +11,7 @@ mod evidence_cursor;
 mod evidence_limits;
 mod evidence_page;
 mod overlay_evidence;
+mod parameters;
 mod parser;
 mod prepared;
 
@@ -35,6 +36,10 @@ pub use evidence_page::{
     GqlEvidencePageToken, GqlEvidencePageTokenDecodeError,
 };
 pub use overlay_evidence::GqlOverlayResultCertificate;
+pub use parameters::{
+    GqlParameterError, GqlParameterSpec, GqlParameterType, GqlParameterValue,
+    GqlParameters, PreparedGqlTemplate,
+};
 pub use parser::{
     BindError, BoundPlan, EdgeDirection, ParseError, ParseErrorKind, RelationBind, ReturnProjection,
 };
