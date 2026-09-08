@@ -1,12 +1,70 @@
 # Reality Check and Bridge Plan
 
-**Current measurement: 2026-09-07 (America/New_York; execution on 2026-09-08 UTC)**,
+**Latest implementation verification: 2026-09-08**, at clean source commit
+`ac0751f2bd5fc4a637233aec0bb515a77074c05b`.
+
+## Implementation follow-through — 2026-09-08
+
+**The complete repository gate now passes. Four bounded repairs are implemented
+and their Beads are closed.** The product remains an unreleased embedded subset;
+this does not establish Genesis/G1, full GQL/SSI, larger-than-memory execution,
+Warden authorization, or a server/CLI product. The vision checklist below still
+describes those larger gaps.
+
+| Repair | Delivered behavior | Source commit and Bead |
+|---|---|---|
+| Identity E2E | Independently re-derived source/reference pins and catalog counts; distinct typed negatives for unapproved bindings and mismatched approved bindings; 96 assertions execute and pass. No checker or invariant contract weakened. | `e4a24238`; `fgdb-a01-reference-roots-2k0q.2` |
+| Public cursor policy | Applications can name and construct the existing cursor consumption limits and inspect typed refusals. External integration tests cover zero, exact and one-over bounds, state preservation, deterministic checkpoints, resume, exhaustion and close. | `6dabf7dd`; `fgdb-w10-embedded-54r.1.1` |
+| Transaction bulk scans | Edge/vertex scans reuse admitted durable rows through the existing staged evaluator instead of repeating whole-history point lookups. Ordered rows, historical visibility and conflict tracking are preserved. | `7f5a1cc6`; `fgdb-w10-embedded-54r.1.2` |
+| Originating handle ownership | Transactions and prepared writes cannot read, stage or commit through another opened database handle. Refusal preserves the transaction for its owner; moves/live advancement work, and reopened lifetimes are distinct. Real public tests cover same-key databases, recovery, cursor resume and preservation of FCW history. | `ac0751f2`; `fgdb-w10-embedded-54r.1.3` |
+
+The scan comparison used a real durable filesystem fixture with 512 vertices
+and 512 edges, an unoptimized development build, ten measured processes and
+three scans per process after three warmups. Edge-scan p50 changed from
+588.636 ms to 3.408 ms; vertex-scan p50 from 2.778 ms to 1.290 ms.
+Whole-process mean changed from 9.510 s to 8.100 s. Maximum observed RSS was
+13,536 KiB before and 13,676 KiB after. Ordered output bytes were identical.
+These are sequential shared-host diagnostics at the batching revision, not
+Section 17 release benchmarks or evidence of bounded memory/spill.
+
+The retained evidence root remains
+`/data/tmp/fgdb-reality-20260907-5al0t4bi`. `implementation-proof` passes on
+`7f5a1cc6`; `ownership-proof` passes on `ac0751f2`, tree
+`bfc2e9bd36dff60d61568a7633ebe6838239f064`. Both complete local proofs ran with
+`.beads/` present and `RCH_CARGO_WRAPPER_BYPASS=1 CARGO_BUILD_JOBS=8 RUST_LOG=error`.
+Each exits 0 with a stable tree, 9/9 core and 40/40 registered gates executed
+and passed, and zero red/unrun. Repository-bound bundle verification also exits
+0; this validates bundle integrity and attribution, not independent authorship
+review. The ownership proof's repeated runs agree across 3,446 tests and its
+Miri workloads pass. Fresh acceptance review was solo; failed new-fixture
+attempts and their corrections remain in the detailed `implementation-todo.md`.
+The unchanged external wrong-handle reproduction now observes typed refusals,
+no misdirected rows in either database, and zero outstanding obligations.
+
+The actual coverage census is **760 tracked = 747 inspected + 13 declared
+exemptions**. A separate P3 reporting defect, `fgdb-rksz`, makes the redundant
+success footer print `0/0`; the coverage function did execute. Do not use those
+footer counts as the census or infer an unrun coverage gate from them.
+
+The highest-impact remaining paths retain their original dependencies: GLA
+cutover (`fgdb-boundplan-gla-lowering-seam-r2kd`) awaits FreeJoin; the buffer and
+ScratchStore owner (`fgdb-w3-buffer-g2v`) awaits snapshot leases and filesystem
+profiles. The broader embedded record still requires its parent owner's scope
+acceptance. Candidate-tree proof enforcement in the actual landing hook
+(`fgdb-l9r3`) remains unproved. The earlier `fgdb-apco` clause-binding validation
+now passes, but that record retains its open dependency; complete enforced
+invariants remain zero. No broad parent or architectural gate is closed by
+these four repairs.
+
+## Historical baseline — 2026-09-07
+
+**Baseline measurement: 2026-09-07 (America/New_York; execution on 2026-09-08 UTC)**,
 at clean baseline commit `fcc39e5b28e04264f28488878d36372cb5934ab9`.
 This document is revised in place. The September 2 and earlier assessments below
 are historical evidence, not current claims. In particular, the previous
 blanket statement that the tree cannot compile and no example runs is obsolete.
 
-## Current delta — 2026-09-07
+### Baseline delta — 2026-09-07
 
 ### Product verdict
 
