@@ -18,7 +18,10 @@ pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,
     GqlOverlayResultArtifact, GqlPreparedResultArtifact,
 };
-pub use evidence_cursor::{GqlEvidenceCursor, GqlEvidenceCursorError, GqlEvidenceCursorState};
+pub use evidence_cursor::{
+    GqlEvidenceCursor, GqlEvidenceCursorError, GqlEvidenceCursorLimitDimension,
+    GqlEvidenceCursorLimitExceeded, GqlEvidenceCursorLimits, GqlEvidenceCursorState,
+};
 pub use evidence_limits::{
     GqlEvidenceLimitDimension, GqlEvidenceLimitExceeded, GqlEvidenceLimitedAuditError,
     GqlEvidenceLimitedDecodeError, GqlEvidenceLimits,
