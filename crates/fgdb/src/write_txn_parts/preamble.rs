@@ -26,6 +26,16 @@ pub enum WriteTxnError {
         pinned: CommitSeq,
         live: CommitSeq,
     },
+    /// Independent relation groups cannot silently consume each other's writes.
+    AtomicRelationConflict {
+        first: RelationId,
+        second: RelationId,
+        element: ElementId,
+    },
+    /// The compound command cannot assign distinct u64 intent-visit ordinals.
+    AtomicOrdinalOverflow,
+    /// A new delta family needs an explicit compound-write independence law.
+    UnsupportedAtomicMutation,
     Read(ReadError),
     Gql(GqlError),
     Write(WriteError),
@@ -47,6 +57,14 @@ impl core::fmt::Display for WriteTxnError {
                 formatter,
                 "write transaction pinned {pinned:?}, but the live snapshot advanced to {live:?}"
             ),
+            Self::AtomicRelationConflict { first, second, element } => write!(
+                formatter,
+                "atomic relation groups {first:?} and {second:?} are not independent at {element:?}"
+            ),
+            Self::AtomicOrdinalOverflow => formatter.write_str("atomic write intent ordinal overflow"),
+            Self::UnsupportedAtomicMutation => formatter.write_str(
+                "atomic write contains a mutation without a defined independence law"
+            ),
             Self::Read(source) => write!(formatter, "could not read the pinned snapshot: {source}"),
             Self::Gql(source) => write!(formatter, "transaction GQL failed: {source}"),
             Self::Write(source) => write!(formatter, "write transaction failed: {source}"),
@@ -64,7 +82,10 @@ impl core::error::Error for WriteTxnError {
             | Self::Finished
             | Self::WrongDatabase
             | Self::RelationMismatch { .. }
-            | Self::SnapshotAdvanced { .. } => None,
+            | Self::SnapshotAdvanced { .. }
+            | Self::AtomicRelationConflict { .. }
+            | Self::AtomicOrdinalOverflow
+            | Self::UnsupportedAtomicMutation => None,
         }
     }
 }

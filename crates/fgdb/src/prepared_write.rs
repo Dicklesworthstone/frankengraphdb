@@ -1,5 +1,7 @@
 //! Prepared writes retain their observations, not a resettable validator epoch.
 
+mod atomic;
+
 use crate::{
     CommitCx, CommitSeq, CrashPoint, Database, ElementId, FirstCommitterWinsValidator, PendingRow,
     PreparedWrite, VId, WriteBatch, WriteError,
