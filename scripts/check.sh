@@ -3584,4 +3584,4 @@ if [ "$CORE_RED" -ne 0 ] || [ "$CORE_UNRUN" -ne 0 ] \
   exit 1
 fi
 
-echo "ALL GATES GREEN — core $CORE_EXECUTED/$CORE_EXPECTED; registered live $REGISTERED_EXECUTED/$REGISTERED_EXPECTED; file coverage $COV_INSPECTED/$COV_TRACKED inspected, $COV_EXEMPT declared-not-inspected"
+echo "ALL GATES GREEN — core $CORE_EXECUTED/$CORE_EXPECTED; registered live $REGISTERED_EXECUTED/$REGISTERED_EXPECTED"
