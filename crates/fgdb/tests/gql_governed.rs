@@ -215,3 +215,49 @@ fn invalid_sources_are_not_disguised_as_zero_budget_errors() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn governed_artifact_replay_keeps_all_identity_and_staged_effect_checks() {
+    use fgdb_gql::{GqlEvidenceLimitedAuditError, GqlEvidenceLimits};
+    let ((), report) = run_async_under_lab(0xc0a2_0005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let txn_cx = contexts.txn();
+        let mut db = seeded(&commit).await;
+        let pinned = db.read_session().unwrap();
+        let query = PreparedGqlQuery::prepare("MATCH (a)-[:R]->(a) RETURN a", &names()).unwrap();
+        let artifact = db.execute_prepared_query_artifact(&query).unwrap();
+        let bytes = artifact.to_bytes();
+        let limits = GqlEvidenceLimits::DEFAULT_UNTRUSTED;
+        let stop = GqlQueryPolicy::new(100, 100, 0, 100);
+        assert!(matches!(db.audit_prepared_query_artifact_governed(&query_cx, &query, &bytes, limits, stop),
+            Err(GqlEvidenceLimitedAuditError::Audit(GqlEvidenceAuditError::Execution(
+                GqlQueryError::Evaluator(_)
+            )))));
+        assert_eq!(db.audit_prepared_query_artifact_governed(&query_cx, &query, &bytes, limits, generous()).unwrap().rows(), &[VId(2)]);
+        assert_eq!(pinned.audit_prepared_query_artifact_governed(&query_cx, &query, &bytes, limits, generous()).unwrap().rows(), &[VId(2)]);
+        let other = PreparedGqlQuery::prepare("MATCH (a)-[:R]->(b) RETURN b", &names()).unwrap();
+        assert!(matches!(db.audit_prepared_query_artifact_governed(&query_cx, &other, &bytes, limits, stop),
+            Err(GqlEvidenceLimitedAuditError::Audit(GqlEvidenceAuditError::InputMismatch))));
+        let mut txn = db.begin(&txn_cx).unwrap();
+        let overlay = txn.execute_prepared_query_overlay_artifact(&db, &query).unwrap();
+        let overlay_bytes = overlay.to_bytes();
+        assert!(matches!(txn.audit_prepared_query_overlay_artifact_governed(&db, &query_cx,
+            &query, &overlay_bytes, limits, stop),
+            Err(GqlEvidenceLimitedAuditError::Audit(GqlEvidenceAuditError::Execution(
+                GqlQueryError::Evaluator(_)
+            )))));
+        assert_eq!(txn.audit_prepared_query_overlay_artifact_governed(&db, &query_cx,
+            &query, &overlay_bytes, limits, generous()).unwrap().rows(), &[VId(2)]);
+        let mut changed = WriteBatch::new(R);
+        changed.set_vertex_property(VId(1), N, Some(CanonicalScalar::Int(8)));
+        txn.write(&mut db, changed).unwrap();
+        assert_eq!(txn.execute_prepared_query_governed(&db, &query_cx, &query, generous()).unwrap().value, vec![VId(2)]);
+        assert!(matches!(txn.audit_prepared_query_overlay_artifact_governed(&db, &query_cx,
+            &query, &overlay_bytes, limits, stop),
+            Err(GqlEvidenceLimitedAuditError::Audit(GqlEvidenceAuditError::StagedEffectMismatch))));
+        txn.abort();
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
