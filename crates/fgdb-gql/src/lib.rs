@@ -10,6 +10,7 @@ mod evidence_artifact;
 mod evidence_cursor;
 mod evidence_limits;
 mod evidence_page;
+mod graph_text;
 mod overlay_evidence;
 mod parameters;
 mod parser;
@@ -34,6 +35,10 @@ pub use evidence_limits::{
 pub use evidence_page::{
     GQL_EVIDENCE_PAGE_TOKEN_LEN, GqlEvidencePage, GqlEvidencePageAuditError, GqlEvidencePageError,
     GqlEvidencePageToken, GqlEvidencePageTokenDecodeError,
+};
+pub use graph_text::{
+    GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
+    MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS, PreparedGraphText,
 };
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
