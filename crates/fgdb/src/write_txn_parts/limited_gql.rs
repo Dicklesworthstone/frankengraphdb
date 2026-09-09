@@ -497,17 +497,14 @@ mod limited_snapshot_admission_tests {
                     || Ok::<_, ()>(()),
                 );
                 if let Some(dimension) = dimension {
-                    let Err(GqlQueryError::Evaluator(exceeded)) = result else {
-                        panic!("{result:?}")
-                    };
-                    assert_eq!(exceeded.dimension, dimension);
                     let limit = if dimension == GlaLimitDimension::WorkUnits {
                         work_cap
                     } else {
                         scratch_cap
                     };
-                    assert_eq!(exceeded.limit, limit);
-                    assert_eq!(exceeded.observed, u128::from(limit) + 1);
+                    assert!(matches!(result, Err(GqlQueryError::Evaluator(exceeded))
+                        if exceeded.dimension == dimension && exceeded.limit == limit
+                            && exceeded.observed == u128::from(limit) + 1));
                 } else {
                     assert_eq!(result.unwrap(), complete);
                 }

@@ -447,7 +447,10 @@ impl AdmissionUsage {
         Ok(())
     }
 
-    pub(crate) fn remaining(self, mut policy: fgdb_gql::GqlQueryPolicy) -> fgdb_gql::GqlQueryPolicy {
+    pub(crate) fn remaining(
+        self,
+        mut policy: fgdb_gql::GqlQueryPolicy,
+    ) -> fgdb_gql::GqlQueryPolicy {
         policy.evaluator.max_work_units -= self.work_units;
         policy.evaluator.max_scratch_entries -= self.scratch_entries;
         policy

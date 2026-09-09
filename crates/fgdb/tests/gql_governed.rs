@@ -257,8 +257,15 @@ fn governed_refusal_preserves_label_witnesses_without_global_insert_fencing() {
             let query = PreparedGqlQuery::prepare("MATCH (a:L) RETURN a", &names()).unwrap();
             // Two source units retain the label witness; the next visit
             // refuses. A zero allowance now refuses BEFORE source admission.
-            assert!(matches!(txn.execute_prepared_query_governed(&db, &query_cx, &query,
-                GqlQueryPolicy::new(10, 10, 2, 100)), Err(GqlQueryError::Evaluator(_))));
+            assert!(matches!(
+                txn.execute_prepared_query_governed(
+                    &db,
+                    &query_cx,
+                    &query,
+                    GqlQueryPolicy::new(10, 10, 2, 100)
+                ),
+                Err(GqlQueryError::Evaluator(_))
+            ));
             let mut winner = WriteBatch::new(R);
             winner.create_vertex(
                 VId(77),
