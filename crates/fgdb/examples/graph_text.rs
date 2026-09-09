@@ -7,7 +7,9 @@
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
+use fgdb_gql::{
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText,
+};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
 const KNOWS: RelationId = RelationId(1);
