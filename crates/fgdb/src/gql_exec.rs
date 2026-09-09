@@ -4,9 +4,11 @@
 //! here. Traversal, predicates, projection, distinct ordering and pagination
 //! belong to fgdb-gql's lowered operators, never a second inline MATCH engine.
 
+mod source;
+
 use crate::{
     Database, EdgeRecord, EmbeddedReadView, GqlCertificate, GqlError, GqlPlanCertificate,
-    ReadError, VertexRow,
+    ReadError, Snapshot, VertexRow,
 };
 use asupersync::fs::Vfs;
 use fgdb_delta_types::RelationId;
@@ -21,6 +23,12 @@ pub(crate) trait GqlSnapshotReader {
     fn gql_vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError>;
     fn gql_vertices_at(&self, as_of: CommitSeq) -> Result<Vec<VertexRow>, ReadError>;
     fn gql_edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError>;
+
+    /// Only production readers can return the private admitted generation.
+    /// Test readers keep their independently fallible owned-source seam.
+    fn gql_admitted_snapshot(&self, _as_of: CommitSeq) -> Result<Option<&Snapshot>, ReadError> {
+        Ok(None)
+    }
 }
 
 impl<V: Vfs + Clone> GqlSnapshotReader for Database<V> {
@@ -35,6 +43,12 @@ impl<V: Vfs + Clone> GqlSnapshotReader for Database<V> {
     fn gql_edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
         Database::edges_at(self, as_of)
     }
+
+    fn gql_admitted_snapshot(&self, as_of: CommitSeq) -> Result<Option<&Snapshot>, ReadError> {
+        self.ensure_readable()?;
+        self.snapshot.check_frontier(as_of)?;
+        Ok(Some(&self.snapshot))
+    }
 }
 
 impl GqlSnapshotReader for EmbeddedReadView {
@@ -48,6 +62,11 @@ impl GqlSnapshotReader for EmbeddedReadView {
 
     fn gql_edges_at(&self, as_of: CommitSeq) -> Result<Vec<EdgeRecord>, ReadError> {
         EmbeddedReadView::edges_at(self, as_of)
+    }
+
+    fn gql_admitted_snapshot(&self, as_of: CommitSeq) -> Result<Option<&Snapshot>, ReadError> {
+        self.snapshot.check_frontier(as_of)?;
+        Ok(Some(&self.snapshot))
     }
 }
 
@@ -190,14 +209,14 @@ impl EmbeddedReadView {
     }
 }
 
-/// Own the admitted table and bind it to the exact plan, reader and sequence.
-/// A budget check can inspect the count and then execute these SAME rows;
-/// it cannot substitute another plan or accidentally re-read a different cut.
-/// At most one of vertices and edges contains data.
+/// Bind source rows to the exact reader, plan and sequence. Production uses
+/// borrowed rows from its private admitted generation, not cloned properties.
+/// Owned fields are the independently fallible test-reader seam only.
 pub(crate) struct AdmittedGqlSnapshot<'a, R: ?Sized> {
     reader: &'a R,
     as_of: CommitSeq,
     logical: GlaPlan,
+    borrowed: Option<source::BorrowedTables<'a>>,
     vertices: BTreeMap<VId, VertexRow>,
     edges: Vec<EdgeRecord>,
     snapshot_records: u64,
@@ -212,14 +231,19 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
         let logical = GlaPlan::lower(plan);
         let mut vertices = BTreeMap::new();
         let mut edges = Vec::new();
-        // Even a logically empty forged plan must cross the ordinary source
-        // fence. Future/fenced snapshots cannot become successful empty reads.
-        let count = if logical.scans_edges() {
+        let borrowed = reader.gql_admitted_snapshot(as_of)?
+            .map(|snapshot| source::admit(snapshot, &logical, as_of, &mut |_| Ok::<_, ReadError>(())))
+            .transpose()?;
+        // Even a logically empty forged plan crosses its source's ordinary
+        // fence. A future/fenced snapshot cannot become a successful empty read.
+        let count = if let Some(tables) = &borrowed {
+            tables.snapshot_records
+        } else if logical.scans_edges() {
             edges = reader.gql_edges_at(as_of)?;
-            edges.len()
+            edges.len() as u64
         } else {
             let rows = reader.gql_vertices_at(as_of)?;
-            let count = rows.len();
+            let count = rows.len() as u64;
             vertices.extend(rows.into_iter().map(|row| (row.vid, row)));
             count
         };
@@ -227,47 +251,54 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
             reader,
             as_of,
             logical,
+            borrowed,
             vertices,
             edges,
-            snapshot_records: u64::try_from(count).unwrap_or(u64::MAX),
+            snapshot_records: count,
         })
+    }
+
+    fn vertex_ids(&self) -> impl Iterator<Item = VId> + '_ {
+        self.borrowed.iter().flat_map(|tables| tables.vertices.iter().map(|row| row.vid))
+            .chain(self.vertices.keys().copied())
+    }
+
+    fn edge_triples(&self) -> impl Iterator<Item = (VId, RelationId, VId)> + '_ {
+        self.borrowed.iter().flat_map(|tables| tables.edges.iter().copied())
+            .chain(self.edges.iter().map(edge_triple))
     }
 
     pub(crate) fn execute_budgeted(
         self,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<ReadError>>
-    {
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<ReadError>> {
         self.logical.execute_budgeted(
             self.snapshot_records,
-            self.vertices.keys().copied(),
-            self.edges.iter().map(edge_triple),
+            self.vertex_ids(),
+            self.edge_triples(),
             |vid, predicates| self.matches(vid, predicates),
             budget,
         )
     }
 
     fn matches(&self, vid: VId, predicates: &[VertexPredicate]) -> Result<bool, ReadError> {
-        if self.logical.scans_edges() {
+        if let Some(tables) = &self.borrowed {
+            Ok(tables.matches(vid, predicates))
+        } else if self.logical.scans_edges() {
             let row = self.reader.gql_vertex_at(vid, self.as_of)?;
             Ok(row.is_some_and(|row| {
-                predicates
-                    .iter()
-                    .all(|p| p.matches(&row.labels, &row.props))
+                predicates.iter().all(|p| p.matches(&row.labels, &row.props))
             }))
         } else {
             Ok(self.vertices.get(&vid).is_some_and(|row| {
-                predicates
-                    .iter()
-                    .all(|p| p.matches(&row.labels, &row.props))
+                predicates.iter().all(|p| p.matches(&row.labels, &row.props))
             }))
         }
     }
 
     pub(crate) fn execute(self) -> Result<Vec<VId>, ReadError> {
         self.logical.execute(
-            self.vertices.keys().copied(),
-            self.edges.iter().map(edge_triple),
+            self.vertex_ids(), self.edge_triples(),
             |vid, predicates| self.matches(vid, predicates),
         )
     }
@@ -277,10 +308,8 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
         limits: GlaExecutionLimits,
     ) -> Result<GlaExecution, GlaExecutionError<ReadError>> {
         self.logical.execute_with_limits(
-            self.vertices.keys().copied(),
-            self.edges.iter().map(edge_triple),
-            |vid, predicates| self.matches(vid, predicates),
-            limits,
+            self.vertex_ids(), self.edge_triples(),
+            |vid, predicates| self.matches(vid, predicates), limits,
         )
     }
 
@@ -290,12 +319,8 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<ReadError, C>> {
         self.logical.execute_governed(
-            self.snapshot_records,
-            self.vertices.keys().copied(),
-            self.edges.iter().map(edge_triple),
-            |vid, predicates| self.matches(vid, predicates),
-            policy,
-            checkpoint,
+            self.snapshot_records, self.vertex_ids(), self.edge_triples(),
+            |vid, predicates| self.matches(vid, predicates), policy, checkpoint,
         )
     }
 }
