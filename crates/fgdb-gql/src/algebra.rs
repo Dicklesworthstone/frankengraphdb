@@ -1,12 +1,12 @@
 //! Typed GLA lowering for the existing bounded MATCH language.
 //!
-//! This is the scan-backed migration seam of
-//! `fgdb-boundplan-gla-lowering-seam-r2kd`, not the registered FreeJoin physical
-//! family. The legacy language's set-of-vertex-IDs contract is explicit:
-//! Project -> Distinct -> OrderByVertexId -> Limit. It is not GQL's general
-//! multiset or path-identity contract. Operators are immutable after lowering.
+//! The default output is a sorted distinct vertex-ID set. Typed graph-pattern
+//! tuple plans preserve correlated columns and use lexicographic row ordering.
+//! Neither output is a general GQL bag or a registered FreeJoin physical plan.
 
 mod pattern;
+mod output;
+pub use output::{GlaOutput, GraphBindingRow};
 pub use pattern::{
     GraphPatternBuilder, PreparedGraphPattern, PatternBuildError, PatternLimitDimension,
     MAX_PATTERN_EDGES, MAX_PATTERN_VERTICES, MAX_PATTERN_PREDICATES,
@@ -15,7 +15,8 @@ pub use pattern::{
 
 use crate::{BoundPlan, EdgeDirection, ReturnProjection};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::CanonicalScalar;
+use fgdb_types::{CanonicalScalar, VId};
+use core::marker::PhantomData;
 
 /// An ordinal in the binding table, independent of a parser variable's name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,28 +24,15 @@ pub struct BindingSlot(pub(crate) u32);
 
 impl BindingSlot {
     #[must_use]
-    pub const fn ordinal(self) -> u32 {
-        self.0
-    }
+    pub const fn ordinal(self) -> u32 { self.0 }
 }
 
 /// Physical orientation after the bounded binder's one-hop normalization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum GlaDirection {
-    Forward,
-    Reverse,
-    Undirected,
-}
+pub enum GlaDirection { Forward, Reverse, Undirected }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IntegerComparison {
-    Equal,
-    NotEqual,
-    Greater,
-    Less,
-    GreaterOrEqual,
-    LessOrEqual,
-}
+pub enum IntegerComparison { Equal, NotEqual, Greater, Less, GreaterOrEqual, LessOrEqual }
 
 impl IntegerComparison {
     #[must_use]
@@ -61,43 +49,26 @@ impl IntegerComparison {
 
     fn tag(self) -> u8 {
         match self {
-            Self::Equal => 0,
-            Self::NotEqual => 1,
-            Self::Greater => 2,
-            Self::Less => 3,
-            Self::GreaterOrEqual => 4,
-            Self::LessOrEqual => 5,
+            Self::Equal => 0, Self::NotEqual => 1, Self::Greater => 2,
+            Self::Less => 3, Self::GreaterOrEqual => 4, Self::LessOrEqual => 5,
         }
     }
 }
 
-/// A position-independent predicate. Missing and non-integer properties fail
-/// every integer comparison, including NotEqual; no implicit coercion occurs.
+/// Missing/noninteger values fail every integer comparison, including NotEqual.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VertexPredicate {
     HasLabel(LabelId),
-    IntegerProperty {
-        key: PropertyKeyId,
-        comparison: IntegerComparison,
-        value: i64,
-    },
+    IntegerProperty { key: PropertyKeyId, comparison: IntegerComparison, value: i64 },
 }
 
 impl VertexPredicate {
     #[must_use]
-    pub fn matches(
-        &self,
-        labels: &[LabelId],
-        properties: &[(PropertyKeyId, CanonicalScalar)],
-    ) -> bool {
-        self.matches_borrowed(
-            labels.iter().copied(),
-            properties.iter().map(|(key, value)| (*key, value)),
-        )
+    pub fn matches(&self, labels: &[LabelId], properties: &[(PropertyKeyId, CanonicalScalar)]) -> bool {
+        self.matches_borrowed(labels.iter().copied(), properties.iter().map(|(key, value)| (*key, value)))
     }
 
-    /// Evaluate the same predicate over borrowed fields, without requiring a
-    /// copy of scalar payloads when a transaction overlays property references.
+    /// Evaluate borrowed canonical fields without cloning scalar payloads.
     #[must_use]
     pub fn matches_borrowed<'a>(
         &self,
@@ -106,132 +77,74 @@ impl VertexPredicate {
     ) -> bool {
         match self {
             Self::HasLabel(label) => labels.into_iter().any(|actual| actual == *label),
-            Self::IntegerProperty {
-                key,
-                comparison,
-                value,
-            } => properties.into_iter().any(|(actual_key, scalar)| {
-                actual_key == *key
-                    && matches!(scalar, CanonicalScalar::Int(actual)
-                        if comparison.accepts(*actual, *value))
+            Self::IntegerProperty { key, comparison, value } => properties.into_iter().any(|(actual_key, scalar)| {
+                actual_key == *key && matches!(scalar, CanonicalScalar::Int(actual)
+                    if comparison.accepts(*actual, *value))
             }),
         }
     }
 }
 
-/// A linear, typed subset of the GLA DAG. Each operator consumes its predecessor.
-/// ScanEdges binds slots 0/1; Expand appends one binding; Select preserves the
-/// complete binding row until Project. Only the final Distinct removes rows.
+/// Linear typed GLA operators. Only a private compiler can construct a plan;
+/// output markers prevent a tuple projection from entering a scalar executor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GlaOperator {
     Empty,
     ScanVertices,
-    ScanEdges {
-        relation: RelationId,
-        direction: GlaDirection,
-    },
-    Select {
-        slot: BindingSlot,
-        predicates: Vec<VertexPredicate>,
-    },
-    VertexIdentity {
-        left: BindingSlot,
-        right: BindingSlot,
-        equal: bool,
-    },
-    Expand {
-        source: BindingSlot,
-        relation: RelationId,
-        direction: GlaDirection,
-    },
-    Project {
-        slot: BindingSlot,
-    },
+    ScanEdges { relation: RelationId, direction: GlaDirection },
+    Select { slot: BindingSlot, predicates: Vec<VertexPredicate> },
+    VertexIdentity { left: BindingSlot, right: BindingSlot, equal: bool },
+    Expand { source: BindingSlot, relation: RelationId, direction: GlaDirection },
+    Project { slot: BindingSlot },
     Distinct,
     OrderByVertexId,
-    Limit {
-        offset: u64,
-        count: Option<u64>,
-    },
+    Limit { offset: u64, count: Option<u64> },
+    /// Column order is semantic. Distinctness applies to the entire tuple.
+    ProjectBindings { slots: Vec<BindingSlot> },
+    OrderByBindings,
 }
 
-/// An immutable executable logical definition, not a second parser or binder.
+/// Immutable logical definition with a statically determined output row shape.
+/// Existing language and API calls retain their default `VId` result type.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GlaPlan {
+pub struct GlaPlan<Row = VId> {
     operators: Vec<GlaOperator>,
+    output: PhantomData<fn() -> Row>,
 }
 
-fn predicates(
-    label: Option<LabelId>,
-    properties: [Option<(PropertyKeyId, i64)>; 6],
-) -> Vec<VertexPredicate> {
+fn predicates(label: Option<LabelId>, properties: [Option<(PropertyKeyId, i64)>; 6]) -> Vec<VertexPredicate> {
     let mut result = Vec::new();
-    if let Some(label) = label {
-        result.push(VertexPredicate::HasLabel(label));
-    }
-    let comparisons = [
-        IntegerComparison::Equal,
-        IntegerComparison::NotEqual,
-        IntegerComparison::Greater,
-        IntegerComparison::Less,
-        IntegerComparison::GreaterOrEqual,
-        IntegerComparison::LessOrEqual,
-    ];
+    if let Some(label) = label { result.push(VertexPredicate::HasLabel(label)); }
+    let comparisons = [IntegerComparison::Equal, IntegerComparison::NotEqual,
+        IntegerComparison::Greater, IntegerComparison::Less,
+        IntegerComparison::GreaterOrEqual, IntegerComparison::LessOrEqual];
     for (property, comparison) in properties.into_iter().zip(comparisons) {
         if let Some((key, value)) = property {
-            result.push(VertexPredicate::IntegerProperty {
-                key,
-                comparison,
-                value,
-            });
+            result.push(VertexPredicate::IntegerProperty { key, comparison, value });
         }
     }
     result
 }
 
 fn select(operators: &mut Vec<GlaOperator>, slot: BindingSlot, predicates: Vec<VertexPredicate>) {
-    if !predicates.is_empty() {
-        operators.push(GlaOperator::Select { slot, predicates });
-    }
+    if !predicates.is_empty() { operators.push(GlaOperator::Select { slot, predicates }); }
 }
 
-/// Reusing a variable names the SAME vertex, not a fresh binding. Attach the
-/// constraint only after both slots exist, and use the first matching slot as
-/// the equivalence-class representative. Spelling is erased; aliasing is not.
-fn bind_alias(
-    operators: &mut Vec<GlaOperator>,
-    previous: &[(BindingSlot, &str)],
-    slot: BindingSlot,
-    name: &str,
-) {
+fn bind_alias(operators: &mut Vec<GlaOperator>, previous: &[(BindingSlot, &str)], slot: BindingSlot, name: &str) {
     if let Some((representative, _)) = previous.iter().find(|(_, bound)| *bound == name) {
-        operators.push(GlaOperator::VertexIdentity {
-            left: *representative,
-            right: slot,
-            equal: true,
-        });
+        operators.push(GlaOperator::VertexIdentity { left: *representative, right: slot, equal: true });
     }
 }
 
 impl GlaPlan {
-    /// Lower every currently executable BoundPlan field exactly once. Positional
-    /// predicate slots exist only at this legacy adapter, never in the executor.
+    /// Normalize the legacy positional representation once, at this boundary.
     #[must_use]
     pub fn lower(plan: &BoundPlan) -> Self {
         let source = BindingSlot(0);
         let destination = BindingSlot(1);
         let far_end = BindingSlot(2);
-        let mut source_predicates = predicates(
-            plan.src_label,
-            [
-                plan.src_prop,
-                plan.src_prop_ne,
-                plan.src_prop_gt,
-                plan.src_prop_lt,
-                plan.src_prop_ge,
-                plan.src_prop_le,
-            ],
-        );
+        let mut source_predicates = predicates(plan.src_label, [plan.src_prop, plan.src_prop_ne,
+            plan.src_prop_gt, plan.src_prop_lt, plan.src_prop_ge, plan.src_prop_le]);
         let mut operators = Vec::new();
         let projection = if let Some(relation) = plan.relation {
             let reverse = plan.direction == EdgeDirection::Incoming && plan.hop2_relation.is_some();
@@ -240,78 +153,27 @@ impl GlaPlan {
                 EdgeDirection::Incoming if reverse => GlaDirection::Reverse,
                 EdgeDirection::Incoming | EdgeDirection::Outgoing => GlaDirection::Forward,
             };
-            operators.push(GlaOperator::ScanEdges {
-                relation,
-                direction,
-            });
-            bind_alias(
-                &mut operators,
-                &[(source, plan.src_var.as_str())],
-                destination,
-                &plan.dst_var,
-            );
-            let destination_properties = predicates(
-                None,
-                [
-                    plan.dst_prop,
-                    plan.dst_prop_ne,
-                    plan.dst_prop_gt,
-                    plan.dst_prop_lt,
-                    plan.dst_prop_ge,
-                    plan.dst_prop_le,
-                ],
-            );
+            operators.push(GlaOperator::ScanEdges { relation, direction });
+            bind_alias(&mut operators, &[(source, plan.src_var.as_str())], destination, &plan.dst_var);
+            let destination_properties = predicates(None, [plan.dst_prop, plan.dst_prop_ne,
+                plan.dst_prop_gt, plan.dst_prop_lt, plan.dst_prop_ge, plan.dst_prop_le]);
             let mut destination_predicates = predicates(plan.dst_label, [None; 6]);
-            // Incoming two-hop statements retain the bounded binder's edge-flow
-            // property role: dst properties constrain the anchor, labels the via.
-            if reverse {
-                source_predicates.extend(destination_properties);
-            } else {
-                destination_predicates.extend(destination_properties);
-            }
+            // Retain the bounded incoming-two-hop property-role contract.
+            if reverse { source_predicates.extend(destination_properties); }
+            else { destination_predicates.extend(destination_properties); }
             select(&mut operators, source, source_predicates);
             select(&mut operators, destination, destination_predicates);
             for (present, equal) in [(plan.neq.is_some(), false), (plan.eq.is_some(), true)] {
-                if present {
-                    operators.push(GlaOperator::VertexIdentity {
-                        left: source,
-                        right: destination,
-                        equal,
-                    });
-                }
+                if present { operators.push(GlaOperator::VertexIdentity { left: source, right: destination, equal }); }
             }
             if let Some(relation) = plan.hop2_relation {
-                operators.push(GlaOperator::Expand {
-                    source: destination,
-                    relation,
-                    direction,
-                });
+                operators.push(GlaOperator::Expand { source: destination, relation, direction });
                 if let Some(name) = &plan.hop2_dst_var {
-                    bind_alias(
-                        &mut operators,
-                        &[
-                            (source, plan.src_var.as_str()),
-                            (destination, plan.dst_var.as_str()),
-                        ],
-                        far_end,
-                        name,
-                    );
+                    bind_alias(&mut operators, &[(source, plan.src_var.as_str()),
+                        (destination, plan.dst_var.as_str())], far_end, name);
                 }
-                select(
-                    &mut operators,
-                    far_end,
-                    predicates(
-                        None,
-                        [
-                            plan.hop2_dst_prop,
-                            plan.hop2_dst_prop_ne,
-                            plan.hop2_dst_prop_gt,
-                            plan.hop2_dst_prop_lt,
-                            plan.hop2_dst_prop_ge,
-                            plan.hop2_dst_prop_le,
-                        ],
-                    ),
-                );
+                select(&mut operators, far_end, predicates(None, [plan.hop2_dst_prop, plan.hop2_dst_prop_ne,
+                    plan.hop2_dst_prop_gt, plan.hop2_dst_prop_lt, plan.hop2_dst_prop_ge, plan.hop2_dst_prop_le]));
             }
             match plan.projection {
                 ReturnProjection::Source => source,
@@ -320,35 +182,34 @@ impl GlaPlan {
                 ReturnProjection::Hop2Destination => destination,
             }
         } else {
-            // A forged unlabeled node plan must not become an all-vertices scan.
-            operators.push(if plan.src_label.is_some() {
-                GlaOperator::ScanVertices
-            } else {
-                GlaOperator::Empty
-            });
+            operators.push(if plan.src_label.is_some() { GlaOperator::ScanVertices } else { GlaOperator::Empty });
             select(&mut operators, source, source_predicates);
             source
         };
-        operators.extend([
-            GlaOperator::Project { slot: projection },
-            GlaOperator::Distinct,
-            GlaOperator::OrderByVertexId,
-            GlaOperator::Limit {
-                offset: plan.skip.unwrap_or(0),
-                count: plan.limit,
-            },
-        ]);
-        Self { operators }
+        operators.extend([GlaOperator::Project { slot: projection }, GlaOperator::Distinct,
+            GlaOperator::OrderByVertexId, GlaOperator::Limit { offset: plan.skip.unwrap_or(0), count: plan.limit }]);
+        Self::from_operators(operators)
+    }
+}
+
+impl<Row> GlaPlan<Row> {
+    // This stays private to the algebra compiler and its child modules. Row and
+    // terminal operator shape must be chosen together, not supplied by callers.
+    fn from_operators(operators: Vec<GlaOperator>) -> Self {
+        Self { operators, output: PhantomData }
     }
 
     #[must_use]
-    pub fn operators(&self) -> &[GlaOperator] {
-        &self.operators
+    pub fn operators(&self) -> &[GlaOperator] { &self.operators }
+
+    #[must_use]
+    pub fn scans_edges(&self) -> bool {
+        matches!(self.operators.first(), Some(GlaOperator::ScanEdges { .. }))
     }
 
-    /// Canonical, domain-separated logical transcript. This is an unreleased
-    /// application transcript, not an Appendix A durable format or certificate.
-    /// Renaming variables preserves identity only when it preserves aliasing.
+    /// Application transcript, not an Appendix A durable format. Existing
+    /// scalar tags/bytes are unchanged. Tuple projection and ordering have
+    /// distinct tags, so neither column order nor tuple identity is erased.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:bounded-gla:v1\0".to_vec();
@@ -357,67 +218,42 @@ impl GlaPlan {
             match operator {
                 GlaOperator::Empty => bytes.push(0),
                 GlaOperator::ScanVertices => bytes.push(1),
-                GlaOperator::ScanEdges {
-                    relation,
-                    direction,
-                } => {
-                    bytes.push(2);
-                    bytes.extend_from_slice(&relation.0.to_be_bytes());
-                    bytes.push(direction_tag(*direction));
+                GlaOperator::ScanEdges { relation, direction } => {
+                    bytes.push(2); bytes.extend_from_slice(&relation.0.to_be_bytes()); bytes.push(direction_tag(*direction));
                 }
                 GlaOperator::Select { slot, predicates } => {
-                    bytes.push(3);
-                    bytes.extend_from_slice(&slot.0.to_be_bytes());
+                    bytes.push(3); bytes.extend_from_slice(&slot.0.to_be_bytes());
                     bytes.extend_from_slice(&(predicates.len() as u64).to_be_bytes());
                     for predicate in predicates {
                         match predicate {
-                            VertexPredicate::HasLabel(label) => {
-                                bytes.push(0);
-                                bytes.extend_from_slice(&label.0.to_be_bytes());
-                            }
-                            VertexPredicate::IntegerProperty {
-                                key,
-                                comparison,
-                                value,
-                            } => {
-                                bytes.push(1);
-                                bytes.extend_from_slice(&key.0.to_be_bytes());
-                                bytes.push(comparison.tag());
-                                bytes.extend_from_slice(&value.to_be_bytes());
+                            VertexPredicate::HasLabel(label) => { bytes.push(0); bytes.extend_from_slice(&label.0.to_be_bytes()); }
+                            VertexPredicate::IntegerProperty { key, comparison, value } => {
+                                bytes.push(1); bytes.extend_from_slice(&key.0.to_be_bytes());
+                                bytes.push(comparison.tag()); bytes.extend_from_slice(&value.to_be_bytes());
                             }
                         }
                     }
                 }
                 GlaOperator::VertexIdentity { left, right, equal } => {
-                    bytes.push(4);
-                    bytes.extend_from_slice(&left.0.to_be_bytes());
-                    bytes.extend_from_slice(&right.0.to_be_bytes());
-                    bytes.push(u8::from(*equal));
+                    bytes.push(4); bytes.extend_from_slice(&left.0.to_be_bytes());
+                    bytes.extend_from_slice(&right.0.to_be_bytes()); bytes.push(u8::from(*equal));
                 }
-                GlaOperator::Expand {
-                    source,
-                    relation,
-                    direction,
-                } => {
-                    bytes.push(5);
-                    bytes.extend_from_slice(&source.0.to_be_bytes());
-                    bytes.extend_from_slice(&relation.0.to_be_bytes());
-                    bytes.push(direction_tag(*direction));
+                GlaOperator::Expand { source, relation, direction } => {
+                    bytes.push(5); bytes.extend_from_slice(&source.0.to_be_bytes());
+                    bytes.extend_from_slice(&relation.0.to_be_bytes()); bytes.push(direction_tag(*direction));
                 }
-                GlaOperator::Project { slot } => {
-                    bytes.push(6);
-                    bytes.extend_from_slice(&slot.0.to_be_bytes());
-                }
+                GlaOperator::Project { slot } => { bytes.push(6); bytes.extend_from_slice(&slot.0.to_be_bytes()); }
                 GlaOperator::Distinct => bytes.push(7),
                 GlaOperator::OrderByVertexId => bytes.push(8),
                 GlaOperator::Limit { offset, count } => {
-                    bytes.push(9);
-                    bytes.extend_from_slice(&offset.to_be_bytes());
-                    bytes.push(u8::from(count.is_some()));
-                    if let Some(count) = count {
-                        bytes.extend_from_slice(&count.to_be_bytes());
-                    }
+                    bytes.push(9); bytes.extend_from_slice(&offset.to_be_bytes()); bytes.push(u8::from(count.is_some()));
+                    if let Some(count) = count { bytes.extend_from_slice(&count.to_be_bytes()); }
                 }
+                GlaOperator::ProjectBindings { slots } => {
+                    bytes.push(10); bytes.extend_from_slice(&(slots.len() as u64).to_be_bytes());
+                    for slot in slots { bytes.extend_from_slice(&slot.0.to_be_bytes()); }
+                }
+                GlaOperator::OrderByBindings => bytes.push(11),
             }
         }
         bytes
@@ -425,11 +261,7 @@ impl GlaPlan {
 }
 
 fn direction_tag(direction: GlaDirection) -> u8 {
-    match direction {
-        GlaDirection::Forward => 0,
-        GlaDirection::Reverse => 1,
-        GlaDirection::Undirected => 2,
-    }
+    match direction { GlaDirection::Forward => 0, GlaDirection::Reverse => 1, GlaDirection::Undirected => 2 }
 }
 
 #[cfg(test)]
@@ -656,26 +488,17 @@ mod tests {
                         let plan = bind().bind(&statement).unwrap();
                         let mut expected = Vec::new();
                         for &(s, r, d) in &edges {
-                            if r != RelationId(1) {
-                                continue;
-                            }
+                            if r != RelationId(1) { continue; }
                             for (x, y) in orient(s, d) {
                                 for &(s2, r2, d2) in &edges {
-                                    if r2 != RelationId(2) {
-                                        continue;
-                                    }
+                                    if r2 != RelationId(2) { continue; }
                                     for (via, z) in orient(s2, d2) {
                                         let values = [x, y, z];
                                         let consistent = (0..3).all(|i| {
-                                            (0..i).all(|j| {
-                                                names[i] != names[j] || values[i] == values[j]
-                                            })
+                                            (0..i).all(|j| names[i] != names[j] || values[i] == values[j])
                                         });
                                         if via == y && consistent {
-                                            let at = names
-                                                .iter()
-                                                .position(|name| *name == returned)
-                                                .unwrap();
+                                            let at = names.iter().position(|name| *name == returned).unwrap();
                                             expected.push(values[at]);
                                         }
                                     }
@@ -685,8 +508,7 @@ mod tests {
                         expected.sort_unstable();
                         expected.dedup();
                         let actual = GlaPlan::lower(&plan)
-                            .execute([], edges.iter().copied(), |_, _| Ok::<_, ()>(true))
-                            .unwrap();
+                            .execute([], edges.iter().copied(), |_, _| Ok::<_, ()>(true)).unwrap();
                         assert_eq!(actual, expected, "mask={mask}, {statement}");
                     }
                 }
