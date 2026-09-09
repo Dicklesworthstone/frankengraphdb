@@ -461,7 +461,6 @@ impl AdmissionUsage {
         use fgdb_gql::{GlaLimitDimension, GqlQueryError};
         match result {
             Ok(mut execution) => {
-                // Both phases were checked against their remaining allowance.
                 execution.evaluator.work_units += self.work_units;
                 execution.evaluator.scratch_entries += self.scratch_entries;
                 Ok(execution)

@@ -1,6 +1,4 @@
-/// Limited and unlimited reads share one snapshot admission owner and one
-/// lowered evaluator. Source errors precede evaluator refusals; no counting
-/// pass discards a table merely to admit it again.
+/// Limited and unlimited durable reads share one admission owner and evaluator.
 fn execute_limited_snapshot_query<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
     reader: &R,
     query: &fgdb_gql::PreparedGqlQuery,
@@ -8,10 +6,8 @@ fn execute_limited_snapshot_query<R: crate::gql_exec::GqlSnapshotReader + ?Sized
     limits: fgdb_gql::GlaExecutionLimits,
 ) -> Result<fgdb_gql::GlaExecution, fgdb_gql::GlaExecutionError<GqlError>> {
     crate::gql_exec::AdmittedGqlSnapshot::admit(query.plan(), reader, as_of)
-        .map_err(GqlError::Read)
-        .map_err(fgdb_gql::GlaExecutionError::Source)?
-        .execute_limited(limits)
-        .map_err(|error| match error {
+        .map_err(GqlError::Read).map_err(fgdb_gql::GlaExecutionError::Source)?
+        .execute_limited(limits).map_err(|error| match error {
             fgdb_gql::GlaExecutionError::Source(error) => {
                 fgdb_gql::GlaExecutionError::Source(GqlError::Read(error))
             }
@@ -19,8 +15,6 @@ fn execute_limited_snapshot_query<R: crate::gql_exec::GqlSnapshotReader + ?Sized
         })
 }
 
-/// Product callers check their inexpensive owner/frontier fences first. The
-/// checkpoint then runs before table admission, in the evaluator and at exit.
 fn execute_governed_snapshot_query<R: crate::gql_exec::GqlSnapshotReader + ?Sized, C>(
     reader: &R,
     query: &fgdb_gql::PreparedGqlQuery,
@@ -30,15 +24,12 @@ fn execute_governed_snapshot_query<R: crate::gql_exec::GqlSnapshotReader + ?Size
 ) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<GqlError, C>> {
     checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
     crate::gql_exec::AdmittedGqlSnapshot::admit(query.plan(), reader, as_of)
-        .map_err(GqlError::Read)
-        .map_err(fgdb_gql::GqlQueryError::Source)?
-        .execute_governed(policy, checkpoint)
-        .map_err(|error| error.map_source(GqlError::Read))
+        .map_err(GqlError::Read).map_err(fgdb_gql::GqlQueryError::Source)?
+        .execute_governed(policy, checkpoint).map_err(|error| error.map_source(GqlError::Read))
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Bound evaluator work and scratch. Source admission is outside these
-    /// limits; success returns exact counters, refusal never partial rows.
+    /// Evaluator-only work/scratch limits; source admission is outside them.
     pub fn execute_prepared_query_limited(
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
@@ -58,8 +49,8 @@ impl<V: Vfs + Clone> Database<V> {
         execute_limited_snapshot_query(self, query, as_of, limits)
     }
 
-    /// Apply scan/result/work/scratch limits and the real QueryCx checkpoint
-    /// to one execution. No certificate or partial rows are issued on failure.
+    /// One source/evaluator allowance and the real query context. No partial
+    /// result or success certificate is issued on refusal.
     pub fn execute_prepared_query_governed(
         &self,
         cx: &fgdb_types::QueryCx,
@@ -71,10 +62,6 @@ impl<V: Vfs + Clone> Database<V> {
         self.execute_prepared_query_governed_at(cx, query, as_of, policy)
     }
 
-    /// Owner/frontier validation precedes cancellation and all source work.
-    /// Checkpoints surround source admission, and run inside evaluator work
-    /// and output copying. They do not preempt a storage read or sort midway,
-    /// and the policy does not bound allocator bytes or snapshot materialization.
     pub fn execute_prepared_query_governed_at(
         &self,
         cx: &fgdb_types::QueryCx,
@@ -129,46 +116,23 @@ impl crate::EmbeddedReadView {
 }
 
 impl WriteTxn {
-    /// Limits do not erase observed dependencies. A foreign handle refuses
-    /// before any admission or witness mutation on the owner's transaction.
+    /// Preserve the existing evaluator-only limit contract, using the same
+    /// canonical borrowed overlay as ordinary and row-budgeted queries.
     pub fn execute_prepared_query_limited<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         query: &fgdb_gql::PreparedGqlQuery,
         limits: fgdb_gql::GlaExecutionLimits,
     ) -> Result<fgdb_gql::GlaExecution, fgdb_gql::GlaExecutionError<WriteTxnError>> {
-        self.ensure_database(database).map_err(fgdb_gql::GlaExecutionError::Source)?;
-        let logical = fgdb_gql::algebra::GlaPlan::lower(query.plan());
-        if logical.scans_edges() {
-            let graph = self.overlay_graph(database).map_err(fgdb_gql::GlaExecutionError::Source)?;
-            if let Some(relation) = query.plan().relation {
-                self.match_expansions.borrow_mut()
-                    .extend(graph.vertices.iter().copied().map(|src| (src, relation)));
-            }
-            let edges = graph.edges.values()
-                .filter(|edge| graph.vertices.contains(&edge.0) && graph.vertices.contains(&edge.2))
-                .copied();
-            logical.execute_with_limits([], edges, |vid, predicates| {
-                Ok(self.vertex(database, vid)?.is_some_and(|row| {
-                    predicates.iter().all(|p| p.matches(&row.labels, &row.props))
-                }))
-            }, limits)
-        } else {
-            let rows: std::collections::BTreeMap<VId, VertexRow> = self
-                .vertices_for_scan(database, query.plan().src_label)
-                .map_err(fgdb_gql::GlaExecutionError::Source)?
-                .into_iter().map(|row| (row.vid, row)).collect();
-            logical.execute_with_limits(rows.keys().copied(), [], |vid, predicates| {
-                Ok(rows.get(&vid).is_some_and(|row| {
-                    predicates.iter().all(|p| p.matches(&row.labels, &row.props))
-                }))
-            }, limits)
-        }
+        let source = self.query_source(database, query.plan())
+            .map_err(fgdb_gql::GlaExecutionError::Source)?;
+        source.logical.execute_with_limits(source.vertex_ids(), source.edge_triples(),
+            |vid, predicates| Ok(source.matches(vid, predicates)), limits)
     }
 
-    /// A governed overlay read preserves its admitted conflict witnesses even
-    /// if the caller's context interrupts it or a resource dimension refuses.
-    /// A failure before admission records no fictitious table observation.
+    /// Govern history selection, negative-read/witness retention, canonical
+    /// overlay construction and evaluation with one allowance. Scratch counts
+    /// logical entries, not allocator bytes or the whole transaction lifetime.
     pub fn execute_prepared_query_governed<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -186,38 +150,19 @@ impl WriteTxn {
         policy: fgdb_gql::GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<WriteTxnError, C>> {
-        self.ensure_database(database).map_err(fgdb_gql::GqlQueryError::Source)?;
-        database.ensure_readable().and_then(|()| database.snapshot.check_frontier(self.basis))
-            .map_err(WriteTxnError::Read).map_err(fgdb_gql::GqlQueryError::Source)?;
+        let snapshot = self.query_snapshot(database).map_err(fgdb_gql::GqlQueryError::Source)?;
         checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
-        let logical = fgdb_gql::algebra::GlaPlan::lower(query.plan());
-        if logical.scans_edges() {
-            let graph = self.overlay_graph(database).map_err(fgdb_gql::GqlQueryError::Source)?;
-            if let Some(relation) = query.plan().relation {
-                self.match_expansions.borrow_mut()
-                    .extend(graph.vertices.iter().copied().map(|src| (src, relation)));
-            }
-            let edges = graph.edges.values()
-                .filter(|edge| graph.vertices.contains(&edge.0) && graph.vertices.contains(&edge.2))
-                .copied();
-            let count = u64::try_from(edges.clone().count()).expect("an admitted table count fits u64");
-            logical.execute_governed(count, [], edges, |vid, predicates| {
-                Ok::<_, WriteTxnError>(self.vertex(database, vid)?.is_some_and(|row| {
-                    predicates.iter().all(|p| p.matches(&row.labels, &row.props))
-                }))
-            }, policy, checkpoint)
-        } else {
-            let mut usage = crate::gql_exec::AdmissionUsage::default();
-            let rows = self.governed_node_rows(database, query.plan().src_label, &mut |event| {
-                checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
-                usage.observe::<WriteTxnError, C>(policy, event)
-            })?;
-            let count = u64::try_from(rows.len()).expect("an admitted table count fits u64");
-            let result = logical.execute_governed(count, rows.keys().copied(), [], |vid, predicates| {
-                Ok::<_, WriteTxnError>(rows.get(&vid).is_some_and(|row| row.matches(predicates)))
-            }, usage.remaining(policy), checkpoint);
-            usage.finish(policy, result)
-        }
+        let mut usage = crate::gql_exec::AdmissionUsage::default();
+        let source = self.query_source_over(snapshot, query.plan(), &mut |event| {
+            checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+            usage.observe::<WriteTxnError, C>(policy, event)
+        })?;
+        let result = source.logical.execute_governed(
+            count_as_u64(source.snapshot_records), source.vertex_ids(), source.edge_triples(),
+            |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
+            usage.remaining(policy), checkpoint,
+        );
+        usage.finish(policy, result)
     }
 }
 
@@ -341,7 +286,9 @@ mod limited_snapshot_admission_tests {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let txn_cx = contexts.txn();
-            for stop in [1, 2] {
+            // Checkpoints: 1=pre-admission, 2=source start, 3=label witness
+            // reservation, 4/5=staged metadata after the witness was retained.
+            for stop in [1, 2, 3, 4, 5] {
                 let keys = crate::DatabaseKeys::new([0x91; 32], DatabaseSecurityNamespaceId([0x92; 32]), [0x93; 32]);
                 let mut db = Database::open_memory(&commit, keys).await.unwrap();
                 let mut txn = db.begin(&txn_cx).unwrap();
@@ -357,12 +304,13 @@ mod limited_snapshot_admission_tests {
                         if calls.get() == stop { Err(stop) } else { Ok(()) }
                     });
                 assert!(matches!(result, Err(fgdb_gql::GqlQueryError::Interrupted(at)) if at == stop));
+                assert_eq!(txn.scanned_vertex_labels.borrow().contains(&fgdb_delta_types::LabelId(1)), stop >= 4);
                 let mut winner = WriteBatch::new(RelationId(1));
                 winner.create_vertex(VId(1), vec![fgdb_delta_types::LabelId(1)], vec![]);
                 db.write(&commit, winner).await.unwrap();
                 let result = txn.commit(&mut db, &commit).await;
-                if stop == 1 {
-                    result.expect("a query cancelled before admission did not observe the table");
+                if stop <= 3 {
+                    result.expect("interrupted before witness retention and data admission");
                     assert!(db.vertex(VId(99)).unwrap().is_some());
                 } else {
                     assert!(matches!(result, Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
