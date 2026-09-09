@@ -4,7 +4,7 @@ mod query_source {
     use crate::gql_exec::source::{self, SourceEvent};
     use asupersync::fs::Vfs;
     use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
-    use fgdb_gql::algebra::{GlaOperator, GlaOutput, GlaPlan, PreparedGraphPattern, VertexPredicate};
+    use fgdb_gql::algebra::{GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, PreparedGraphPattern, VertexPredicate};
     use fgdb_types::{CanonicalScalar, VId};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,7 +49,12 @@ mod query_source {
             self.vertices.binary_search_by_key(&vid, |(vid, _)| *vid).ok()
                 .is_some_and(|at| predicates.iter().all(|predicate| self.vertices[at].1.matches(predicate)))
         }
-        pub(super) fn execute(self) -> Result<Vec<Row>, WriteTxnError> {
+        fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+            let at = self.vertices.binary_search_by_key(&vid, |(vid, _)| *vid).ok()?;
+            self.vertices[at].1.property(key)
+        }
+        pub(super) fn execute(self) -> Result<Vec<Row>, WriteTxnError>
+        where Row: GlaIdentityOutput {
             self.logical.execute(self.vertex_ids(), self.edge_triples(), |vid, predicates| Ok(self.matches(vid, predicates)))
         }
     }
@@ -106,8 +111,9 @@ mod query_source {
                 let source = self.query_source_over_logical(snapshot, pattern.plan().clone(), pattern.required_vertex_label(), &mut |event| {
                     cx.checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?; usage.observe(policy, event)
                 })?;
-                let result = source.logical.execute_governed(source.snapshot_records as u64, source.vertex_ids(), source.edge_triples(),
-                    |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)), usage.remaining(policy), || cx.checkpoint());
+                let result = source.logical.execute_governed_with_properties(source.snapshot_records as u64, source.vertex_ids(), source.edge_triples(),
+                    |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
+                    |vid, key| Ok(source.property(vid, key)), usage.remaining(policy), || cx.checkpoint());
                 usage.finish(policy, result)
             })
         }
@@ -200,7 +206,7 @@ mod query_source {
                     }
                 }
             }
-            if edge_scan && logical.operators().iter().any(|op| matches!(op, GlaOperator::Select { .. })) {
+            if edge_scan && logical.needs_vertex_values() {
                 let mut candidates = BTreeSet::new();
                 for &(src, relation, dst) in edges.values() {
                     control(SourceEvent::Work)?;

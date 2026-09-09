@@ -3,9 +3,10 @@
 //! A tuple is one correlated assignment projection, never a zip or product of
 //! independently evaluated columns. The compiler alone constructs typed plans.
 
-use super::{GlaOperator, MAX_PATTERN_VERTICES};
+use super::{GlaOperator, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::GlaExecutionEvent;
-use fgdb_types::VId;
+use fgdb_delta_types::PropertyKeyId;
+use fgdb_types::{CanonicalScalar, VId};
 use std::collections::BTreeSet;
 
 /// One nonempty, ordered projection of vertex bindings. Column positions match
@@ -52,11 +53,19 @@ impl core::fmt::Debug for GraphBindingRow {
     }
 }
 
-/// Closed output domain of GLA. Applications cannot add an output collector or
-/// turn a scalar plan into a tuple plan. Existing APIs default to `VId`.
-pub trait GlaOutput: sealed::Projection + Clone + Ord {}
+/// Closed output domain. Only a private compiler pairs plans with collectors.
+/// Property rows require an explicit property source; no absent-source fallback
+/// can silently replace every projected value with null.
+pub trait GlaOutput: sealed::PropertyProjection + Clone + Ord {}
 impl GlaOutput for VId {}
 impl GlaOutput for GraphBindingRow {}
+impl GlaOutput for GraphValueRow {}
+
+/// Outputs that need only vertex identities and predicate reads. This sealed
+/// bound keeps the existing predicate-only execution APIs statically honest.
+pub trait GlaIdentityOutput: GlaOutput + sealed::Projection {}
+impl GlaIdentityOutput for VId {}
+impl GlaIdentityOutput for GraphBindingRow {}
 
 mod sealed {
     use super::*;
@@ -66,6 +75,16 @@ mod sealed {
             operator: &GlaOperator,
             bindings: &[VId],
             projected: &mut BTreeSet<Self>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E>;
+    }
+
+    pub trait PropertyProjection: Sized + Ord {
+        fn collect_properties<'a, E>(
+            operator: &GlaOperator,
+            bindings: &[VId],
+            projected: &mut BTreeSet<Self>,
+            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E>;
     }
@@ -119,38 +138,70 @@ mod sealed {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 values.push(*value);
             }
-            projected.insert(GraphBindingRow {
-                values: values.into_boxed_slice(),
-            });
+            projected.insert(GraphBindingRow { values: values.into_boxed_slice() });
             Ok(())
+        }
+    }
+
+    impl PropertyProjection for VId {
+        fn collect_properties<'a, E>(
+            operator: &GlaOperator,
+            bindings: &[VId],
+            projected: &mut BTreeSet<Self>,
+            _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            Self::collect(operator, bindings, projected, control)
+        }
+    }
+
+    impl PropertyProjection for GraphBindingRow {
+        fn collect_properties<'a, E>(
+            operator: &GlaOperator,
+            bindings: &[VId],
+            projected: &mut BTreeSet<Self>,
+            _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            Self::collect(operator, bindings, projected, control)
+        }
+    }
+
+    impl PropertyProjection for GraphValueRow {
+        fn collect_properties<'a, E>(
+            operator: &GlaOperator,
+            bindings: &[VId],
+            projected: &mut BTreeSet<Self>,
+            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            let GlaOperator::ProjectValues { columns } = operator else {
+                unreachable!("the private value-plan constructor owns its projection shape")
+            };
+            super::super::values::collect_values(columns, bindings, projected, property, control)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sealed::Projection;
     use super::*;
+    use super::sealed::Projection;
     use crate::algebra::BindingSlot;
 
     #[test]
     fn tuple_collection_keeps_correlations_and_deduplicates_complete_rows() {
-        let op = GlaOperator::ProjectBindings {
-            slots: vec![BindingSlot(1), BindingSlot(0)],
-        };
+        let op = GlaOperator::ProjectBindings { slots: vec![BindingSlot(1), BindingSlot(0)] };
         let mut rows = BTreeSet::new();
         let mut scratch = 0;
         for bindings in [[VId(1), VId(3)], [VId(2), VId(3)], [VId(1), VId(3)]] {
             GraphBindingRow::collect(&op, &bindings, &mut rows, &mut |event| {
                 scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
                 Ok::<_, ()>(())
-            })
-            .unwrap();
+            }).unwrap();
         }
-        assert_eq!(
-            rows.iter().map(|r| r.values()).collect::<Vec<_>>(),
-            vec![&[VId(3), VId(1)][..], &[VId(3), VId(2)][..]]
-        );
+        assert_eq!(rows.iter().map(|r| r.values()).collect::<Vec<_>>(),
+            vec![&[VId(3), VId(1)][..], &[VId(3), VId(2)][..]]);
         assert_eq!(scratch, 6, "two rows, each one entry plus two owned cells");
         assert!(!format!("{rows:?}").contains("VId"));
         let first = rows.first().unwrap();
@@ -162,9 +213,7 @@ mod tests {
 
     #[test]
     fn every_tuple_checkpoint_refuses_before_publishing_an_incomplete_row() {
-        let op = GlaOperator::ProjectBindings {
-            slots: vec![BindingSlot(0), BindingSlot(1)],
-        };
+        let op = GlaOperator::ProjectBindings { slots: vec![BindingSlot(0), BindingSlot(1)] };
         for stop in 1..=5 {
             let mut rows = BTreeSet::new();
             let mut calls = 0;
