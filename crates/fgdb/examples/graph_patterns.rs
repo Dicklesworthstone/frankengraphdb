@@ -1,11 +1,11 @@
 //! cargo run -p fgdb --example graph_patterns
 //!
-//! A five-edge motif with scalar and correlated multi-column projections.
+//! A five-edge motif with distinct identities, correlated tuples and value bags.
 
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::{GlaDirection, GraphPatternBuilder, IntegerComparison, VertexPredicate};
+use fgdb_gql::algebra::{GlaDirection, GraphColumn, GraphPatternBuilder, IntegerComparison, VertexPredicate};
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
@@ -57,6 +57,10 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         ] {
             let mut batch = WriteBatch::new(relation);
             batch.ensure_edge_by_triple(EId(id), VId(source), VId(destination), vec![]);
+            if relation == OWNS {
+                // A second real edge occurrence, not an idempotent ensure.
+                batch.add_edge(EId(15), VId(source), VId(destination), vec![]);
+            }
             batches.push(batch);
         }
         let created = db.write_atomic(&commit_cx, batches).await?;
@@ -132,6 +136,25 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             tuples.evaluator.scratch_entries,
         );
 
+        // Canonical scalar values are projected from the same matching source.
+        // ALL retains the two concrete OWNS witnesses; DISTINCT above did not.
+        let values = builder.prepare_values(&[
+            GraphColumn::vertex("company", "company"),
+            GraphColumn::property("supplier_risk", "supplier", RISK),
+        ], 0, Some(10))?.with_duplicates();
+        let value_bag = db.execute_graph_pattern_governed(&query_cx, &values, policy)?;
+        assert_eq!(values.columns(), &["company", "supplier_risk"]);
+        assert_eq!(value_bag.value.len(), 2);
+        assert_eq!(value_bag.value[0], value_bag.value[1]);
+        assert_eq!(value_bag.value[0].get(0).and_then(|v| v.as_vertex()), Some(VId(1)));
+        assert_eq!(value_bag.value[0].get(1).and_then(|v| v.as_scalar()), Some(&CanonicalScalar::Int(90)));
+        let value_exact = GqlQueryPolicy::new(
+            value_bag.rows.snapshot_records, value_bag.rows.result_rows,
+            value_bag.evaluator.work_units, value_bag.evaluator.scratch_entries,
+        );
+        assert_eq!(db.execute_graph_pattern_governed(&query_cx, &values, value_exact)?, value_bag);
+        println!("matching property-row occurrences: {}", value_bag.rows.result_rows);
+
         let mut txn = db.begin(&txn_cx)?;
         let mut reduction = WriteBatch::new(BUYS_FROM);
         reduction.set_vertex_property(VId(3), RISK, Some(CanonicalScalar::Int(10)));
@@ -146,6 +169,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 .value
                 .is_empty()
         );
+        assert!(txn.execute_graph_pattern_governed(&db, &query_cx, &values, policy)?.value.is_empty());
         assert_eq!(
             db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?
                 .value,
@@ -156,6 +180,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 .value,
             tuples.value
         );
+        assert_eq!(db.execute_graph_pattern_governed(&query_cx, &values, policy)?.value, value_bag.value);
         txn.commit(&mut db, &commit_cx).await?;
         assert!(
             db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?
@@ -167,6 +192,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 .value
                 .is_empty()
         );
+        assert!(db.execute_graph_pattern_governed(&query_cx, &values, policy)?.value.is_empty());
         assert_eq!(
             pinned
                 .execute_graph_pattern_governed(&query_cx, &pattern, policy)?
@@ -189,6 +215,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 .value,
             tuples.value
         );
+        assert_eq!(pinned.execute_graph_pattern_governed(&query_cx, &values, policy)?.value, value_bag.value);
+        assert_eq!(db.execute_graph_pattern_governed_at(&query_cx, &values, created, policy)?.value, value_bag.value);
 
         root.cancel_with(CancelKind::User, Some("demonstration complete"));
         assert!(matches!(
@@ -199,8 +227,10 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             db.execute_graph_pattern_governed(&query_cx, &bindings, policy),
             Err(GqlQueryError::Interrupted(_))
         ));
+        assert!(matches!(db.execute_graph_pattern_governed(&query_cx, &values, policy),
+            Err(GqlQueryError::Interrupted(_))));
         println!(
-            "OK: correlated rows, exact limits, canonical overlay, pinned history and cancellation"
+            "OK: correlated rows and property bags, exact limits, canonical overlay, pinned history and cancellation"
         );
         Ok(())
     })
