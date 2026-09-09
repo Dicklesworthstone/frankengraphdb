@@ -19,6 +19,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     let commit = contexts.commit();
     let txn_cx = contexts.txn();
     runtime.block_on(async move {
+        // Fixed demonstration keys for a private transient database only.
         let keys = DatabaseKeys::new(
             [0xb1; 32],
             DatabaseSecurityNamespaceId([0xb2; 32]),
@@ -27,13 +28,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let mut db = Database::open_memory(&commit, keys).await?;
         let knows = RelationId(1);
         let works_at = RelationId(2);
-        // Cross-relation groups may share existing endpoints; they may not
-        // depend on vertices another relation group has just created.
-        let mut entities = WriteBatch::new(knows);
-        for id in 1..=3 {
-            entities.create_vertex(VId(id), vec![], vec![]);
-        }
-        let basis = db.write(&commit, entities).await?;
+        let basis = db.frontier()?;
         let pinned = db.read_session()?;
         let names = RelationBind::new()
             .with_relation("KNOWS", knows)
@@ -42,25 +37,52 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             "MATCH (person)-[:KNOWS]->(friend)-[:WORKS_AT]->(company) RETURN company",
             &names,
         )?;
+
+        // The vertex-initialization prefix is explicit and first. Its source
+        // relation need not sort before the edges: preparation emits the
+        // canonical endpoint creations once in the earliest coordinate.
+        let mut entities = WriteBatch::new(RelationId(9));
+        for id in 1..=3 {
+            entities.ensure_vertex(VId(id), vec![], vec![]);
+        }
         let mut social = WriteBatch::new(knows);
-        social.add_edge(EId(10), VId(1), VId(2), vec![]);
+        social.ensure_edge_by_triple(EId(10), VId(1), VId(2), vec![]);
         let mut employment = WriteBatch::new(works_at);
-        employment.add_edge(EId(20), VId(2), VId(3), vec![]);
+        employment.ensure_edge_by_triple(EId(20), VId(2), VId(3), vec![]);
+        let groups = vec![entities, employment, social];
+
         let mut txn = db.begin(&txn_cx)?;
-        txn.write_atomic(&mut db, vec![employment, social])?;
+        txn.write_atomic(&mut db, groups.clone())?;
         assert_eq!(txn.execute_prepared_query(&db, &query)?, vec![VId(3)]);
-        assert!(db.execute_prepared_query(&query)?.is_empty());
+        assert!(db.vertices()?.is_empty());
+        assert!(db.edges()?.is_empty());
         let sequence = txn.commit(&mut db, &commit).await?;
-        assert_eq!(sequence, CommitSeq(basis.0 + 1));
+        assert_eq!(basis, CommitSeq(0));
+        assert_eq!(sequence, CommitSeq(1));
         assert_eq!(db.delta_since(basis)?.count(), 1);
+        assert_eq!(db.vertices()?.len(), 3);
+        assert_eq!(db.edges()?.len(), 2);
         assert_eq!(db.execute_prepared_query(&query)?, vec![VId(3)]);
+        assert!(pinned.vertices()?.is_empty());
         assert!(pinned.execute_prepared_query(&query)?.is_empty());
         assert!(db.execute_prepared_query_at(&query, basis)?.is_empty());
         let artifact = db.execute_prepared_query_artifact(&query)?;
         db.audit_prepared_query_artifact(&query, &artifact.to_bytes())?;
-        println!("commit: {sequence:?}");
+
+        // Ensures make the graph operation idempotent. A repeated submission
+        // still uses the ordinary commit protocol and may advance its marker;
+        // this is not exactly-once request or transaction deduplication.
+        let vertices = db.vertices()?;
+        let edges = db.edges()?;
+        let versions = db.element_versions()?.clone();
+        let repeated = db.write_atomic(&commit, groups).await?;
+        assert_eq!(db.vertices()?, vertices);
+        assert_eq!(db.edges()?, edges);
+        assert_eq!(db.element_versions()?, &versions);
+        db.audit_prepared_query_artifact(&query, &artifact.to_bytes())?;
+        println!("initial commit: {sequence:?}; repeated ensure commit: {repeated:?}");
         println!("companies: {:?}", artifact.rows());
-        println!("OK: two relations, one marker, pinned history preserved");
+        println!("OK: new vertices and two relations publish atomically; repeated ensures preserve graph state");
         Ok(())
     })
 }
