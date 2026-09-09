@@ -85,6 +85,8 @@ impl PreparedGqlQuery {
 /// bounded executor: vertices for a node scan, edges for an edge pattern.
 /// `result_rows` counts final rows after predicates, projection, sorting,
 /// deduplication, `SKIP`, and `LIMIT`.
+/// The result guard runs before copying each final row into the output vector;
+/// it does not bound the evaluator's retained distinct set or snapshot table.
 ///
 /// These are deterministic work-shape guards, not wall-clock cancellation,
 /// allocation or I/O preemption, spill governance, or physical cost evidence.
@@ -178,6 +180,9 @@ pub enum GqlBudgetDimension {
 pub struct GqlBudgetExceeded {
     pub dimension: GqlBudgetDimension,
     pub limit: u64,
+    /// The count at refusal: the complete admitted table for `SnapshotRecords`,
+    /// or the first rejected output prefix for `ResultRows` during execution.
+    /// It is not an estimate of how many additional result rows remain.
     pub observed: u64,
 }
 

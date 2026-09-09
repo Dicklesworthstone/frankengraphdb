@@ -88,10 +88,15 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert_eq!(governed.rows.snapshot_records, 2);
         assert_eq!(governed.rows.result_rows, 1);
         assert_eq!(governed.evaluator, limited.stats);
-        println!("age >= 40: {:?}; governed counters: {:?}", governed.value, governed);
+        println!(
+            "age >= 40: {:?}; governed counters: {:?}",
+            governed.value, governed
+        );
         assert!(matches!(
             db.execute_prepared_query_governed(
-                &query_cx, &older, GqlQueryPolicy::new(2, 0, 1_000, 1_000),
+                &query_cx,
+                &older,
+                GqlQueryPolicy::new(2, 0, 1_000, 1_000),
             ),
             Err(GqlQueryError::Rows(_))
         ));
@@ -113,8 +118,13 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         );
         assert_eq!(
             db.audit_prepared_query_artifact_governed(
-                &query_cx, &older, &bytes, GqlEvidenceLimits::DEFAULT_UNTRUSTED, policy,
-            )?.rows(),
+                &query_cx,
+                &older,
+                &bytes,
+                GqlEvidenceLimits::DEFAULT_UNTRUSTED,
+                policy,
+            )?
+            .rows(),
             &[VId(3)]
         );
         let same_rows_different_binding = template.bind_parameters(&arguments(41)?)?;
@@ -134,13 +144,20 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert_eq!(db.execute_prepared_query(&older)?, vec![VId(2), VId(3)]);
         assert_eq!(pinned.execute_prepared_query(&older)?, vec![VId(3)]);
         assert_eq!(
-            pinned.execute_prepared_query_governed(&query_cx, &older, policy)?.value,
+            pinned
+                .execute_prepared_query_governed(&query_cx, &older, policy)?
+                .value,
             vec![VId(3)]
         );
         assert_eq!(
             db.audit_prepared_query_artifact_governed(
-                &query_cx, &older, &bytes, GqlEvidenceLimits::DEFAULT_UNTRUSTED, policy,
-            )?.rows(),
+                &query_cx,
+                &older,
+                &bytes,
+                GqlEvidenceLimits::DEFAULT_UNTRUSTED,
+                policy,
+            )?
+            .rows(),
             &[VId(3)]
         );
 
@@ -151,7 +168,9 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             db.execute_prepared_query_governed(&query_cx, &older, policy),
             Err(GqlQueryError::Interrupted(_))
         ));
-        println!("OK: typed rebinding, combined limits, bounded replay, pinned reads and cancellation");
+        println!(
+            "OK: typed rebinding, combined limits, bounded replay, pinned reads and cancellation"
+        );
         Ok(())
     })
 }

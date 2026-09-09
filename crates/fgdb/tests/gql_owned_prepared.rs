@@ -174,7 +174,7 @@ fn budgeted_adapters_count_the_admitted_table_and_stop_at_the_first_excess_row()
 }
 
 #[test]
-fn refused_budgeted_edge_reads_keep_phantom_and_negative_identity_witnesses() {
+fn refused_budgeted_edge_reads_keep_disconnected_phantom_and_ensure_dependencies() {
     let ((), report) = run_async_under_lab(0x35_06, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -186,14 +186,16 @@ fn refused_budgeted_edge_reads_keep_phantom_and_negative_identity_witnesses() {
             ] {
                 let mut db = Database::open_memory(&commit, keys()).await.unwrap();
                 let mut initial = WriteBatch::new(R);
-                for id in 1..=3 {
+                for id in 1..=4 {
                     initial.create_vertex(VId(id), vec![], vec![]);
                 }
                 initial.add_edge(EId(10), VId(1), VId(2), vec![]);
                 db.write(&commit, initial).await.unwrap();
                 let mut txn = db.begin(&txn_cx).unwrap();
                 let mut staged = WriteBatch::new(R);
-                staged.ensure_edge_by_triple(EId(99), VId(1), VId(2), vec![]);
+                if !phantom {
+                    staged.ensure_edge_by_triple(EId(99), VId(1), VId(2), vec![]);
+                }
                 staged.create_vertex(VId(9), vec![], vec![]);
                 txn.write(&mut db, staged).unwrap();
                 let query = db
@@ -205,7 +207,10 @@ fn refused_budgeted_edge_reads_keep_phantom_and_negative_identity_witnesses() {
                 ));
                 let mut winner = WriteBatch::new(R);
                 if phantom {
-                    winner.add_edge(EId(99), VId(2), VId(3), vec![]);
+                    // Neither endpoint nor EId is in the point read/write
+                    // footprint: only the refused query's table scan can
+                    // protect against this disconnected new matching path.
+                    winner.add_edge(EId(100), VId(3), VId(4), vec![]);
                 } else {
                     winner.delete_edge(EId(10));
                 }

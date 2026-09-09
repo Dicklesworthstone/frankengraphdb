@@ -602,15 +602,24 @@ mod tests {
             (VId(2), RelationId(2), VId(2)),
         ];
         for mask in 0..(1_u32 << universe.len()) {
-            let edges: Vec<_> = universe.iter().enumerate()
+            let edges: Vec<_> = universe
+                .iter()
+                .enumerate()
                 .filter(|(i, _)| mask & (1_u32 << *i) != 0)
-                .map(|(_, row)| *row).collect();
-            for names in [["a", "b", "c"], ["a", "a", "b"], ["a", "b", "a"],
-                ["a", "b", "b"], ["a", "a", "a"]]
-            {
-                for (arrow, direction) in [("->", EdgeDirection::Outgoing),
-                    ("-", EdgeDirection::Undirected), ("<-", EdgeDirection::Incoming)]
-                {
+                .map(|(_, row)| *row)
+                .collect();
+            for names in [
+                ["a", "b", "c"],
+                ["a", "a", "b"],
+                ["a", "b", "a"],
+                ["a", "b", "b"],
+                ["a", "a", "a"],
+            ] {
+                for (arrow, direction) in [
+                    ("->", EdgeDirection::Outgoing),
+                    ("-", EdgeDirection::Undirected),
+                    ("<-", EdgeDirection::Incoming),
+                ] {
                     let [a, b, c] = names;
                     let pattern = match direction {
                         EdgeDirection::Incoming => format!("MATCH ({a})<-[:R]-({b})<-[:S]-({c})"),
@@ -626,16 +635,26 @@ mod tests {
                         let plan = bind().bind(&statement).unwrap();
                         let mut expected = Vec::new();
                         for &(s, r, d) in &edges {
-                            if r != RelationId(1) { continue; }
+                            if r != RelationId(1) {
+                                continue;
+                            }
                             for (x, y) in orient(s, d) {
                                 for &(s2, r2, d2) in &edges {
-                                    if r2 != RelationId(2) { continue; }
+                                    if r2 != RelationId(2) {
+                                        continue;
+                                    }
                                     for (via, z) in orient(s2, d2) {
                                         let values = [x, y, z];
-                                        let consistent = (0..3).all(|i| (0..i)
-                                            .all(|j| names[i] != names[j] || values[i] == values[j]));
+                                        let consistent = (0..3).all(|i| {
+                                            (0..i).all(|j| {
+                                                names[i] != names[j] || values[i] == values[j]
+                                            })
+                                        });
                                         if via == y && consistent {
-                                            let at = names.iter().position(|name| *name == returned).unwrap();
+                                            let at = names
+                                                .iter()
+                                                .position(|name| *name == returned)
+                                                .unwrap();
                                             expected.push(values[at]);
                                         }
                                     }
@@ -645,7 +664,8 @@ mod tests {
                         expected.sort_unstable();
                         expected.dedup();
                         let actual = GlaPlan::lower(&plan)
-                            .execute([], edges.iter().copied(), |_, _| Ok::<_, ()>(true)).unwrap();
+                            .execute([], edges.iter().copied(), |_, _| Ok::<_, ()>(true))
+                            .unwrap();
                         assert_eq!(actual, expected, "mask={mask}, {statement}");
                     }
                 }
