@@ -1,13 +1,13 @@
 //! cargo run -p fgdb --example graph_aggregation
 //!
-//! Streaming group summaries over a connected text query's compiled ALL child.
+//! Streaming summaries prepared from aggregate RETURN and GROUP BY text.
 
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::{
-    GraphAggregate, GraphSymbol, GraphSymbolKind, GqlParameters, GqlQueryError,
-    GqlQueryPolicy, PreparedGraphAggregate, PreparedGraphText,
+    GraphAggregateTextSlot, GraphSymbol, GraphSymbolKind, GqlParameters, GqlQueryError,
+    GqlQueryPolicy, PreparedGraphAggregateText,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
@@ -57,9 +57,12 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let created = db.write_atomic(&commit_cx, vec![entities, first, second]).await?;
         let pinned = db.read_session()?;
 
-        let text = PreparedGraphText::prepare(
+        let text = PreparedGraphAggregateText::prepare(
             "MATCH (person)-[:LINK]->(bridge)-[:TO]->(item) \
-             RETURN ALL person AS owner, item.amount AS amount",
+             RETURN person AS owner, COUNT(*) AS paths, \
+             COUNT(item.amount) AS valued_paths, COUNT(DISTINCT item.amount) AS unique_amounts, \
+             SUM(item.amount) AS total, MIN(item.amount) AS least, MAX(item.amount) AS greatest \
+             GROUP BY person LIMIT $groups",
             |kind, name| match (kind, name) {
                 (GraphSymbolKind::Relation, "LINK") => Some(GraphSymbol::Relation(LINK)),
                 (GraphSymbolKind::Relation, "TO") => Some(GraphSymbol::Relation(TO)),
@@ -67,21 +70,9 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 _ => None,
             },
         )?;
-        let input = text.bind_parameters(&GqlParameters::new())?;
-        let summary = PreparedGraphAggregate::prepare(
-            input,
-            &[0],
-            &[
-                GraphAggregate::count_rows("paths"),
-                GraphAggregate::count("valued_paths", 1),
-                GraphAggregate::count_distinct("unique_amounts", 1),
-                GraphAggregate::sum_int("total", 1),
-                GraphAggregate::min("least", 1),
-                GraphAggregate::max("greatest", 1),
-            ],
-            0,
-            None,
-        )?;
+        let summary = text.bind_parameters(&GqlParameters::new().with_uint64("groups", 10)?)?;
+        assert_eq!(text.output_slots()[0], GraphAggregateTextSlot::GroupKey(0));
+        assert_eq!(text.output_slots()[1], GraphAggregateTextSlot::Aggregate(0));
         let policy = GqlQueryPolicy::new(100, 10, 100_000, 10_000);
         let before = db.execute_graph_aggregate_governed(&query_cx, &summary, policy)?;
         assert_eq!(summary.key_columns(), &["owner"]);
@@ -101,6 +92,9 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             before.evaluator.scratch_entries,
         );
         assert_eq!(db.execute_graph_aggregate_governed(&query_cx, &summary, exact)?, before);
+        let page = text.bind_parameters(&GqlParameters::new().with_uint64("groups", 1)?)?;
+        assert_eq!(db.execute_graph_aggregate_governed(&query_cx, &page, policy)?.value, before.value[..1]);
+        assert_eq!(db.execute_graph_aggregate_governed(&query_cx, &summary, policy)?.value, before.value);
         for row in &before.value {
             println!(
                 "owner={:?}, paths={:?}, nonnull={:?}, sum={:?}",
@@ -131,7 +125,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         root.cancel_with(CancelKind::User, Some("aggregate demonstration complete"));
         assert!(matches!(db.execute_graph_aggregate_governed(&query_cx, &summary, policy),
             Err(GqlQueryError::Interrupted(_))));
-        println!("OK: grouped counts, exact integer sums, canonical staging, history and cancellation");
+        println!("OK: aggregate text, grouped counts, exact sums, staging, history and cancellation");
         Ok(())
     })
 }
