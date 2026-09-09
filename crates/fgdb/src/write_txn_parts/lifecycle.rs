@@ -41,7 +41,8 @@ impl WriteTxn {
 
     /// Stage a same-relation batch against this transaction's pinned snapshot.
     /// Once `write_atomic` has explicitly staged several relation groups,
-    /// subsequent writes are admitted under that same independence contract.
+    /// subsequent writes re-enter that same composition check, including the
+    /// immutable shared-initializer prefix when one is present.
     pub fn write<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -89,13 +90,17 @@ impl WriteTxn {
         Ok(())
     }
 
-    /// Atomically stage independent relation groups, including prior batches.
+    /// Atomically stage relation groups, including all prior staged batches.
     ///
-    /// Each relation retains its ordered prefix. Other relations must be
-    /// independent at the pinned basis, exactly as `prepare_atomic_writes`
-    /// requires. This does not permit one relation to consume another's new
-    /// vertex. A refusal preserves the old staged effects and prepared write;
-    /// any reads already made still participate in conflict validation.
+    /// Independent groups share the pinned basis. A leading vertex-create or
+    /// vertex-ensure prefix may additionally supply new endpoints to multiple
+    /// relations, under `prepare_atomic_writes`' exact-prefix verification.
+    /// The prefix can come from an earlier `write` call; it must precede every
+    /// other intent in the complete staged input. Suffix groups remain
+    /// independent and may not change the shared initialized vertex contents.
+    /// This is not arbitrary ordered cross-relation statement execution.
+    /// A refusal preserves the prior staged effects and prepared write; any
+    /// observations already made still participate in conflict validation.
     /// No capsule or marker is published until the ordinary `commit` method.
     pub fn write_atomic<V: Vfs + Clone>(
         &mut self,
