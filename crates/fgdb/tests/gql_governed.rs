@@ -82,8 +82,8 @@ fn governed_aliases_agree_with_expected_rows_across_every_product_surface() {
             let overlay = txn.execute_prepared_query_governed(&db, &query_cx, &query, generous()).unwrap();
             assert_eq!(overlay.value, live.value);
             assert_eq!(overlay.rows, live.rows);
-            // Physical source work differs: durable reads now charge borrowed
-            // admission, while this transaction adapter retains its own scan.
+            // Both borrow the basis, but the transaction additionally charges
+            // canonical overlay and retained conflict-witness metadata.
         }
 
         let template = PreparedGqlTemplate::prepare(
@@ -162,8 +162,10 @@ fn governed_refusal_preserves_label_witnesses_without_global_insert_fencing() {
             stage.create_vertex(VId(99), vec![], vec![]);
             txn.write(&mut db, stage).unwrap();
             let query = PreparedGqlQuery::prepare("MATCH (a:L) RETURN a", &names()).unwrap();
+            // Two source units retain the label witness; the next visit
+            // refuses. A zero allowance now refuses BEFORE source admission.
             assert!(matches!(txn.execute_prepared_query_governed(&db, &query_cx, &query,
-                GqlQueryPolicy::new(10, 10, 0, 100)), Err(GqlQueryError::Evaluator(_))));
+                GqlQueryPolicy::new(10, 10, 2, 100)), Err(GqlQueryError::Evaluator(_))));
             let mut winner = WriteBatch::new(R);
             winner.create_vertex(VId(77), if winner_kind == 1 { vec![L] } else { vec![] }, vec![]);
             db.write(&commit, winner).await.unwrap();
