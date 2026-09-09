@@ -382,6 +382,7 @@ mod limited_snapshot_admission_tests {
     #[test]
     fn governed_node_overlay_checks_every_phase_and_shares_one_allowance() {
         use asupersync::lab::run_async_under_lab;
+        use fgdb_delta_types::PropertyKeyId;
         use fgdb_gql::{GlaLimitDimension, GqlBudgetDimension, GqlQueryError, GqlQueryPolicy};
         use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
         let ((), report) = run_async_under_lab(0xc0a1_0002, |root| async move {
@@ -545,6 +546,89 @@ mod limited_snapshot_admission_tests {
             assert_eq!(result.rows.snapshot_records, 0);
             assert_eq!(result.rows.result_rows, 0);
             txn.abort();
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn interrupted_node_admission_keeps_an_observed_property_dependency() {
+        use asupersync::lab::run_async_under_lab;
+        use fgdb_delta_types::PropertyKeyId;
+        use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+        let ((), report) = run_async_under_lab(0xc0a1_0003, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txn_cx = contexts.txn();
+            for observe in [false, true] {
+                let keys = crate::DatabaseKeys::new(
+                    [0x97; 32],
+                    DatabaseSecurityNamespaceId([0x98; 32]),
+                    [0x99; 32],
+                );
+                let mut db = Database::open_memory(&commit, keys).await.unwrap();
+                let key = PropertyKeyId(1);
+                let mut seed = WriteBatch::new(RelationId(1));
+                seed.create_vertex(
+                    VId(1),
+                    vec![LabelId(1)],
+                    vec![(key, CanonicalScalar::Int(7))],
+                );
+                db.write(&commit, seed).await.unwrap();
+                let mut txn = db.begin(&txn_cx).unwrap();
+                let mut staged = WriteBatch::new(RelationId(1));
+                staged.create_vertex(VId(99), vec![], vec![]);
+                txn.write(&mut db, staged).unwrap();
+                let query = fgdb_gql::PreparedGqlQuery::prepare(
+                    "MATCH (a:L) WHERE a.n=7 RETURN a",
+                    &RelationBind::new()
+                        .with_label("L", LabelId(1))
+                        .with_property("n", key),
+                )
+                .unwrap();
+                let mut calls = 0;
+                let result = txn.execute_governed_with_checkpoint(
+                    &db,
+                    &query,
+                    fgdb_gql::GqlQueryPolicy::new(2, 2, 1_000, 1_000),
+                    || {
+                        calls += 1;
+                        if (!observe && calls == 1)
+                            || (observe
+                                && txn.read_set.borrow().contains(&ElementId::Vertex(VId(1))))
+                        {
+                            Err("stop at the selected observation boundary")
+                        } else {
+                            Ok(())
+                        }
+                    },
+                );
+                assert!(matches!(
+                    result,
+                    Err(fgdb_gql::GqlQueryError::Interrupted(_))
+                ));
+                assert_eq!(
+                    txn.read_set.borrow().contains(&ElementId::Vertex(VId(1))),
+                    observe
+                );
+                let mut winner = WriteBatch::new(RelationId(1));
+                winner.set_vertex_property(VId(1), key, Some(CanonicalScalar::Int(8)));
+                let frontier = db.write(&commit, winner).await.unwrap();
+                let result = txn.commit(&mut db, &commit).await;
+                if observe {
+                    assert!(matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ));
+                    assert_eq!(db.frontier().unwrap(), frontier);
+                    assert!(db.vertex(VId(99)).unwrap().is_none());
+                } else {
+                    result.expect("no observation or mutation overlaps the changed property");
+                    assert!(db.vertex(VId(99)).unwrap().is_some());
+                }
+            }
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
