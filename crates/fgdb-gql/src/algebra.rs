@@ -6,6 +6,13 @@
 //! Project -> Distinct -> OrderByVertexId -> Limit. It is not GQL's general
 //! multiset or path-identity contract. Operators are immutable after lowering.
 
+mod pattern;
+pub use pattern::{
+    GraphPatternBuilder, PreparedGraphPattern, PatternBuildError, PatternLimitDimension,
+    MAX_PATTERN_EDGES, MAX_PATTERN_VERTICES, MAX_PATTERN_PREDICATES,
+    MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
+};
+
 use crate::{BoundPlan, EdgeDirection, ReturnProjection};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::CanonicalScalar;
