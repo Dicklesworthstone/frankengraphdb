@@ -13,12 +13,13 @@ immutable scan, select, vertex-identity, expand, project, distinct, order and
 limit operators. Positional integer-comparison fields are consumed at lowering;
 predicates have one position-independent evaluator.
 
-Ordinary live, historical, immutable pinned, bound/prepared, budgeted, limited
-and transaction MATCH execution now use this evaluator. Certificate and replay
-adapters reach it through their existing execution entrypoints. The legacy
-inline adjacency/predicate engine and the root-level `execute_bound_plan_over`,
-`apply_skip` and `apply_limit` helpers have been removed. The bounded read cutover
-is no longer an opt-in limited-query path or a transaction-only migration.
+Ordinary live, historical, immutable pinned, bound/prepared, budgeted, limited,
+governed and transaction MATCH execution now use this evaluator. Certificate
+and replay adapters reach it through their existing execution entrypoints. The
+legacy inline adjacency/predicate engine and the root-level
+`execute_bound_plan_over`, `apply_skip` and `apply_limit` helpers have been
+removed. The bounded read cutover is no longer an opt-in limited-query path or
+a transaction-only migration.
 
 Requested relation/orientation pairs are indexed once. Binding rows stream
 through expansion, predicate conjunctions are cached per operator/vertex, and
@@ -31,6 +32,22 @@ The logical transcript remains application data, not a registered durable
 format. Existing statement, bind, plan, result and overlay certificate formats
 were not changed by this cutover. It does not add executable-plan cost evidence
 or make those certificates attest the full registered physical operator family.
+
+### Repeated pattern bindings are identities
+
+`MATCH (a)-[:R]->(a) RETURN a` requires a self-loop; it must not match an
+ordinary edge merely because both positions use the same name. Likewise,
+`MATCH (a)-[:R]->(b)-[:S]->(a) RETURN a` requires the far end to equal the
+starting vertex. Lowering now emits explicit identity operators after each
+slot becomes bound, before that slot's property observations. The first
+occurrence is the representative of its alias class. This covers all five
+three-position alias partitions in outgoing, incoming and undirected patterns.
+
+Renaming variables preserves the logical transcript only when it preserves
+aliasing. Closed and unconstrained open paths therefore have different lowered
+transcripts. The shared correction applies to ordinary, parameterized,
+historical, staged and evidence-replayed queries. It does not add an edge
+uniqueness or general path-identity contract.
 
 ## Native typed numeric parameters
 
@@ -51,11 +68,11 @@ explicit errors; a rejected duplicate never replaces the existing value.
 `bind_parameters` validates the whole argument set before cloning and filling
 the bound numeric slots. It does not parse again or resolve schema names again.
 The result is the existing immutable `PreparedGqlQuery`, so live, historical,
-pinned, staged, budgeted, limited, artifact and cursor APIs need no separate
-parameter execution engine. Reusing a template never changes earlier bindings.
-Names, labels, relation names, property names, operators and clauses are not
-parameter positions. Strings, floats, nulls and collections are not implemented
-by this bounded numeric slice.
+pinned, staged, budgeted, limited, governed, artifact and cursor APIs need no
+separate parameter execution engine. Reusing a template never changes earlier
+bindings. Names, labels, relation names, property names, operators and clauses
+are not parameter positions. Strings, floats, nulls and collections are not
+implemented by this bounded numeric slice.
 
 ```rust
 use fgdb_gql::{GqlParameters, PreparedGqlTemplate};
@@ -72,8 +89,8 @@ let rows = db.execute_prepared_query(&query)?;
 ```
 
 The complete production-runtime example, including database creation, repeated
-bindings, limits, pinned views and evidence replay, is
-`crates/fgdb/examples/parameterized_queries.rs`:
+bindings, combined limits, pinned views, bounded evidence replay and runtime
+cancellation, is `crates/fgdb/examples/parameterized_queries.rs`:
 
 ```text
 cargo run -p fgdb --example parameterized_queries
@@ -97,26 +114,29 @@ template bytes, including when whitespace is multibyte.
 ## Admit durable input once, then execute that exact input
 
 `fgdb::gql_exec::AdmittedGqlSnapshot` owns the admitted source table together
-with its lowered plan, reader and exact sequence. Ordinary, limited and budgeted
-durable adapters share this admission owner. Budgeted execution checks its
-record count and then executes those same rows; it no longer discards a counting
-scan and reads the table again. Node predicates reuse admitted vertex rows.
+with its lowered plan, reader and exact sequence. Ordinary, limited, budgeted
+and governed durable adapters share this admission owner. Budgeted execution
+checks its record count and then executes those same rows; it no longer
+discards a counting scan and reads the table again. Node predicates reuse
+admitted vertex rows.
 
 Even a logically empty forged plan crosses the source's ordinary admission
 checks. Future or fenced snapshots therefore cannot become successful empty
 reads or be masked by evaluator limits. A transaction's foreign-handle check
 still precedes data observation and witness mutation.
 
-The transaction admission/final-row budget API still has its existing overlay
-counting step. Its traversal is shared GLA, but this change does not claim to
-have eliminated every repeated overlay materialization or staged-row visit.
+The older transaction admission/final-row budget API still has its existing
+overlay counting step. The governed transaction call constructs one overlay
+for both its count and execution, but this does not eliminate all repeated
+staged-row visits or predicate-source reads.
 
 ## Evaluator limits and cancellation
 
 `GlaPlan::execute_with_control` is the shared execution body. Its callback runs
-before admitted-row work, operator visits and scratch insertions, and propagates
-a caller-defined cancellation/resource error without returning partial rows.
-Unlimited execution uses the same body with an inert control callback.
+before admitted-row work, operator visits, scratch insertions and final output
+row copies. It propagates a caller-defined cancellation/resource error without
+returning partial rows. Unlimited execution uses the same body with an inert
+control callback.
 
 `GlaExecutionLimits::new(max_work_units, max_scratch_entries)` bounds evaluator
 events and accumulated adjacency occurrences, predicate-cache entries and
@@ -126,16 +146,81 @@ failure from a work/scratch refusal. Exact limits succeed, one-over refuses, and
 the observed count uses u128 to represent one past u64::MAX without wrapping.
 A final `LIMIT 1` does not excuse unlimited work finding that answer.
 
+`ResultRow` is emitted after distinct/order/SKIP/LIMIT and before each final
+vector insertion. Work counters now include these output-copy events. The
+vector is not preallocated to the full result length before its guard runs.
+Projected distinct IDs are still held separately; the scratch-entry limit, not
+the final-row budget, governs that intermediate representation.
+
 `Database` and `EmbeddedReadView` expose `execute_prepared_query_limited` and
 `execute_prepared_query_limited_at`; `WriteTxn` exposes the corresponding
 `execute_prepared_query_limited(database, query, limits)` method. They accept the
 existing coherent `PreparedGqlQuery` rather than a second preparation format.
 
+### One combined policy with the real query context
+
+`GqlQueryPolicy` combines the existing row budget with evaluator limits:
+
+```rust
+let policy = fgdb_gql::GqlQueryPolicy::new(
+    100_000, // admitted snapshot records
+    1_000,   // final returned rows
+    1_000_000, // evaluator work units
+    200_000, // scratch entries
+);
+let execution = db.execute_prepared_query_governed(&query_cx, &query, policy)?;
+```
+
+`Database` and `EmbeddedReadView` expose `execute_prepared_query_governed` and
+`execute_prepared_query_governed_at`. `WriteTxn` exposes
+`execute_prepared_query_governed(database, query_cx, query, policy)`.
+All use the same GLA evaluator and meter; no second execution is needed to
+combine policies. `GqlQueryExecution` returns rows plus the row and evaluator
+counters from that exact run, with redacted Debug output.
+
+`GqlQueryError` distinguishes `Source`, `Rows`, `Evaluator`, and `Interrupted`.
+The interruption arm retains the original `QueryCx::checkpoint` error, rather
+than relabeling cancellation as exhaustion. Direct-query owner, handle-state
+and future-frontier checks precede cancellation. The context's ambient
+restriction wraps execution. Checkpoints run before admission, at evaluator
+events and at completion, including when the result is empty.
+
+A transaction interrupted before admission gains no fictitious scan. Once the
+source has been admitted, interruption or budget refusal retains its witnesses.
+Node queries use the existing label-scoped insertion dependencies, not a new
+global vertex-insertion fence. Unrelated unlabeled insertions can still commit;
+matching insertions or later matching label membership changes are detected.
+
 These are **not allocator-byte, storage-I/O, wall-clock or spill limits**.
 Source materialization, overlay construction and predicate-source internals
-remain outside the evaluator accounting. The control hook is not an end-to-end
-QueryCx deadline, runtime-task cancellation contract or resource-ledger proof.
-The existing `GqlExecutionBudget` admission/final-row API remains distinct.
+remain outside the evaluator accounting. A checkpoint does not interrupt a
+single storage merge or sort midway; bounded deadline responsiveness and the
+whole-operation resource ledger remain incomplete. Existing unguided query
+APIs have not silently acquired a new default policy.
+
+### Governed artifact replay
+
+A small evidence envelope can describe an expensive query. Limiting only its
+encoded bytes and declared rows does not limit the work needed to reproduce it.
+`Database` and `EmbeddedReadView` therefore expose
+`audit_prepared_query_artifact_governed(query_cx, query, bytes, evidence_limits, policy)`;
+`WriteTxn` exposes the overlay counterpart with the database argument first.
+
+These methods preflight artifact bytes and row counts under `GqlEvidenceLimits`,
+then verify the existing input, plan, snapshot/basis, result and staged-effect
+contracts. Their one replay runs under `GqlQueryPolicy` and the real QueryCx.
+Ordinary and governed audits share the verification helpers and certificate
+authority. A governed audit never runs the ordinary unbounded audit first,
+skips an identity check, or returns a merely decoded artifact when replay fails.
+Interruption and query-policy errors stay nested under the existing evidence
+execution error; decoding and artifact-admission errors retain their own arms.
+
+The governed overlay method checks lifecycle/ownership and the source handle
+before admission. Stale staged effects still refuse even if result rows would
+be unchanged. Terminal checkpoints also precede the successful artifact return.
+Encoded-input decoding and digest checks are not individually preemptible.
+No evidence encoding or authorization rule changes. Existing page/cursor APIs
+retain their prior audit paths; they do not implicitly inherit governed replay.
 
 ## Prepared writes validate their own committed history
 
@@ -163,10 +248,13 @@ independent unconstrained parallel-edge creations need not conflict merely
 because they share endpoints. Ensure-by-triple and vertex deletion do retain
 adjacency witnesses because insertions can invalidate those operations.
 
-`WriteTxn` retains its existing additional read/mutation validation and explicit
-vertex/edge table-scan insertion witnesses. Empty, filtered, skipped and refused
-queries cannot erase the admitted dependencies. These remain conservative
-scan-backed guards, not a complete predicate/range SSI implementation.
+`WriteTxn` retains its existing additional read/mutation validation and scan
+insertion witnesses, including label-scoped node-query witnesses. Empty,
+filtered, skipped and refused queries cannot erase admitted dependencies.
+These remain conservative scan-backed guards, not a complete predicate/range
+SSI implementation. Independent atomic relation groups are described in
+`docs/atomic_relation_writes.md`; general ordered cross-relation dependencies
+remain unsupported by that API.
 
 ## Overlay edge reads use actual net effects
 
@@ -184,19 +272,26 @@ constraint-keyed EnsureEdge contract.
 
 ## Verification state and remaining work
 
-The numeric-parameter continuation adds 15 Rust tests: eight argument/template
-laws, four native AST operand/span/normalization tests, and three product
-integration tests. Coverage includes comparison with ordinary literal binding,
-integer boundaries, immutable rebinding, strict argument errors, all existing
-read surfaces, budgets, evaluator limits, artifacts, cursor resumption,
-compaction, stale-overlay refusal and retained empty-scan conflict witnesses.
-The complete preexisting parser test block was retained byte-for-byte. The
-new example and all new parameter tests are **UNRUN** here.
+The alias/governance continuation adds 15 Rust tests: three alias laws, four
+combined-policy laws, two context/admission tests, one shared-audit replay law
+and five public governed-query/artifact integration tests. The alias matrix
+covers 64 graphs, all five three-position alias partitions, three directions
+and each projected position. Governance cases cover all four dimensions,
+exact boundaries, interruption at every low-level checkpoint, pre-admission
+refusal, post-admission conflict retention, source refusal precedence, artifact
+replay, stale overlays and preservation of label-scoped conflicts. These tests
+and the updated production-runtime example are **ADDED BUT UNRUN** here.
 
-Source copies and the native parser upload were checked by Git blob identity;
-Rust-token delimiters were inspected. These are source-integrity checks, not
-Rust parsing, typechecking, compilation, formatting or behavioral test results.
-The concurrent main-branch storage changes were preserved during integration.
+A separate Python specification check executed 2,880 finite cases comparing the
+representative-slot alias rule with the all-pairs equality definition. It
+passed. It did not execute the Rust parser, lowering or evaluator and is not a
+native build or product-validation verdict.
+
+The numeric-parameter continuation previously added 15 Rust tests: eight
+argument/template laws, four native AST operand/span/normalization tests, and
+three product integration tests. The original parser test block was retained.
+Those connector-authored additions have no native-test verdict from this
+environment either; source identity and delimiter checks do not establish one.
 
 Earlier GLA/prepared-write work added 12 Rust tests: four validator laws, one
 shared-admission check, four standalone prepared-write integration tests, two
@@ -211,15 +306,13 @@ independent executor oracle. The nested-loop test and the existing small-
 multigraph enumeration provide independent algorithmic checks.
 
 Earlier Python query-semantics/interleaving/metering checks were separate model
-checks, not a Rust build verdict. In particular they do not validate the new
-native parameter parser. Cargo, rustc and rustfmt are unavailable here and
-external network access failed. Cargo tests, formatting, Clippy and the
-committed-tree repository proof for the new parameter implementation remain
-unrun, not passing. No GitHub Actions workflow was dispatched and no bead was
-closed on unexecuted tests.
+checks, not a Rust build verdict. Cargo, rustc and rustfmt are unavailable here
+and external network access failed. Cargo tests, formatting, Clippy and the
+committed-tree repository proof remain unrun, not passing. No GitHub Actions
+workflow was dispatched and no bead was closed on unexecuted tests.
 
 The registered FreeJoin/authorized-Strata access path, whole-operation resource
 and spill governance, nonnumeric parameters, final prepared-session/catalog
-invalidation protocols, general GQL semantics and full SSI remain outstanding.
-No runtime speedup, complete replay proof or Genesis-gate completion is claimed
-by this source-level continuation.
+invalidation protocols, general GQL semantics, general ordered cross-relation
+transactions and full SSI remain outstanding. No runtime speedup, complete
+replay proof or Genesis-gate completion is claimed by this source-level work.
