@@ -1,6 +1,6 @@
 //! cargo run -p fgdb --example graph_patterns
 //!
-//! A five-edge connected motif, not a sequence of separately queried hops.
+//! A five-edge motif with scalar and correlated multi-column projections.
 
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
@@ -43,8 +43,11 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let mut db = Database::open_memory(&commit_cx, keys).await?;
         let mut entities = WriteBatch::new(RelationId(9));
         for id in 1..=4 {
-            entities.ensure_vertex(VId(id), vec![COMPANY],
-                vec![(RISK, CanonicalScalar::Int(if id == 3 { 90 } else { 10 }))]);
+            entities.ensure_vertex(
+                VId(id),
+                vec![COMPANY],
+                vec![(RISK, CanonicalScalar::Int(if id == 3 { 90 } else { 10 }))],
+            );
         }
         let mut batches = vec![entities];
         for (id, relation, source, destination) in [
@@ -66,20 +69,24 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             builder.vertex(name)?;
         }
         builder.edge("company", OWNS, GlaDirection::Forward, "holding")?;
-        // Both endpoints of this atom are initially unbound. The connected
-        // compiler defers it until the next atom has bound the supplier.
+        // Initially disconnected, this atom is deferred until supplier is bound.
         builder.edge("supplier", SHIPS_TO, GlaDirection::Forward, "carrier")?;
         builder.edge("holding", BUYS_FROM, GlaDirection::Forward, "supplier")?;
         builder.edge("carrier", FINANCES, GlaDirection::Forward, "company")?;
         builder.edge("company", BACKS, GlaDirection::Forward, "supplier")?;
         builder.filter("company", VertexPredicate::HasLabel(COMPANY))?;
-        builder.filter("supplier", VertexPredicate::IntegerProperty {
-            key: RISK,
-            comparison: IntegerComparison::GreaterOrEqual,
-            value: 80,
-        })?;
+        builder.filter(
+            "supplier",
+            VertexPredicate::IntegerProperty {
+                key: RISK,
+                comparison: IntegerComparison::GreaterOrEqual,
+                value: 80,
+            },
+        )?;
         builder.identity("company", "carrier", false)?;
+
         let pattern = builder.prepare("carrier", 0, Some(10))?;
+        let bindings = builder.prepare_bindings(&["company", "supplier", "carrier"], 0, Some(10))?;
         let policy = GqlQueryPolicy::new(100, 10, 100_000, 10_000);
         let initial = db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?;
         assert_eq!(initial.value, vec![VId(4)]);
@@ -90,26 +97,56 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             initial.evaluator.scratch_entries,
         );
         assert_eq!(db.execute_graph_pattern_governed(&query_cx, &pattern, exact)?, initial);
-        println!("matching carriers: {:?}", initial.value);
-        println!("source rows: {}; work: {}; scratch entries: {}",
-            initial.rows.snapshot_records, initial.evaluator.work_units,
-            initial.evaluator.scratch_entries);
+
+        // Each row is one matching assignment. It is not reconstructed from
+        // independent company, supplier and carrier sets.
+        let tuples = db.execute_graph_pattern_governed(&query_cx, &bindings, policy)?;
+        assert_eq!(bindings.columns(), &["company", "supplier", "carrier"]);
+        assert_eq!(tuples.value.len(), 1);
+        assert_eq!(tuples.value[0].values(), &[VId(1), VId(3), VId(4)]);
+        assert_eq!(tuples.value[0].get(2), Some(VId(4)));
+        assert_eq!(tuples.value[0].get(3), None);
+        let tuple_exact = GqlQueryPolicy::new(
+            tuples.rows.snapshot_records,
+            tuples.rows.result_rows,
+            tuples.evaluator.work_units,
+            tuples.evaluator.scratch_entries,
+        );
+        assert_eq!(db.execute_graph_pattern_governed(&query_cx, &bindings, tuple_exact)?, tuples);
+        for row in &tuples.value {
+            for (column, value) in bindings.columns().iter().zip(row.values()) {
+                print!("{column}={value:?} ");
+            }
+            println!();
+        }
+        println!(
+            "tuple rows: {}; source rows: {}; work: {}; scratch entries: {}",
+            tuples.rows.result_rows,
+            tuples.rows.snapshot_records,
+            tuples.evaluator.work_units,
+            tuples.evaluator.scratch_entries,
+        );
 
         let mut txn = db.begin(&txn_cx)?;
         let mut reduction = WriteBatch::new(BUYS_FROM);
         reduction.set_vertex_property(VId(3), RISK, Some(CanonicalScalar::Int(10)));
         txn.write(&mut db, reduction)?;
         assert!(txn.execute_graph_pattern_governed(&db, &query_cx, &pattern, policy)?.value.is_empty());
+        assert!(txn.execute_graph_pattern_governed(&db, &query_cx, &bindings, policy)?.value.is_empty());
         assert_eq!(db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?.value, vec![VId(4)]);
+        assert_eq!(db.execute_graph_pattern_governed(&query_cx, &bindings, policy)?.value, tuples.value);
         txn.commit(&mut db, &commit_cx).await?;
         assert!(db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?.value.is_empty());
+        assert!(db.execute_graph_pattern_governed(&query_cx, &bindings, policy)?.value.is_empty());
         assert_eq!(pinned.execute_graph_pattern_governed(&query_cx, &pattern, policy)?.value, vec![VId(4)]);
         assert_eq!(db.execute_graph_pattern_governed_at(&query_cx, &pattern, created, policy)?.value, vec![VId(4)]);
+        assert_eq!(pinned.execute_graph_pattern_governed(&query_cx, &bindings, policy)?.value, tuples.value);
+        assert_eq!(db.execute_graph_pattern_governed_at(&query_cx, &bindings, created, policy)?.value, tuples.value);
 
         root.cancel_with(CancelKind::User, Some("demonstration complete"));
-        assert!(matches!(db.execute_graph_pattern_governed(&query_cx, &pattern, policy),
-            Err(GqlQueryError::Interrupted(_))));
-        println!("OK: connected motif, exact limits, canonical overlay, pinned history and cancellation");
+        assert!(matches!(db.execute_graph_pattern_governed(&query_cx, &pattern, policy), Err(GqlQueryError::Interrupted(_))));
+        assert!(matches!(db.execute_graph_pattern_governed(&query_cx, &bindings, policy), Err(GqlQueryError::Interrupted(_))));
+        println!("OK: correlated rows, exact limits, canonical overlay, pinned history and cancellation");
         Ok(())
     })
 }
