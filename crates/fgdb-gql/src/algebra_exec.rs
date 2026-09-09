@@ -167,6 +167,53 @@ fn push_neighbor<E>(
     Ok(())
 }
 
+/// In-place, iterative heapsort. Every value comparison and swap crosses the
+/// same work/cancellation seam as traversal. A high-degree vertex therefore
+/// cannot hide an arbitrarily long opaque sort behind one Work event. Equal
+/// IDs have no separate ordering identity, but every occurrence is preserved.
+/// A refusal leaves only a private permutation which the caller discards.
+fn sort_neighbors<E>(
+    values: &mut [VId],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    let len = values.len();
+    for root in (0..len / 2).rev() {
+        sift_neighbors(values, root, len, control)?;
+    }
+    for end in (1..len).rev() {
+        control(GlaExecutionEvent::Work)?;
+        values.swap(0, end);
+        sift_neighbors(values, 0, end, control)?;
+    }
+    Ok(())
+}
+
+fn sift_neighbors<E>(
+    values: &mut [VId],
+    mut root: usize,
+    end: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    // root < end/2 proves 2*root+1 < end, without overflowing usize.
+    while root < end / 2 {
+        let mut child = 2 * root + 1;
+        if child + 1 < end {
+            control(GlaExecutionEvent::Work)?;
+            if values[child + 1] > values[child] {
+                child += 1;
+            }
+        }
+        control(GlaExecutionEvent::Work)?;
+        if values[root] >= values[child] {
+            break;
+        }
+        control(GlaExecutionEvent::Work)?;
+        values.swap(root, child);
+        root = child;
+    }
+    Ok(())
+}
+
 fn build_index<E>(
     operators: &[GlaOperator],
     edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
@@ -213,7 +260,7 @@ fn build_index<E>(
         for neighbors in adjacency.values_mut() {
             control(GlaExecutionEvent::Work)?;
             // Parallel occurrences survive until the explicit final Distinct.
-            neighbors.sort_unstable();
+            sort_neighbors(neighbors, control)?;
         }
     }
     Ok(index)
@@ -753,5 +800,78 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.observed, u128::from(u64::MAX) + 1);
         assert_eq!(stats, before);
+    }
+
+    #[test]
+    fn controlled_ordering_matches_std_for_every_small_array() {
+        let choices = [VId(0), VId(1_u128 << 100), VId(u128::MAX)];
+        for len in 0..=7_u32 {
+            for mut encoding in 0..3_usize.pow(len) {
+                let mut values = Vec::new();
+                for _ in 0..len {
+                    values.push(choices[encoding % 3]);
+                    encoding /= 3;
+                }
+                let mut expected = values.clone();
+                expected.sort_unstable();
+                let mut events = 0_u64;
+                sort_neighbors(&mut values, &mut |event| {
+                    assert_eq!(event, GlaExecutionEvent::Work);
+                    events += 1;
+                    Ok::<_, ()>(())
+                }).unwrap();
+                assert_eq!(values, expected);
+                // A loose executable O(n log n) upper bound; no timing claim.
+                let depth = u64::from(usize::BITS - values.len().leading_zeros());
+                assert!(events <= 8 * u64::from(len) * (depth + 1));
+            }
+        }
+    }
+
+    #[test]
+    fn controlled_ordering_can_stop_at_every_event_without_losing_occurrences() {
+        let original = [VId(9), VId(1), VId(9), VId(3), VId(2), VId(u128::MAX), VId(0)];
+        let mut expected = original;
+        expected.sort_unstable();
+        let mut total = 0;
+        let mut completed = original;
+        sort_neighbors(&mut completed, &mut |_| { total += 1; Ok::<_, ()>(()) }).unwrap();
+        assert_eq!(completed, expected);
+        for stop in 1..=total {
+            let mut values = original;
+            let mut events = 0;
+            let result = sort_neighbors(&mut values, &mut |_| {
+                events += 1;
+                if events == stop { Err(stop) } else { Ok(()) }
+            });
+            assert_eq!(result, Err(stop));
+            assert_eq!(events, stop);
+            values.sort_unstable();
+            assert_eq!(values, expected, "even a refused private index remains a permutation");
+        }
+    }
+
+    #[test]
+    fn index_ordering_refuses_before_any_predicate_read() {
+        let original: Vec<_> = (2..34).rev().map(VId).collect();
+        let mut ordered = original.clone();
+        let mut sort_events = 0;
+        sort_neighbors(&mut ordered, &mut |_| { sort_events += 1; Ok::<_, ()>(()) }).unwrap();
+        let stop = 2 * original.len() + 1 + sort_events;
+        let mut plan = bound(false);
+        plan.dst_label = Some(LabelId(1));
+        let mut events = 0;
+        let mut reads = 0;
+        let result = GlaPlan::lower(&plan).execute_with_control(
+            [], original.into_iter().map(|vid| (VId(1), RelationId(1), vid)),
+            |_, _| { reads += 1; Ok(true) },
+            |_| {
+                events += 1;
+                if events == stop { Err("stopped in adjacency ordering") } else { Ok(()) }
+            },
+        );
+        assert_eq!(result, Err("stopped in adjacency ordering"));
+        assert_eq!(events, stop);
+        assert_eq!(reads, 0);
     }
 }

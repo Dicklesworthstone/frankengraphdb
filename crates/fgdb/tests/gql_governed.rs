@@ -101,11 +101,13 @@ fn governed_aliases_agree_with_expected_rows_across_every_product_surface() {
                     .unwrap(),
                 live
             );
-            assert_eq!(
-                txn.execute_prepared_query_governed(&db, &query_cx, &query, generous())
-                    .unwrap(),
-                live
-            );
+            let overlay = txn
+                .execute_prepared_query_governed(&db, &query_cx, &query, generous())
+                .unwrap();
+            assert_eq!(overlay.value, live.value);
+            assert_eq!(overlay.rows, live.rows);
+            // Physical source work differs: durable reads now charge borrowed
+            // admission, while this transaction adapter retains its own scan.
         }
 
         let template = PreparedGqlTemplate::prepare(
@@ -459,6 +461,212 @@ fn governed_artifact_replay_keeps_all_identity_and_staged_effect_checks() {
             ))
         ));
         txn.abort();
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn source_history_is_metered_and_property_versions_do_not_multiply_candidate_scratch() {
+    let ((), report) = run_async_under_lab(0xc0a2_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let mut db = seeded(&commit).await;
+        let query = PreparedGqlQuery::prepare("MATCH (a)-[:R]->(b) RETURN b", &names()).unwrap();
+        let before = db
+            .execute_prepared_query_governed(&query_cx, &query, generous())
+            .unwrap();
+        for byte in 1..=4 {
+            let mut update = WriteBatch::new(R);
+            update.set_edge_property(
+                EId(10),
+                N,
+                Some(CanonicalScalar::bytes(vec![byte; 8_000]).unwrap()),
+            );
+            db.write(&commit, update).await.unwrap();
+        }
+        let after = db
+            .execute_prepared_query_governed(&query_cx, &query, generous())
+            .unwrap();
+        assert_eq!(after.value, before.value);
+        assert_eq!(after.rows, before.rows);
+        assert_eq!(
+            after.evaluator.scratch_entries,
+            before.evaluator.scratch_entries
+        );
+        assert!(after.evaluator.work_units > before.evaluator.work_units);
+        for work in 0..after.evaluator.work_units {
+            let policy = GqlQueryPolicy::new(5, 1, work, 10_000);
+            assert!(
+                matches!(db.execute_prepared_query_governed(&query_cx, &query, policy),
+                Err(GqlQueryError::Evaluator(error))
+                    if error.dimension == GlaLimitDimension::WorkUnits
+                    && error.limit == work && error.observed == u128::from(work) + 1)
+            );
+        }
+        for scratch in 0..after.evaluator.scratch_entries {
+            let policy = GqlQueryPolicy::new(5, 1, 10_000, scratch);
+            assert!(
+                matches!(db.execute_prepared_query_governed(&query_cx, &query, policy),
+                Err(GqlQueryError::Evaluator(error))
+                    if error.dimension == GlaLimitDimension::ScratchEntries
+                    && error.limit == scratch && error.observed == u128::from(scratch) + 1)
+            );
+        }
+        assert!(
+            matches!(db.execute_prepared_query_governed(&query_cx, &query,
+            GqlQueryPolicy::new(1, 1, 10_000, 10_000)),
+            Err(GqlQueryError::Rows(error)) if error.dimension == GqlBudgetDimension::SnapshotRecords
+                && error.limit == 1 && error.observed == 2)
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn source_oracle(db: &Database<MemVfs>, at: CommitSeq) -> Vec<(Vec<VId>, u64)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let vertices: BTreeMap<_, _> = db
+        .vertices_at(at)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.vid, r))
+        .collect();
+    let edges = db.edges_at(at).unwrap();
+    let qualifying = |vid: VId| {
+        vertices.get(&vid).is_some_and(|row| {
+            row.props.iter().any(|(key, value)| {
+                *key == N && matches!(value, CanonicalScalar::Int(n) if *n >= 3)
+            })
+        })
+    };
+    let nodes = vertices
+        .values()
+        .filter(|row| row.labels.contains(&L) && qualifying(row.vid))
+        .map(|row| row.vid)
+        .collect();
+    let destinations: BTreeSet<_> = edges
+        .iter()
+        .filter(|r| r.entry.relation == R && qualifying(r.entry.dst))
+        .map(|r| r.entry.dst)
+        .collect();
+    let mut closed = BTreeSet::new();
+    for first in edges.iter().filter(|r| r.entry.relation == R) {
+        for second in edges.iter().filter(|r| r.entry.relation == S) {
+            if first.entry.dst == second.entry.src && first.entry.src == second.entry.dst {
+                closed.insert(first.entry.src);
+            }
+        }
+    }
+    vec![
+        (nodes, vertices.len() as u64),
+        (destinations.into_iter().collect(), edges.len() as u64),
+        (closed.into_iter().collect(), edges.len() as u64),
+    ]
+}
+
+fn check_source_history(
+    db: &Database<MemVfs>,
+    query_cx: &fgdb_types::QueryCx,
+) -> Vec<Vec<(Vec<VId>, u64)>> {
+    let queries: Vec<_> = [
+        "MATCH (a:L) WHERE a.n>=3 RETURN a",
+        "MATCH (a)-[:R]->(b) WHERE b.n>=3 RETURN b",
+        "MATCH (a)-[:R]->(b)-[:S]->(a) RETURN a",
+    ]
+    .into_iter()
+    .map(|text| PreparedGqlQuery::prepare(text, &names()).unwrap())
+    .collect();
+    let view = db.read_session().unwrap();
+    let mut history = Vec::new();
+    for seq in 0..=db.frontier().unwrap().0 {
+        let at = CommitSeq(seq);
+        let expected = source_oracle(db, at);
+        for (query, (rows, count)) in queries.iter().zip(&expected) {
+            assert_eq!(db.execute_prepared_query_at(query, at).unwrap(), *rows);
+            let run = db
+                .execute_prepared_query_governed_at(query_cx, query, at, generous())
+                .unwrap();
+            assert_eq!(run.value, *rows);
+            assert_eq!(run.rows.snapshot_records, *count);
+            assert_eq!(
+                view.execute_prepared_query_governed_at(query_cx, query, at, generous())
+                    .unwrap(),
+                run
+            );
+        }
+        history.push(expected);
+    }
+    history
+}
+
+#[test]
+fn borrowed_sources_match_independent_storage_merges_through_compaction_and_reopen() {
+    let ((), report) = run_async_under_lab(0xc0a2_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let high = VId((1_u128 << 96) + 7);
+        let mut seed = WriteBatch::new(R);
+        for (id, value) in [(VId(1), 1), (VId(2), 2), (VId(3), 3), (high, 9)] {
+            seed.create_vertex(id, vec![L], vec![(N, CanonicalScalar::Int(value))]);
+        }
+        seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+        seed.add_edge(EId(11), VId(1), VId(3), vec![]);
+        seed.add_edge(EId(12), VId(2), high, vec![]);
+        db.write(&commit, seed).await.unwrap();
+        let mut other = WriteBatch::new(S);
+        other.add_edge(EId(20), VId(2), VId(1), vec![]);
+        other.add_edge(EId(21), high, VId(2), vec![]);
+        db.write(&commit, other).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let pinned_query =
+            PreparedGqlQuery::prepare("MATCH (a)-[:R]->(b) WHERE b.n>=3 RETURN b", &names())
+                .unwrap();
+        let old = source_oracle(&db, db.frontier().unwrap())[1].0.clone();
+        check_source_history(&db, &query_cx);
+        let mut update = WriteBatch::new(R);
+        update.set_vertex_property(VId(2), N, Some(CanonicalScalar::Int(8)));
+        update.set_edge_property(
+            EId(10),
+            N,
+            Some(CanonicalScalar::bytes(vec![0x42; 8_000]).unwrap()),
+        );
+        db.write(&commit, update).await.unwrap();
+        let mut retire = WriteBatch::new(R);
+        retire.delete_edge(EId(11));
+        retire.set_vertex_label(VId(3), L, false);
+        retire.set_vertex_property(high, N, None);
+        db.write(&commit, retire).await.unwrap();
+        let mut cascade = WriteBatch::new(S);
+        cascade.delete_vertex(high);
+        db.write(&commit, cascade).await.unwrap();
+        let expected = check_source_history(&db, &query_cx);
+        assert_eq!(
+            pinned
+                .execute_prepared_query_governed(&query_cx, &pinned_query, generous())
+                .unwrap()
+                .value,
+            old
+        );
+        db.compact(&commit).await.unwrap();
+        assert_eq!(check_source_history(&db, &query_cx), expected);
+        drop(db);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        assert_eq!(check_source_history(&reopened, &query_cx), expected);
+        assert_eq!(
+            pinned
+                .execute_prepared_query_governed(&query_cx, &pinned_query, generous())
+                .unwrap()
+                .value,
+            old
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
