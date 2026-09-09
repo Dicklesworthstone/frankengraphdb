@@ -21,27 +21,40 @@ mod query_source {
 
     impl<'a> VertexView<'a> {
         fn new(labels: &'a [LabelId], props: &'a [(PropertyKeyId, CanonicalScalar)]) -> Self {
-            Self { labels, props, label_edits: BTreeMap::new(), property_edits: BTreeMap::new() }
+            Self {
+                labels,
+                props,
+                label_edits: BTreeMap::new(),
+                property_edits: BTreeMap::new(),
+            }
         }
 
         fn property(&self, key: PropertyKeyId) -> Option<&CanonicalScalar> {
             if let Some(value) = self.property_edits.get(&key) {
                 *value
             } else {
-                self.props.binary_search_by_key(&key, |(key, _)| *key)
-                    .ok().map(|at| &self.props[at].1)
+                self.props
+                    .binary_search_by_key(&key, |(key, _)| *key)
+                    .ok()
+                    .map(|at| &self.props[at].1)
             }
         }
 
         fn matches(&self, predicate: &VertexPredicate) -> bool {
-            match predicate {
-                VertexPredicate::HasLabel(label) => self.label_edits.get(label).copied()
-                    .unwrap_or_else(|| self.labels.binary_search(label).is_ok()),
-                VertexPredicate::IntegerProperty { key, comparison, value } => {
-                    matches!(self.property(*key), Some(CanonicalScalar::Int(actual))
-                        if comparison.accepts(*actual, *value))
+            let (label, property) = match predicate {
+                VertexPredicate::HasLabel(label) => (
+                    self.label_edits
+                        .get(label)
+                        .copied()
+                        .unwrap_or_else(|| self.labels.binary_search(label).is_ok())
+                        .then_some(*label),
+                    None,
+                ),
+                VertexPredicate::IntegerProperty { key, .. } => {
+                    (None, self.property(*key).map(|value| (*key, value)))
                 }
-            }
+            };
+            predicate.matches_borrowed(label, property)
         }
     }
 
@@ -64,22 +77,35 @@ mod query_source {
         }
 
         pub(super) fn matches(&self, vid: VId, predicates: &[VertexPredicate]) -> bool {
-            self.vertices.binary_search_by_key(&vid, |(vid, _)| *vid).ok().is_some_and(|at| {
-                predicates.iter().all(|predicate| self.vertices[at].1.matches(predicate))
-            })
+            self.vertices
+                .binary_search_by_key(&vid, |(vid, _)| *vid)
+                .ok()
+                .is_some_and(|at| {
+                    predicates
+                        .iter()
+                        .all(|predicate| self.vertices[at].1.matches(predicate))
+                })
         }
 
         pub(super) fn execute(self) -> Result<Vec<VId>, WriteTxnError> {
-            self.logical.execute(self.vertex_ids(), self.edge_triples(), |vid, predicates| {
-                Ok(self.matches(vid, predicates))
-            })
+            self.logical
+                .execute(self.vertex_ids(), self.edge_triples(), |vid, predicates| {
+                    Ok(self.matches(vid, predicates))
+                })
         }
     }
 
     fn is_vertex_effect(row: &DeltaRow) -> bool {
-        matches!(row, DeltaRow::CreateVertex { .. } | DeltaRow::DeleteVertex { .. }
-            | DeltaRow::LabelMembership { .. }
-            | DeltaRow::Property { elem: ElementId::Vertex(_), .. })
+        matches!(
+            row,
+            DeltaRow::CreateVertex { .. }
+                | DeltaRow::DeleteVertex { .. }
+                | DeltaRow::LabelMembership { .. }
+                | DeltaRow::Property {
+                    elem: ElementId::Vertex(_),
+                    ..
+                }
+        )
     }
 
     /// NENF already resolved statement order, CAS and ensure. Apply its final
@@ -91,9 +117,9 @@ mod query_source {
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<(), E> {
         match effect {
-            DeltaRow::CreateVertex { vid, labels, props, .. }
-                if candidates.is_none_or(|candidates| candidates.contains(vid)) =>
-            {
+            DeltaRow::CreateVertex {
+                vid, labels, props, ..
+            } if candidates.is_none_or(|candidates| candidates.contains(vid)) => {
                 if !rows.contains_key(vid) {
                     control(SourceEvent::ScratchEntry)?;
                 }
@@ -102,7 +128,9 @@ mod query_source {
             DeltaRow::DeleteVertex { vid, .. } => {
                 rows.remove(vid);
             }
-            DeltaRow::LabelMembership { vid, label, after, .. } => {
+            DeltaRow::LabelMembership {
+                vid, label, after, ..
+            } => {
                 if let Some(row) = rows.get_mut(vid) {
                     if !row.label_edits.contains_key(label) {
                         control(SourceEvent::ScratchEntry)?;
@@ -110,7 +138,12 @@ mod query_source {
                     row.label_edits.insert(*label, *after);
                 }
             }
-            DeltaRow::Property { elem: ElementId::Vertex(vid), property, after, .. } => {
+            DeltaRow::Property {
+                elem: ElementId::Vertex(vid),
+                property,
+                after,
+                ..
+            } => {
                 if let Some(row) = rows.get_mut(vid) {
                     if !row.property_edits.contains_key(property) {
                         control(SourceEvent::ScratchEntry)?;
@@ -199,7 +232,11 @@ mod query_source {
                             self.note_query_read(&mut observed, ElementId::Vertex(*vid), control)?;
                         }
                         PendingRow::Edge { eid, src, dst, .. } if edge_scan => {
-                            for element in [ElementId::Edge(*eid), ElementId::Vertex(*src), ElementId::Vertex(*dst)] {
+                            for element in [
+                                ElementId::Edge(*eid),
+                                ElementId::Vertex(*src),
+                                ElementId::Vertex(*dst),
+                            ] {
                                 self.note_query_read(&mut observed, element, control)?;
                             }
                         }
@@ -215,7 +252,11 @@ mod query_source {
             let mut edges = OverlayEdgeMap::new();
             if edge_scan {
                 source::visit_edges(&snapshot.blocks, self.basis, control, |entry, control| {
-                    for element in [ElementId::Edge(entry.eid), ElementId::Vertex(entry.src), ElementId::Vertex(entry.dst)] {
+                    for element in [
+                        ElementId::Edge(entry.eid),
+                        ElementId::Vertex(entry.src),
+                        ElementId::Vertex(entry.dst),
+                    ] {
                         self.note_query_read(&mut observed, element, control)?;
                     }
                     control(SourceEvent::ScratchEntry)?;
@@ -242,7 +283,13 @@ mod query_source {
                             continue;
                         }
                         match effect {
-                            DeltaRow::CreateEdge { eid, src, relation, dst, .. } => {
+                            DeltaRow::CreateEdge {
+                                eid,
+                                src,
+                                relation,
+                                dst,
+                                ..
+                            } => {
                                 if !edges.contains_key(eid) {
                                     control(SourceEvent::ScratchEntry)?;
                                 }
@@ -251,12 +298,19 @@ mod query_source {
                             DeltaRow::DeleteEdge { eid, .. } => {
                                 edges.remove(eid);
                             }
-                            DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } => {
+                            DeltaRow::DeleteVertex {
+                                sorted_retired_incident_edges,
+                                ..
+                            } => {
                                 // Engine-derived cascade IDs avoid scanning the
                                 // whole edge map for every deleted vertex.
                                 for eid in sorted_retired_incident_edges {
                                     control(SourceEvent::Work)?;
-                                    self.note_query_read(&mut observed, ElementId::Edge(*eid), control)?;
+                                    self.note_query_read(
+                                        &mut observed,
+                                        ElementId::Edge(*eid),
+                                        control,
+                                    )?;
                                     edges.remove(eid);
                                 }
                             }
@@ -270,13 +324,22 @@ mod query_source {
                 }
             }
 
-            if edge_scan && logical.operators().iter().any(|op| matches!(op, GlaOperator::Select { .. })) {
+            if edge_scan
+                && logical
+                    .operators()
+                    .iter()
+                    .any(|op| matches!(op, GlaOperator::Select { .. }))
+            {
                 let mut candidates = BTreeSet::new();
                 for &(src, relation, dst) in edges.values() {
                     control(SourceEvent::Work)?;
                     let requested = logical.operators().iter().any(|op| match op {
-                        GlaOperator::ScanEdges { relation: required, .. }
-                        | GlaOperator::Expand { relation: required, .. } => *required == relation,
+                        GlaOperator::ScanEdges {
+                            relation: required, ..
+                        }
+                        | GlaOperator::Expand {
+                            relation: required, ..
+                        } => *required == relation,
                         _ => false,
                     });
                     if requested {
@@ -290,7 +353,9 @@ mod query_source {
                 }
                 for &vid in &candidates {
                     self.note_query_read(&mut observed, ElementId::Vertex(vid), control)?;
-                    if let Some(row) = source::find_vertex(&snapshot.patches, vid, self.basis, control)? {
+                    if let Some(row) =
+                        source::find_vertex(&snapshot.patches, vid, self.basis, control)?
+                    {
                         control(SourceEvent::ScratchEntry)?;
                         vertices.insert(vid, VertexView::new(&row.labels, &row.props));
                     }
@@ -317,8 +382,17 @@ mod query_source {
                 control(SourceEvent::ScratchEntry)?;
                 edge_rows.push(triple);
             }
-            let snapshot_records = if edge_scan { edge_rows.len() } else { vertex_rows.len() };
-            Ok(OverlayQuerySource { logical, vertices: vertex_rows, edges: edge_rows, snapshot_records })
+            let snapshot_records = if edge_scan {
+                edge_rows.len()
+            } else {
+                vertex_rows.len()
+            };
+            Ok(OverlayQuerySource {
+                logical,
+                vertices: vertex_rows,
+                edges: edge_rows,
+                snapshot_records,
+            })
         }
     }
 
@@ -337,15 +411,25 @@ mod query_source {
             row.property_edits.insert(key, Some(&changed));
             assert!(std::ptr::eq(row.property(key).unwrap(), &changed));
             assert!(row.matches(&VertexPredicate::IntegerProperty {
-                key, comparison: IntegerComparison::Equal, value: 9,
+                key,
+                comparison: IntegerComparison::Equal,
+                value: 9,
             }));
             row.property_edits.insert(key, None);
             assert!(row.property(key).is_none());
-            for comparison in [IntegerComparison::Equal, IntegerComparison::NotEqual,
-                IntegerComparison::Greater, IntegerComparison::Less,
-                IntegerComparison::GreaterOrEqual, IntegerComparison::LessOrEqual]
-            {
-                assert!(!row.matches(&VertexPredicate::IntegerProperty { key, comparison, value: 9 }));
+            for comparison in [
+                IntegerComparison::Equal,
+                IntegerComparison::NotEqual,
+                IntegerComparison::Greater,
+                IntegerComparison::Less,
+                IntegerComparison::GreaterOrEqual,
+                IntegerComparison::LessOrEqual,
+            ] {
+                assert!(!row.matches(&VertexPredicate::IntegerProperty {
+                    key,
+                    comparison,
+                    value: 9
+                }));
             }
         }
 
