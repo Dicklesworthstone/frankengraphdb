@@ -122,6 +122,15 @@ fn ensure_prefixes_are_idempotent_and_preserve_existing_vertex_contents() {
         assert_eq!(db.vertices().unwrap(), expected_vertices);
         assert_eq!(db.edges().unwrap(), expected_edges);
         assert_eq!(db.element_versions().unwrap(), &versions);
+        let mut retire = WriteBatch::new(R);
+        retire.delete_vertex(VId(4));
+        db.write(&cx, retire).await.unwrap();
+        let before_refusal = db.frontier().unwrap();
+        assert!(matches!(db.write_atomic(&cx, graph(true)).await,
+            Err(WriteTxnError::Write(WriteError::IdentitySpent { elem }))
+                if elem == ElementId::Vertex(VId(4))));
+        assert_eq!(db.frontier().unwrap(), before_refusal);
+        assert_eq!(db.edges().unwrap(), expected_edges);
 
         let mut fresh = Database::open_memory(&cx, keys()).await.unwrap();
         let mut prefix = WriteBatch::new(Z);
@@ -285,6 +294,110 @@ fn transaction_prefix_reuses_existing_staging_and_preserves_it_after_rejected_ed
         assert_eq!(db.execute_prepared_query(&query).unwrap(), vec![HIGH]);
         assert!(pinned.execute_prepared_query(&query).unwrap().is_empty());
         assert_eq!(db.delta_since(CommitSeq(0)).unwrap().count(), 1);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn new_endpoints_and_all_relations_recover_together_across_marker_boundaries() {
+    use fgdb::CrashPoint;
+    let ((), report) = run_async_under_lab(0xa704_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        for (name, point, tear, committed) in [
+            ("before", Some(CrashPoint::BeforeCapsule), false, false),
+            ("capsule", Some(CrashPoint::AfterCapsuleBeforeD1), false, false),
+            ("d1", Some(CrashPoint::AfterD1), false, false),
+            ("marker-survived", Some(CrashPoint::AfterMarkerBeforeD2), false, true),
+            ("marker-torn", Some(CrashPoint::AfterMarkerBeforeD2), true, false),
+            ("marker-synced", Some(CrashPoint::AfterMarkerFileSyncBeforeDirectorySync), false, true),
+            ("complete", None, false, true),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "fgdb-shared-prefix-recovery-{}-{name}", std::process::id()));
+            let mut db = Database::create(&cx, &path, keys()).await.unwrap();
+            let pinned = db.read_session().unwrap();
+            let prepared = db.prepare_atomic_writes(graph(false)).unwrap();
+            let result = db.commit_prepared_with_crash(&cx, prepared, point).await;
+            assert_eq!(result.is_ok(), point.is_none(), "point must be reached: {name}");
+            if matches!(point, Some(CrashPoint::AfterMarkerBeforeD2
+                | CrashPoint::AfterMarkerFileSyncBeforeDirectorySync)) {
+                assert!(matches!(result, Err(WriteError::CommitOutcomeUnknown { .. })));
+                assert!(db.frontier().is_err());
+            }
+            assert!(pinned.vertices().unwrap().is_empty());
+            assert!(pinned.edges().unwrap().is_empty());
+            drop(db);
+            if tear {
+                fgdb_chronicle::CommitCoordinator::<asupersync::fs::UnixVfs>::tear_log_tail_for_test(&path, 1).unwrap();
+            }
+            // Surviving unflushed bytes are one crash outcome, not a guarantee
+            // of persistence before D2. A torn trailer must recover neither.
+            let reopened = Database::open(&cx, &path, keys()).await.unwrap();
+            assert_eq!(reopened.frontier().unwrap(), CommitSeq(u64::from(committed)), "{name}");
+            assert_eq!(reopened.vertices().unwrap().len(), if committed { 4 } else { 0 }, "{name}");
+            assert_eq!(reopened.edges().unwrap().len(), if committed { 2 } else { 0 }, "{name}");
+            assert_eq!(reopened.delta_since(CommitSeq(0)).unwrap().count(), usize::from(committed));
+            assert_eq!(reopened.execute_prepared_query(&query()).unwrap(),
+                if committed { vec![HIGH] } else { vec![] });
+            let vertices = reopened.vertices().unwrap();
+            let edges = reopened.edges().unwrap();
+            let versions = reopened.element_versions().unwrap().clone();
+            drop(reopened);
+            let rebuilt = Database::open_rebuilding(&cx, &path, keys()).await.unwrap();
+            assert_eq!(rebuilt.vertices().unwrap(), vertices);
+            assert_eq!(rebuilt.edges().unwrap(), edges);
+            assert_eq!(rebuilt.element_versions().unwrap(), &versions);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn shared_initialization_versions_and_history_survive_updates_compaction_and_rebuild() {
+    let ((), report) = run_async_under_lab(0xa704_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let path = std::env::temp_dir().join(format!(
+            "fgdb-shared-prefix-compact-{}", std::process::id()));
+        let mut db = Database::create(&cx, &path, keys()).await.unwrap();
+        let created = db.write_atomic(&cx, graph(false)).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let original_births: Vec<_> = db.vertices().unwrap().into_iter()
+            .map(|row| (row.vid, row.birth_ordinal)).collect();
+        let mut r = WriteBatch::new(R);
+        r.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(77)));
+        let mut s = WriteBatch::new(S);
+        s.set_vertex_property(VId(2), P, Some(CanonicalScalar::Int(88)));
+        db.write_atomic(&cx, vec![s, r]).await.unwrap();
+        let mut cascade = WriteBatch::new(R);
+        cascade.delete_vertex(VId(2));
+        let retired = db.write(&cx, cascade).await.unwrap();
+        assert!(db.edges().unwrap().is_empty());
+        assert_eq!(pinned.execute_prepared_query(&query()).unwrap(), vec![HIGH]);
+        assert_eq!(db.execute_prepared_query_at(&query(), created).unwrap(), vec![HIGH]);
+        let history: Vec<_> = (0..=retired.0).map(|seq| {
+            let at = CommitSeq(seq);
+            (db.vertices_at(at).unwrap(), db.edges_at(at).unwrap())
+        }).collect();
+        let versions = db.element_versions().unwrap().clone();
+        db.compact(&cx).await.unwrap();
+        assert_eq!(db.element_versions().unwrap(), &versions);
+        drop(db);
+        for rebuild in [false, true] {
+            let reopened = if rebuild {
+                Database::open_rebuilding(&cx, &path, keys()).await.unwrap()
+            } else { Database::open(&cx, &path, keys()).await.unwrap() };
+            assert_eq!(reopened.frontier().unwrap(), retired);
+            assert_eq!(reopened.element_versions().unwrap(), &versions);
+            for (seq, (vertices, edges)) in history.iter().enumerate() {
+                assert_eq!(reopened.vertices_at(CommitSeq(seq as u64)).unwrap(), *vertices);
+                assert_eq!(reopened.edges_at(CommitSeq(seq as u64)).unwrap(), *edges);
+            }
+            assert_eq!(reopened.vertices_at(created).unwrap().into_iter()
+                .map(|row| (row.vid, row.birth_ordinal)).collect::<Vec<_>>(), original_births);
+            assert_eq!(reopened.execute_prepared_query_at(&query(), created).unwrap(), vec![HIGH]);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
