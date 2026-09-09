@@ -289,14 +289,14 @@ fn refused_overlay_reads_keep_dependencies_but_allow_unrelated_vertex_commits() 
                     Err(GqlQueryError::Rows(_))));
                 let mut winner = WriteBatch::new(R);
                 match winner_kind {
-                    0 => winner.set_vertex_property(VId(2), N, Some(CanonicalScalar::Int(20))),
-                    1 => winner.delete_edge(EId(10)),
+                    0 => { winner.set_vertex_property(VId(2), N, Some(CanonicalScalar::Int(20))); }
+                    1 => { winner.delete_edge(EId(10)); }
                     2 => {
                         winner.create_vertex(VId(77), vec![], vec![]);
                         winner.create_vertex(VId(78), vec![], vec![]);
                         winner.add_edge(EId(80), VId(77), VId(78), vec![]);
                     }
-                    _ => winner.create_vertex(VId(77), vec![], vec![]),
+                    _ => { winner.create_vertex(VId(77), vec![], vec![]); }
                 }
                 db.write(&commit, winner).await.unwrap();
                 let frontier = db.frontier().unwrap();
@@ -343,6 +343,41 @@ fn multi_relation_source_keeps_coordinates_and_failed_staging_leaves_it_unchange
         txn.commit(&mut db, &commit).await.unwrap();
         assert_eq!(db.execute_prepared_query(&query).unwrap(), vec![VId(1), VId(4)]);
         assert_eq!(pinned.execute_prepared_query(&query).unwrap(), vec![VId(1)]);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn interleaved_live_history_does_not_rebase_the_borrowed_overlay() {
+    let ((), report) = run_async_under_lab(0xc0a3_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txn_cx = contexts.txn();
+        let mut db = seeded(&commit).await;
+        let mut txn = db.begin(&txn_cx).unwrap();
+        let mut stage = WriteBatch::new(R);
+        stage.set_vertex_property(VId(2), N, Some(CanonicalScalar::Int(10)));
+        stage.create_vertex(VId(99), vec![], vec![]);
+        txn.write(&mut db, stage).unwrap();
+        let query = query("MATCH (a)-[:R]->(b) WHERE b.n>=3 RETURN b");
+        let expected = vec![VId(2), VId(3), HIGH];
+        assert_eq!(txn.execute_prepared_query(&db, &query).unwrap(), expected);
+        let mut winner = WriteBatch::new(R);
+        winner.set_vertex_property(VId(3), N, Some(CanonicalScalar::Int(0)));
+        winner.delete_edge(EId(15));
+        winner.create_vertex(VId(6), vec![L], vec![(N, CanonicalScalar::Int(99))]);
+        winner.add_edge(EId(80), VId(1), VId(6), vec![]);
+        db.write(&commit, winner).await.unwrap();
+        assert_eq!(db.execute_prepared_query(&query).unwrap(), vec![VId(6)]);
+        assert_eq!(txn.execute_prepared_query_governed(&db, &cx, &query, generous()).unwrap().value, expected);
+        assert_eq!(txn.execute_prepared_query_budgeted(&db, &query,
+            GqlExecutionBudget::new(8, 3)).unwrap().value, expected);
+        let frontier = db.frontier().unwrap();
+        assert!(matches!(txn.commit(&mut db, &commit).await,
+            Err(WriteTxnError::Write(WriteError::FirstCommitterWins { law: "FG-LAW-FCW-READ-01", .. }))));
+        assert_eq!(db.frontier().unwrap(), frontier);
+        assert!(db.vertex(VId(99)).unwrap().is_none());
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
