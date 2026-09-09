@@ -1,7 +1,7 @@
 //! Atomic composition of relation groups through the ordinary write builder.
 //!
 //! Independent groups retain their existing common-basis contract. A leading
-//! prefix of unconditional vertex creations can additionally seed endpoints
+//! prefix of vertex creations/ensures can additionally seed new endpoints
 //! shared by several relations. Every suffix sees that same immutable prefix;
 //! groups must leave it unchanged and remain mutually read/write independent.
 //! Prefix effects are emitted once, before any dependent edge coordinate.
@@ -77,22 +77,23 @@ fn written_elements(template: &LogicalDeltaTemplate) -> Result<BTreeSet<ElementI
     Ok(writes)
 }
 
-/// Detect an explicit creation prefix, never hoist a later creation past an
-/// edge, ensure, condition, update or delete. Existing independent operations
+/// Detect an explicit vertex-initialization prefix, never hoist a later
+/// creation past an edge, condition, update or delete. Independent operations
 /// stay on their original path, including their exact ordinal/coordinate law.
-/// Only a cross-relation endpoint dependency activates prefix composition.
+/// Only a cross-relation dependency on an absent endpoint activates prefix
+/// composition. Already-live ensured endpoints retain the independent path.
 struct SharedVertexPrefix {
     rows: Vec<PendingRow>,
     origins: BTreeMap<VId, RelationId>,
 }
 
 impl SharedVertexPrefix {
-    fn discover(batches: &[WriteBatch]) -> Option<Self> {
+    fn discover(batches: &[WriteBatch], is_live: impl Fn(VId) -> bool) -> Option<Self> {
         let mut count = 0;
         let mut origins = BTreeMap::new();
         'prefix: for batch in batches {
             for row in &batch.rows {
-                let PendingRow::Vertex { vid, ensure: false, .. } = row else {
+                let PendingRow::Vertex { vid, .. } = row else {
                     break 'prefix;
                 };
                 count += 1;
@@ -105,6 +106,7 @@ impl SharedVertexPrefix {
             batch.rows.iter().any(|row| match row {
                 PendingRow::Edge { src, dst, .. } => [src, dst].into_iter().any(|vid| {
                     origins.get(vid).is_some_and(|origin| *origin != batch.relation)
+                        && !is_live(*vid)
                 }),
                 _ => false,
             })
@@ -201,7 +203,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// Prepare one atomic write spanning multiple edge relations.
     ///
     /// Independent relation groups keep their original common-basis semantics.
-    /// A leading run of unconditional vertex creations can also supply new
+    /// A leading run of vertex creations/ensures can also supply new
     /// endpoints to other relation groups. It must precede every non-creation
     /// intent in the input. Every group evaluates through the ordinary builder
     /// against that same prefix, must leave its canonical vertex content
@@ -220,7 +222,7 @@ impl<V: Vfs + Clone> Database<V> {
         if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
             return Err(WriteError::EmptyBatch.into());
         }
-        if let Some(prefix) = SharedVertexPrefix::discover(&batches) {
+        if let Some(prefix) = SharedVertexPrefix::discover(&batches, |vid| self.writer.is_vertex_live(vid)) {
             return self.prepare_vertex_prefixed_groups(batches, prefix);
         }
         let mut groups: BTreeMap<RelationId, WriteBatch> = BTreeMap::new();
@@ -279,14 +281,15 @@ impl<V: Vfs + Clone> Database<V> {
                 let DeltaRow::CreateVertex { vid, .. } = row else {
                     return Err(WriteTxnError::UnsupportedAtomicMutation);
                 };
+                if !prefix.origins.contains_key(vid) {
+                    return Err(WriteTxnError::UnsupportedAtomicMutation);
+                }
                 expected.insert(*vid, row.clone());
             }
             merge_coordinate(&mut coordinates, coordinate)?;
         }
-        // Unconditional creates cannot be normalized away in a pure prefix.
-        if expected.len() != prefix.rows.len() {
-            return Err(WriteTxnError::UnsupportedAtomicMutation);
-        }
+        // Ensures of live or earlier prefix-created vertices may be no-ops.
+        // Their raw visits still count, and their observations remain captured.
         let mut dependencies = prefix_prepared.dependencies;
         let mut groups = BTreeMap::new();
         let mut remaining_prefix = prefix.rows.len();
@@ -319,9 +322,12 @@ impl<V: Vfs + Clone> Database<V> {
             // Its repeated evaluation is not a write/write conflict between
             // suffixes. KEEP these negative reads in the final external FCW
             // dependencies; remove them only for this intra-command check.
-            writes.retain(|element| !prefix.owns(element));
+            let created_by_prefix = |element: &ElementId| {
+                matches!(element, ElementId::Vertex(vid) if expected.contains_key(vid))
+            };
+            writes.retain(|element| !created_by_prefix(element));
             let reads = prepared.dependencies.elements.iter().copied()
-                .filter(|element| !prefix.owns(element)).collect();
+                .filter(|element| !created_by_prefix(element)).collect();
             independence.admit(relation, &reads, &writes)?;
             for coordinate in stripped { merge_coordinate(&mut coordinates, coordinate)?; }
             dependencies.elements.extend(prepared.dependencies.elements);
@@ -390,10 +396,10 @@ mod tests {
         vertices.create_vertex(VId(2), vec![], vec![]);
         let mut edge = WriteBatch::new(RelationId(1));
         edge.add_edge(EId(10), VId(1), VId(2), vec![]);
-        let prefix = SharedVertexPrefix::discover(&[vertices.clone(), edge.clone()]).unwrap();
+        let prefix = SharedVertexPrefix::discover(&[vertices.clone(), edge.clone()], |_| false).unwrap();
         assert_eq!(prefix.rows.len(), 2);
         assert_eq!(prefix.origins[&VId(1)], RelationId(9));
-        assert!(SharedVertexPrefix::discover(&[edge, vertices]).is_none());
+        assert!(SharedVertexPrefix::discover(&[edge, vertices], |_| false).is_none());
     }
 
     #[test]
@@ -406,17 +412,20 @@ mod tests {
         b.create_vertex(VId(3), vec![], vec![]);
         b.create_vertex(VId(4), vec![], vec![]);
         b.add_edge(EId(11), VId(3), VId(4), vec![]);
-        assert!(SharedVertexPrefix::discover(&[a.clone()]).is_none());
-        assert!(SharedVertexPrefix::discover(&[a, b]).is_none());
+        assert!(SharedVertexPrefix::discover(&[a.clone()], |_| false).is_none());
+        assert!(SharedVertexPrefix::discover(&[a, b], |_| false).is_none());
     }
 
     #[test]
-    fn ensure_is_not_misclassified_as_an_unconditional_shared_creation() {
+    fn ensured_endpoints_select_the_shared_path_only_when_not_already_live() {
         let mut first = WriteBatch::new(RelationId(9));
         first.ensure_vertex(VId(1), vec![], vec![]);
         first.create_vertex(VId(2), vec![], vec![]);
         let mut next = WriteBatch::new(RelationId(1));
         next.add_edge(EId(10), VId(1), VId(2), vec![]);
-        assert!(SharedVertexPrefix::discover(&[first, next]).is_none());
+        let batches = [first, next];
+        assert!(SharedVertexPrefix::discover(&batches, |_| true).is_none());
+        let prefix = SharedVertexPrefix::discover(&batches, |_| false).unwrap();
+        assert_eq!(prefix.rows.len(), 2);
     }
 }
