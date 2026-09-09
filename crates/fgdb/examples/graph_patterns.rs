@@ -5,9 +5,7 @@
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::{
-    GlaDirection, GraphPatternBuilder, IntegerComparison, VertexPredicate,
-};
+use fgdb_gql::algebra::{GlaDirection, GraphPatternBuilder, IntegerComparison, VertexPredicate};
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
@@ -86,7 +84,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         builder.identity("company", "carrier", false)?;
 
         let pattern = builder.prepare("carrier", 0, Some(10))?;
-        let bindings = builder.prepare_bindings(&["company", "supplier", "carrier"], 0, Some(10))?;
+        let bindings =
+            builder.prepare_bindings(&["company", "supplier", "carrier"], 0, Some(10))?;
         let policy = GqlQueryPolicy::new(100, 10, 100_000, 10_000);
         let initial = db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?;
         assert_eq!(initial.value, vec![VId(4)]);
@@ -96,7 +95,10 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             initial.evaluator.work_units,
             initial.evaluator.scratch_entries,
         );
-        assert_eq!(db.execute_graph_pattern_governed(&query_cx, &pattern, exact)?, initial);
+        assert_eq!(
+            db.execute_graph_pattern_governed(&query_cx, &pattern, exact)?,
+            initial
+        );
 
         // Each row is one matching assignment. It is not reconstructed from
         // independent company, supplier and carrier sets.
@@ -112,7 +114,10 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             tuples.evaluator.work_units,
             tuples.evaluator.scratch_entries,
         );
-        assert_eq!(db.execute_graph_pattern_governed(&query_cx, &bindings, tuple_exact)?, tuples);
+        assert_eq!(
+            db.execute_graph_pattern_governed(&query_cx, &bindings, tuple_exact)?,
+            tuples
+        );
         for row in &tuples.value {
             for (column, value) in bindings.columns().iter().zip(row.values()) {
                 print!("{column}={value:?} ");
@@ -131,22 +136,72 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let mut reduction = WriteBatch::new(BUYS_FROM);
         reduction.set_vertex_property(VId(3), RISK, Some(CanonicalScalar::Int(10)));
         txn.write(&mut db, reduction)?;
-        assert!(txn.execute_graph_pattern_governed(&db, &query_cx, &pattern, policy)?.value.is_empty());
-        assert!(txn.execute_graph_pattern_governed(&db, &query_cx, &bindings, policy)?.value.is_empty());
-        assert_eq!(db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?.value, vec![VId(4)]);
-        assert_eq!(db.execute_graph_pattern_governed(&query_cx, &bindings, policy)?.value, tuples.value);
+        assert!(
+            txn.execute_graph_pattern_governed(&db, &query_cx, &pattern, policy)?
+                .value
+                .is_empty()
+        );
+        assert!(
+            txn.execute_graph_pattern_governed(&db, &query_cx, &bindings, policy)?
+                .value
+                .is_empty()
+        );
+        assert_eq!(
+            db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?
+                .value,
+            vec![VId(4)]
+        );
+        assert_eq!(
+            db.execute_graph_pattern_governed(&query_cx, &bindings, policy)?
+                .value,
+            tuples.value
+        );
         txn.commit(&mut db, &commit_cx).await?;
-        assert!(db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?.value.is_empty());
-        assert!(db.execute_graph_pattern_governed(&query_cx, &bindings, policy)?.value.is_empty());
-        assert_eq!(pinned.execute_graph_pattern_governed(&query_cx, &pattern, policy)?.value, vec![VId(4)]);
-        assert_eq!(db.execute_graph_pattern_governed_at(&query_cx, &pattern, created, policy)?.value, vec![VId(4)]);
-        assert_eq!(pinned.execute_graph_pattern_governed(&query_cx, &bindings, policy)?.value, tuples.value);
-        assert_eq!(db.execute_graph_pattern_governed_at(&query_cx, &bindings, created, policy)?.value, tuples.value);
+        assert!(
+            db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?
+                .value
+                .is_empty()
+        );
+        assert!(
+            db.execute_graph_pattern_governed(&query_cx, &bindings, policy)?
+                .value
+                .is_empty()
+        );
+        assert_eq!(
+            pinned
+                .execute_graph_pattern_governed(&query_cx, &pattern, policy)?
+                .value,
+            vec![VId(4)]
+        );
+        assert_eq!(
+            db.execute_graph_pattern_governed_at(&query_cx, &pattern, created, policy)?
+                .value,
+            vec![VId(4)]
+        );
+        assert_eq!(
+            pinned
+                .execute_graph_pattern_governed(&query_cx, &bindings, policy)?
+                .value,
+            tuples.value
+        );
+        assert_eq!(
+            db.execute_graph_pattern_governed_at(&query_cx, &bindings, created, policy)?
+                .value,
+            tuples.value
+        );
 
         root.cancel_with(CancelKind::User, Some("demonstration complete"));
-        assert!(matches!(db.execute_graph_pattern_governed(&query_cx, &pattern, policy), Err(GqlQueryError::Interrupted(_))));
-        assert!(matches!(db.execute_graph_pattern_governed(&query_cx, &bindings, policy), Err(GqlQueryError::Interrupted(_))));
-        println!("OK: correlated rows, exact limits, canonical overlay, pinned history and cancellation");
+        assert!(matches!(
+            db.execute_graph_pattern_governed(&query_cx, &pattern, policy),
+            Err(GqlQueryError::Interrupted(_))
+        ));
+        assert!(matches!(
+            db.execute_graph_pattern_governed(&query_cx, &bindings, policy),
+            Err(GqlQueryError::Interrupted(_))
+        ));
+        println!(
+            "OK: correlated rows, exact limits, canonical overlay, pinned history and cancellation"
+        );
         Ok(())
     })
 }

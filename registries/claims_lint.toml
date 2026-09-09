@@ -83,6 +83,7 @@ scan = [
   "docs/WORKSPACE_TOPOLOGY.md",
   "docs/atomic_relation_writes.md",
   "docs/bounded_gla_execution.md",
+  "docs/graph_patterns.md",
 ]
 
 # Directories whose prose must be wholly accounted for by `scan` + `[[exclude]]`.
