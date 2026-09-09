@@ -1,13 +1,37 @@
-//! Value-column preparation over the existing connected-pattern compiler.
+//! Value-column preparation and terminal multiplicity selection over the
+//! existing connected-pattern compiler.
 
 use super::*;
 use super::super::{GraphColumn, GraphValueRow, ValueProjection};
+
+impl<Row> PreparedGraphPattern<Row> {
+    /// Preserve every complete matching occurrence instead of deduplicating
+    /// projected rows. This applies to identity, binding and property outputs.
+    /// Ordering still precedes occurrence-based offset/count pagination.
+    /// Changing multiplicity changes logical bytes; the column schema and
+    /// source/traversal plan are unchanged. Repeated calls are idempotent.
+    #[must_use]
+    pub fn with_duplicates(mut self) -> Self {
+        if let Some(at) = self.logical.operators.len().checked_sub(3)
+            && matches!(self.logical.operators.get(at), Some(GlaOperator::Distinct))
+        {
+            self.logical.operators.remove(at);
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn preserves_duplicates(&self) -> bool {
+        !matches!(self.logical.operators.iter().rev().nth(2), Some(GlaOperator::Distinct))
+    }
+}
 
 impl GraphPatternBuilder {
     /// Project correlated vertex identities and canonical vertex properties.
     /// Aliases are unique column names; one vertex/property may appear under
     /// several different aliases. Missing properties become canonical nulls.
-    /// Complete value rows are deduplicated and ordered before pagination.
+    /// Complete value rows are deduplicated and ordered before pagination
+    /// unless the prepared result explicitly selects `with_duplicates()`.
     pub fn prepare_values(
         &self,
         columns: &[GraphColumn<'_>],
@@ -157,5 +181,40 @@ mod tests {
             assert!(matches!(result, Err(GqlQueryError::Interrupted(value)) if value == stop));
             assert_eq!(at, stop);
         }
+    }
+
+    #[test]
+    fn value_bags_keep_equal_null_and_typed_numeric_occurrences_in_canonical_order() {
+        let b = builder();
+        let key = PropertyKeyId(7);
+        let values = [CanonicalScalar::Int(9), CanonicalScalar::Null, CanonicalScalar::Int(9),
+            CanonicalScalar::Float(CanonicalF64::new(9.0))];
+        let distinct = b.prepare_values(&[GraphColumn::property("value", "b", key)], 0, None).unwrap();
+        let bag = distinct.clone().with_duplicates();
+        assert!(bag.preserves_duplicates());
+        assert!(!distinct.preserves_duplicates());
+        assert_eq!(bag.clone().with_duplicates(), bag);
+        assert_eq!(bag.columns(), distinct.columns());
+        assert_ne!(bag.canonical_bytes(), distinct.canonical_bytes());
+        let edges = [(VId(9), RelationId(1), VId(0)), (VId(9), RelationId(1), VId(0)),
+            (VId(9), RelationId(1), VId(1)), (VId(9), RelationId(1), VId(2)),
+            (VId(9), RelationId(1), VId(3))];
+        let run = |pattern: &PreparedGraphPattern<GraphValueRow>, policy| {
+            pattern.plan().execute_governed_with_properties(5, [], edges, |_, _| Ok::<_, ()>(true),
+                |vid, _| Ok(Some(&values[vid.0 as usize])), policy, || Ok::<_, ()>(()))
+        };
+        let all = run(&bag, GqlQueryPolicy::new(5, 5, u64::MAX, u64::MAX)).unwrap();
+        assert_eq!(all.value.iter().map(|row| row.get(0).unwrap().as_scalar().unwrap()).collect::<Vec<_>>(),
+            vec![&values[1], &values[0], &values[0], &values[0], &values[3]]);
+        assert_eq!(run(&distinct, GqlQueryPolicy::new(5, 3, u64::MAX, u64::MAX)).unwrap().value.len(), 3);
+        assert!(matches!(run(&bag, GqlQueryPolicy::new(5, 2, u64::MAX, u64::MAX)),
+            Err(GqlQueryError::Rows(error)) if error.observed == 3));
+        let exact = GqlQueryPolicy::new(5, 5, all.evaluator.work_units, all.evaluator.scratch_entries);
+        assert_eq!(run(&bag, exact).unwrap(), all);
+        let page = b.prepare_values(&[GraphColumn::property("value", "b", key)], 2, Some(2)).unwrap().with_duplicates();
+        let page = run(&page, GqlQueryPolicy::new(5, 2, u64::MAX, u64::MAX)).unwrap();
+        assert_eq!(page.value.len(), 2);
+        assert_eq!(page.value[0], page.value[1]);
+        assert_eq!(page.value[0].get(0).unwrap().as_scalar(), Some(&values[0]));
     }
 }
