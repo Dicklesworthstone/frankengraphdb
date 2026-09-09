@@ -5,6 +5,9 @@
 //! entrypoints. This profile is separate from the legacy two-hop statement and
 //! artifact contract; it never falls back to that parser after a refusal.
 
+mod aggregate;
+pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
+
 use crate::algebra::{
     GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueRow, IntegerComparison,
     MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES, MAX_PATTERN_PREDICATES,
@@ -81,6 +84,7 @@ pub enum GraphPatternTextErrorKind {
     },
     UnexpectedArguments,
     Build(PatternBuildError),
+    AggregateBuild(crate::GraphAggregateBuildError),
 }
 
 impl core::fmt::Display for GraphPatternTextError {
@@ -528,7 +532,8 @@ impl<'a> Parser<'a> {
             GraphPatternTextErrorKind::Expected("comparison operator"),
         ))
     }
-    fn parse(mut self) -> Result<Syntax<'a>, GraphPatternTextError> {
+    /// Common MATCH/WHERE grammar for ordinary and aggregate RETURN profiles.
+    fn parse_head(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         self.word("MATCH")?;
         loop {
@@ -621,7 +626,11 @@ impl<'a> Parser<'a> {
             }
         }
         self.syntax.return_at = self.current.at;
-        self.word("RETURN")?;
+        self.word("RETURN")
+    }
+    fn parse(mut self) -> Result<Syntax<'a>, GraphPatternTextError> {
+        use crate::algebra::PatternLimitDimension;
+        self.parse_head()?;
         self.syntax.distinct = self.take_word("DISTINCT")?;
         if !self.syntax.distinct {
             self.take_word("ALL")?;
@@ -673,19 +682,27 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        self.parse_pagination()?;
+        self.end()?;
+        Ok(self.syntax)
+    }
+    fn parse_pagination(&mut self) -> Result<(), GraphPatternTextError> {
         if self.take_word("SKIP")? {
             self.syntax.offset = self.number(GqlParameterType::UInt64)?;
         }
         if self.take_word("LIMIT")? {
             self.syntax.count = Some(self.number(GqlParameterType::UInt64)?);
         }
+        Ok(())
+    }
+    fn end(&self) -> Result<(), GraphPatternTextError> {
         if !matches!(self.current.kind, TokenKind::End) {
             return Err(error(
                 self.current.at,
                 GraphPatternTextErrorKind::Expected("end of statement"),
             ));
         }
-        Ok(self.syntax)
+        Ok(())
     }
 }
 
@@ -742,9 +759,16 @@ impl PreparedGraphText {
     /// Resolution is a host-catalog seam, not a second catalog or authorization.
     pub fn prepare(
         statement: &str,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<Self, GraphPatternTextError> {
+        Self::from_syntax(statement, Parser::new(statement)?.parse()?, resolve)
+    }
+
+    fn from_syntax(
+        statement: &str,
+        syntax: Syntax<'_>,
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphPatternTextError> {
-        let syntax = Parser::new(statement)?.parse()?;
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
@@ -870,6 +894,14 @@ impl PreparedGraphText {
         &self,
         arguments: &GqlParameters,
     ) -> Result<PreparedGraphPattern<GraphValueRow>, GraphPatternTextError> {
+        let values = self.checked_arguments(arguments)?;
+        self.bind_values(&values)
+    }
+
+    fn checked_arguments(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<Vec<GqlParameterValue>, GraphPatternTextError> {
         let mut values = Vec::new();
         for (index, spec) in self.parameters.iter().enumerate() {
             let at = self.parameter_offsets[index];
@@ -893,6 +925,13 @@ impl PreparedGraphText {
                 GraphPatternTextErrorKind::UnexpectedArguments,
             ));
         }
+        Ok(values)
+    }
+
+    fn bind_values(
+        &self,
+        values: &[GqlParameterValue],
+    ) -> Result<PreparedGraphPattern<GraphValueRow>, GraphPatternTextError> {
         let mut builder = self.builder.clone();
         for filter in &self.filters {
             built(
@@ -902,7 +941,7 @@ impl PreparedGraphText {
                     VertexPredicate::IntegerProperty {
                         key: filter.key,
                         comparison: filter.comparison,
-                        value: filter.value.signed(&values),
+                        value: filter.value.signed(values),
                     },
                 ),
             )?;
@@ -919,8 +958,8 @@ impl PreparedGraphText {
             self.return_at,
             builder.prepare_values(
                 &columns,
-                self.offset.unsigned(&values),
-                self.count.as_ref().map(|count| count.unsigned(&values)),
+                self.offset.unsigned(values),
+                self.count.as_ref().map(|count| count.unsigned(values)),
             ),
         )?;
         Ok(if self.distinct {

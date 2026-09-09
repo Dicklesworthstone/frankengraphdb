@@ -42,8 +42,9 @@ pub use evidence_page::{
     GqlEvidencePageToken, GqlEvidencePageTokenDecodeError,
 };
 pub use graph_text::{
-    GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
-    MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS, PreparedGraphText,
+    GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol,
+    GraphSymbolKind, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS, PreparedGraphAggregateText,
+    PreparedGraphText,
 };
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
