@@ -28,30 +28,20 @@ fn execute_budgeted_at<R: crate::gql_exec::GqlSnapshotReader + ?Sized>(
     query: &fgdb_gql::PreparedGqlQuery,
     as_of: CommitSeq,
     budget: fgdb_gql::GqlExecutionBudget,
-) -> Result<
-    fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
-    fgdb_gql::BudgetedGqlError<GqlError>,
-> {
+) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>> {
     // Keep the admitted rows until execution; do not discard a counting scan
     // and then validate/materialize the same source table a second time.
     let admitted = crate::gql_exec::AdmittedGqlSnapshot::admit(query.plan(), reader, as_of)
         .map_err(GqlError::Read)
         .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
-    let snapshot_records = admitted.snapshot_records();
-    budget
-        .check(fgdb_gql::GqlBudgetDimension::SnapshotRecords, snapshot_records)
-        .map_err(fgdb_gql::BudgetedGqlError::Budget)?;
-    let rows = admitted.execute()
-        .map_err(GqlError::Read)
-        .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
-    let result_rows = count_as_u64(rows.len());
-    budget
-        .check(fgdb_gql::GqlBudgetDimension::ResultRows, result_rows)
-        .map_err(fgdb_gql::BudgetedGqlError::Budget)?;
-    Ok(fgdb_gql::BudgetedGqlExecution {
-        value: rows,
-        stats: fgdb_gql::GqlExecutionStats { snapshot_records, result_rows },
-    })
+    admitted
+        .execute_budgeted(budget)
+        .map_err(|error| match error {
+            fgdb_gql::BudgetedGqlError::Execution(error) => {
+                fgdb_gql::BudgetedGqlError::Execution(GqlError::Read(error))
+            }
+            fgdb_gql::BudgetedGqlError::Budget(error) => fgdb_gql::BudgetedGqlError::Budget(error),
+        })
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -90,11 +80,11 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<
-        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
-        fgdb_gql::BudgetedGqlError<GqlError>,
-    > {
-        let as_of = self.frontier().map_err(GqlError::Read)
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>>
+    {
+        let as_of = self
+            .frontier()
+            .map_err(GqlError::Read)
             .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
         self.execute_prepared_query_budgeted_at(query, as_of, budget)
     }
@@ -105,10 +95,8 @@ impl<V: Vfs + Clone> Database<V> {
         query: &fgdb_gql::PreparedGqlQuery,
         as_of: CommitSeq,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<
-        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
-        fgdb_gql::BudgetedGqlError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>>
+    {
         execute_budgeted_at(self, query, as_of, budget)
     }
 
@@ -117,7 +105,12 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
     ) -> Result<
-        (Vec<VId>, crate::GqlCertificate, crate::GqlPlanCertificate, fgdb_crypto::Digest),
+        (
+            Vec<VId>,
+            crate::GqlCertificate,
+            crate::GqlPlanCertificate,
+            fgdb_crypto::Digest,
+        ),
         GqlError,
     > {
         let as_of = self.frontier().map_err(GqlError::Read)?;
@@ -130,7 +123,12 @@ impl<V: Vfs + Clone> Database<V> {
         query: &fgdb_gql::PreparedGqlQuery,
         as_of: CommitSeq,
     ) -> Result<
-        (Vec<VId>, crate::GqlCertificate, crate::GqlPlanCertificate, fgdb_crypto::Digest),
+        (
+            Vec<VId>,
+            crate::GqlCertificate,
+            crate::GqlPlanCertificate,
+            fgdb_crypto::Digest,
+        ),
         GqlError,
     > {
         let (rows, plan_certificate, result_digest) =
@@ -168,10 +166,8 @@ impl crate::EmbeddedReadView {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<
-        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
-        fgdb_gql::BudgetedGqlError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>>
+    {
         self.execute_prepared_query_budgeted_at(query, self.frontier(), budget)
     }
 
@@ -180,10 +176,8 @@ impl crate::EmbeddedReadView {
         query: &fgdb_gql::PreparedGqlQuery,
         as_of: CommitSeq,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<
-        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
-        fgdb_gql::BudgetedGqlError<GqlError>,
-    > {
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<GqlError>>
+    {
         execute_budgeted_at(self, query, as_of, budget)
     }
 
@@ -191,7 +185,12 @@ impl crate::EmbeddedReadView {
         &self,
         query: &fgdb_gql::PreparedGqlQuery,
     ) -> Result<
-        (Vec<VId>, crate::GqlCertificate, crate::GqlPlanCertificate, fgdb_crypto::Digest),
+        (
+            Vec<VId>,
+            crate::GqlCertificate,
+            crate::GqlPlanCertificate,
+            fgdb_crypto::Digest,
+        ),
         GqlError,
     > {
         self.execute_prepared_query_with_result_digest_at(query, self.frontier())
@@ -202,7 +201,12 @@ impl crate::EmbeddedReadView {
         query: &fgdb_gql::PreparedGqlQuery,
         as_of: CommitSeq,
     ) -> Result<
-        (Vec<VId>, crate::GqlCertificate, crate::GqlPlanCertificate, fgdb_crypto::Digest),
+        (
+            Vec<VId>,
+            crate::GqlCertificate,
+            crate::GqlPlanCertificate,
+            fgdb_crypto::Digest,
+        ),
         GqlError,
     > {
         let (rows, plan_certificate, result_digest) =
@@ -240,27 +244,62 @@ impl WriteTxn {
         database: &Database<V>,
         query: &fgdb_gql::PreparedGqlQuery,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<
-        fgdb_gql::BudgetedGqlExecution<Vec<VId>>,
-        fgdb_gql::BudgetedGqlError<WriteTxnError>,
-    > {
-        let snapshot_records = if query.plan().relation.is_some() {
-            self.edges(database).map(|rows| count_as_u64(rows.len()))
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<WriteTxnError>>
+    {
+        let logical = fgdb_gql::algebra::GlaPlan::lower(query.plan());
+        if logical.scans_edges() {
+            // edges() applies the exact prepared net effects and retains even
+            // absent staged identities. Count and execute these same rows;
+            // neither a second storage merge nor raw-intent replay is needed.
+            let rows = self
+                .edges(database)
+                .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
+            // Retain endpoint observations for every admitted edge, including
+            // those predicates, DISTINCT or LIMIT will discard. edges() owns
+            // the table-wide phantom and negative-EId witnesses already.
+            self.read_set
+                .borrow_mut()
+                .extend(rows.iter().flat_map(|row| {
+                    [
+                        ElementId::Vertex(row.entry.src),
+                        ElementId::Vertex(row.entry.dst),
+                    ]
+                }));
+            logical.execute_budgeted(
+                count_as_u64(rows.len()),
+                [],
+                rows.iter()
+                    .map(|row| (row.entry.src, row.entry.relation, row.entry.dst)),
+                |vid, predicates| {
+                    Ok(self.vertex(database, vid)?.is_some_and(|row| {
+                        predicates
+                            .iter()
+                            .all(|p| p.matches(&row.labels, &row.props))
+                    }))
+                },
+                budget,
+            )
         } else {
-            self.vertices_for_scan(database, query.plan().src_label)
-                .map(|rows| count_as_u64(rows.len()))
-        }.map_err(fgdb_gql::BudgetedGqlError::Execution)?;
-        budget.check(fgdb_gql::GqlBudgetDimension::SnapshotRecords, snapshot_records)
-            .map_err(fgdb_gql::BudgetedGqlError::Budget)?;
-        let rows = self.execute_prepared_query(database, query)
-            .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
-        let result_rows = count_as_u64(rows.len());
-        budget.check(fgdb_gql::GqlBudgetDimension::ResultRows, result_rows)
-            .map_err(fgdb_gql::BudgetedGqlError::Budget)?;
-        Ok(fgdb_gql::BudgetedGqlExecution {
-            value: rows,
-            stats: fgdb_gql::GqlExecutionStats { snapshot_records, result_rows },
-        })
+            let rows: std::collections::BTreeMap<VId, VertexRow> = self
+                .vertices_for_scan(database, query.plan().src_label)
+                .map_err(fgdb_gql::BudgetedGqlError::Execution)?
+                .into_iter()
+                .map(|row| (row.vid, row))
+                .collect();
+            logical.execute_budgeted(
+                count_as_u64(rows.len()),
+                rows.keys().copied(),
+                [],
+                |vid, predicates| {
+                    Ok(rows.get(&vid).is_some_and(|row| {
+                        predicates
+                            .iter()
+                            .all(|p| p.matches(&row.labels, &row.props))
+                    }))
+                },
+                budget,
+            )
+        }
     }
 
     /// Plan-certify at the durable basis. This certificate does not bind the

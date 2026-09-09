@@ -233,8 +233,18 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
         })
     }
 
-    pub(crate) fn snapshot_records(&self) -> u64 {
-        self.snapshot_records
+    pub(crate) fn execute_budgeted(
+        self,
+        budget: fgdb_gql::GqlExecutionBudget,
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<ReadError>>
+    {
+        self.logical.execute_budgeted(
+            self.snapshot_records,
+            self.vertices.keys().copied(),
+            self.edges.iter().map(edge_triple),
+            |vid, predicates| self.matches(vid, predicates),
+            budget,
+        )
     }
 
     fn matches(&self, vid: VId, predicates: &[VertexPredicate]) -> Result<bool, ReadError> {
