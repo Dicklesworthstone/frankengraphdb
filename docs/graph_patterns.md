@@ -2,8 +2,9 @@
 
 Source implemented on unreleased `main`, September 9, 2026. Native Rust build,
 tests and repository gates for these connector-authored changes are
-**unverified here**. Owners `fgdb-boundplan-gla-lowering-seam-r2kd` and
-`fgdb-w10-embedded-54r` remain open pending complete acceptance evidence.
+**unverified here**. Owners `fgdb-boundplan-gla-lowering-seam-r2kd`,
+`fgdb-w5-parsers-nje` and `fgdb-w10-embedded-54r` remain open pending complete
+acceptance evidence.
 
 ## Capability
 
@@ -14,17 +15,111 @@ predicates on any declared vertex, and explicit equality/inequality between
 any pair of declared vertices.
 
 A pattern can return vertex IDs, correlated multi-column vertex bindings, or
-canonical vertex properties mixed with identities. Each preparation defaults
-to whole-row DISTINCT. `with_duplicates()` selects ALL matching occurrences.
-The outputs and multiplicities share one compiler, source path and evaluator;
-they do not run separate column queries, zip independent sets, or reconstruct
-a Cartesian product after traversal.
+canonical vertex properties mixed with identities. Each builder preparation
+defaults to whole-row DISTINCT. `with_duplicates()` selects ALL matching
+occurrences. The outputs and multiplicities share one compiler, source path
+and evaluator; they do not run separate column queries, zip independent sets,
+or reconstruct a Cartesian product after traversal.
 
-**This is a typed Rust preparation API, not an extension of GQL text syntax.**
-It consumes caller-resolved label/property/relation IDs, like the bound-plan
-API. It neither resolves catalog names nor grants graph authority. Text
-parsing, numeric templates and their existing statement/evidence formats are
-unchanged. No external dependency or storage backend was added.
+GraphPatternBuilder remains a typed Rust API consuming caller-resolved IDs.
+The new `PreparedGraphText` is an explicit bounded text front end for that same
+compiler, described below. Neither grants graph authority. The legacy
+`RelationBind::bind`, `PreparedGqlQuery`, numeric templates and their existing
+statement/evidence formats remain unchanged. No external dependency or storage
+backend was added, and no refusal falls back to a different parser.
+
+## Connected-pattern text and reusable numeric templates
+
+`fgdb_gql::PreparedGraphText::prepare(statement, resolve)` parses a bounded
+connected-pattern profile and resolves its graph names. Binding returns the
+existing `PreparedGraphPattern<GraphValueRow>`; execute that value through
+`execute_graph_pattern_governed` on Database, EmbeddedReadView or WriteTxn.
+There is no text-interpreting executor and no independent query per column.
+
+```text
+MATCH (person:Person)-[:KNOWS]->(friend)-[:WORKS_AT]->(company)-[:SHIPS]->(carrier),
+      (carrier)-[:BACKS]->(person)
+WHERE company.score >= $minimum AND person <> carrier
+RETURN ALL person AS owner, company.name AS company, carrier
+LIMIT $take
+```
+
+```rust
+let template = PreparedGraphText::prepare(statement, symbols)?;
+let arguments = GqlParameters::new()
+    .with_int64("minimum", 80)?
+    .with_uint64("take", 10)?;
+let pattern = template.bind_parameters(&arguments)?;
+let result = db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?;
+```
+
+`symbols` is the host's typed schema callback:
+`FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>`. A relation must resolve
+to GraphSymbol::Relation, a label to Label, and a property to Property. An
+unknown name or wrong-domain result refuses; numeric identities are never
+cast between domains. Syntax is completely parsed before the callback runs.
+Each distinct (kind,name) is resolved once per preparation. This callback is
+an integration seam for an existing host catalog, not a second catalog,
+automatic schema discovery, authorization token, or session-generation lease.
+The legacy RelationBind maps and their artifact transcript are not decoded or
+reinterpreted to simulate name resolution.
+
+The accepted profile includes named node patterns, multiple positive labels
+with colon notation, fixed-length paths, comma-connected path components,
+per-edge outgoing/incoming/undirected direction, and repeated node variables.
+WHERE accepts AND-conjoined integer-property comparisons (`=`, `<>`, `!=`,
+`<`, `<=`, `>`, `>=`) on any bound vertex, plus arbitrary vertex equality or
+inequality. Edges can be supplied before the atom that connects them; the
+shared compiler schedules connected atoms. Truly disconnected definitions
+refuse instead of dropping a component or inserting a Cartesian product.
+
+RETURN selects named vertices and canonical vertex properties, with optional
+AS aliases. An unaliased vertex uses its variable name; an unaliased property
+uses the property name. Colliding output names require explicit distinct
+aliases and otherwise refuse. Repeated expressions under different aliases
+are legal. RETURN * selects each declared variable once in first-occurrence
+order and cannot be mixed with additional columns in this profile.
+
+**Text RETURN defaults to ALL; DISTINCT is explicit.** This is different from
+the typed builder's DISTINCT default and the old single-ID text API. The
+profile choice is the explicit PreparedGraphText API, never an implicit retry
+or widening of an existing prepared query. SKIP and LIMIT count canonically
+ordered whole rows/occurrences; both accept zero, unlike the legacy parser's
+positive-LIMIT restriction. Missing properties project as canonical nulls.
+No arbitrary ORDER BY or expression-ordering semantics are implied.
+
+Keywords are ASCII case-insensitive, while names are case-sensitive ASCII
+identifiers. Unicode whitespace is accepted and errors carry byte offsets.
+Quoted identifiers, comments, semicolon terminators, multiple statements,
+edge variables, property maps, OR/NOT, optional matches, variable-length paths,
+aggregates, arbitrary projection expressions and general ORDER BY are outside
+this profile and refuse rather than being silently ignored. This is not full
+GQL/openCypher conformance or the complete registered LanguageContract.
+
+Numeric `$name` operands are structural syntax. `parameter_schema()` exposes
+the existing GqlParameterSpec objects, including type and occurrence count.
+Property predicates require Int64; SKIP/LIMIT require UInt64. One name cannot
+have conflicting roles. `bind_parameters` accepts exactly the required
+GqlParameters names/types, refusing missing, extra and mistyped arguments.
+It never performs string substitution, reparses source, resolves graph names,
+or reads storage. It does clone the bounded resolved builder and run its
+ordinary lowering with the concrete values; there is no claim that binding
+is allocation-free or skips compilation. Previously bound plans stay immutable.
+
+Definition admission limits are 65,536 UTF-8 bytes, 8,192 lexical tokens and
+the builder's existing edge/vertex/predicate/identity/column/name limits. The
+lexer keeps one lookahead token and borrows token text. These are bounded
+preparation resources, not the runtime QueryCx work allowance or allocator-byte
+accounting. Structural/error Debug output redacts names, query text, catalog
+IDs and values. `statement()` and `parameter_schema()` are explicit exports.
+
+The resulting plans use the same borrowed source and governed execution as
+Rust-built patterns. Ownership, retained snapshots, canonical staged effects,
+interruption, resource refusals and transaction dependency tracking remain
+owned by those existing paths. This change does not alter the CLI, server
+wire parser or legacy prepared-result artifact formats, nor add typed-pattern
+evidence. There is no new statement certificate claiming these plans are old
+BoundPlan queries.
 
 ## Pattern preparation
 
@@ -150,8 +245,8 @@ values, a catalog binding service or an authorization grant.
 
 ## DISTINCT and ALL matching occurrences
 
-All three prepared output shapes default to DISTINCT. Explicitly retain each
-complete match with the immutable modifier:
+All three builder-prepared output shapes default to DISTINCT. Explicitly retain
+each complete match with the immutable modifier:
 
 ```rust
 let all = builder
@@ -243,7 +338,7 @@ Typed patterns are not squeezed into the legacy BoundPlan certificate format.
 There is still no public pattern artifact/audit API. Logical bytes and schema
 are application identity, not snapshot evidence or a registered replay manifest.
 
-## Complete example
+## Complete examples
 
 `crates/fgdb/examples/graph_patterns.rs` atomically initializes a five-edge
 branching cycle with a chord, a risk predicate and a real parallel OWNS edge.
@@ -256,37 +351,64 @@ QueryCx cancellation for all three shapes.
 cargo run -p fgdb --example graph_patterns
 ```
 
-The example is committed but **unrun in this environment**.
+`crates/fgdb/examples/graph_text.rs` uses the production runtime to initialize
+a multi-relation graph, prepare the named four-edge text example above, bind
+and rebind numeric arguments, preserve duplicate property rows, validate exact
+policy boundaries, stage an update, publish once, read pinned/history results,
+and observe real runtime cancellation.
+
+```text
+cargo run -p fgdb --example graph_text
+```
+
+Both examples are committed but **unrun in this environment**.
 
 ## Verification and remaining work
 
-The bag/value-composition continuation adds **15 Rust tests**: two multiplicity
-collector laws, two property-payload/null collector laws, one property-bag
-preparation/policy law, four independent pattern-bag tests, and six product
-integration tests in `crates/fgdb/tests/graph_bags.rs`. These supplement rather
-than replace the concurrent property projection's tests and earlier scalar,
-tuple, source, transaction and policy tests.
+The text-preparation continuation adds **13 Rust tests**: nine lexical,
+structural, schema, parameter, independent-assignment and policy tests in
+fgdb-gql, plus four public integration tests in `fgdb/tests/graph_text.rs`.
+The core assignment oracle covers 768 graph/profile cases without sharing
+text parsing, slot allocation or traversal. Product tests independently join
+four concrete owned edge records and read ordinary vertex properties.
+Coverage includes long paths, closing motifs, all five read surfaces, aliases,
+nulls, multiplicity, 128-bit IDs, strict name domains, numeric boundaries,
+UTF-8 prefixes, input/token/shape caps, exact limits, every low-level
+interruption checkpoint, staged ensures/deletes, conflict retention, disjoint
+commits, compaction/reopen and historical isolation.
 
-The pattern oracle enumerates complete variable assignments and multiplies
-concrete edge-occurrence counts only inside the bounded test model. Its 26,244
-bag cases also check unchanged DISTINCT answers. Product oracles enumerate
-pairs of ordinary owned edge records and independently look up ordinary stored
-vertex properties; they do not execute scalar queries and zip the answers.
-Coverage includes nulls, type-preserving values, payload reservations, parallel
-edges, cycles, mixed directions, every interruption checkpoint, exact limits,
-occurrence pagination, ensure aliases, retained unprojected dependencies,
-canonical staging, compaction/reopen, owner checks and pinned/history isolation.
+These tests and the new example are **ADDED BUT UNRUN**. An attempted
+`cargo test -p fgdb-gql` returned exit 127 because Cargo is missing. rustc,
+rustfmt, rch and native repository gates are unavailable here. Lexical delimiter
+and Git blob-identity checks were performed; neither is compilation, runtime
+validation, formatting, Clippy or exact-tree proof. No new Python algorithm
+model is represented as validation of the text front end. No hosted workflow
+was dispatched and no bead was closed.
 
-These tests and the updated example are **ADDED BUT UNRUN here**. Cargo, rustc,
-rustfmt and rch are unavailable. There is no passing native build, Clippy,
-formatting, exact-tree proof or repository-gate verdict. No hosted workflow was
-dispatched and no bead was closed on source inspection.
+The earlier bag/value-composition continuation added **15 Rust tests**: two
+multiplicity collector laws, two property-payload/null collector laws, one
+property-bag preparation/policy law, four independent pattern-bag tests, and
+six product integration tests in `crates/fgdb/tests/graph_bags.rs`. These
+supplement rather than replace the concurrent property projection's tests and
+earlier scalar, tuple, source, transaction and policy tests.
 
-Actually rerun separately: the finite Python bag specification passed 26,244
-bag comparisons, the same number of DISTINCT controls, 131,220 pagination
-comparisons and 13,065 interrupted collector prefixes across widths 1..65.
-This is an abstract identity/bag model, not Rust execution or validation of
-canonical scalar behavior, property-source admission, transactions or durability.
+The earlier pattern oracle enumerates complete variable assignments and
+multiplies concrete edge-occurrence counts only inside the bounded test model.
+Its 26,244 bag cases also check unchanged DISTINCT answers. Product oracles
+enumerate pairs of ordinary owned edge records and independently look up
+ordinary stored vertex properties; they do not execute scalar queries and zip
+the answers. Coverage includes nulls, type-preserving values, payload
+reservations, parallel edges, cycles, mixed directions, every interruption
+checkpoint, exact limits, occurrence pagination, ensure aliases, retained
+unprojected dependencies, canonical staging, compaction/reopen, owner checks
+and pinned/history isolation. Those tests were also added but unrun here.
+
+Previously executed separately: the finite Python bag specification passed
+26,244 bag comparisons, the same number of DISTINCT controls, 131,220
+pagination comparisons and 13,065 interrupted collector prefixes across widths
+1..65. This is an abstract identity/bag model, not Rust execution or validation
+of canonical scalar behavior, property-source admission, transactions or
+durability. It does not validate this text parser.
 
 Earlier finite model results remain limited to their original domains: the
 binding-row model had 27,648 exhaustive tuple cases, 1,000 randomized patterns
@@ -294,7 +416,8 @@ and 4,355 interrupted prefixes; the earlier single-column pattern model had
 15,147 projection comparisons and an explicitly reported large mixed-direction
 fixture timeout. None becomes acceptance evidence for this Rust integration.
 
-Remaining: general text grammar/binding, edge/path/optional columns, arbitrary
-projection expressions, complete GQL bag/path semantics, pattern evidence and
-catalog/session contracts, registered FreeJoin/authorized-Strata access,
-variable-length paths, spill and byte-accurate whole-operation governance.
+Remaining: full text language/profile and CLI/wire integration, quoted names,
+comments, optional/edge/path columns, arbitrary projection expressions,
+complete GQL bag/path semantics, pattern evidence and catalog/session contracts,
+registered FreeJoin/authorized-Strata access, variable-length paths, spill and
+byte-accurate whole-operation governance.
