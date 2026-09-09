@@ -73,9 +73,10 @@ impl<Row: Ord> ProjectedRows<Row> {
             Storage::Distinct(rows) => (Some(rows), None),
             Storage::All(rows) => (None, Some(rows)),
         };
-        distinct.into_iter().flatten().chain(
-            all.into_iter().flatten().map(|(row, _)| row),
-        )
+        distinct
+            .into_iter()
+            .flatten()
+            .chain(all.into_iter().flatten().map(|(row, _)| row))
     }
 
     #[cfg(test)]
@@ -84,9 +85,10 @@ impl<Row: Ord> ProjectedRows<Row> {
             Storage::Distinct(rows) => (Some(rows), None),
             Storage::All(rows) => (None, Some(rows)),
         };
-        distinct.into_iter().flatten().chain(
-            all.into_iter().flatten().map(|(row, _)| row),
-        )
+        distinct
+            .into_iter()
+            .flatten()
+            .chain(all.into_iter().flatten().map(|(row, _)| row))
     }
 
     #[cfg(test)]
@@ -129,10 +131,14 @@ mod tests {
         assert_eq!(all.len(), 5);
         assert_eq!(distinct.len(), 3);
         assert!(!format!("{all:?}").contains("VId"));
-        assert_eq!(all.into_rows().collect::<Vec<_>>(),
-            vec![VId(1), VId(1), VId(2), VId(3), VId(3)]);
-        assert_eq!(distinct.into_rows().collect::<Vec<_>>(),
-            vec![VId(1), VId(2), VId(3)]);
+        assert_eq!(
+            all.into_rows().collect::<Vec<_>>(),
+            vec![VId(1), VId(1), VId(2), VId(3), VId(3)]
+        );
+        assert_eq!(
+            distinct.into_rows().collect::<Vec<_>>(),
+            vec![VId(1), VId(2), VId(3)]
+        );
     }
 
     #[test]

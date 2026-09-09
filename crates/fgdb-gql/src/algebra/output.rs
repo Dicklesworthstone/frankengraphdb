@@ -138,7 +138,9 @@ mod sealed {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 values.push(*value);
             }
-            projected.insert(GraphBindingRow { values: values.into_boxed_slice() });
+            projected.insert(GraphBindingRow {
+                values: values.into_boxed_slice(),
+            });
             Ok(())
         }
     }
@@ -185,23 +187,28 @@ mod sealed {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::sealed::Projection;
+    use super::*;
     use crate::algebra::BindingSlot;
 
     #[test]
     fn tuple_collection_keeps_correlations_and_deduplicates_complete_rows() {
-        let op = GlaOperator::ProjectBindings { slots: vec![BindingSlot(1), BindingSlot(0)] };
+        let op = GlaOperator::ProjectBindings {
+            slots: vec![BindingSlot(1), BindingSlot(0)],
+        };
         let mut rows = ProjectedRows::new(true);
         let mut scratch = 0;
         for bindings in [[VId(1), VId(3)], [VId(2), VId(3)], [VId(1), VId(3)]] {
             GraphBindingRow::collect(&op, &bindings, &mut rows, &mut |event| {
                 scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
                 Ok::<_, ()>(())
-            }).unwrap();
+            })
+            .unwrap();
         }
-        assert_eq!(rows.iter().map(|r| r.values()).collect::<Vec<_>>(),
-            vec![&[VId(3), VId(1)][..], &[VId(3), VId(2)][..]]);
+        assert_eq!(
+            rows.iter().map(|r| r.values()).collect::<Vec<_>>(),
+            vec![&[VId(3), VId(1)][..], &[VId(3), VId(2)][..]]
+        );
         assert_eq!(scratch, 6, "two rows, each one entry plus two owned cells");
         assert!(!format!("{rows:?}").contains("VId"));
         let first = rows.first().unwrap();
@@ -213,7 +220,9 @@ mod tests {
 
     #[test]
     fn every_tuple_checkpoint_refuses_before_publishing_an_incomplete_row() {
-        let op = GlaOperator::ProjectBindings { slots: vec![BindingSlot(0), BindingSlot(1)] };
+        let op = GlaOperator::ProjectBindings {
+            slots: vec![BindingSlot(0), BindingSlot(1)],
+        };
         for stop in 1..=5 {
             let mut rows = ProjectedRows::new(true);
             let mut calls = 0;

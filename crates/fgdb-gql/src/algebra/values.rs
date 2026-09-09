@@ -16,8 +16,15 @@ use std::cmp::Ordering;
 /// by a prepared pattern. The caller already resolved property key identities.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GraphColumn<'a> {
-    Vertex { name: &'a str, variable: &'a str },
-    Property { name: &'a str, variable: &'a str, key: PropertyKeyId },
+    Vertex {
+        name: &'a str,
+        variable: &'a str,
+    },
+    Property {
+        name: &'a str,
+        variable: &'a str,
+        key: PropertyKeyId,
+    },
 }
 
 impl<'a> GraphColumn<'a> {
@@ -28,30 +35,45 @@ impl<'a> GraphColumn<'a> {
 
     #[must_use]
     pub const fn property(name: &'a str, variable: &'a str, key: PropertyKeyId) -> Self {
-        Self::Property { name, variable, key }
+        Self::Property {
+            name,
+            variable,
+            key,
+        }
     }
 
     #[must_use]
     pub const fn name(self) -> &'a str {
-        match self { Self::Vertex { name, .. } | Self::Property { name, .. } => name }
+        match self {
+            Self::Vertex { name, .. } | Self::Property { name, .. } => name,
+        }
     }
 
     pub(super) const fn variable(self) -> &'a str {
-        match self { Self::Vertex { variable, .. } | Self::Property { variable, .. } => variable }
+        match self {
+            Self::Vertex { variable, .. } | Self::Property { variable, .. } => variable,
+        }
     }
 }
 
 impl core::fmt::Debug for GraphColumn<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("GraphColumn").field("definition", &"[REDACTED]").finish()
+        f.debug_struct("GraphColumn")
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
 /// Compiler-bound value expression. Column order is semantic, unlike aliases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueProjection {
-    Vertex { slot: BindingSlot },
-    Property { slot: BindingSlot, key: PropertyKeyId },
+    Vertex {
+        slot: BindingSlot,
+    },
+    Property {
+        slot: BindingSlot,
+        key: PropertyKeyId,
+    },
 }
 
 /// Scalar values retain their exact canonical type, collation and time binding.
@@ -66,12 +88,18 @@ pub enum GraphValue {
 impl GraphValue {
     #[must_use]
     pub fn as_scalar(&self) -> Option<&CanonicalScalar> {
-        match self { Self::Scalar(value) => Some(value), Self::Vertex(_) => None }
+        match self {
+            Self::Scalar(value) => Some(value),
+            Self::Vertex(_) => None,
+        }
     }
 
     #[must_use]
     pub fn as_vertex(&self) -> Option<VId> {
-        match self { Self::Vertex(value) => Some(*value), Self::Scalar(_) => None }
+        match self {
+            Self::Vertex(value) => Some(*value),
+            Self::Scalar(_) => None,
+        }
     }
 
     #[must_use]
@@ -82,7 +110,10 @@ impl GraphValue {
 
 impl core::fmt::Debug for GraphValue {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let kind = match self { Self::Scalar(_) => "Scalar", Self::Vertex(_) => "Vertex" };
+        let kind = match self {
+            Self::Scalar(_) => "Scalar",
+            Self::Vertex(_) => "Vertex",
+        };
         f.debug_tuple(kind).field(&"[REDACTED]").finish()
     }
 }
@@ -96,19 +127,29 @@ pub struct GraphValueRow {
 
 impl GraphValueRow {
     #[must_use]
-    pub fn values(&self) -> &[GraphValue] { &self.values }
+    pub fn values(&self) -> &[GraphValue] {
+        &self.values
+    }
     #[must_use]
-    pub fn get(&self, column: usize) -> Option<&GraphValue> { self.values.get(column) }
+    pub fn get(&self, column: usize) -> Option<&GraphValue> {
+        self.values.get(column)
+    }
     #[must_use]
-    pub fn len(&self) -> usize { self.values.len() }
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
     #[must_use]
-    pub fn is_empty(&self) -> bool { self.values.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
 }
 
 impl core::fmt::Debug for GraphValueRow {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("GraphValueRow").field("columns", &self.len())
-            .field("values", &"[REDACTED]").finish()
+        f.debug_struct("GraphValueRow")
+            .field("columns", &self.len())
+            .field("values", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -157,11 +198,17 @@ trait RowKey {
 
 struct BorrowedRow<'a>(&'a [ValueRef<'a>]);
 impl RowKey for BorrowedRow<'_> {
-    fn width(&self) -> usize { self.0.len() }
-    fn cell(&self, at: usize) -> ValueRef<'_> { self.0[at] }
+    fn width(&self) -> usize {
+        self.0.len()
+    }
+    fn cell(&self, at: usize) -> ValueRef<'_> {
+        self.0[at]
+    }
 }
 impl RowKey for GraphValueRow {
-    fn width(&self) -> usize { self.values.len() }
+    fn width(&self) -> usize {
+        self.values.len()
+    }
     fn cell(&self, at: usize) -> ValueRef<'_> {
         match &self.values[at] {
             GraphValue::Scalar(value) => ValueRef::Scalar(value),
@@ -170,20 +217,28 @@ impl RowKey for GraphValueRow {
     }
 }
 impl<'a> Borrow<dyn RowKey + 'a> for GraphValueRow {
-    fn borrow(&self) -> &(dyn RowKey + 'a) { self }
+    fn borrow(&self) -> &(dyn RowKey + 'a) {
+        self
+    }
 }
 impl PartialEq for dyn RowKey + '_ {
-    fn eq(&self, other: &Self) -> bool { self.cmp(other) == Ordering::Equal }
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
 }
 impl Eq for dyn RowKey + '_ {}
 impl PartialOrd for dyn RowKey + '_ {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for dyn RowKey + '_ {
     fn cmp(&self, other: &Self) -> Ordering {
         for at in 0..self.width().min(other.width()) {
             let order = self.cell(at).cmp(&other.cell(at));
-            if order != Ordering::Equal { return order; }
+            if order != Ordering::Equal {
+                return order;
+            }
         }
         self.width().cmp(&other.width())
     }
@@ -207,18 +262,26 @@ pub(super) fn collect_values<'a, E>(
                 ValueRef::Scalar(value.unwrap_or(&null))
             }
         };
-        for _ in 0..key[at].payload_units() { control(GlaExecutionEvent::Work)?; }
+        for _ in 0..key[at].payload_units() {
+            control(GlaExecutionEvent::Work)?;
+        }
     }
     let borrowed = BorrowedRow(&key[..columns.len()]);
-    if projected.contains(&borrowed as &dyn RowKey) { return Ok(()); }
+    if projected.contains(&borrowed as &dyn RowKey) {
+        return Ok(());
+    }
     control(GlaExecutionEvent::ScratchEntry)?;
     let mut values = Vec::new();
     for value in &key[..columns.len()] {
         control(GlaExecutionEvent::ScratchEntry)?;
-        for _ in 0..value.payload_units() { control(GlaExecutionEvent::ScratchEntry)?; }
+        for _ in 0..value.payload_units() {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
         values.push((*value).into_owned());
     }
-    projected.insert(GraphValueRow { values: values.into_boxed_slice() });
+    projected.insert(GraphValueRow {
+        values: values.into_boxed_slice(),
+    });
     Ok(())
 }
 
@@ -229,20 +292,44 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn columns() -> [ValueProjection; 2] {
-        [ValueProjection::Vertex { slot: BindingSlot(0) },
-            ValueProjection::Property { slot: BindingSlot(1), key: PropertyKeyId(7) }]
+        [
+            ValueProjection::Vertex {
+                slot: BindingSlot(0),
+            },
+            ValueProjection::Property {
+                slot: BindingSlot(1),
+                key: PropertyKeyId(7),
+            },
+        ]
     }
 
     #[test]
     fn owned_and_borrowed_value_keys_have_identical_total_order() {
-        let scalars = [CanonicalScalar::Null, CanonicalScalar::Bool(false), CanonicalScalar::Int(-1),
-            CanonicalScalar::Int(0), CanonicalScalar::Float(CanonicalF64::new(f64::NAN)),
+        let scalars = [
+            CanonicalScalar::Null,
+            CanonicalScalar::Bool(false),
+            CanonicalScalar::Int(-1),
+            CanonicalScalar::Int(0),
+            CanonicalScalar::Float(CanonicalF64::new(f64::NAN)),
             CanonicalScalar::ucs_basic_text("private payload").unwrap(),
-            CanonicalScalar::bytes(vec![0, 255]).unwrap()];
+            CanonicalScalar::bytes(vec![0, 255]).unwrap(),
+        ];
         let mut rows = Vec::new();
         for scalar in &scalars {
-            rows.push(GraphValueRow { values: vec![GraphValue::Scalar(scalar.clone()), GraphValue::Vertex(VId(9))].into() });
-            rows.push(GraphValueRow { values: vec![GraphValue::Vertex(VId(9)), GraphValue::Scalar(scalar.clone())].into() });
+            rows.push(GraphValueRow {
+                values: vec![
+                    GraphValue::Scalar(scalar.clone()),
+                    GraphValue::Vertex(VId(9)),
+                ]
+                .into(),
+            });
+            rows.push(GraphValueRow {
+                values: vec![
+                    GraphValue::Vertex(VId(9)),
+                    GraphValue::Scalar(scalar.clone()),
+                ]
+                .into(),
+            });
         }
         for left in &rows {
             for right in &rows {
@@ -262,8 +349,14 @@ mod tests {
         let null = CanonicalScalar::Null;
         let mut rows = ProjectedRows::new(true);
         for (owner, present) in [(1, false), (1, true), (2, false)] {
-            collect_values(&columns(), &[VId(owner), VId(4)], &mut rows,
-                &mut |_, _| Ok::<_, ()>(present.then_some(&null)), &mut |_| Ok(())).unwrap();
+            collect_values(
+                &columns(),
+                &[VId(owner), VId(4)],
+                &mut rows,
+                &mut |_, _| Ok::<_, ()>(present.then_some(&null)),
+                &mut |_| Ok(()),
+            )
+            .unwrap();
         }
         assert_eq!(rows.len(), 2);
         for row in rows.into_rows() {
@@ -280,36 +373,69 @@ mod tests {
         let mut rows = ProjectedRows::new(true);
         let mut scratch = 0;
         for _ in 0..2 {
-            collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
-                &mut |_, _| Ok::<_, ()>(Some(&payload)), &mut |event| {
-                    scratch += usize::from(event == GlaExecutionEvent::ScratchEntry); Ok(())
-                }).unwrap();
+            collect_values(
+                &columns(),
+                &[VId(1), VId(2)],
+                &mut rows,
+                &mut |_, _| Ok::<_, ()>(Some(&payload)),
+                &mut |event| {
+                    scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                    Ok(())
+                },
+            )
+            .unwrap();
         }
         assert_eq!(rows.len(), 1);
         assert_eq!(scratch, 1 + 2 + 3);
-        assert_eq!(rows.first().unwrap().get(1).unwrap().as_scalar(), Some(&payload));
+        assert_eq!(
+            rows.first().unwrap().get(1).unwrap().as_scalar(),
+            Some(&payload)
+        );
     }
 
     #[test]
     fn every_value_projection_checkpoint_refuses_before_row_publication() {
         let payload = CanonicalScalar::ucs_basic_text(&"x".repeat(129)).unwrap();
         let mut total = 0;
-        collect_values(&columns(), &[VId(1), VId(2)], &mut ProjectedRows::new(true),
-            &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| { total += 1; Ok(()) }).unwrap();
+        collect_values(
+            &columns(),
+            &[VId(1), VId(2)],
+            &mut ProjectedRows::new(true),
+            &mut |_, _| Ok::<_, usize>(Some(&payload)),
+            &mut |_| {
+                total += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
         for stop in 1..=total {
             let mut rows = ProjectedRows::new(true);
             let mut calls = 0;
-            let result = collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
-                &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| {
-                    calls += 1; if calls == stop { Err(stop) } else { Ok(()) }
-                });
+            let result = collect_values(
+                &columns(),
+                &[VId(1), VId(2)],
+                &mut rows,
+                &mut |_, _| Ok::<_, usize>(Some(&payload)),
+                &mut |_| {
+                    calls += 1;
+                    if calls == stop { Err(stop) } else { Ok(()) }
+                },
+            );
             assert_eq!(result, Err(stop));
             assert_eq!(calls, stop);
             assert!(rows.is_empty());
         }
         let mut rows = ProjectedRows::new(true);
-        assert_eq!(collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
-            &mut |_, _| Err::<Option<&CanonicalScalar>, _>("source"), &mut |_| Ok(())), Err("source"));
+        assert_eq!(
+            collect_values(
+                &columns(),
+                &[VId(1), VId(2)],
+                &mut rows,
+                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("source"),
+                &mut |_| Ok(())
+            ),
+            Err("source")
+        );
         assert!(rows.is_empty());
     }
 
@@ -319,10 +445,17 @@ mod tests {
         let mut rows = ProjectedRows::new(false);
         let mut scratch = 0;
         for present in [true, false, true, false] {
-            collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
-                &mut |_, _| Ok::<_, ()>(present.then_some(&payload)), &mut |event| {
-                    scratch += usize::from(event == GlaExecutionEvent::ScratchEntry); Ok(())
-                }).unwrap();
+            collect_values(
+                &columns(),
+                &[VId(1), VId(2)],
+                &mut rows,
+                &mut |_, _| Ok::<_, ()>(present.then_some(&payload)),
+                &mut |event| {
+                    scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                    Ok(())
+                },
+            )
+            .unwrap();
         }
         assert_eq!(scratch, 2 * (1 + 2 + 3) + 2 * (1 + 2));
         let rows: Vec<_> = rows.into_rows().collect();
@@ -337,20 +470,45 @@ mod tests {
     fn every_all_value_checkpoint_preserves_previously_completed_occurrences() {
         let payload = CanonicalScalar::bytes(vec![9; 129]).unwrap();
         let mut total = 0;
-        collect_values(&columns(), &[VId(1), VId(2)], &mut ProjectedRows::new(false),
-            &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| { total += 1; Ok(()) }).unwrap();
+        collect_values(
+            &columns(),
+            &[VId(1), VId(2)],
+            &mut ProjectedRows::new(false),
+            &mut |_, _| Ok::<_, usize>(Some(&payload)),
+            &mut |_| {
+                total += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
         for stop in 1..=total {
             let mut rows = ProjectedRows::new(false);
-            collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
-                &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| Ok(())).unwrap();
+            collect_values(
+                &columns(),
+                &[VId(1), VId(2)],
+                &mut rows,
+                &mut |_, _| Ok::<_, usize>(Some(&payload)),
+                &mut |_| Ok(()),
+            )
+            .unwrap();
             let mut calls = 0;
-            let result = collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
-                &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| {
-                    calls += 1; if calls == stop { Err(stop) } else { Ok(()) }
-                });
+            let result = collect_values(
+                &columns(),
+                &[VId(1), VId(2)],
+                &mut rows,
+                &mut |_, _| Ok::<_, usize>(Some(&payload)),
+                &mut |_| {
+                    calls += 1;
+                    if calls == stop { Err(stop) } else { Ok(()) }
+                },
+            );
             assert_eq!(result, Err(stop));
             assert_eq!(calls, stop);
-            assert_eq!(rows.len(), 1, "refused occurrence never enters the private collector");
+            assert_eq!(
+                rows.len(),
+                1,
+                "refused occurrence never enters the private collector"
+            );
         }
     }
 }

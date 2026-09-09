@@ -5,7 +5,9 @@
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::{GlaDirection, GraphColumn, GraphPatternBuilder, IntegerComparison, VertexPredicate};
+use fgdb_gql::algebra::{
+    GlaDirection, GraphColumn, GraphPatternBuilder, IntegerComparison, VertexPredicate,
+};
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
