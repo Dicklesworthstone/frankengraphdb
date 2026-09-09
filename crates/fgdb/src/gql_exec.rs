@@ -12,7 +12,7 @@ use crate::{
 };
 use asupersync::fs::Vfs;
 use fgdb_delta_types::RelationId;
-use fgdb_gql::algebra::{GlaPlan, VertexPredicate};
+use fgdb_gql::algebra::{GlaPlan, PreparedGraphPattern, VertexPredicate};
 use fgdb_gql::{BoundPlan, GlaExecution, GlaExecutionError, GlaExecutionLimits, RelationBind};
 use fgdb_types::{CommitSeq, VId};
 use source::SourceEvent;
@@ -125,6 +125,36 @@ impl<V: Vfs + Clone> Database<V> {
     pub fn read_session(&self) -> Result<EmbeddedReadView, ReadError> {
         self.pinned_read_view()
     }
+
+    /// Execute a connected typed graph pattern using the existing governed
+    /// source and GLA evaluator. The prepared definition may contain more than
+    /// two edges, mixed directions, cycles and nonadjacent identity constraints.
+    /// This does not parse new GQL syntax or issue a legacy BoundPlan certificate.
+    pub fn execute_graph_pattern_governed(
+        &self,
+        cx: &fgdb_types::QueryCx,
+        pattern: &PreparedGraphPattern,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<GqlError, Box<asupersync::error::Error>>> {
+        let as_of = self.frontier().map_err(GqlError::Read)
+            .map_err(fgdb_gql::GqlQueryError::Source)?;
+        self.execute_graph_pattern_governed_at(cx, pattern, as_of, policy)
+    }
+
+    /// Select exactly one retained sequence, with health/frontier refusals
+    /// preceding cancellation. The four policy dimensions cover the same
+    /// borrowed-source and evaluation phases as governed prepared GQL reads.
+    pub fn execute_graph_pattern_governed_at(
+        &self,
+        cx: &fgdb_types::QueryCx,
+        pattern: &PreparedGraphPattern,
+        as_of: CommitSeq,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<GqlError, Box<asupersync::error::Error>>> {
+        self.ensure_readable().and_then(|()| self.snapshot.check_frontier(as_of))
+            .map_err(GqlError::Read).map_err(fgdb_gql::GqlQueryError::Source)?;
+        cx.with_restriction(|| execute_pattern_at(self, pattern, as_of, policy, || cx.checkpoint()))
+    }
 }
 
 impl EmbeddedReadView {
@@ -208,6 +238,43 @@ impl EmbeddedReadView {
     pub fn prepared_gql_plan_certificate(&self, plan: &BoundPlan) -> GqlPlanCertificate {
         crate::gql_cert::certify(plan, self.frontier())
     }
+
+    /// Execute a typed connected pattern at this immutable generation's cut.
+    pub fn execute_graph_pattern_governed(
+        &self,
+        cx: &fgdb_types::QueryCx,
+        pattern: &PreparedGraphPattern,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<GqlError, Box<asupersync::error::Error>>> {
+        self.execute_graph_pattern_governed_at(cx, pattern, self.frontier(), policy)
+    }
+
+    /// A later live generation cannot widen the sequence authority of this view.
+    pub fn execute_graph_pattern_governed_at(
+        &self,
+        cx: &fgdb_types::QueryCx,
+        pattern: &PreparedGraphPattern,
+        as_of: CommitSeq,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<GqlError, Box<asupersync::error::Error>>> {
+        self.snapshot.check_frontier(as_of).map_err(GqlError::Read)
+            .map_err(fgdb_gql::GqlQueryError::Source)?;
+        cx.with_restriction(|| execute_pattern_at(self, pattern, as_of, policy, || cx.checkpoint()))
+    }
+}
+
+fn execute_pattern_at<R: GqlSnapshotReader + ?Sized, C>(
+    reader: &R,
+    pattern: &PreparedGraphPattern,
+    as_of: CommitSeq,
+    policy: fgdb_gql::GqlQueryPolicy,
+    mut checkpoint: impl FnMut() -> Result<(), C>,
+) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<GqlError, C>> {
+    checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+    AdmittedGqlSnapshot::admit_logical(pattern.plan().clone(), reader, as_of)
+        .map_err(GqlError::Read).map_err(fgdb_gql::GqlQueryError::Source)?
+        .execute_governed(policy, checkpoint)
+        .map_err(|error| error.map_source(GqlError::Read))
 }
 
 fn as_of_for_view(view: &EmbeddedReadView) -> CommitSeq {
@@ -234,7 +301,16 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
         reader: &'a R,
         as_of: CommitSeq,
     ) -> Result<Self, ReadError> {
-        let logical = GlaPlan::lower(plan);
+        Self::admit_logical(GlaPlan::lower(plan), reader, as_of)
+    }
+
+    /// Bound text and typed graph patterns enter the same snapshot admission.
+    /// GlaPlan is immutable and only its checked lowering modules construct it.
+    fn admit_logical(
+        logical: GlaPlan,
+        reader: &'a R,
+        as_of: CommitSeq,
+    ) -> Result<Self, ReadError> {
         let mut vertices = BTreeMap::new();
         let mut edges = Vec::new();
         // A private Snapshot is already structurally/cryptographically admitted.

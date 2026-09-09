@@ -4,7 +4,7 @@ mod query_source {
     use crate::gql_exec::source::{self, SourceEvent};
     use asupersync::fs::Vfs;
     use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
-    use fgdb_gql::algebra::{GlaOperator, GlaPlan, VertexPredicate};
+    use fgdb_gql::algebra::{GlaOperator, GlaPlan, PreparedGraphPattern, VertexPredicate};
     use fgdb_types::{CanonicalScalar, VId};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -178,6 +178,43 @@ mod query_source {
             self.query_source_over(snapshot, plan, &mut |_| Ok(()))
         }
 
+        /// Execute a typed connected pattern over the pinned basis and canonical
+        /// staged effects. The same borrowed source, predicate implementation,
+        /// conflict witnesses and shared allowance serve prepared GQL reads.
+        /// Longer/cyclic patterns do not acquire a separate transaction model.
+        pub fn execute_graph_pattern_governed<V: Vfs + Clone>(
+            &self,
+            database: &Database<V>,
+            cx: &fgdb_types::QueryCx,
+            pattern: &PreparedGraphPattern,
+            policy: fgdb_gql::GqlQueryPolicy,
+        ) -> Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<WriteTxnError, Box<asupersync::error::Error>>> {
+            cx.with_restriction(|| {
+                let snapshot = self.query_snapshot(database)
+                    .map_err(fgdb_gql::GqlQueryError::Source)?;
+                cx.checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                let mut usage = crate::gql_exec::AdmissionUsage::default();
+                let source = self.query_source_over_logical(
+                    snapshot,
+                    pattern.plan().clone(),
+                    pattern.required_vertex_label(),
+                    &mut |event| {
+                        cx.checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                        usage.observe(policy, event)
+                    },
+                )?;
+                let result = source.logical.execute_governed(
+                    source.snapshot_records as u64,
+                    source.vertex_ids(),
+                    source.edge_triples(),
+                    |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
+                    usage.remaining(policy),
+                    || cx.checkpoint(),
+                );
+                usage.finish(policy, result)
+            })
+        }
+
         /// Charge the local witness entry and a persistent transaction slot
         /// before retaining either. Charge both logical entries on every run,
         /// even if the persistent set already contains the ID. Repeating a
@@ -198,22 +235,34 @@ mod query_source {
             Ok(())
         }
 
-        /// Build one source for all transaction MATCH execution postures.
-        /// The caller checked this private snapshot and performed its initial
-        /// cancellation checkpoint. Row limits apply to the final overlay, not
-        /// basis rows that canonical effects subsequently remove.
+        /// The bounded text adapter contributes its lowered plan and required
+        /// positive node label to the one source implementation below.
         pub(super) fn query_source_over<'a, E>(
             &'a self,
             snapshot: &'a Snapshot,
             plan: &BoundPlan,
             control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
         ) -> Result<OverlayQuerySource<'a>, E> {
-            let logical = GlaPlan::lower(plan);
+            self.query_source_over_logical(snapshot, GlaPlan::lower(plan), plan.src_label, control)
+        }
+
+        /// Build one source for all transaction MATCH execution postures.
+        /// The caller checked this private snapshot and performed its initial
+        /// cancellation checkpoint. Row limits apply to the final overlay, not
+        /// basis rows that canonical effects subsequently remove. The label is
+        /// a required positive predicate, never a caller-selected authorization.
+        fn query_source_over_logical<'a, E>(
+            &'a self,
+            snapshot: &'a Snapshot,
+            logical: GlaPlan,
+            required_vertex_label: Option<LabelId>,
+            control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+        ) -> Result<OverlayQuerySource<'a>, E> {
             let edge_scan = logical.scans_edges();
             control(SourceEvent::Work)?;
             if edge_scan {
                 self.scanned_edges.set(true);
-            } else if let Some(label) = plan.src_label {
+            } else if let Some(label) = required_vertex_label {
                 control(SourceEvent::ScratchEntry)?;
                 self.scanned_vertex_labels.borrow_mut().insert(label);
             } else {
