@@ -83,14 +83,28 @@ impl VertexPredicate {
         labels: &[LabelId],
         properties: &[(PropertyKeyId, CanonicalScalar)],
     ) -> bool {
+        self.matches_borrowed(
+            labels.iter().copied(),
+            properties.iter().map(|(key, value)| (*key, value)),
+        )
+    }
+
+    /// Evaluate the same predicate over borrowed fields, without requiring a
+    /// copy of scalar payloads when a transaction overlays property references.
+    #[must_use]
+    pub fn matches_borrowed<'a>(
+        &self,
+        labels: impl IntoIterator<Item = LabelId>,
+        properties: impl IntoIterator<Item = (PropertyKeyId, &'a CanonicalScalar)>,
+    ) -> bool {
         match self {
-            Self::HasLabel(label) => labels.contains(label),
+            Self::HasLabel(label) => labels.into_iter().any(|actual| actual == *label),
             Self::IntegerProperty {
                 key,
                 comparison,
                 value,
-            } => properties.iter().any(|(actual_key, scalar)| {
-                actual_key == key
+            } => properties.into_iter().any(|(actual_key, scalar)| {
+                actual_key == *key
                     && matches!(scalar, CanonicalScalar::Int(actual)
                         if comparison.accepts(*actual, *value))
             }),

@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 /// Emitted before the corresponding work or allocation. Scratch counts new
 /// logical entries, not allocator bytes; reused heap slots are not recharged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SourceEvent {
+pub(crate) enum SourceEvent {
     Work,
     ScratchEntry,
     SnapshotRecord,
@@ -64,7 +64,7 @@ fn scan_edges<E>(
 /// Each typed patch is sorted by (VId, creation sequence). Merge with one heap
 /// slot per nonempty patch, replacing its slot after every pop. Only visible
 /// winners are retained, as references into the pinned generation.
-fn scan_vertices<'a, E>(
+pub(crate) fn scan_vertices<'a, E>(
     patches: &'a [VertexPatchRows],
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,

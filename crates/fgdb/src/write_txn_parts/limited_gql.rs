@@ -207,18 +207,16 @@ impl WriteTxn {
                 }))
             }, policy, checkpoint)
         } else {
-            // Use the existing label-scoped admission, not raw vertices(): the
-            // newer label witnesses must not regress to a global insert fence.
-            let rows: std::collections::BTreeMap<VId, VertexRow> = self
-                .vertices_for_scan(database, query.plan().src_label)
-                .map_err(fgdb_gql::GqlQueryError::Source)?
-                .into_iter().map(|row| (row.vid, row)).collect();
+            let mut usage = crate::gql_exec::AdmissionUsage::default();
+            let rows = self.governed_node_rows(database, query.plan().src_label, &mut |event| {
+                checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
+                usage.observe::<WriteTxnError, C>(policy, event)
+            })?;
             let count = u64::try_from(rows.len()).expect("an admitted table count fits u64");
-            logical.execute_governed(count, rows.keys().copied(), [], |vid, predicates| {
-                Ok::<_, WriteTxnError>(rows.get(&vid).is_some_and(|row| {
-                    predicates.iter().all(|p| p.matches(&row.labels, &row.props))
-                }))
-            }, policy, checkpoint)
+            let result = logical.execute_governed(count, rows.keys().copied(), [], |vid, predicates| {
+                Ok::<_, WriteTxnError>(rows.get(&vid).is_some_and(|row| row.matches(predicates)))
+            }, usage.remaining(policy), checkpoint);
+            usage.finish(policy, result)
         }
     }
 }
