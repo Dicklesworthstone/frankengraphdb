@@ -252,8 +252,14 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
             count
         };
         Ok(Self {
-            reader, as_of, logical, snapshot, borrowed: None,
-            vertices, edges, snapshot_records: count,
+            reader,
+            as_of,
+            logical,
+            snapshot,
+            borrowed: None,
+            vertices,
+            edges,
+            snapshot_records: count,
         })
     }
 
@@ -261,7 +267,9 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
         &mut self,
         control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
     ) -> Result<(), E> {
-        if self.borrowed.is_none() && let Some(snapshot) = self.snapshot {
+        if self.borrowed.is_none()
+            && let Some(snapshot) = self.snapshot
+        {
             let tables = source::admit(snapshot, &self.logical, self.as_of, control)?;
             self.snapshot_records = tables.snapshot_records;
             self.borrowed = Some(tables);
@@ -270,24 +278,32 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
     }
 
     fn vertex_ids(&self) -> impl Iterator<Item = VId> + '_ {
-        self.borrowed.iter().flat_map(|tables| tables.vertices.iter().map(|row| row.vid))
+        self.borrowed
+            .iter()
+            .flat_map(|tables| tables.vertices.iter().map(|row| row.vid))
             .chain(self.vertices.keys().copied())
     }
 
     fn edge_triples(&self) -> impl Iterator<Item = (VId, RelationId, VId)> + '_ {
-        self.borrowed.iter().flat_map(|tables| tables.edges.iter().copied())
+        self.borrowed
+            .iter()
+            .flat_map(|tables| tables.edges.iter().copied())
             .chain(self.edges.iter().map(edge_triple))
     }
 
     pub(crate) fn execute_budgeted(
         mut self,
         budget: fgdb_gql::GqlExecutionBudget,
-    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<ReadError>> {
+    ) -> Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, fgdb_gql::BudgetedGqlError<ReadError>>
+    {
         self.materialize(&mut |_| Ok::<_, ReadError>(()))
             .map_err(fgdb_gql::BudgetedGqlError::Execution)?;
         self.logical.execute_budgeted(
-            self.snapshot_records, self.vertex_ids(), self.edge_triples(),
-            |vid, predicates| self.matches(vid, predicates), budget,
+            self.snapshot_records,
+            self.vertex_ids(),
+            self.edge_triples(),
+            |vid, predicates| self.matches(vid, predicates),
+            budget,
         )
     }
 
@@ -297,31 +313,38 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
         } else if self.logical.scans_edges() {
             let row = self.reader.gql_vertex_at(vid, self.as_of)?;
             Ok(row.is_some_and(|row| {
-                predicates.iter().all(|p| p.matches(&row.labels, &row.props))
+                predicates
+                    .iter()
+                    .all(|p| p.matches(&row.labels, &row.props))
             }))
         } else {
             Ok(self.vertices.get(&vid).is_some_and(|row| {
-                predicates.iter().all(|p| p.matches(&row.labels, &row.props))
+                predicates
+                    .iter()
+                    .all(|p| p.matches(&row.labels, &row.props))
             }))
         }
     }
 
     pub(crate) fn execute(mut self) -> Result<Vec<VId>, ReadError> {
         self.materialize(&mut |_| Ok::<_, ReadError>(()))?;
-        self.logical.execute(
-            self.vertex_ids(), self.edge_triples(),
-            |vid, predicates| self.matches(vid, predicates),
-        )
+        self.logical
+            .execute(self.vertex_ids(), self.edge_triples(), |vid, predicates| {
+                self.matches(vid, predicates)
+            })
     }
 
     pub(crate) fn execute_limited(
         mut self,
         limits: GlaExecutionLimits,
     ) -> Result<GlaExecution, GlaExecutionError<ReadError>> {
-        self.materialize(&mut |_| Ok::<_, ReadError>(())).map_err(GlaExecutionError::Source)?;
+        self.materialize(&mut |_| Ok::<_, ReadError>(()))
+            .map_err(GlaExecutionError::Source)?;
         self.logical.execute_with_limits(
-            self.vertex_ids(), self.edge_triples(),
-            |vid, predicates| self.matches(vid, predicates), limits,
+            self.vertex_ids(),
+            self.edge_triples(),
+            |vid, predicates| self.matches(vid, predicates),
+            limits,
         )
     }
 
@@ -336,8 +359,12 @@ impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
             usage.observe::<ReadError, C>(policy, event)
         })?;
         let result = self.logical.execute_governed(
-            self.snapshot_records, self.vertex_ids(), self.edge_triples(),
-            |vid, predicates| self.matches(vid, predicates), usage.remaining(policy), checkpoint,
+            self.snapshot_records,
+            self.vertex_ids(),
+            self.edge_triples(),
+            |vid, predicates| self.matches(vid, predicates),
+            usage.remaining(policy),
+            checkpoint,
         );
         usage.finish(policy, result)
     }
@@ -380,21 +407,39 @@ impl AdmissionUsage {
         let mut next = *self;
         if event == SourceEvent::SnapshotRecord {
             // Actual in-memory records, never an untrusted declared counter.
-            next.records = next.records.checked_add(1).expect("source record count fits u64");
-            policy.rows.check(GqlBudgetDimension::SnapshotRecords, next.records)
+            next.records = next
+                .records
+                .checked_add(1)
+                .expect("source record count fits u64");
+            policy
+                .rows
+                .check(GqlBudgetDimension::SnapshotRecords, next.records)
                 .map_err(GqlQueryError::Rows)?;
         }
         for (value, limit, dimension, active) in [
-            (&mut next.work_units, policy.evaluator.max_work_units, GlaLimitDimension::WorkUnits, true),
-            (&mut next.scratch_entries, policy.evaluator.max_scratch_entries,
-                GlaLimitDimension::ScratchEntries, event == SourceEvent::ScratchEntry),
+            (
+                &mut next.work_units,
+                policy.evaluator.max_work_units,
+                GlaLimitDimension::WorkUnits,
+                true,
+            ),
+            (
+                &mut next.scratch_entries,
+                policy.evaluator.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+                event == SourceEvent::ScratchEntry,
+            ),
         ] {
             if !active {
                 continue;
             }
             let observed = u128::from(*value) + 1;
             if observed > u128::from(limit) {
-                return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+                return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                    dimension,
+                    limit,
+                    observed,
+                }));
             }
             *value = observed as u64;
         }
@@ -442,41 +487,69 @@ impl AdmissionUsage {
 #[cfg(test)]
 mod admission_meter_tests {
     use super::*;
-    use fgdb_gql::{GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
-        GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
+    use fgdb_gql::{
+        GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlExecutionStats, GqlQueryError,
+        GqlQueryExecution, GqlQueryPolicy,
+    };
 
     #[test]
     fn phases_share_one_allowance_and_refusals_report_original_limits() {
         let policy = GqlQueryPolicy::new(1, 1, 3, 2);
         let mut usage = AdmissionUsage::default();
-        usage.observe::<(), ()>(policy, SourceEvent::ScratchEntry).unwrap();
-        usage.observe::<(), ()>(policy, SourceEvent::SnapshotRecord).unwrap();
+        usage
+            .observe::<(), ()>(policy, SourceEvent::ScratchEntry)
+            .unwrap();
+        usage
+            .observe::<(), ()>(policy, SourceEvent::SnapshotRecord)
+            .unwrap();
         let remaining = usage.remaining(policy);
         assert_eq!(remaining.evaluator.max_work_units, 1);
         assert_eq!(remaining.evaluator.max_scratch_entries, 1);
         let execution = GqlQueryExecution {
-            value: vec![], rows: GqlExecutionStats { snapshot_records: 1, result_rows: 0 },
-            evaluator: GlaExecutionStats { work_units: 1, scratch_entries: 1 },
+            value: vec![],
+            rows: GqlExecutionStats {
+                snapshot_records: 1,
+                result_rows: 0,
+            },
+            evaluator: GlaExecutionStats {
+                work_units: 1,
+                scratch_entries: 1,
+            },
         };
         let success = usage.finish::<(), ()>(policy, Ok(execution)).unwrap();
         assert_eq!(success.evaluator.work_units, 3);
         assert_eq!(success.evaluator.scratch_entries, 2);
-        let refused = usage.finish::<(), ()>(policy, Err(GqlQueryError::Evaluator(GlaLimitExceeded {
-            dimension: GlaLimitDimension::WorkUnits, limit: 1, observed: 2,
-        })));
-        assert!(matches!(refused, Err(GqlQueryError::Evaluator(GlaLimitExceeded {
-            dimension: GlaLimitDimension::WorkUnits, limit: 3, observed: 4,
-        }))));
+        let refused = usage.finish::<(), ()>(
+            policy,
+            Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                dimension: GlaLimitDimension::WorkUnits,
+                limit: 1,
+                observed: 2,
+            })),
+        );
+        assert!(matches!(
+            refused,
+            Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                dimension: GlaLimitDimension::WorkUnits,
+                limit: 3,
+                observed: 4,
+            }))
+        ));
         let before = usage;
-        assert!(matches!(usage.observe::<(), ()>(policy, SourceEvent::SnapshotRecord),
-            Err(GqlQueryError::Rows(error)) if error.observed == 2));
+        assert!(
+            matches!(usage.observe::<(), ()>(policy, SourceEvent::SnapshotRecord),
+            Err(GqlQueryError::Rows(error)) if error.observed == 2)
+        );
         assert_eq!(usage, before);
     }
 
     #[test]
     fn source_work_never_wraps_and_refused_events_do_not_change_counters() {
         let policy = GqlQueryPolicy::new(0, 0, u64::MAX, u64::MAX);
-        let mut usage = AdmissionUsage { work_units: u64::MAX, ..AdmissionUsage::default() };
+        let mut usage = AdmissionUsage {
+            work_units: u64::MAX,
+            ..AdmissionUsage::default()
+        };
         let before = usage;
         assert!(matches!(usage.observe::<(), ()>(policy, SourceEvent::Work),
             Err(GqlQueryError::Evaluator(error)) if error.observed == u128::from(u64::MAX) + 1));

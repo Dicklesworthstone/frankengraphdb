@@ -6,8 +6,8 @@
 
 use crate::Snapshot;
 use fgdb_delta_types::RelationId;
-use fgdb_strata::vertex::{VertexPatchRows, VertexRow};
 use fgdb_strata::AdjacencyEntry;
+use fgdb_strata::vertex::{VertexPatchRows, VertexRow};
 use fgdb_types::{CommitSeq, EId, VId};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -171,13 +171,21 @@ pub(super) fn admit<'a, E>(
     }
     let edges = scan_edges(&snapshot.blocks, as_of, control)?;
     let mut vertices = Vec::new();
-    if logical.operators().iter().any(|operator| matches!(operator, GlaOperator::Select { .. })) {
+    if logical
+        .operators()
+        .iter()
+        .any(|operator| matches!(operator, GlaOperator::Select { .. }))
+    {
         let mut candidates = std::collections::BTreeSet::new();
         for &(src, relation, dst) in &edges {
             control(SourceEvent::Work)?;
             let requested = logical.operators().iter().any(|operator| match operator {
-                GlaOperator::ScanEdges { relation: required, .. }
-                | GlaOperator::Expand { relation: required, .. } => *required == relation,
+                GlaOperator::ScanEdges {
+                    relation: required, ..
+                }
+                | GlaOperator::Expand {
+                    relation: required, ..
+                } => *required == relation,
                 _ => false,
             });
             if !requested {
@@ -207,11 +215,20 @@ pub(super) fn admit<'a, E>(
 }
 
 impl BorrowedTables<'_> {
-    pub(super) fn matches(&self, vid: VId, predicates: &[fgdb_gql::algebra::VertexPredicate]) -> bool {
-        self.vertices.binary_search_by_key(&vid, |row| row.vid).ok().is_some_and(|at| {
-            let row = self.vertices[at];
-            predicates.iter().all(|predicate| predicate.matches(&row.labels, &row.props))
-        })
+    pub(super) fn matches(
+        &self,
+        vid: VId,
+        predicates: &[fgdb_gql::algebra::VertexPredicate],
+    ) -> bool {
+        self.vertices
+            .binary_search_by_key(&vid, |row| row.vid)
+            .ok()
+            .is_some_and(|at| {
+                let row = self.vertices[at];
+                predicates
+                    .iter()
+                    .all(|predicate| predicate.matches(&row.labels, &row.props))
+            })
     }
 }
 
@@ -223,8 +240,11 @@ mod tests {
 
     fn row(id: u128, created: u64, retired: Option<u64>, value: i64) -> VertexRow {
         VertexRow {
-            vid: VId(id), birth_ordinal: id as u64, created_at: CommitSeq(created),
-            retired_at: retired.map(CommitSeq), labels: vec![LabelId(1)],
+            vid: VId(id),
+            birth_ordinal: id as u64,
+            created_at: CommitSeq(created),
+            retired_at: retired.map(CommitSeq),
+            labels: vec![LabelId(1)],
             props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
         }
     }
@@ -248,19 +268,27 @@ mod tests {
             let actual = scan_vertices(&patches, CommitSeq(at), &mut |_| Ok::<_, ()>(())).unwrap();
             assert_eq!(actual, expected.iter().collect::<Vec<_>>());
             for vid in [VId(1), VId(2), VId(99), VId(high)] {
-                let actual = find_vertex(&patches, vid, CommitSeq(at), &mut |_| Ok::<_, ()>(())).unwrap();
+                let actual =
+                    find_vertex(&patches, vid, CommitSeq(at), &mut |_| Ok::<_, ()>(())).unwrap();
                 let expected = fgdb_strata::vertex::merge_vertex(&patches, vid, CommitSeq(at));
                 assert_eq!(actual, expected.as_ref());
             }
-            assert!(actual.iter().all(|found| patches.iter().any(|patch|
-                patch.iter().any(|original| std::ptr::eq(*found, original)))));
+            assert!(actual.iter().all(|found| {
+                patches
+                    .iter()
+                    .any(|patch| patch.iter().any(|original| std::ptr::eq(*found, original)))
+            }));
         }
     }
 
     fn edge(id: u128, created: u64, retired: Option<u64>) -> AdjacencyEntry {
         AdjacencyEntry {
-            src: VId(1), relation: RelationId(1), dst: VId(2), eid: EId(id),
-            created_at: CommitSeq(created), retired_at: retired.map(CommitSeq),
+            src: VId(1),
+            relation: RelationId(1),
+            dst: VId(2),
+            eid: EId(id),
+            created_at: CommitSeq(created),
+            retired_at: retired.map(CommitSeq),
         }
     }
 
@@ -273,8 +301,12 @@ mod tests {
         ];
         let props = vec![None; blocks.len()];
         for at in 0..=4 {
-            let expected = fgdb_strata::root::merge_all_edges_with_props(&blocks, &props, CommitSeq(at))
-                .unwrap().into_iter().map(|(entry, _)| (entry.src, entry.relation, entry.dst)).collect::<Vec<_>>();
+            let expected =
+                fgdb_strata::root::merge_all_edges_with_props(&blocks, &props, CommitSeq(at))
+                    .unwrap()
+                    .into_iter()
+                    .map(|(entry, _)| (entry.src, entry.relation, entry.dst))
+                    .collect::<Vec<_>>();
             let actual = scan_edges(&blocks, CommitSeq(at), &mut |_| Ok::<_, ()>(())).unwrap();
             assert_eq!(actual, expected);
         }
@@ -282,8 +314,12 @@ mod tests {
         scan_edges(&blocks, CommitSeq(3), &mut |event| {
             allocations += usize::from(event == SourceEvent::ScratchEntry);
             Ok::<_, ()>(())
-        }).unwrap();
-        assert_eq!(allocations, 3, "two EId candidates plus one visible triple, not one per version");
+        })
+        .unwrap();
+        assert_eq!(
+            allocations, 3,
+            "two EId candidates plus one visible triple, not one per version"
+        );
     }
 
     #[test]

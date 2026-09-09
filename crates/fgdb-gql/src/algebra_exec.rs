@@ -819,7 +819,8 @@ mod tests {
                     assert_eq!(event, GlaExecutionEvent::Work);
                     events += 1;
                     Ok::<_, ()>(())
-                }).unwrap();
+                })
+                .unwrap();
                 assert_eq!(values, expected);
                 // A loose executable O(n log n) upper bound; no timing claim.
                 let depth = u64::from(usize::BITS - values.len().leading_zeros());
@@ -830,12 +831,24 @@ mod tests {
 
     #[test]
     fn controlled_ordering_can_stop_at_every_event_without_losing_occurrences() {
-        let original = [VId(9), VId(1), VId(9), VId(3), VId(2), VId(u128::MAX), VId(0)];
+        let original = [
+            VId(9),
+            VId(1),
+            VId(9),
+            VId(3),
+            VId(2),
+            VId(u128::MAX),
+            VId(0),
+        ];
         let mut expected = original;
         expected.sort_unstable();
         let mut total = 0;
         let mut completed = original;
-        sort_neighbors(&mut completed, &mut |_| { total += 1; Ok::<_, ()>(()) }).unwrap();
+        sort_neighbors(&mut completed, &mut |_| {
+            total += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap();
         assert_eq!(completed, expected);
         for stop in 1..=total {
             let mut values = original;
@@ -847,7 +860,10 @@ mod tests {
             assert_eq!(result, Err(stop));
             assert_eq!(events, stop);
             values.sort_unstable();
-            assert_eq!(values, expected, "even a refused private index remains a permutation");
+            assert_eq!(
+                values, expected,
+                "even a refused private index remains a permutation"
+            );
         }
     }
 
@@ -856,18 +872,30 @@ mod tests {
         let original: Vec<_> = (2..34).rev().map(VId).collect();
         let mut ordered = original.clone();
         let mut sort_events = 0;
-        sort_neighbors(&mut ordered, &mut |_| { sort_events += 1; Ok::<_, ()>(()) }).unwrap();
+        sort_neighbors(&mut ordered, &mut |_| {
+            sort_events += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap();
         let stop = 2 * original.len() + 1 + sort_events;
         let mut plan = bound(false);
         plan.dst_label = Some(LabelId(1));
         let mut events = 0;
         let mut reads = 0;
         let result = GlaPlan::lower(&plan).execute_with_control(
-            [], original.into_iter().map(|vid| (VId(1), RelationId(1), vid)),
-            |_, _| { reads += 1; Ok(true) },
+            [],
+            original.into_iter().map(|vid| (VId(1), RelationId(1), vid)),
+            |_, _| {
+                reads += 1;
+                Ok(true)
+            },
             |_| {
                 events += 1;
-                if events == stop { Err("stopped in adjacency ordering") } else { Ok(()) }
+                if events == stop {
+                    Err("stopped in adjacency ordering")
+                } else {
+                    Ok(())
+                }
             },
         );
         assert_eq!(result, Err("stopped in adjacency ordering"));
