@@ -3,18 +3,21 @@
 //! admitted-row work, operator visits, scratch growth and final row release.
 
 mod policy;
+mod projection;
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
+pub use projection::ProjectedRows;
 
 use crate::algebra::{GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, VertexPredicate};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, VId};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GlaExecutionEvent {
     Work,
     ScratchEntry,
-    /// One final ordered/distinct/paginated row before releasing it to output.
+    /// One final ordered/paginated occurrence before releasing it to output.
+    /// Repeated values are removed only when terminal DISTINCT is present.
     ResultRow,
 }
 
@@ -176,13 +179,13 @@ struct Execution<F, C, P, Row> {
     control: C,
     project: P,
     predicate_cache: BTreeMap<(usize, VId), bool>,
-    projected: BTreeSet<Row>,
+    projected: ProjectedRows<Row>,
 }
 
 impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
     fn visit<E>(&mut self, operators: &[GlaOperator], ordinal: usize, bindings: &mut Vec<VId>, index: &Index) -> Result<(), E>
     where F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>, C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[VId], &mut BTreeSet<Row>, &mut C) -> Result<(), E> {
+        P: FnMut(&GlaOperator, &[VId], &mut ProjectedRows<Row>, &mut C) -> Result<(), E> {
         let Some(operator) = operators.get(ordinal) else { return Ok(()); };
         (self.control)(GlaExecutionEvent::Work)?;
         match operator {
@@ -279,10 +282,12 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         edges: impl IntoIterator<Item = (VId, RelationId, VId)>,
         test_vertex: F, mut control: C, project: P) -> Result<Vec<Row>, E>
     where F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>, C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[VId], &mut BTreeSet<Row>, &mut C) -> Result<(), E> {
+        P: FnMut(&GlaOperator, &[VId], &mut ProjectedRows<Row>, &mut C) -> Result<(), E> {
         let operators = self.operators();
         let index = if self.scans_edges() { build_index(operators, edges, &mut control)? } else { Index::new() };
-        let mut execution = Execution { test_vertex, control, project, predicate_cache: BTreeMap::new(), projected: BTreeSet::<Row>::new() };
+        // Only the compiler-owned terminal DISTINCT selects duplicate removal.
+        let distinct = matches!(operators.iter().rev().nth(2), Some(GlaOperator::Distinct));
+        let mut execution = Execution { test_vertex, control, project, predicate_cache: BTreeMap::new(), projected: ProjectedRows::<Row>::new(distinct) };
         let mut bindings = Vec::new();
         match operators.first() {
             Some(GlaOperator::ScanVertices) => {
@@ -311,7 +316,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             _ => (0, usize::MAX),
         };
         let mut value = Vec::new();
-        for row in execution.projected.into_iter().skip(offset).take(count) {
+        for row in execution.projected.into_rows().skip(offset).take(count) {
             (execution.control)(GlaExecutionEvent::ResultRow)?;
             value.push(row);
         }

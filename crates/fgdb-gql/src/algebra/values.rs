@@ -1,15 +1,16 @@
-//! Canonical property-value cells and correlated, distinct projection rows.
+//! Canonical property-value cells and correlated projection rows.
 //!
-//! Source scalars are borrowed while a candidate key is tested. Only a new
-//! complete row clones payloads, after its logical scratch reservations.
+//! Source scalars are borrowed while a candidate key is tested. DISTINCT
+//! copies a new value row once; ALL copies each retained matching occurrence.
+//! Every copy follows its logical scratch reservations.
 
 use super::{BindingSlot, MAX_PATTERN_VERTICES};
 use crate::GlaExecutionEvent;
+use crate::algebra_exec::ProjectedRows;
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, VId};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
 
 /// Preparation-only column declarations. Names are checked before being owned
 /// by a prepared pattern. The caller already resolved property key identities.
@@ -191,7 +192,7 @@ impl Ord for dyn RowKey + '_ {
 pub(super) fn collect_values<'a, E>(
     columns: &[ValueProjection],
     bindings: &[VId],
-    projected: &mut BTreeSet<GraphValueRow>,
+    projected: &mut ProjectedRows<GraphValueRow>,
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -225,6 +226,7 @@ pub(super) fn collect_values<'a, E>(
 mod tests {
     use super::*;
     use fgdb_types::CanonicalF64;
+    use std::collections::BTreeSet;
 
     fn columns() -> [ValueProjection; 2] {
         [ValueProjection::Vertex { slot: BindingSlot(0) },
@@ -258,13 +260,13 @@ mod tests {
     #[test]
     fn missing_and_stored_null_collapse_but_vertex_correlations_survive() {
         let null = CanonicalScalar::Null;
-        let mut rows = BTreeSet::new();
+        let mut rows = ProjectedRows::new(true);
         for (owner, present) in [(1, false), (1, true), (2, false)] {
             collect_values(&columns(), &[VId(owner), VId(4)], &mut rows,
                 &mut |_, _| Ok::<_, ()>(present.then_some(&null)), &mut |_| Ok(())).unwrap();
         }
         assert_eq!(rows.len(), 2);
-        for row in rows {
+        for row in rows.into_rows() {
             assert!(row.get(1).unwrap().is_null());
             assert!(row.get(0).unwrap().as_vertex().is_some());
             assert_eq!(row.get(2), None);
@@ -275,7 +277,7 @@ mod tests {
     #[test]
     fn duplicate_payload_rows_allocate_nothing_and_payload_growth_is_charged() {
         let payload = CanonicalScalar::bytes(vec![7; 129]).unwrap();
-        let mut rows = BTreeSet::new();
+        let mut rows = ProjectedRows::new(true);
         let mut scratch = 0;
         for _ in 0..2 {
             collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
@@ -292,10 +294,10 @@ mod tests {
     fn every_value_projection_checkpoint_refuses_before_row_publication() {
         let payload = CanonicalScalar::ucs_basic_text(&"x".repeat(129)).unwrap();
         let mut total = 0;
-        collect_values(&columns(), &[VId(1), VId(2)], &mut BTreeSet::new(),
+        collect_values(&columns(), &[VId(1), VId(2)], &mut ProjectedRows::new(true),
             &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| { total += 1; Ok(()) }).unwrap();
         for stop in 1..=total {
-            let mut rows = BTreeSet::new();
+            let mut rows = ProjectedRows::new(true);
             let mut calls = 0;
             let result = collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
                 &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| {
@@ -305,9 +307,50 @@ mod tests {
             assert_eq!(calls, stop);
             assert!(rows.is_empty());
         }
-        let mut rows = BTreeSet::new();
+        let mut rows = ProjectedRows::new(true);
         assert_eq!(collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
             &mut |_, _| Err::<Option<&CanonicalScalar>, _>("source"), &mut |_| Ok(())), Err("source"));
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn all_value_rows_charge_each_payload_and_keep_null_occurrences() {
+        let payload = CanonicalScalar::bytes(vec![7; 129]).unwrap();
+        let mut rows = ProjectedRows::new(false);
+        let mut scratch = 0;
+        for present in [true, false, true, false] {
+            collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
+                &mut |_, _| Ok::<_, ()>(present.then_some(&payload)), &mut |event| {
+                    scratch += usize::from(event == GlaExecutionEvent::ScratchEntry); Ok(())
+                }).unwrap();
+        }
+        assert_eq!(scratch, 2 * (1 + 2 + 3) + 2 * (1 + 2));
+        let rows: Vec<_> = rows.into_rows().collect();
+        assert_eq!(rows.len(), 4);
+        assert!(rows[0].get(1).unwrap().is_null());
+        assert_eq!(rows[0], rows[1]);
+        assert_eq!(rows[2], rows[3]);
+        assert_eq!(rows[2].get(1).unwrap().as_scalar(), Some(&payload));
+    }
+
+    #[test]
+    fn every_all_value_checkpoint_preserves_previously_completed_occurrences() {
+        let payload = CanonicalScalar::bytes(vec![9; 129]).unwrap();
+        let mut total = 0;
+        collect_values(&columns(), &[VId(1), VId(2)], &mut ProjectedRows::new(false),
+            &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| { total += 1; Ok(()) }).unwrap();
+        for stop in 1..=total {
+            let mut rows = ProjectedRows::new(false);
+            collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
+                &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| Ok(())).unwrap();
+            let mut calls = 0;
+            let result = collect_values(&columns(), &[VId(1), VId(2)], &mut rows,
+                &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| {
+                    calls += 1; if calls == stop { Err(stop) } else { Ok(()) }
+                });
+            assert_eq!(result, Err(stop));
+            assert_eq!(calls, stop);
+            assert_eq!(rows.len(), 1, "refused occurrence never enters the private collector");
+        }
     }
 }

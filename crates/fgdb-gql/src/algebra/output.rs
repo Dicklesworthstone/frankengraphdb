@@ -5,9 +5,9 @@
 
 use super::{GlaOperator, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::GlaExecutionEvent;
+use crate::algebra_exec::ProjectedRows;
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, VId};
-use std::collections::BTreeSet;
 
 /// One nonempty, ordered projection of vertex bindings. Column positions match
 /// the immutable prepared pattern's `columns()`; Debug never prints identities.
@@ -74,7 +74,7 @@ mod sealed {
         fn collect<E>(
             operator: &GlaOperator,
             bindings: &[VId],
-            projected: &mut BTreeSet<Self>,
+            projected: &mut ProjectedRows<Self>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E>;
     }
@@ -83,7 +83,7 @@ mod sealed {
         fn collect_properties<'a, E>(
             operator: &GlaOperator,
             bindings: &[VId],
-            projected: &mut BTreeSet<Self>,
+            projected: &mut ProjectedRows<Self>,
             property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E>;
@@ -93,7 +93,7 @@ mod sealed {
         fn collect<E>(
             operator: &GlaOperator,
             bindings: &[VId],
-            projected: &mut BTreeSet<Self>,
+            projected: &mut ProjectedRows<Self>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             let GlaOperator::Project { slot } = operator else {
@@ -112,15 +112,15 @@ mod sealed {
         fn collect<E>(
             operator: &GlaOperator,
             bindings: &[VId],
-            projected: &mut BTreeSet<Self>,
+            projected: &mut ProjectedRows<Self>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             let GlaOperator::ProjectBindings { slots } = operator else {
                 unreachable!("the private tuple-plan constructor owns its projection shape")
             };
             // The compiler caps columns at MAX_PATTERN_VERTICES. Form the
-            // lookup key on the stack; duplicate path occurrences allocate no
-            // new tuple. Every selected cell is a work/cancellation checkpoint.
+            // lookup key on the stack. DISTINCT elides repeated tuples; ALL
+            // reserves each occurrence. Every selected cell is a checkpoint.
             let mut key = [VId(0); MAX_PATTERN_VERTICES];
             for (column, slot) in slots.iter().enumerate() {
                 control(GlaExecutionEvent::Work)?;
@@ -147,7 +147,7 @@ mod sealed {
         fn collect_properties<'a, E>(
             operator: &GlaOperator,
             bindings: &[VId],
-            projected: &mut BTreeSet<Self>,
+            projected: &mut ProjectedRows<Self>,
             _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
@@ -159,7 +159,7 @@ mod sealed {
         fn collect_properties<'a, E>(
             operator: &GlaOperator,
             bindings: &[VId],
-            projected: &mut BTreeSet<Self>,
+            projected: &mut ProjectedRows<Self>,
             _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
@@ -171,7 +171,7 @@ mod sealed {
         fn collect_properties<'a, E>(
             operator: &GlaOperator,
             bindings: &[VId],
-            projected: &mut BTreeSet<Self>,
+            projected: &mut ProjectedRows<Self>,
             property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn tuple_collection_keeps_correlations_and_deduplicates_complete_rows() {
         let op = GlaOperator::ProjectBindings { slots: vec![BindingSlot(1), BindingSlot(0)] };
-        let mut rows = BTreeSet::new();
+        let mut rows = ProjectedRows::new(true);
         let mut scratch = 0;
         for bindings in [[VId(1), VId(3)], [VId(2), VId(3)], [VId(1), VId(3)]] {
             GraphBindingRow::collect(&op, &bindings, &mut rows, &mut |event| {
@@ -215,7 +215,7 @@ mod tests {
     fn every_tuple_checkpoint_refuses_before_publishing_an_incomplete_row() {
         let op = GlaOperator::ProjectBindings { slots: vec![BindingSlot(0), BindingSlot(1)] };
         for stop in 1..=5 {
-            let mut rows = BTreeSet::new();
+            let mut rows = ProjectedRows::new(true);
             let mut calls = 0;
             let result = GraphBindingRow::collect(&op, &[VId(1), VId(2)], &mut rows, &mut |_| {
                 calls += 1;
