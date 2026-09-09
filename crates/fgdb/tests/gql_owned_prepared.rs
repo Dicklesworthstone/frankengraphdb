@@ -34,6 +34,201 @@ fn test_directory() -> std::io::Result<std::path::PathBuf> {
 }
 
 #[test]
+fn budgeted_adapters_count_the_admitted_table_and_stop_at_the_first_excess_row() {
+    fn first_excess<E: core::fmt::Debug>(
+        result: Result<fgdb_gql::BudgetedGqlExecution<Vec<VId>>, BudgetedGqlError<E>>,
+    ) {
+        assert!(matches!(result.expect_err("no partial successful result"),
+            BudgetedGqlError::Budget(error)
+                if error.dimension == GqlBudgetDimension::ResultRows
+                    && error.limit == 1 && error.observed == 2));
+    }
+    let ((), report) = run_async_under_lab(0x35_05, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut initial = WriteBatch::new(R);
+        for id in 1..=5 {
+            initial.create_vertex(VId(id), vec![PERSON], vec![]);
+        }
+        for (eid, dst) in [(10, 2), (11, 3), (12, 4), (13, 5), (14, 2)] {
+            initial.add_edge(EId(eid), VId(1), VId(dst), vec![]);
+        }
+        let basis = db.write(&commit, initial).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let mut txn = db.begin(&txn_cx).unwrap();
+        let mut staged = WriteBatch::new(R);
+        staged.create_vertex(VId(7), vec![PERSON], vec![]);
+        staged.delete_edge(EId(11));
+        staged.ensure_edge_by_triple(EId(99), VId(1), VId(2), vec![]);
+        staged.add_edge(EId(17), VId(1), VId(7), vec![]);
+        txn.write(&mut db, staged).unwrap();
+        let bind = RelationBind::new()
+            .with_relation("R", R)
+            .with_label("L", PERSON);
+        for (statement, expected, count, overlay, overlay_count) in [
+            (
+                STATEMENT,
+                vec![VId(2), VId(3), VId(4), VId(5)],
+                5,
+                vec![VId(2), VId(4), VId(5), VId(7)],
+                5,
+            ),
+            (
+                "MATCH (a:L) RETURN a",
+                vec![VId(1), VId(2), VId(3), VId(4), VId(5)],
+                5,
+                vec![VId(1), VId(2), VId(3), VId(4), VId(5), VId(7)],
+                6,
+            ),
+        ] {
+            let query = db.prepare_gql_query(statement, &bind).unwrap();
+            let exact = GqlExecutionBudget::new(count, expected.len() as u64);
+            for result in [
+                db.execute_prepared_query_budgeted(&query, exact).unwrap(),
+                db.execute_prepared_query_budgeted_at(&query, basis, exact)
+                    .unwrap(),
+                pinned
+                    .execute_prepared_query_budgeted(&query, exact)
+                    .unwrap(),
+                pinned
+                    .execute_prepared_query_budgeted_at(&query, basis, exact)
+                    .unwrap(),
+            ] {
+                assert_eq!(result.value, expected);
+                assert_eq!(result.stats.snapshot_records, count);
+                assert_eq!(result.stats.result_rows, expected.len() as u64);
+            }
+            let result = txn
+                .execute_prepared_query_budgeted(
+                    &db,
+                    &query,
+                    GqlExecutionBudget::new(overlay_count, overlay.len() as u64),
+                )
+                .unwrap();
+            assert_eq!(result.value, overlay);
+            assert_eq!(result.stats.snapshot_records, overlay_count);
+            assert_eq!(result.stats.result_rows, overlay.len() as u64);
+            first_excess(
+                db.execute_prepared_query_budgeted(&query, GqlExecutionBudget::result_rows(1)),
+            );
+            first_excess(db.execute_prepared_query_budgeted_at(
+                &query,
+                basis,
+                GqlExecutionBudget::result_rows(1),
+            ));
+            first_excess(
+                pinned.execute_prepared_query_budgeted(&query, GqlExecutionBudget::result_rows(1)),
+            );
+            first_excess(pinned.execute_prepared_query_budgeted_at(
+                &query,
+                basis,
+                GqlExecutionBudget::result_rows(1),
+            ));
+            first_excess(txn.execute_prepared_query_budgeted(
+                &db,
+                &query,
+                GqlExecutionBudget::result_rows(1),
+            ));
+        }
+        let paged = db
+            .prepare_gql_query(&format!("{STATEMENT} SKIP 1 LIMIT 1"), &bind)
+            .unwrap();
+        assert_eq!(
+            db.execute_prepared_query_budgeted(&paged, GqlExecutionBudget::new(5, 1))
+                .unwrap()
+                .value,
+            vec![VId(3)]
+        );
+        assert_eq!(
+            txn.execute_prepared_query_budgeted(&db, &paged, GqlExecutionBudget::new(5, 1))
+                .unwrap()
+                .value,
+            vec![VId(4)]
+        );
+        let empty = db
+            .prepare_gql_query(&format!("{STATEMENT} LIMIT 0"), &bind)
+            .unwrap();
+        assert!(
+            txn.execute_prepared_query_budgeted(&db, &empty, GqlExecutionBudget::new(5, 0))
+                .unwrap()
+                .value
+                .is_empty()
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert!(
+            db.edge(EId(99)).unwrap().is_none(),
+            "ensure alias was never a row"
+        );
+        assert_eq!(db.execute_prepared_query(&paged).unwrap(), vec![VId(4)]);
+        assert_eq!(
+            pinned
+                .execute_prepared_query_budgeted(&paged, GqlExecutionBudget::new(5, 1))
+                .unwrap()
+                .value,
+            vec![VId(3)]
+        );
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn refused_budgeted_edge_reads_keep_phantom_and_negative_identity_witnesses() {
+    let ((), report) = run_async_under_lab(0x35_06, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txn_cx = contexts.txn();
+        for phantom in [false, true] {
+            for budget in [
+                GqlExecutionBudget::snapshot_records(0),
+                GqlExecutionBudget::result_rows(0),
+            ] {
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let mut initial = WriteBatch::new(R);
+                for id in 1..=3 {
+                    initial.create_vertex(VId(id), vec![], vec![]);
+                }
+                initial.add_edge(EId(10), VId(1), VId(2), vec![]);
+                db.write(&commit, initial).await.unwrap();
+                let mut txn = db.begin(&txn_cx).unwrap();
+                let mut staged = WriteBatch::new(R);
+                staged.ensure_edge_by_triple(EId(99), VId(1), VId(2), vec![]);
+                staged.create_vertex(VId(9), vec![], vec![]);
+                txn.write(&mut db, staged).unwrap();
+                let query = db
+                    .prepare_gql_query(STATEMENT, &RelationBind::new().with_relation("R", R))
+                    .unwrap();
+                assert!(matches!(
+                    txn.execute_prepared_query_budgeted(&db, &query, budget),
+                    Err(BudgetedGqlError::Budget(_))
+                ));
+                let mut winner = WriteBatch::new(R);
+                if phantom {
+                    winner.add_edge(EId(99), VId(2), VId(3), vec![]);
+                } else {
+                    winner.delete_edge(EId(10));
+                }
+                db.write(&commit, winner).await.unwrap();
+                let frontier = db.frontier().unwrap();
+                assert!(matches!(
+                    txn.commit(&mut db, &commit).await,
+                    Err(fgdb::WriteTxnError::Write(
+                        fgdb::WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }
+                    ))
+                ));
+                assert_eq!(db.frontier().unwrap(), frontier);
+                assert!(db.vertex(VId(9)).unwrap().is_none());
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn owned_preparation_is_stable_across_database_view_and_transaction_surfaces() {
     let ((), report) = run_async_under_lab(0x35_04, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
