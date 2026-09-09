@@ -1,159 +1,218 @@
-# Typed connected graph patterns
+# Typed connected graph patterns and correlated binding rows
 
 Source implemented on unreleased `main`, September 9, 2026. Native Rust build,
-tests and repository gates for this continuation are **unverified here**.
-Owners `fgdb-boundplan-gla-lowering-seam-r2kd` and `fgdb-w10-embedded-54r` remain
-open pending their complete acceptance evidence.
+tests and repository gates for these connector-authored changes are
+**unverified here**. Owners `fgdb-boundplan-gla-lowering-seam-r2kd` and
+`fgdb-w10-embedded-54r` remain open pending complete acceptance evidence.
 
 ## Capability
 
-`fgdb_gql::algebra::GraphPatternBuilder` prepares connected, positive graph
-patterns that are not limited to the legacy text parser's two edge positions.
-It supports longer fixed-length paths, branching motifs, closed walks, chords,
-self-loops, mixed edge directions, predicates on any declared vertex, and
-explicit equality/inequality between any pair of declared vertices. Any one
-vertex may be projected, with sorted distinct IDs and offset/count pagination.
+`fgdb_gql::algebra::GraphPatternBuilder` prepares connected positive patterns
+beyond the legacy text parser's two edge positions. It supports longer fixed
+paths, branching motifs, closed walks, chords, self-loops, mixed directions,
+predicates on any declared vertex, and explicit equality/inequality between
+any pair of declared vertices.
 
-The prepared result is `PreparedGraphPattern`. It lowers to the existing
-`GlaPlan` operators: `ScanVertices`, `ScanEdges`, `Expand`, `Select`,
-`VertexIdentity`, `Project`, `Distinct`, `OrderByVertexId`, and `Limit`.
-There is no second executor, graph extraction loop, parser-interprets-AST path,
-new positional `BoundPlan` fields, or extra dependency.
+A pattern can return either a sorted unique vertex-ID vector or **correlated
+multi-column binding rows**. The two outputs share one connected-pattern
+compiler and one GLA evaluator. They do not execute one query per column, zip
+independent column sets, or reconstruct a Cartesian product after traversal.
 
-**This is a typed Rust preparation API, not an extension of the GQL text
-syntax.** It uses caller-resolved label/property/relation IDs in the same sense
-as the existing bound-plan API. It neither resolves catalog names nor grants
-authorization. The text parser, numeric parameter templates and their existing
-statement/evidence contracts are unchanged.
+**This is a typed Rust preparation API, not an extension of GQL text syntax.**
+It consumes caller-resolved label/property/relation IDs, like the existing
+bound-plan API. It neither resolves catalog names nor grants graph authority.
+Text parsing, numeric templates and their existing statement/evidence formats
+remain unchanged. No external dependency or storage backend was added.
 
-## Preparation
+## Pattern preparation
 
-Declare each variable once. Reuse its name in any number of edge atoms and
-filters. Edge direction is relative to the two named endpoints: `Forward`
-means source to destination, `Reverse` means destination to source, and
-`Undirected` permits either orientation.
+Declare each variable once, then reuse its name in edge atoms and predicates.
+An edge's direction is relative to its named endpoints: Forward means source
+to destination, Reverse means destination to source, and Undirected allows
+either orientation.
 
 ```rust
 use fgdb_gql::algebra::{GlaDirection, GraphPatternBuilder};
 
 let mut builder = GraphPatternBuilder::new();
-for name in ["a", "b", "c", "d"] {
+for name in ["person", "friend", "company"] {
     builder.vertex(name)?;
 }
-builder.edge("a", r, GlaDirection::Forward, "b")?;
-builder.edge("c", s, GlaDirection::Reverse, "d")?;
-builder.edge("b", r, GlaDirection::Forward, "c")?;
-builder.edge("d", t, GlaDirection::Forward, "a")?;
-builder.identity("a", "d", false)?;
-let pattern = builder.prepare("d", 0, Some(100))?;
+builder.edge("person", knows, GlaDirection::Forward, "friend")?;
+builder.edge("friend", works_at, GlaDirection::Forward, "company")?;
+let pattern = builder.prepare("company", 0, Some(100))?;
 let result = db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?;
 ```
 
-The first edge seeds a binding row. The compiler then selects the first
-remaining edge connected to an already bound variable. If only its destination
-is bound, it reverses the traversal direction, not the atom's meaning. It can
-therefore defer an initially disconnected atom until a later connector makes
-it available. Every declared vertex must ultimately belong to the same
-edge-connected component; a missing connector produces `Disconnected`, never
-a silently omitted component or implicit Cartesian product.
+The first edge seeds a binding row. The compiler repeatedly selects the first
+remaining edge connected to an already bound variable. When only its
+right-hand variable is bound it reverses traversal, not the atom's meaning.
+An initially disconnected edge can therefore be deferred until a connector
+makes it available. Every declared variable must eventually belong to the
+same edge-connected component; a missing connector produces Disconnected,
+not a dropped component or implicit Cartesian product.
 
 A previously bound endpoint becomes an explicit identity check after expansion.
-A newly bound endpoint receives its predicates once. Explicit equalities and
-inequalities are emitted as soon as both variables are available. A single
-vertex with no edges is a deliberate vertex scan and may be unlabeled; more
-than one edgeless variable refuses.
+A newly bound endpoint receives its predicates once. Explicit identities are
+emitted when both variables are available. One edgeless vertex is a deliberate
+vertex scan and may be unlabeled; multiple edgeless variables refuse.
 
-The definition ceilings are structural admission bounds, not performance SLOs:
-64 edge atoms, 65 declared vertices, 256 total predicates, 64 explicit identity
-constraints, and 128 ASCII bytes per variable name. Names follow
-`[A-Za-z_][A-Za-z0-9_]*`. Every builder mutator validates its arguments and limits
-before changing state. Missing, duplicate and invalid names, disconnected
-patterns and excess definitions have typed errors that do not echo data.
+Definition ceilings are structural admission bounds, not performance SLOs:
+64 edge atoms, 65 declared vertices, 256 predicates, 64 identity constraints,
+and 128 ASCII bytes per name. Names follow `[A-Za-z_][A-Za-z0-9_]*`. Mutators
+validate before changing the builder. Invalid/duplicate/missing names,
+disconnected definitions and excess definitions produce typed errors without
+echoing protected names or values.
 
-An immutable prepared pattern does not change when its builder is subsequently
-edited. Prepared/builder Debug output redacts definitions. `plan()` and
-`canonical_bytes()` are explicit exports, not redacted logging interfaces.
-Names disappear from lowering, so alpha-renaming preserves the transcript.
-This does not claim a full graph-isomorphism or logical-orbit canonicalizer:
-edge ordering can choose a different logical pipeline for an equivalent pattern.
+## Correlated multi-column projection
 
-## Semantics and cost
+Use `prepare_bindings` to retain several variables from each complete match:
 
-The current contract is a connected positive pattern with **vertex identity**
-constraints. The same variable always means the same vertex. Different names
-may bind the same vertex unless an inequality disallows it. An edge atom may
-reuse the edge occurrence that satisfies another atom. A self-loop atom must
-bind equal endpoints.
+```rust
+let pattern = builder.prepare_bindings(
+    &["person", "friend", "company"],
+    0,
+    Some(100),
+)?;
+let result = db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?;
+for row in &result.value {
+    for (name, value) in pattern.columns().iter().zip(row.values()) {
+        println!("{name}: {value:?}");
+    }
+}
+```
 
-Parallel edge occurrences survive in the evaluator until the terminal distinct
-projection. The returned value is a sorted unique vector of the selected
-vertex IDs, **not a binding table, bag, path object, cycle enumeration, or count
-of matching paths**. Consequently, the operation does not assert TRAIL,
-ACYCLIC, SIMPLE, edge-variable identity, or the default morphism semantics of
-the complete GQL language. WALK-like fixed-length reuse is explicit here.
+The projection requires 1..=65 distinct declared variable names, in the desired
+column order. EmptyProjection, DuplicateProjection, UnknownVariable and a
+Columns limit error reject invalid definitions without changing the builder.
+The same variable cannot be repeated as two output columns in this bounded
+surface; aliases and arbitrary expressions are not implemented here.
 
-Labels and integer comparisons use the same `VertexPredicate` implementation
-as existing queries. Missing and noninteger properties fail integer comparisons,
-including NotEqual; no new numeric coercion rule is introduced. A zero return
-count is legal and yields an empty result after ordinary admission and resource
-checks. `LIMIT` does not excuse unlimited work finding the answer.
+`PreparedGraphPattern<GraphBindingRow>` owns an immutable ordered column schema.
+`columns()[i]` names `row.get(i)`. `GraphBindingRow` owns only that row's vertex
+IDs; `values()` borrows the full slice, `get(i)` returns None out of range, and
+`len()`/`is_empty()` describe the shape. Produced rows are nonempty and have
+exactly the prepared schema's width. Rows and result Debug output redact IDs;
+`columns()`, `values()`, `get()`, `plan()` and canonical byte getters are
+explicit data exports, not redacted log interfaces.
 
-The compiler's deterministic connected-edge order is not a cost-based optimizer
-or the registered FreeJoin physical family. Each atom still uses existing
-scan/index/expansion machinery. A 64-edge definition is finite but may enumerate
-an enormous number of bindings on a dense or cyclic graph; the edge ceiling is
-not a promise of cheap execution. Product execution requires a policy.
+Consider a graph whose matching pairs are `(person1, company20)` and
+`(person2, company21)`. The tuple result retains those two pairs. Independently
+projecting person and company would lose which person belonged to which
+company; neither invented pair is introduced by this implementation.
 
-## Product reads
+The shared compiler emits ProjectBindings with its ordered slot list,
+Distinct, OrderByBindings and Limit. Distinctness is over the **complete
+projected row**, not each column or the unprojected path. Rows are ordered
+lexicographically by their declared column order and numeric 128-bit VIds.
+Offset/count pagination applies after that ordering and duplicate elimination.
+Parallel edges and multiple witnesses of the same tuple collapse at this
+explicit final distinct operation. Different tuples sharing one column remain
+different. An empty result still has its schema on the prepared pattern.
 
-`Database` and `EmbeddedReadView` expose:
+### Statically determined output shape
 
-- `execute_graph_pattern_governed(query_cx, pattern, policy)`;
-- `execute_graph_pattern_governed_at(query_cx, pattern, sequence, policy)`.
+`GlaPlan<Row = VId>`, `PreparedGraphPattern<Row = VId>`,
+`GlaExecution<Row = VId>` and `GqlQueryExecution<Row = VId>` retain the original
+scalar type as their default. Existing `prepare` calls still return VIds.
+`prepare_bindings` chooses GraphBindingRow. The output domain is sealed to
+these two shapes; applications cannot install another collector or turn an
+immutable tuple plan into a scalar plan. Only the private compiler constructs
+plans and their corresponding terminal operators.
 
-`WriteTxn` exposes
-`execute_graph_pattern_governed(database, query_cx, pattern, policy)`.
+The traversal, source, predicate cache, work meter and result-limit checks are
+shared. The only output-specific step collects the terminal projection. A
+single-column tuple query agrees with the scalar query's IDs but remains a
+different typed result, not a silently flattened vector.
 
-All five return the existing `GqlQueryExecution`, containing the projected IDs,
-source/result row counts, and work/scratch counters from that execution. Errors
-use the existing `GqlQueryError` source/row/evaluator/interruption distinction.
-Source, ownership, health and frontier refusals precede cancellation/resource
-refusals in the same manner as the existing governed query APIs. No query
-result is returned on failure.
+Existing scalar logical transcript tags and bytes are unchanged. Tuple
+projection and tuple ordering have distinct tags; the slot sequence is encoded,
+so changing output column order changes logical identity. Renaming variables
+without changing their relationships preserves the logical transcript. Column
+names remain separately owned schema metadata, not part of the name-erased
+logical transcript. Neither that transcript nor the schema is an authorization
+token or a complete result/replay certificate.
 
-The durable methods admit the same immutable snapshot and use the same borrowed
-source as text queries. Historical reads keep their exact sequence. Pinned
-views cannot observe a later generation. The transaction method folds the same
-canonical prepared effects over its original basis and borrows property values;
-it never reinterprets raw intentions to create rows.
+## Semantics and physical boundaries
 
-Source and evaluator consume one `GqlQueryPolicy` allowance. SnapshotRecords
-counts the whole admitted base table or final transaction overlay, not only
-the relations surviving pattern filters. Final result rows are charged after
-distinct/order/pagination. Work/scratch accounting, interruptible adjacency
-ordering, terminal checkpoints and error translation are shared with existing
-queries. Physical counters can differ across layouts and read surfaces even
-when logical answers agree.
+The contract is a connected positive pattern with vertex identity constraints.
+The same variable always denotes the same vertex. Different names may denote
+the same vertex unless an inequality forbids it. Edge atoms may reuse the same
+edge occurrence; self-loop atoms require equal endpoints.
 
-Transaction reads retain their existing conservative edge-table, element and
-endpoint dependencies. Node-only patterns with a positive required label retain
-a label-scoped insertion witness; an unlabeled node pattern needs a whole-table
-witness. A later refusal cannot erase already admitted dependencies. A new
-matching disconnected path/cycle can conflict with an earlier empty edge scan.
-An unrelated vertex-only insertion need not conflict with an edge scan, and an
-unrelated unlabeled insertion need not conflict with a label-scoped node scan.
+Both outputs have **set projection semantics**, not general GQL bags. Tuple
+rows contain vertex IDs only, not property values, edge IDs, nullable optional
+bindings, complete paths, path counts or factorized batches. No TRAIL, ACYCLIC,
+SIMPLE, edge-variable identity or general GQL morphism contract is implied.
+Fixed-length WALK-like reuse is explicit in this typed surface.
 
-The pattern is not stuffed into a legacy two-hop `BoundPlan` merely to obtain
-an existing certificate. No new public artifact/audit API is advertised for
-these typed patterns. Their canonical logical bytes are application identity,
-not snapshot evidence, an authorization token, or a registered replay manifest.
+Labels and integer predicates use the existing VertexPredicate implementation.
+Missing/noninteger properties fail integer comparisons, including NotEqual;
+there is no new coercion policy. Count zero is legal and yields no final rows
+after normal source admission and evaluation checks. LIMIT is not permission
+to perform unlimited work finding the answer.
+
+The deterministic connected-edge order is not a cost-based optimizer or the
+registered FreeJoin physical family. A finite 64-edge pattern can still have
+an enormous number of witnesses on a dense graph. The ceiling is not a cheap
+execution guarantee. Product execution requires an explicit policy.
+
+## Product reads and resource controls
+
+Database and EmbeddedReadView expose `execute_graph_pattern_governed` and its
+exact-sequence `_at` variant. WriteTxn exposes
+`execute_graph_pattern_governed(database, query_cx, pattern, policy)`. All five
+accept either prepared output shape, inferred from the pattern, and return
+`GqlQueryExecution<Row>` with rows and exact source/result/work/scratch counts.
+There is no separate tuple-only database API or second query-source engine.
+
+Source, ownership, health and frontier errors retain their precedence over
+cancellation/resource refusals. Historical reads use their exact sequence;
+pinned views cannot observe a later generation. The transaction source folds
+canonical prepared effects over its original basis and borrows property values,
+never interpreting raw intentions to manufacture rows.
+
+One GqlQueryPolicy allowance covers source construction and evaluation.
+SnapshotRecords counts the admitted base table or final transaction overlay,
+not projected cells or just the relations surviving filters. ResultRows counts
+complete final rows after distinct/order/pagination. No partial vector or
+incomplete tuple is returned on failure.
+
+Tuple collection uses a fixed, definition-bounded stack key to check whether a
+whole row already exists. Every projected cell consumes a Work checkpoint.
+A new tuple reserves one scratch entry for the set and one per owned cell,
+checking before growth. Duplicate path occurrences allocate no new tuple.
+Completed tuples move into final output after a ResultRow guard; they are not
+cloned again one cell at a time at release. Scalar collection retains its
+previous event sequence. Source work is not repeated per output column.
+
+These are logical work/scratch-entry budgets, **not exact allocator-byte or
+peak-memory limits**. Fixed-width lookup keys, allocator capacities, individual
+B-tree operations and cleanup are not per-machine-instruction accounting.
+Ordering comparisons are bounded by the 65-column definition ceiling. No spill,
+hard wall-clock cancellation deadline, transaction-lifetime budget or
+larger-than-memory storage claim is made.
+
+Transaction dependencies are not projected away with columns. Unprojected
+predicate vertices, observed edge IDs, endpoints and insertion witnesses
+remain relevant after a result-budget or evaluator refusal. Positive-label
+node patterns retain label-scoped insertion witnesses; unlabeled scans retain
+the table witness. Unrelated vertex-only insertions need not conflict with an
+edge scan. An unrelated unlabeled insertion need not conflict with a
+label-scoped node scan. Existing ownership and history-conflict checks apply.
+
+Typed patterns are not squeezed into the two-hop BoundPlan certificate format.
+There is still no public pattern artifact/audit API. Logical bytes are
+application identity, not snapshot evidence or a registered replay manifest.
 
 ## Complete example
 
 `crates/fgdb/examples/graph_patterns.rs` initializes a multi-relation graph in
 one atomic write, prepares a five-edge branching cycle with a chord and a risk
-predicate, checks exact execution limits, evaluates a staged update, commits,
-checks historical and pinned reads, and exercises real QueryCx cancellation.
+predicate, then projects both a carrier-ID set and correlated
+`(company, supplier, carrier)` rows. It reads the column schema and row
+accessors, checks exact limits, applies a staged update, commits, checks pinned
+and historical results, and exercises real QueryCx cancellation for both shapes.
 
 ```text
 cargo run -p fgdb --example graph_patterns
@@ -163,33 +222,43 @@ The example is committed but **unrun in this environment**.
 
 ## Verification and remaining work
 
-Twelve Rust tests were added: six builder/lowering laws and six public
-integration tests. The lowering oracle enumerates complete variable assignments
-independently of GLA slot allocation, traversal indexes and edge scheduling.
-The product oracle evaluates assignments over ordinary owned storage rows,
-independently of the new pattern compiler and borrowed query source.
-Coverage includes mixed directions, deferred connected atoms, cycles, branching,
-self-loops, all projections, parallel edges, arbitrary identities, the 64-edge
-ceiling, alpha-renaming, failed-edit atomicity, every low-level interruption
-checkpoint, exact/one-below limits, historical and staged changes, compaction,
-reopen, ensures, cascades, phantom retention and authority error precedence.
-Existing source/evaluator/transaction tests were retained.
+This continuation adds **ten Rust tests**: two sealed collector laws, two
+projection-schema/maximum-width laws and six integration tests in
+`crates/fgdb/tests/graph_bindings.rs`. The existing assignment oracle is extended
+with 6,912 tuple projections across graph/direction/shape/column combinations.
+It enumerates full assignments independently of GLA slots and edge scheduling;
+it does not zip the previous scalar oracle's output columns.
 
-These tests and the example are **ADDED BUT UNRUN** here. Cargo, rustc and
-rustfmt are unavailable. There is no claimed passing native build, Clippy,
-formatting, exact-tree proof or repository gate. No hosted workflow was
+Product tests use an independent nested-loop join over ordinary owned storage
+rows. They cover tuple correlation, column order, full-row distinctness,
+pagination, singleton/scalar equivalence, all five read surfaces, 128-bit IDs,
+exact and one-below limits, retained unprojected dependencies, ensures, staged
+updates/deletions, compaction, reopening, pinned/history isolation, source-error
+precedence and interruption at every low-level evaluator checkpoint. The
+collector test interrupts every row-construction checkpoint before insertion.
+Existing scalar, source, policy and transaction regression cases are retained.
+
+These tests and the updated example are **ADDED BUT UNRUN here**. Cargo, rustc,
+rustfmt and rch are unavailable. There is no passing native build, Clippy,
+formatting, exact-tree proof or repository-gate verdict. No hosted workflow was
 dispatched and no bead was closed on source inspection.
 
-A separate Python specification model passed 15,147 projected-variable
-comparisons across 2,304 exhaustive graph/pattern combinations and 2,000
-randomized connected patterns, plus directed maximum-depth controls at 3, 10,
-32 and 64 edges. An initial model run timed out while enumerating a 64-edge
-mixed-direction fixture; maximum-depth controls were changed to directed paths,
-while the bounded mixed-direction and cyclic cases remained. That finite model
-does not execute Rust, source admission, transaction validation or durability.
+Actually executed separately: a finite Python specification compared complete
+assignment enumeration against connected streaming projection for **27,648
+exhaustive tuple cases and 1,000 randomized connected patterns**, including
+parallel edges, mixed directions, cycles, inequalities, column permutations,
+pagination and IDs above 64 bits. It also checked **4,355 interrupted collector
+prefixes across widths 1..65**. These passed as algorithm models. They do not
+compile or execute Rust, validate source admission, prove transaction behavior,
+or establish durability or repository acceptance.
 
-Remaining: text grammar/binder integration for general patterns, general
-binding-table outputs, typed pattern evidence and catalog contracts, registered
-FreeJoin/authorized-Strata physical access, variable-length/path-mode semantics,
-spill and byte-accurate whole-operation resource governance. The existing
-64-edge executor is not larger-than-memory storage or a complete GQL engine.
+The previous pattern continuation's twelve Rust tests remain, along with its
+separate 15,147-projection Python model and explicitly reported large
+mixed-direction fixture timeout. Those earlier results are not reclassified
+as validation of the new Rust tuple implementation.
+
+Remaining: general text grammar/binding, scalar/property/edge/path columns,
+bag and optional-match output semantics, pattern evidence/catalog/session
+contracts, registered FreeJoin/authorized-Strata access, variable-length and
+path-mode semantics, spill and byte-accurate whole-operation resource governance.
+These vertex binding rows do not complete the general GQL result contract.
