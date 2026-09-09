@@ -111,6 +111,54 @@ impl<Row: Ord> core::fmt::Debug for ProjectedRows<Row> {
     }
 }
 
+impl super::GlaExecutionStats {
+    /// The aggregate operator shares the evaluator's transactional, checked
+    /// meter instead of reimplementing its limit or overflow arithmetic.
+    pub(crate) fn charge_event(
+        &mut self,
+        limits: super::GlaExecutionLimits,
+        event: super::GlaExecutionEvent,
+    ) -> Result<(), super::GlaLimitExceeded> {
+        super::charge(self, limits, event)
+    }
+}
+
+impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
+    /// Internal GroupAggregate input seam. The caller owns a checked ALL,
+    /// unpaginated child. Complete bindings feed its accumulator directly;
+    /// the ordinary projection collector is deliberately left empty. Root
+    /// scans, expansion, predicates, caches and cancellation remain the SAME
+    /// evaluator, and no public callback can replace query semantics.
+    pub(crate) fn visit_value_bindings<E, F, C, P>(
+        &self,
+        vertices: impl IntoIterator<Item = fgdb_types::VId>,
+        edges: impl IntoIterator<Item = (fgdb_types::VId, fgdb_delta_types::RelationId, fgdb_types::VId)>,
+        test_vertex: F,
+        control: C,
+        mut visit: P,
+    ) -> Result<(), E>
+    where
+        F: FnMut(fgdb_types::VId, &[crate::algebra::VertexPredicate]) -> Result<bool, E>,
+        C: FnMut(super::GlaExecutionEvent) -> Result<(), E>,
+        P: FnMut(&[crate::algebra::ValueProjection], &[fgdb_types::VId], &mut C) -> Result<(), E>,
+    {
+        let unused = self.execute_projected(
+            vertices,
+            edges,
+            test_vertex,
+            control,
+            |operator, bindings, _projected, control| {
+                let crate::algebra::GlaOperator::ProjectValues { columns } = operator else {
+                    unreachable!("the checked aggregate child has value projection")
+                };
+                visit(columns, bindings, control)
+            },
+        )?;
+        debug_assert!(unused.is_empty(), "aggregation never materializes its child bag");
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

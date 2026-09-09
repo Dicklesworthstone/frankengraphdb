@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+mod aggregation;
 pub mod algebra;
 mod algebra_exec;
 mod evidence_artifact;
@@ -16,6 +17,10 @@ mod parameters;
 mod parser;
 mod prepared;
 
+pub use aggregation::{
+    GraphAggregate, GraphAggregateBuildError, GraphAggregateError, GraphAggregateFunction,
+    GraphAggregateRow, GraphAggregateValue, PreparedGraphAggregate,
+};
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
     GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
