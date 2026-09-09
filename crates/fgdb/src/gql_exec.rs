@@ -4,7 +4,7 @@
 //! here. Traversal, predicates, projection, distinct ordering and pagination
 //! belong to fgdb-gql's lowered operators, never a second inline MATCH engine.
 
-mod source;
+pub(crate) mod source;
 
 use crate::{
     Database, EdgeRecord, EmbeddedReadView, GqlCertificate, GqlError, GqlPlanCertificate,
@@ -364,14 +364,14 @@ pub(crate) fn execute_at<R: GqlSnapshotReader + ?Sized>(
 
 /// Source and evaluator consume one allowance, not independent phase budgets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct AdmissionUsage {
+pub(crate) struct AdmissionUsage {
     work_units: u64,
     scratch_entries: u64,
     records: u64,
 }
 
 impl AdmissionUsage {
-    fn observe<E, C>(
+    pub(crate) fn observe<E, C>(
         &mut self,
         policy: fgdb_gql::GqlQueryPolicy,
         event: SourceEvent,
@@ -379,7 +379,6 @@ impl AdmissionUsage {
         use fgdb_gql::{GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension, GqlQueryError};
         let mut next = *self;
         if event == SourceEvent::SnapshotRecord {
-            // Actual in-memory records, never an untrusted declared counter.
             next.records = next.records.checked_add(1).expect("source record count fits u64");
             policy.rows.check(GqlBudgetDimension::SnapshotRecords, next.records)
                 .map_err(GqlQueryError::Rows)?;
@@ -402,13 +401,13 @@ impl AdmissionUsage {
         Ok(())
     }
 
-    fn remaining(self, mut policy: fgdb_gql::GqlQueryPolicy) -> fgdb_gql::GqlQueryPolicy {
+    pub(crate) fn remaining(self, mut policy: fgdb_gql::GqlQueryPolicy) -> fgdb_gql::GqlQueryPolicy {
         policy.evaluator.max_work_units -= self.work_units;
         policy.evaluator.max_scratch_entries -= self.scratch_entries;
         policy
     }
 
-    fn finish<E, C>(
+    pub(crate) fn finish<E, C>(
         self,
         policy: fgdb_gql::GqlQueryPolicy,
         result: Result<fgdb_gql::GqlQueryExecution, fgdb_gql::GqlQueryError<E, C>>,
@@ -416,7 +415,6 @@ impl AdmissionUsage {
         use fgdb_gql::{GlaLimitDimension, GqlQueryError};
         match result {
             Ok(mut execution) => {
-                // Both phases were checked against their remaining allowance.
                 execution.evaluator.work_units += self.work_units;
                 execution.evaluator.scratch_entries += self.scratch_entries;
                 Ok(execution)

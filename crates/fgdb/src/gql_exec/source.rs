@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 /// Emitted before the corresponding work or allocation. Scratch counts new
 /// logical entries, not allocator bytes; reused heap slots are not recharged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SourceEvent {
+pub(crate) enum SourceEvent {
     Work,
     ScratchEntry,
     SnapshotRecord,
@@ -24,13 +24,18 @@ pub(super) enum SourceEvent {
 type EdgeTriple = (VId, RelationId, VId);
 type VertexCursor = Reverse<(VId, CommitSeq, usize, usize)>;
 
-/// One candidate per EId, not per historical content version. Property
-/// sidecars are never read or cloned: bounded MATCH consumes topology only.
-fn scan_edges<E>(
-    blocks: &[Vec<AdjacencyEntry>],
+/// Select winning live EIds once, then visit borrowed entries. The visitor
+/// decides whether they are final records or inputs to a staged overlay. This
+/// keeps transaction removals from being charged as final admitted rows.
+pub(crate) fn visit_edges<'a, E, C>(
+    blocks: &'a [Vec<AdjacencyEntry>],
     as_of: CommitSeq,
-    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<Vec<EdgeTriple>, E> {
+    control: &mut C,
+    mut visit: impl FnMut(&'a AdjacencyEntry, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
     let mut winners: BTreeMap<EId, &AdjacencyEntry> = BTreeMap::new();
     for block in blocks {
         control(SourceEvent::Work)?;
@@ -44,31 +49,46 @@ fn scan_edges<E>(
                 Some(_) => {}
                 None => control(SourceEvent::ScratchEntry)?,
             }
-            // Equal creation sequences are restatements; later publication
-            // wins, including a retirement. Do NOT filter retirement first.
             winners.insert(entry.eid, entry);
         }
     }
-    let mut rows = Vec::new();
     for entry in winners.into_values() {
         control(SourceEvent::Work)?;
         if entry.visible_at(as_of) {
-            control(SourceEvent::SnapshotRecord)?;
-            control(SourceEvent::ScratchEntry)?;
-            rows.push((entry.src, entry.relation, entry.dst));
+            visit(entry, control)?;
         }
     }
+    Ok(())
+}
+
+/// One candidate per EId, not per historical version. No property sidecar is
+/// read or cloned; bounded MATCH consumes topology only.
+fn scan_edges<E>(
+    blocks: &[Vec<AdjacencyEntry>],
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Vec<EdgeTriple>, E> {
+    let mut rows = Vec::new();
+    visit_edges(blocks, as_of, control, |entry, control| {
+        control(SourceEvent::SnapshotRecord)?;
+        control(SourceEvent::ScratchEntry)?;
+        rows.push((entry.src, entry.relation, entry.dst));
+        Ok(())
+    })?;
     Ok(rows)
 }
 
-/// Each typed patch is sorted by (VId, creation sequence). Merge with one heap
-/// slot per nonempty patch, replacing its slot after every pop. Only visible
-/// winners are retained, as references into the pinned generation.
-fn scan_vertices<'a, E>(
+/// Merge with one reusable heap slot per nonempty patch. Visitors see only
+/// visible winners, in VId order, and borrow directly from the generation.
+pub(crate) fn visit_vertices<'a, E, C>(
     patches: &'a [VertexPatchRows],
     as_of: CommitSeq,
-    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<Vec<&'a VertexRow>, E> {
+    control: &mut C,
+    mut visit: impl FnMut(&'a VertexRow, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
     let mut heap: BinaryHeap<VertexCursor> = BinaryHeap::new();
     for (patch_at, patch) in patches.iter().enumerate() {
         control(SourceEvent::Work)?;
@@ -77,18 +97,18 @@ fn scan_vertices<'a, E>(
             heap.push(Reverse((row.vid, row.created_at, patch_at, 0)));
         }
     }
-    let mut rows = Vec::new();
     let mut group = None;
     let mut winner: Option<&VertexRow> = None;
     while let Some(Reverse((vid, _, patch_at, row_at))) = heap.pop() {
         control(SourceEvent::Work)?;
         if group != Some(vid) {
-            emit_vertex(winner.take(), as_of, &mut rows, control)?;
+            if let Some(row) = winner.take().filter(|row| row.visible_at(as_of)) {
+                visit(row, control)?;
+            }
             group = Some(vid);
         }
         let patch = &patches[patch_at];
         let row = &patch[row_at];
-        // Heap order visits newer statements and later publications last.
         if row.created_at <= as_of {
             winner = Some(row);
         }
@@ -96,27 +116,29 @@ fn scan_vertices<'a, E>(
             heap.push(Reverse((next.vid, next.created_at, patch_at, row_at + 1)));
         }
     }
-    emit_vertex(winner, as_of, &mut rows, control)?;
-    Ok(rows)
-}
-
-fn emit_vertex<'a, E>(
-    winner: Option<&'a VertexRow>,
-    as_of: CommitSeq,
-    rows: &mut Vec<&'a VertexRow>,
-    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<(), E> {
     if let Some(row) = winner.filter(|row| row.visible_at(as_of)) {
-        control(SourceEvent::SnapshotRecord)?;
-        control(SourceEvent::ScratchEntry)?;
-        rows.push(row);
+        visit(row, control)?;
     }
     Ok(())
 }
 
-/// Borrow one predicate source without materializing a history map or cloning
-/// properties. Every patch and binary-search comparison is a checkpoint.
-fn find_vertex<'a, E>(
+fn scan_vertices<'a, E>(
+    patches: &'a [VertexPatchRows],
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Vec<&'a VertexRow>, E> {
+    let mut rows = Vec::new();
+    visit_vertices(patches, as_of, control, |row, control| {
+        control(SourceEvent::SnapshotRecord)?;
+        control(SourceEvent::ScratchEntry)?;
+        rows.push(row);
+        Ok(())
+    })?;
+    Ok(rows)
+}
+
+/// Borrow one predicate source without a history map or property clones.
+pub(crate) fn find_vertex<'a, E>(
     patches: &'a [VertexPatchRows],
     vid: VId,
     as_of: CommitSeq,
@@ -146,8 +168,7 @@ fn find_vertex<'a, E>(
     Ok(winner.filter(|row| row.visible_at(as_of)))
 }
 
-/// Payload references are tied to one admitted generation. Edge property
-/// sidecars are not requested, and no graph scalar is cloned during admission.
+/// Payload references are tied to one admitted generation.
 pub(super) struct BorrowedTables<'a> {
     pub(super) vertices: Vec<&'a VertexRow>,
     pub(super) edges: Vec<EdgeTriple>,
@@ -190,8 +211,6 @@ pub(super) fn admit<'a, E>(
                 }
             }
         }
-        // Predicate sources are not base-table admission records. Their work,
-        // candidate set and retained references are still scratch-metered.
         for vid in candidates {
             if let Some(row) = find_vertex(&snapshot.patches, vid, as_of, control)? {
                 control(SourceEvent::ScratchEntry)?;
