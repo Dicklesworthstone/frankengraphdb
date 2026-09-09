@@ -75,12 +75,14 @@ impl WriteTxn {
             // subsequent preparation fails or normalizes the ensure to no-op.
             drop(self.edges(database)?);
         }
+        let previous_len = self.staged.len();
         self.staged.push(batch);
         let combined = Self::combined_batch(&self.staged)
             .expect("a batch was staged immediately before combination");
         let prepared = match database.prepare_write(combined) {
             Ok(prepared) => prepared,
             Err(source) => {
+                self.retain_failed_preparation_observations(database, previous_len);
                 let _ = self.staged.pop();
                 return Err(WriteTxnError::Write(source));
             }
@@ -128,6 +130,7 @@ impl WriteTxn {
         let prepared = match database.prepare_atomic_writes(self.staged.clone()) {
             Ok(prepared) => prepared,
             Err(error) => {
+                self.retain_failed_preparation_observations(database, previous_len);
                 self.staged.truncate(previous_len);
                 return Err(error);
             }
@@ -135,5 +138,21 @@ impl WriteTxn {
         debug_assert_eq!(prepared.basis(), self.basis);
         self.prepared = Some(prepared);
         Ok(())
+    }
+
+    fn retain_failed_preparation_observations<V: Vfs>(
+        &self,
+        database: &Database<V>,
+        previous_len: usize,
+    ) {
+        // Preparation is side-effect-free on the live writer, so it still
+        // supplies the exact basis that the refused attempt observed. Keep
+        // the same conservative capture used by successful prepared writes;
+        // returned errors (notably CAS.actual) can expose those observations.
+        let mut observations = self.read_set.borrow_mut();
+        for batch in &self.staged[previous_len..] {
+            crate::prepared_write::PreparedDependencies::capture(&database.writer, batch)
+                .retain_observations(&mut observations);
+        }
     }
 }

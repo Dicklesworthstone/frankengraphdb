@@ -180,6 +180,200 @@ fn failed_atomic_staging_preserves_prior_effects_and_evidence() {
 }
 
 #[test]
+fn rejected_staging_keeps_exposed_cas_reads_without_discarding_prior_effects() {
+    let ((), report) = run_async_under_lab(0xa702_0026, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txn_cx = contexts.txn();
+        for mode in 0..3 {
+            for edge_target in [false, true] {
+                for changed_target in [false, true] {
+                    let mut db = seeded(&cx).await;
+                    let mut seed_edge = WriteBatch::new(R);
+                    seed_edge.add_edge(EId(10), VId(1), VId(2), vec![(P, CanonicalScalar::Int(7))]);
+                    db.write(&cx, seed_edge).await.unwrap();
+                    let pins = txn_cx.outstanding_obligations();
+                    let mut txn = db.begin(&txn_cx).unwrap();
+                    let mut prior = WriteBatch::new(R);
+                    prior.create_vertex(VId(99), vec![], vec![]);
+                    txn.write(&mut db, prior).unwrap();
+                    let digest = txn.staged_effect_digest().unwrap();
+                    let frontier = db.frontier().unwrap();
+                    let mut attempt = WriteBatch::new(R);
+                    if mode == 2 {
+                        attempt.add_edge(EId(20), VId(4), VId(5), vec![]);
+                    }
+                    let target = if edge_target {
+                        attempt.compare_and_set_edge_property(
+                            EId(10),
+                            P,
+                            Some(CanonicalScalar::Int(999)),
+                            CanonicalScalar::Int(1000),
+                            fgdb::WriteMismatchPolicy::AbortWrite,
+                        );
+                        fgdb_delta_types::ElementId::Edge(EId(10))
+                    } else {
+                        attempt.compare_and_set_vertex_property(
+                            VId(1),
+                            P,
+                            Some(CanonicalScalar::Int(999)),
+                            CanonicalScalar::Int(1000),
+                            fgdb::WriteMismatchPolicy::AbortWrite,
+                        );
+                        fgdb_delta_types::ElementId::Vertex(VId(1))
+                    };
+                    let result = match mode {
+                        0 => txn.write(&mut db, attempt),
+                        1 => {
+                            let mut other = WriteBatch::new(S);
+                            other.create_vertex(VId(88), vec![], vec![]);
+                            txn.write_atomic(&mut db, vec![attempt, other])
+                        }
+                        _ => {
+                            let mut prefix = WriteBatch::new(S);
+                            prefix.ensure_vertex(VId(1), vec![], vec![]);
+                            prefix.create_vertex(VId(4), vec![], vec![]);
+                            prefix.create_vertex(VId(5), vec![], vec![]);
+                            txn.write_atomic(&mut db, vec![prefix, attempt])
+                        }
+                    };
+                    assert!(matches!(result,
+                        Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(mismatch)))
+                            if mismatch.elem == target
+                                && mismatch.actual == Some(CanonicalScalar::Int(if edge_target { 7 } else { 0 }))
+                    ));
+                    assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+                    assert_eq!(db.frontier().unwrap(), frontier);
+                    // Read the database only: a transaction point/scan here
+                    // would hide the missing observation in the failed write.
+                    assert!(db.vertex(VId(99)).unwrap().is_none());
+                    assert!(db.edge(EId(20)).unwrap().is_none());
+                    let mut winner = WriteBatch::new(R);
+                    if changed_target && edge_target {
+                        winner.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(8)));
+                    } else {
+                        winner.set_vertex_property(
+                            if changed_target { VId(1) } else { VId(3) },
+                            P,
+                            Some(CanonicalScalar::Int(8)),
+                        );
+                    }
+                    db.write(&cx, winner).await.unwrap();
+                    let before_commit = db.frontier().unwrap();
+                    let result = txn.commit(&mut db, &cx).await;
+                    if changed_target {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                                    law: "FG-LAW-FCW-READ-01",
+                                    ..
+                                }))
+                            ),
+                            "mode={mode}, edge_target={edge_target}, result={result:?}"
+                        );
+                        assert_eq!(db.frontier().unwrap(), before_commit);
+                        assert!(db.vertex(VId(99)).unwrap().is_none());
+                    } else {
+                        assert_eq!(result.unwrap(), CommitSeq(before_commit.0 + 1));
+                        assert!(db.vertex(VId(99)).unwrap().is_some());
+                    }
+                    for vid in [VId(4), VId(5), VId(88)] {
+                        assert!(db.vertex(vid).unwrap().is_none());
+                    }
+                    assert!(db.edge(EId(20)).unwrap().is_none());
+                    assert_eq!(txn_cx.outstanding_obligations(), pins);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn rejected_staging_keeps_negative_and_derived_cascade_observations() {
+    let ((), report) = run_async_under_lab(0xa702_0027, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let txn_cx = contexts.txn();
+        for atomic in [false, true] {
+            for cascade in [false, true] {
+                for changed_target in [false, true] {
+                    let mut db = seeded(&cx).await;
+                    let mut seed_edge = WriteBatch::new(R);
+                    seed_edge.add_edge(EId(10), VId(1), VId(2), vec![]);
+                    db.write(&cx, seed_edge).await.unwrap();
+                    let pins = txn_cx.outstanding_obligations();
+                    let mut txn = db.begin(&txn_cx).unwrap();
+                    let mut prior = WriteBatch::new(R);
+                    prior.create_vertex(VId(99), vec![], vec![]);
+                    txn.write(&mut db, prior).unwrap();
+                    let digest = txn.staged_effect_digest().unwrap();
+                    let mut attempt = WriteBatch::new(R);
+                    if cascade {
+                        // EId(10) is never named by the attempted batch. The
+                        // ordinary dependency capture must derive it from V1.
+                        attempt.delete_vertex(VId(1));
+                    }
+                    attempt.delete_vertex(VId(404));
+                    let result = if atomic {
+                        let mut other = WriteBatch::new(S);
+                        other.create_vertex(VId(88), vec![], vec![]);
+                        txn.write_atomic(&mut db, vec![attempt, other])
+                    } else {
+                        txn.write(&mut db, attempt)
+                    };
+                    assert!(matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::UnknownVertex {
+                            vid: VId(404)
+                        }))
+                    ));
+                    assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+                    assert!(db.vertex(VId(1)).unwrap().is_some());
+                    assert!(db.edge(EId(10)).unwrap().is_some());
+                    let mut winner = WriteBatch::new(R);
+                    if changed_target && cascade {
+                        // A property change touches the derived edge identity,
+                        // without inserting an edge or touching its endpoints.
+                        winner.set_edge_property(EId(10), P, Some(CanonicalScalar::Int(8)));
+                    } else if changed_target {
+                        winner.create_vertex(VId(404), vec![], vec![]);
+                    } else {
+                        winner.set_vertex_property(VId(3), P, Some(CanonicalScalar::Int(8)));
+                    }
+                    db.write(&cx, winner).await.unwrap();
+                    let frontier = db.frontier().unwrap();
+                    let result = txn.commit(&mut db, &cx).await;
+                    if changed_target {
+                        assert!(
+                            matches!(
+                                result,
+                                Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                                    law: "FG-LAW-FCW-READ-01",
+                                    ..
+                                }))
+                            ),
+                            "atomic={atomic}, cascade={cascade}, result={result:?}"
+                        );
+                        assert_eq!(db.frontier().unwrap(), frontier);
+                        assert!(db.vertex(VId(99)).unwrap().is_none());
+                    } else {
+                        assert_eq!(result.unwrap(), CommitSeq(frontier.0 + 1));
+                        assert!(db.vertex(VId(99)).unwrap().is_some());
+                    }
+                    assert!(db.vertex(VId(88)).unwrap().is_none());
+                    assert!(db.vertex(VId(1)).unwrap().is_some());
+                    assert!(db.edge(EId(10)).unwrap().is_some());
+                    assert_eq!(txn_cx.outstanding_obligations(), pins);
+                }
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn legacy_relation_refusal_and_atomic_owner_lifecycle_remain_explicit() {
     let ((), report) = run_async_under_lab(0xa702_0004, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);

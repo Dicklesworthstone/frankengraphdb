@@ -28,7 +28,7 @@ impl core::fmt::Debug for PreparedDependencies {
 }
 
 impl PreparedDependencies {
-    fn capture(writer: &BlockWriter, batch: &WriteBatch) -> Self {
+    pub(super) fn capture(writer: &BlockWriter, batch: &WriteBatch) -> Self {
         let mut result = Self::default();
         for pending in &batch.rows {
             match pending {
@@ -82,6 +82,15 @@ impl PreparedDependencies {
             }
         }
         result
+    }
+
+    /// A refused preparation still observed its basis. Preserve its
+    /// conservative footprint when the caller rolls back the attempted effects.
+    pub(super) fn retain_observations(self, observations: &mut BTreeSet<ElementId>) {
+        observations.extend(self.elements);
+        // Transaction validation checks adjacency-changing writes against
+        // endpoint vertex observations, including previously absent edges.
+        observations.extend(self.adjacency.into_iter().map(ElementId::Vertex));
     }
 }
 

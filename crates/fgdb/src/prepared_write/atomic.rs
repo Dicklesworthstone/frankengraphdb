@@ -105,14 +105,21 @@ impl SharedVertexPrefix {
         let crosses = batches.iter().any(|batch| {
             batch.rows.iter().any(|row| match row {
                 PendingRow::Edge { src, dst, .. } => [src, dst].into_iter().any(|vid| {
-                    origins.get(vid).is_some_and(|origin| *origin != batch.relation)
+                    origins
+                        .get(vid)
+                        .is_some_and(|origin| *origin != batch.relation)
                         && !is_live(*vid)
                 }),
                 _ => false,
             })
         });
         crosses.then(|| Self {
-            rows: batches.iter().flat_map(|batch| &batch.rows).take(count).cloned().collect(),
+            rows: batches
+                .iter()
+                .flat_map(|batch| &batch.rows)
+                .take(count)
+                .cloned()
+                .collect(),
             origins,
         })
     }
@@ -160,7 +167,8 @@ impl SharedVertexPrefix {
                 if let DeltaRow::CreateVertex { birth_ordinal, .. }
                 | DeltaRow::CreateEdge { birth_ordinal, .. } = &mut row
                 {
-                    *birth_ordinal = birth_ordinal.checked_add(suffix_offset)
+                    *birth_ordinal = birth_ordinal
+                        .checked_add(suffix_offset)
                         .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
                 }
                 suffix.push(row);
@@ -184,10 +192,13 @@ fn merge_coordinate(
 ) -> Result<(), WriteTxnError> {
     use std::collections::btree_map::Entry;
     match coordinates.entry(coordinate.relation) {
-        Entry::Vacant(slot) => { slot.insert(coordinate); }
+        Entry::Vacant(slot) => {
+            slot.insert(coordinate);
+        }
         Entry::Occupied(mut slot) => {
             let previous = slot.get_mut();
-            if previous.graph != coordinate.graph || previous.branch != coordinate.branch
+            if previous.graph != coordinate.graph
+                || previous.branch != coordinate.branch
                 || previous.schema_epoch != coordinate.schema_epoch
                 || previous.schema_transition != coordinate.schema_transition
             {
@@ -222,12 +233,16 @@ impl<V: Vfs + Clone> Database<V> {
         if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
             return Err(WriteError::EmptyBatch.into());
         }
-        if let Some(prefix) = SharedVertexPrefix::discover(&batches, |vid| self.writer.is_vertex_live(vid)) {
+        if let Some(prefix) =
+            SharedVertexPrefix::discover(&batches, |vid| self.writer.is_vertex_live(vid))
+        {
             return self.prepare_vertex_prefixed_groups(batches, prefix);
         }
         let mut groups: BTreeMap<RelationId, WriteBatch> = BTreeMap::new();
         for batch in batches {
-            groups.entry(batch.relation).or_insert_with(|| WriteBatch::new(batch.relation))
+            groups
+                .entry(batch.relation)
+                .or_insert_with(|| WriteBatch::new(batch.relation))
                 .extend(batch)?;
         }
         let mut independence = Independence::default();
@@ -235,8 +250,10 @@ impl<V: Vfs + Clone> Database<V> {
         let mut coordinates = Vec::with_capacity(groups.len());
         let mut ordinal_offset = 0_u64;
         for (relation, batch) in groups {
-            let visits = u64::try_from(batch.len()).map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?;
-            let next_offset = ordinal_offset.checked_add(visits)
+            let visits =
+                u64::try_from(batch.len()).map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?;
+            let next_offset = ordinal_offset
+                .checked_add(visits)
                 .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
             let prepared = self.prepare_write_checked(batch)?;
             let writes = written_elements(&prepared.template)?;
@@ -245,15 +262,19 @@ impl<V: Vfs + Clone> Database<V> {
                 // Original independent-group ordinal law is unchanged.
                 for row in &mut coordinate.rows {
                     if let DeltaRow::CreateVertex { birth_ordinal, .. }
-                    | DeltaRow::CreateEdge { birth_ordinal, .. } = row {
-                        *birth_ordinal = birth_ordinal.checked_add(ordinal_offset)
+                    | DeltaRow::CreateEdge { birth_ordinal, .. } = row
+                    {
+                        *birth_ordinal = birth_ordinal
+                            .checked_add(ordinal_offset)
                             .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
                     }
                 }
                 coordinates.push(coordinate);
             }
             dependencies.elements.extend(prepared.dependencies.elements);
-            dependencies.adjacency.extend(prepared.dependencies.adjacency);
+            dependencies
+                .adjacency
+                .extend(prepared.dependencies.adjacency);
             ordinal_offset = next_offset;
         }
         self.finish_atomic_preparation(coordinates, dependencies)
@@ -267,16 +288,25 @@ impl<V: Vfs + Clone> Database<V> {
         // Vertex identities are graph-wide in this slice, not relation-local.
         // The least coordinate must own the SINGLE prefix payload so canonical
         // replay creates all endpoints before any later relation's edges.
-        let owner = batches.iter().map(|batch| batch.relation).min()
+        let owner = batches
+            .iter()
+            .map(|batch| batch.relation)
+            .min()
             .ok_or(WriteError::EmptyBatch)?;
-        let prefix_visits = u64::try_from(prefix.rows.len())
-            .map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?;
+        let prefix_visits =
+            u64::try_from(prefix.rows.len()).map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?;
         let prefix_prepared = self.prepare_write_checked(WriteBatch {
-            relation: owner, rows: prefix.rows.clone(),
+            relation: owner,
+            rows: prefix.rows.clone(),
         })?;
         let mut expected = BTreeMap::new();
         let mut coordinates = BTreeMap::new();
-        for coordinate in prefix_prepared.template.coordinate_entries().iter().cloned() {
+        for coordinate in prefix_prepared
+            .template
+            .coordinate_entries()
+            .iter()
+            .cloned()
+        {
             for row in &coordinate.rows {
                 let DeltaRow::CreateVertex { vid, .. } = row else {
                     return Err(WriteTxnError::UnsupportedAtomicMutation);
@@ -294,44 +324,65 @@ impl<V: Vfs + Clone> Database<V> {
         let mut groups = BTreeMap::new();
         let mut remaining_prefix = prefix.rows.len();
         for batch in batches {
-            let suffix = groups.entry(batch.relation)
+            let suffix = groups
+                .entry(batch.relation)
                 .or_insert_with(|| WriteBatch::new(batch.relation));
             for row in batch.rows {
-                if remaining_prefix > 0 { remaining_prefix -= 1; }
-                else { suffix.rows.push(row); }
+                if remaining_prefix > 0 {
+                    remaining_prefix -= 1;
+                } else {
+                    suffix.rows.push(row);
+                }
             }
         }
         let mut independence = Independence::default();
         let mut suffix_offset = 0_u64;
         for (relation, mut suffix) in groups {
-            if suffix.is_empty() { continue; }
-            let visits = u64::try_from(suffix.len()).map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?;
-            let next_offset = suffix_offset.checked_add(visits)
+            if suffix.is_empty() {
+                continue;
+            }
+            let visits =
+                u64::try_from(suffix.len()).map_err(|_| WriteTxnError::AtomicOrdinalOverflow)?;
+            let next_offset = suffix_offset
+                .checked_add(visits)
                 .filter(|offset| prefix_visits.checked_add(*offset).is_some())
                 .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
-            let mut batch = WriteBatch { relation, rows: prefix.rows.clone() };
+            let mut batch = WriteBatch {
+                relation,
+                rows: prefix.rows.clone(),
+            };
             batch.rows.append(&mut suffix.rows);
             // No shadow database and no second mutation evaluator: the same
             // builder resolves order, ensures, CAS, admission and net effects.
             let prepared = self.prepare_write_checked(batch)?;
             let mut writes = written_elements(&prepared.template)?;
             let stripped = prefix.strip_verified_prefix(
-                &prepared.template, &expected, relation, suffix_offset,
+                &prepared.template,
+                &expected,
+                relation,
+                suffix_offset,
             )?;
             // Every group has just proved that the common prefix is immutable.
             // Its repeated evaluation is not a write/write conflict between
             // suffixes. KEEP these negative reads in the final external FCW
             // dependencies; remove them only for this intra-command check.
-            let created_by_prefix = |element: &ElementId| {
-                matches!(element, ElementId::Vertex(vid) if expected.contains_key(vid))
-            };
+            let created_by_prefix = |element: &ElementId| matches!(element, ElementId::Vertex(vid) if expected.contains_key(vid));
             writes.retain(|element| !created_by_prefix(element));
-            let reads = prepared.dependencies.elements.iter().copied()
-                .filter(|element| !created_by_prefix(element)).collect();
+            let reads = prepared
+                .dependencies
+                .elements
+                .iter()
+                .copied()
+                .filter(|element| !created_by_prefix(element))
+                .collect();
             independence.admit(relation, &reads, &writes)?;
-            for coordinate in stripped { merge_coordinate(&mut coordinates, coordinate)?; }
+            for coordinate in stripped {
+                merge_coordinate(&mut coordinates, coordinate)?;
+            }
             dependencies.elements.extend(prepared.dependencies.elements);
-            dependencies.adjacency.extend(prepared.dependencies.adjacency);
+            dependencies
+                .adjacency
+                .extend(prepared.dependencies.adjacency);
             suffix_offset = next_offset;
         }
         self.finish_atomic_preparation(coordinates.into_values().collect(), dependencies)
@@ -342,12 +393,14 @@ impl<V: Vfs + Clone> Database<V> {
         coordinates: Vec<CoordinateEntry>,
         dependencies: PreparedDependencies,
     ) -> Result<PreparedWrite, WriteTxnError> {
-        let template = LogicalDeltaTemplate::build(
-            crate::intent_semantics_oid(), [0_u8; 32], coordinates,
-        ).map_err(WriteError::Canonical)?;
+        let template =
+            LogicalDeltaTemplate::build(crate::intent_semantics_oid(), [0_u8; 32], coordinates)
+                .map_err(WriteError::Canonical)?;
         Ok(PreparedWrite {
-            template, basis: self.snapshot.frontier,
-            handle_owner: Arc::clone(&self.handle_owner), dependencies,
+            template,
+            basis: self.snapshot.frontier,
+            handle_owner: Arc::clone(&self.handle_owner),
+            dependencies,
         })
     }
 
@@ -375,16 +428,26 @@ mod tests {
         let edge_a = ElementId::Edge(EId(10));
         let edge_b = ElementId::Edge(EId(11));
         let mut check = Independence::default();
-        check.admit(RelationId(1), &[endpoint, edge_a].into(), &[edge_a].into()).unwrap();
-        check.admit(RelationId(2), &[endpoint, edge_b].into(), &[edge_b].into()).unwrap();
+        check
+            .admit(RelationId(1), &[endpoint, edge_a].into(), &[edge_a].into())
+            .unwrap();
+        check
+            .admit(RelationId(2), &[endpoint, edge_b].into(), &[edge_b].into())
+            .unwrap();
         let before_readers = check.readers.clone();
         let before_writers = check.writers.clone();
         let rejected = check.admit(RelationId(3), &[endpoint].into(), &[endpoint].into());
-        assert!(matches!(rejected, Err(WriteTxnError::AtomicRelationConflict { .. })));
+        assert!(matches!(
+            rejected,
+            Err(WriteTxnError::AtomicRelationConflict { .. })
+        ));
         assert_eq!(check.readers, before_readers);
         assert_eq!(check.writers, before_writers);
         let rejected = check.admit(RelationId(4), &[edge_a].into(), &BTreeSet::new());
-        assert!(matches!(rejected, Err(WriteTxnError::AtomicRelationConflict { .. })));
+        assert!(matches!(
+            rejected,
+            Err(WriteTxnError::AtomicRelationConflict { .. })
+        ));
         assert_eq!(check.readers, before_readers);
         assert_eq!(check.writers, before_writers);
     }
@@ -396,7 +459,8 @@ mod tests {
         vertices.create_vertex(VId(2), vec![], vec![]);
         let mut edge = WriteBatch::new(RelationId(1));
         edge.add_edge(EId(10), VId(1), VId(2), vec![]);
-        let prefix = SharedVertexPrefix::discover(&[vertices.clone(), edge.clone()], |_| false).unwrap();
+        let prefix =
+            SharedVertexPrefix::discover(&[vertices.clone(), edge.clone()], |_| false).unwrap();
         assert_eq!(prefix.rows.len(), 2);
         assert_eq!(prefix.origins[&VId(1)], RelationId(9));
         assert!(SharedVertexPrefix::discover(&[edge, vertices], |_| false).is_none());
