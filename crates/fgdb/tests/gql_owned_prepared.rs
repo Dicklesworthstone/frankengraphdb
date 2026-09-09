@@ -148,7 +148,7 @@ fn budgeted_adapters_count_the_admitted_table_and_stop_at_the_first_excess_row()
             vec![VId(4)]
         );
         let empty = db
-            .prepare_gql_query(&format!("{STATEMENT} LIMIT 0"), &bind)
+            .prepare_gql_query(&format!("{STATEMENT} SKIP 4"), &bind)
             .unwrap();
         assert!(
             txn.execute_prepared_query_budgeted(&db, &empty, GqlExecutionBudget::new(5, 0))

@@ -279,11 +279,7 @@ mod tests {
             }))
         ));
         assert_eq!(consumed.get(), 0, "admission precedes evaluator input");
-        for (tail, expected) in [
-            (" SKIP 1 LIMIT 1", vec![VId(3)]),
-            (" LIMIT 0", vec![]),
-            (" SKIP 2", vec![]),
-        ] {
+        for (tail, expected) in [(" SKIP 1 LIMIT 1", vec![VId(3)]), (" SKIP 2", vec![])] {
             let result = plan(tail)
                 .execute_budgeted(
                     3,
@@ -302,6 +298,30 @@ mod tests {
                 }
             );
         }
+        // Literal LIMIT 0 is outside the parser's positive-limit subset, but
+        // a directly constructed bound plan must still obey a zero row limit.
+        let mut zero = crate::RelationBind::new()
+            .with_relation("R", RelationId(1))
+            .bind("MATCH (a)-[:R]->(b) RETURN b")
+            .unwrap();
+        zero.limit = Some(0);
+        let result = GlaPlan::lower(&zero)
+            .execute_budgeted(
+                3,
+                [],
+                edges(),
+                |_, _| Ok::<_, ()>(true),
+                GqlExecutionBudget::new(3, 0),
+            )
+            .unwrap();
+        assert!(result.value.is_empty());
+        assert_eq!(
+            result.stats,
+            GqlExecutionStats {
+                snapshot_records: 3,
+                result_rows: 0
+            }
+        );
     }
 
     #[test]
