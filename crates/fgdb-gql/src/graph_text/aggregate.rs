@@ -3,7 +3,11 @@
 //! re-resolution. Group pagination is never pushed into the matching child.
 
 use super::*;
-use crate::{GraphAggregate, GraphAggregateFunction, PreparedGraphAggregate};
+use crate::{
+    GraphAggregate, GraphAggregateFunction, PreparedGraphAggregate, GraphAggregateColumn,
+    GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest, GraphNullPlacement,
+    MAX_AGGREGATE_FILTERS,
+};
 
 /// Position of a textual RETURN item in the typed aggregate result. All keys
 /// are retained by that result, even when RETURN interleaves keys and summaries.
@@ -18,6 +22,18 @@ struct Summary {
     function: GraphAggregateFunction,
     column: Option<usize>,
     alias: String,
+}
+
+#[derive(Clone)]
+enum HavingTest {
+    Integer { comparison: IntegerComparison, value: Number },
+    IsNull,
+    IsNotNull,
+}
+#[derive(Clone)]
+struct Having {
+    column: GraphAggregateColumn,
+    test: HavingTest,
 }
 impl Summary {
     fn declaration(&self) -> GraphAggregate<'_> {
@@ -47,6 +63,8 @@ pub struct PreparedGraphAggregateText {
     slots: Vec<GraphAggregateTextSlot>,
     offset: Number,
     count: Option<Number>,
+    having: Vec<Having>,
+    ordering: Vec<GraphAggregateOrder>,
 }
 impl core::fmt::Debug for PreparedGraphAggregateText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -92,8 +110,6 @@ impl PreparedGraphAggregateText {
                 if !parser.take(b',')? { break; }
             }
         }
-        parser.parse_pagination()?;
-        parser.end()?;
         if !returned.iter().any(|item| item.function.is_some()) {
             return Err(error(parser.syntax.return_at, GraphPatternTextErrorKind::Expected("at least one aggregate expression")));
         }
@@ -107,6 +123,46 @@ impl PreparedGraphAggregateText {
                 return Err(error(group.variable.at, GraphPatternTextErrorKind::Expected("GROUP BY expression projected in RETURN")));
             }
         }
+        let mut having = Vec::new();
+        if parser.take_word("HAVING")? {
+            loop {
+                parser.capacity(having.len(), MAX_AGGREGATE_FILTERS, crate::algebra::PatternLimitDimension::Predicates)?;
+                let column = parser.result_column(&returned, &groups)?;
+                let test = if parser.take_word("IS")? {
+                    let negate = parser.take_word("NOT")?;
+                    parser.word("NULL")?;
+                    if negate { HavingTest::IsNotNull } else { HavingTest::IsNull }
+                } else {
+                    let comparison = parser.comparison()?;
+                    let value = parser.number(GqlParameterType::Int64)?;
+                    HavingTest::Integer { comparison, value }
+                };
+                having.push(Having { column, test });
+                if !parser.take_word("AND")? { break; }
+            }
+        }
+        let mut ordering: Vec<GraphAggregateOrder> = Vec::new();
+        if parser.take_word("ORDER")? {
+            parser.word("BY")?;
+            loop {
+                parser.capacity(ordering.len(), MAX_PATTERN_VERTICES, crate::algebra::PatternLimitDimension::Columns)?;
+                let at = parser.current.at;
+                let column = parser.result_column(&returned, &groups)?;
+                if ordering.iter().any(|previous| previous.column == column) {
+                    return Err(error(at, GraphPatternTextErrorKind::Expected("unique ORDER BY column")));
+                }
+                let descending = parser.take_word("DESC")?;
+                if !descending { parser.take_word("ASC")?; }
+                let nulls = if parser.take_word("NULLS")? {
+                    if parser.take_word("FIRST")? { GraphNullPlacement::First }
+                    else { parser.word("LAST")?; GraphNullPlacement::Last }
+                } else { GraphNullPlacement::Last };
+                ordering.push(GraphAggregateOrder { column, descending, nulls });
+                if !parser.take(b',')? { break; }
+            }
+        }
+        parser.parse_pagination()?;
+        parser.end()?;
         // Emit group input expressions first with their actual public aliases.
         // Repeated aggregate arguments reuse one source column. A grouping
         // expression first mentioned inside SUM cannot steal the key's name.
@@ -149,7 +205,7 @@ impl PreparedGraphAggregateText {
         let count = parser.syntax.count.take();
         parser.syntax.distinct = false;
         let child = PreparedGraphText::from_syntax(statement, parser.syntax, resolve)?;
-        Ok(Self { child, keys, summaries, names, slots, offset, count })
+        Ok(Self { child, keys, summaries, names, slots, offset, count, having, ordering })
     }
 
     /// Explicit definition and schema exports; Debug does not expose them.
@@ -170,8 +226,19 @@ impl PreparedGraphAggregateText {
         let values = self.child.checked_arguments(arguments)?;
         let input = self.child.bind_values(&values)?;
         let summaries: Vec<_> = self.summaries.iter().map(Summary::declaration).collect();
+        let having: Vec<_> = self.having.iter().map(|filter| GraphAggregateFilter {
+            column: filter.column,
+            test: match &filter.test {
+                HavingTest::Integer { comparison, value } => GraphAggregateTest::Integer {
+                    comparison: *comparison, value: i128::from(value.signed(&values)),
+                },
+                HavingTest::IsNull => GraphAggregateTest::IsNull,
+                HavingTest::IsNotNull => GraphAggregateTest::IsNotNull,
+            },
+        }).collect();
         PreparedGraphAggregate::prepare(input, &self.keys, &summaries,
             self.offset.unsigned(&values), self.count.as_ref().map(|count| count.unsigned(&values)))
+            .and_then(|aggregate| aggregate.with_result_clauses(&having, &self.ordering))
             .map_err(|kind| error(self.child.return_at, GraphPatternTextErrorKind::AggregateBuild(kind)))
     }
 }
@@ -203,25 +270,7 @@ impl<'a> Parser<'a> {
     fn aggregate_item(&mut self) -> Result<ReturnItem<'a>, GraphPatternTextError> {
         let name = self.name()?;
         let (expression, function, default_alias) = if self.take(b'(')? {
-            let function = if name.text.eq_ignore_ascii_case("COUNT") { GraphAggregateFunction::Count }
-                else if name.text.eq_ignore_ascii_case("SUM") || name.text.eq_ignore_ascii_case("SUM_INT") { GraphAggregateFunction::SumInt }
-                else if name.text.eq_ignore_ascii_case("MIN") { GraphAggregateFunction::Min }
-                else if name.text.eq_ignore_ascii_case("MAX") { GraphAggregateFunction::Max }
-                else { return Err(error(name.at, GraphPatternTextErrorKind::Expected("COUNT, SUM, SUM_INT, MIN or MAX"))); };
-            let distinct = self.take_word("DISTINCT")?;
-            if !distinct { self.take_word("ALL")?; }
-            let (expression, function) = if self.take(b'*')? {
-                if function != GraphAggregateFunction::Count || distinct {
-                    return Err(error(name.at, GraphPatternTextErrorKind::Expected("COUNT(*) without argument DISTINCT")));
-                }
-                (None, GraphAggregateFunction::CountRows)
-            } else {
-                if distinct && function != GraphAggregateFunction::Count {
-                    return Err(error(name.at, GraphPatternTextErrorKind::Expected("DISTINCT argument only for COUNT")));
-                }
-                (Some(self.aggregate_expression()?), if distinct { GraphAggregateFunction::CountDistinct } else { function })
-            };
-            self.punct(b')', ")")?;
+            let (expression, function) = self.aggregate_call(name)?;
             let alias = match function {
                 GraphAggregateFunction::CountRows | GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct => "count",
                 GraphAggregateFunction::SumInt => "sum", GraphAggregateFunction::Min => "min", GraphAggregateFunction::Max => "max",
@@ -233,5 +282,67 @@ impl<'a> Parser<'a> {
         };
         let alias = if self.take_word("AS")? { self.name()? } else { default_alias };
         Ok(ReturnItem { expression, function, alias })
+    }
+
+    /// Called after the opening parenthesis. RETURN and post-aggregate
+    /// references share exactly one aggregate-function grammar.
+    fn aggregate_call(&mut self, name: Name<'a>)
+        -> Result<(Option<Expression<'a>>, GraphAggregateFunction), GraphPatternTextError> {
+        let function = if name.text.eq_ignore_ascii_case("COUNT") { GraphAggregateFunction::Count }
+            else if name.text.eq_ignore_ascii_case("SUM") || name.text.eq_ignore_ascii_case("SUM_INT") { GraphAggregateFunction::SumInt }
+            else if name.text.eq_ignore_ascii_case("MIN") { GraphAggregateFunction::Min }
+            else if name.text.eq_ignore_ascii_case("MAX") { GraphAggregateFunction::Max }
+            else { return Err(error(name.at, GraphPatternTextErrorKind::Expected("COUNT, SUM, SUM_INT, MIN or MAX"))); };
+        let distinct = self.take_word("DISTINCT")?;
+        if !distinct { self.take_word("ALL")?; }
+        let result = if self.take(b'*')? {
+            if function != GraphAggregateFunction::Count || distinct {
+                return Err(error(name.at, GraphPatternTextErrorKind::Expected("COUNT(*) without argument DISTINCT")));
+            }
+            (None, GraphAggregateFunction::CountRows)
+        } else {
+            if distinct && function != GraphAggregateFunction::Count {
+                return Err(error(name.at, GraphPatternTextErrorKind::Expected("DISTINCT argument only for COUNT")));
+            }
+            (Some(self.aggregate_expression()?), if distinct { GraphAggregateFunction::CountDistinct } else { function })
+        };
+        self.punct(b')', ")")?;
+        Ok(result)
+    }
+
+    /// Resolve an output alias or repeated projected expression without adding
+    /// a hidden summary, re-reading source columns or changing the result shape.
+    /// A bare output alias wins over a same-spelled input variable; qualified
+    /// expressions and function calls always mean the explicit expression.
+    fn result_column(&mut self, returned: &[ReturnItem<'a>], groups: &[Expression<'a>])
+        -> Result<GraphAggregateColumn, GraphPatternTextError> {
+        let name = self.name()?;
+        let selected = if self.take(b'(')? {
+            let (expression, function) = self.aggregate_call(name)?;
+            returned.iter().position(|item| item.function == Some(function)
+                && same_expression(item.expression, expression))
+        } else if !self.is_punct(b'.') && returned.iter().any(|item| item.alias.text == name.text) {
+            returned.iter().position(|item| item.alias.text == name.text)
+        } else {
+            let expression = self.expression_after_name(name)?;
+            returned.iter().position(|item| item.function.is_none()
+                && item.expression.is_some_and(|previous| previous.same(expression)))
+        }.ok_or_else(|| error(name.at, GraphPatternTextErrorKind::Expected("projected group key or aggregate")))?;
+        let item = &returned[selected];
+        if item.function.is_some() {
+            Ok(GraphAggregateColumn::Aggregate(returned[..selected].iter().filter(|item| item.function.is_some()).count()))
+        } else {
+            let expression = item.expression.expect("a nonaggregate return item has an expression");
+            Ok(GraphAggregateColumn::GroupKey(groups.iter().position(|group| group.same(expression))
+                .expect("all nonaggregate return expressions were validated as keys")))
+        }
+    }
+}
+
+fn same_expression(left: Option<Expression<'_>>, right: Option<Expression<'_>>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.same(right),
+        (None, None) => true,
+        _ => false,
     }
 }
