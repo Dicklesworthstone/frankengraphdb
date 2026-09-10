@@ -1,14 +1,14 @@
 //! Typed GLA lowering for the existing bounded MATCH language.
 //!
 //! The default output is a sorted distinct vertex-ID set. Typed graph-pattern
-//! tuple plans preserve correlated columns and use lexicographic row ordering.
-//! Neither output is a general GQL bag or a registered FreeJoin physical plan.
+//! value plans additionally support bags and scoped nullable bindings. This
+//! is not the registered FreeJoin physical implementation.
 
 mod existence;
 mod output;
 mod pattern;
 mod values;
-pub use existence::GraphExistence;
+pub use existence::{GraphExistence, GraphMatchClause};
 pub use output::{GlaIdentityOutput, GlaOutput, GraphBindingRow};
 pub use pattern::{
     GraphPatternBuilder, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
@@ -124,8 +124,8 @@ impl VertexPredicate {
     }
 }
 
-/// Typed GLA operators. Probe/ProbeEnd delimit a correlated semijoin or
-/// antijoin; only a private compiler can pair their boundaries and slots.
+/// Typed GLA operators. Scoped left/semi/anti joins have compiler-owned
+/// boundaries and binding slots; callers cannot construct executable plans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GlaOperator {
     Empty,
@@ -156,6 +156,18 @@ pub enum GlaOperator {
         anti: bool,
     },
     ProbeEnd {
+        group: u32,
+    },
+    /// Correlated left join. `slots` is the complete inner frame width,
+    /// including copies of correlated bindings. No match extends that frame
+    /// with nulls exactly once; the projection retains original outer slots.
+    Optional {
+        group: u32,
+        end: u32,
+        slots: u32,
+    },
+    /// Match success is recorded here, before executing any later clause.
+    OptionalEnd {
         group: u32,
     },
     /// Copy a correlated identity into the inner scope, without scanning rows.
@@ -525,6 +537,16 @@ impl<Row> GlaPlan<Row> {
                 GlaOperator::BindVertex { source } => {
                     bytes.push(16);
                     bytes.extend_from_slice(&source.0.to_be_bytes());
+                }
+                GlaOperator::Optional { group, end, slots } => {
+                    bytes.push(17);
+                    bytes.extend_from_slice(&group.to_be_bytes());
+                    bytes.extend_from_slice(&end.to_be_bytes());
+                    bytes.extend_from_slice(&slots.to_be_bytes());
+                }
+                GlaOperator::OptionalEnd { group } => {
+                    bytes.push(18);
+                    bytes.extend_from_slice(&group.to_be_bytes());
                 }
             }
         }

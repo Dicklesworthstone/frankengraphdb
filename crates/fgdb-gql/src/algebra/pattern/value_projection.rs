@@ -43,37 +43,7 @@ impl GraphPatternBuilder {
         offset: u64,
         count: Option<u64>,
     ) -> Result<PreparedGraphPattern<GraphValueRow>, PatternBuildError> {
-        if self.variables.is_empty() {
-            return Err(PatternBuildError::EmptyPattern);
-        }
-        if columns.is_empty() {
-            return Err(PatternBuildError::EmptyProjection);
-        }
-        if columns.len() > MAX_PATTERN_VERTICES {
-            return Err(PatternBuildError::LimitExceeded {
-                dimension: PatternLimitDimension::Columns,
-                limit: MAX_PATTERN_VERTICES,
-                observed: columns.len(),
-            });
-        }
-        let mut variables = Vec::new();
-        for (at, column) in columns.iter().enumerate() {
-            let name = column.name();
-            let bytes = name.as_bytes();
-            if bytes.is_empty()
-                || bytes.len() > MAX_PATTERN_NAME_BYTES
-                || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-                || !bytes
-                    .iter()
-                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
-                return Err(PatternBuildError::InvalidColumnName);
-            }
-            if columns[..at].iter().any(|previous| previous.name() == name) {
-                return Err(PatternBuildError::DuplicateProjection);
-            }
-            variables.push(self.variable(column.variable())?);
-        }
+        let variables = self.checked_value_columns(columns)?;
         let (mut operators, slots) = self.compile()?;
         let projection = columns
             .iter()

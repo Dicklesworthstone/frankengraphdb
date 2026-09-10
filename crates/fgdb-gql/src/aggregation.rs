@@ -354,10 +354,14 @@ impl PreparedGraphAggregate {
                 for (at, column) in columns.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
                     values[at] = match column {
-                        ValueProjection::Vertex { slot } => ValueRef::Vertex(bindings[slot.ordinal() as usize]),
+                        ValueProjection::Vertex { slot } => bindings[slot.ordinal() as usize]
+                            .map_or(ValueRef::Scalar(&NULL), ValueRef::Vertex),
                         ValueProjection::Property { slot, key } => {
-                            let value = property(bindings[slot.ordinal() as usize], *key)
-                                .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?;
+                            let value = match bindings[slot.ordinal() as usize] {
+                                Some(vid) => property(vid, *key)
+                                    .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))?,
+                                None => None,
+                            };
                             ValueRef::Scalar(value.unwrap_or(&NULL))
                         }
                     };
@@ -418,7 +422,8 @@ impl ValueRef<'_> {
     }
     fn copy_owned<E>(self, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<GraphValue, E> {
         control(GlaExecutionEvent::ScratchEntry)?;
-        for _ in 0..self.payload_units() { control(GlaExecutionEvent::ScratchEntry)?; }
+        for _ in 0..self.payload_units() { control(GlaExecutionEvent::ScratchEntry)?;
+        }
         Ok(match self {
             Self::Scalar(value) => GraphValue::Scalar(value.clone()),
             Self::Vertex(value) => GraphValue::Vertex(value),

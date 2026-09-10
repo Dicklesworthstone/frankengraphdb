@@ -55,7 +55,8 @@ impl core::fmt::Debug for GraphBindingRow {
 
 /// Closed output domain. Only a private compiler pairs plans with collectors.
 /// Property rows require an explicit property source; no absent-source fallback
-/// can silently replace every projected value with null.
+/// can silently replace every projected value with null. Nullable scopes are
+/// compiled only for GraphValueRow, never for the identity-only output types.
 pub trait GlaOutput: sealed::PropertyProjection + Clone + Ord {}
 impl GlaOutput for VId {}
 impl GlaOutput for GraphBindingRow {}
@@ -73,7 +74,7 @@ mod sealed {
     pub trait Projection: Sized + Ord {
         fn collect<E>(
             operator: &GlaOperator,
-            bindings: &[VId],
+            bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E>;
@@ -82,7 +83,7 @@ mod sealed {
     pub trait PropertyProjection: Sized + Ord {
         fn collect_properties<'a, E>(
             operator: &GlaOperator,
-            bindings: &[VId],
+            bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
             property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -92,14 +93,15 @@ mod sealed {
     impl Projection for VId {
         fn collect<E>(
             operator: &GlaOperator,
-            bindings: &[VId],
+            bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             let GlaOperator::Project { slot } = operator else {
                 unreachable!("the private scalar-plan constructor owns its projection shape")
             };
-            let value = bindings[slot.ordinal() as usize];
+            let value = bindings[slot.ordinal() as usize]
+                .expect("identity-only plans cannot contain nullable bindings");
             if !projected.contains(&value) {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 projected.insert(value);
@@ -111,7 +113,7 @@ mod sealed {
     impl Projection for GraphBindingRow {
         fn collect<E>(
             operator: &GlaOperator,
-            bindings: &[VId],
+            bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
@@ -124,7 +126,8 @@ mod sealed {
             let mut key = [VId(0); MAX_PATTERN_VERTICES];
             for (column, slot) in slots.iter().enumerate() {
                 control(GlaExecutionEvent::Work)?;
-                key[column] = bindings[slot.ordinal() as usize];
+                key[column] = bindings[slot.ordinal() as usize]
+                    .expect("identity-only plans cannot contain nullable bindings");
             }
             let key = &key[..slots.len()];
             if projected.contains(key) {
@@ -148,7 +151,7 @@ mod sealed {
     impl PropertyProjection for VId {
         fn collect_properties<'a, E>(
             operator: &GlaOperator,
-            bindings: &[VId],
+            bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
             _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -160,7 +163,7 @@ mod sealed {
     impl PropertyProjection for GraphBindingRow {
         fn collect_properties<'a, E>(
             operator: &GlaOperator,
-            bindings: &[VId],
+            bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
             _property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -172,7 +175,7 @@ mod sealed {
     impl PropertyProjection for GraphValueRow {
         fn collect_properties<'a, E>(
             operator: &GlaOperator,
-            bindings: &[VId],
+            bindings: &[Option<VId>],
             projected: &mut ProjectedRows<Self>,
             property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -199,7 +202,7 @@ mod tests {
         let mut rows = ProjectedRows::new(true);
         let mut scratch = 0;
         for bindings in [[VId(1), VId(3)], [VId(2), VId(3)], [VId(1), VId(3)]] {
-            GraphBindingRow::collect(&op, &bindings, &mut rows, &mut |event| {
+            GraphBindingRow::collect(&op, &bindings.map(Some), &mut rows, &mut |event| {
                 scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
                 Ok::<_, ()>(())
             })
@@ -226,7 +229,7 @@ mod tests {
         for stop in 1..=5 {
             let mut rows = ProjectedRows::new(true);
             let mut calls = 0;
-            let result = GraphBindingRow::collect(&op, &[VId(1), VId(2)], &mut rows, &mut |_| {
+            let result = GraphBindingRow::collect(&op, &[Some(VId(1)), Some(VId(2))], &mut rows, &mut |_| {
                 calls += 1;
                 if calls == stop { Err(stop) } else { Ok(()) }
             });

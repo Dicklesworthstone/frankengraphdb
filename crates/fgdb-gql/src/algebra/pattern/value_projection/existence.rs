@@ -1,14 +1,12 @@
-//! Scoped semijoin/antijoin lowering reuses the positive-pattern compiler.
+//! Scoped left/semi/anti joins lowered through the positive-pattern compiler.
 
 use super::*;
-use crate::algebra::GraphExistence;
+use crate::algebra::{GraphExistence, GraphMatchClause};
+use crate::algebra::existence::GraphMatchKind;
 
 impl GraphPatternBuilder {
     /// Project outer values subject to correlated EXISTS / NOT EXISTS patterns.
-    /// All constraints are AND-conjoined, before DISTINCT/order/pagination.
-    /// Inner variable names that also occur outside are correlated identities;
-    /// other names are local and cannot be returned. Every inner definition
-    /// must be connected and have at least one outer correlation.
+    /// Inner local names never become outer projections or later correlations.
     pub fn prepare_values_with_existence(
         &self,
         constraints: &[GraphExistence<'_>],
@@ -16,28 +14,53 @@ impl GraphPatternBuilder {
         offset: u64,
         count: Option<u64>,
     ) -> Result<PreparedGraphPattern<GraphValueRow>, PatternBuildError> {
-        let mut output = self.prepare_values(columns, offset, count)?;
-        if constraints.is_empty() { return Ok(output); }
         check_total(constraints.len(), MAX_PATTERN_IDENTITIES, PatternLimitDimension::Identities)?;
+        let clauses: Vec<_> = constraints.iter().map(|constraint| {
+            if constraint.anti { GraphMatchClause::not_exists(constraint.pattern) }
+            else { GraphMatchClause::exists(constraint.pattern) }
+        }).collect();
+        self.prepare_values_with_clauses(&clauses, columns, offset, count)
+    }
+
+    /// Compile ordered correlated OPTIONAL, EXISTS and NOT EXISTS clauses.
+    /// OPTIONAL exports new variables, nullable when its complete child has no
+    /// match. Later clauses may correlate those variables but cannot rebind a
+    /// null. EXISTS locals stay private. A complete optional witness remains a
+    /// witness even if a later clause rejects it. ALL/DISTINCT and pagination
+    /// apply only to the final correlated projection.
+    ///
+    /// Each positive connected child needs an already visible correlation.
+    /// Definition-wide edge/predicate/identity/visible-variable caps apply;
+    /// clause count is capped at 64. No runtime input constructs a GLA scope.
+    pub fn prepare_values_with_clauses(
+        &self,
+        clauses: &[GraphMatchClause<'_>],
+        columns: &[GraphColumn<'_>],
+        offset: u64,
+        count: Option<u64>,
+    ) -> Result<PreparedGraphPattern<GraphValueRow>, PatternBuildError> {
+        if clauses.is_empty() { return self.prepare_values(columns, offset, count); }
+        check_total(clauses.len(), MAX_PATTERN_IDENTITIES, PatternLimitDimension::Identities)?;
         let mut edges = self.edges.len();
         let mut predicates = self.predicate_count;
         let mut identities = self.identities.len();
-        for constraint in constraints {
-            edges = edges.saturating_add(constraint.pattern.edges.len());
-            predicates = predicates.saturating_add(constraint.pattern.predicate_count);
-            identities = identities.saturating_add(constraint.pattern.identities.len());
+        for clause in clauses {
+            edges = edges.saturating_add(clause.pattern.edges.len());
+            predicates = predicates.saturating_add(clause.pattern.predicate_count);
+            identities = identities.saturating_add(clause.pattern.identities.len());
             check_total(edges, MAX_PATTERN_EDGES, PatternLimitDimension::Edges)?;
             check_total(predicates, MAX_PATTERN_PREDICATES, PatternLimitDimension::Predicates)?;
             check_total(identities, MAX_PATTERN_IDENTITIES, PatternLimitDimension::Identities)?;
         }
-        // Use the same compiler's slot map. No positional guesses from the
-        // projection schema; a correlation need not be a returned column.
-        let (mut operators, outer_slots) = self.compile()?;
-        let width = (if self.edges.is_empty() { 1 } else { self.edges.len() + 1 }) as u32;
-        for (group, constraint) in constraints.iter().enumerate() {
-            let mut inner = (*constraint.pattern).clone();
+        // Scope metadata has only declared names; it is never recompiled as an
+        // inner-join replacement for the sequence of nullable clauses.
+        let mut scope = self.clone();
+        let (mut operators, mut scope_slots) = self.compile()?;
+        let mut width = (if self.edges.is_empty() { 1 } else { self.edges.len() + 1 }) as u32;
+        for (group, clause) in clauses.iter().enumerate() {
+            let mut inner = (*clause.pattern).clone();
             if inner.variables.is_empty() { return Err(PatternBuildError::EmptyPattern); }
-            let correlation = |inner_at: usize| self.variables.iter()
+            let correlation = |inner_at: usize| scope.variables.iter()
                 .position(|outer| outer.name == inner.variables[inner_at].name);
             let anchor = if inner.edges.is_empty() {
                 if inner.variables.len() != 1 { return Err(PatternBuildError::Disconnected); }
@@ -51,7 +74,7 @@ impl GraphPatternBuilder {
             let (edge_at, outer_at) = anchor;
             if !inner.edges.is_empty() {
                 inner.edges.swap(0, edge_at);
-                if inner.variables[inner.edges[0].source].name != self.variables[outer_at].name {
+                if inner.variables[inner.edges[0].source].name != scope.variables[outer_at].name {
                     let edge = &mut inner.edges[0];
                     core::mem::swap(&mut edge.source, &mut edge.destination);
                     edge.direction = super::super::reverse(edge.direction);
@@ -59,23 +82,28 @@ impl GraphPatternBuilder {
             }
             let (body, inner_slots) = inner.compile()?;
             let correlations: Vec<_> = inner.variables.iter().enumerate().filter_map(|(at, variable)| {
-                self.variables.iter().position(|outer| outer.name == variable.name)
-                    .map(|outer| (inner_slots[at], outer_slots[outer]))
+                scope.variables.iter().position(|outer| outer.name == variable.name)
+                    .map(|outer| (inner_slots[at], scope_slots[outer]))
             }).collect();
             let start = operators.len();
-            operators.push(GlaOperator::Probe { group: group as u32, end: 0, anti: constraint.anti });
-            // A real copied binding, not a row scan or a synthetic identifier.
-            // Keeping inner slots separate also keeps inner labels out of the
-            // outer node scan's mandatory-label conflict witness.
-            operators.push(GlaOperator::BindVertex { source: outer_slots[outer_at] });
-            let map = |slot: BindingSlot| BindingSlot(width + slot.ordinal());
+            let optional = clause.kind == GraphMatchKind::Optional;
+            operators.push(if optional {
+                GlaOperator::Optional { group: group as u32, end: 0, slots: 0 }
+            } else {
+                GlaOperator::Probe { group: group as u32, end: 0, anti: clause.kind == GraphMatchKind::NotExists }
+            });
+            // An explicit inner copy preserves outer labels/identities and
+            // prevents a child predicate becoming a mandatory outer-scan label.
+            operators.push(GlaOperator::BindVertex { source: scope_slots[outer_at] });
+            let base = width;
+            let map = |slot: BindingSlot| BindingSlot(base + slot.ordinal());
             let mut available = 1_u32;
             emit_correlations(&mut operators, &correlations, 0, map);
             for (at, operator) in body.into_iter().enumerate() {
                 match operator {
                     GlaOperator::ScanVertices if at == 0 => {}
                     GlaOperator::ScanEdges { relation, direction } if at == 0 => {
-                        operators.push(GlaOperator::Expand { source: BindingSlot(width), relation, direction });
+                        operators.push(GlaOperator::Expand { source: BindingSlot(base), relation, direction });
                         emit_correlations(&mut operators, &correlations, available, map);
                         available += 1;
                     }
@@ -90,14 +118,65 @@ impl GraphPatternBuilder {
                 }
             }
             let end = operators.len() as u32;
-            operators.push(GlaOperator::ProbeEnd { group: group as u32 });
-            operators[start] = GlaOperator::Probe { group: group as u32, end, anti: constraint.anti };
+            if optional {
+                operators.push(GlaOperator::OptionalEnd { group: group as u32 });
+                operators[start] = GlaOperator::Optional { group: group as u32, end, slots: available };
+                for (at, variable) in inner.variables.iter().enumerate() {
+                    if !scope.variables.iter().any(|outer| outer.name == variable.name) {
+                        scope.vertex(&variable.name)?;
+                        scope_slots.push(map(inner_slots[at]));
+                    }
+                }
+                // At most total edges + one copied anchor per clause + the
+                // root slot are live, bounded above by 129 slots, not by data.
+                width += available;
+            } else {
+                operators.push(GlaOperator::ProbeEnd { group: group as u32 });
+                operators[start] = GlaOperator::Probe { group: group as u32, end, anti: clause.kind == GraphMatchKind::NotExists };
+            }
         }
-        let suffix = &output.logical.operators()[output.logical.operators().len() - 4..];
-        operators.extend_from_slice(suffix);
-        output.logical = GlaPlan::from_operators(operators);
-        output.edge_count = edges;
-        Ok(output)
+        let variables = scope.checked_value_columns(columns)?;
+        let projection = columns.iter().zip(variables).map(|(column, variable)| {
+            let slot = scope_slots[variable];
+            match column {
+                GraphColumn::Vertex { .. } => ValueProjection::Vertex { slot },
+                GraphColumn::Property { key, .. } => ValueProjection::Property { slot, key: *key },
+            }
+        }).collect();
+        operators.extend([
+            GlaOperator::ProjectValues { columns: projection },
+            GlaOperator::Distinct,
+            GlaOperator::OrderByValues,
+            GlaOperator::Limit { offset, count },
+        ]);
+        Ok(PreparedGraphPattern {
+            logical: GlaPlan::from_operators(operators),
+            variable_count: scope.variables.len(),
+            edge_count: edges,
+            columns: columns.iter().map(|column| column.name().to_owned()).collect(),
+        })
+    }
+
+    /// One projection validation path for positive and scoped value patterns.
+    pub(super) fn checked_value_columns(&self, columns: &[GraphColumn<'_>]) -> Result<Vec<usize>, PatternBuildError> {
+        if self.variables.is_empty() { return Err(PatternBuildError::EmptyPattern); }
+        if columns.is_empty() { return Err(PatternBuildError::EmptyProjection); }
+        check_total(columns.len(), MAX_PATTERN_VERTICES, PatternLimitDimension::Columns)?;
+        let mut variables = Vec::new();
+        for (at, column) in columns.iter().enumerate() {
+            let bytes = column.name().as_bytes();
+            if bytes.is_empty() || bytes.len() > MAX_PATTERN_NAME_BYTES
+                || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+                || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                return Err(PatternBuildError::InvalidColumnName);
+            }
+            if columns[..at].iter().any(|previous| previous.name() == column.name()) {
+                return Err(PatternBuildError::DuplicateProjection);
+            }
+            variables.push(self.variable(column.variable())?);
+        }
+        Ok(variables)
     }
 }
 

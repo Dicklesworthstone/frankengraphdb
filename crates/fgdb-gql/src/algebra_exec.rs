@@ -262,6 +262,7 @@ struct Execution<F, C, P, Row> {
     projected: ProjectedRows<Row>,
     active_probe: Option<usize>,
     probe_matches: [bool; crate::algebra::MAX_PATTERN_IDENTITIES],
+    optional_matches: [bool; crate::algebra::MAX_PATTERN_IDENTITIES],
 }
 
 impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
@@ -269,13 +270,13 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
         &mut self,
         operators: &[GlaOperator],
         ordinal: usize,
-        bindings: &mut Vec<VId>,
+        bindings: &mut Vec<Option<VId>>,
         index: &Index,
     ) -> Result<(), E>
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[VId], &mut ProjectedRows<Row>, &mut C) -> Result<(), E>,
+        P: FnMut(&GlaOperator, &[Option<VId>], &mut ProjectedRows<Row>, &mut C) -> Result<(), E>,
     {
         let Some(operator) = operators.get(ordinal) else {
             return Ok(());
@@ -283,7 +284,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
         (self.control)(GlaExecutionEvent::Work)?;
         match operator {
             GlaOperator::Select { slot, predicates } => {
-                let Some(vid) = bindings.get(slot.ordinal() as usize).copied() else {
+                let Some(vid) = bindings.get(slot.ordinal() as usize).copied().flatten() else {
                     return Ok(());
                 };
                 let key = (ordinal, vid);
@@ -300,7 +301,8 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 }
             }
             GlaOperator::VertexIdentity { left, right, equal } => {
-                if let (Some(left), Some(right)) = (
+                // NULL = NULL and NULL <> x are not matching predicates.
+                if let (Some(Some(left)), Some(Some(right))) = (
                     bindings.get(left.ordinal() as usize),
                     bindings.get(right.ordinal() as usize),
                 ) && (left == right) == *equal
@@ -313,7 +315,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 relation,
                 direction,
             } => {
-                let Some(source) = bindings.get(source.ordinal() as usize).copied() else {
+                let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten() else {
                     return Ok(());
                 };
                 if let Some(neighbors) = index
@@ -321,7 +323,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                     .and_then(|adjacency| adjacency.get(&source))
                 {
                     for destination in neighbors {
-                        bindings.push(*destination);
+                        bindings.push(Some(*destination));
                         let result = self.visit(operators, ordinal + 1, bindings, index);
                         let _ = bindings.pop();
                         result?;
@@ -353,10 +355,41 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 debug_assert_eq!(self.active_probe, Some(*group as usize));
                 self.probe_matches[*group as usize] = true;
             }
+            GlaOperator::Optional { group, end, slots } => {
+                let group = *group as usize;
+                let width = bindings.len();
+                self.optional_matches[group] = false;
+                let result = self.visit(operators, ordinal + 1, bindings, index);
+                bindings.truncate(width);
+                // Only a successfully exhausted scope can establish absence.
+                // Failure after a witness must not return a partial outer bag.
+                result?;
+                if !self.optional_matches[group] {
+                    let result = (|| {
+                        for _ in 0..*slots {
+                            (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                            bindings.push(None);
+                        }
+                        self.visit(operators, *end as usize + 1, bindings, index)
+                    })();
+                    // A refusal halfway through null extension restores the
+                    // original frame just as a refused real expansion does.
+                    bindings.truncate(width);
+                    result?;
+                }
+            }
+            GlaOperator::OptionalEnd { group } => {
+                // This boundary is before all subsequent clauses. A later
+                // semijoin rejecting this witness cannot invent a null row.
+                self.optional_matches[*group as usize] = true;
+                self.visit(operators, ordinal + 1, bindings, index)?;
+            }
             GlaOperator::BindVertex { source } => {
-                let value = bindings[source.ordinal() as usize];
+                let Some(value) = bindings[source.ordinal() as usize] else {
+                    return Ok(());
+                };
                 (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                bindings.push(value);
+                bindings.push(Some(value));
                 let result = self.visit(operators, ordinal + 1, bindings, index);
                 let _ = bindings.pop();
                 result?;
@@ -464,7 +497,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[VId], &mut ProjectedRows<Row>, &mut C) -> Result<(), E>,
+        P: FnMut(&GlaOperator, &[Option<VId>], &mut ProjectedRows<Row>, &mut C) -> Result<(), E>,
     {
         let operators = self.operators();
         let index = if self.reads_edges() {
@@ -482,6 +515,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             projected: ProjectedRows::<Row>::new(distinct),
             active_probe: None,
             probe_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
+            optional_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
         };
         let mut bindings = Vec::new();
         match operators.first() {
@@ -489,7 +523,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 for vid in vertices {
                     (execution.control)(GlaExecutionEvent::Work)?;
                     bindings.clear();
-                    bindings.push(vid);
+                    bindings.push(Some(vid));
                     execution.visit(operators, 1, &mut bindings, &index)?;
                 }
             }
@@ -502,7 +536,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                         for destination in destinations {
                             (execution.control)(GlaExecutionEvent::Work)?;
                             bindings.clear();
-                            bindings.extend([*source, *destination]);
+                            bindings.extend([Some(*source), Some(*destination)]);
                             execution.visit(operators, 1, &mut bindings, &index)?;
                         }
                     }

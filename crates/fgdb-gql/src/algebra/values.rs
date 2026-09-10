@@ -77,7 +77,8 @@ pub enum ValueProjection {
 }
 
 /// Scalar values retain their exact canonical type, collation and time binding.
-/// Missing properties project as Scalar(Null). No numeric coercion occurs.
+/// Missing properties and null-extended vertices project as Scalar(Null).
+/// No numeric coercion occurs. No VId is reserved as a null sentinel.
 /// Canonical scalar order precedes the disjoint vertex-identity domain.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GraphValue {
@@ -246,7 +247,7 @@ impl Ord for dyn RowKey + '_ {
 
 pub(super) fn collect_values<'a, E>(
     columns: &[ValueProjection],
-    bindings: &[VId],
+    bindings: &[Option<VId>],
     projected: &mut ProjectedRows<GraphValueRow>,
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -256,9 +257,15 @@ pub(super) fn collect_values<'a, E>(
     for (at, column) in columns.iter().enumerate() {
         control(GlaExecutionEvent::Work)?;
         key[at] = match column {
-            ValueProjection::Vertex { slot } => ValueRef::Vertex(bindings[slot.ordinal() as usize]),
+            ValueProjection::Vertex { slot } => bindings[slot.ordinal() as usize]
+                .map_or(ValueRef::Scalar(&null), ValueRef::Vertex),
             ValueProjection::Property { slot, key } => {
-                let value = property(bindings[slot.ordinal() as usize], *key)?;
+                // An absent binding is not a vertex with a missing property.
+                // Never consult the source with a fabricated identity.
+                let value = match bindings[slot.ordinal() as usize] {
+                    Some(vid) => property(vid, *key)?,
+                    None => None,
+                };
                 ValueRef::Scalar(value.unwrap_or(&null))
             }
         };
@@ -351,7 +358,7 @@ mod tests {
         for (owner, present) in [(1, false), (1, true), (2, false)] {
             collect_values(
                 &columns(),
-                &[VId(owner), VId(4)],
+                &[Some(VId(owner)), Some(VId(4))],
                 &mut rows,
                 &mut |_, _| Ok::<_, ()>(present.then_some(&null)),
                 &mut |_| Ok(()),
@@ -375,7 +382,7 @@ mod tests {
         for _ in 0..2 {
             collect_values(
                 &columns(),
-                &[VId(1), VId(2)],
+                &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
                 &mut |_, _| Ok::<_, ()>(Some(&payload)),
                 &mut |event| {
@@ -399,7 +406,7 @@ mod tests {
         let mut total = 0;
         collect_values(
             &columns(),
-            &[VId(1), VId(2)],
+            &[Some(VId(1)), Some(VId(2))],
             &mut ProjectedRows::new(true),
             &mut |_, _| Ok::<_, usize>(Some(&payload)),
             &mut |_| {
@@ -413,7 +420,7 @@ mod tests {
             let mut calls = 0;
             let result = collect_values(
                 &columns(),
-                &[VId(1), VId(2)],
+                &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
                 &mut |_, _| Ok::<_, usize>(Some(&payload)),
                 &mut |_| {
@@ -429,7 +436,7 @@ mod tests {
         assert_eq!(
             collect_values(
                 &columns(),
-                &[VId(1), VId(2)],
+                &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
                 &mut |_, _| Err::<Option<&CanonicalScalar>, _>("source"),
                 &mut |_| Ok(())
@@ -447,7 +454,7 @@ mod tests {
         for present in [true, false, true, false] {
             collect_values(
                 &columns(),
-                &[VId(1), VId(2)],
+                &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
                 &mut |_, _| Ok::<_, ()>(present.then_some(&payload)),
                 &mut |event| {
@@ -472,7 +479,7 @@ mod tests {
         let mut total = 0;
         collect_values(
             &columns(),
-            &[VId(1), VId(2)],
+            &[Some(VId(1)), Some(VId(2))],
             &mut ProjectedRows::new(false),
             &mut |_, _| Ok::<_, usize>(Some(&payload)),
             &mut |_| {
@@ -485,7 +492,7 @@ mod tests {
             let mut rows = ProjectedRows::new(false);
             collect_values(
                 &columns(),
-                &[VId(1), VId(2)],
+                &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
                 &mut |_, _| Ok::<_, usize>(Some(&payload)),
                 &mut |_| Ok(()),
@@ -494,7 +501,7 @@ mod tests {
             let mut calls = 0;
             let result = collect_values(
                 &columns(),
-                &[VId(1), VId(2)],
+                &[Some(VId(1)), Some(VId(2))],
                 &mut rows,
                 &mut |_, _| Ok::<_, usize>(Some(&payload)),
                 &mut |_| {
@@ -510,5 +517,37 @@ mod tests {
                 "refused occurrence never enters the private collector"
             );
         }
+    }
+
+    #[test]
+    fn absent_bindings_project_null_without_reading_a_sentinel_vertex() {
+        let selected = [
+            ValueProjection::Vertex { slot: BindingSlot(0) },
+            ValueProjection::Vertex { slot: BindingSlot(1) },
+            ValueProjection::Property { slot: BindingSlot(1), key: PropertyKeyId(7) },
+        ];
+        for owner in [VId(0), VId(u128::MAX)] {
+            let mut rows = ProjectedRows::new(false);
+            collect_values(&selected, &[Some(owner), None], &mut rows,
+                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("null binding reached the source"),
+                &mut |_| Ok(())).unwrap();
+            let row = rows.first().unwrap();
+            assert_eq!(row.get(0).unwrap().as_vertex(), Some(owner));
+            assert!(row.get(1).unwrap().is_null());
+            assert!(row.get(2).unwrap().is_null());
+        }
+        let scalar = CanonicalScalar::Int(12);
+        let mut calls = 0;
+        let mut rows = ProjectedRows::new(false);
+        collect_values(&selected, &[Some(VId(u128::MAX)), Some(VId(0))], &mut rows,
+            &mut |vid, _| {
+                assert_eq!(vid, VId(0));
+                calls += 1;
+                Ok::<_, ()>(Some(&scalar))
+            }, &mut |_| Ok(())).unwrap();
+        assert_eq!(calls, 1);
+        let row = rows.first().unwrap();
+        assert_eq!(row.get(1).unwrap().as_vertex(), Some(VId(0)));
+        assert_eq!(row.get(2).unwrap().as_scalar(), Some(&scalar));
     }
 }
