@@ -140,11 +140,15 @@ mod query_source {
             &'a self, snapshot: &'a Snapshot, logical: GlaPlan<Row>, required_vertex_label: Option<LabelId>,
             control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
         ) -> Result<OverlayQuerySource<'a, Row>, E> {
-            let edge_scan = logical.scans_edges(); control(SourceEvent::Work)?;
-            if edge_scan { self.scanned_edges.set(true); }
-            else if let Some(label) = required_vertex_label {
-                control(SourceEvent::ScratchEntry)?; self.scanned_vertex_labels.borrow_mut().insert(label);
-            } else { self.scanned_vertices.set(true); }
+            let edge_scan = logical.scans_edges();
+            let reads_edges = logical.reads_edges();
+            control(SourceEvent::Work)?;
+            if reads_edges { self.scanned_edges.set(true); }
+            if !edge_scan {
+                if let Some(label) = required_vertex_label {
+                    control(SourceEvent::ScratchEntry)?; self.scanned_vertex_labels.borrow_mut().insert(label);
+                } else { self.scanned_vertices.set(true); }
+            }
             let mut observed = BTreeSet::new();
             // Raw intentions contribute only negative-read identities. The
             // canonical template, not these intentions, creates query rows.
@@ -156,12 +160,12 @@ mod query_source {
                         PendingRow::Vertex { vid, .. } | PendingRow::DeleteVertex { vid, .. } => {
                             self.note_query_read(&mut observed, ElementId::Vertex(*vid), control)?;
                         }
-                        PendingRow::Edge { eid, src, dst, .. } if edge_scan => {
+                        PendingRow::Edge { eid, src, dst, .. } if reads_edges => {
                             for element in [ElementId::Edge(*eid), ElementId::Vertex(*src), ElementId::Vertex(*dst)] {
                                 self.note_query_read(&mut observed, element, control)?;
                             }
                         }
-                        PendingRow::DeleteEdge { eid, .. } if edge_scan => {
+                        PendingRow::DeleteEdge { eid, .. } if reads_edges => {
                             self.note_query_read(&mut observed, ElementId::Edge(*eid), control)?;
                         }
                         _ => {}
@@ -169,7 +173,7 @@ mod query_source {
                 }
             }
             let mut vertices = BTreeMap::new(); let mut edges = OverlayEdgeMap::new();
-            if edge_scan {
+            if reads_edges {
                 source::visit_edges(&snapshot.blocks, self.basis, control, |entry, control| {
                     for element in [ElementId::Edge(entry.eid), ElementId::Vertex(entry.src), ElementId::Vertex(entry.dst)] {
                         self.note_query_read(&mut observed, element, control)?;
@@ -177,7 +181,8 @@ mod query_source {
                     control(SourceEvent::ScratchEntry)?;
                     edges.insert(entry.eid, (entry.src, entry.relation, entry.dst)); Ok(())
                 })?;
-            } else {
+            }
+            if !edge_scan {
                 source::visit_vertices(&snapshot.patches, self.basis, control, |row, control| {
                     self.note_query_read(&mut observed, ElementId::Vertex(row.vid), control)?;
                     control(SourceEvent::ScratchEntry)?; vertices.insert(row.vid, VertexView::new(&row.labels, &row.props)); Ok(())
@@ -189,22 +194,24 @@ mod query_source {
                     control(SourceEvent::Work)?;
                     for effect in &coordinate.rows {
                         control(SourceEvent::Work)?;
-                        if !edge_scan { apply_vertex(&mut vertices, effect, None, control)?; continue; }
-                        match effect {
-                            DeltaRow::CreateEdge { eid, src, relation, dst, .. } => {
-                                if !edges.contains_key(eid) { control(SourceEvent::ScratchEntry)?; }
-                                edges.insert(*eid, (*src, *relation, *dst));
-                            }
-                            DeltaRow::DeleteEdge { eid, .. } => { edges.remove(eid); }
-                            DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } => {
-                                for eid in sorted_retired_incident_edges {
-                                    control(SourceEvent::Work)?; self.note_query_read(&mut observed, ElementId::Edge(*eid), control)?;
-                                    edges.remove(eid);
+                        if !edge_scan { apply_vertex(&mut vertices, effect, None, control)?; }
+                        if reads_edges {
+                            match effect {
+                                DeltaRow::CreateEdge { eid, src, relation, dst, .. } => {
+                                    if !edges.contains_key(eid) { control(SourceEvent::ScratchEntry)?; }
+                                    edges.insert(*eid, (*src, *relation, *dst));
                                 }
+                                DeltaRow::DeleteEdge { eid, .. } => { edges.remove(eid); }
+                                DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } => {
+                                    for eid in sorted_retired_incident_edges {
+                                        control(SourceEvent::Work)?; self.note_query_read(&mut observed, ElementId::Edge(*eid), control)?;
+                                        edges.remove(eid);
+                                    }
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
-                        if is_vertex_effect(effect) { control(SourceEvent::ScratchEntry)?; vertex_effects.push(effect); }
+                        if edge_scan && is_vertex_effect(effect) { control(SourceEvent::ScratchEntry)?; vertex_effects.push(effect); }
                     }
                 }
             }
@@ -240,7 +247,7 @@ mod query_source {
             for triple in edges.into_values() {
                 control(SourceEvent::Work)?; control(SourceEvent::SnapshotRecord)?; control(SourceEvent::ScratchEntry)?; edge_rows.push(triple);
             }
-            let snapshot_records = if edge_scan { edge_rows.len() } else { vertex_rows.len() };
+            let snapshot_records = edge_rows.len() + if edge_scan { 0 } else { vertex_rows.len() };
             Ok(OverlayQuerySource { logical, vertices: vertex_rows, edges: edge_rows, snapshot_records })
         }
     }

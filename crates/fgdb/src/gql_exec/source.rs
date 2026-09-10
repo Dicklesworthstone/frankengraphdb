@@ -172,10 +172,18 @@ pub(super) fn admit<'a, E, Row>(
     use fgdb_gql::algebra::GlaOperator;
     if !logical.scans_edges() {
         let vertices = scan_vertices(&snapshot.patches, as_of, control)?;
+        // A node-root semijoin needs both base tables. Keep isolated outer
+        // vertices, admit topology once, and charge every base record to the
+        // same allowance. Probe execution never rereads either source table.
+        let edges = if logical.reads_edges() {
+            scan_edges(&snapshot.blocks, as_of, control)?
+        } else {
+            Vec::new()
+        };
         return Ok(BorrowedTables {
-            snapshot_records: vertices.len() as u64,
+            snapshot_records: vertices.len() as u64 + edges.len() as u64,
             vertices,
-            edges: Vec::new(),
+            edges,
         });
     }
     let edges = scan_edges(&snapshot.blocks, as_of, control)?;

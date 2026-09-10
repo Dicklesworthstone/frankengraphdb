@@ -307,7 +307,10 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             let rows = reader.gql_vertices_at(as_of)?;
             let count = rows.len() as u64;
             vertices.extend(rows.into_iter().map(|row| (row.vid, row)));
-            count
+            if logical.reads_edges() {
+                edges = reader.gql_edges_at(as_of)?;
+            }
+            count + edges.len() as u64
         };
         Ok(Self {
             reader,
