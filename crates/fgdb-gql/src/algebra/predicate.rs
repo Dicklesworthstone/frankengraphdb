@@ -98,21 +98,7 @@ impl ScalarPredicate {
 
     #[must_use]
     pub fn matches(&self, actual: Option<&CanonicalScalar>) -> bool {
-        let Some(actual) = actual else { return false; };
-        if matches!(actual, CanonicalScalar::Null) || matches!(self.value(), CanonicalScalar::Null)
-            || core::mem::discriminant(actual) != core::mem::discriminant(self.value())
-        {
-            return false;
-        }
-        let order = actual.cmp(self.value());
-        match self.comparison {
-            IntegerComparison::Equal => order == Ordering::Equal,
-            IntegerComparison::NotEqual => order != Ordering::Equal,
-            IntegerComparison::Greater => order == Ordering::Greater,
-            IntegerComparison::Less => order == Ordering::Less,
-            IntegerComparison::GreaterOrEqual => order != Ordering::Less,
-            IntegerComparison::LessOrEqual => order != Ordering::Greater,
-        }
+        self.comparison.accepts_scalar_pair(actual, Some(self.value()))
     }
 
     pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
@@ -129,6 +115,35 @@ fn check_size(observed: usize) -> Result<(), ScalarPredicateError> {
     if observed > MAX_SCALAR_PREDICATE_BYTES {
         Err(ScalarPredicateError::LiteralTooLarge { limit: MAX_SCALAR_PREDICATE_BYTES, observed })
     } else { Ok(()) }
+}
+
+impl IntegerComparison {
+    /// Compare two borrowed canonical properties under the same rule as a
+    /// scalar literal predicate. Missing/null/heterogeneous pairs never pass,
+    /// including NotEqual. This is a WHERE-selection result, not a three-valued
+    /// Boolean expression whose false result may safely be negated.
+    #[must_use]
+    pub fn accepts_scalar_pair(
+        self,
+        left: Option<&CanonicalScalar>,
+        right: Option<&CanonicalScalar>,
+    ) -> bool {
+        let (Some(left), Some(right)) = (left, right) else { return false; };
+        if matches!(left, CanonicalScalar::Null) || matches!(right, CanonicalScalar::Null)
+            || core::mem::discriminant(left) != core::mem::discriminant(right)
+        {
+            return false;
+        }
+        let order = left.cmp(right);
+        match self {
+            Self::Equal => order == Ordering::Equal,
+            Self::NotEqual => order != Ordering::Equal,
+            Self::Greater => order == Ordering::Greater,
+            Self::Less => order == Ordering::Less,
+            Self::GreaterOrEqual => order != Ordering::Less,
+            Self::LessOrEqual => order != Ordering::Greater,
+        }
+    }
 }
 
 impl VertexPredicate {
@@ -253,5 +268,25 @@ mod tests {
         assert_eq!(actual, expected);
         drop(equal);
         assert!(!different.matches(Some(different.value())));
+    }
+
+    #[test]
+    fn borrowed_pairs_preserve_direction_and_reject_absence_on_either_side() {
+        let small = CanonicalScalar::Int(i64::MIN);
+        let large = CanonicalScalar::Int(i64::MAX);
+        let floating = CanonicalScalar::Float(CanonicalF64::new(0.0));
+        let null = CanonicalScalar::Null;
+        for comparison in [IntegerComparison::Equal, IntegerComparison::NotEqual,
+            IntegerComparison::Greater, IntegerComparison::Less,
+            IntegerComparison::GreaterOrEqual, IntegerComparison::LessOrEqual] {
+            for absent in [None, Some(&null), Some(&floating)] {
+                assert!(!comparison.accepts_scalar_pair(Some(&small), absent));
+                assert!(!comparison.accepts_scalar_pair(absent, Some(&small)));
+            }
+            assert_eq!(comparison.accepts_scalar_pair(Some(&small), Some(&large)),
+                comparison.accepts(i64::MIN, i64::MAX));
+            assert_eq!(comparison.accepts_scalar_pair(Some(&large), Some(&small)),
+                comparison.accepts(i64::MAX, i64::MIN));
+        }
     }
 }
