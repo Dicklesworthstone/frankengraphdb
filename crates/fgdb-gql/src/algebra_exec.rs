@@ -3,6 +3,7 @@
 //! admitted-row work, operator visits, scratch growth and final row release.
 
 mod comparison;
+mod join;
 mod policy;
 mod projection;
 use comparison::compare_properties;
@@ -225,6 +226,7 @@ fn build_index<E>(
             index.entry((*relation, *direction)).or_default();
         }
     }
+    join::register_indexes(operators, &mut index, control)?;
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
         for direction in [
@@ -342,8 +344,16 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                     .get(&(*relation, *direction))
                     .and_then(|adjacency| adjacency.get(&source))
                 {
-                    for destination in neighbors {
-                        bindings.push(Some(*destination));
+                    let mut candidates = join::candidates(
+                        operators,
+                        ordinal,
+                        bindings,
+                        neighbors,
+                        index,
+                        &mut self.control,
+                    )?;
+                    while let Some(destination) = candidates.next(&mut self.control)? {
+                        bindings.push(Some(destination));
                         let result = self.visit(operators, ordinal + 1, bindings, index);
                         let _ = bindings.pop();
                         result?;
@@ -562,6 +572,13 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             }) => {
                 if let Some(adjacency) = index.get(&(*relation, *direction)) {
                     for (source, destinations) in adjacency {
+                        let destinations = join::bound_neighbors(
+                            operators.get(1),
+                            1,
+                            &[Some(*source)],
+                            destinations,
+                            &mut execution.control,
+                        )?;
                         for destination in destinations {
                             (execution.control)(GlaExecutionEvent::Work)?;
                             bindings.clear();
