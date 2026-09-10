@@ -28,8 +28,10 @@ fn reverse(direction: GlaDirection) -> GlaDirection {
 
 /// Recognize two adjacent expansions whose new slots are joined immediately:
 ///
-///     expand(bound, x); expand(x, y); y = bound2
-///     expand(bound, x); expand(bound2, y); y = x
+/// ```text
+/// expand(bound, x); expand(x, y); y = bound2
+/// expand(bound, x); expand(bound2, y); y = x
+/// ```
 ///
 /// No predicate or scope boundary may intervene. Numeric slot relationships are
 /// checked again against the actual binding width before using an access path.
