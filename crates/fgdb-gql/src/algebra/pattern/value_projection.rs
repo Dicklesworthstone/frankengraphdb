@@ -1,6 +1,8 @@
 //! Value-column preparation and terminal multiplicity selection over the
 //! existing connected-pattern compiler.
 
+mod existence;
+
 use super::super::{GraphColumn, GraphValueRow, ValueProjection};
 use super::*;
 

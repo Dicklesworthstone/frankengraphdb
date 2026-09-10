@@ -4,9 +4,11 @@
 //! tuple plans preserve correlated columns and use lexicographic row ordering.
 //! Neither output is a general GQL bag or a registered FreeJoin physical plan.
 
+mod existence;
 mod output;
 mod pattern;
 mod values;
+pub use existence::GraphExistence;
 pub use output::{GlaIdentityOutput, GlaOutput, GraphBindingRow};
 pub use pattern::{
     GraphPatternBuilder, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
@@ -122,8 +124,8 @@ impl VertexPredicate {
     }
 }
 
-/// Linear typed GLA operators. Only a private compiler can construct a plan;
-/// output markers prevent a tuple projection from entering a scalar executor.
+/// Typed GLA operators. Probe/ProbeEnd delimit a correlated semijoin or
+/// antijoin; only a private compiler can pair their boundaries and slots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GlaOperator {
     Empty,
@@ -145,6 +147,20 @@ pub enum GlaOperator {
         source: BindingSlot,
         relation: RelationId,
         direction: GlaDirection,
+    },
+    /// Evaluate the enclosed binding scope once per outer occurrence. The
+    /// first complete witness resolves the predicate; it is not an output row.
+    Probe {
+        group: u32,
+        end: u32,
+        anti: bool,
+    },
+    ProbeEnd {
+        group: u32,
+    },
+    /// Copy a correlated identity into the inner scope, without scanning rows.
+    BindVertex {
+        source: BindingSlot,
     },
     Project {
         slot: BindingSlot,
@@ -370,6 +386,14 @@ impl<Row> GlaPlan<Row> {
         matches!(self.operators.first(), Some(GlaOperator::ScanEdges { .. }))
     }
 
+    /// An outer vertex scan may also need topology for correlated predicates.
+    /// This is distinct from the root scan that determines the outer rows.
+    #[must_use]
+    pub fn reads_edges(&self) -> bool {
+        self.operators.iter().any(|operator| matches!(operator,
+            GlaOperator::ScanEdges { .. } | GlaOperator::Expand { .. }))
+    }
+
     /// Property projections require a real source even without a predicate.
     #[must_use]
     pub fn projects_properties(&self) -> bool {
@@ -488,6 +512,20 @@ impl<Row> GlaPlan<Row> {
                     }
                 }
                 GlaOperator::OrderByValues => bytes.push(13),
+                GlaOperator::Probe { group, end, anti } => {
+                    bytes.push(14);
+                    bytes.extend_from_slice(&group.to_be_bytes());
+                    bytes.extend_from_slice(&end.to_be_bytes());
+                    bytes.push(u8::from(*anti));
+                }
+                GlaOperator::ProbeEnd { group } => {
+                    bytes.push(15);
+                    bytes.extend_from_slice(&group.to_be_bytes());
+                }
+                GlaOperator::BindVertex { source } => {
+                    bytes.push(16);
+                    bytes.extend_from_slice(&source.0.to_be_bytes());
+                }
             }
         }
         bytes

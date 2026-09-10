@@ -260,6 +260,8 @@ struct Execution<F, C, P, Row> {
     project: P,
     predicate_cache: BTreeMap<(usize, VId), bool>,
     projected: ProjectedRows<Row>,
+    active_probe: Option<usize>,
+    probe_matches: [bool; crate::algebra::MAX_PATTERN_IDENTITIES],
 }
 
 impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
@@ -323,8 +325,41 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                         let result = self.visit(operators, ordinal + 1, bindings, index);
                         let _ = bindings.pop();
                         result?;
+                        // Existence resolves at its clause boundary, not by
+                        // counting final results or watching DISTINCT change.
+                        if self.active_probe.is_some_and(|group| self.probe_matches[group]) {
+                            break;
+                        }
                     }
                 }
+            }
+            GlaOperator::Probe { group, end, anti } => {
+                let group = *group as usize;
+                let previous = self.active_probe;
+                self.active_probe = Some(group);
+                self.probe_matches[group] = false;
+                let width = bindings.len();
+                let result = self.visit(operators, ordinal + 1, bindings, index);
+                // Restore scope even on source, work, scratch or cancellation
+                // refusal. No failure is converted into NOT EXISTS success.
+                bindings.truncate(width);
+                self.active_probe = previous;
+                result?;
+                if self.probe_matches[group] != *anti {
+                    self.visit(operators, *end as usize + 1, bindings, index)?;
+                }
+            }
+            GlaOperator::ProbeEnd { group } => {
+                debug_assert_eq!(self.active_probe, Some(*group as usize));
+                self.probe_matches[*group as usize] = true;
+            }
+            GlaOperator::BindVertex { source } => {
+                let value = bindings[source.ordinal() as usize];
+                (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                bindings.push(value);
+                let result = self.visit(operators, ordinal + 1, bindings, index);
+                let _ = bindings.pop();
+                result?;
             }
             GlaOperator::Project { .. }
             | GlaOperator::ProjectBindings { .. }
@@ -432,7 +467,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         P: FnMut(&GlaOperator, &[VId], &mut ProjectedRows<Row>, &mut C) -> Result<(), E>,
     {
         let operators = self.operators();
-        let index = if self.scans_edges() {
+        let index = if self.reads_edges() {
             build_index(operators, edges, &mut control)?
         } else {
             Index::new()
@@ -445,6 +480,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             project,
             predicate_cache: BTreeMap::new(),
             projected: ProjectedRows::<Row>::new(distinct),
+            active_probe: None,
+            probe_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
         };
         let mut bindings = Vec::new();
         match operators.first() {
