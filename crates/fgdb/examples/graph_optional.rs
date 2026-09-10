@@ -1,38 +1,36 @@
 //! cargo run -p fgdb --example graph_optional
 //!
-//! Ordered correlated OPTIONAL/EXISTS/NOT EXISTS share the existing compiler,
-//! source admission, GLA binding visitor, governed policy and result collectors.
-//! An OPTIONAL child exports new vertex names to later clauses. No complete
-//! child match produces one null extension; real child matches keep their bag
-//! multiplicity. Child predicates run before null extension. A subsequent
-//! clause rejecting a real match cannot make that match become an absent one.
+//! OPTIONAL MATCH and root EXISTS/NOT EXISTS text lower to the same ordered
+//! scoped GLA as the typed builder. Optional children export new names; their
+//! WHERE predicates run before null extension. The root remains mandatory.
+//! One missing complete child contributes one null extension, while actual
+//! matches preserve bag multiplicity. Chained clauses preserve partial paths.
 //!
-//! Null bindings are Option<VId>, not a reserved ID. They never reach vertex
-//! predicate/property sources and cannot be rebound by later correlations.
-//! A later independent optional branch may still match through a nonnull outer
-//! variable. EXISTS locals remain private. Final GraphValueRow cells express
-//! absent vertices/properties as canonical null, and streaming aggregates apply
-//! their normal null rules: COUNT(*) retains the outer occurrence, COUNT(b)
-//! excludes a null b. Identity-only result APIs remain statically nonnullable.
+//! All scopes share the original lexer, numeric-argument schema, catalog cache,
+//! byte offsets and definition-wide caps. Binding never reparses, resolves names
+//! again, or executes a query. RETURN * and aggregate text see optional names,
+//! but existential locals never escape. Scoped WHERE can refer to variables
+//! explicitly named in its own MATCH; correlation names must also be visible
+//! outside. Inner bodies are positive and connected. Nested scopes, inner
+//! RETURN, arbitrary expressions and disconnected subqueries remain refusals.
 //!
-//! Existing snapshot and canonical transaction sources admit required tables
-//! once, keep isolated vertices and conflict witnesses, and share one allowance
-//! with traversal, null extension, grouping and output. Definitions admit up to
-//! 64 clauses/edge atoms, 65 visible variables/columns, 256 predicates and 64
-//! explicit identity constraints. Copied correlations can occupy 129 private
-//! binding slots. Every positive child must connect to a visible correlation.
+//! Null bindings are Option<VId>, not reserved IDs. They never reach property
+//! sources. COUNT(*) preserves null-extended occurrences; COUNT(company) does
+//! not count an absent company. Source, traversal, grouping and final output
+//! share one governed allowance, and dependencies survive later refusal.
 //!
-//! This is the typed API, not OPTIONAL MATCH text syntax, arbitrary nested or
-//! disconnected subqueries, variable-length paths, full SSI, authorized FreeJoin
-//! access, spill or byte-accurate allocator/lifetime governance. The example and
-//! fifteen new Rust tests are UNRUN in this connector environment without Rust.
+//! This is not full GQL, full SSI, edge/path-valued output, governed wire/CLI
+//! integration, registered FreeJoin, spill or byte-accurate lifetime governance.
+//! The example and new scoped-text Rust tests are UNRUN in the connector
+//! environment without Cargo/rustc. No native validation is asserted here.
 
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GlaDirection, GraphColumn, GraphMatchClause, GraphPatternBuilder,
     GraphValueRow, IntegerComparison, VertexPredicate};
-use fgdb_gql::{GraphAggregate, GqlQueryError, GqlQueryPolicy, PreparedGraphAggregate};
+use fgdb_gql::{GraphSymbol, GraphSymbolKind, GqlParameters, GqlQueryError, GqlQueryPolicy,
+    PreparedGraphAggregateText, PreparedGraphText};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
 const KNOWS: RelationId = RelationId(1);
@@ -40,6 +38,15 @@ const WORKS_AT: RelationId = RelationId(2);
 const PERSON: LabelId = LabelId(1);
 const SCORE: PropertyKeyId = PropertyKeyId(1);
 
+fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+    match (kind, name) {
+        (GraphSymbolKind::Relation, "KNOWS") => Some(GraphSymbol::Relation(KNOWS)),
+        (GraphSymbolKind::Relation, "WORKS_AT") => Some(GraphSymbol::Relation(WORKS_AT)),
+        (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(PERSON)),
+        (GraphSymbolKind::Property, "score") => Some(GraphSymbol::Property(SCORE)),
+        _ => None,
+    }
+}
 fn main() {
     if let Err(error) = run() {
         eprintln!("FAILED: {error}");
@@ -73,6 +80,7 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let created = db.write_atomic(&commit, vec![vertices, first, second]).await?;
         let pinned = db.read_session()?;
 
+        // Preserve a typed definition as a direct lowering equivalence check.
         let mut people = GraphPatternBuilder::new();
         people.vertex("person")?;
         people.filter("person", VertexPredicate::HasLabel(PERSON))?;
@@ -88,7 +96,15 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let columns = [GraphColumn::vertex("owner", "person"), GraphColumn::vertex("friend", "friend"),
             GraphColumn::vertex("company", "company"), GraphColumn::property("score", "company", SCORE)];
         let clauses = [GraphMatchClause::optional(&friendship), GraphMatchClause::optional(&employment)];
-        let pattern = people.prepare_values_with_clauses(&clauses, &columns, 0, None)?.with_duplicates();
+        let typed = people.prepare_values_with_clauses(&clauses, &columns, 0, None)?.with_duplicates();
+        let head = "MATCH (person:Person) OPTIONAL MATCH (person)-[:KNOWS]->(friend) \
+            OPTIONAL MATCH (friend)-[:WORKS_AT]->(company) WHERE company.score >= $minimum";
+        let text = PreparedGraphText::prepare(
+            &format!("{head} RETURN person AS owner,friend,company,company.score AS score"), symbols,
+        )?;
+        let arguments = GqlParameters::new().with_int64("minimum", 5)?;
+        let pattern = text.bind_parameters(&arguments)?;
+        assert_eq!(pattern, typed);
         let policy = GqlQueryPolicy::new(100, 100, 1_000_000, 100_000);
         let before = db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?;
         assert_eq!(before.rows.snapshot_records, 11);
@@ -99,11 +115,17 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert!(before.value[5].get(3).is_some_and(|value| value.is_null()));
         let exact = GqlQueryPolicy::new(11, 6, before.evaluator.work_units, before.evaluator.scratch_entries);
         assert_eq!(db.execute_graph_pattern_governed(&query_cx, &pattern, exact)?, before);
+        let stricter = text.bind_parameters(&GqlParameters::new().with_int64("minimum", 8)?)?;
+        let unavailable = db.execute_graph_pattern_governed(&query_cx, &stricter, policy)?;
+        assert_eq!(unavailable.value.len(), 4);
+        assert!(unavailable.value.iter().all(|row| row.get(2).is_some_and(|value| value.is_null())));
+        assert_eq!(db.execute_graph_pattern_governed(&query_cx, &pattern, policy)?, before);
 
-        let summary = PreparedGraphAggregate::prepare(pattern.clone(), &[0], &[
-            GraphAggregate::count_rows("rows"), GraphAggregate::count("companies", 2),
-            GraphAggregate::count_distinct("unique_companies", 2), GraphAggregate::sum_int("total", 3),
-        ], 0, None)?;
+        let summary_text = PreparedGraphAggregateText::prepare(&format!(
+            "{head} RETURN person AS owner,COUNT(*) AS rows,COUNT(company) AS companies,\
+             COUNT(DISTINCT company) AS unique_companies,SUM(company.score) AS total GROUP BY person"
+        ), symbols)?;
+        let summary = summary_text.bind_parameters(&arguments)?;
         let totals = db.execute_graph_aggregate_governed(&query_cx, &summary, policy)?;
         assert_eq!(totals.value.len(), 3);
         assert_eq!(totals.value[0].get(0).and_then(|value| value.as_count()), Some(4));
@@ -113,10 +135,14 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
             assert_eq!(row.get(1).and_then(|value| value.as_count()), Some(0));
             assert!(row.get(3).is_some_and(|value| value.is_null()));
         }
-        let mut bound_company = GraphPatternBuilder::new(); bound_company.vertex("company")?;
-        let missing = people.prepare_values_with_clauses(&[
-            clauses[0], clauses[1], GraphMatchClause::not_exists(&bound_company),
-        ], &columns, 0, None)?.with_duplicates();
+        // A root antijoin asks which people have NO qualifying complete path.
+        // It does not expose any inner names or multiply outer occurrences.
+        let missing_text = PreparedGraphText::prepare(
+            "MATCH (person:Person) WHERE NOT EXISTS { \
+             MATCH (person)-[:KNOWS]->(friend)-[:WORKS_AT]->(company) \
+             WHERE company.score >= $minimum } RETURN person AS owner", symbols,
+        )?;
+        let missing = missing_text.bind_parameters(&arguments)?;
         assert_eq!(ids(&db.execute_graph_pattern_governed(&query_cx, &missing, policy)?.value), vec![VId(1), VId(2)]);
 
         let mut txn = db.begin(&txn_cx)?;
@@ -148,9 +174,9 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 row.get(2).and_then(|value| value.as_vertex()),
                 row.get(3).and_then(|value| value.as_scalar()));
         }
-        root.cancel_with(CancelKind::User, Some("optional demonstration complete"));
+        root.cancel_with(CancelKind::User, Some("optional text demonstration complete"));
         assert!(matches!(db.execute_graph_pattern_governed(&query_cx, &pattern, policy), Err(GqlQueryError::Interrupted(_))));
-        println!("OK: nullable chained matches, bags, zero-preserving summaries, staging, history and cancellation");
+        println!("OK: optional and existential text, zero-preserving aggregates, staging, history and cancellation");
         Ok(())
     })
 }
