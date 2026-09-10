@@ -166,6 +166,26 @@ fn grouping_argument_reuse_and_count_only_do_not_create_accidental_distinct_chil
         .unwrap();
     assert_eq!(empty.value.len(), 1);
     assert_eq!(empty.value[0].get(0).unwrap().as_count(), Some(0));
+    for (text, expected_rows) in [
+        ("MATCH (n) RETURN COUNT(*) HAVING count > 1", 0),
+        ("MATCH (n) RETURN COUNT(*) ORDER BY count", 1),
+    ] {
+        let result = prepare(text)
+            .execute_governed(
+                0,
+                [],
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(result.value.len(), expected_rows, "{text}");
+        if expected_rows == 1 {
+            assert_eq!(result.value[0].get(0).unwrap().as_count(), Some(0));
+        }
+    }
     let distinct = prepare("MATCH (n) RETURN DISTINCT COUNT(*)");
     assert_eq!(distinct.canonical_bytes(), count.canonical_bytes());
     let grouped = prepare("MATCH (n) RETURN n,COUNT(*) GROUP BY n");
@@ -290,8 +310,8 @@ fn malformed_ungrouped_and_unsupported_aggregates_never_resolve_names() {
         "MATCH (a) RETURN COUNT(*) AS x,SUM(a.n) AS x",
         "MATCH (a) RETURN COUNT(*) LIMIT -1",
         "MATCH (a) RETURN COUNT(*) GROUP BY a;",
-        "MATCH (a) RETURN COUNT(*) HAVING count > 1",
-        "MATCH (a) RETURN COUNT(*) ORDER BY count",
+        "MATCH (a) RETURN COUNT(*) HAVING missing > 1",
+        "MATCH (a) RETURN COUNT(*) ORDER BY missing",
         "MATCH (a) WHERE a.n >= $p RETURN COUNT(*) LIMIT $p",
     ] {
         let mut calls = 0;
