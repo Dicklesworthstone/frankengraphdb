@@ -6,7 +6,9 @@
 //! artifact contract; it never falls back to that parser after a refusal.
 
 mod aggregate;
+mod scoped;
 pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
+use scoped::{BoundScope, ScopeSyntax};
 
 use crate::algebra::{
     GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueRow, IntegerComparison,
@@ -127,6 +129,7 @@ struct Token<'a> {
     at: usize,
 }
 
+#[derive(Clone)]
 struct Lexer<'a> {
     text: &'a str,
     at: usize,
@@ -198,7 +201,7 @@ impl<'a> Lexer<'a> {
                 at,
             });
         }
-        if b"()[]:,.<>=!-*".contains(&ch) {
+        if b"()[]{}:,.<>=!-*".contains(&ch) {
             self.at += 1;
             return Ok(Token {
                 kind: TokenKind::Punct(ch),
@@ -261,9 +264,11 @@ struct Column<'a> {
 }
 struct Syntax<'a> {
     variables: Vec<Name<'a>>,
+    root_variables: usize,
     labels: Vec<(Name<'a>, Name<'a>)>,
     edges: Vec<Edge<'a>>,
     filters: Vec<Filter<'a>>,
+    scopes: Vec<ScopeSyntax<'a>>,
     columns: Vec<Column<'a>>,
     parameters: Vec<GqlParameterSpec>,
     parameter_offsets: Vec<usize>,
@@ -279,6 +284,7 @@ struct Parser<'a> {
     syntax: Syntax<'a>,
     predicates: usize,
     identities: usize,
+    edge_count: usize,
 }
 impl<'a> Parser<'a> {
     fn new(text: &'a str) -> Result<Self, GraphPatternTextError> {
@@ -299,11 +305,14 @@ impl<'a> Parser<'a> {
             current,
             predicates: 0,
             identities: 0,
+            edge_count: 0,
             syntax: Syntax {
                 variables: Vec::new(),
+                root_variables: 0,
                 labels: Vec::new(),
                 edges: Vec::new(),
                 filters: Vec::new(),
+                scopes: Vec::new(),
                 columns: Vec::new(),
                 parameters: Vec::new(),
                 parameter_offsets: Vec::new(),
@@ -532,101 +541,9 @@ impl<'a> Parser<'a> {
             GraphPatternTextErrorKind::Expected("comparison operator"),
         ))
     }
-    /// Common MATCH/WHERE grammar for ordinary and aggregate RETURN profiles.
+    /// Common scoped MATCH/WHERE grammar for ordinary and aggregate RETURN.
     fn parse_head(&mut self) -> Result<(), GraphPatternTextError> {
-        use crate::algebra::PatternLimitDimension;
-        self.word("MATCH")?;
-        loop {
-            let mut left = self.node()?;
-            while self.is_punct(b'-') || self.is_punct(b'<') {
-                self.capacity(
-                    self.syntax.edges.len(),
-                    MAX_PATTERN_EDGES,
-                    PatternLimitDimension::Edges,
-                )?;
-                let incoming = self.take(b'<')?;
-                self.punct(b'-', "-")?;
-                self.punct(b'[', "[")?;
-                self.punct(b':', ":")?;
-                let relation = self.name()?;
-                self.punct(b']', "]")?;
-                self.punct(b'-', "-")?;
-                let outgoing = self.take(b'>')?;
-                if incoming && outgoing {
-                    return Err(error(
-                        relation.at,
-                        GraphPatternTextErrorKind::Expected("one edge direction"),
-                    ));
-                }
-                let right = self.node()?;
-                self.syntax.edges.push(Edge {
-                    source: left,
-                    relation,
-                    destination: right,
-                    direction: if incoming {
-                        GlaDirection::Reverse
-                    } else if outgoing {
-                        GlaDirection::Forward
-                    } else {
-                        GlaDirection::Undirected
-                    },
-                });
-                left = right;
-            }
-            if !self.take(b',')? {
-                break;
-            }
-        }
-        if self.take_word("WHERE")? {
-            loop {
-                let left = self.variable()?;
-                if self.take(b'.')? {
-                    self.capacity(
-                        self.predicates,
-                        MAX_PATTERN_PREDICATES,
-                        PatternLimitDimension::Predicates,
-                    )?;
-                    let key = self.name()?;
-                    let comparison = self.comparison()?;
-                    let value = self.number(GqlParameterType::Int64)?;
-                    self.syntax.filters.push(Filter::Property {
-                        variable: left,
-                        key,
-                        comparison,
-                        value,
-                    });
-                    self.predicates += 1;
-                } else {
-                    self.capacity(
-                        self.identities,
-                        MAX_PATTERN_IDENTITIES,
-                        PatternLimitDimension::Identities,
-                    )?;
-                    let comparison = self.comparison()?;
-                    if !matches!(
-                        comparison,
-                        IntegerComparison::Equal | IntegerComparison::NotEqual
-                    ) {
-                        return Err(error(
-                            left.at,
-                            GraphPatternTextErrorKind::Expected("vertex equality or inequality"),
-                        ));
-                    }
-                    let right = self.variable()?;
-                    self.syntax.filters.push(Filter::Identity {
-                        left,
-                        right,
-                        equal: comparison == IntegerComparison::Equal,
-                    });
-                    self.identities += 1;
-                }
-                if !self.take_word("AND")? {
-                    break;
-                }
-            }
-        }
-        self.syntax.return_at = self.current.at;
-        self.word("RETURN")
+        self.parse_scoped_head()
     }
     fn parse(mut self) -> Result<Syntax<'a>, GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
@@ -719,6 +636,14 @@ struct BoundColumn {
     variable: String,
     key: Option<PropertyKeyId>,
 }
+impl BoundColumn {
+    fn declaration(&self) -> GraphColumn<'_> {
+        match self.key {
+            Some(key) => GraphColumn::property(&self.alias, &self.variable, key),
+            None => GraphColumn::vertex(&self.alias, &self.variable),
+        }
+    }
+}
 
 /// Prepared syntax and schema, independent of parameter values and database
 /// generations. Binding never lexes text, calls the catalog, or reads storage.
@@ -728,6 +653,7 @@ pub struct PreparedGraphText {
     statement: String,
     builder: GraphPatternBuilder,
     filters: Vec<BoundFilter>,
+    scopes: Vec<BoundScope>,
     columns: Vec<BoundColumn>,
     parameters: Vec<GqlParameterSpec>,
     parameter_offsets: Vec<usize>,
@@ -742,6 +668,7 @@ impl core::fmt::Debug for PreparedGraphText {
         f.debug_struct("PreparedGraphText")
             .field("columns", &self.columns.len())
             .field("parameters", &self.parameters.len())
+            .field("scopes", &self.scopes.len())
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -749,14 +676,15 @@ impl core::fmt::Debug for PreparedGraphText {
 
 impl PreparedGraphText {
     /// Prepare the bounded connected-pattern text profile. Keywords are ASCII
-    /// case-insensitive; names are case-sensitive. RETURN defaults to ALL;
-    /// DISTINCT is explicit. Integer predicates, numeric parameters, comma-
-    /// connected paths, mixed directions, property columns, aliases, RETURN *,
-    /// SKIP and LIMIT lower through the existing typed pattern compiler.
+    /// case-insensitive; names are case-sensitive. RETURN defaults to ALL.
+    /// The mandatory root may have AND-conjoined EXISTS/NOT EXISTS { MATCH }
+    /// predicates, followed by correlated OPTIONAL MATCH clauses. A WHERE
+    /// after OPTIONAL belongs to that child, before null extension. Scoped
+    /// children are positive connected patterns; nested scopes are refused.
     ///
     /// Syntax is completely validated before calling `resolve`. Each unique
-    /// (kind,name) is resolved once. Unknown or wrong-kind names fail closed.
-    /// Resolution is a host-catalog seam, not a second catalog or authorization.
+    /// (kind,name) is resolved once across ALL scopes. Unknown/wrong-kind names
+    /// refuse. Numeric arguments use one schema and retain original offsets.
     pub fn prepare(
         statement: &str,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
@@ -764,13 +692,13 @@ impl PreparedGraphText {
         Self::from_syntax(statement, Parser::new(statement)?.parse()?, resolve)
     }
 
-    fn from_syntax(
+    fn from_syntax<'a>(
         statement: &str,
-        syntax: Syntax<'_>,
+        syntax: Syntax<'a>,
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphPatternTextError> {
         let mut cache = BTreeMap::new();
-        let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
+        let mut symbol = |kind, name: Name<'a>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
             if let Some(value) = cache.get(&key) {
                 return Ok(*value);
@@ -789,57 +717,16 @@ impl PreparedGraphText {
             cache.insert(key, value);
             Ok(value)
         };
-        let mut builder = GraphPatternBuilder::new();
-        for name in &syntax.variables {
-            built(name.at, builder.vertex(name.text))?;
-        }
-        for &(variable, label) in &syntax.labels {
-            let GraphSymbol::Label(label_id) = symbol(GraphSymbolKind::Label, label)? else {
-                unreachable!("symbol domain checked above")
-            };
-            built(
-                variable.at,
-                builder.filter(variable.text, VertexPredicate::HasLabel(label_id)),
-            )?;
-        }
-        for edge in &syntax.edges {
-            let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, edge.relation)?
-            else {
-                unreachable!("symbol domain checked above")
-            };
-            built(
-                edge.relation.at,
-                builder.edge(
-                    edge.source.text,
-                    relation,
-                    edge.direction,
-                    edge.destination.text,
-                ),
-            )?;
-        }
-        let mut filters = Vec::new();
-        for filter in syntax.filters {
-            match filter {
-                Filter::Identity { left, right, equal } => {
-                    built(left.at, builder.identity(left.text, right.text, equal))?;
-                }
-                Filter::Property {
-                    variable,
-                    key,
-                    comparison,
-                    value,
-                } => {
-                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
-                        unreachable!("symbol domain checked above")
-                    };
-                    filters.push(BoundFilter {
-                        variable: variable.text.to_owned(),
-                        key,
-                        comparison,
-                        value,
-                    });
-                }
-            }
+        let (builder, filters) = scoped::resolve_pattern(
+            &syntax.variables[..syntax.root_variables],
+            &syntax.labels,
+            &syntax.edges,
+            syntax.filters,
+            &mut symbol,
+        )?;
+        let mut scopes = Vec::new();
+        for scope in syntax.scopes {
+            scopes.push(scope.resolve(&mut symbol)?);
         }
         let mut columns = Vec::new();
         for column in syntax.columns {
@@ -857,16 +744,17 @@ impl PreparedGraphText {
                 key,
             });
         }
-        // Refuse disconnected definitions at preparation, not on first binding.
-        // This structural compilation does not observe numeric argument values.
-        built(
-            syntax.return_at,
-            builder.prepare(syntax.variables[0].text, 0, None),
-        )?;
+        // Compile the actual scope topology for structural validation. Do not
+        // flatten optional edges into mandatory MATCH or expose EXISTS locals.
+        // Numeric operands are not inspected by this preparation-only check.
+        let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
+        let projected: Vec<_> = columns.iter().map(BoundColumn::declaration).collect();
+        built(syntax.return_at, builder.prepare_values_with_clauses(&clauses, &projected, 0, None))?;
         Ok(Self {
             statement: statement.to_owned(),
             builder,
             filters,
+            scopes,
             columns,
             parameters: syntax.parameters,
             parameter_offsets: syntax.parameter_offsets,
@@ -932,31 +820,16 @@ impl PreparedGraphText {
         &self,
         values: &[GqlParameterValue],
     ) -> Result<PreparedGraphPattern<GraphValueRow>, GraphPatternTextError> {
-        let mut builder = self.builder.clone();
-        for filter in &self.filters {
-            built(
-                self.return_at,
-                builder.filter(
-                    &filter.variable,
-                    VertexPredicate::IntegerProperty {
-                        key: filter.key,
-                        comparison: filter.comparison,
-                        value: filter.value.signed(values),
-                    },
-                ),
-            )?;
-        }
-        let columns: Vec<_> = self
-            .columns
-            .iter()
-            .map(|column| match column.key {
-                Some(key) => GraphColumn::property(&column.alias, &column.variable, key),
-                None => GraphColumn::vertex(&column.alias, &column.variable),
-            })
-            .collect();
+        let builder = scoped::bind_builder(&self.builder, &self.filters, values, self.return_at)?;
+        let scopes = self.scopes.iter()
+            .map(|scope| scope.bind_values(values, self.return_at))
+            .collect::<Result<Vec<_>, _>>()?;
+        let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
+        let columns: Vec<_> = self.columns.iter().map(BoundColumn::declaration).collect();
         let pattern = built(
             self.return_at,
-            builder.prepare_values(
+            builder.prepare_values_with_clauses(
+                &clauses,
                 &columns,
                 self.offset.unsigned(values),
                 self.count.as_ref().map(|count| count.unsigned(values)),
@@ -1266,7 +1139,7 @@ mod tests {
             "MATCH (a) WHERE a.n = -9223372036854775809 RETURN a",
             "MATCH (a {n:1}) RETURN a",
             "MATCH (a) RETURN *,a",
-            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) RETURN a",
+            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b) } RETURN a",
         ] {
             let mut calls = 0;
             assert!(
