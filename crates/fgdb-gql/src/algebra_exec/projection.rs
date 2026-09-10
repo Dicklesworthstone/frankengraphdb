@@ -147,7 +147,10 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
     ) -> Result<(), E>
     where
         F: FnMut(fgdb_types::VId, &[crate::algebra::VertexPredicate]) -> Result<bool, E>,
-        R: FnMut(fgdb_types::VId, fgdb_delta_types::PropertyKeyId) -> Result<Option<&'a fgdb_types::CanonicalScalar>, E>,
+        R: FnMut(
+            fgdb_types::VId,
+            fgdb_delta_types::PropertyKeyId,
+        ) -> Result<Option<&'a fgdb_types::CanonicalScalar>, E>,
         C: FnMut(super::GlaExecutionEvent) -> Result<(), E>,
         P: FnMut(
             &[crate::algebra::ValueProjection],
@@ -162,7 +165,10 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
             test_vertex,
             control,
             |operator, bindings, _projected, control| {
-                if matches!(operator, crate::algebra::GlaOperator::CompareProperties { .. }) {
+                if matches!(
+                    operator,
+                    crate::algebra::GlaOperator::CompareProperties { .. }
+                ) {
                     return super::compare_properties(operator, bindings, &mut property, control);
                 }
                 let crate::algebra::GlaOperator::ProjectValues { columns } = operator else {

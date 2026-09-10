@@ -34,15 +34,28 @@ impl GraphPatternBuilder {
     ) -> Result<&mut Self, PatternBuildError> {
         let left = self.variable(left)?;
         let right = self.variable(right)?;
-        check_next(self.predicate_count, MAX_PATTERN_PREDICATES, PatternLimitDimension::Predicates)?;
-        self.property_comparisons.push(PropertyComparison { left, left_key, right, right_key, comparison });
+        check_next(
+            self.predicate_count,
+            MAX_PATTERN_PREDICATES,
+            PatternLimitDimension::Predicates,
+        )?;
+        self.property_comparisons.push(PropertyComparison {
+            left,
+            left_key,
+            right,
+            right_key,
+            comparison,
+        });
         self.predicate_count += 1;
         Ok(self)
     }
 
     pub(super) fn require_identity_projection(&self) -> Result<(), PatternBuildError> {
-        if self.property_comparisons.is_empty() { Ok(()) }
-        else { Err(PatternBuildError::RequiresValueProjection) }
+        if self.property_comparisons.is_empty() {
+            Ok(())
+        } else {
+            Err(PatternBuildError::RequiresValueProjection)
+        }
     }
 
     /// The positive compiler has finished introducing every declared variable.

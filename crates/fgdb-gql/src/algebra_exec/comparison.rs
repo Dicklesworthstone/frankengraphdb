@@ -1,7 +1,7 @@
 //! Borrowed, binding-dependent property selection in the shared GLA visitor.
 
-use crate::algebra::{GlaOperator, GRAPH_VALUE_PAYLOAD_UNIT_BYTES};
 use crate::GlaExecutionEvent;
+use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, VId};
 
@@ -16,12 +16,22 @@ pub(super) fn compare_properties<'a, E>(
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<bool, E> {
-    let GlaOperator::CompareProperties { left, left_key, right, right_key, comparison } = operator else {
+    let GlaOperator::CompareProperties {
+        left,
+        left_key,
+        right,
+        right_key,
+        comparison,
+    } = operator
+    else {
         unreachable!("the compiler dispatches only a binding property comparison")
     };
     let (Some(Some(left)), Some(Some(right))) = (
-        bindings.get(left.ordinal() as usize), bindings.get(right.ordinal() as usize),
-    ) else { return Ok(false); };
+        bindings.get(left.ordinal() as usize),
+        bindings.get(right.ordinal() as usize),
+    ) else {
+        return Ok(false);
+    };
     control(GlaExecutionEvent::Work)?;
     let left = property(*left, *left_key)?;
     control(GlaExecutionEvent::Work)?;
@@ -41,9 +51,14 @@ fn charge_payload<E>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     let sizes = match value {
-        CanonicalScalar::Text(value) => [value.len(), value.canonical_sort_key().map_or(0, <[u8]>::len)],
+        CanonicalScalar::Text(value) => [
+            value.len(),
+            value.canonical_sort_key().map_or(0, <[u8]>::len),
+        ],
         CanonicalScalar::Bytes(value) => [value.as_slice().len(), 0],
-        CanonicalScalar::Timestamp(value) => [value.zone().map_or(0, |zone| zone.identifier().len()), 0],
+        CanonicalScalar::Timestamp(value) => {
+            [value.zone().map_or(0, |zone| zone.identifier().len()), 0]
+        }
         _ => [0, 0],
     };
     for bytes in sizes {
@@ -61,8 +76,10 @@ mod tests {
 
     fn comparison() -> GlaOperator {
         GlaOperator::CompareProperties {
-            left: BindingSlot(0), left_key: PropertyKeyId(1),
-            right: BindingSlot(1), right_key: PropertyKeyId(2),
+            left: BindingSlot(0),
+            left_key: PropertyKeyId(1),
+            right: BindingSlot(1),
+            right_key: PropertyKeyId(2),
             comparison: IntegerComparison::Less,
         }
     }
@@ -70,14 +87,30 @@ mod tests {
     #[test]
     fn missing_properties_do_not_hide_source_errors_but_null_bindings_do_not_read() {
         let mut reads = 0;
-        let result = compare_properties(&comparison(), &[Some(VId(1)), Some(VId(2))],
-            &mut |vid, _| { reads += 1; if vid == VId(1) { Ok(None) } else { Err("right source failed") } },
-            &mut |_| Ok(()));
+        let result = compare_properties(
+            &comparison(),
+            &[Some(VId(1)), Some(VId(2))],
+            &mut |vid, _| {
+                reads += 1;
+                if vid == VId(1) {
+                    Ok(None)
+                } else {
+                    Err("right source failed")
+                }
+            },
+            &mut |_| Ok(()),
+        );
         assert_eq!(result, Err("right source failed"));
         assert_eq!(reads, 2);
-        assert!(!compare_properties(&comparison(), &[Some(VId(1)), None],
-            &mut |_, _| Err::<Option<&CanonicalScalar>, _>("must not read null bindings"),
-            &mut |_| Ok(())).unwrap());
+        assert!(
+            !compare_properties(
+                &comparison(),
+                &[Some(VId(1)), None],
+                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("must not read null bindings"),
+                &mut |_| Ok(())
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -86,17 +119,34 @@ mod tests {
         let second = CanonicalScalar::ucs_basic_text(&"b".repeat(8192)).unwrap();
         let values = [&first, &second];
         let mut events = 0;
-        let complete = compare_properties(&comparison(), &[Some(VId(0)), Some(VId(1))],
+        let complete = compare_properties(
+            &comparison(),
+            &[Some(VId(0)), Some(VId(1))],
             &mut |vid, _| Ok::<_, usize>(Some(values[vid.0 as usize])),
-            &mut |event| { assert_eq!(event, GlaExecutionEvent::Work); events += 1; Ok(()) }).unwrap();
+            &mut |event| {
+                assert_eq!(event, GlaExecutionEvent::Work);
+                events += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
         assert!(complete);
-        assert_eq!(events, 3 + 4096_usize.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
-            + 8192_usize.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES));
+        assert_eq!(
+            events,
+            3 + 4096_usize.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+                + 8192_usize.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+        );
         for stop in 1..=events {
             let mut at = 0;
-            let result = compare_properties(&comparison(), &[Some(VId(0)), Some(VId(1))],
+            let result = compare_properties(
+                &comparison(),
+                &[Some(VId(0)), Some(VId(1))],
                 &mut |vid, _| Ok::<_, usize>(Some(values[vid.0 as usize])),
-                &mut |_| { at += 1; if at == stop { Err(stop) } else { Ok(()) } });
+                &mut |_| {
+                    at += 1;
+                    if at == stop { Err(stop) } else { Ok(()) }
+                },
+            );
             assert_eq!(result, Err(stop));
             assert_eq!(at, stop);
         }

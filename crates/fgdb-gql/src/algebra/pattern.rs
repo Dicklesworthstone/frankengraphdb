@@ -5,10 +5,10 @@
 mod property_comparison;
 mod value_projection;
 
-use property_comparison::PropertyComparison;
 use super::{BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, VertexPredicate};
 use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_types::VId;
+use property_comparison::PropertyComparison;
 
 pub const MAX_PATTERN_EDGES: usize = 64;
 pub const MAX_PATTERN_VERTICES: usize = MAX_PATTERN_EDGES + 1;
@@ -55,7 +55,9 @@ impl core::fmt::Display for PatternBuildError {
             Self::EmptyProjection => f.write_str("binding projection requires a column"),
             Self::DuplicateProjection => f.write_str("binding projection repeats a column"),
             Self::InvalidColumnName => f.write_str("invalid graph-pattern column name"),
-            Self::RequiresValueProjection => f.write_str("binding property comparisons require prepare_values or its scoped variants"),
+            Self::RequiresValueProjection => f.write_str(
+                "binding property comparisons require prepare_values or its scoped variants",
+            ),
             Self::LimitExceeded {
                 dimension,
                 limit,

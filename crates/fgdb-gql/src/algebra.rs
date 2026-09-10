@@ -459,11 +459,12 @@ impl<Row> GlaPlan<Row> {
     #[must_use]
     pub fn needs_vertex_values(&self) -> bool {
         self.projects_properties()
-            || self
-                .operators
-                .iter()
-                .any(|operator| matches!(operator,
-                    GlaOperator::Select { .. } | GlaOperator::CompareProperties { .. }))
+            || self.operators.iter().any(|operator| {
+                matches!(
+                    operator,
+                    GlaOperator::Select { .. } | GlaOperator::CompareProperties { .. }
+                )
+            })
     }
 
     /// Application transcript, not an Appendix A durable format. Existing
@@ -598,7 +599,13 @@ impl<Row> GlaPlan<Row> {
                     bytes.push(18);
                     bytes.extend_from_slice(&group.to_be_bytes());
                 }
-                GlaOperator::CompareProperties { left, left_key, right, right_key, comparison } => {
+                GlaOperator::CompareProperties {
+                    left,
+                    left_key,
+                    right,
+                    right_key,
+                    comparison,
+                } => {
                     bytes.push(19);
                     bytes.extend_from_slice(&left.0.to_be_bytes());
                     bytes.extend_from_slice(&left_key.0.to_be_bytes());
