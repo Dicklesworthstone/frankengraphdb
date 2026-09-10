@@ -10,6 +10,7 @@ use super::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, IntegerComparison, VertexPredicate};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, ScalarEncodeError};
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 /// Definition admission bound, not an allocator-byte or execution-time limit.
 /// Both the variable payload and complete canonical encoding must fit.
@@ -34,14 +35,20 @@ impl core::error::Error for ScalarPredicateError {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct ScalarOperand {
+    value: CanonicalScalar,
+    encoded: Box<[u8]>,
+}
+
 /// Immutable checked operand plus its exact canonical transcript. Encoding is
 /// prepared fallibly once, never recreated by the executor or hashed in place
 /// of value identity. Neither field is publicly mutable; Debug redacts values.
+/// Cloning or changing the comparison shares the checked operand allocation.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ScalarPredicate {
-    value: CanonicalScalar,
+    operand: Arc<ScalarOperand>,
     comparison: IntegerComparison,
-    encoded: Box<[u8]>,
 }
 impl core::fmt::Debug for ScalarPredicate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -65,24 +72,39 @@ impl ScalarPredicate {
         check_size(payload)?;
         let encoded = value.encode().map_err(ScalarPredicateError::Encoding)?;
         check_size(encoded.len())?;
-        Ok(Self { value, comparison, encoded: encoded.into_boxed_slice() })
+        Ok(Self {
+            operand: Arc::new(ScalarOperand { value, encoded: encoded.into_boxed_slice() }),
+            comparison,
+        })
     }
 
     /// Explicit plaintext operand export. No source scalar is cloned to match.
     #[must_use]
-    pub fn value(&self) -> &CanonicalScalar { &self.value }
+    pub fn value(&self) -> &CanonicalScalar { &self.operand.value }
     #[must_use]
     pub fn comparison(&self) -> IntegerComparison { self.comparison }
+
+    /// Bind another operator to the same admitted scalar. This does not encode,
+    /// copy the payload, change the original predicate, or weaken its bounds.
+    #[must_use]
+    pub fn with_comparison(&self, comparison: IntegerComparison) -> Self {
+        Self { operand: Arc::clone(&self.operand), comparison }
+    }
+
+    /// Explicit plaintext canonical-value export, excluding the comparison.
+    /// The bytes are the immutable encoding checked during operand admission.
+    #[must_use]
+    pub fn canonical_value_bytes(&self) -> &[u8] { &self.operand.encoded }
 
     #[must_use]
     pub fn matches(&self, actual: Option<&CanonicalScalar>) -> bool {
         let Some(actual) = actual else { return false; };
-        if matches!(actual, CanonicalScalar::Null) || matches!(&self.value, CanonicalScalar::Null)
-            || core::mem::discriminant(actual) != core::mem::discriminant(&self.value)
+        if matches!(actual, CanonicalScalar::Null) || matches!(self.value(), CanonicalScalar::Null)
+            || core::mem::discriminant(actual) != core::mem::discriminant(self.value())
         {
             return false;
         }
-        let order = actual.cmp(&self.value);
+        let order = actual.cmp(self.value());
         match self.comparison {
             IntegerComparison::Equal => order == Ordering::Equal,
             IntegerComparison::NotEqual => order != Ordering::Equal,
@@ -95,12 +117,12 @@ impl ScalarPredicate {
 
     pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
         bytes.push(self.comparison.tag());
-        bytes.extend_from_slice(&(self.encoded.len() as u64).to_be_bytes());
-        bytes.extend_from_slice(&self.encoded);
+        bytes.extend_from_slice(&(self.operand.encoded.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&self.operand.encoded);
     }
 
     fn comparison_work_units(&self) -> usize {
-        self.encoded.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+        self.operand.encoded.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
     }
 }
 fn check_size(observed: usize) -> Result<(), ScalarPredicateError> {
@@ -213,5 +235,23 @@ mod tests {
         let framed = CanonicalScalar::bytes(vec![0; MAX_SCALAR_PREDICATE_BYTES]).unwrap();
         assert!(matches!(ScalarPredicate::new(framed, IntegerComparison::Equal),
             Err(ScalarPredicateError::LiteralTooLarge { .. })));
+    }
+
+    #[test]
+    fn rebinding_comparisons_shares_the_checked_operand_and_preserves_identity() {
+        let value = CanonicalScalar::ucs_basic_text(&"x".repeat(4096)).unwrap();
+        let equal = ScalarPredicate::new(value.clone(), IntegerComparison::Equal).unwrap();
+        let different = equal.with_comparison(IntegerComparison::NotEqual);
+        assert!(std::ptr::eq(equal.value(), different.value()));
+        assert!(std::ptr::eq(equal.canonical_value_bytes(), different.canonical_value_bytes()));
+        assert_eq!(equal.canonical_value_bytes(), value.encode().unwrap());
+        assert!(equal.matches(Some(&value)));
+        assert!(!different.matches(Some(&value)));
+        let mut actual = Vec::new(); different.append_transcript(&mut actual);
+        let mut expected = Vec::new();
+        ScalarPredicate::new(value, IntegerComparison::NotEqual).unwrap().append_transcript(&mut expected);
+        assert_eq!(actual, expected);
+        drop(equal);
+        assert!(!different.matches(Some(different.value())));
     }
 }
