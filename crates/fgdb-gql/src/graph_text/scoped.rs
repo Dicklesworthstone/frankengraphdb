@@ -111,6 +111,20 @@ pub(super) fn resolve_pattern<'a>(
                     variable: variable.text.to_owned(), key, comparison, value,
                 });
             }
+            Filter::Scalar { variable, key, predicate } => {
+                let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
+                    unreachable!("symbol domain is checked by the shared resolver")
+                };
+                built(variable.at, builder.filter(variable.text,
+                    VertexPredicate::ScalarProperty { key, predicate }))?;
+            }
+            Filter::Null { variable, key, is_null } => {
+                let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
+                    unreachable!("symbol domain is checked by the shared resolver")
+                };
+                built(variable.at, builder.filter(variable.text,
+                    VertexPredicate::PropertyNull { key, is_null }))?;
+            }
         }
     }
     Ok((builder, numeric))
@@ -224,9 +238,8 @@ impl<'a> Parser<'a> {
         if self.take(b'.')? {
             self.capacity(self.predicates, MAX_PATTERN_PREDICATES, PatternLimitDimension::Predicates)?;
             let key = self.name()?;
-            let comparison = self.comparison()?;
-            let value = self.number(GqlParameterType::Int64)?;
-            self.syntax.filters.push(Filter::Property { variable: left, key, comparison, value });
+            let filter = self.property_filter(left, key)?;
+            self.syntax.filters.push(filter);
             self.predicates += 1;
         } else {
             self.capacity(self.identities, MAX_PATTERN_IDENTITIES, PatternLimitDimension::Identities)?;

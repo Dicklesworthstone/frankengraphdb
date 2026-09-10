@@ -6,6 +6,7 @@
 //! artifact contract; it never falls back to that parser after a refusal.
 
 mod aggregate;
+mod literal;
 mod scoped;
 pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 use scoped::{BoundScope, ScopeSyntax};
@@ -72,6 +73,7 @@ pub enum GraphPatternTextErrorKind {
     NameTooLong,
     Expected(&'static str),
     IntegerOutOfRange,
+    ScalarLiteral,
     UnknownVariable,
     UnknownSymbol(GraphSymbolKind),
     WrongSymbolKind {
@@ -120,6 +122,7 @@ enum TokenKind<'a> {
     Word(&'a str),
     Digits(&'a str),
     Parameter(&'a str),
+    Quoted(&'a str),
     Punct(u8),
     End,
 }
@@ -156,6 +159,9 @@ impl<'a> Lexer<'a> {
         }
         self.tokens += 1;
         let ch = bytes[at];
+        if ch == b'\'' {
+            return self.quoted();
+        }
         let parameter = ch == b'$';
         if parameter {
             self.at += 1;
@@ -250,6 +256,16 @@ enum Filter<'a> {
         key: Name<'a>,
         comparison: IntegerComparison,
         value: Number,
+    },
+    Scalar {
+        variable: Name<'a>,
+        key: Name<'a>,
+        predicate: crate::algebra::ScalarPredicate,
+    },
+    Null {
+        variable: Name<'a>,
+        key: Name<'a>,
+        is_null: bool,
     },
     Identity {
         left: Name<'a>,
@@ -681,6 +697,9 @@ impl PreparedGraphText {
     /// predicates, followed by correlated OPTIONAL MATCH clauses. A WHERE
     /// after OPTIONAL belongs to that child, before null extension. Scoped
     /// children are positive connected patterns; nested scopes are refused.
+    /// Property WHERE operands also accept single-quoted UCS_BASIC strings,
+    /// TRUE/FALSE/NULL, and IS [NOT] NULL. Only doubled quotes escape a quote;
+    /// quoted keywords and parameter-looking text remain literal payloads.
     ///
     /// Syntax is completely validated before calling `resolve`. Each unique
     /// (kind,name) is resolved once across ALL scopes. Unknown/wrong-kind names
