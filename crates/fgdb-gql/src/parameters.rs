@@ -45,7 +45,9 @@ impl GqlParameterValue {
         match self {
             Self::Int64(value) => value.to_string(),
             Self::UInt64(value) => value.to_string(),
-            Self::Scalar(_) => unreachable!("legacy template validation admits only numeric arguments"),
+            Self::Scalar(_) => {
+                unreachable!("legacy template validation admits only numeric arguments")
+            }
         }
     }
 }
@@ -213,7 +215,9 @@ impl core::fmt::Display for GqlParameterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Bind(error) => core::fmt::Display::fmt(error, f),
-            Self::ScalarLiteral => f.write_str("scalar argument exceeds canonical operand admission bounds"),
+            Self::ScalarLiteral => {
+                f.write_str("scalar argument exceeds canonical operand admission bounds")
+            }
             Self::InvalidParameterName { offset } => {
                 write!(f, "invalid GQL parameter name at byte {offset}")
             }

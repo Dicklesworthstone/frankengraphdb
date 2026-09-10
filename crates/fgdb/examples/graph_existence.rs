@@ -24,9 +24,11 @@
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::{GlaDirection, GraphColumn, GraphExistence, GraphPatternBuilder,
-    GraphValueRow, IntegerComparison, VertexPredicate};
-use fgdb_gql::{GraphAggregate, GqlQueryError, GqlQueryPolicy, PreparedGraphAggregate};
+use fgdb_gql::algebra::{
+    GlaDirection, GraphColumn, GraphExistence, GraphPatternBuilder, GraphValueRow,
+    IntegerComparison, VertexPredicate,
+};
+use fgdb_gql::{GqlQueryError, GqlQueryPolicy, GraphAggregate, PreparedGraphAggregate};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
 const KNOWS: RelationId = RelationId(1);
@@ -42,8 +44,13 @@ fn main() {
     }
 }
 fn ids(rows: &[GraphValueRow]) -> Vec<VId> {
-    rows.iter().map(|row| row.get(0).and_then(|value| value.as_vertex())
-        .expect("the prepared first column is an outer vertex")).collect()
+    rows.iter()
+        .map(|row| {
+            row.get(0)
+                .and_then(|value| value.as_vertex())
+                .expect("the prepared first column is an outer vertex")
+        })
+        .collect()
 }
 fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     let runtime = RuntimeBuilder::new().build()?;

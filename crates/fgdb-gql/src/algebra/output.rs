@@ -229,10 +229,15 @@ mod tests {
         for stop in 1..=5 {
             let mut rows = ProjectedRows::new(true);
             let mut calls = 0;
-            let result = GraphBindingRow::collect(&op, &[Some(VId(1)), Some(VId(2))], &mut rows, &mut |_| {
-                calls += 1;
-                if calls == stop { Err(stop) } else { Ok(()) }
-            });
+            let result = GraphBindingRow::collect(
+                &op,
+                &[Some(VId(1)), Some(VId(2))],
+                &mut rows,
+                &mut |_| {
+                    calls += 1;
+                    if calls == stop { Err(stop) } else { Ok(()) }
+                },
+            );
             assert_eq!(result, Err(stop));
             assert_eq!(calls, stop);
             assert!(rows.is_empty());

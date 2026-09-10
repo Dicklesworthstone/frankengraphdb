@@ -27,11 +27,13 @@
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::{GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy,
-    GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
-    PreparedGraphAggregateText, PreparedGraphText};
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind, DatabaseSecurityNamespaceId,
-    EId, PurposeContexts, VId};
+use fgdb_gql::{
+    GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphPatternTextErrorKind,
+    GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText, PreparedGraphText,
+};
+use fgdb_types::{
+    CanonicalScalar, CanonicalScalarKind, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
+};
 
 const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(1);
@@ -42,9 +44,18 @@ const WANTED: &str = "O'Reilly 🦀 '$enabled'";
 const HEAD: &str = "MATCH (p:Person) WHERE p.active=$enabled \
     OPTIONAL MATCH (p)-[:R]->(c) WHERE c.category=$category AND c.fingerprint=$fingerprint";
 const TYPES: [(&str, GqlParameterType); 3] = [
-    ("enabled", GqlParameterType::Scalar(CanonicalScalarKind::Bool)),
-    ("category", GqlParameterType::Scalar(CanonicalScalarKind::Text)),
-    ("fingerprint", GqlParameterType::Scalar(CanonicalScalarKind::Bytes)),
+    (
+        "enabled",
+        GqlParameterType::Scalar(CanonicalScalarKind::Bool),
+    ),
+    (
+        "category",
+        GqlParameterType::Scalar(CanonicalScalarKind::Text),
+    ),
+    (
+        "fingerprint",
+        GqlParameterType::Scalar(CanonicalScalarKind::Bytes),
+    ),
 ];
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -56,8 +67,11 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         _ => None,
     }
 }
-fn arguments(category: Option<&str>) -> Result<GqlParameters, Box<dyn core::error::Error + Send + Sync>> {
-    let arguments = GqlParameters::new().with_bool("enabled", true)?
+fn arguments(
+    category: Option<&str>,
+) -> Result<GqlParameters, Box<dyn core::error::Error + Send + Sync>> {
+    let arguments = GqlParameters::new()
+        .with_bool("enabled", true)?
         .with_scalar("fingerprint", CanonicalScalar::bytes(vec![0, 255, 42])?)?
         .with_uint64("take", 100)?;
     Ok(match category {
@@ -75,7 +89,9 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     let runtime = RuntimeBuilder::new().build()?;
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
-    let commit = contexts.commit(); let query_cx = contexts.query(); let txn_cx = contexts.txn();
+    let commit = contexts.commit();
+    let query_cx = contexts.query();
+    let txn_cx = contexts.txn();
     runtime.block_on(async move {
         // Fixture keys belong only to this transient demonstration database.
         let keys = DatabaseKeys::new([0xf1; 32], DatabaseSecurityNamespaceId([0xf2; 32]), [0xf3; 32]);

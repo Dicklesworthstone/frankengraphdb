@@ -27,10 +27,14 @@
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::{GlaDirection, GraphColumn, GraphMatchClause, GraphPatternBuilder,
-    GraphValueRow, IntegerComparison, VertexPredicate};
-use fgdb_gql::{GraphSymbol, GraphSymbolKind, GqlParameters, GqlQueryError, GqlQueryPolicy,
-    PreparedGraphAggregateText, PreparedGraphText};
+use fgdb_gql::algebra::{
+    GlaDirection, GraphColumn, GraphMatchClause, GraphPatternBuilder, GraphValueRow,
+    IntegerComparison, VertexPredicate,
+};
+use fgdb_gql::{
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
+    PreparedGraphAggregateText, PreparedGraphText,
+};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
 const KNOWS: RelationId = RelationId(1);
@@ -54,14 +58,21 @@ fn main() {
     }
 }
 fn ids(rows: &[GraphValueRow]) -> Vec<VId> {
-    rows.iter().map(|row| row.get(0).and_then(|value| value.as_vertex())
-        .expect("the prepared first column is a nonnullable outer identity")).collect()
+    rows.iter()
+        .map(|row| {
+            row.get(0)
+                .and_then(|value| value.as_vertex())
+                .expect("the prepared first column is a nonnullable outer identity")
+        })
+        .collect()
 }
 fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     let runtime = RuntimeBuilder::new().build()?;
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
-    let commit = contexts.commit(); let query_cx = contexts.query(); let txn_cx = contexts.txn();
+    let commit = contexts.commit();
+    let query_cx = contexts.query();
+    let txn_cx = contexts.txn();
     runtime.block_on(async move {
         // Fixture keys belong only to this transient demonstration database.
         let keys = DatabaseKeys::new([0xd1; 32], DatabaseSecurityNamespaceId([0xd2; 32]), [0xd3; 32]);

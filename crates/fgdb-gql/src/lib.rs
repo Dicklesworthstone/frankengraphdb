@@ -18,10 +18,10 @@ mod parser;
 mod prepared;
 
 pub use aggregation::{
-    GraphAggregate, GraphAggregateBuildError, GraphAggregateError, GraphAggregateFunction,
-    GraphAggregateRow, GraphAggregateValue, PreparedGraphAggregate,
-    GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest,
-    GraphNullPlacement, MAX_AGGREGATE_FILTERS,
+    GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
+    GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder, GraphAggregateRow,
+    GraphAggregateTest, GraphAggregateValue, GraphNullPlacement, MAX_AGGREGATE_FILTERS,
+    PreparedGraphAggregate,
 };
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,

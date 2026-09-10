@@ -65,7 +65,11 @@ impl<'a> ScopeSyntax<'a> {
             self.body.filters,
             symbol,
         )?;
-        Ok(BoundScope { kind: self.kind, builder, filters })
+        Ok(BoundScope {
+            kind: self.kind,
+            builder,
+            filters,
+        })
     }
 }
 
@@ -87,15 +91,25 @@ pub(super) fn resolve_pattern<'a>(
         let GraphSymbol::Label(label_id) = symbol(GraphSymbolKind::Label, label)? else {
             unreachable!("symbol domain is checked by the shared resolver")
         };
-        built(variable.at, builder.filter(variable.text, VertexPredicate::HasLabel(label_id)))?;
+        built(
+            variable.at,
+            builder.filter(variable.text, VertexPredicate::HasLabel(label_id)),
+        )?;
     }
     for edge in edges {
-        let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, edge.relation)? else {
+        let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, edge.relation)?
+        else {
             unreachable!("symbol domain is checked by the shared resolver")
         };
-        built(edge.relation.at, builder.edge(
-            edge.source.text, relation, edge.direction, edge.destination.text,
-        ))?;
+        built(
+            edge.relation.at,
+            builder.edge(
+                edge.source.text,
+                relation,
+                edge.direction,
+                edge.destination.text,
+            ),
+        )?;
     }
     let mut numeric = Vec::new();
     for filter in filters {
@@ -103,27 +117,53 @@ pub(super) fn resolve_pattern<'a>(
             Filter::Identity { left, right, equal } => {
                 built(left.at, builder.identity(left.text, right.text, equal))?;
             }
-            Filter::Property { variable, key, comparison, value } => {
+            Filter::Property {
+                variable,
+                key,
+                comparison,
+                value,
+            } => {
                 let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
                     unreachable!("symbol domain is checked by the shared resolver")
                 };
                 numeric.push(BoundFilter {
-                    variable: variable.text.to_owned(), key, comparison, value,
+                    variable: variable.text.to_owned(),
+                    key,
+                    comparison,
+                    value,
                 });
             }
-            Filter::Scalar { variable, key, predicate } => {
+            Filter::Scalar {
+                variable,
+                key,
+                predicate,
+            } => {
                 let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
                     unreachable!("symbol domain is checked by the shared resolver")
                 };
-                built(variable.at, builder.filter(variable.text,
-                    VertexPredicate::ScalarProperty { key, predicate }))?;
+                built(
+                    variable.at,
+                    builder.filter(
+                        variable.text,
+                        VertexPredicate::ScalarProperty { key, predicate },
+                    ),
+                )?;
             }
-            Filter::Null { variable, key, is_null } => {
+            Filter::Null {
+                variable,
+                key,
+                is_null,
+            } => {
                 let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
                     unreachable!("symbol domain is checked by the shared resolver")
                 };
-                built(variable.at, builder.filter(variable.text,
-                    VertexPredicate::PropertyNull { key, is_null }))?;
+                built(
+                    variable.at,
+                    builder.filter(
+                        variable.text,
+                        VertexPredicate::PropertyNull { key, is_null },
+                    ),
+                )?;
             }
         }
     }
@@ -140,12 +180,17 @@ pub(super) fn bind_builder(
     for filter in filters {
         let predicate = match filter.value.value(values) {
             GqlParameterValue::Int64(value) => VertexPredicate::IntegerProperty {
-                key: filter.key, comparison: filter.comparison, value,
+                key: filter.key,
+                comparison: filter.comparison,
+                value,
             },
             GqlParameterValue::Scalar(value) => VertexPredicate::ScalarProperty {
-                key: filter.key, predicate: value.predicate(filter.comparison),
+                key: filter.key,
+                predicate: value.predicate(filter.comparison),
             },
-            GqlParameterValue::UInt64(_) => unreachable!("property arguments were type-checked at preparation"),
+            GqlParameterValue::UInt64(_) => {
+                unreachable!("property arguments were type-checked at preparation")
+            }
         };
         built(at, builder.filter(&filter.variable, predicate))?;
     }
@@ -174,7 +219,11 @@ impl<'a> Parser<'a> {
         loop {
             let mut left = self.node()?;
             while self.is_punct(b'-') || self.is_punct(b'<') {
-                self.capacity(self.edge_count, MAX_PATTERN_EDGES, PatternLimitDimension::Edges)?;
+                self.capacity(
+                    self.edge_count,
+                    MAX_PATTERN_EDGES,
+                    PatternLimitDimension::Edges,
+                )?;
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
                 self.punct(b'[', "[")?;
@@ -184,21 +233,30 @@ impl<'a> Parser<'a> {
                 self.punct(b'-', "-")?;
                 let outgoing = self.take(b'>')?;
                 if incoming && outgoing {
-                    return Err(error(relation.at, GraphPatternTextErrorKind::Expected("one edge direction")));
+                    return Err(error(
+                        relation.at,
+                        GraphPatternTextErrorKind::Expected("one edge direction"),
+                    ));
                 }
                 let right = self.node()?;
                 self.syntax.edges.push(Edge {
                     source: left,
                     relation,
                     destination: right,
-                    direction: if incoming { GlaDirection::Reverse }
-                        else if outgoing { GlaDirection::Forward }
-                        else { GlaDirection::Undirected },
+                    direction: if incoming {
+                        GlaDirection::Reverse
+                    } else if outgoing {
+                        GlaDirection::Forward
+                    } else {
+                        GlaDirection::Undirected
+                    },
                 });
                 self.edge_count += 1;
                 left = right;
             }
-            if !self.take(b',')? { break; }
+            if !self.take(b',')? {
+                break;
+            }
         }
         Ok(())
     }
@@ -224,17 +282,27 @@ impl<'a> Parser<'a> {
         loop {
             if self.starts_existence()? {
                 if !allow_existence {
-                    return Err(error(self.current.at,
-                        GraphPatternTextErrorKind::Expected("positive predicates inside a scoped MATCH")));
+                    return Err(error(
+                        self.current.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "positive predicates inside a scoped MATCH",
+                        ),
+                    ));
                 }
                 let anti = self.take_word("NOT")?;
                 self.word("EXISTS")?;
                 self.punct(b'{', "{")?;
-                self.match_scope(if anti { ScopeKind::NotExists } else { ScopeKind::Exists })?;
+                self.match_scope(if anti {
+                    ScopeKind::NotExists
+                } else {
+                    ScopeKind::Exists
+                })?;
             } else {
                 self.positive_predicate()?;
             }
-            if !self.take_word("AND")? { break; }
+            if !self.take_word("AND")? {
+                break;
+            }
         }
         Ok(())
     }
@@ -243,20 +311,36 @@ impl<'a> Parser<'a> {
         use crate::algebra::PatternLimitDimension;
         let left = self.variable()?;
         if self.take(b'.')? {
-            self.capacity(self.predicates, MAX_PATTERN_PREDICATES, PatternLimitDimension::Predicates)?;
+            self.capacity(
+                self.predicates,
+                MAX_PATTERN_PREDICATES,
+                PatternLimitDimension::Predicates,
+            )?;
             let key = self.name()?;
             let filter = self.property_filter(left, key)?;
             self.syntax.filters.push(filter);
             self.predicates += 1;
         } else {
-            self.capacity(self.identities, MAX_PATTERN_IDENTITIES, PatternLimitDimension::Identities)?;
+            self.capacity(
+                self.identities,
+                MAX_PATTERN_IDENTITIES,
+                PatternLimitDimension::Identities,
+            )?;
             let comparison = self.comparison()?;
-            if !matches!(comparison, IntegerComparison::Equal | IntegerComparison::NotEqual) {
-                return Err(error(left.at, GraphPatternTextErrorKind::Expected("vertex equality or inequality")));
+            if !matches!(
+                comparison,
+                IntegerComparison::Equal | IntegerComparison::NotEqual
+            ) {
+                return Err(error(
+                    left.at,
+                    GraphPatternTextErrorKind::Expected("vertex equality or inequality"),
+                ));
             }
             let right = self.variable()?;
             self.syntax.filters.push(Filter::Identity {
-                left, right, equal: comparison == IntegerComparison::Equal,
+                left,
+                right,
+                equal: comparison == IntegerComparison::Equal,
             });
             self.identities += 1;
         }
@@ -282,31 +366,58 @@ impl<'a> Parser<'a> {
     fn match_scope(&mut self, kind: ScopeKind) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         let at = self.current.at;
-        self.capacity(self.syntax.scopes.len(), MAX_PATTERN_IDENTITIES, PatternLimitDimension::Identities)?;
+        self.capacity(
+            self.syntax.scopes.len(),
+            MAX_PATTERN_IDENTITIES,
+            PatternLimitDimension::Identities,
+        )?;
         let outer = self.take_pattern();
         // Only positive fields change scope. The lexer, global parameters,
         // original offsets, caps and previously completed clauses never reset.
         let parsed = (|| {
             self.word("MATCH")?;
             self.positive_pattern()?;
-            if self.take_word("WHERE")? { self.scoped_predicates(false)?; }
-            if !matches!(kind, ScopeKind::Optional) { self.punct(b'}', "}")?; }
+            if self.take_word("WHERE")? {
+                self.scoped_predicates(false)?;
+            }
+            if !matches!(kind, ScopeKind::Optional) {
+                self.punct(b'}', "}")?;
+            }
             Ok::<_, GraphPatternTextError>(self.take_pattern())
         })();
         let body = match parsed {
             Ok(body) => body,
-            Err(error) => { self.restore_pattern(outer); return Err(error); }
+            Err(error) => {
+                self.restore_pattern(outer);
+                return Err(error);
+            }
         };
-        let correlated = body.variables.iter().any(|local|
-            outer.variables.iter().any(|visible| visible.text == local.text));
+        let correlated = body.variables.iter().any(|local| {
+            outer
+                .variables
+                .iter()
+                .any(|visible| visible.text == local.text)
+        });
         self.restore_pattern(outer);
         if !correlated {
-            return Err(error(at, GraphPatternTextErrorKind::Build(PatternBuildError::Disconnected)));
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Build(PatternBuildError::Disconnected),
+            ));
         }
         if matches!(kind, ScopeKind::Optional) {
             for variable in &body.variables {
-                if !self.syntax.variables.iter().any(|visible| visible.text == variable.text) {
-                    self.capacity(self.syntax.variables.len(), MAX_PATTERN_VERTICES, PatternLimitDimension::Vertices)?;
+                if !self
+                    .syntax
+                    .variables
+                    .iter()
+                    .any(|visible| visible.text == variable.text)
+                {
+                    self.capacity(
+                        self.syntax.variables.len(),
+                        MAX_PATTERN_VERTICES,
+                        PatternLimitDimension::Vertices,
+                    )?;
                     self.syntax.variables.push(*variable);
                 }
             }

@@ -132,12 +132,16 @@ impl VertexPredicate {
                     if comparison.accepts(*actual, *value))
             }),
             Self::ScalarProperty { key, predicate } => {
-                let actual = properties.into_iter().find(|(actual_key, _)| actual_key == key)
+                let actual = properties
+                    .into_iter()
+                    .find(|(actual_key, _)| actual_key == key)
                     .map(|(_, value)| value);
                 predicate.matches(actual)
             }
             Self::PropertyNull { key, is_null } => {
-                let actual = properties.into_iter().find(|(actual_key, _)| actual_key == key)
+                let actual = properties
+                    .into_iter()
+                    .find(|(actual_key, _)| actual_key == key)
                     .map(|(_, value)| value);
                 actual.is_none_or(|value| matches!(value, CanonicalScalar::Null)) == *is_null
             }
@@ -423,8 +427,12 @@ impl<Row> GlaPlan<Row> {
     /// This is distinct from the root scan that determines the outer rows.
     #[must_use]
     pub fn reads_edges(&self) -> bool {
-        self.operators.iter().any(|operator| matches!(operator,
-            GlaOperator::ScanEdges { .. } | GlaOperator::Expand { .. }))
+        self.operators.iter().any(|operator| {
+            matches!(
+                operator,
+                GlaOperator::ScanEdges { .. } | GlaOperator::Expand { .. }
+            )
+        })
     }
 
     /// Property projections require a real source even without a predicate.

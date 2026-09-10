@@ -17,8 +17,8 @@ use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::{
-    GraphAggregateTextSlot, GraphSymbol, GraphSymbolKind, GqlParameters, GqlQueryError,
-    GqlQueryPolicy, PreparedGraphAggregateText,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateTextSlot, GraphSymbol,
+    GraphSymbolKind, PreparedGraphAggregateText,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
@@ -65,7 +65,9 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         for (eid, item) in [(20, 3), (21, 3), (22, 5)] {
             second.add_edge(EId(eid), VId(2), VId(item), vec![]);
         }
-        let created = db.write_atomic(&commit_cx, vec![entities, first, second]).await?;
+        let created = db
+            .write_atomic(&commit_cx, vec![entities, first, second])
+            .await?;
         let pinned = db.read_session()?;
 
         let text = PreparedGraphAggregateText::prepare(
@@ -82,8 +84,11 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
                 _ => None,
             },
         )?;
-        let summary = text.bind_parameters(&GqlParameters::new()
-            .with_int64("min_paths", 0)?.with_uint64("groups", 10)?)?;
+        let summary = text.bind_parameters(
+            &GqlParameters::new()
+                .with_int64("min_paths", 0)?
+                .with_uint64("groups", 10)?,
+        )?;
         assert_eq!(text.output_slots()[0], GraphAggregateTextSlot::GroupKey(0));
         assert_eq!(text.output_slots()[1], GraphAggregateTextSlot::Aggregate(0));
         let policy = GqlQueryPolicy::new(100, 10, 100_000, 10_000);
@@ -96,23 +101,50 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert_eq!(before.value[0].get(0).and_then(|v| v.as_count()), Some(3));
         assert_eq!(before.value[0].get(1).and_then(|v| v.as_count()), Some(2));
         assert_eq!(before.value[0].get(2).and_then(|v| v.as_count()), Some(1));
-        assert_eq!(before.value[0].get(3).and_then(|v| v.as_integer()), Some(14));
+        assert_eq!(
+            before.value[0].get(3).and_then(|v| v.as_integer()),
+            Some(14)
+        );
         assert_eq!(before.value[1].get(0).and_then(|v| v.as_count()), Some(6));
-        assert_eq!(before.value[1].get(3).and_then(|v| v.as_integer()), Some(28));
+        assert_eq!(
+            before.value[1].get(3).and_then(|v| v.as_integer()),
+            Some(28)
+        );
         let exact = GqlQueryPolicy::new(
             before.rows.snapshot_records,
             before.rows.result_rows,
             before.evaluator.work_units,
             before.evaluator.scratch_entries,
         );
-        assert_eq!(db.execute_graph_aggregate_governed(&query_cx, &summary, exact)?, before);
-        let page = text.bind_parameters(&GqlParameters::new()
-            .with_int64("min_paths", 0)?.with_uint64("groups", 1)?)?;
-        assert_eq!(db.execute_graph_aggregate_governed(&query_cx, &page, policy)?.value, before.value[..1]);
-        let filtered = text.bind_parameters(&GqlParameters::new()
-            .with_int64("min_paths", 4)?.with_uint64("groups", 10)?)?;
-        assert_eq!(db.execute_graph_aggregate_governed(&query_cx, &filtered, policy)?.value, before.value[1..]);
-        assert_eq!(db.execute_graph_aggregate_governed(&query_cx, &summary, policy)?.value, before.value);
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&query_cx, &summary, exact)?,
+            before
+        );
+        let page = text.bind_parameters(
+            &GqlParameters::new()
+                .with_int64("min_paths", 0)?
+                .with_uint64("groups", 1)?,
+        )?;
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&query_cx, &page, policy)?
+                .value,
+            before.value[..1]
+        );
+        let filtered = text.bind_parameters(
+            &GqlParameters::new()
+                .with_int64("min_paths", 4)?
+                .with_uint64("groups", 10)?,
+        )?;
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&query_cx, &filtered, policy)?
+                .value,
+            before.value[1..]
+        );
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&query_cx, &summary, policy)?
+                .value,
+            before.value
+        );
         for row in &before.value {
             println!(
                 "owner={:?}, paths={:?}, nonnull={:?}, sum={:?}",
@@ -134,15 +166,34 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         assert_eq!(staged.value[0].get(3).and_then(|v| v.as_integer()), Some(1));
         assert_eq!(staged.value[1].get(0).and_then(|v| v.as_count()), Some(4));
         assert_eq!(staged.value[1].get(3).and_then(|v| v.as_integer()), Some(2));
-        assert_eq!(db.execute_graph_aggregate_governed(&query_cx, &summary, policy)?.value, before.value);
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&query_cx, &summary, policy)?
+                .value,
+            before.value
+        );
         txn.commit(&mut db, &commit_cx).await?;
-        assert_eq!(db.execute_graph_aggregate_governed(&query_cx, &summary, policy)?.value, staged.value);
-        assert_eq!(db.execute_graph_aggregate_governed_at(&query_cx, &summary, created, policy)?.value, before.value);
-        assert_eq!(pinned.execute_graph_aggregate_governed(&query_cx, &summary, policy)?.value, before.value);
+        assert_eq!(
+            db.execute_graph_aggregate_governed(&query_cx, &summary, policy)?
+                .value,
+            staged.value
+        );
+        assert_eq!(
+            db.execute_graph_aggregate_governed_at(&query_cx, &summary, created, policy)?
+                .value,
+            before.value
+        );
+        assert_eq!(
+            pinned
+                .execute_graph_aggregate_governed(&query_cx, &summary, policy)?
+                .value,
+            before.value
+        );
 
         root.cancel_with(CancelKind::User, Some("aggregate demonstration complete"));
-        assert!(matches!(db.execute_graph_aggregate_governed(&query_cx, &summary, policy),
-            Err(GqlQueryError::Interrupted(_))));
+        assert!(matches!(
+            db.execute_graph_aggregate_governed(&query_cx, &summary, policy),
+            Err(GqlQueryError::Interrupted(_))
+        ));
         println!("OK: HAVING, ranked groups, exact sums, staging, history and cancellation");
         Ok(())
     })

@@ -324,7 +324,8 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 relation,
                 direction,
             } => {
-                let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten() else {
+                let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten()
+                else {
                     return Ok(());
                 };
                 if let Some(neighbors) = index
@@ -338,7 +339,10 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                         result?;
                         // Existence resolves at its clause boundary, not by
                         // counting final results or watching DISTINCT change.
-                        if self.active_probe.is_some_and(|group| self.probe_matches[group]) {
+                        if self
+                            .active_probe
+                            .is_some_and(|group| self.probe_matches[group])
+                        {
                             break;
                         }
                     }

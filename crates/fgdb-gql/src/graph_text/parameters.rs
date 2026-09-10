@@ -37,14 +37,19 @@ impl<'a> Parser<'a> {
         let mut bytes = 0_usize;
         for &(name, kind) in declarations {
             let raw = name.as_bytes();
-            if raw.is_empty() || raw.len() > MAX_PATTERN_NAME_BYTES
+            if raw.is_empty()
+                || raw.len() > MAX_PATTERN_NAME_BYTES
                 || !(raw[0].is_ascii_alphabetic() || raw[0] == b'_')
-                || !raw.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                || !raw
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
                 || parser.parameter_types.contains_key(name)
             {
                 return Err(error(0, GraphPatternTextErrorKind::ParameterDeclaration));
             }
-            bytes = bytes.checked_add(raw.len()).ok_or_else(|| error(0, GraphPatternTextErrorKind::ParameterDeclaration))?;
+            bytes = bytes
+                .checked_add(raw.len())
+                .ok_or_else(|| error(0, GraphPatternTextErrorKind::ParameterDeclaration))?;
             if bytes > MAX_GRAPH_TEXT_BYTES {
                 return Err(error(0, GraphPatternTextErrorKind::ParameterDeclaration));
             }
@@ -59,16 +64,31 @@ impl<'a> Parser<'a> {
         required: GqlParameterType,
         at: usize,
     ) -> Result<(), GraphPatternTextError> {
-        if self.parameter_types.get(name).is_some_and(|declared| *declared != required) {
-            return Err(error(at, GraphPatternTextErrorKind::ConflictingParameterTypes));
+        if self
+            .parameter_types
+            .get(name)
+            .is_some_and(|declared| *declared != required)
+        {
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::ConflictingParameterTypes,
+            ));
         }
         Ok(())
     }
 
     pub(super) fn check_parameter_declarations(&self) -> Result<(), GraphPatternTextError> {
-        if self.parameter_types.keys().any(|name|
-            !self.syntax.parameters.iter().any(|spec| spec.name.as_str() == name.as_str())) {
-            return Err(error(self.current.at, GraphPatternTextErrorKind::UnusedParameterDeclaration));
+        if self.parameter_types.keys().any(|name| {
+            !self
+                .syntax
+                .parameters
+                .iter()
+                .any(|spec| spec.name.as_str() == name.as_str())
+        }) {
+            return Err(error(
+                self.current.at,
+                GraphPatternTextErrorKind::UnusedParameterDeclaration,
+            ));
         }
         Ok(())
     }

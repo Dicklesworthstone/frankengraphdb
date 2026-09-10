@@ -24,14 +24,20 @@ pub enum ScalarPredicateError {
 impl core::fmt::Display for ScalarPredicateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::LiteralTooLarge { limit, observed } => write!(f, "scalar predicate literal uses {observed} bytes, limit {limit}"),
+            Self::LiteralTooLarge { limit, observed } => write!(
+                f,
+                "scalar predicate literal uses {observed} bytes, limit {limit}"
+            ),
             Self::Encoding(error) => write!(f, "scalar predicate encoding failed: {error}"),
         }
     }
 }
 impl core::error::Error for ScalarPredicateError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self { Self::Encoding(error) => Some(error), _ => None }
+        match self {
+            Self::Encoding(error) => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -62,43 +68,63 @@ impl ScalarPredicate {
     /// The existing six comparison operators also apply to canonical scalar
     /// operands. Comparisons never use cross-kind ranks to coerce an Int into
     /// Float, or to treat a missing/ill-typed property as NotEqual.
-    pub fn new(value: CanonicalScalar, comparison: IntegerComparison) -> Result<Self, ScalarPredicateError> {
+    pub fn new(
+        value: CanonicalScalar,
+        comparison: IntegerComparison,
+    ) -> Result<Self, ScalarPredicateError> {
         let payload = match &value {
             CanonicalScalar::Bytes(value) => value.as_slice().len(),
-            CanonicalScalar::Text(value) => value.len().saturating_add(value.canonical_sort_key().map_or(0, <[u8]>::len)),
-            CanonicalScalar::Timestamp(value) => value.zone().map_or(0, |zone| zone.identifier().len()),
+            CanonicalScalar::Text(value) => value
+                .len()
+                .saturating_add(value.canonical_sort_key().map_or(0, <[u8]>::len)),
+            CanonicalScalar::Timestamp(value) => {
+                value.zone().map_or(0, |zone| zone.identifier().len())
+            }
             _ => 0,
         };
         check_size(payload)?;
         let encoded = value.encode().map_err(ScalarPredicateError::Encoding)?;
         check_size(encoded.len())?;
         Ok(Self {
-            operand: Arc::new(ScalarOperand { value, encoded: encoded.into_boxed_slice() }),
+            operand: Arc::new(ScalarOperand {
+                value,
+                encoded: encoded.into_boxed_slice(),
+            }),
             comparison,
         })
     }
 
     /// Explicit plaintext operand export. No source scalar is cloned to match.
     #[must_use]
-    pub fn value(&self) -> &CanonicalScalar { &self.operand.value }
+    pub fn value(&self) -> &CanonicalScalar {
+        &self.operand.value
+    }
     #[must_use]
-    pub fn comparison(&self) -> IntegerComparison { self.comparison }
+    pub fn comparison(&self) -> IntegerComparison {
+        self.comparison
+    }
 
     /// Bind another operator to the same admitted scalar. This does not encode,
     /// copy the payload, change the original predicate, or weaken its bounds.
     #[must_use]
     pub fn with_comparison(&self, comparison: IntegerComparison) -> Self {
-        Self { operand: Arc::clone(&self.operand), comparison }
+        Self {
+            operand: Arc::clone(&self.operand),
+            comparison,
+        }
     }
 
     /// Explicit plaintext canonical-value export, excluding the comparison.
     /// The bytes are the immutable encoding checked during operand admission.
     #[must_use]
-    pub fn canonical_value_bytes(&self) -> &[u8] { &self.operand.encoded }
+    pub fn canonical_value_bytes(&self) -> &[u8] {
+        &self.operand.encoded
+    }
 
     #[must_use]
     pub fn matches(&self, actual: Option<&CanonicalScalar>) -> bool {
-        self.comparison.accepts_scalar_pair(actual, Some(self.value()))
+        self.comparison
+            .accepts_scalar_pair(actual, Some(self.value()))
     }
 
     pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
@@ -108,13 +134,21 @@ impl ScalarPredicate {
     }
 
     fn comparison_work_units(&self) -> usize {
-        self.operand.encoded.len().div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+        self.operand
+            .encoded
+            .len()
+            .div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
     }
 }
 fn check_size(observed: usize) -> Result<(), ScalarPredicateError> {
     if observed > MAX_SCALAR_PREDICATE_BYTES {
-        Err(ScalarPredicateError::LiteralTooLarge { limit: MAX_SCALAR_PREDICATE_BYTES, observed })
-    } else { Ok(()) }
+        Err(ScalarPredicateError::LiteralTooLarge {
+            limit: MAX_SCALAR_PREDICATE_BYTES,
+            observed,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 impl IntegerComparison {
@@ -128,8 +162,11 @@ impl IntegerComparison {
         left: Option<&CanonicalScalar>,
         right: Option<&CanonicalScalar>,
     ) -> bool {
-        let (Some(left), Some(right)) = (left, right) else { return false; };
-        if matches!(left, CanonicalScalar::Null) || matches!(right, CanonicalScalar::Null)
+        let (Some(left), Some(right)) = (left, right) else {
+            return false;
+        };
+        if matches!(left, CanonicalScalar::Null)
+            || matches!(right, CanonicalScalar::Null)
             || core::mem::discriminant(left) != core::mem::discriminant(right)
         {
             return false;
@@ -179,19 +216,29 @@ mod tests {
     #[test]
     fn every_comparison_uses_canonical_order_without_cross_kind_coercion() {
         let values = [
-            CanonicalScalar::Null, CanonicalScalar::Bool(false), CanonicalScalar::Bool(true),
-            CanonicalScalar::Int(i64::MIN), CanonicalScalar::Int(0), CanonicalScalar::Int(i64::MAX),
+            CanonicalScalar::Null,
+            CanonicalScalar::Bool(false),
+            CanonicalScalar::Bool(true),
+            CanonicalScalar::Int(i64::MIN),
+            CanonicalScalar::Int(0),
+            CanonicalScalar::Int(i64::MAX),
             CanonicalScalar::Float(CanonicalF64::new(-0.0)),
             CanonicalScalar::Float(CanonicalF64::new(f64::INFINITY)),
             CanonicalScalar::Float(CanonicalF64::new(f64::NAN)),
             CanonicalScalar::ucs_basic_text("").unwrap(),
             CanonicalScalar::ucs_basic_text("O'Brien 🦀").unwrap(),
-            CanonicalScalar::bytes(vec![]).unwrap(), CanonicalScalar::bytes(vec![0, 255]).unwrap(),
+            CanonicalScalar::bytes(vec![]).unwrap(),
+            CanonicalScalar::bytes(vec![0, 255]).unwrap(),
         ];
         for expected in &values {
-            for comparison in [IntegerComparison::Equal, IntegerComparison::NotEqual,
-                IntegerComparison::Greater, IntegerComparison::Less,
-                IntegerComparison::GreaterOrEqual, IntegerComparison::LessOrEqual] {
+            for comparison in [
+                IntegerComparison::Equal,
+                IntegerComparison::NotEqual,
+                IntegerComparison::Greater,
+                IntegerComparison::Less,
+                IntegerComparison::GreaterOrEqual,
+                IntegerComparison::LessOrEqual,
+            ] {
                 let predicate = ScalarPredicate::new(expected.clone(), comparison).unwrap();
                 assert!(!predicate.matches(None));
                 for actual in &values {
@@ -200,14 +247,15 @@ mod tests {
                         && core::mem::discriminant(actual) == core::mem::discriminant(expected);
                     // Independently encoded order, not the predicate's comparator.
                     let order = actual.encode().unwrap().cmp(&expected.encode().unwrap());
-                    let wanted = comparable && match comparison {
-                        IntegerComparison::Equal => order.is_eq(),
-                        IntegerComparison::NotEqual => !order.is_eq(),
-                        IntegerComparison::Greater => order.is_gt(),
-                        IntegerComparison::Less => order.is_lt(),
-                        IntegerComparison::GreaterOrEqual => !order.is_lt(),
-                        IntegerComparison::LessOrEqual => !order.is_gt(),
-                    };
+                    let wanted = comparable
+                        && match comparison {
+                            IntegerComparison::Equal => order.is_eq(),
+                            IntegerComparison::NotEqual => !order.is_eq(),
+                            IntegerComparison::Greater => order.is_gt(),
+                            IntegerComparison::Less => order.is_lt(),
+                            IntegerComparison::GreaterOrEqual => !order.is_lt(),
+                            IntegerComparison::LessOrEqual => !order.is_gt(),
+                        };
                     assert_eq!(predicate.matches(Some(actual)), wanted);
                 }
             }
@@ -221,12 +269,27 @@ mod tests {
             let predicate = VertexPredicate::PropertyNull { key, is_null: null };
             assert_eq!(predicate.property_key(), Some(key));
             assert_eq!(predicate.matches(&[], &[]), null);
-            assert_eq!(predicate.matches(&[], &[(key, CanonicalScalar::Null)]), null);
-            assert_eq!(predicate.matches(&[], &[(key, CanonicalScalar::Bool(false))]), !null);
-            assert_eq!(predicate.matches(&[], &[(PropertyKeyId(8), CanonicalScalar::Bool(false))]), null);
+            assert_eq!(
+                predicate.matches(&[], &[(key, CanonicalScalar::Null)]),
+                null
+            );
+            assert_eq!(
+                predicate.matches(&[], &[(key, CanonicalScalar::Bool(false))]),
+                !null
+            );
+            assert_eq!(
+                predicate.matches(&[], &[(PropertyKeyId(8), CanonicalScalar::Bool(false))]),
+                null
+            );
         }
-        let predicate = VertexPredicate::ScalarProperty { key,
-            predicate: ScalarPredicate::new(CanonicalScalar::Bool(true), IntegerComparison::NotEqual).unwrap() };
+        let predicate = VertexPredicate::ScalarProperty {
+            key,
+            predicate: ScalarPredicate::new(
+                CanonicalScalar::Bool(true),
+                IntegerComparison::NotEqual,
+            )
+            .unwrap(),
+        };
         assert!(!predicate.matches(&[], &[]));
         assert!(!predicate.matches(&[], &[(key, CanonicalScalar::Null)]));
         assert!(!predicate.matches(&[], &[(key, CanonicalScalar::Int(1))]));
@@ -239,17 +302,24 @@ mod tests {
         let predicate = ScalarPredicate::new(value.clone(), IntegerComparison::Equal).unwrap();
         assert_eq!(predicate.value(), &value);
         assert!(!format!("{predicate:?}").contains("sensitive"));
-        let mut first = Vec::new(); predicate.append_transcript(&mut first);
+        let mut first = Vec::new();
+        predicate.append_transcript(&mut first);
         let mut changed = Vec::new();
-        ScalarPredicate::new(value, IntegerComparison::NotEqual).unwrap().append_transcript(&mut changed);
+        ScalarPredicate::new(value, IntegerComparison::NotEqual)
+            .unwrap()
+            .append_transcript(&mut changed);
         assert_ne!(first, changed);
         let over = CanonicalScalar::bytes(vec![0; MAX_SCALAR_PREDICATE_BYTES + 1]).unwrap();
-        assert!(matches!(ScalarPredicate::new(over, IntegerComparison::Equal),
-            Err(ScalarPredicateError::LiteralTooLarge { .. })));
+        assert!(matches!(
+            ScalarPredicate::new(over, IntegerComparison::Equal),
+            Err(ScalarPredicateError::LiteralTooLarge { .. })
+        ));
         // Memcomparable framing can exceed the cap even with a raw payload at it.
         let framed = CanonicalScalar::bytes(vec![0; MAX_SCALAR_PREDICATE_BYTES]).unwrap();
-        assert!(matches!(ScalarPredicate::new(framed, IntegerComparison::Equal),
-            Err(ScalarPredicateError::LiteralTooLarge { .. })));
+        assert!(matches!(
+            ScalarPredicate::new(framed, IntegerComparison::Equal),
+            Err(ScalarPredicateError::LiteralTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -258,13 +328,19 @@ mod tests {
         let equal = ScalarPredicate::new(value.clone(), IntegerComparison::Equal).unwrap();
         let different = equal.with_comparison(IntegerComparison::NotEqual);
         assert!(std::ptr::eq(equal.value(), different.value()));
-        assert!(std::ptr::eq(equal.canonical_value_bytes(), different.canonical_value_bytes()));
+        assert!(std::ptr::eq(
+            equal.canonical_value_bytes(),
+            different.canonical_value_bytes()
+        ));
         assert_eq!(equal.canonical_value_bytes(), value.encode().unwrap());
         assert!(equal.matches(Some(&value)));
         assert!(!different.matches(Some(&value)));
-        let mut actual = Vec::new(); different.append_transcript(&mut actual);
+        let mut actual = Vec::new();
+        different.append_transcript(&mut actual);
         let mut expected = Vec::new();
-        ScalarPredicate::new(value, IntegerComparison::NotEqual).unwrap().append_transcript(&mut expected);
+        ScalarPredicate::new(value, IntegerComparison::NotEqual)
+            .unwrap()
+            .append_transcript(&mut expected);
         assert_eq!(actual, expected);
         drop(equal);
         assert!(!different.matches(Some(different.value())));
@@ -276,17 +352,26 @@ mod tests {
         let large = CanonicalScalar::Int(i64::MAX);
         let floating = CanonicalScalar::Float(CanonicalF64::new(0.0));
         let null = CanonicalScalar::Null;
-        for comparison in [IntegerComparison::Equal, IntegerComparison::NotEqual,
-            IntegerComparison::Greater, IntegerComparison::Less,
-            IntegerComparison::GreaterOrEqual, IntegerComparison::LessOrEqual] {
+        for comparison in [
+            IntegerComparison::Equal,
+            IntegerComparison::NotEqual,
+            IntegerComparison::Greater,
+            IntegerComparison::Less,
+            IntegerComparison::GreaterOrEqual,
+            IntegerComparison::LessOrEqual,
+        ] {
             for absent in [None, Some(&null), Some(&floating)] {
                 assert!(!comparison.accepts_scalar_pair(Some(&small), absent));
                 assert!(!comparison.accepts_scalar_pair(absent, Some(&small)));
             }
-            assert_eq!(comparison.accepts_scalar_pair(Some(&small), Some(&large)),
-                comparison.accepts(i64::MIN, i64::MAX));
-            assert_eq!(comparison.accepts_scalar_pair(Some(&large), Some(&small)),
-                comparison.accepts(i64::MAX, i64::MIN));
+            assert_eq!(
+                comparison.accepts_scalar_pair(Some(&small), Some(&large)),
+                comparison.accepts(i64::MIN, i64::MAX)
+            );
+            assert_eq!(
+                comparison.accepts_scalar_pair(Some(&large), Some(&small)),
+                comparison.accepts(i64::MAX, i64::MIN)
+            );
         }
     }
 }

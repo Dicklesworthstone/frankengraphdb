@@ -25,9 +25,15 @@ impl<'a> Lexer<'a> {
             }
             let raw = &self.text[start..self.at];
             self.at += 1;
-            return Ok(Token { kind: TokenKind::Quoted(raw), at });
+            return Ok(Token {
+                kind: TokenKind::Quoted(raw),
+                at,
+            });
         }
-        Err(error(at, GraphPatternTextErrorKind::Expected("closing single quote")))
+        Err(error(
+            at,
+            GraphPatternTextErrorKind::Expected("closing single quote"),
+        ))
     }
 }
 
@@ -37,7 +43,9 @@ fn text_scalar(raw: &str, at: usize) -> Result<CanonicalScalar, GraphPatternText
         return CanonicalScalar::ucs_basic_text(raw).map_err(|_| refusal());
     }
     let mut decoded = String::new();
-    decoded.try_reserve_exact(raw.len()).map_err(|_| refusal())?;
+    decoded
+        .try_reserve_exact(raw.len())
+        .map_err(|_| refusal())?;
     let mut parts = raw.split("''");
     decoded.push_str(parts.next().unwrap_or_default());
     for part in parts {
@@ -59,31 +67,53 @@ impl<'a> Parser<'a> {
         if self.take_word("IS")? {
             let negate = self.take_word("NOT")?;
             self.word("NULL")?;
-            return Ok(Filter::Null { variable, key, is_null: !negate });
+            return Ok(Filter::Null {
+                variable,
+                key,
+                is_null: !negate,
+            });
         }
         let comparison = self.comparison()?;
         let at = self.current.at;
         let literal = match self.current.kind {
             TokenKind::Quoted(raw) => Some(text_scalar(raw, at)?),
-            TokenKind::Word(word) if word.eq_ignore_ascii_case("TRUE") => Some(CanonicalScalar::Bool(true)),
-            TokenKind::Word(word) if word.eq_ignore_ascii_case("FALSE") => Some(CanonicalScalar::Bool(false)),
-            TokenKind::Word(word) if word.eq_ignore_ascii_case("NULL") => Some(CanonicalScalar::Null),
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("TRUE") => {
+                Some(CanonicalScalar::Bool(true))
+            }
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("FALSE") => {
+                Some(CanonicalScalar::Bool(false))
+            }
+            TokenKind::Word(word) if word.eq_ignore_ascii_case("NULL") => {
+                Some(CanonicalScalar::Null)
+            }
             _ => None,
         };
         if let Some(value) = literal {
             self.advance()?;
             let predicate = ScalarPredicate::new(value, comparison)
                 .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
-            Ok(Filter::Scalar { variable, key, predicate })
+            Ok(Filter::Scalar {
+                variable,
+                key,
+                predicate,
+            })
         } else {
             let expected = match self.current.kind {
-                TokenKind::Parameter(name) => self.parameter_types.get(name).copied()
+                TokenKind::Parameter(name) => self
+                    .parameter_types
+                    .get(name)
+                    .copied()
                     .filter(|kind| matches!(kind, GqlParameterType::Scalar(_)))
                     .unwrap_or(GqlParameterType::Int64),
                 _ => GqlParameterType::Int64,
             };
             let value = self.number(expected)?;
-            Ok(Filter::Property { variable, key, comparison, value })
+            Ok(Filter::Property {
+                variable,
+                key,
+                comparison,
+                value,
+            })
         }
     }
 }

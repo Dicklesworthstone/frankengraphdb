@@ -257,8 +257,9 @@ pub(super) fn collect_values<'a, E>(
     for (at, column) in columns.iter().enumerate() {
         control(GlaExecutionEvent::Work)?;
         key[at] = match column {
-            ValueProjection::Vertex { slot } => bindings[slot.ordinal() as usize]
-                .map_or(ValueRef::Scalar(&null), ValueRef::Vertex),
+            ValueProjection::Vertex { slot } => {
+                bindings[slot.ordinal() as usize].map_or(ValueRef::Scalar(&null), ValueRef::Vertex)
+            }
             ValueProjection::Property { slot, key } => {
                 // An absent binding is not a vertex with a missing property.
                 // Never consult the source with a fabricated identity.
@@ -522,15 +523,27 @@ mod tests {
     #[test]
     fn absent_bindings_project_null_without_reading_a_sentinel_vertex() {
         let selected = [
-            ValueProjection::Vertex { slot: BindingSlot(0) },
-            ValueProjection::Vertex { slot: BindingSlot(1) },
-            ValueProjection::Property { slot: BindingSlot(1), key: PropertyKeyId(7) },
+            ValueProjection::Vertex {
+                slot: BindingSlot(0),
+            },
+            ValueProjection::Vertex {
+                slot: BindingSlot(1),
+            },
+            ValueProjection::Property {
+                slot: BindingSlot(1),
+                key: PropertyKeyId(7),
+            },
         ];
         for owner in [VId(0), VId(u128::MAX)] {
             let mut rows = ProjectedRows::new(false);
-            collect_values(&selected, &[Some(owner), None], &mut rows,
+            collect_values(
+                &selected,
+                &[Some(owner), None],
+                &mut rows,
                 &mut |_, _| Err::<Option<&CanonicalScalar>, _>("null binding reached the source"),
-                &mut |_| Ok(())).unwrap();
+                &mut |_| Ok(()),
+            )
+            .unwrap();
             let row = rows.first().unwrap();
             assert_eq!(row.get(0).unwrap().as_vertex(), Some(owner));
             assert!(row.get(1).unwrap().is_null());
@@ -539,12 +552,18 @@ mod tests {
         let scalar = CanonicalScalar::Int(12);
         let mut calls = 0;
         let mut rows = ProjectedRows::new(false);
-        collect_values(&selected, &[Some(VId(u128::MAX)), Some(VId(0))], &mut rows,
+        collect_values(
+            &selected,
+            &[Some(VId(u128::MAX)), Some(VId(0))],
+            &mut rows,
             &mut |vid, _| {
                 assert_eq!(vid, VId(0));
                 calls += 1;
                 Ok::<_, ()>(Some(&scalar))
-            }, &mut |_| Ok(())).unwrap();
+            },
+            &mut |_| Ok(()),
+        )
+        .unwrap();
         assert_eq!(calls, 1);
         let row = rows.first().unwrap();
         assert_eq!(row.get(1).unwrap().as_vertex(), Some(VId(0)));

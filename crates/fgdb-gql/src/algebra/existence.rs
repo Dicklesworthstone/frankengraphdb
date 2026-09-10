@@ -15,11 +15,17 @@ pub struct GraphExistence<'a> {
 impl<'a> GraphExistence<'a> {
     #[must_use]
     pub const fn exists(pattern: &'a GraphPatternBuilder) -> Self {
-        Self { pattern, anti: false }
+        Self {
+            pattern,
+            anti: false,
+        }
     }
     #[must_use]
     pub const fn not_exists(pattern: &'a GraphPatternBuilder) -> Self {
-        Self { pattern, anti: true }
+        Self {
+            pattern,
+            anti: true,
+        }
     }
 }
 
@@ -54,15 +60,24 @@ pub struct GraphMatchClause<'a> {
 impl<'a> GraphMatchClause<'a> {
     #[must_use]
     pub const fn optional(pattern: &'a GraphPatternBuilder) -> Self {
-        Self { pattern, kind: GraphMatchKind::Optional }
+        Self {
+            pattern,
+            kind: GraphMatchKind::Optional,
+        }
     }
     #[must_use]
     pub const fn exists(pattern: &'a GraphPatternBuilder) -> Self {
-        Self { pattern, kind: GraphMatchKind::Exists }
+        Self {
+            pattern,
+            kind: GraphMatchKind::Exists,
+        }
     }
     #[must_use]
     pub const fn not_exists(pattern: &'a GraphPatternBuilder) -> Self {
-        Self { pattern, kind: GraphMatchKind::NotExists }
+        Self {
+            pattern,
+            kind: GraphMatchKind::NotExists,
+        }
     }
 }
 

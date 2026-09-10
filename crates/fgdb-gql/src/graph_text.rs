@@ -517,7 +517,12 @@ impl<'a> Parser<'a> {
             .parse::<u64>()
             .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
         let value = match expected {
-            GqlParameterType::Scalar(_) => return Err(error(at, GraphPatternTextErrorKind::Expected("declared scalar parameter"))),
+            GqlParameterType::Scalar(_) => {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("declared scalar parameter"),
+                ));
+            }
             GqlParameterType::UInt64 => GqlParameterValue::UInt64(magnitude),
             GqlParameterType::Int64 => {
                 let signed = if negative {
@@ -775,7 +780,10 @@ impl PreparedGraphText {
         // Numeric operands are not inspected by this preparation-only check.
         let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
         let projected: Vec<_> = columns.iter().map(BoundColumn::declaration).collect();
-        built(syntax.return_at, builder.prepare_values_with_clauses(&clauses, &projected, 0, None))?;
+        built(
+            syntax.return_at,
+            builder.prepare_values_with_clauses(&clauses, &projected, 0, None),
+        )?;
         Ok(Self {
             statement: statement.to_owned(),
             builder,
@@ -847,7 +855,9 @@ impl PreparedGraphText {
         values: &[GqlParameterValue],
     ) -> Result<PreparedGraphPattern<GraphValueRow>, GraphPatternTextError> {
         let builder = scoped::bind_builder(&self.builder, &self.filters, values, self.return_at)?;
-        let scopes = self.scopes.iter()
+        let scopes = self
+            .scopes
+            .iter()
             .map(|scope| scope.bind_values(values, self.return_at))
             .collect::<Result<Vec<_>, _>>()?;
         let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();

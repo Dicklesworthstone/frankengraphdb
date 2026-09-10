@@ -132,7 +132,13 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
     pub(crate) fn visit_value_bindings<E, F, C, P>(
         &self,
         vertices: impl IntoIterator<Item = fgdb_types::VId>,
-        edges: impl IntoIterator<Item = (fgdb_types::VId, fgdb_delta_types::RelationId, fgdb_types::VId)>,
+        edges: impl IntoIterator<
+            Item = (
+                fgdb_types::VId,
+                fgdb_delta_types::RelationId,
+                fgdb_types::VId,
+            ),
+        >,
         test_vertex: F,
         control: C,
         mut visit: P,
@@ -140,7 +146,11 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
     where
         F: FnMut(fgdb_types::VId, &[crate::algebra::VertexPredicate]) -> Result<bool, E>,
         C: FnMut(super::GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&[crate::algebra::ValueProjection], &[Option<fgdb_types::VId>], &mut C) -> Result<(), E>,
+        P: FnMut(
+            &[crate::algebra::ValueProjection],
+            &[Option<fgdb_types::VId>],
+            &mut C,
+        ) -> Result<(), E>,
     {
         let unused = self.execute_projected(
             vertices,
@@ -154,7 +164,10 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
                 visit(columns, bindings, control)
             },
         )?;
-        debug_assert!(unused.is_empty(), "aggregation never materializes its child bag");
+        debug_assert!(
+            unused.is_empty(),
+            "aggregation never materializes its child bag"
+        );
         Ok(())
     }
 }
