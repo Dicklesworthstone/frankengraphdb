@@ -1,18 +1,16 @@
-//! Typed numeric parameters for the existing bounded MATCH language.
+//! Typed arguments and numeric templates for the bounded MATCH language.
 //!
-//! The canonical parser reads `$name` as a structural numeric operand. Its AST
-//! determines the bound slot and original source span, with no lexical role
-//! inference or preparation-time text substitution. Instantiation checks the
-//! complete argument set and fills those numeric slots directly; neither binding
-//! values nor execution reparses or rebinds names.
-//!
-//! A concrete statement is also rendered for the existing prepared-query and
-//! evidence contracts. It contains only decimal encodings of typed numbers at
-//! previously validated token spans. Existing evidence binds this concrete
-//! definition, not the original template or an authenticated parameter receipt.
+//! Graph-pattern text additionally accepts declared canonical scalar arguments.
+//! Legacy templates retain numeric-only semantics and concrete evidence bytes.
+//! Arguments enter one exact-name map; scalar payloads are checked once and
+//! shared by immutable bindings rather than interpolated into statement text.
+
+mod scalar;
+pub use scalar::GqlScalarParameter;
 
 use crate::{BindError, BoundPlan, ParseErrorKind, PreparedGqlQuery, RelationBind};
 use fgdb_delta_types::PropertyKeyId;
+use fgdb_types::CanonicalScalarKind;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
@@ -20,28 +18,34 @@ use std::ops::Range;
 pub enum GqlParameterType {
     Int64,
     UInt64,
+    /// Exact canonical kind or canonical null; no cross-kind numeric coercion.
+    Scalar(CanonicalScalarKind),
 }
 
-/// No text, floating-point, null, or implicit numeric coercion in this slice.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Scalar arguments own shared bounded storage. This enum is Clone, not Copy;
+/// retrieving or cloning an argument never duplicates its scalar payload.
+#[derive(Clone, PartialEq, Eq)]
 pub enum GqlParameterValue {
     Int64(i64),
     UInt64(u64),
+    Scalar(GqlScalarParameter),
 }
 
 impl GqlParameterValue {
     #[must_use]
-    pub const fn parameter_type(self) -> GqlParameterType {
+    pub fn parameter_type(&self) -> GqlParameterType {
         match self {
             Self::Int64(_) => GqlParameterType::Int64,
             Self::UInt64(_) => GqlParameterType::UInt64,
+            Self::Scalar(value) => GqlParameterType::Scalar(value.kind()),
         }
     }
 
-    fn decimal(self) -> String {
+    fn decimal(&self) -> String {
         match self {
             Self::Int64(value) => value.to_string(),
             Self::UInt64(value) => value.to_string(),
+            Self::Scalar(_) => unreachable!("legacy template validation admits only numeric arguments"),
         }
     }
 }
@@ -101,7 +105,7 @@ impl GqlParameters {
 
     #[must_use]
     pub fn get(&self, name: &str) -> Option<GqlParameterValue> {
-        self.values.get(name).copied()
+        self.values.get(name).cloned()
     }
 
     #[must_use]
@@ -116,6 +120,8 @@ impl GqlParameters {
 
     /// Explicit plaintext export. Unlike Debug, these bytes contain values.
     /// This is a self-delimiting application transcript, not a durable format.
+    /// Numeric-only maps retain their exact existing bytes. Scalar tag 2 uses
+    /// the already admitted canonical encoding, never a second scalar encoder.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:gql-parameters:v1\0".to_vec();
@@ -130,6 +136,10 @@ impl GqlParameters {
                 GqlParameterValue::UInt64(value) => {
                     bytes.push(1);
                     bytes.extend_from_slice(&value.to_be_bytes());
+                }
+                GqlParameterValue::Scalar(value) => {
+                    bytes.push(2);
+                    append_bytes(&mut bytes, value.canonical_bytes());
                 }
             }
         }
@@ -159,6 +169,8 @@ pub struct GqlParameterSpec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GqlParameterError {
     Bind(BindError),
+    /// The scalar could not be admitted within the canonical operand bounds.
+    ScalarLiteral,
     InvalidParameterName {
         offset: usize,
     },
@@ -201,6 +213,7 @@ impl core::fmt::Display for GqlParameterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Bind(error) => core::fmt::Display::fmt(error, f),
+            Self::ScalarLiteral => f.write_str("scalar argument exceeds canonical operand admission bounds"),
             Self::InvalidParameterName { offset } => {
                 write!(f, "invalid GQL parameter name at byte {offset}")
             }

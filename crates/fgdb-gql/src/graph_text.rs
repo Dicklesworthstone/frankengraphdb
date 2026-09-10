@@ -7,6 +7,7 @@
 
 mod aggregate;
 mod literal;
+mod parameters;
 mod scoped;
 pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 use scoped::{BoundScope, ScopeSyntax};
@@ -80,6 +81,8 @@ pub enum GraphPatternTextErrorKind {
         expected: GraphSymbolKind,
         found: GraphSymbolKind,
     },
+    ParameterDeclaration,
+    UnusedParameterDeclaration,
     ConflictingParameterTypes,
     MissingParameter,
     ParameterTypeMismatch {
@@ -226,20 +229,20 @@ enum Number {
 impl Number {
     fn value(&self, arguments: &[GqlParameterValue]) -> GqlParameterValue {
         match self {
-            Self::Literal(value) => *value,
-            Self::Parameter(at) => arguments[*at],
+            Self::Literal(value) => value.clone(),
+            Self::Parameter(at) => arguments[*at].clone(),
         }
     }
     fn signed(&self, arguments: &[GqlParameterValue]) -> i64 {
         match self.value(arguments) {
             GqlParameterValue::Int64(value) => value,
-            GqlParameterValue::UInt64(_) => unreachable!("private numeric syntax and schema agree"),
+            _ => unreachable!("private numeric syntax and schema agree"),
         }
     }
     fn unsigned(&self, arguments: &[GqlParameterValue]) -> u64 {
         match self.value(arguments) {
             GqlParameterValue::UInt64(value) => value,
-            GqlParameterValue::Int64(_) => unreachable!("private numeric syntax and schema agree"),
+            _ => unreachable!("private numeric syntax and schema agree"),
         }
     }
 }
@@ -301,6 +304,7 @@ struct Parser<'a> {
     predicates: usize,
     identities: usize,
     edge_count: usize,
+    parameter_types: BTreeMap<String, GqlParameterType>,
 }
 impl<'a> Parser<'a> {
     fn new(text: &'a str) -> Result<Self, GraphPatternTextError> {
@@ -322,6 +326,7 @@ impl<'a> Parser<'a> {
             predicates: 0,
             identities: 0,
             edge_count: 0,
+            parameter_types: BTreeMap::new(),
             syntax: Syntax {
                 variables: Vec::new(),
                 root_variables: 0,
@@ -471,6 +476,7 @@ impl<'a> Parser<'a> {
     fn number(&mut self, expected: GqlParameterType) -> Result<Number, GraphPatternTextError> {
         let at = self.current.at;
         if let TokenKind::Parameter(name) = self.current.kind {
+            self.check_declared_parameter(name, expected, at)?;
             let index = if let Some(index) = self
                 .syntax
                 .parameters
@@ -511,6 +517,7 @@ impl<'a> Parser<'a> {
             .parse::<u64>()
             .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
         let value = match expected {
+            GqlParameterType::Scalar(_) => return Err(error(at, GraphPatternTextErrorKind::Expected("declared scalar parameter"))),
             GqlParameterType::UInt64 => GqlParameterValue::UInt64(magnitude),
             GqlParameterType::Int64 => {
                 let signed = if negative {
@@ -635,7 +642,7 @@ impl<'a> Parser<'a> {
                 GraphPatternTextErrorKind::Expected("end of statement"),
             ));
         }
-        Ok(())
+        self.check_parameter_declarations()
     }
 }
 
@@ -815,7 +822,7 @@ impl PreparedGraphText {
             let value = arguments
                 .get(&spec.name)
                 .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
-            if value.parameter_type() != spec.parameter_type {
+            if !spec.parameter_type.accepts(value.parameter_type()) {
                 return Err(error(
                     at,
                     GraphPatternTextErrorKind::ParameterTypeMismatch {

@@ -76,7 +76,13 @@ impl<'a> Parser<'a> {
                 .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral))?;
             Ok(Filter::Scalar { variable, key, predicate })
         } else {
-            let value = self.number(GqlParameterType::Int64)?;
+            let expected = match self.current.kind {
+                TokenKind::Parameter(name) => self.parameter_types.get(name).copied()
+                    .filter(|kind| matches!(kind, GqlParameterType::Scalar(_)))
+                    .unwrap_or(GqlParameterType::Int64),
+                _ => GqlParameterType::Int64,
+            };
+            let value = self.number(expected)?;
             Ok(Filter::Property { variable, key, comparison, value })
         }
     }

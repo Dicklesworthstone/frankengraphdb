@@ -51,7 +51,7 @@ pub use graph_text::{
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
     GqlParameterError, GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters,
-    PreparedGqlTemplate,
+    GqlScalarParameter, PreparedGqlTemplate,
 };
 pub use parser::{
     BindError, BoundPlan, EdgeDirection, ParseError, ParseErrorKind, RelationBind, ReturnProjection,

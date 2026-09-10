@@ -82,7 +82,18 @@ impl PreparedGraphAggregateText {
         statement: &str,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphPatternTextError> {
-        let mut parser = Parser::new(statement)?;
+        Self::prepare_with_parameter_types(statement, &[], resolve)
+    }
+
+    /// The same aggregate grammar with explicit canonical scalar argument
+    /// kinds in MATCH/WHERE scopes. Numeric HAVING and pagination requirements
+    /// remain strict and participate in the same declaration/argument table.
+    pub fn prepare_with_parameter_types(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<Self, GraphPatternTextError> {
+        let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         parser.parse_head()?;
         // All grouping keys are projected; DISTINCT on the aggregate output
         // is therefore redundant. Neither spelling deduplicates child matches.

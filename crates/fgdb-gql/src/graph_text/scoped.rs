@@ -138,9 +138,16 @@ pub(super) fn bind_builder(
 ) -> Result<GraphPatternBuilder, GraphPatternTextError> {
     let mut builder = builder.clone();
     for filter in filters {
-        built(at, builder.filter(&filter.variable, VertexPredicate::IntegerProperty {
-            key: filter.key, comparison: filter.comparison, value: filter.value.signed(values),
-        }))?;
+        let predicate = match filter.value.value(values) {
+            GqlParameterValue::Int64(value) => VertexPredicate::IntegerProperty {
+                key: filter.key, comparison: filter.comparison, value,
+            },
+            GqlParameterValue::Scalar(value) => VertexPredicate::ScalarProperty {
+                key: filter.key, predicate: value.predicate(filter.comparison),
+            },
+            GqlParameterValue::UInt64(_) => unreachable!("property arguments were type-checked at preparation"),
+        };
+        built(at, builder.filter(&filter.variable, predicate))?;
     }
     Ok(builder)
 }
