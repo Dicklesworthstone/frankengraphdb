@@ -401,53 +401,60 @@ fn filtered_scalar_rows_and_matching_insertions_conflict_even_after_result_refus
 #[test]
 fn scalar_queries_keep_exact_policy_boundaries_and_real_runtime_cancellation() {
     let ((), report) = run_async_under_lab(0x5ca1_0004, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let commit = contexts.commit();
-        let cx = contexts.query();
-        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        seed(&mut db, &commit).await;
-        let pattern = query("MATCH (n:Person) WHERE n.status = 'ready' RETURN n");
-        let full = db
-            .execute_graph_pattern_governed(&cx, &pattern, policy())
-            .unwrap();
-        assert_eq!(ids(&full.value), vec![VId(0), VId(1)]);
-        let exact = GqlQueryPolicy::new(
-            7,
-            2,
-            full.evaluator.work_units,
-            full.evaluator.scratch_entries,
-        );
-        assert_eq!(
-            db.execute_graph_pattern_governed(&cx, &pattern, exact)
-                .unwrap(),
-            full
-        );
-        for cap in [
-            GqlQueryPolicy::new(6, 2, u64::MAX, u64::MAX),
-            GqlQueryPolicy::new(7, 1, u64::MAX, u64::MAX),
-        ] {
-            assert!(matches!(
-                db.execute_graph_pattern_governed(&cx, &pattern, cap),
-                Err(GqlQueryError::Rows(_))
-            ));
-        }
-        for cap in [
-            GqlQueryPolicy::new(7, 2, full.evaluator.work_units - 1, u64::MAX),
-            GqlQueryPolicy::new(7, 2, u64::MAX, full.evaluator.scratch_entries - 1),
-        ] {
-            assert!(matches!(
-                db.execute_graph_pattern_governed(&cx, &pattern, cap),
-                Err(GqlQueryError::Evaluator(_))
-            ));
-        }
-        root.cancel_with(
-            CancelKind::User,
-            Some("scalar query cancellation regression"),
-        );
-        assert!(matches!(
-            db.execute_graph_pattern_governed(&cx, &pattern, policy()),
-            Err(GqlQueryError::Interrupted(_))
-        ));
+        // Cancel the query child, keeping the lab supervisor available to join it.
+        let mut handle = root
+            .spawn(|root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let cx = contexts.query();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                seed(&mut db, &commit).await;
+                let pattern = query("MATCH (n:Person) WHERE n.status = 'ready' RETURN n");
+                let full = db
+                    .execute_graph_pattern_governed(&cx, &pattern, policy())
+                    .unwrap();
+                assert_eq!(ids(&full.value), vec![VId(0), VId(1)]);
+                let exact = GqlQueryPolicy::new(
+                    7,
+                    2,
+                    full.evaluator.work_units,
+                    full.evaluator.scratch_entries,
+                );
+                assert_eq!(
+                    db.execute_graph_pattern_governed(&cx, &pattern, exact)
+                        .unwrap(),
+                    full
+                );
+                for cap in [
+                    GqlQueryPolicy::new(6, 2, u64::MAX, u64::MAX),
+                    GqlQueryPolicy::new(7, 1, u64::MAX, u64::MAX),
+                ] {
+                    assert!(matches!(
+                        db.execute_graph_pattern_governed(&cx, &pattern, cap),
+                        Err(GqlQueryError::Rows(_))
+                    ));
+                }
+                for cap in [
+                    GqlQueryPolicy::new(7, 2, full.evaluator.work_units - 1, u64::MAX),
+                    GqlQueryPolicy::new(7, 2, u64::MAX, full.evaluator.scratch_entries - 1),
+                ] {
+                    assert!(matches!(
+                        db.execute_graph_pattern_governed(&cx, &pattern, cap),
+                        Err(GqlQueryError::Evaluator(_))
+                    ));
+                }
+                root.cancel_with(
+                    CancelKind::User,
+                    Some("scalar query cancellation regression"),
+                );
+                assert!(matches!(
+                    db.execute_graph_pattern_governed(&cx, &pattern, policy()),
+                    Err(GqlQueryError::Interrupted(_))
+                ));
+            })
+            .expect("lab query task can be spawned");
+        assert_eq!(handle.join(&root).await, Ok(()));
+        assert!(root.checkpoint().is_ok(), "the supervisor remains live");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

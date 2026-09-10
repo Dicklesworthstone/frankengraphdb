@@ -454,64 +454,71 @@ fn optional_nulls_and_anti_absence_retain_dependencies_after_output_refusal() {
 #[test]
 fn empty_outer_sources_and_authority_refusals_keep_their_meaning() {
     let ((), report) = run_async_under_lab(0x0f71_0004, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let cx = contexts.query();
-        let commit = contexts.commit();
-        let txn_cx = contexts.txn();
-        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        assert!(
-            db.execute_graph_pattern_governed(&cx, &query(), policy())
+        // Cancel the query child, keeping the lab supervisor available to join it.
+        let mut handle = root
+            .spawn(|root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let cx = contexts.query();
+                let commit = contexts.commit();
+                let txn_cx = contexts.txn();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                assert!(
+                    db.execute_graph_pattern_governed(&cx, &query(), policy())
+                        .unwrap()
+                        .value
+                        .is_empty()
+                );
+                assert!(
+                    db.execute_graph_aggregate_governed(&cx, &aggregate(), policy())
+                        .unwrap()
+                        .value
+                        .is_empty()
+                );
+                let global = PreparedGraphAggregateText::prepare(
+                    &format!("{HEAD} RETURN COUNT(*) AS n,COUNT(c) AS present"),
+                    symbols,
+                )
                 .unwrap()
-                .value
-                .is_empty()
-        );
-        assert!(
-            db.execute_graph_aggregate_governed(&cx, &aggregate(), policy())
-                .unwrap()
-                .value
-                .is_empty()
-        );
-        let global = PreparedGraphAggregateText::prepare(
-            &format!("{HEAD} RETURN COUNT(*) AS n,COUNT(c) AS present"),
-            symbols,
-        )
-        .unwrap()
-        .bind_parameters(&arguments())
-        .unwrap();
-        let zero = db
-            .execute_graph_aggregate_governed(&cx, &global, policy())
-            .unwrap();
-        assert_eq!(zero.value.len(), 1);
-        assert_eq!(zero.value[0].get(0).unwrap().as_count(), Some(0));
-        assert_eq!(zero.value[0].get(1).unwrap().as_count(), Some(0));
-        seed(&mut db, &commit).await;
-        let foreign = Database::open_memory(&commit, keys()).await.unwrap();
-        let txn = db.begin(&txn_cx).unwrap();
-        let view = db.read_session().unwrap();
-        let query = query();
-        root.cancel_with(CancelKind::User, Some("scoped text error ordering"));
-        assert!(matches!(
-            txn.execute_graph_pattern_governed(&foreign, &cx, &query, policy()),
-            Err(GqlQueryError::Source(WriteTxnError::WrongDatabase))
-        ));
-        let future = CommitSeq(db.frontier().unwrap().0 + 1);
-        assert!(matches!(
-            db.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
-            Err(GqlQueryError::Source(GqlError::Read(
-                ReadError::BeyondFrontier { .. }
-            )))
-        ));
-        assert!(matches!(
-            view.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
-            Err(GqlQueryError::Source(GqlError::Read(
-                ReadError::BeyondFrontier { .. }
-            )))
-        ));
-        assert!(matches!(
-            db.execute_graph_pattern_governed(&cx, &query, policy()),
-            Err(GqlQueryError::Interrupted(_))
-        ));
-        txn.abort();
+                .bind_parameters(&arguments())
+                .unwrap();
+                let zero = db
+                    .execute_graph_aggregate_governed(&cx, &global, policy())
+                    .unwrap();
+                assert_eq!(zero.value.len(), 1);
+                assert_eq!(zero.value[0].get(0).unwrap().as_count(), Some(0));
+                assert_eq!(zero.value[0].get(1).unwrap().as_count(), Some(0));
+                seed(&mut db, &commit).await;
+                let foreign = Database::open_memory(&commit, keys()).await.unwrap();
+                let txn = db.begin(&txn_cx).unwrap();
+                let view = db.read_session().unwrap();
+                let query = query();
+                root.cancel_with(CancelKind::User, Some("scoped text error ordering"));
+                assert!(matches!(
+                    txn.execute_graph_pattern_governed(&foreign, &cx, &query, policy()),
+                    Err(GqlQueryError::Source(WriteTxnError::WrongDatabase))
+                ));
+                let future = CommitSeq(db.frontier().unwrap().0 + 1);
+                assert!(matches!(
+                    db.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
+                    Err(GqlQueryError::Source(GqlError::Read(
+                        ReadError::BeyondFrontier { .. }
+                    )))
+                ));
+                assert!(matches!(
+                    view.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
+                    Err(GqlQueryError::Source(GqlError::Read(
+                        ReadError::BeyondFrontier { .. }
+                    )))
+                ));
+                assert!(matches!(
+                    db.execute_graph_pattern_governed(&cx, &query, policy()),
+                    Err(GqlQueryError::Interrupted(_))
+                ));
+                txn.abort();
+            })
+            .expect("lab query task can be spawned");
+        assert_eq!(handle.join(&root).await, Ok(()));
+        assert!(root.checkpoint().is_ok(), "the supervisor remains live");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

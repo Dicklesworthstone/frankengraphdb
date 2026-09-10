@@ -453,96 +453,103 @@ fn bound_scalar_reads_keep_rejected_values_and_absence_in_the_conflict_footprint
 #[test]
 fn exact_limits_and_runtime_cancellation_preserve_source_and_argument_errors() {
     let ((), report) = run_async_under_lab(0x5ca1_0003, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let cx = contexts.query();
-        let commit = contexts.commit();
-        let txn_cx = contexts.txn();
-        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        seed(&mut db, &commit).await;
-        let prepared = template();
-        let pattern = prepared.bind_parameters(&arguments()).unwrap();
-        let full = db
-            .execute_graph_pattern_governed(&cx, &pattern, policy())
-            .unwrap();
-        let exact = GqlQueryPolicy::new(
-            full.rows.snapshot_records,
-            full.rows.result_rows,
-            full.evaluator.work_units,
-            full.evaluator.scratch_entries,
-        );
-        assert_eq!(
-            db.execute_graph_pattern_governed(&cx, &pattern, exact)
-                .unwrap(),
-            full
-        );
-        for cap in [
-            GqlQueryPolicy::new(full.rows.snapshot_records - 1, 100, u64::MAX, u64::MAX),
-            GqlQueryPolicy::new(100, full.rows.result_rows - 1, u64::MAX, u64::MAX),
-            GqlQueryPolicy::new(100, 100, full.evaluator.work_units - 1, u64::MAX),
-            GqlQueryPolicy::new(100, 100, u64::MAX, full.evaluator.scratch_entries - 1),
-        ] {
-            assert!(
-                db.execute_graph_pattern_governed(&cx, &pattern, cap)
-                    .is_err()
-            );
-        }
-        let wrong = GqlParameters::new()
-            .with_text("status", "ready")
-            .unwrap()
-            .with_text("active", "true")
-            .unwrap()
-            .with_text("category", WANTED)
-            .unwrap()
-            .with_uint64("take", 100)
-            .unwrap();
-        assert!(matches!(
-            prepared.bind_parameters(&wrong).unwrap_err().kind,
-            GraphPatternTextErrorKind::ParameterTypeMismatch { .. }
-        ));
-        let foreign = Database::open_memory(&commit, keys()).await.unwrap();
-        let txn = db.begin(&txn_cx).unwrap();
-        let view = db.read_session().unwrap();
-        let mut later = WriteBatch::new(R);
-        later.set_vertex_property(VId(10), CATEGORY, Some(text("no longer selected")));
-        db.write(&commit, later).await.unwrap();
-        assert_eq!(
-            txn.execute_graph_pattern_governed(&db, &cx, &pattern, policy())
-                .unwrap()
-                .value,
-            full.value
-        );
-        assert_ne!(
-            db.execute_graph_pattern_governed(&cx, &pattern, policy())
-                .unwrap()
-                .value,
-            full.value
-        );
-        root.cancel_with(
-            CancelKind::User,
-            Some("scalar argument cancellation ordering"),
-        );
-        assert!(matches!(
-            txn.execute_graph_pattern_governed(&foreign, &cx, &pattern, policy()),
-            Err(GqlQueryError::Source(WriteTxnError::WrongDatabase))
-        ));
-        let future = CommitSeq(db.frontier().unwrap().0 + 1);
-        assert!(matches!(
-            db.execute_graph_pattern_governed_at(&cx, &pattern, future, policy()),
-            Err(GqlQueryError::Source(GqlError::Read(
-                ReadError::BeyondFrontier { .. }
-            )))
-        ));
-        assert!(matches!(
-            view.execute_graph_pattern_governed_at(&cx, &pattern, future, policy()),
-            Err(GqlQueryError::Source(GqlError::Read(
-                ReadError::BeyondFrontier { .. }
-            )))
-        ));
-        assert!(matches!(
-            db.execute_graph_pattern_governed(&cx, &pattern, policy()),
-            Err(GqlQueryError::Interrupted(_))
-        ));
-        txn.abort();
+        // Cancel the query child, keeping the lab supervisor available to join it.
+        let mut handle = root
+            .spawn(|root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let cx = contexts.query();
+                let commit = contexts.commit();
+                let txn_cx = contexts.txn();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                seed(&mut db, &commit).await;
+                let prepared = template();
+                let pattern = prepared.bind_parameters(&arguments()).unwrap();
+                let full = db
+                    .execute_graph_pattern_governed(&cx, &pattern, policy())
+                    .unwrap();
+                let exact = GqlQueryPolicy::new(
+                    full.rows.snapshot_records,
+                    full.rows.result_rows,
+                    full.evaluator.work_units,
+                    full.evaluator.scratch_entries,
+                );
+                assert_eq!(
+                    db.execute_graph_pattern_governed(&cx, &pattern, exact)
+                        .unwrap(),
+                    full
+                );
+                for cap in [
+                    GqlQueryPolicy::new(full.rows.snapshot_records - 1, 100, u64::MAX, u64::MAX),
+                    GqlQueryPolicy::new(100, full.rows.result_rows - 1, u64::MAX, u64::MAX),
+                    GqlQueryPolicy::new(100, 100, full.evaluator.work_units - 1, u64::MAX),
+                    GqlQueryPolicy::new(100, 100, u64::MAX, full.evaluator.scratch_entries - 1),
+                ] {
+                    assert!(
+                        db.execute_graph_pattern_governed(&cx, &pattern, cap)
+                            .is_err()
+                    );
+                }
+                let wrong = GqlParameters::new()
+                    .with_text("status", "ready")
+                    .unwrap()
+                    .with_text("active", "true")
+                    .unwrap()
+                    .with_text("category", WANTED)
+                    .unwrap()
+                    .with_uint64("take", 100)
+                    .unwrap();
+                assert!(matches!(
+                    prepared.bind_parameters(&wrong).unwrap_err().kind,
+                    GraphPatternTextErrorKind::ParameterTypeMismatch { .. }
+                ));
+                let foreign = Database::open_memory(&commit, keys()).await.unwrap();
+                let txn = db.begin(&txn_cx).unwrap();
+                let view = db.read_session().unwrap();
+                let mut later = WriteBatch::new(R);
+                later.set_vertex_property(VId(10), CATEGORY, Some(text("no longer selected")));
+                db.write(&commit, later).await.unwrap();
+                assert_eq!(
+                    txn.execute_graph_pattern_governed(&db, &cx, &pattern, policy())
+                        .unwrap()
+                        .value,
+                    full.value
+                );
+                assert_ne!(
+                    db.execute_graph_pattern_governed(&cx, &pattern, policy())
+                        .unwrap()
+                        .value,
+                    full.value
+                );
+                root.cancel_with(
+                    CancelKind::User,
+                    Some("scalar argument cancellation ordering"),
+                );
+                assert!(matches!(
+                    txn.execute_graph_pattern_governed(&foreign, &cx, &pattern, policy()),
+                    Err(GqlQueryError::Source(WriteTxnError::WrongDatabase))
+                ));
+                let future = CommitSeq(db.frontier().unwrap().0 + 1);
+                assert!(matches!(
+                    db.execute_graph_pattern_governed_at(&cx, &pattern, future, policy()),
+                    Err(GqlQueryError::Source(GqlError::Read(
+                        ReadError::BeyondFrontier { .. }
+                    )))
+                ));
+                assert!(matches!(
+                    view.execute_graph_pattern_governed_at(&cx, &pattern, future, policy()),
+                    Err(GqlQueryError::Source(GqlError::Read(
+                        ReadError::BeyondFrontier { .. }
+                    )))
+                ));
+                assert!(matches!(
+                    db.execute_graph_pattern_governed(&cx, &pattern, policy()),
+                    Err(GqlQueryError::Interrupted(_))
+                ));
+                txn.abort();
+            })
+            .expect("lab query task can be spawned");
+        assert_eq!(handle.join(&root).await, Ok(()));
+        assert!(root.checkpoint().is_ok(), "the supervisor remains live");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

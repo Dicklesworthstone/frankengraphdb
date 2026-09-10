@@ -398,43 +398,50 @@ fn zero_count_and_refused_group_output_preserve_read_dependencies() {
 #[test]
 fn data_owner_snapshot_and_cancellation_errors_keep_their_domains() {
     let ((), report) = run_async_under_lab(0xa660_0004, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let commit = contexts.commit();
-        let cx = contexts.query();
-        let txn_cx = contexts.txn();
-        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        seed(&mut db, &commit).await;
-        let foreign = Database::open_memory(&commit, keys()).await.unwrap();
-        let aggregate = aggregate(false);
-        let mut wrong_type = WriteBatch::new(R);
-        wrong_type.set_vertex_property(VId(3), P, Some(CanonicalScalar::Bool(true)));
-        db.write(&commit, wrong_type).await.unwrap();
-        assert!(matches!(
-            db.execute_graph_aggregate_governed(&cx, &aggregate, policy()),
-            Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
-                aggregate: 3
-            }))
-        ));
-        let txn = db.begin(&txn_cx).unwrap();
-        root.cancel_with(CancelKind::User, Some("aggregate authority regression"));
-        assert!(matches!(
-            txn.execute_graph_aggregate_governed(&foreign, &cx, &aggregate, policy()),
-            Err(GqlQueryError::Source(GraphAggregateError::Source(
-                WriteTxnError::WrongDatabase
-            )))
-        ));
-        let future = CommitSeq(db.frontier().unwrap().0 + 1);
-        assert!(matches!(
-            db.execute_graph_aggregate_governed_at(&cx, &aggregate, future, policy()),
-            Err(GqlQueryError::Source(GraphAggregateError::Source(
-                GqlError::Read(ReadError::BeyondFrontier { .. })
-            )))
-        ));
-        assert!(matches!(
-            db.execute_graph_aggregate_governed(&cx, &aggregate, policy()),
-            Err(GqlQueryError::Interrupted(_))
-        ));
-        txn.abort();
+        // Cancel the query child, keeping the lab supervisor available to join it.
+        let mut handle = root
+            .spawn(|root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let cx = contexts.query();
+                let txn_cx = contexts.txn();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                seed(&mut db, &commit).await;
+                let foreign = Database::open_memory(&commit, keys()).await.unwrap();
+                let aggregate = aggregate(false);
+                let mut wrong_type = WriteBatch::new(R);
+                wrong_type.set_vertex_property(VId(3), P, Some(CanonicalScalar::Bool(true)));
+                db.write(&commit, wrong_type).await.unwrap();
+                assert!(matches!(
+                    db.execute_graph_aggregate_governed(&cx, &aggregate, policy()),
+                    Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
+                        aggregate: 3
+                    }))
+                ));
+                let txn = db.begin(&txn_cx).unwrap();
+                root.cancel_with(CancelKind::User, Some("aggregate authority regression"));
+                assert!(matches!(
+                    txn.execute_graph_aggregate_governed(&foreign, &cx, &aggregate, policy()),
+                    Err(GqlQueryError::Source(GraphAggregateError::Source(
+                        WriteTxnError::WrongDatabase
+                    )))
+                ));
+                let future = CommitSeq(db.frontier().unwrap().0 + 1);
+                assert!(matches!(
+                    db.execute_graph_aggregate_governed_at(&cx, &aggregate, future, policy()),
+                    Err(GqlQueryError::Source(GraphAggregateError::Source(
+                        GqlError::Read(ReadError::BeyondFrontier { .. })
+                    )))
+                ));
+                assert!(matches!(
+                    db.execute_graph_aggregate_governed(&cx, &aggregate, policy()),
+                    Err(GqlQueryError::Interrupted(_))
+                ));
+                txn.abort();
+            })
+            .expect("lab query task can be spawned");
+        assert_eq!(handle.join(&root).await, Ok(()));
+        assert!(root.checkpoint().is_ok(), "the supervisor remains live");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

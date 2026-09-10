@@ -576,43 +576,50 @@ fn optional_values_compose_with_semijoins_antijoins_and_streaming_grouping() {
 #[test]
 fn optional_read_authority_and_snapshot_errors_precede_runtime_interruption() {
     let ((), report) = run_async_under_lab(0x0f71_0005, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let commit = contexts.commit();
-        let cx = contexts.query();
-        let txn_cx = contexts.txn();
-        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        seed(&mut db, &commit).await;
-        let foreign = Database::open_memory(&commit, keys()).await.unwrap();
-        let pinned = db.read_session().unwrap();
-        let txn = db.begin(&txn_cx).unwrap();
-        let query = pattern(false);
-        let future = CommitSeq(db.frontier().unwrap().0 + 1);
-        root.cancel_with(CancelKind::User, Some("optional scope interruption"));
-        assert!(matches!(
-            txn.execute_graph_pattern_governed(&foreign, &cx, &query, policy()),
-            Err(GqlQueryError::Source(WriteTxnError::WrongDatabase))
-        ));
-        assert!(matches!(
-            db.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
-            Err(GqlQueryError::Source(GqlError::Read(
-                ReadError::BeyondFrontier { .. }
-            )))
-        ));
-        assert!(matches!(
-            pinned.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
-            Err(GqlQueryError::Source(GqlError::Read(
-                ReadError::BeyondFrontier { .. }
-            )))
-        ));
-        assert!(matches!(
-            db.execute_graph_pattern_governed(&cx, &query, policy()),
-            Err(GqlQueryError::Interrupted(_))
-        ));
-        assert!(matches!(
-            txn.execute_graph_pattern_governed(&db, &cx, &query, policy()),
-            Err(GqlQueryError::Interrupted(_))
-        ));
-        txn.abort();
+        // Cancel the query child, keeping the lab supervisor available to join it.
+        let mut handle = root
+            .spawn(|root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let cx = contexts.query();
+                let txn_cx = contexts.txn();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                seed(&mut db, &commit).await;
+                let foreign = Database::open_memory(&commit, keys()).await.unwrap();
+                let pinned = db.read_session().unwrap();
+                let txn = db.begin(&txn_cx).unwrap();
+                let query = pattern(false);
+                let future = CommitSeq(db.frontier().unwrap().0 + 1);
+                root.cancel_with(CancelKind::User, Some("optional scope interruption"));
+                assert!(matches!(
+                    txn.execute_graph_pattern_governed(&foreign, &cx, &query, policy()),
+                    Err(GqlQueryError::Source(WriteTxnError::WrongDatabase))
+                ));
+                assert!(matches!(
+                    db.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
+                    Err(GqlQueryError::Source(GqlError::Read(
+                        ReadError::BeyondFrontier { .. }
+                    )))
+                ));
+                assert!(matches!(
+                    pinned.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
+                    Err(GqlQueryError::Source(GqlError::Read(
+                        ReadError::BeyondFrontier { .. }
+                    )))
+                ));
+                assert!(matches!(
+                    db.execute_graph_pattern_governed(&cx, &query, policy()),
+                    Err(GqlQueryError::Interrupted(_))
+                ));
+                assert!(matches!(
+                    txn.execute_graph_pattern_governed(&db, &cx, &query, policy()),
+                    Err(GqlQueryError::Interrupted(_))
+                ));
+                txn.abort();
+            })
+            .expect("lab query task can be spawned");
+        assert_eq!(handle.join(&root).await, Ok(()));
+        assert!(root.checkpoint().is_ok(), "the supervisor remains live");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

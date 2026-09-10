@@ -381,63 +381,70 @@ fn filtered_and_unselected_groups_keep_dependencies_but_disjoint_writes_remain_a
 #[test]
 fn ranked_empty_counts_and_owner_future_cancellation_errors_retain_their_meaning() {
     let ((), report) = run_async_under_lab(0xa680_0004, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let commit = contexts.commit();
-        let cx = contexts.query();
-        let txn_cx = contexts.txn();
-        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        let query = PreparedGraphAggregateText::prepare(
-            "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n HAVING n > 0 ORDER BY n DESC",
-            symbols,
-        )
-        .unwrap()
-        .bind_parameters(&GqlParameters::new())
-        .unwrap();
-        assert!(
-            db.execute_graph_aggregate_governed(&cx, &query, policy())
+        // Cancel the query child, keeping the lab supervisor available to join it.
+        let mut handle = root
+            .spawn(|root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let cx = contexts.query();
+                let txn_cx = contexts.txn();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                let query = PreparedGraphAggregateText::prepare(
+                    "MATCH (a)-[:R]->(b) RETURN COUNT(*) AS n HAVING n > 0 ORDER BY n DESC",
+                    symbols,
+                )
                 .unwrap()
-                .value
-                .is_empty()
-        );
-        let mut txn = db.begin(&txn_cx).unwrap();
-        let mut stage = WriteBatch::new(R);
-        stage.create_vertex(VId(99), vec![], vec![]);
-        txn.write(&mut db, stage).unwrap();
-        assert!(
-            txn.execute_graph_aggregate_governed(&db, &cx, &query, policy())
-                .unwrap()
-                .value
-                .is_empty()
-        );
-        seed(&mut db, &commit).await;
-        assert!(matches!(
-            txn.commit(&mut db, &commit).await,
-            Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                law: "FG-LAW-FCW-READ-01",
-                ..
-            }))
-        ));
-        let foreign = Database::open_memory(&commit, keys()).await.unwrap();
-        let txn = db.begin(&txn_cx).unwrap();
-        root.cancel_with(CancelKind::User, Some("ranked aggregate error ordering"));
-        assert!(matches!(
-            txn.execute_graph_aggregate_governed(&foreign, &cx, &query, policy()),
-            Err(GqlQueryError::Source(GraphAggregateError::Source(
-                WriteTxnError::WrongDatabase
-            )))
-        ));
-        let future = CommitSeq(db.frontier().unwrap().0 + 1);
-        assert!(matches!(
-            db.execute_graph_aggregate_governed_at(&cx, &query, future, policy()),
-            Err(GqlQueryError::Source(GraphAggregateError::Source(
-                GqlError::Read(ReadError::BeyondFrontier { .. })
-            )))
-        ));
-        assert!(matches!(
-            db.execute_graph_aggregate_governed(&cx, &query, policy()),
-            Err(GqlQueryError::Interrupted(_))
-        ));
-        txn.abort();
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+                assert!(
+                    db.execute_graph_aggregate_governed(&cx, &query, policy())
+                        .unwrap()
+                        .value
+                        .is_empty()
+                );
+                let mut txn = db.begin(&txn_cx).unwrap();
+                let mut stage = WriteBatch::new(R);
+                stage.create_vertex(VId(99), vec![], vec![]);
+                txn.write(&mut db, stage).unwrap();
+                assert!(
+                    txn.execute_graph_aggregate_governed(&db, &cx, &query, policy())
+                        .unwrap()
+                        .value
+                        .is_empty()
+                );
+                seed(&mut db, &commit).await;
+                assert!(matches!(
+                    txn.commit(&mut db, &commit).await,
+                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                        law: "FG-LAW-FCW-READ-01",
+                        ..
+                    }))
+                ));
+                let foreign = Database::open_memory(&commit, keys()).await.unwrap();
+                let txn = db.begin(&txn_cx).unwrap();
+                root.cancel_with(CancelKind::User, Some("ranked aggregate error ordering"));
+                assert!(matches!(
+                    txn.execute_graph_aggregate_governed(&foreign, &cx, &query, policy()),
+                    Err(GqlQueryError::Source(GraphAggregateError::Source(
+                        WriteTxnError::WrongDatabase
+                    )))
+                ));
+                let future = CommitSeq(db.frontier().unwrap().0 + 1);
+                assert!(matches!(
+                    db.execute_graph_aggregate_governed_at(&cx, &query, future, policy()),
+                    Err(GqlQueryError::Source(GraphAggregateError::Source(
+                        GqlError::Read(ReadError::BeyondFrontier { .. })
+                    )))
+                ));
+                assert!(matches!(
+                    db.execute_graph_aggregate_governed(&cx, &query, policy()),
+                    Err(GqlQueryError::Interrupted(_))
+                ));
+                txn.abort();
+            })
+            .expect("lab query task can be spawned");
+        assert_eq!(handle.join(&root).await, Ok(()));
+        assert!(root.checkpoint().is_ok(), "the supervisor remains live");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

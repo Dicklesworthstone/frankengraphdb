@@ -460,32 +460,39 @@ fn edge_root_correlations_and_streaming_aggregation_reuse_the_same_probe() {
 #[test]
 fn wrong_owner_future_snapshot_and_cancellation_never_become_successful_absence() {
     let ((), report) = run_async_under_lab(0xe715_0005, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let commit = contexts.commit();
-        let cx = contexts.query();
-        let txn_cx = contexts.txn();
-        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        seed(&mut db, &commit).await;
-        let foreign = Database::open_memory(&commit, keys()).await.unwrap();
-        let txn = db.begin(&txn_cx).unwrap();
-        let query = pattern(true);
-        root.cancel_with(CancelKind::User, Some("correlated existence cancellation"));
-        assert!(matches!(
-            txn.execute_graph_pattern_governed(&foreign, &cx, &query, policy()),
-            Err(GqlQueryError::Source(WriteTxnError::WrongDatabase))
-        ));
-        let future = CommitSeq(db.frontier().unwrap().0 + 1);
-        assert!(matches!(
-            db.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
-            Err(GqlQueryError::Source(GqlError::Read(
-                ReadError::BeyondFrontier { .. }
-            )))
-        ));
-        assert!(matches!(
-            db.execute_graph_pattern_governed(&cx, &query, policy()),
-            Err(GqlQueryError::Interrupted(_))
-        ));
-        txn.abort();
+        // Cancel the query child, keeping the lab supervisor available to join it.
+        let mut handle = root
+            .spawn(|root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let cx = contexts.query();
+                let txn_cx = contexts.txn();
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                seed(&mut db, &commit).await;
+                let foreign = Database::open_memory(&commit, keys()).await.unwrap();
+                let txn = db.begin(&txn_cx).unwrap();
+                let query = pattern(true);
+                root.cancel_with(CancelKind::User, Some("correlated existence cancellation"));
+                assert!(matches!(
+                    txn.execute_graph_pattern_governed(&foreign, &cx, &query, policy()),
+                    Err(GqlQueryError::Source(WriteTxnError::WrongDatabase))
+                ));
+                let future = CommitSeq(db.frontier().unwrap().0 + 1);
+                assert!(matches!(
+                    db.execute_graph_pattern_governed_at(&cx, &query, future, policy()),
+                    Err(GqlQueryError::Source(GqlError::Read(
+                        ReadError::BeyondFrontier { .. }
+                    )))
+                ));
+                assert!(matches!(
+                    db.execute_graph_pattern_governed(&cx, &query, policy()),
+                    Err(GqlQueryError::Interrupted(_))
+                ));
+                txn.abort();
+            })
+            .expect("lab query task can be spawned");
+        assert_eq!(handle.join(&root).await, Ok(()));
+        assert!(root.checkpoint().is_ok(), "the supervisor remains live");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

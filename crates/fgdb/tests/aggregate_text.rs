@@ -342,76 +342,83 @@ fn staged_changes_reopen_and_history_keep_the_same_text_summary() {
 #[test]
 fn zero_output_preserves_unprojected_dependencies_without_fencing_disjoint_writes() {
     let ((), report) = run_async_under_lab(0xa670_0003, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let commit = contexts.commit();
-        let cx = contexts.query();
-        let txn_cx = contexts.txn();
-        for conflict in [false, true] {
-            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-            seed(&mut db, &commit).await;
-            let template = PreparedGraphAggregateText::prepare(TEXT, symbols).unwrap();
-            let query = template.bind_parameters(&args(0, 0, 0)).unwrap();
-            let mut txn = db.begin(&txn_cx).unwrap();
-            let mut staged = WriteBatch::new(R);
-            staged.create_vertex(VId(99), vec![], vec![]);
-            txn.write(&mut db, staged).unwrap();
-            assert!(
-                txn.execute_graph_aggregate_governed(&db, &cx, &query, policy())
+        // Cancel the query child, keeping the lab supervisor available to join it.
+        let mut handle = root
+            .spawn(|root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let cx = contexts.query();
+                let txn_cx = contexts.txn();
+                for conflict in [false, true] {
+                    let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                    seed(&mut db, &commit).await;
+                    let template = PreparedGraphAggregateText::prepare(TEXT, symbols).unwrap();
+                    let query = template.bind_parameters(&args(0, 0, 0)).unwrap();
+                    let mut txn = db.begin(&txn_cx).unwrap();
+                    let mut staged = WriteBatch::new(R);
+                    staged.create_vertex(VId(99), vec![], vec![]);
+                    txn.write(&mut db, staged).unwrap();
+                    assert!(
+                        txn.execute_graph_aggregate_governed(&db, &cx, &query, policy())
+                            .unwrap()
+                            .value
+                            .is_empty()
+                    );
+                    let mut winner = WriteBatch::new(R);
+                    winner.set_vertex_property(
+                        if conflict { VId(2) } else { VId(6) },
+                        P,
+                        Some(CanonicalScalar::Int(11)),
+                    );
+                    db.write(&commit, winner).await.unwrap();
+                    let frontier = db.frontier().unwrap();
+                    let result = txn.commit(&mut db, &commit).await;
+                    if conflict {
+                        assert!(matches!(
+                            result,
+                            Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                                law: "FG-LAW-FCW-READ-01",
+                                ..
+                            }))
+                        ));
+                        assert_eq!(db.frontier().unwrap(), frontier);
+                        assert!(db.vertex(VId(99)).unwrap().is_none());
+                    } else {
+                        result.unwrap();
+                        assert!(db.vertex(VId(99)).unwrap().is_some());
+                    }
+                }
+                let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                seed(&mut db, &commit).await;
+                let foreign = Database::open_memory(&commit, keys()).await.unwrap();
+                let txn = db.begin(&txn_cx).unwrap();
+                let query = PreparedGraphAggregateText::prepare(TEXT, symbols)
                     .unwrap()
-                    .value
-                    .is_empty()
-            );
-            let mut winner = WriteBatch::new(R);
-            winner.set_vertex_property(
-                if conflict { VId(2) } else { VId(6) },
-                P,
-                Some(CanonicalScalar::Int(11)),
-            );
-            db.write(&commit, winner).await.unwrap();
-            let frontier = db.frontier().unwrap();
-            let result = txn.commit(&mut db, &commit).await;
-            if conflict {
+                    .bind_parameters(&args(0, 0, 100))
+                    .unwrap();
+                root.cancel_with(CancelKind::User, Some("aggregate text authority control"));
                 assert!(matches!(
-                    result,
-                    Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
-                        law: "FG-LAW-FCW-READ-01",
-                        ..
-                    }))
+                    txn.execute_graph_aggregate_governed(&foreign, &cx, &query, policy()),
+                    Err(GqlQueryError::Source(GraphAggregateError::Source(
+                        WriteTxnError::WrongDatabase
+                    )))
                 ));
-                assert_eq!(db.frontier().unwrap(), frontier);
-                assert!(db.vertex(VId(99)).unwrap().is_none());
-            } else {
-                result.unwrap();
-                assert!(db.vertex(VId(99)).unwrap().is_some());
-            }
-        }
-        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-        seed(&mut db, &commit).await;
-        let foreign = Database::open_memory(&commit, keys()).await.unwrap();
-        let txn = db.begin(&txn_cx).unwrap();
-        let query = PreparedGraphAggregateText::prepare(TEXT, symbols)
-            .unwrap()
-            .bind_parameters(&args(0, 0, 100))
-            .unwrap();
-        root.cancel_with(CancelKind::User, Some("aggregate text authority control"));
-        assert!(matches!(
-            txn.execute_graph_aggregate_governed(&foreign, &cx, &query, policy()),
-            Err(GqlQueryError::Source(GraphAggregateError::Source(
-                WriteTxnError::WrongDatabase
-            )))
-        ));
-        let future = CommitSeq(db.frontier().unwrap().0 + 1);
-        assert!(matches!(
-            db.execute_graph_aggregate_governed_at(&cx, &query, future, policy()),
-            Err(GqlQueryError::Source(GraphAggregateError::Source(
-                GqlError::Read(ReadError::BeyondFrontier { .. })
-            )))
-        ));
-        assert!(matches!(
-            db.execute_graph_aggregate_governed(&cx, &query, policy()),
-            Err(GqlQueryError::Interrupted(_))
-        ));
-        txn.abort();
+                let future = CommitSeq(db.frontier().unwrap().0 + 1);
+                assert!(matches!(
+                    db.execute_graph_aggregate_governed_at(&cx, &query, future, policy()),
+                    Err(GqlQueryError::Source(GraphAggregateError::Source(
+                        GqlError::Read(ReadError::BeyondFrontier { .. })
+                    )))
+                ));
+                assert!(matches!(
+                    db.execute_graph_aggregate_governed(&cx, &query, policy()),
+                    Err(GqlQueryError::Interrupted(_))
+                ));
+                txn.abort();
+            })
+            .expect("lab query task can be spawned");
+        assert_eq!(handle.join(&root).await, Ok(()));
+        assert!(root.checkpoint().is_ok(), "the supervisor remains live");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
