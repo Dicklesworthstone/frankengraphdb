@@ -114,7 +114,12 @@ impl GraphPatternBuilder {
                     }
                     GlaOperator::Select { slot, predicates } => operators.push(GlaOperator::Select { slot: map(slot), predicates }),
                     GlaOperator::VertexIdentity { left, right, equal } => operators.push(GlaOperator::VertexIdentity { left: map(left), right: map(right), equal }),
-                    _ => unreachable!("the positive compiler emits only scan/select/expand/identity"),
+                    GlaOperator::CompareProperties { left, left_key, right, right_key, comparison } => {
+                        operators.push(GlaOperator::CompareProperties {
+                            left: map(left), left_key, right: map(right), right_key, comparison,
+                        });
+                    }
+                    _ => unreachable!("the positive compiler emits only scans, expansions and selections"),
                 }
             }
             let end = operators.len() as u32;

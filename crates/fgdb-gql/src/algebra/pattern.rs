@@ -2,8 +2,10 @@
 //! Projection may return a vertex-ID set or correlated distinct binding rows.
 //! This is a typed Rust surface, not another text grammar or a bag/path engine.
 
+mod property_comparison;
 mod value_projection;
 
+use property_comparison::PropertyComparison;
 use super::{BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, VertexPredicate};
 use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_types::VId;
@@ -33,6 +35,7 @@ pub enum PatternBuildError {
     EmptyProjection,
     DuplicateProjection,
     InvalidColumnName,
+    RequiresValueProjection,
     LimitExceeded {
         dimension: PatternLimitDimension,
         limit: usize,
@@ -52,6 +55,7 @@ impl core::fmt::Display for PatternBuildError {
             Self::EmptyProjection => f.write_str("binding projection requires a column"),
             Self::DuplicateProjection => f.write_str("binding projection repeats a column"),
             Self::InvalidColumnName => f.write_str("invalid graph-pattern column name"),
+            Self::RequiresValueProjection => f.write_str("binding property comparisons require prepare_values or its scoped variants"),
             Self::LimitExceeded {
                 dimension,
                 limit,
@@ -90,6 +94,7 @@ pub struct GraphPatternBuilder {
     variables: Vec<Variable>,
     edges: Vec<Edge>,
     identities: Vec<Identity>,
+    property_comparisons: Vec<PropertyComparison>,
     predicate_count: usize,
 }
 impl core::fmt::Debug for GraphPatternBuilder {
@@ -305,6 +310,7 @@ impl GraphPatternBuilder {
             return Err(PatternBuildError::EmptyPattern);
         }
         let projection_at = self.variable(projection)?;
+        self.require_identity_projection()?;
         let (mut operators, slots) = self.compile()?;
         operators.extend([
             GlaOperator::Project {
@@ -352,6 +358,7 @@ impl GraphPatternBuilder {
             }
             projected.push(at);
         }
+        self.require_identity_projection()?;
         let (mut operators, slots) = self.compile()?;
         operators.extend([
             GlaOperator::ProjectBindings {
@@ -456,13 +463,12 @@ impl GraphPatternBuilder {
             }
         }
         debug_assert!(emitted.iter().all(|emitted| *emitted));
-        Ok((
-            operators,
-            slots
-                .into_iter()
-                .map(|slot| slot.expect("all variables are connected"))
-                .collect(),
-        ))
+        let slots: Vec<_> = slots
+            .into_iter()
+            .map(|slot| slot.expect("all variables are connected"))
+            .collect();
+        self.emit_property_comparisons(&slots, &mut operators);
+        Ok((operators, slots))
     }
 }
 

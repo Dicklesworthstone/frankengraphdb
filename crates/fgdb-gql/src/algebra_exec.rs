@@ -2,8 +2,10 @@
 //! Requested relation/orientation pairs are indexed once. Controls precede
 //! admitted-row work, operator visits, scratch growth and final row release.
 
+mod comparison;
 mod policy;
 mod projection;
+use comparison::compare_properties;
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::ProjectedRows;
 
@@ -276,7 +278,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[Option<VId>], &mut ProjectedRows<Row>, &mut C) -> Result<(), E>,
+        P: FnMut(&GlaOperator, &[Option<VId>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
     {
         let Some(operator) = operators.get(ordinal) else {
             return Ok(());
@@ -306,6 +308,14 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                     keep
                 };
                 if keep {
+                    self.visit(operators, ordinal + 1, bindings, index)?;
+                }
+            }
+            GlaOperator::CompareProperties { .. } => {
+                // The value-aware action owns the SAME property resolver as
+                // projection/aggregation. Its Boolean is only a continuation
+                // decision; no projected row is produced by this selection.
+                if (self.project)(operator, bindings, &mut self.projected, &mut self.control)? {
                     self.visit(operators, ordinal + 1, bindings, index)?;
                 }
             }
@@ -406,7 +416,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
             GlaOperator::Project { .. }
             | GlaOperator::ProjectBindings { .. }
             | GlaOperator::ProjectValues { .. } => {
-                (self.project)(operator, bindings, &mut self.projected, &mut self.control)?;
+                let _ = (self.project)(operator, bindings, &mut self.projected, &mut self.control)?;
             }
             GlaOperator::Empty
             | GlaOperator::ScanVertices
@@ -463,7 +473,8 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
             test_vertex,
             control,
             |operator, bindings, projected, control| {
-                Row::collect(operator, bindings, projected, control)
+                Row::collect(operator, bindings, projected, control)?;
+                Ok(false)
             },
         )
     }
@@ -488,13 +499,18 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             test_vertex,
             control,
             |operator, bindings, projected, control| {
-                Row::collect_properties(operator, bindings, projected, &mut property, control)
+                if matches!(operator, GlaOperator::CompareProperties { .. }) {
+                    return compare_properties(operator, bindings, &mut property, control);
+                }
+                Row::collect_properties(operator, bindings, projected, &mut property, control)?;
+                Ok(false)
             },
         )
     }
 
-    /// One evaluator body. Only its sealed terminal projection depends on row
-    /// shape; sources, traversal, ordering and the release tail are shared.
+    /// One evaluator body. The private action handles value-dependent selection
+    /// and the sealed terminal projection. Sources, traversal, scope boundaries,
+    /// ordering and release remain shared, including streaming aggregation.
     fn execute_projected<E, F, C, P>(
         &self,
         vertices: impl IntoIterator<Item = VId>,
@@ -506,7 +522,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[Option<VId>], &mut ProjectedRows<Row>, &mut C) -> Result<(), E>,
+        P: FnMut(&GlaOperator, &[Option<VId>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
     {
         let operators = self.operators();
         let index = if self.reads_edges() {

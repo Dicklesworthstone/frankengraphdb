@@ -214,6 +214,16 @@ pub enum GlaOperator {
         columns: Vec<ValueProjection>,
     },
     OrderByValues,
+    /// A binding-dependent selection inside the current positive MATCH scope.
+    /// Both operands use the admitted property source. Unlike Select, its
+    /// result cannot be cached under only one vertex identity.
+    CompareProperties {
+        left: BindingSlot,
+        left_key: PropertyKeyId,
+        right: BindingSlot,
+        right_key: PropertyKeyId,
+        comparison: IntegerComparison,
+    },
 }
 
 /// Immutable logical definition with a statically determined output row shape.
@@ -444,7 +454,8 @@ impl<Row> GlaPlan<Row> {
             || self
                 .operators
                 .iter()
-                .any(|operator| matches!(operator, GlaOperator::Select { .. }))
+                .any(|operator| matches!(operator,
+                    GlaOperator::Select { .. } | GlaOperator::CompareProperties { .. }))
     }
 
     /// Application transcript, not an Appendix A durable format. Existing
@@ -578,6 +589,14 @@ impl<Row> GlaPlan<Row> {
                 GlaOperator::OptionalEnd { group } => {
                     bytes.push(18);
                     bytes.extend_from_slice(&group.to_be_bytes());
+                }
+                GlaOperator::CompareProperties { left, left_key, right, right_key, comparison } => {
+                    bytes.push(19);
+                    bytes.extend_from_slice(&left.0.to_be_bytes());
+                    bytes.extend_from_slice(&left_key.0.to_be_bytes());
+                    bytes.extend_from_slice(&right.0.to_be_bytes());
+                    bytes.extend_from_slice(&right_key.0.to_be_bytes());
+                    bytes.push(comparison.tag());
                 }
             }
         }
