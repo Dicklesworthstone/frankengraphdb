@@ -8,6 +8,8 @@ mod query_source {
     use fgdb_types::{CanonicalScalar, VId};
     use std::collections::{BTreeMap, BTreeSet};
 
+    include!("aggregate_queries.rs");
+
     type EdgeTriple = (VId, RelationId, VId);
     struct VertexView<'a> {
         labels: &'a [LabelId],

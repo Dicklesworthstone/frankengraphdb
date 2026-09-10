@@ -1,6 +1,8 @@
 //! Borrowed scans of an already admitted immutable Snapshot generation.
 //! These helpers do not validate raw blocks or bypass snapshot admission.
 
+mod aggregation;
+
 use crate::Snapshot;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_strata::AdjacencyEntry;
