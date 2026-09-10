@@ -196,9 +196,24 @@ impl GraphPatternBuilder {
                             equal,
                         })
                     }
-                    _ => {
-                        unreachable!("the positive compiler emits only scan/select/expand/identity")
+                    GlaOperator::CompareProperties {
+                        left,
+                        left_key,
+                        right,
+                        right_key,
+                        comparison,
+                    } => {
+                        operators.push(GlaOperator::CompareProperties {
+                            left: map(left),
+                            left_key,
+                            right: map(right),
+                            right_key,
+                            comparison,
+                        });
                     }
+                    _ => unreachable!(
+                        "the positive compiler emits only scan/select/expand/identity/compare"
+                    ),
                 }
             }
             let end = operators.len() as u32;

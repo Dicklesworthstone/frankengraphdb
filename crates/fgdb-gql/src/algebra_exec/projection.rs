@@ -129,7 +129,8 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
     /// the ordinary projection collector is deliberately left empty. Root
     /// scans, expansion, predicates, caches and cancellation remain the SAME
     /// evaluator, and no public callback can replace query semantics.
-    pub(crate) fn visit_value_bindings<E, F, C, P>(
+    /// Binding selections and aggregate arguments share one property resolver.
+    pub(crate) fn visit_value_bindings<'a, E, F, C, P, R>(
         &self,
         vertices: impl IntoIterator<Item = fgdb_types::VId>,
         edges: impl IntoIterator<
@@ -140,15 +141,18 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
             ),
         >,
         test_vertex: F,
+        mut property: R,
         control: C,
         mut visit: P,
     ) -> Result<(), E>
     where
         F: FnMut(fgdb_types::VId, &[crate::algebra::VertexPredicate]) -> Result<bool, E>,
+        R: FnMut(fgdb_types::VId, fgdb_delta_types::PropertyKeyId) -> Result<Option<&'a fgdb_types::CanonicalScalar>, E>,
         C: FnMut(super::GlaExecutionEvent) -> Result<(), E>,
         P: FnMut(
             &[crate::algebra::ValueProjection],
             &[Option<fgdb_types::VId>],
+            &mut R,
             &mut C,
         ) -> Result<(), E>,
     {
@@ -158,10 +162,14 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
             test_vertex,
             control,
             |operator, bindings, _projected, control| {
+                if matches!(operator, crate::algebra::GlaOperator::CompareProperties { .. }) {
+                    return super::compare_properties(operator, bindings, &mut property, control);
+                }
                 let crate::algebra::GlaOperator::ProjectValues { columns } = operator else {
                     unreachable!("the checked aggregate child has value projection")
                 };
-                visit(columns, bindings, control)
+                visit(columns, bindings, &mut property, control)?;
+                Ok(false)
             },
         )?;
         debug_assert!(

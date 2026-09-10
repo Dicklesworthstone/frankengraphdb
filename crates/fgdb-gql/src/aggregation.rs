@@ -490,8 +490,12 @@ impl PreparedGraphAggregate {
                 test_vertex(vid, predicates)
                     .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))
             },
+            |vid, key| {
+                property(vid, key)
+                    .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))
+            },
             &mut control,
-            |columns, bindings, control| {
+            |columns, bindings, property, control| {
                 let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
                 for (at, column) in columns.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
@@ -500,9 +504,7 @@ impl PreparedGraphAggregate {
                             .map_or(ValueRef::Scalar(&NULL), ValueRef::Vertex),
                         ValueProjection::Property { slot, key } => {
                             let value = match bindings[slot.ordinal() as usize] {
-                                Some(vid) => property(vid, *key).map_err(|error| {
-                                    GqlQueryError::Source(GraphAggregateError::Source(error))
-                                })?,
+                                Some(vid) => property(vid, *key)?,
                                 None => None,
                             };
                             ValueRef::Scalar(value.unwrap_or(&NULL))
