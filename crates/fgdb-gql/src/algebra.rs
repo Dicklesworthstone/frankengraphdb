@@ -7,6 +7,7 @@
 mod existence;
 mod output;
 mod pattern;
+mod predicate;
 mod values;
 pub use existence::{GraphExistence, GraphMatchClause};
 pub use output::{GlaIdentityOutput, GlaOutput, GraphBindingRow};
@@ -15,6 +16,7 @@ pub use pattern::{
     MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError, PatternLimitDimension,
     PreparedGraphPattern,
 };
+pub use predicate::{MAX_SCALAR_PREDICATE_BYTES, ScalarPredicate, ScalarPredicateError};
 pub use values::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphValue, GraphValueRow, ValueProjection,
 };
@@ -78,7 +80,8 @@ impl IntegerComparison {
     }
 }
 
-/// Missing/noninteger values fail every integer comparison, including NotEqual.
+/// Ordinary comparisons reject missing, null and incompatible scalar kinds.
+/// PropertyNull explicitly tests missing/stored null without conflating errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VertexPredicate {
     HasLabel(LabelId),
@@ -86,6 +89,14 @@ pub enum VertexPredicate {
         key: PropertyKeyId,
         comparison: IntegerComparison,
         value: i64,
+    },
+    ScalarProperty {
+        key: PropertyKeyId,
+        predicate: ScalarPredicate,
+    },
+    PropertyNull {
+        key: PropertyKeyId,
+        is_null: bool,
     },
 }
 
@@ -120,6 +131,16 @@ impl VertexPredicate {
                     && matches!(scalar, CanonicalScalar::Int(actual)
                     if comparison.accepts(*actual, *value))
             }),
+            Self::ScalarProperty { key, predicate } => {
+                let actual = properties.into_iter().find(|(actual_key, _)| actual_key == key)
+                    .map(|(_, value)| value);
+                predicate.matches(actual)
+            }
+            Self::PropertyNull { key, is_null } => {
+                let actual = properties.into_iter().find(|(actual_key, _)| actual_key == key)
+                    .map(|(_, value)| value);
+                actual.is_none_or(|value| matches!(value, CanonicalScalar::Null)) == *is_null
+            }
         }
     }
 }
@@ -464,6 +485,16 @@ impl<Row> GlaPlan<Row> {
                                 bytes.extend_from_slice(&key.0.to_be_bytes());
                                 bytes.push(comparison.tag());
                                 bytes.extend_from_slice(&value.to_be_bytes());
+                            }
+                            VertexPredicate::ScalarProperty { key, predicate } => {
+                                bytes.push(2);
+                                bytes.extend_from_slice(&key.0.to_be_bytes());
+                                predicate.append_transcript(&mut bytes);
+                            }
+                            VertexPredicate::PropertyNull { key, is_null } => {
+                                bytes.push(3);
+                                bytes.extend_from_slice(&key.0.to_be_bytes());
+                                bytes.push(u8::from(*is_null));
                             }
                         }
                     }

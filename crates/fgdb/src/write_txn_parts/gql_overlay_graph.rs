@@ -27,11 +27,12 @@ mod query_source {
             }
         }
         fn matches(&self, predicate: &VertexPredicate) -> bool {
-            let (label, property) = match predicate {
-                VertexPredicate::HasLabel(label) => (self.label_edits.get(label).copied()
-                    .unwrap_or_else(|| self.labels.binary_search(label).is_ok()).then_some(*label), None),
-                VertexPredicate::IntegerProperty { key, .. } => (None, self.property(*key).map(|value| (*key, value))),
-            };
+            let label = if let VertexPredicate::HasLabel(label) = predicate {
+                self.label_edits.get(label).copied()
+                    .unwrap_or_else(|| self.labels.binary_search(label).is_ok()).then_some(*label)
+            } else { None };
+            let property = predicate.property_key()
+                .and_then(|key| self.property(key).map(|value| (key, value)));
             predicate.matches_borrowed(label, property)
         }
     }
@@ -276,6 +277,27 @@ mod query_source {
             assert!(!row.matches(&VertexPredicate::HasLabel(LabelId(2))));
             assert!(row.matches(&VertexPredicate::HasLabel(LabelId(3)))); assert!(row.matches(&VertexPredicate::HasLabel(LabelId(4))));
             assert_eq!(labels, [LabelId(2), LabelId(4)]);
+        }
+        #[test]
+        fn scalar_and_null_predicates_read_the_canonical_override_not_the_old_type() {
+            use fgdb_gql::algebra::ScalarPredicate;
+            let key = PropertyKeyId(1);
+            let properties = [(key, CanonicalScalar::ucs_basic_text("old value").unwrap())];
+            let changed = CanonicalScalar::Bool(false);
+            let null = CanonicalScalar::Null;
+            let mut row = VertexView::new(&[], &properties);
+            let scalar = VertexPredicate::ScalarProperty { key,
+                predicate: ScalarPredicate::new(changed.clone(), IntegerComparison::Equal).unwrap() };
+            let absent = VertexPredicate::PropertyNull { key, is_null: true };
+            assert!(!row.matches(&scalar)); assert!(!row.matches(&absent));
+            row.property_edits.insert(key, Some(&changed));
+            assert!(row.matches(&scalar)); assert!(!row.matches(&absent));
+            assert!(std::ptr::eq(row.property(key).unwrap(), &changed));
+            row.property_edits.insert(key, Some(&null));
+            assert!(!row.matches(&scalar)); assert!(row.matches(&absent));
+            row.property_edits.insert(key, None);
+            assert!(!row.matches(&scalar)); assert!(row.matches(&absent));
+            assert!(std::ptr::eq(&properties[0].1, &properties[0].1));
         }
     }
 }

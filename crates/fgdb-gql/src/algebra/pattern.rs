@@ -147,7 +147,7 @@ impl<Row> PreparedGraphPattern<Row> {
             GlaOperator::Select { slot, predicates } if slot.ordinal() == 0 => {
                 predicates.iter().find_map(|p| match p {
                     VertexPredicate::HasLabel(label) => Some(*label),
-                    VertexPredicate::IntegerProperty { .. } => None,
+                    _ => None,
                 })
             }
             _ => None,

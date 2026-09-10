@@ -292,6 +292,15 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                     *keep
                 } else {
                     (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    // Reserve bounded canonical literal payload comparisons
+                    // before entering the source. Cache hits neither reread
+                    // the row nor repeat this work. Old fixed predicates add
+                    // no events, preserving their existing physical counters.
+                    for predicate in predicates {
+                        for _ in 0..predicate.comparison_work_units() {
+                            (self.control)(GlaExecutionEvent::Work)?;
+                        }
+                    }
                     let keep = (self.test_vertex)(vid, predicates)?;
                     self.predicate_cache.insert(key, keep);
                     keep
