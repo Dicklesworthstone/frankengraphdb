@@ -4,6 +4,12 @@
 //! bag of projected rows is materialized. Keys, extrema and distinct arguments
 //! borrow the admitted source until final, owned aggregate rows are released.
 
+mod result;
+pub use result::{
+    GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest,
+    GraphNullPlacement, MAX_AGGREGATE_FILTERS,
+};
+
 use crate::algebra::{
     GraphValue, GraphValueRow, PreparedGraphPattern, ValueProjection, VertexPredicate,
     GlaOperator, MAX_PATTERN_NAME_BYTES, MAX_PATTERN_VERTICES, GRAPH_VALUE_PAYLOAD_UNIT_BYTES,
@@ -78,6 +84,9 @@ pub enum GraphAggregateBuildError {
     DuplicateKey { column: usize },
     InvalidName,
     DuplicateName,
+    UnknownOutputColumn { column: GraphAggregateColumn },
+    TooManyFilters { limit: usize, observed: usize },
+    DuplicateOrder { column: GraphAggregateColumn },
 }
 
 impl core::fmt::Display for GraphAggregateBuildError {
@@ -90,6 +99,9 @@ impl core::fmt::Display for GraphAggregateBuildError {
             Self::DuplicateKey { column } => write!(f, "group key repeats input column {column}"),
             Self::InvalidName => f.write_str("invalid aggregate output name"),
             Self::DuplicateName => f.write_str("aggregate output names must be unique"),
+            Self::UnknownOutputColumn { column } => write!(f, "unknown aggregate output column {column:?}"),
+            Self::TooManyFilters { limit, observed } => write!(f, "aggregate has {observed} HAVING predicates, limit {limit}"),
+            Self::DuplicateOrder { column } => write!(f, "aggregate ORDER BY repeats column {column:?}"),
         }
     }
 }
@@ -102,6 +114,7 @@ pub enum GraphAggregateError<E> {
     Source(E),
     NonIntegerSum { aggregate: usize },
     ArithmeticOverflow { aggregate: usize },
+    NonIntegerHaving { predicate: usize },
 }
 
 impl<E> GraphAggregateError<E> {
@@ -110,6 +123,7 @@ impl<E> GraphAggregateError<E> {
             Self::Source(error) => GraphAggregateError::Source(map(error)),
             Self::NonIntegerSum { aggregate } => GraphAggregateError::NonIntegerSum { aggregate },
             Self::ArithmeticOverflow { aggregate } => GraphAggregateError::ArithmeticOverflow { aggregate },
+            Self::NonIntegerHaving { predicate } => GraphAggregateError::NonIntegerHaving { predicate },
         }
     }
 }
@@ -119,6 +133,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
             Self::Source(error) => core::fmt::Display::fmt(error, f),
             Self::NonIntegerSum { aggregate } => write!(f, "SUM_INT aggregate {aggregate} requires integer or null input"),
             Self::ArithmeticOverflow { aggregate } => write!(f, "aggregate {aggregate} exceeded its exact integer result range"),
+            Self::NonIntegerHaving { predicate } => write!(f, "HAVING predicate {predicate} requires integer or null input"),
         }
     }
 }
@@ -202,6 +217,8 @@ pub struct PreparedGraphAggregate {
     aggregate_names: Vec<String>,
     offset: u64,
     count: Option<u64>,
+    having: Vec<GraphAggregateFilter>,
+    ordering: Vec<GraphAggregateOrder>,
 }
 impl core::fmt::Debug for PreparedGraphAggregate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -253,7 +270,8 @@ impl PreparedGraphAggregate {
         let aggregates = aggregates.iter().map(|aggregate| BoundAggregate {
             function: aggregate.function, column: aggregate.column,
         }).collect();
-        Ok(Self { input, keys: keys.to_vec(), aggregates, key_names, aggregate_names, offset, count })
+        Ok(Self { input, keys: keys.to_vec(), aggregates, key_names, aggregate_names, offset, count,
+            having: Vec::new(), ordering: Vec::new() })
     }
 
     /// Explicit child definition for source admission. This is not the summary
@@ -288,6 +306,7 @@ impl PreparedGraphAggregate {
         bytes.extend_from_slice(&self.offset.to_be_bytes());
         bytes.push(u8::from(self.count.is_some()));
         if let Some(count) = self.count { bytes.extend_from_slice(&count.to_be_bytes()); }
+        self.append_result_transcript(&mut bytes);
         bytes
     }
 
@@ -370,30 +389,7 @@ impl PreparedGraphAggregate {
                 Ok(())
             },
         )?;
-        let offset = usize::try_from(self.offset).unwrap_or(usize::MAX);
-        let count = self.count.and_then(|count| usize::try_from(count).ok()).unwrap_or(usize::MAX);
-        let mut value = Vec::new();
-        for (key, group) in groups.into_iter().skip(offset).take(count) {
-            control(GlaExecutionEvent::ResultRow)?;
-            control(GlaExecutionEvent::ScratchEntry)?;
-            let mut keys = Vec::new();
-            for cell in key { keys.push(cell.copy_owned(&mut control)?); }
-            let mut values = Vec::new();
-            for state in group {
-                control(GlaExecutionEvent::ScratchEntry)?;
-                let cell = match state {
-                    Accumulator::Count(count) => GraphAggregateValue::Count(count),
-                    Accumulator::Distinct(seen) => GraphAggregateValue::Count(seen.len() as u64),
-                    Accumulator::Sum { value, present: true } => GraphAggregateValue::Integer(value),
-                    Accumulator::Sum { present: false, .. } | Accumulator::Extreme(None) => {
-                        GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
-                    }
-                    Accumulator::Extreme(Some(value)) => GraphAggregateValue::Value(value.copy_owned(&mut control)?),
-                };
-                values.push(cell);
-            }
-            value.push(GraphAggregateRow { keys: keys.into_boxed_slice(), values: values.into_boxed_slice() });
-        }
+        let value = self.finish_groups(&groups, &mut control)?;
         // Even empty and zero-count outputs observe a terminal checkpoint.
         control(GlaExecutionEvent::Work)?;
         Ok(GqlQueryExecution { value, rows, evaluator })

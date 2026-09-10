@@ -20,6 +20,8 @@ mod prepared;
 pub use aggregation::{
     GraphAggregate, GraphAggregateBuildError, GraphAggregateError, GraphAggregateFunction,
     GraphAggregateRow, GraphAggregateValue, PreparedGraphAggregate,
+    GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest,
+    GraphNullPlacement, MAX_AGGREGATE_FILTERS,
 };
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
