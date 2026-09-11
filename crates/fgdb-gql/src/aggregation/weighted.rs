@@ -14,6 +14,8 @@
 //! and downstream execution share the original control/error path. This is a
 //! bounded factorization law, not general FreeJoin, a COLT, or spill storage.
 
+mod tree;
+
 use super::*;
 use crate::algebra::GlaDirection;
 use core::num::NonZeroU64;
@@ -41,6 +43,11 @@ impl Multiplicity {
     fn product(self, other: Self) -> Self {
         Self(self.exact_count().zip(other.exact_count())
             .and_then(|(a, b)| a.checked_mul(b)).and_then(NonZeroU64::new))
+    }
+
+    fn sum(self, other: Self) -> Self {
+        Self(self.exact_count().zip(other.exact_count())
+            .and_then(|(a, b)| a.checked_add(b)).and_then(NonZeroU64::new))
     }
 }
 
@@ -162,10 +169,19 @@ where
         }
     }
 
-    plan.visit_value_bindings(vertices, topology.keys().copied(), test_vertex, property, control,
+    // Remove only a compiler-proved unprojected forest. Messages sum distinct
+    // child assignments and multiply independent branches, without generating
+    // their Cartesian product. Cyclic/projected prefix bindings still use GLA.
+    let prefix = plan.aggregate_prefix(&mut control)?;
+    let retained = prefix.as_ref().map_or(accesses.len(), |(_, retained)| *retained);
+    let forest = tree::Forest::build(&accesses[retained..], &topology, &mut control)?;
+    let execution_plan = prefix.as_ref().map_or(plan, |(prefix, _)| prefix);
+    execution_plan.visit_value_bindings(vertices, topology.keys().copied(), test_vertex, property, control,
         |columns, bindings, property, control| {
-            let mut weight = Multiplicity::ONE;
-            for access in &accesses {
+            let Some(mut weight) = forest.completion(bindings, control)? else {
+                return Ok(());
+            };
+            for access in &accesses[..retained] {
                 control(GlaExecutionEvent::Work)?;
                 let unavailable = || GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable);
                 let source = bindings.get(access.source).copied().flatten().ok_or_else(unavailable)?;

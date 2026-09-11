@@ -68,6 +68,76 @@ pub trait GlaIdentityOutput: GlaOutput + sealed::Projection {}
 impl GlaIdentityOutput for VId {}
 impl GlaIdentityOutput for GraphBindingRow {}
 
+impl super::GlaPlan<GraphValueRow> {
+    /// Internal aggregate specialization, never a public plan constructor.
+    /// A terminal forest of fresh, unprojected bindings can be replaced by
+    /// completion weights. The caller must attach those weights; executing
+    /// this prefix alone is NOT equivalent to executing the original query.
+    ///
+    /// Keep every projected slot and stop at the first non-Expand operator.
+    /// Earlier identities/cycles remain in the prefix. No predicate, property
+    /// read, nullable scope, DISTINCT or child pagination is removable here.
+    /// Return the number of edge atoms retained by the prefix, in their
+    /// original order. All remaining atoms form the completion forest.
+    pub(crate) fn aggregate_prefix<E>(
+        &self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<(Self, usize)>, E> {
+        let operators = self.operators();
+        let Some(projection_at) = operators.len().checked_sub(3) else {
+            return Ok(None);
+        };
+        let Some(GlaOperator::ProjectValues { columns }) = operators.get(projection_at) else {
+            return Ok(None);
+        };
+        if !matches!(operators.first(), Some(GlaOperator::ScanEdges { .. }))
+            || !matches!(operators.get(projection_at + 1), Some(GlaOperator::OrderByValues))
+            || !matches!(operators.last(), Some(GlaOperator::Limit { offset: 0, count: None }))
+        {
+            return Ok(None);
+        }
+        let mut width = 2_usize;
+        for operator in &operators[1..projection_at] {
+            control(GlaExecutionEvent::Work)?;
+            match operator {
+                GlaOperator::Expand { source, .. } if (source.ordinal() as usize) < width => {
+                    width += 1;
+                }
+                GlaOperator::VertexIdentity { left, right, .. }
+                    if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width => {}
+                _ => return Ok(None),
+            }
+        }
+        let mut last_projected = 0_usize;
+        for column in columns {
+            control(GlaExecutionEvent::Work)?;
+            let super::ValueProjection::Vertex { slot } = column else {
+                return Ok(None);
+            };
+            let slot = slot.ordinal() as usize;
+            if slot >= width { return Ok(None); }
+            last_projected = last_projected.max(slot);
+        }
+        let mut cut = projection_at;
+        while cut > 1 && width - 1 > last_projected {
+            control(GlaExecutionEvent::Work)?;
+            if !matches!(operators[cut - 1], GlaOperator::Expand { .. }) { break; }
+            cut -= 1;
+            width -= 1;
+        }
+        if cut == projection_at { return Ok(None); }
+        let mut prefix = Vec::new();
+        for operator in operators[..cut].iter().chain(&operators[projection_at..]) {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            if let GlaOperator::ProjectValues { columns } = operator {
+                for _ in columns { control(GlaExecutionEvent::ScratchEntry)?; }
+            }
+            prefix.push(operator.clone());
+        }
+        Ok(Some((Self::from_operators(prefix), width - 1)))
+    }
+}
+
 mod sealed {
     use super::*;
 
@@ -241,6 +311,43 @@ mod tests {
             assert_eq!(result, Err(stop));
             assert_eq!(calls, stop);
             assert!(rows.is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod factorization_tests {
+    use super::*;
+    use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
+    use fgdb_delta_types::RelationId;
+
+    #[test]
+    fn aggregate_prefix_preserves_columns_and_cannot_remove_observed_constraints() {
+        for (text, expected) in [
+            ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(*) AS n", Some(1)),
+            ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(c) AS n", None),
+            ("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a=c RETURN COUNT(*) AS n", None),
+            ("MATCH (a)-[:R]->(b)-[:S]->(a),(b)-[:R]->(c) RETURN COUNT(*) AS n", Some(2)),
+            ("MATCH (a)-[:R]->(b)-[:S]->(c:L) RETURN COUNT(*) AS n", None),
+            ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(c.n) AS n", None),
+            ("MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:S]->(c) RETURN COUNT(*) AS n", None),
+        ] {
+            let aggregate = PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
+                GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(if name == "R" { 1 } else { 2 }))),
+                GraphSymbolKind::Property => Some(GraphSymbol::Property(PropertyKeyId(1))),
+                GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
+            }).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            let plan = aggregate.input_pattern().plan();
+            let original = plan.canonical_bytes();
+            let prefix = plan.aggregate_prefix(&mut |_| Ok::<_, ()>(())).unwrap();
+            assert_eq!(prefix.as_ref().map(|(_, retained)| *retained), expected, "{text}");
+            if let Some((prefix, _)) = prefix {
+                assert_eq!(prefix.operators().last(), plan.operators().last());
+                assert_eq!(prefix.operators().iter().find(|op| matches!(op, GlaOperator::ProjectValues { .. })),
+                    plan.operators().iter().find(|op| matches!(op, GlaOperator::ProjectValues { .. })));
+                assert!(prefix.operators().len() < plan.operators().len());
+            }
+            assert_eq!(plan.canonical_bytes(), original);
         }
     }
 }
