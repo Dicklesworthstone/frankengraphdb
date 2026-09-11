@@ -551,7 +551,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             control,
             project,
             predicate_cache: BTreeMap::new(),
-            projected: ProjectedRows::<Row>::new(distinct),
+            projected: ProjectedRows::<Row>::for_plan(distinct, operators),
             active_probe: None,
             probe_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
             optional_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],

@@ -275,7 +275,10 @@ pub(super) fn collect_values<'a, E>(
         }
     }
     let borrowed = BorrowedRow(&key[..columns.len()]);
-    if projected.contains(&borrowed as &dyn RowKey) {
+    // Resolve ALL selected fields before testing the page cutoff. A later
+    // unreadable property is an error even when an earlier cell already sorts
+    // after the retained prefix, or the logical LIMIT is zero.
+    if !projected.should_retain(&borrowed as &dyn RowKey, control)? {
         return Ok(());
     }
     control(GlaExecutionEvent::ScratchEntry)?;
@@ -298,6 +301,63 @@ mod tests {
     use super::*;
     use fgdb_types::CanonicalF64;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn bounded_values_read_rejected_payloads_without_copying_them() {
+        let payload = CanonicalScalar::bytes(vec![3; 4096]).unwrap();
+        let mut rows = ProjectedRows::for_plan(false, &[super::super::GlaOperator::Limit {
+            offset: 0, count: Some(1),
+        }]);
+        let mut reads = 0;
+        let mut scratch = 0;
+        for owner in 0..32 {
+            collect_values(&columns(), &[Some(VId(owner)), Some(VId(42))], &mut rows,
+                &mut |_, _| { reads += 1; Ok::<_, ()>(Some(&payload)) }, &mut |event| {
+                    scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                    Ok(())
+                }).unwrap();
+        }
+        assert_eq!(reads, 32, "cutoff cannot suppress fallible field reads");
+        assert_eq!(scratch, 1 + 2 + 64, "only the first payload row is copied");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.first().unwrap().get(0).unwrap().as_vertex(), Some(VId(0)));
+        assert_eq!(collect_values(&columns(), &[Some(VId(99)), Some(VId(42))], &mut rows,
+            &mut |_, _| Err::<Option<&CanonicalScalar>, _>("late property failure"),
+            &mut |_| Ok(())), Err("late property failure"));
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn refused_replacement_keeps_the_previous_complete_value_row() {
+        let payload = CanonicalScalar::bytes(vec![1; 129]).unwrap();
+        let initialized = || {
+            let mut rows = ProjectedRows::for_plan(false, &[super::super::GlaOperator::Limit {
+                offset: 0, count: Some(1),
+            }]);
+            collect_values(&columns(), &[Some(VId(9)), Some(VId(2))], &mut rows,
+                &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| Ok(())).unwrap();
+            rows
+        };
+        let mut measured = initialized();
+        let mut total = 0;
+        collect_values(&columns(), &[Some(VId(1)), Some(VId(2))], &mut measured,
+            &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| { total += 1; Ok(()) }).unwrap();
+        assert_eq!(measured.first().unwrap().get(0).unwrap().as_vertex(), Some(VId(1)));
+        for stop in 1..=total {
+            let mut rows = initialized();
+            let before = rows.first().unwrap().clone();
+            let mut calls = 0;
+            let result = collect_values(&columns(), &[Some(VId(1)), Some(VId(2))], &mut rows,
+                &mut |_, _| Ok::<_, usize>(Some(&payload)), &mut |_| {
+                    calls += 1;
+                    if calls == stop { Err(stop) } else { Ok(()) }
+                });
+            assert_eq!(result, Err(stop));
+            assert_eq!(calls, stop);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows.first(), Some(&before));
+        }
+    }
 
     fn columns() -> [ValueProjection; 2] {
         [

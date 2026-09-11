@@ -1,8 +1,12 @@
 //! Terminal DISTINCT and ALL collectors for the one binding-row evaluator.
 //!
-//! ALL retains each actual occurrence. Its ordinal disambiguates equal keys
-//! inside a B-tree; it is neither a public column nor a multiplicity estimate.
+//! A finite logical page retains only its smallest offset + count rows, under
+//! the existing canonical order. This is terminal selection, not early query
+//! termination: every candidate's fallible predicates/properties still execute.
+//! ALL retains occurrences rather than values; private reusable slot IDs keep
+//! equal rows distinct without an ever-growing occurrence counter.
 
+use super::{GlaExecutionEvent, GlaOperator};
 use std::borrow::Borrow;
 use std::collections::BTreeSet;
 
@@ -11,6 +15,7 @@ use std::collections::BTreeSet;
 /// this type is not exported from the crate's public surface.
 pub struct ProjectedRows<Row> {
     storage: Storage<Row>,
+    capacity: Option<usize>,
 }
 
 enum Storage<Row> {
@@ -26,7 +31,65 @@ impl<Row: Ord> ProjectedRows<Row> {
             } else {
                 Storage::All(BTreeSet::new())
             },
+            capacity: None,
         }
+    }
+
+    /// Fuse only the compiler-owned terminal pagination into collection. An
+    /// unrepresentable bound must never wrap to a smaller page. LIMIT 0 needs
+    /// no retained rows, even with an enormous offset, but does not skip reads.
+    pub(crate) fn for_plan(distinct: bool, operators: &[GlaOperator]) -> Self {
+        let mut rows = Self::new(distinct);
+        rows.capacity = match operators.last() {
+            Some(GlaOperator::Limit { count: Some(0), .. }) => Some(0),
+            Some(GlaOperator::Limit { offset, count: Some(count) }) => offset
+                .checked_add(*count)
+                .and_then(|bound| usize::try_from(bound).ok()),
+            _ => None,
+        };
+        rows
+    }
+
+    /// Called AFTER reading the complete borrowed candidate, BEFORE cloning
+    /// owned cells. A previously discarded DISTINCT value never needs a global
+    /// seen set: once full, the largest retained value can only decrease.
+    /// Extra equal ALL occurrences cannot improve an already full prefix.
+    ///
+    /// Reserve the cutoff decision and any eviction before row construction.
+    /// If construction later refuses, the previous collector stays unchanged.
+    /// Scratch remains cumulative admission work, not a peak-memory counter;
+    /// replacing an entry never refunds the already charged payload units.
+    pub(crate) fn should_retain<Key: Ord + ?Sized, E>(
+        &self,
+        key: &Key,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E>
+    where
+        Row: Borrow<Key>,
+    {
+        if self.contains(key) {
+            return Ok(false);
+        }
+        let Some(capacity) = self.capacity else {
+            return Ok(true);
+        };
+        control(GlaExecutionEvent::Work)?;
+        if capacity == 0 {
+            return Ok(false);
+        }
+        if self.len() < capacity {
+            return Ok(true);
+        }
+        let largest = match &self.storage {
+            Storage::Distinct(rows) => rows.last(),
+            Storage::All(rows) => rows.last().map(|(row, _)| row),
+        }.expect("a nonzero full prefix has a largest row");
+        let largest: &Key = largest.borrow();
+        if largest <= key {
+            return Ok(false);
+        }
+        control(GlaExecutionEvent::Work)?;
+        Ok(true)
     }
 
     /// A duplicate can be elided only when the logical plan contains DISTINCT.
@@ -41,19 +104,35 @@ impl<Row: Ord> ProjectedRows<Row> {
         }
     }
 
-    /// Callers charge the entry and its owned cells before reaching this method.
+    /// Private callers first admit the borrowed candidate with should_retain,
+    /// then charge/build every owned cell. Only complete rows reach insertion.
+    /// At most capacity retained rows plus that one staged candidate coexist.
     pub(crate) fn insert(&mut self, row: Row) {
+        let full = self.capacity.is_some_and(|capacity| self.len() == capacity);
+        debug_assert_ne!(self.capacity, Some(0), "a zero-size page admits no row");
         match &mut self.storage {
             Storage::Distinct(rows) => {
+                if full {
+                    debug_assert!(rows.last().is_some_and(|largest| largest > &row));
+                    debug_assert!(!rows.contains(&row));
+                    let _ = rows.pop_last();
+                }
                 rows.insert(row);
             }
             Storage::All(rows) => {
-                // No entry is removed during collection. len() is a unique
-                // occurrence ordinal and counts physically retained entries,
-                // not products of input cardinalities that could overflow.
-                let ordinal = rows.len();
+                // Every retained slot ID is unique. Growth assigns the next
+                // unused ID; replacement reuses exactly the evicted ID. Thus
+                // repeated equal rows never collide after arbitrary evictions,
+                // and even a long input needs no monotonically growing ordinal.
+                let ordinal = if full {
+                    let (largest, slot) = rows.pop_last().expect("full nonempty ALL prefix");
+                    debug_assert!(largest > row);
+                    slot
+                } else {
+                    rows.len()
+                };
                 let inserted = rows.insert((row, ordinal));
-                debug_assert!(inserted, "each retained occurrence has a fresh ordinal");
+                debug_assert!(inserted, "each retained occurrence has a unique live slot");
             }
         }
     }
@@ -190,6 +269,105 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
 mod tests {
     use super::*;
     use fgdb_types::VId;
+
+    fn page<Row: Ord>(distinct: bool, offset: u64, count: Option<u64>) -> ProjectedRows<Row> {
+        ProjectedRows::for_plan(distinct, &[GlaOperator::Limit { offset, count }])
+    }
+
+    #[test]
+    fn every_bounded_prefix_matches_full_sort_and_distinct_before_pagination() {
+        let choices = [VId(0), VId(1_u128 << 100), VId(u128::MAX)];
+        for len in 0..=6_u32 {
+            for mut encoded in 0..3_usize.pow(len) {
+                let mut input = Vec::new();
+                for _ in 0..len {
+                    input.push(choices[encoded % 3]);
+                    encoded /= 3;
+                }
+                for distinct in [false, true] {
+                    for offset in 0..=3_u64 {
+                        for count in 0..=3_u64 {
+                            let mut rows = page(distinct, offset, Some(count));
+                            let capacity = if count == 0 { 0 } else { (offset + count) as usize };
+                            let mut seen = Vec::new();
+                            for &value in &input {
+                                seen.push(value);
+                                if rows.should_retain(&value, &mut |_| Ok::<_, ()>(())).unwrap() {
+                                    rows.insert(value);
+                                }
+                                let mut expected = seen.clone();
+                                expected.sort_unstable();
+                                if distinct { expected.dedup(); }
+                                expected.truncate(capacity);
+                                assert_eq!(rows.iter().copied().collect::<Vec<_>>(), expected);
+                                assert!(rows.len() <= capacity);
+                            }
+                            let mut expected = input.clone();
+                            expected.sort_unstable();
+                            if distinct { expected.dedup(); }
+                            assert_eq!(rows.into_rows().skip(offset as usize).take(count as usize).collect::<Vec<_>>(),
+                                expected.into_iter().skip(offset as usize).take(count as usize).collect::<Vec<_>>());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_slots_are_unique_when_equal_rows_replace_unequal_cutoffs() {
+        // Evicted IDs are not necessarily rows.len() - 1. Reusing len() would
+        // merge two equal occurrences when their slot IDs collide.
+        let mut rows = page(false, 0, Some(3));
+        for value in [8, 10, 9, 7, 7, 6, 6, 6, 5, 6] {
+            if rows.should_retain(&value, &mut |_| Ok::<_, ()>(())).unwrap() {
+                rows.insert(value);
+            }
+            let Storage::All(set) = &rows.storage else { unreachable!() };
+            let slots: BTreeSet<_> = set.iter().map(|(_, slot)| *slot).collect();
+            assert_eq!(slots.len(), set.len());
+            assert!(slots.iter().all(|slot| *slot < 3));
+        }
+        assert_eq!(rows.into_rows().collect::<Vec<_>>(), vec![5, 6, 6]);
+    }
+
+    #[test]
+    fn borrowed_cutoff_refusal_does_not_mutate_the_collector() {
+        let mut rows = page::<String>(false, 0, Some(2));
+        for value in ["z", "y"] {
+            assert!(rows.should_retain(value, &mut |_| Ok::<_, ()>(())).unwrap());
+            rows.insert(value.to_owned());
+        }
+        for stop in 1..=2 {
+            let mut calls = 0;
+            let result = rows.should_retain("a", &mut |_| {
+                calls += 1;
+                if calls == stop { Err(stop) } else { Ok(()) }
+            });
+            assert_eq!(result, Err(stop));
+            assert_eq!(calls, stop);
+            assert_eq!(rows.iter().map(String::as_str).collect::<Vec<_>>(), vec!["y", "z"]);
+        }
+        assert!(!rows.should_retain("z", &mut |_| Ok::<_, ()>(())).unwrap());
+        assert!(!rows.should_retain("zz", &mut |_| Ok::<_, ()>(())).unwrap());
+        assert!(rows.should_retain("a", &mut |_| Ok::<_, ()>(())).unwrap());
+        rows.insert("a".into());
+        assert_eq!(rows.into_rows().collect::<Vec<_>>(), vec!["a", "y"]);
+    }
+
+    #[test]
+    fn finite_capacity_arithmetic_never_wraps_and_zero_needs_no_prefix() {
+        assert_eq!(page::<u8>(false, u64::MAX, Some(0)).capacity, Some(0));
+        assert_eq!(page::<u8>(true, u64::MAX, Some(1)).capacity, None);
+        assert_eq!(page::<u8>(false, 1, Some(u64::MAX)).capacity, None);
+        assert_eq!(page::<u8>(true, 7, None).capacity, None);
+        assert_eq!(page::<u8>(true, 7, Some(3)).capacity, Some(10));
+        assert_eq!(page::<u8>(false, 0, Some(u64::MAX)).capacity,
+            usize::try_from(u64::MAX).ok());
+        let rows = page::<u8>(false, u64::MAX, Some(0));
+        assert!(!rows.should_retain(&1, &mut |_| Ok::<_, ()>(())).unwrap());
+        assert!(rows.is_empty());
+    }
 
     #[test]
     fn all_retains_each_occurrence_and_distinct_retains_each_value() {

@@ -102,7 +102,7 @@ mod sealed {
             };
             let value = bindings[slot.ordinal() as usize]
                 .expect("identity-only plans cannot contain nullable bindings");
-            if !projected.contains(&value) {
+            if projected.should_retain(&value, control)? {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 projected.insert(value);
             }
@@ -130,7 +130,7 @@ mod sealed {
                     .expect("identity-only plans cannot contain nullable bindings");
             }
             let key = &key[..slots.len()];
-            if projected.contains(key) {
+            if !projected.should_retain(key, control)? {
                 return Ok(());
             }
             // One set entry plus every owned cell is charged before growth.
