@@ -6,9 +6,14 @@
 //! ALL retains occurrences rather than values; private reusable slot IDs keep
 //! equal rows distinct without an ever-growing occurrence counter.
 
+mod ranked;
+
 use super::{GlaExecutionEvent, GlaOperator};
+use crate::algebra::GraphValueOrder;
+use ranked::Ranked;
 use std::borrow::Borrow;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// Private construction selects the logical terminal projection's semantics.
 /// Public visibility is required by the public-but-sealed projection trait;
@@ -21,6 +26,11 @@ pub struct ProjectedRows<Row> {
 enum Storage<Row> {
     Distinct(BTreeSet<Row>),
     All(BTreeSet<(Row, usize)>),
+    Ranked {
+        rows: BTreeSet<Ranked<Row>>,
+        order: Arc<[GraphValueOrder]>,
+        distinct: bool,
+    },
 }
 
 impl<Row: Ord> ProjectedRows<Row> {
@@ -47,6 +57,13 @@ impl<Row: Ord> ProjectedRows<Row> {
                 .and_then(|bound| usize::try_from(bound).ok()),
             _ => None,
         };
+        if let Some(GlaOperator::OrderByValueColumns { columns }) = operators.iter().rev().nth(1) {
+            rows.storage = Storage::Ranked {
+                rows: BTreeSet::new(),
+                order: Arc::clone(columns),
+                distinct,
+            };
+        }
         rows
     }
 
@@ -83,6 +100,7 @@ impl<Row: Ord> ProjectedRows<Row> {
         let largest = match &self.storage {
             Storage::Distinct(rows) => rows.last(),
             Storage::All(rows) => rows.last().map(|(row, _)| row),
+            Storage::Ranked { .. } => unreachable!("ordered value rows use their borrowed ranked key"),
         }.expect("a nonzero full prefix has a largest row");
         let largest: &Key = largest.borrow();
         if largest <= key {
@@ -101,6 +119,7 @@ impl<Row: Ord> ProjectedRows<Row> {
         match &self.storage {
             Storage::Distinct(rows) => rows.contains(key),
             Storage::All(_) => false,
+            Storage::Ranked { .. } => unreachable!("ordered value rows use their borrowed ranked key"),
         }
     }
 
@@ -134,6 +153,7 @@ impl<Row: Ord> ProjectedRows<Row> {
                 let inserted = rows.insert((row, ordinal));
                 debug_assert!(inserted, "each retained occurrence has a unique live slot");
             }
+            Storage::Ranked { .. } => unreachable!("ordered value rows use their checked ranked insertion"),
         }
     }
 
@@ -141,6 +161,7 @@ impl<Row: Ord> ProjectedRows<Row> {
         match &self.storage {
             Storage::Distinct(rows) => rows.len(),
             Storage::All(rows) => rows.len(),
+            Storage::Ranked { rows, .. } => rows.len(),
         }
     }
 
@@ -148,26 +169,30 @@ impl<Row: Ord> ProjectedRows<Row> {
     /// Equal rows remain equal after their private ordinals are removed. Every
     /// row moves to the evaluator's existing pagination/output guard unchanged.
     pub(crate) fn into_rows(self) -> impl Iterator<Item = Row> {
-        let (distinct, all) = match self.storage {
-            Storage::Distinct(rows) => (Some(rows), None),
-            Storage::All(rows) => (None, Some(rows)),
+        let (distinct, all, ranked) = match self.storage {
+            Storage::Distinct(rows) => (Some(rows), None, None),
+            Storage::All(rows) => (None, Some(rows), None),
+            Storage::Ranked { rows, .. } => (None, None, Some(rows)),
         };
         distinct
             .into_iter()
             .flatten()
             .chain(all.into_iter().flatten().map(|(row, _)| row))
+            .chain(ranked.into_iter().flatten().map(|entry| entry.row))
     }
 
     #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Row> {
-        let (distinct, all) = match &self.storage {
-            Storage::Distinct(rows) => (Some(rows), None),
-            Storage::All(rows) => (None, Some(rows)),
+        let (distinct, all, ranked) = match &self.storage {
+            Storage::Distinct(rows) => (Some(rows), None, None),
+            Storage::All(rows) => (None, Some(rows), None),
+            Storage::Ranked { rows, .. } => (None, None, Some(rows)),
         };
         distinct
             .into_iter()
             .flatten()
             .chain(all.into_iter().flatten().map(|(row, _)| row))
+            .chain(ranked.into_iter().flatten().map(|entry| &entry.row))
     }
 
     #[cfg(test)]

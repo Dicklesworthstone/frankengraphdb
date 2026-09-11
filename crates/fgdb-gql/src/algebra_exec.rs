@@ -439,6 +439,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
             | GlaOperator::OrderByVertexId
             | GlaOperator::OrderByBindings
             | GlaOperator::OrderByValues
+            | GlaOperator::OrderByValueColumns { .. }
             | GlaOperator::Limit { .. } => {}
         }
         Ok(())

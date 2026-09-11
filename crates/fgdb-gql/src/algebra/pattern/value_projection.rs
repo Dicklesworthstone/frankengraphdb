@@ -79,6 +79,19 @@ impl GraphPatternBuilder {
 }
 
 impl PreparedGraphPattern<GraphValueRow> {
+    /// Rank by projected column positions before applying the existing page.
+    /// Nulls default to last in both directions. Canonical complete-row order
+    /// breaks remaining ties; DISTINCT still compares the entire output row.
+    /// The prepared column schema, source and matching scopes are unchanged.
+    /// Repeated calls replace the ordering rather than appending sort keys.
+    pub fn with_order_by(
+        mut self,
+        order: &[super::super::GraphValueOrder],
+    ) -> Result<Self, super::super::GraphOrderError> {
+        self.logical.set_value_order(order)?;
+        Ok(self)
+    }
+
     /// Ordered expression schema. Property keys and slots are explicit exports;
     /// Debug output remains redacted. Aliases are available through columns().
     #[must_use]

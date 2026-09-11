@@ -159,7 +159,7 @@ impl core::fmt::Debug for GraphValueRow {
 pub const GRAPH_VALUE_PAYLOAD_UNIT_BYTES: usize = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ValueRef<'a> {
+pub(crate) enum ValueRef<'a> {
     Scalar(&'a CanonicalScalar),
     Vertex(VId),
 }
@@ -192,7 +192,7 @@ impl ValueRef<'_> {
 // Heterogeneous lookup compares borrowed source cells with owned result cells
 // under exactly the same order as GraphValueRow::Ord. Hashes never substitute
 // for identity. No candidate scalar or tuple allocation is needed for lookup.
-trait RowKey {
+pub(crate) trait RowKey {
     fn width(&self) -> usize;
     fn cell(&self, at: usize) -> ValueRef<'_>;
 }
@@ -278,7 +278,7 @@ pub(super) fn collect_values<'a, E>(
     // Resolve ALL selected fields before testing the page cutoff. A later
     // unreadable property is an error even when an earlier cell already sorts
     // after the retained prefix, or the logical LIMIT is zero.
-    if !projected.should_retain(&borrowed as &dyn RowKey, control)? {
+    if !projected.should_retain_value(&borrowed as &dyn RowKey, control)? {
         return Ok(());
     }
     control(GlaExecutionEvent::ScratchEntry)?;
@@ -290,7 +290,7 @@ pub(super) fn collect_values<'a, E>(
         }
         values.push((*value).into_owned());
     }
-    projected.insert(GraphValueRow {
+    projected.insert_value(GraphValueRow {
         values: values.into_boxed_slice(),
     });
     Ok(())

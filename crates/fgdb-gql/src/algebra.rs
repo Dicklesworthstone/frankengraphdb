@@ -5,11 +5,14 @@
 //! is not the registered FreeJoin physical implementation.
 
 mod existence;
+mod ordering;
 mod output;
 mod pattern;
 mod predicate;
 mod values;
 pub use existence::{GraphExistence, GraphMatchClause};
+pub use ordering::{GraphOrderError, GraphValueOrder};
+pub(crate) use values::{RowKey, ValueRef};
 pub use output::{GlaIdentityOutput, GlaOutput, GraphBindingRow};
 pub use pattern::{
     GraphPatternBuilder, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
@@ -218,6 +221,11 @@ pub enum GlaOperator {
         columns: Vec<ValueProjection>,
     },
     OrderByValues,
+    /// Prepared output-column ordering, with canonical whole-row tie-breaking.
+    /// Shared immutable metadata is allocated during preparation, not per row.
+    OrderByValueColumns {
+        columns: std::sync::Arc<[GraphValueOrder]>,
+    },
     /// A binding-dependent selection inside the current positive MATCH scope.
     /// Both operands use the admitted property source. Unlike Select, its
     /// result cannot be cached under only one vertex identity.
@@ -575,6 +583,15 @@ impl<Row> GlaPlan<Row> {
                     }
                 }
                 GlaOperator::OrderByValues => bytes.push(13),
+                GlaOperator::OrderByValueColumns { columns } => {
+                    bytes.push(20);
+                    bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
+                    for column in columns.iter() {
+                        bytes.extend_from_slice(&(column.column as u64).to_be_bytes());
+                        bytes.push(u8::from(column.descending));
+                        bytes.push(u8::from(column.nulls_first));
+                    }
+                }
                 GlaOperator::Probe { group, end, anti } => {
                     bytes.push(14);
                     bytes.extend_from_slice(&group.to_be_bytes());
