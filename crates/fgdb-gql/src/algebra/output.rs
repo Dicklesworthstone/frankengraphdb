@@ -68,21 +68,32 @@ pub trait GlaIdentityOutput: GlaOutput + sealed::Projection {}
 impl GlaIdentityOutput for VId {}
 impl GlaIdentityOutput for GraphBindingRow {}
 
+/// Compiler-owned partition of an aggregate's binding tree. Kept slots occupy
+/// [0, retained_width); removed slots occupy a disjoint tail used only by the
+/// completion forest. The permutation preserves order within both partitions.
+/// The plan alone is not equivalent to the original: its weights are required.
+pub(crate) struct AggregateCore {
+    pub(crate) plan: super::GlaPlan<GraphValueRow>,
+    pub(crate) slot_map: Vec<super::BindingSlot>,
+    pub(crate) retained_width: usize,
+}
+
 impl super::GlaPlan<GraphValueRow> {
     /// Internal aggregate specialization, never a public plan constructor.
-    /// A terminal forest of fresh, unprojected bindings can be replaced by
-    /// completion weights. The caller must attach those weights; executing
-    /// this prefix alone is NOT equivalent to executing the original query.
+    /// A forest of fresh, unobserved bindings can be replaced by completion
+    /// weights even when its branches occur before or between kept expansions.
     ///
-    /// Keep every projected slot and stop at the first non-Expand operator.
-    /// Earlier identities/cycles remain in the prefix. No predicate, property
-    /// read, nullable scope, DISTINCT or child pagination is removable here.
-    /// Return the number of edge atoms retained by the prefix, in their
-    /// original order. All remaining atoms form the completion forest.
-    pub(crate) fn aggregate_prefix<E>(
+    /// Seed liveness with the original root, all output slots and BOTH sides
+    /// of every identity constraint. Close it over binding parents in reverse
+    /// order. Every removed component then has exactly one kept attachment and
+    /// no observable use. Keep the root and constrained/cyclic core in their
+    /// original traversal order; remap every source, identity and output slot.
+    /// Predicates, property reads, scopes, DISTINCT and pagination refuse this
+    /// specialization entirely. No fallible read can be hidden by elimination.
+    pub(crate) fn aggregate_core<E>(
         &self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<Option<(Self, usize)>, E> {
+    ) -> Result<Option<AggregateCore>, E> {
         let operators = self.operators();
         let Some(projection_at) = operators.len().checked_sub(3) else {
             return Ok(None);
@@ -96,19 +107,30 @@ impl super::GlaPlan<GraphValueRow> {
         {
             return Ok(None);
         }
+        if columns.is_empty() || columns.len() > MAX_PATTERN_VERTICES {
+            return Ok(None);
+        }
+        let mut parents = [0_usize; MAX_PATTERN_VERTICES];
+        let mut kept = [false; MAX_PATTERN_VERTICES];
+        kept[0] = true;
+        kept[1] = true;
         let mut width = 2_usize;
         for operator in &operators[1..projection_at] {
             control(GlaExecutionEvent::Work)?;
             match operator {
-                GlaOperator::Expand { source, .. } if (source.ordinal() as usize) < width => {
+                GlaOperator::Expand { source, .. }
+                    if (source.ordinal() as usize) < width && width < MAX_PATTERN_VERTICES => {
+                    parents[width] = source.ordinal() as usize;
                     width += 1;
                 }
                 GlaOperator::VertexIdentity { left, right, .. }
-                    if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width => {}
+                    if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width => {
+                    kept[left.ordinal() as usize] = true;
+                    kept[right.ordinal() as usize] = true;
+                }
                 _ => return Ok(None),
             }
         }
-        let mut last_projected = 0_usize;
         for column in columns {
             control(GlaExecutionEvent::Work)?;
             let super::ValueProjection::Vertex { slot } = column else {
@@ -116,25 +138,72 @@ impl super::GlaPlan<GraphValueRow> {
             };
             let slot = slot.ordinal() as usize;
             if slot >= width { return Ok(None); }
-            last_projected = last_projected.max(slot);
+            kept[slot] = true;
         }
-        let mut cut = projection_at;
-        while cut > 1 && width - 1 > last_projected {
+        // Parents always have smaller original ordinals. One reverse pass is
+        // the full transitive closure, including a projected deep descendant.
+        for slot in (2..width).rev() {
             control(GlaExecutionEvent::Work)?;
-            if !matches!(operators[cut - 1], GlaOperator::Expand { .. }) { break; }
-            cut -= 1;
-            width -= 1;
+            if kept[slot] { kept[parents[slot]] = true; }
         }
-        if cut == projection_at { return Ok(None); }
-        let mut prefix = Vec::new();
-        for operator in operators[..cut].iter().chain(&operators[projection_at..]) {
+        let retained_width = kept[..width].iter().filter(|keep| **keep).count();
+        if retained_width == width { return Ok(None); }
+
+        // Removed IDs cannot reuse compact core IDs. That would merge unrelated
+        // forest roots when an early branch precedes a retained later binding.
+        let mut slot_map = Vec::new();
+        let mut next_kept = 0;
+        let mut next_removed = retained_width;
+        for keep in &kept[..width] {
             control(GlaExecutionEvent::ScratchEntry)?;
-            if let GlaOperator::ProjectValues { columns } = operator {
-                for _ in columns { control(GlaExecutionEvent::ScratchEntry)?; }
-            }
-            prefix.push(operator.clone());
+            let next = if *keep { &mut next_kept } else { &mut next_removed };
+            slot_map.push(super::BindingSlot(*next as u32));
+            *next += 1;
         }
-        Ok(Some((Self::from_operators(prefix), width - 1)))
+        debug_assert_eq!((next_kept, next_removed), (retained_width, width));
+        let mut core = Vec::new();
+        let mut appended = 2;
+        for operator in &operators[..projection_at] {
+            control(GlaExecutionEvent::Work)?;
+            let remapped = match operator {
+                GlaOperator::ScanEdges { .. } => operator.clone(),
+                GlaOperator::Expand { source, relation, direction } => {
+                    let keep = kept[appended];
+                    appended += 1;
+                    if !keep { continue; }
+                    GlaOperator::Expand {
+                        source: slot_map[source.ordinal() as usize],
+                        relation: *relation,
+                        direction: *direction,
+                    }
+                }
+                GlaOperator::VertexIdentity { left, right, equal } => GlaOperator::VertexIdentity {
+                    left: slot_map[left.ordinal() as usize],
+                    right: slot_map[right.ordinal() as usize],
+                    equal: *equal,
+                },
+                _ => unreachable!("the complete topology-only shape was validated above"),
+            };
+            control(GlaExecutionEvent::ScratchEntry)?;
+            core.push(remapped);
+        }
+        control(GlaExecutionEvent::ScratchEntry)?;
+        let mut remapped_columns = Vec::new();
+        for column in columns {
+            let super::ValueProjection::Vertex { slot } = column else {
+                unreachable!("the complete output shape was validated above")
+            };
+            control(GlaExecutionEvent::ScratchEntry)?;
+            remapped_columns.push(super::ValueProjection::Vertex {
+                slot: slot_map[slot.ordinal() as usize],
+            });
+        }
+        core.push(GlaOperator::ProjectValues { columns: remapped_columns });
+        for operator in &operators[projection_at + 1..] {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            core.push(operator.clone());
+        }
+        Ok(Some(AggregateCore { plan: Self::from_operators(core), slot_map, retained_width }))
     }
 }
 
@@ -321,8 +390,81 @@ mod factorization_tests {
     use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
     use fgdb_delta_types::RelationId;
 
+    fn prepare(text: &str) -> crate::PreparedGraphAggregate {
+        PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
+            GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(
+                match name { "R" => 1, "S" => 2, _ => 3 },
+            ))),
+            _ => None,
+        }).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+    }
+
     #[test]
-    fn aggregate_prefix_preserves_columns_and_cannot_remove_observed_constraints() {
+    fn interleaved_branches_have_disjoint_slots_and_remapped_cycle_and_output() {
+        let aggregate = prepare("MATCH (a)-[:R]->(b), (b)-[:S]->(hidden)-[:T]->(leaf), \
+            (b)-[:R]->(c), (a)-[:T]->(d), (c)-[:S]->(a), (c)-[:R]->(unused) \
+            RETURN c,d,COUNT(*) AS n GROUP BY c,d");
+        let plan = aggregate.input_pattern().plan();
+        let original = plan.canonical_bytes();
+        let core = plan.aggregate_core(&mut |_| Ok::<_, ()>(())).unwrap().unwrap();
+        assert_eq!(core.retained_width, 5);
+        let slots: Vec<_> = core.slot_map.iter().map(|slot| slot.ordinal()).collect();
+        assert_eq!(slots, vec![0, 1, 5, 6, 2, 3, 4, 7]);
+        let mut permutation = slots;
+        permutation.sort_unstable();
+        assert_eq!(permutation, (0..8).collect::<Vec<_>>());
+        assert!(core.plan.operators().iter().any(|op| matches!(op,
+            GlaOperator::VertexIdentity { left, right, equal: true }
+                if left.ordinal() == 0 && right.ordinal() == 4)));
+        let sources: Vec<_> = core.plan.operators().iter().filter_map(|op| match op {
+            GlaOperator::Expand { source, .. } => Some(source.ordinal()), _ => None,
+        }).collect();
+        assert_eq!(sources, vec![1, 0, 2]);
+        let output: Vec<_> = core.plan.operators().iter().find_map(|op| match op {
+            GlaOperator::ProjectValues { columns } => Some(columns.iter().map(|column| match column {
+                super::super::ValueProjection::Vertex { slot } => slot.ordinal(),
+                _ => panic!("identity-only output"),
+            }).collect()),
+            _ => None,
+        }).unwrap();
+        assert_eq!(output, vec![2, 3]);
+        assert_eq!(plan.canonical_bytes(), original);
+    }
+
+    #[test]
+    fn retained_deep_descendant_keeps_all_ancestors_but_not_its_sibling() {
+        let aggregate = prepare("MATCH (a)-[:R]->(b), (b)-[:S]->(x), (b)-[:S]->(y), \
+            (x)-[:T]->(z) RETURN z,COUNT(*) AS n GROUP BY z");
+        let core = aggregate.input_pattern().plan().aggregate_core(&mut |_| Ok::<_, ()>(()))
+            .unwrap().unwrap();
+        assert_eq!(core.retained_width, 4);
+        assert_eq!(core.slot_map.iter().map(|slot| slot.ordinal()).collect::<Vec<_>>(),
+            vec![0, 1, 2, 4, 3]);
+        assert_eq!(core.plan.operators().iter().filter(|op| matches!(op, GlaOperator::Expand { .. })).count(), 2);
+    }
+
+    #[test]
+    fn core_compilation_is_interruptible_and_never_mutates_the_definition() {
+        let aggregate = prepare("MATCH (a)-[:R]->(b), (b)-[:S]->(x), (x)-[:T]->(y), \
+            (b)-[:R]->(c), (c)-[:T]->(a) RETURN c,COUNT(*) AS n GROUP BY c");
+        let plan = aggregate.input_pattern().plan();
+        let original = plan.canonical_bytes();
+        let mut total = 0;
+        assert!(plan.aggregate_core(&mut |_| { total += 1; Ok::<_, usize>(()) }).unwrap().is_some());
+        for stop in 1..=total {
+            let mut calls = 0;
+            let result = plan.aggregate_core(&mut |_| {
+                calls += 1;
+                if calls == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(value) if value == stop));
+            assert_eq!(calls, stop);
+            assert_eq!(plan.canonical_bytes(), original);
+        }
+    }
+
+    #[test]
+    fn aggregate_core_preserves_columns_and_cannot_remove_observed_constraints() {
         for (text, expected) in [
             ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(*) AS n", Some(1)),
             ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(c) AS n", None),
@@ -339,9 +481,10 @@ mod factorization_tests {
             }).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
             let plan = aggregate.input_pattern().plan();
             let original = plan.canonical_bytes();
-            let prefix = plan.aggregate_prefix(&mut |_| Ok::<_, ()>(())).unwrap();
-            assert_eq!(prefix.as_ref().map(|(_, retained)| *retained), expected, "{text}");
-            if let Some((prefix, _)) = prefix {
+            let reduced = plan.aggregate_core(&mut |_| Ok::<_, ()>(())).unwrap();
+            assert_eq!(reduced.as_ref().map(|core| core.retained_width - 1), expected, "{text}");
+            if let Some(reduced) = reduced {
+                let prefix = reduced.plan;
                 assert_eq!(prefix.operators().last(), plan.operators().last());
                 assert_eq!(prefix.operators().iter().find(|op| matches!(op, GlaOperator::ProjectValues { .. })),
                     plan.operators().iter().find(|op| matches!(op, GlaOperator::ProjectValues { .. })));

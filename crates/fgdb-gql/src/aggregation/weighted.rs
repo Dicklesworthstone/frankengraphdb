@@ -171,17 +171,39 @@ where
 
     // Remove only a compiler-proved unprojected forest. Messages sum distinct
     // child assignments and multiply independent branches, without generating
-    // their Cartesian product. Cyclic/projected prefix bindings still use GLA.
-    let prefix = plan.aggregate_prefix(&mut control)?;
-    let retained = prefix.as_ref().map_or(accesses.len(), |(_, retained)| *retained);
-    let forest = tree::Forest::build(&accesses[retained..], &topology, &mut control)?;
-    let execution_plan = prefix.as_ref().map_or(plan, |(prefix, _)| prefix);
+    // their Cartesian product. Cyclic/projected core bindings still use GLA.
+    // Both partitions preserve original edge order. All slots are remapped:
+    // removed ones occupy a separate tail, so early branches cannot alias the
+    // compact IDs of retained later variables in the completion-message maps.
+    let reduced = plan.aggregate_core(&mut control)?;
+    let mut branches = Vec::new();
+    if let Some(core) = &reduced {
+        let mut retained = 0;
+        for at in 0..accesses.len() {
+            control(GlaExecutionEvent::Work)?;
+            let mut access = accesses[at];
+            let unavailable = || GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable);
+            access.source = core.slot_map.get(access.source).ok_or_else(unavailable)?.ordinal() as usize;
+            access.destination = core.slot_map.get(access.destination).ok_or_else(unavailable)?.ordinal() as usize;
+            if access.destination >= core.retained_width {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                branches.push(access);
+            } else {
+                debug_assert!(access.source < core.retained_width);
+                accesses[retained] = access;
+                retained += 1;
+            }
+        }
+        accesses.truncate(retained);
+    }
+    let forest = tree::Forest::build(&branches, &topology, &mut control)?;
+    let execution_plan = reduced.as_ref().map_or(plan, |core| &core.plan);
     execution_plan.visit_value_bindings(vertices, topology.keys().copied(), test_vertex, property, control,
         |columns, bindings, property, control| {
             let Some(mut weight) = forest.completion(bindings, control)? else {
                 return Ok(());
             };
-            for access in &accesses[..retained] {
+            for access in &accesses {
                 control(GlaExecutionEvent::Work)?;
                 let unavailable = || GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable);
                 let source = bindings.get(access.source).copied().flatten().ok_or_else(unavailable)?;
