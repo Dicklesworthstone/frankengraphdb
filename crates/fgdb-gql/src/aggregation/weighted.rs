@@ -14,6 +14,7 @@
 //! and downstream execution share the original control/error path. This is a
 //! bounded factorization law, not general FreeJoin, a COLT, or spill storage.
 
+mod chain;
 mod tree;
 
 use super::*;
@@ -198,26 +199,8 @@ where
     }
     let forest = tree::Forest::build(&branches, &topology, &mut control)?;
     let execution_plan = reduced.as_ref().map_or(plan, |core| &core.plan);
-    execution_plan.visit_value_bindings(vertices, topology.keys().copied(), test_vertex, property, control,
-        |columns, bindings, property, control| {
-            let Some(mut weight) = forest.completion(bindings, control)? else {
-                return Ok(());
-            };
-            for access in &accesses {
-                control(GlaExecutionEvent::Work)?;
-                let unavailable = || GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable);
-                let source = bindings.get(access.source).copied().flatten().ok_or_else(unavailable)?;
-                let destination = bindings.get(access.destination).copied().flatten().ok_or_else(unavailable)?;
-                let key = match access.direction {
-                    GlaDirection::Forward => (source, access.relation, destination),
-                    GlaDirection::Reverse => (destination, access.relation, source),
-                    GlaDirection::Undirected => normalized(source, access.relation, destination, true),
-                };
-                let factor = topology.get(&key).copied().ok_or_else(unavailable)?;
-                weight = weight.product(factor);
-            }
-            visit(columns, bindings, property, control, weight)
-        })
+    chain::visit_bindings(execution_plan, vertices, &topology, &accesses, &forest,
+        test_vertex, property, control, visit)
 }
 
 #[cfg(test)]

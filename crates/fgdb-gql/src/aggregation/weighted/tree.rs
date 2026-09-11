@@ -23,6 +23,12 @@ pub(super) struct Forest {
 }
 
 impl Forest {
+    /// Attachment bindings remain live if a later path contraction remaps the
+    /// retained core. Empty messages are protected too: they denote ZERO.
+    pub(super) fn anchors(&self) -> impl Iterator<Item = usize> + '_ {
+        self.roots.keys().copied()
+    }
+
     pub(super) fn build<E>(
         suffix: &[EdgeAccess],
         topology: &BTreeMap<TopologyKey, Multiplicity>,
