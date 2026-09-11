@@ -15,6 +15,8 @@
 //! no ordinal is mixed with a catalog RelationId or stored in the database.
 //! Tables are metered, in-memory preprocessing, not spill or a byte-memory cap.
 
+mod cycle;
+
 use super::*;
 use crate::algebra::{GraphColumn, GraphPatternBuilder, GlaPlan, MAX_PATTERN_IDENTITIES, MAX_PATTERN_VERTICES};
 
@@ -242,6 +244,9 @@ where
     P: FnMut(&[ValueProjection], &[Option<VId>], &mut R, &mut M, Multiplicity)
         -> Result<(), VisitError<E, C>>,
 {
+    if let Some(reduced) = cycle::contract(plan, topology, accesses, forest, &mut control)? {
+        return reduced.visit_bindings(vertices, forest, test_vertex, property, control, visit);
+    }
     let reduced = prepare(plan, accesses, forest, &mut control)?;
     let mut derived = BTreeMap::new();
     let mut remapped_accesses = Vec::new();
