@@ -5,6 +5,7 @@
 //! borrow the admitted source until final, owned aggregate rows are released.
 
 mod result;
+mod weighted;
 pub use result::{
     GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest,
     GraphNullPlacement, MAX_AGGREGATE_FILTERS,
@@ -152,6 +153,8 @@ pub enum GraphAggregateError<E> {
     NonIntegerSum { aggregate: usize },
     ArithmeticOverflow { aggregate: usize },
     NonIntegerHaving { predicate: usize },
+    /// A physical weighted binding did not match its admitted topology.
+    MultiplicityUnavailable,
 }
 
 impl<E> GraphAggregateError<E> {
@@ -165,6 +168,7 @@ impl<E> GraphAggregateError<E> {
             Self::NonIntegerHaving { predicate } => {
                 GraphAggregateError::NonIntegerHaving { predicate }
             }
+            Self::MultiplicityUnavailable => GraphAggregateError::MultiplicityUnavailable,
         }
     }
 }
@@ -184,6 +188,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
                 f,
                 "HAVING predicate {predicate} requires integer or null input"
             ),
+            Self::MultiplicityUnavailable => {
+                f.write_str("aggregate binding has no admitted topology multiplicity")
+            }
         }
     }
 }
@@ -442,6 +449,11 @@ impl PreparedGraphAggregate {
     /// returned counters. Count/null/sum semantics are applied per occurrence.
     /// Keyless aggregation yields one zero/null row on empty input; keyed
     /// aggregation yields no rows. Group ordering precedes output pagination.
+    /// Positive topology-only summaries may factor parallel occurrences into
+    /// checked weights. Property reads, predicates, scoped matches, and mixed
+    /// directed/undirected use of one relation keep ordinary visitation. The
+    /// physical optimization does not change the logical transcript or source
+    /// record count; its preprocessing shares the evaluator's resource meter.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_governed<'a, E, C>(
         &self,
@@ -483,7 +495,8 @@ impl PreparedGraphAggregate {
             control(GlaExecutionEvent::ScratchEntry)?;
             groups.insert(Vec::new(), new_group(&self.aggregates, &mut control)?);
         }
-        self.input.plan().visit_value_bindings(
+        weighted::visit_bindings(
+            self,
             vertices,
             edges,
             |vid, predicates| {
@@ -495,7 +508,7 @@ impl PreparedGraphAggregate {
                     .map_err(|error| GqlQueryError::Source(GraphAggregateError::Source(error)))
             },
             &mut control,
-            |columns, bindings, property, control| {
+            |columns, bindings, property, control, multiplicity| {
                 let mut values = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
                 for (at, column) in columns.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
@@ -537,7 +550,7 @@ impl PreparedGraphAggregate {
                 for (at, (aggregate, state)) in self.aggregates.iter().zip(state).enumerate() {
                     control(GlaExecutionEvent::Work)?;
                     let value = aggregate.column.map(|column| values[column]);
-                    update(state, aggregate.function, value, at, control)?;
+                    update(state, aggregate.function, value, multiplicity, at, control)?;
                 }
                 Ok(())
             },
@@ -627,6 +640,7 @@ fn update<'a, E, C>(
     state: &mut Accumulator<'a>,
     function: GraphAggregateFunction,
     value: Option<ValueRef<'a>>,
+    multiplicity: weighted::Multiplicity,
     aggregate: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
 ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
@@ -636,7 +650,8 @@ fn update<'a, E, C>(
     let overflow = || GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate });
     match state {
         Accumulator::Count(count) => {
-            *count = count.checked_add(1).ok_or_else(overflow)?;
+            let delta = multiplicity.exact_count().ok_or_else(overflow)?;
+            *count = count.checked_add(delta).ok_or_else(overflow)?;
         }
         Accumulator::Distinct(seen) => {
             let value = value.expect("non-count argument was checked");
@@ -649,6 +664,11 @@ fn update<'a, E, C>(
             value: sum,
             present,
         } => {
+            // Weighted execution never admits SUM. Preserve its ordinary
+            // checked per-occurrence semantics and fail closed on misrouting.
+            if multiplicity != weighted::Multiplicity::ONE {
+                return Err(GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable));
+            }
             let Some(ValueRef::Scalar(CanonicalScalar::Int(value))) = value else {
                 return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
                     aggregate,
