@@ -7,13 +7,14 @@
 
 mod aggregate;
 mod literal;
+mod ordering;
 mod parameters;
 mod scoped;
 pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 use scoped::{BoundScope, ScopeSyntax};
 
 use crate::algebra::{
-    GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueRow, IntegerComparison,
+    GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder, GraphValueRow, IntegerComparison,
     MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES, MAX_PATTERN_PREDICATES,
     MAX_PATTERN_VERTICES, PatternBuildError, PreparedGraphPattern, VertexPredicate,
 };
@@ -91,6 +92,7 @@ pub enum GraphPatternTextErrorKind {
     },
     UnexpectedArguments,
     Build(PatternBuildError),
+    OrderBuild(crate::algebra::GraphOrderError),
     AggregateBuild(crate::GraphAggregateBuildError),
 }
 
@@ -289,6 +291,7 @@ struct Syntax<'a> {
     filters: Vec<Filter<'a>>,
     scopes: Vec<ScopeSyntax<'a>>,
     columns: Vec<Column<'a>>,
+    ordering: Vec<GraphValueOrder>,
     parameters: Vec<GqlParameterSpec>,
     parameter_offsets: Vec<usize>,
     offset: Number,
@@ -335,6 +338,7 @@ impl<'a> Parser<'a> {
                 filters: Vec::new(),
                 scopes: Vec::new(),
                 columns: Vec::new(),
+                ordering: Vec::new(),
                 parameters: Vec::new(),
                 parameter_offsets: Vec::new(),
                 offset: Number::Literal(GqlParameterValue::UInt64(0)),
@@ -627,6 +631,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        self.parse_row_ordering()?;
         self.parse_pagination()?;
         self.end()?;
         Ok(self.syntax)
@@ -683,6 +688,7 @@ pub struct PreparedGraphText {
     filters: Vec<BoundFilter>,
     scopes: Vec<BoundScope>,
     columns: Vec<BoundColumn>,
+    ordering: Vec<GraphValueOrder>,
     parameters: Vec<GqlParameterSpec>,
     parameter_offsets: Vec<usize>,
     offset: Number,
@@ -712,6 +718,9 @@ impl PreparedGraphText {
     /// Property WHERE operands also accept single-quoted UCS_BASIC strings,
     /// TRUE/FALSE/NULL, and IS [NOT] NULL. Only doubled quotes escape a quote;
     /// quoted keywords and parameter-looking text remain literal payloads.
+    /// ORDER BY selects returned expressions or aliases, with ASC/DESC and
+    /// independent NULLS FIRST/LAST (default LAST). Whole rows break ties.
+    /// Ordering precedes SKIP/LIMIT; hidden sort expressions are refused.
     ///
     /// Syntax is completely validated before calling `resolve`. Each unique
     /// (kind,name) is resolved once across ALL scopes. Unknown/wrong-kind names
@@ -790,6 +799,7 @@ impl PreparedGraphText {
             filters,
             scopes,
             columns,
+            ordering: syntax.ordering,
             parameters: syntax.parameters,
             parameter_offsets: syntax.parameter_offsets,
             offset: syntax.offset,
@@ -871,11 +881,18 @@ impl PreparedGraphText {
                 self.count.as_ref().map(|count| count.unsigned(values)),
             ),
         )?;
-        Ok(if self.distinct {
+        let pattern = if self.distinct {
             pattern
         } else {
             pattern.with_duplicates()
-        })
+        };
+        if self.ordering.is_empty() {
+            Ok(pattern)
+        } else {
+            pattern.with_order_by(&self.ordering).map_err(|kind| {
+                error(self.return_at, GraphPatternTextErrorKind::OrderBuild(kind))
+            })
+        }
     }
 }
 
@@ -1164,7 +1181,7 @@ mod tests {
             "MATCH (a)-[:R]->(b) RETURN missing",
             "MATCH (a) RETURN a;",
             "MATCH (a) RETURN a DROP GRAPH x",
-            "MATCH (a) RETURN a ORDER BY a",
+            "MATCH (a) RETURN a ORDER BY missing",
             "MATCH (a) WHERE a.n = 1 OR a.n = 2 RETURN a",
             "MATCH (a) WHERE a > a RETURN a",
             "MATCH (a) WHERE a.n = 1.5 RETURN a",
