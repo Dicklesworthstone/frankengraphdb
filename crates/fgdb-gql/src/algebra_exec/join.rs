@@ -8,7 +8,7 @@
 //! intersection is a candidate filter, not a multiplicity estimate or DISTINCT.
 
 use super::{GlaDirection, GlaExecutionEvent, GlaOperator, Index, RelationId, VId};
-use crate::algebra::BindingSlot;
+use crate::algebra::{BindingSlot, MAX_PATTERN_EDGES};
 
 #[derive(Clone, Copy)]
 struct IntersectionAccess {
@@ -61,6 +61,56 @@ fn intersection_access(operators: &[GlaOperator], at: usize) -> Option<Intersect
     Some(IntersectionAccess { candidate: candidate as usize, anchor, relation: *relation, direction })
 }
 
+/// Continue only through adjacent Expand/equality pairs for the SAME candidate.
+/// A closing pair appends a temporary slot, even though its representative was
+/// already bound. Check that exact ordinal on every step; a user identity, a
+/// new independent variable or a scope boundary cannot masquerade as a close.
+/// No graph reads, allocation or value-dependent planning occurs here.
+fn additional_accesses(
+    operators: &[GlaOperator],
+    at: usize,
+    first: IntersectionAccess,
+) -> impl Iterator<Item = IntersectionAccess> + '_ {
+    let mut next = at.checked_add(3);
+    let mut appended = first.candidate.checked_add(2);
+    let mut remaining = MAX_PATTERN_EDGES - 2;
+    std::iter::from_fn(move || {
+        if remaining == 0 { return None; }
+        // Taking next makes the iterator fused on every failed recognition.
+        let at = next.take()?;
+        let slot = appended?;
+        let GlaOperator::Expand { source, relation, direction } = operators.get(at)? else {
+            return None;
+        };
+        let GlaOperator::VertexIdentity { left, right, equal: true } = operators.get(at.checked_add(1)?)? else {
+            return None;
+        };
+        let other = if left.ordinal() as usize == slot {
+            *right
+        } else if right.ordinal() as usize == slot {
+            *left
+        } else {
+            return None;
+        };
+        let candidate = first.candidate;
+        let (anchor, direction) = if source.ordinal() as usize == candidate
+            && (other.ordinal() as usize) < candidate
+        {
+            (other, reverse(*direction))
+        } else if (source.ordinal() as usize) < candidate
+            && other.ordinal() as usize == candidate
+        {
+            (*source, *direction)
+        } else {
+            return None;
+        };
+        next = at.checked_add(2);
+        appended = slot.checked_add(1);
+        remaining -= 1;
+        Some(IntersectionAccess { candidate, anchor, relation: *relation, direction })
+    })
+}
+
 /// Called once after registering the logical plan's ordinary index pairs.
 /// Only a genuinely new reciprocal pair reserves an extra metadata entry; edge
 /// occurrences in it subsequently use build_index's existing scratch controls.
@@ -70,12 +120,14 @@ pub(super) fn register_indexes<E>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     for at in 0..operators.len() {
-        if let Some(access) = intersection_access(operators, at) {
-            control(GlaExecutionEvent::Work)?;
-            let key = (access.relation, access.direction);
-            if !index.contains_key(&key) {
-                control(GlaExecutionEvent::ScratchEntry)?;
-                index.insert(key, Default::default());
+        if let Some(first) = intersection_access(operators, at) {
+            for access in std::iter::once(first).chain(additional_accesses(operators, at, first)) {
+                control(GlaExecutionEvent::Work)?;
+                let key = (access.relation, access.direction);
+                if !index.contains_key(&key) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    index.insert(key, Default::default());
+                }
             }
         }
     }
@@ -169,19 +221,29 @@ pub(super) fn bound_neighbors<'a, E>(
     }
 }
 
-/// Borrowed, allocation-free candidate cursor. Every occurrence in primary is
-/// yielded once iff its ID occurs in membership. Repetitions in membership are
-/// deliberately not expanded here: the following logical Expand does that once,
-/// using its complete equal range. This preserves the product of multiplicities.
+/// Additional cursors contain only borrowed adjacency slices and monotone
+/// positions, never candidate/result rows. Each descriptor is charged before
+/// its allocation. The ordinary pair path needs no additional allocation.
+struct Membership<'a> {
+    values: &'a [VId],
+    position: usize,
+}
+
+/// Yield each primary occurrence only if it is in EVERY membership list.
+/// Membership repetitions are deliberately not multiplied here: the original
+/// visitor expands each complete equal range in turn. Thus conjunction pruning
+/// changes candidate access, not the bag or OPTIONAL/EXISTS success boundary.
 pub(super) struct Candidates<'a> {
     primary: &'a [VId],
     membership: Option<&'a [VId]>,
     left: usize,
     right: usize,
+    additional: Vec<Membership<'a>>,
+    confirmed: Option<VId>,
 }
 impl<'a> Candidates<'a> {
     fn all(primary: &'a [VId]) -> Self {
-        Self { primary, membership: None, left: 0, right: 0 }
+        Self { primary, membership: None, left: 0, right: 0, additional: Vec::new(), confirmed: None }
     }
 
     pub(super) fn next<E>(
@@ -193,12 +255,30 @@ impl<'a> Candidates<'a> {
             if value.is_some() { self.left += 1; }
             return Ok(value);
         };
-        while self.left < self.primary.len() && self.right < membership.len() {
+        'candidate: while self.left < self.primary.len() && self.right < membership.len() {
             let left = self.primary[self.left];
             let right = membership[self.right];
             control(GlaExecutionEvent::Work)?;
             match left.cmp(&right) {
                 core::cmp::Ordering::Equal => {
+                    if self.confirmed != Some(left) {
+                        for cursor in &mut self.additional {
+                            cursor.position = seek_ge(cursor.values, left, cursor.position, control)?;
+                            let Some(&candidate) = cursor.values.get(cursor.position) else {
+                                self.left = self.primary.len();
+                                return Ok(None);
+                            };
+                            control(GlaExecutionEvent::Work)?;
+                            if candidate != left {
+                                // All positions advance monotonically. If one
+                                // stream jumps ahead, retry the first stream
+                                // before a value may be declared common to all.
+                                self.left = seek_ge(self.primary, candidate, self.left + 1, control)?;
+                                continue 'candidate;
+                            }
+                        }
+                        self.confirmed = Some(left);
+                    }
                     self.left += 1;
                     return Ok(Some(left));
                 }
@@ -233,7 +313,20 @@ pub(super) fn candidates<'a, E>(
         return Ok(Candidates::all(neighbors));
     };
     let membership = adjacency.get(anchor).map_or(&[][..], Vec::as_slice);
-    Ok(Candidates { primary: neighbors, membership: Some(membership), left: 0, right: 0 })
+    let mut cursor = Candidates::all(neighbors);
+    cursor.membership = Some(membership);
+    for next in additional_accesses(operators, at, access) {
+        control(GlaExecutionEvent::Work)?;
+        let Some(anchor) = bindings.get(next.anchor.ordinal() as usize) else { break; };
+        let Some(anchor) = anchor else { return Ok(Candidates::all(&neighbors[..0])); };
+        // A missing derived index disables further pruning, never the logical
+        // constraint. Existing, already admitted membership checks stay valid.
+        let Some(adjacency) = index.get(&(next.relation, next.direction)) else { break; };
+        let values = adjacency.get(anchor).map_or(&[][..], Vec::as_slice);
+        control(GlaExecutionEvent::ScratchEntry)?;
+        cursor.additional.push(Membership { values, position: 0 });
+    }
+    Ok(cursor)
 }
 
 #[cfg(test)]
@@ -283,7 +376,8 @@ mod tests {
         let arrays = multisets();
         for left in &arrays {
             for right in &arrays {
-                let mut cursor = Candidates { primary: left, membership: Some(right), left: 0, right: 0 };
+                let mut cursor = Candidates::all(left);
+                cursor.membership = Some(right);
                 let mut found = Vec::new();
                 let mut work = 0_usize;
                 while let Some(value) = cursor.next(&mut |event| {
@@ -304,7 +398,8 @@ mod tests {
         let right = [VId(1), VId(4), VId(4), VId(9), VId(12)];
         let run = |stop: usize| {
             let mut events = 0;
-            let mut cursor = Candidates { primary: &left, membership: Some(&right), left: 0, right: 0 };
+            let mut cursor = Candidates::all(&left);
+            cursor.membership = Some(&right);
             let mut found = Vec::new();
             let result = (|| {
                 while let Some(value) = cursor.next(&mut |_| {
@@ -411,5 +506,149 @@ mod tests {
             assert_eq!(found.len(), usize::from(target.0 < 65_536));
             assert!(comparisons <= 100, "comparison bound violated: {comparisons}");
         }
+    }
+
+    fn multiple_closings() -> Vec<GlaOperator> {
+        let mut ops = closing(true, GlaDirection::Forward);
+        ops.extend([
+            GlaOperator::Expand { source: BindingSlot(2), relation: RelationId(4), direction: GlaDirection::Forward },
+            GlaOperator::VertexIdentity { left: BindingSlot(4), right: BindingSlot(0), equal: true },
+            GlaOperator::Expand { source: BindingSlot(1), relation: RelationId(5), direction: GlaDirection::Reverse },
+            GlaOperator::VertexIdentity { left: BindingSlot(2), right: BindingSlot(5), equal: true },
+        ]);
+        ops
+    }
+
+    #[test]
+    fn four_lists_match_independent_membership_and_preserve_primary_multiplicity() {
+        let arrays: Vec<_> = multisets().into_iter().filter(|row| row.len() <= 2).collect();
+        for a in &arrays {
+            for b in &arrays {
+                for c in &arrays {
+                    for d in &arrays {
+                        let mut cursor = Candidates::all(a);
+                        cursor.membership = Some(b);
+                        cursor.additional = vec![
+                            Membership { values: c, position: 0 },
+                            Membership { values: d, position: 0 },
+                        ];
+                        let expected: Vec<_> = a.iter().copied()
+                            .filter(|value| b.contains(value) && c.contains(value) && d.contains(value))
+                            .collect();
+                        let mut actual = Vec::new();
+                        while let Some(value) = cursor.next(&mut |_| Ok::<_, ()>(())).unwrap() {
+                            actual.push(value);
+                        }
+                        assert_eq!(actual, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pairwise_overlap_is_not_a_multiway_witness_and_all_checkpoints_refuse() {
+        let primary = [VId(1), VId(1), VId(2), VId(3), VId(9), VId(9)];
+        let a = [VId(1), VId(2), VId(9)];
+        let b = [VId(2), VId(3), VId(9)];
+        let c = [VId(1), VId(3), VId(9)];
+        let run = |stop| {
+            let mut cursor = Candidates::all(&primary);
+            cursor.membership = Some(&a);
+            cursor.additional = vec![Membership { values: &b, position: 0 }, Membership { values: &c, position: 0 }];
+            let mut events = 0;
+            let result = (|| {
+                let mut rows = Vec::new();
+                while let Some(value) = cursor.next(&mut |_| {
+                    events += 1;
+                    if events == stop { Err(stop) } else { Ok(()) }
+                })? { rows.push(value); }
+                Ok(rows)
+            })();
+            (events, result)
+        };
+        let (total, result) = run(usize::MAX);
+        assert_eq!(result, Ok(vec![VId(9), VId(9)]));
+        for stop in 1..=total {
+            assert_eq!(run(stop), (stop, Err(stop)));
+        }
+    }
+
+    #[test]
+    fn closing_chain_registers_every_actual_direction_but_stops_at_barriers() {
+        let ops = multiple_closings();
+        let first = intersection_access(&ops, 0).unwrap();
+        let tail: Vec<_> = additional_accesses(&ops, 0, first)
+            .map(|access| (access.candidate, access.anchor.ordinal(), access.relation, access.direction))
+            .collect();
+        assert_eq!(tail, vec![
+            (2, 0, RelationId(4), GlaDirection::Reverse),
+            (2, 1, RelationId(5), GlaDirection::Reverse),
+        ]);
+        let mut index = Index::new();
+        let mut reservations = 0;
+        register_indexes(&ops, &mut index, &mut |event| {
+            reservations += usize::from(event == GlaExecutionEvent::ScratchEntry);
+            Ok::<_, ()>(())
+        }).unwrap();
+        assert_eq!(reservations, 3);
+        for (relation, direction) in [(3, GlaDirection::Forward), (4, GlaDirection::Reverse), (5, GlaDirection::Reverse)] {
+            assert!(index.contains_key(&(RelationId(relation), direction)));
+        }
+        for barrier in [
+            GlaOperator::Select { slot: BindingSlot(2), predicates: vec![] },
+            GlaOperator::CompareProperties {
+                left: BindingSlot(2), left_key: fgdb_delta_types::PropertyKeyId(1),
+                right: BindingSlot(0), right_key: fgdb_delta_types::PropertyKeyId(2),
+                comparison: crate::algebra::IntegerComparison::Equal,
+            },
+            GlaOperator::ProbeEnd { group: 0 },
+            GlaOperator::OptionalEnd { group: 0 },
+            GlaOperator::BindVertex { source: BindingSlot(0) },
+        ] {
+            let mut blocked = ops.clone();
+            blocked.insert(3, barrier);
+            let first = intersection_access(&blocked, 0).unwrap();
+            assert!(additional_accesses(&blocked, 0, first).next().is_none());
+        }
+        let mut malformed = ops.clone();
+        malformed[4] = GlaOperator::VertexIdentity { left: BindingSlot(3), right: BindingSlot(0), equal: true };
+        assert!(additional_accesses(&malformed, 0, first).next().is_none());
+        malformed[4] = GlaOperator::VertexIdentity { left: BindingSlot(4), right: BindingSlot(0), equal: false };
+        assert!(additional_accesses(&malformed, 0, first).next().is_none());
+    }
+
+    #[test]
+    fn descriptor_refusals_missing_indexes_and_null_later_anchors_stay_fail_closed() {
+        let ops = multiple_closings();
+        let primary = [VId(2), VId(2), VId(3)];
+        let mut index = Index::new();
+        for (relation, direction, anchor, values) in [
+            (3, GlaDirection::Forward, VId(0), vec![VId(2), VId(3)]),
+            (4, GlaDirection::Reverse, VId(0), vec![VId(2), VId(3)]),
+            (5, GlaDirection::Reverse, VId(1), vec![VId(2)]),
+        ] {
+            index.entry((RelationId(relation), direction)).or_default().insert(anchor, values);
+        }
+        let bindings = [Some(VId(0)), Some(VId(1))];
+        for stop in 1..=2 {
+            let mut scratch = 0;
+            let result = candidates(&ops, 0, &bindings, &primary, &index, &mut |event| {
+                scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                if scratch == stop { Err(stop) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(found) if found == stop));
+        }
+        let mut cursor = candidates(&ops, 0, &bindings, &primary, &index, &mut |_| Ok::<_, ()>(())).unwrap();
+        assert_eq!(cursor.next(&mut |_| Ok::<_, ()>(())).unwrap(), Some(VId(2)));
+        assert_eq!(cursor.next(&mut |_| Ok::<_, ()>(())).unwrap(), Some(VId(2)));
+        assert_eq!(cursor.next(&mut |_| Ok::<_, ()>(())).unwrap(), None);
+        let mut cursor = candidates(&ops, 0, &[Some(VId(0)), None], &primary, &index, &mut |_| Ok::<_, ()>(())).unwrap();
+        assert_eq!(cursor.next(&mut |_| Ok::<_, ()>(())).unwrap(), None);
+        index.remove(&(RelationId(5), GlaDirection::Reverse));
+        let mut cursor = candidates(&ops, 0, &bindings, &primary, &index, &mut |_| Ok::<_, ()>(())).unwrap();
+        let mut result = Vec::new();
+        while let Some(value) = cursor.next(&mut |_| Ok::<_, ()>(())).unwrap() { result.push(value); }
+        assert_eq!(result, primary, "an absent derived index is not an empty relation");
     }
 }
