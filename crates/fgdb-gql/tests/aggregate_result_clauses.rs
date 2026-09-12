@@ -122,7 +122,7 @@ fn text_clauses_equal_typed_definitions_and_rebinding_never_resolves_again() {
 fn malformed_hidden_or_duplicate_clauses_never_call_the_catalog() {
     for tail in [
         "HAVING missing > 0",
-        "HAVING MIN(b.p) > 0",
+        "HAVING MIN(*) > 0",
         "HAVING total > 1.5",
         "HAVING total IS TRUE",
         "HAVING total IS NOT",

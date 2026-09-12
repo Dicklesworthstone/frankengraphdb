@@ -1,7 +1,7 @@
 //! HAVING precedence and immutable operands over the shared aggregate parser.
 //! No extra lexer, source query, catalog lookup or text interpolation at bind.
-//! Output references resolve through the SAME returned-column resolver used
-//! by ORDER BY. No unprojected aggregate or key is synthesized by this clause.
+//! Output references and private aggregate calls use the SAME resolver and
+//! bounded registry as ORDER BY. Group keys remain explicit RETURN items.
 
 use super::*;
 use crate::{GraphHavingExpression, GraphHavingOp, GraphHavingOperand, MAX_HAVING_INSTRUCTIONS};
@@ -60,11 +60,16 @@ impl HavingTemplate {
     }
 }
 
-pub(super) fn parse<'a>(parser: &mut Parser<'a>, returned: &[ReturnItem<'a>], groups: &[Expression<'a>])
+pub(super) fn parse<'a>(
+    parser: &mut Parser<'a>,
+    returned: &[ReturnItem<'a>],
+    groups: &[Expression<'a>],
+    hidden: &mut Vec<HiddenSummary<'a>>,
+)
     -> Result<(Vec<Having>, Option<HavingTemplate>), GraphPatternTextError> {
     if !parser.take_word("HAVING")? { return Ok((Vec::new(), None)); }
     let at = parser.current.at;
-    let mut input = HavingParser { parser, returned, groups, program: Vec::new(), leaves: 0, compound: false };
+    let mut input = HavingParser { parser, returned, groups, hidden, program: Vec::new(), leaves: 0, compound: false };
     input.disjunction(0)?;
     // One grammar, not retry-after-error. Preserve the old flat conjunction's
     // lowering, eager numeric-domain checks, counters and transcript bytes.
@@ -93,6 +98,7 @@ struct HavingParser<'p, 'a> {
     parser: &'p mut Parser<'a>,
     returned: &'p [ReturnItem<'a>],
     groups: &'p [Expression<'a>],
+    hidden: &'p mut Vec<HiddenSummary<'a>>,
     program: Vec<Op>,
     leaves: usize,
     compound: bool,
@@ -159,12 +165,12 @@ impl HavingParser<'_, '_> {
                 let next = self.parser.lexer.clone().next()?;
                 if matches!(next.kind, TokenKind::Punct(b'.' | b'('))
                     || self.returned.iter().any(|item| item.alias.text == word) {
-                    return self.parser.result_column(self.returned, self.groups).map(Operand::Column);
+                    return self.parser.result_column(self.returned, self.groups, self.hidden).map(Operand::Column);
                 }
                 if word.eq_ignore_ascii_case("TRUE") { Some(CanonicalScalar::Bool(true)) }
                 else if word.eq_ignore_ascii_case("FALSE") { Some(CanonicalScalar::Bool(false)) }
                 else if word.eq_ignore_ascii_case("NULL") { Some(CanonicalScalar::Null) }
-                else { return self.parser.result_column(self.returned, self.groups).map(Operand::Column); }
+                else { return self.parser.result_column(self.returned, self.groups, self.hidden).map(Operand::Column); }
             }
             _ => None,
         };
