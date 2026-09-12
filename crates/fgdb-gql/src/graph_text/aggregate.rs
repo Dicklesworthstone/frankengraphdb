@@ -49,6 +49,15 @@ impl Summary {
                 GraphAggregate::count_distinct(&self.alias, at)
             }
             (GraphAggregateFunction::SumInt, Some(at)) => GraphAggregate::sum_int(&self.alias, at),
+            (GraphAggregateFunction::SumIntDistinct, Some(at)) => {
+                GraphAggregate::sum_int_distinct(&self.alias, at)
+            }
+            (GraphAggregateFunction::AverageInt, Some(at)) => {
+                GraphAggregate::average_int(&self.alias, at)
+            }
+            (GraphAggregateFunction::AverageIntDistinct, Some(at)) => {
+                GraphAggregate::average_int_distinct(&self.alias, at)
+            }
             (GraphAggregateFunction::Min, Some(at)) => GraphAggregate::min(&self.alias, at),
             (GraphAggregateFunction::Max, Some(at)) => GraphAggregate::max(&self.alias, at),
             _ => unreachable!("private aggregate parser pairs functions and arguments"),
@@ -60,7 +69,10 @@ impl Summary {
 /// aggregate, with one shared governed source and visitor at execution time.
 /// The explicit profile requires every grouping expression in RETURN and
 /// every nonaggregate RETURN expression in GROUP BY. Grouping uses expressions,
-/// not aliases. SUM/SUM_INT are checked integer-only operations in this profile.
+/// not aliases. SUM/SUM_INT and AVG/AVG_INT accept integer/null arguments only.
+/// SUM and AVG accept ALL or DISTINCT. AVG returns an exact reduced fraction;
+/// it is never converted to floating point or truncated to an integer. This
+/// bounded profile does not implement floating/decimal AVG coercion rules.
 #[derive(Clone)]
 pub struct PreparedGraphAggregateText {
     child: PreparedGraphText,
@@ -442,7 +454,10 @@ impl<'a> Parser<'a> {
                 GraphAggregateFunction::CountRows
                 | GraphAggregateFunction::Count
                 | GraphAggregateFunction::CountDistinct => "count",
-                GraphAggregateFunction::SumInt => "sum",
+                GraphAggregateFunction::SumInt
+                | GraphAggregateFunction::SumIntDistinct => "sum",
+                GraphAggregateFunction::AverageInt
+                | GraphAggregateFunction::AverageIntDistinct => "avg",
                 GraphAggregateFunction::Min => "min",
                 GraphAggregateFunction::Max => "max",
             };
@@ -481,6 +496,9 @@ impl<'a> Parser<'a> {
         } else if name.text.eq_ignore_ascii_case("SUM") || name.text.eq_ignore_ascii_case("SUM_INT")
         {
             GraphAggregateFunction::SumInt
+        } else if name.text.eq_ignore_ascii_case("AVG") || name.text.eq_ignore_ascii_case("AVG_INT")
+        {
+            GraphAggregateFunction::AverageInt
         } else if name.text.eq_ignore_ascii_case("MIN") {
             GraphAggregateFunction::Min
         } else if name.text.eq_ignore_ascii_case("MAX") {
@@ -488,7 +506,7 @@ impl<'a> Parser<'a> {
         } else {
             return Err(error(
                 name.at,
-                GraphPatternTextErrorKind::Expected("COUNT, SUM, SUM_INT, MIN or MAX"),
+                GraphPatternTextErrorKind::Expected("COUNT, SUM, SUM_INT, AVG, AVG_INT, MIN or MAX"),
             ));
         };
         let distinct = self.take_word("DISTINCT")?;
@@ -504,19 +522,22 @@ impl<'a> Parser<'a> {
             }
             (None, GraphAggregateFunction::CountRows)
         } else {
-            if distinct && function != GraphAggregateFunction::Count {
-                return Err(error(
-                    name.at,
-                    GraphPatternTextErrorKind::Expected("DISTINCT argument only for COUNT"),
-                ));
-            }
+            let function = if distinct {
+                match function {
+                    GraphAggregateFunction::Count => GraphAggregateFunction::CountDistinct,
+                    GraphAggregateFunction::SumInt => GraphAggregateFunction::SumIntDistinct,
+                    GraphAggregateFunction::AverageInt => GraphAggregateFunction::AverageIntDistinct,
+                    _ => return Err(error(
+                        name.at,
+                        GraphPatternTextErrorKind::Expected("DISTINCT argument for COUNT, SUM or AVG"),
+                    )),
+                }
+            } else {
+                function
+            };
             (
                 Some(self.aggregate_expression()?),
-                if distinct {
-                    GraphAggregateFunction::CountDistinct
-                } else {
-                    function
-                },
+                function,
             )
         };
         self.punct(b')', ")")?;

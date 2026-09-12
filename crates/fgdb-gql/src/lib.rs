@@ -18,6 +18,7 @@ mod parser;
 mod prepared;
 
 pub use aggregation::{
+    GraphExactAverage,
     GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
     GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder, GraphAggregateRow,
     GraphAggregateTest, GraphAggregateValue, GraphNullPlacement, MAX_AGGREGATE_FILTERS,

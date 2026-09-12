@@ -4,8 +4,10 @@
 //! bag of projected rows is materialized. Keys, extrema and distinct arguments
 //! borrow the admitted source until final, owned aggregate rows are released.
 
+mod numeric;
 mod result;
 mod weighted;
+pub use numeric::GraphExactAverage;
 pub use result::{
     GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest,
     GraphNullPlacement, MAX_AGGREGATE_FILTERS,
@@ -33,6 +35,9 @@ pub enum GraphAggregateFunction {
     SumInt,
     Min,
     Max,
+    SumIntDistinct,
+    AverageInt,
+    AverageIntDistinct,
 }
 
 /// A named aggregate over a zero-based column of the child value pattern.
@@ -74,6 +79,30 @@ impl<'a> GraphAggregate<'a> {
         Self {
             name,
             function: GraphAggregateFunction::SumInt,
+            column: Some(column),
+        }
+    }
+    #[must_use]
+    pub const fn sum_int_distinct(name: &'a str, column: usize) -> Self {
+        Self {
+            name,
+            function: GraphAggregateFunction::SumIntDistinct,
+            column: Some(column),
+        }
+    }
+    #[must_use]
+    pub const fn average_int(name: &'a str, column: usize) -> Self {
+        Self {
+            name,
+            function: GraphAggregateFunction::AverageInt,
+            column: Some(column),
+        }
+    }
+    #[must_use]
+    pub const fn average_int_distinct(name: &'a str, column: usize) -> Self {
+        Self {
+            name,
+            function: GraphAggregateFunction::AverageIntDistinct,
             column: Some(column),
         }
     }
@@ -153,6 +182,7 @@ impl core::error::Error for GraphAggregateBuildError {}
 pub enum GraphAggregateError<E> {
     Source(E),
     NonIntegerSum { aggregate: usize },
+    NonIntegerAverage { aggregate: usize },
     ArithmeticOverflow { aggregate: usize },
     NonIntegerHaving { predicate: usize },
     /// A physical weighted binding did not match its admitted topology.
@@ -164,6 +194,9 @@ impl<E> GraphAggregateError<E> {
         match self {
             Self::Source(error) => GraphAggregateError::Source(map(error)),
             Self::NonIntegerSum { aggregate } => GraphAggregateError::NonIntegerSum { aggregate },
+            Self::NonIntegerAverage { aggregate } => {
+                GraphAggregateError::NonIntegerAverage { aggregate }
+            }
             Self::ArithmeticOverflow { aggregate } => {
                 GraphAggregateError::ArithmeticOverflow { aggregate }
             }
@@ -182,13 +215,17 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
                 f,
                 "SUM_INT aggregate {aggregate} requires integer or null input"
             ),
+            Self::NonIntegerAverage { aggregate } => write!(
+                f,
+                "AVG_INT aggregate {aggregate} requires integer or null input"
+            ),
             Self::ArithmeticOverflow { aggregate } => write!(
                 f,
                 "aggregate {aggregate} exceeded its exact integer result range"
             ),
             Self::NonIntegerHaving { predicate } => write!(
                 f,
-                "HAVING predicate {predicate} requires integer or null input"
+                "HAVING predicate {predicate} requires exact numeric or null input"
             ),
             Self::MultiplicityUnavailable => {
                 f.write_str("aggregate binding has no admitted topology multiplicity")
@@ -205,7 +242,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphAggregateError
     }
 }
 
-/// Counts and sums have explicit exact domains, not lossy canonical-i64 casts.
+/// Counts, sums and averages have exact domains, not lossy scalar/float casts.
 /// MIN/MAX preserve the original canonical scalar or vertex value. Empty
 /// non-count aggregates produce Value(Scalar(Null)).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -213,6 +250,7 @@ pub enum GraphAggregateValue {
     Count(u64),
     Integer(i128),
     Value(GraphValue),
+    Average(GraphExactAverage),
 }
 impl GraphAggregateValue {
     #[must_use]
@@ -226,6 +264,15 @@ impl GraphAggregateValue {
     pub fn as_integer(&self) -> Option<i128> {
         match self {
             Self::Integer(value) => Some(*value),
+            _ => None,
+        }
+    }
+    #[must_use]
+    /// Return the exact fraction, including denominator one. This never
+    /// coerces it into the distinct Integer or Value result variants.
+    pub fn as_average(&self) -> Option<GraphExactAverage> {
+        match self {
+            Self::Average(value) => Some(*value),
             _ => None,
         }
     }
@@ -295,6 +342,7 @@ pub struct PreparedGraphAggregate {
     aggregates: Vec<BoundAggregate>,
     key_names: Vec<String>,
     aggregate_names: Vec<String>,
+    output_aggregates: usize,
     offset: u64,
     count: Option<u64>,
     having: Vec<GraphAggregateFilter>,
@@ -305,7 +353,8 @@ impl core::fmt::Debug for PreparedGraphAggregate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphAggregate")
             .field("key_columns", &self.keys.len())
-            .field("aggregate_columns", &self.aggregates.len())
+            .field("aggregate_columns", &self.output_aggregates)
+            .field("evaluated_aggregates", &self.aggregates.len())
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -376,6 +425,7 @@ impl PreparedGraphAggregate {
             .iter()
             .map(|aggregate| aggregate.name.to_owned())
             .collect();
+        let output_aggregates = aggregates.len();
         let aggregates = aggregates
             .iter()
             .map(|aggregate| BoundAggregate {
@@ -389,6 +439,7 @@ impl PreparedGraphAggregate {
             aggregates,
             key_names,
             aggregate_names,
+            output_aggregates,
             offset,
             count,
             having: Vec::new(),
@@ -409,7 +460,35 @@ impl PreparedGraphAggregate {
     }
     #[must_use]
     pub fn aggregate_columns(&self) -> &[String] {
+        &self.aggregate_names[..self.output_aggregates]
+    }
+
+    /// The full evaluation schema used by HAVING, ORDER BY, and aggregate
+    /// error indices. A suffix can be internal to those clauses and therefore
+    /// absent from aggregate_columns() and GraphAggregateRow::values().
+    #[must_use]
+    pub fn evaluation_aggregate_columns(&self) -> &[String] {
         &self.aggregate_names
+    }
+
+    /// Return only the first `count` aggregate values, retaining every key.
+    /// All aggregates are still evaluated and remain available to HAVING and
+    /// ORDER BY. This is late projection, not permission to omit source reads,
+    /// arithmetic, failures, or transaction observations. A zero prefix is
+    /// valid; it returns keys without exposing clause-only summary values.
+    /// Replacing this prefix never renumbers the evaluation schema.
+    pub fn with_aggregate_output_prefix(
+        mut self,
+        count: usize,
+    ) -> Result<Self, GraphAggregateBuildError> {
+        if count > self.aggregates.len() {
+            return Err(GraphAggregateBuildError::TooManyColumns {
+                limit: self.aggregates.len(),
+                observed: count,
+            });
+        }
+        self.output_aggregates = count;
+        Ok(self)
     }
 
     /// Application logical transcript: GroupAggregate(child, keys, functions),
@@ -434,6 +513,9 @@ impl PreparedGraphAggregate {
                 GraphAggregateFunction::SumInt => 3,
                 GraphAggregateFunction::Min => 4,
                 GraphAggregateFunction::Max => 5,
+                GraphAggregateFunction::SumIntDistinct => 6,
+                GraphAggregateFunction::AverageInt => 7,
+                GraphAggregateFunction::AverageIntDistinct => 8,
             });
             if let Some(column) = aggregate.column {
                 bytes.extend_from_slice(&(column as u64).to_be_bytes());
@@ -447,6 +529,12 @@ impl PreparedGraphAggregate {
         self.append_result_transcript(&mut bytes);
         if let Some(expression) = &self.having_expression {
             expression.append_transcript(&mut bytes);
+        }
+        if self.output_aggregates != self.aggregates.len() {
+            // The unchanged self-delimiting prefix still describes the full
+            // evaluation. Identity projection preserves all existing bytes.
+            bytes.extend_from_slice(b"fgdb:aggregate-output-prefix:v1\0");
+            bytes.extend_from_slice(&(self.output_aggregates as u64).to_be_bytes());
         }
         bytes
     }
@@ -619,6 +707,7 @@ enum Accumulator<'a> {
     Distinct(BTreeSet<ValueRef<'a>>),
     Sum { value: i128, present: bool },
     Extreme(Option<ValueRef<'a>>),
+    Numeric(numeric::NumericAccumulator),
 }
 
 fn new_group<'a, E>(
@@ -637,6 +726,15 @@ fn new_group<'a, E>(
                 value: 0,
                 present: false,
             },
+            GraphAggregateFunction::SumIntDistinct => {
+                Accumulator::Numeric(numeric::NumericAccumulator::new(false, true))
+            }
+            GraphAggregateFunction::AverageInt => {
+                Accumulator::Numeric(numeric::NumericAccumulator::new(true, false))
+            }
+            GraphAggregateFunction::AverageIntDistinct => {
+                Accumulator::Numeric(numeric::NumericAccumulator::new(true, true))
+            }
             GraphAggregateFunction::Min | GraphAggregateFunction::Max => Accumulator::Extreme(None),
         });
     }
@@ -683,6 +781,14 @@ fn update<'a, E, C>(
             };
             *sum = sum.checked_add(i128::from(*value)).ok_or_else(overflow)?;
             *present = true;
+        }
+        Accumulator::Numeric(state) => {
+            // Property-aware numeric functions retain ordinary visitation.
+            // Never accept a support-only/overflowed topology weight here.
+            if multiplicity != weighted::Multiplicity::ONE {
+                return Err(GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable));
+            }
+            state.update(value.expect("non-count argument was checked"), aggregate, control)?;
         }
         Accumulator::Extreme(current) => {
             let value = value.expect("non-count argument was checked");
