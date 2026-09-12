@@ -2,6 +2,8 @@
 //! No source rewriting, second lexer, child-result materialization or catalog
 //! re-resolution. Group pagination is never pushed into the matching child.
 
+mod having;
+
 use super::*;
 use crate::{
     GraphAggregate, GraphAggregateColumn, GraphAggregateFilter, GraphAggregateFunction,
@@ -69,6 +71,7 @@ pub struct PreparedGraphAggregateText {
     offset: Number,
     count: Option<Number>,
     having: Vec<Having>,
+    having_expression: Option<having::HavingTemplate>,
     ordering: Vec<GraphAggregateOrder>,
 }
 impl core::fmt::Debug for PreparedGraphAggregateText {
@@ -92,8 +95,10 @@ impl PreparedGraphAggregateText {
     }
 
     /// The same aggregate grammar with explicit canonical scalar argument
-    /// kinds in MATCH/WHERE scopes. Numeric HAVING and pagination requirements
-    /// remain strict and participate in the same declaration/argument table.
+    /// kinds in MATCH/WHERE and HAVING. Compound HAVING accepts NOT/AND/OR,
+    /// parentheses, projected output comparisons and canonical scalar values.
+    /// Undeclared HAVING parameters remain Int64; pagination remains UInt64.
+    /// Declared types participate in the same definition-wide argument table.
     pub fn prepare_with_parameter_types(
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
@@ -186,34 +191,7 @@ impl PreparedGraphAggregateText {
                 ));
             }
         }
-        let mut having = Vec::new();
-        if parser.take_word("HAVING")? {
-            loop {
-                parser.capacity(
-                    having.len(),
-                    MAX_AGGREGATE_FILTERS,
-                    crate::algebra::PatternLimitDimension::Predicates,
-                )?;
-                let column = parser.result_column(&returned, &groups)?;
-                let test = if parser.take_word("IS")? {
-                    let negate = parser.take_word("NOT")?;
-                    parser.word("NULL")?;
-                    if negate {
-                        HavingTest::IsNotNull
-                    } else {
-                        HavingTest::IsNull
-                    }
-                } else {
-                    let comparison = parser.comparison()?;
-                    let value = parser.number(GqlParameterType::Int64)?;
-                    HavingTest::Integer { comparison, value }
-                };
-                having.push(Having { column, test });
-                if !parser.take_word("AND")? {
-                    break;
-                }
-            }
-        }
+        let (having, having_expression) = having::parse(&mut parser, &returned, &groups)?;
         let mut ordering: Vec<GraphAggregateOrder> = Vec::new();
         if parser.take_word("ORDER")? {
             parser.word("BY")?;
@@ -343,6 +321,7 @@ impl PreparedGraphAggregateText {
             offset,
             count,
             having,
+            having_expression,
             ordering,
         })
     }
@@ -391,7 +370,7 @@ impl PreparedGraphAggregateText {
                 },
             })
             .collect();
-        PreparedGraphAggregate::prepare(
+        let aggregate = PreparedGraphAggregate::prepare(
             input,
             &self.keys,
             &summaries,
@@ -404,7 +383,11 @@ impl PreparedGraphAggregateText {
                 self.child.return_at,
                 GraphPatternTextErrorKind::AggregateBuild(kind),
             )
-        })
+        })?;
+        match &self.having_expression {
+            Some(expression) => expression.attach(aggregate, &values),
+            None => Ok(aggregate),
+        }
     }
 }
 

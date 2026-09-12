@@ -126,7 +126,7 @@ fn malformed_hidden_or_duplicate_clauses_never_call_the_catalog() {
         "HAVING total > 1.5",
         "HAVING total IS TRUE",
         "HAVING total IS NOT",
-        "HAVING total > 0 OR n > 0",
+        "HAVING total > 0 OR OR n > 0",
         "ORDER BY missing",
         "ORDER BY total ASC DESC",
         "ORDER BY total NULLS MIDDLE",

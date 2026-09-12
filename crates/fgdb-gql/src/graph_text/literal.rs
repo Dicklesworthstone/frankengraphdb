@@ -37,7 +37,7 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn text_scalar(raw: &str, at: usize) -> Result<CanonicalScalar, GraphPatternTextError> {
+pub(super) fn text_scalar(raw: &str, at: usize) -> Result<CanonicalScalar, GraphPatternTextError> {
     let refusal = || error(at, GraphPatternTextErrorKind::ScalarLiteral);
     if !raw.contains("''") {
         return CanonicalScalar::ucs_basic_text(raw).map_err(|_| refusal());
