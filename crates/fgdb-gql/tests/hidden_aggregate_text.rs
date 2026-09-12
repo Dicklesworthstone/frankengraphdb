@@ -177,7 +177,7 @@ fn private_aliases_cannot_capture_public_names_and_calls_preserve_distinctness()
 #[test]
 fn computed_width_and_malformed_private_references_refuse_before_catalog_access() {
     for text in [
-        "MATCH (a) RETURN a GROUP BY a", "MATCH (a) RETURN COUNT(*) GROUP BY a",
+        "MATCH (a) RETURN a GROUP BY a", "MATCH (a) RETURN COUNT(*) GROUP BY missing",
         "MATCH (a) RETURN a GROUP BY a HAVING SUM(*) > 0",
         "MATCH (a) RETURN a GROUP BY a ORDER BY AVG(COUNT(a.p))",
         "MATCH (a) RETURN a GROUP BY a ORDER BY SUM(a.p),SUM_INT(ALL a.p)",

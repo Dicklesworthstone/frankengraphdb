@@ -11,8 +11,8 @@ use crate::{
     PreparedGraphAggregate,
 };
 
-/// Position of a textual RETURN item in the typed aggregate result. All keys
-/// are retained by that result, even when RETURN interleaves keys and summaries.
+/// Position of a textual RETURN item in the public aggregate result. Hidden
+/// grouping keys have no slot; clause indices use the separate evaluation schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphAggregateTextSlot {
     GroupKey(usize),
@@ -67,22 +67,28 @@ impl Summary {
 
 /// Parse-once grouped text definition. Binding returns the existing streaming
 /// aggregate, with one shared governed source and visitor at execution time.
-/// The explicit profile requires every grouping expression in RETURN and
-/// every nonaggregate RETURN expression in GROUP BY. Grouping uses expressions,
-/// not aliases. SUM/SUM_INT and AVG/AVG_INT accept integer/null arguments only.
+/// The explicit profile requires every nonaggregate RETURN expression in
+/// GROUP BY, but grouping expressions may be omitted from RETURN. Grouping
+/// uses expressions, not aliases. SUM/SUM_INT and AVG/AVG_INT accept only
+/// integer/null arguments.
 /// SUM and AVG accept ALL or DISTINCT. AVG returns an exact reduced fraction;
 /// it is never converted to floating point or truncated to an integer. This
 /// bounded profile does not implement floating/decimal AVG coercion rules.
 /// HAVING and ORDER BY may compute aggregates omitted from RETURN. Repeated
 /// calls share one internal summary; only returned summaries appear in rows.
-/// Grouping keys must still be returned, and bare aliases name only RETURN
-/// items. Internal summaries retain their reads, errors and resource costs.
+/// Direct GROUP BY expressions remain usable in HAVING and ORDER BY, while
+/// bare public aliases name only RETURN items and take precedence. Hidden keys
+/// and summaries retain all reads, errors and resource costs. ALL preserves
+/// distinct groups with equal visible cells; DISTINCT removes duplicate visible
+/// rows after filtering/ranking and before pagination, never from child matches.
 #[derive(Clone)]
 pub struct PreparedGraphAggregateText {
     child: PreparedGraphText,
     keys: Vec<usize>,
+    output_keys: Vec<usize>,
     summaries: Vec<Summary>,
     output_aggregates: usize,
+    output_distinct: bool,
     names: Vec<String>,
     slots: Vec<GraphAggregateTextSlot>,
     offset: Number,
@@ -127,11 +133,11 @@ impl PreparedGraphAggregateText {
         // They are private metadata, never inserted into statement text or
         // the namespace used to resolve HAVING/ORDER BY aliases.
         let mut hidden_aliases: Vec<String> = Vec::new();
+        let mut key_aliases: Vec<(String, usize)> = Vec::new();
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         parser.parse_head()?;
-        // All grouping keys are projected; DISTINCT on the aggregate output
-        // is therefore redundant. Neither spelling deduplicates child matches.
-        if !parser.take_word("DISTINCT")? {
+        let distinct = parser.take_word("DISTINCT")?;
+        if !distinct {
             parser.take_word("ALL")?;
         }
         let mut returned = Vec::new();
@@ -195,18 +201,14 @@ impl PreparedGraphAggregateText {
                 ));
             }
         }
-        for group in &groups {
-            if !returned.iter().any(|item| {
-                item.function.is_none()
-                    && item
-                        .expression
-                        .is_some_and(|expression| expression.same(*group))
-            }) {
-                return Err(error(
-                    group.variable.at,
-                    GraphPatternTextErrorKind::Expected("GROUP BY expression projected in RETURN"),
-                ));
-            }
+        // Hidden grouping keys consume real evaluation columns. Bound their
+        // combined width with returned summaries before any catalog access.
+        for (at, _) in returned.iter().filter(|item| item.function.is_some()).enumerate() {
+            parser.capacity(
+                groups.len() + at,
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
         }
         let mut hidden = Vec::new();
         let (having, having_expression) =
@@ -276,21 +278,39 @@ impl PreparedGraphAggregateText {
                 }
             }
         }
-        // Emit group input expressions first with their actual public aliases.
+        // Preserve the original GROUP BY order, including hidden leading keys.
+        // Public key slots are a projection of this evaluation order, not a
+        // renumbering of the HAVING/ORDER BY namespace. Private key names use
+        // a disjoint prefix from private summary names and skip public aliases.
+        let mut output_keys = Vec::new();
+        let mut candidate = 0;
+        for (at, group) in groups.iter().enumerate() {
+            if let Some(item) = returned.iter().find(|item| {
+                item.function.is_none()
+                    && item.expression.is_some_and(|expression| expression.same(*group))
+            }) {
+                output_keys.push(at);
+                key_aliases.push((item.alias.text.to_owned(), item.alias.at));
+            } else {
+                loop {
+                    let alias = format!("__fgdb_group_{candidate}");
+                    candidate += 1;
+                    if !returned.iter().any(|item| item.alias.text == alias) {
+                        key_aliases.push((alias, group.variable.at));
+                        break;
+                    }
+                }
+            }
+        }
+        // With every grouping key visible, output DISTINCT is redundant.
+        // Preserve that existing profile's exact bound definitions/transcripts.
+        let output_distinct = distinct && output_keys.len() != groups.len();
+        // Emit all group input expressions before aggregate arguments.
         // Repeated aggregate arguments reuse one source column. A grouping
         // expression first mentioned inside SUM cannot steal the key's name.
         let mut inputs: Vec<Expression<'_>> = Vec::new();
-        for group in &groups {
-            let alias = returned
-                .iter()
-                .find(|item| {
-                    item.function.is_none()
-                        && item
-                            .expression
-                            .is_some_and(|expression| expression.same(*group))
-                })
-                .expect("group projection checked above")
-                .alias;
+        for (group, (text, at)) in groups.iter().zip(&key_aliases) {
+            let alias = Name { text: text.as_str(), at: *at };
             inputs.push(*group);
             parser.syntax.columns.push(Column {
                 variable: group.variable,
@@ -326,9 +346,9 @@ impl PreparedGraphAggregateText {
                 });
             } else {
                 slots.push(GraphAggregateTextSlot::GroupKey(
-                    groups
+                    output_keys
                         .iter()
-                        .position(|group| group.same(item.expression.expect("key expression")))
+                        .position(|at| groups[*at].same(item.expression.expect("key expression")))
                         .expect("group checked above"),
                 ));
             }
@@ -380,8 +400,10 @@ impl PreparedGraphAggregateText {
         Ok(Self {
             child,
             keys,
+            output_keys,
             summaries,
             output_aggregates,
+            output_distinct,
             names,
             slots,
             offset,
@@ -443,7 +465,9 @@ impl PreparedGraphAggregateText {
             self.offset.unsigned(&values),
             self.count.as_ref().map(|count| count.unsigned(&values)),
         )
+        .and_then(|aggregate| aggregate.with_key_output_columns(&self.output_keys))
         .and_then(|aggregate| aggregate.with_aggregate_output_prefix(self.output_aggregates))
+        .map(|aggregate| aggregate.with_distinct_output(self.output_distinct))
         .and_then(|aggregate| aggregate.with_result_clauses(&having, &self.ordering))
         .map_err(|kind| {
             error(
@@ -610,7 +634,8 @@ impl<'a> Parser<'a> {
     /// Resolve public aliases and expressions. An explicit aggregate call
     /// first reuses a returned summary, then a registered private summary.
     /// HAVING and ORDER BY share this registry; generated internal names never
-    /// enter alias resolution. Plain properties must remain projected keys.
+    /// enter alias resolution. Direct properties must be GROUP BY expressions;
+    /// they need not be visible. Clause indices always address evaluated keys.
     fn result_column(
         &mut self,
         returned: &[ReturnItem<'a>],
@@ -644,44 +669,25 @@ impl<'a> Parser<'a> {
             hidden.push(HiddenSummary { expression, function, at: name.at });
             return Ok(GraphAggregateColumn::Aggregate(at));
         }
-        let selected = if !self.is_punct(b'.') && returned.iter().any(|item| item.alias.text == name.text) {
-            returned
-                .iter()
-                .position(|item| item.alias.text == name.text)
-        } else {
-            let expression = self.expression_after_name(name)?;
-            returned.iter().position(|item| {
-                item.function.is_none()
-                    && item
-                        .expression
-                        .is_some_and(|previous| previous.same(expression))
-            })
-        }
-        .ok_or_else(|| {
-            error(
-                name.at,
-                GraphPatternTextErrorKind::Expected("projected group key or aggregate"),
-            )
-        })?;
-        let item = &returned[selected];
-        if item.function.is_some() {
-            Ok(GraphAggregateColumn::Aggregate(
-                returned[..selected]
-                    .iter()
-                    .filter(|item| item.function.is_some())
-                    .count(),
-            ))
-        } else {
-            let expression = item
-                .expression
-                .expect("a nonaggregate return item has an expression");
-            Ok(GraphAggregateColumn::GroupKey(
-                groups
-                    .iter()
-                    .position(|group| group.same(expression))
+        if !self.is_punct(b'.')
+            && let Some(selected) = returned.iter().position(|item| item.alias.text == name.text)
+        {
+            let item = &returned[selected];
+            if item.function.is_some() {
+                return Ok(GraphAggregateColumn::Aggregate(
+                    returned[..selected].iter().filter(|item| item.function.is_some()).count(),
+                ));
+            }
+            let expression = item.expression.expect("a nonaggregate return item has an expression");
+            return Ok(GraphAggregateColumn::GroupKey(
+                groups.iter().position(|group| group.same(expression))
                     .expect("all nonaggregate return expressions were validated as keys"),
-            ))
+            ));
         }
+        let expression = self.expression_after_name(name)?;
+        groups.iter().position(|group| group.same(expression))
+            .map(GraphAggregateColumn::GroupKey)
+            .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::Expected("GROUP BY expression or aggregate")))
     }
 }
 

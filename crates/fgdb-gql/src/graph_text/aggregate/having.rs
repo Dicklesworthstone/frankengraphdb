@@ -1,7 +1,7 @@
 //! HAVING precedence and immutable operands over the shared aggregate parser.
 //! No extra lexer, source query, catalog lookup or text interpolation at bind.
 //! Output references and private aggregate calls use the SAME resolver and
-//! bounded registry as ORDER BY. Group keys remain explicit RETURN items.
+//! bounded registry as ORDER BY. Hidden grouping keys keep evaluation indices.
 
 use super::*;
 use crate::{GraphHavingExpression, GraphHavingOp, GraphHavingOperand, MAX_HAVING_INSTRUCTIONS};
@@ -164,7 +164,8 @@ impl HavingParser<'_, '_> {
             TokenKind::Word(word) => {
                 let next = self.parser.lexer.clone().next()?;
                 if matches!(next.kind, TokenKind::Punct(b'.' | b'('))
-                    || self.returned.iter().any(|item| item.alias.text == word) {
+                    || self.returned.iter().any(|item| item.alias.text == word)
+                    || self.groups.iter().any(|group| group.property.is_none() && group.variable.text == word) {
                     return self.parser.result_column(self.returned, self.groups, self.hidden).map(Operand::Column);
                 }
                 if word.eq_ignore_ascii_case("TRUE") { Some(CanonicalScalar::Bool(true)) }
