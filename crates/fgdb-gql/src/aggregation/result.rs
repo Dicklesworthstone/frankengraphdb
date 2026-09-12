@@ -4,6 +4,12 @@
 //! bindings or pushes LIMIT into the aggregate. Selected groups borrow their
 //! keys/state, and a finite page retains at most offset + count references.
 
+mod having;
+pub use having::{
+    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
+    MAX_HAVING_INSTRUCTIONS,
+};
+
 use super::*;
 use crate::algebra::IntegerComparison;
 use std::cmp::Ordering;
@@ -177,6 +183,7 @@ impl PreparedGraphAggregate {
     /// Replace post-aggregate clauses after validating every referenced output.
     /// All filters are AND-conjoined; ORDER BY is lexicographic. The child,
     /// grouping, output schema and existing pagination remain unchanged.
+    /// This replaces any earlier Boolean HAVING expression as well.
     pub fn with_result_clauses(
         mut self,
         having: &[GraphAggregateFilter],
@@ -220,6 +227,7 @@ impl PreparedGraphAggregate {
             }
         }
         self.having = having.to_vec();
+        self.having_expression = None;
         self.ordering = ordering.to_vec();
         Ok(self)
     }
@@ -282,6 +290,9 @@ impl PreparedGraphAggregate {
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<bool, GqlQueryError<GraphAggregateError<E>, C>> {
+        if let Some(expression) = &self.having_expression {
+            return expression.evaluate(group, control);
+        }
         let mut keep = true;
         // Evaluate every declared filter even after false/unknown, so an
         // earlier test cannot silently mask an invalid argument domain.
@@ -407,7 +418,7 @@ impl PreparedGraphAggregate {
         if self.ordering.is_empty() {
             // Already in canonical group order; no selection buffer or payload
             // copy for rejected/skipped groups. Preserve the old no-filter path.
-            if self.having.is_empty() {
+            if self.having.is_empty() && self.having_expression.is_none() {
                 for (key, state) in groups.iter().skip(offset).take(count) {
                     output.push(Group { key, state }.copy_owned(control)?);
                 }

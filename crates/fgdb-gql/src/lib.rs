@@ -21,6 +21,8 @@ pub use aggregation::{
     GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
     GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder, GraphAggregateRow,
     GraphAggregateTest, GraphAggregateValue, GraphNullPlacement, MAX_AGGREGATE_FILTERS,
+    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
+    MAX_HAVING_INSTRUCTIONS,
     PreparedGraphAggregate,
 };
 pub use algebra_exec::{

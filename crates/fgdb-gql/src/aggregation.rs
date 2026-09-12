@@ -9,6 +9,8 @@ mod weighted;
 pub use result::{
     GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest,
     GraphNullPlacement, MAX_AGGREGATE_FILTERS,
+    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
+    MAX_HAVING_INSTRUCTIONS,
 };
 
 use crate::algebra::{
@@ -296,6 +298,7 @@ pub struct PreparedGraphAggregate {
     offset: u64,
     count: Option<u64>,
     having: Vec<GraphAggregateFilter>,
+    having_expression: Option<GraphHavingExpression>,
     ordering: Vec<GraphAggregateOrder>,
 }
 impl core::fmt::Debug for PreparedGraphAggregate {
@@ -389,6 +392,7 @@ impl PreparedGraphAggregate {
             offset,
             count,
             having: Vec::new(),
+            having_expression: None,
             ordering: Vec::new(),
         })
     }
@@ -441,6 +445,9 @@ impl PreparedGraphAggregate {
             bytes.extend_from_slice(&count.to_be_bytes());
         }
         self.append_result_transcript(&mut bytes);
+        if let Some(expression) = &self.having_expression {
+            expression.append_transcript(&mut bytes);
+        }
         bytes
     }
 
