@@ -4,13 +4,16 @@ use super::*;
 use crate::algebra::IntegerComparison;
 use fgdb_delta_types::PropertyKeyId;
 
-#[derive(Clone, Copy)]
-pub(super) struct PropertyComparison {
-    left: usize,
-    left_key: PropertyKeyId,
-    right: usize,
-    right_key: PropertyKeyId,
-    comparison: IntegerComparison,
+#[derive(Clone)]
+pub(super) enum PropertyComparison {
+    Properties {
+        left: usize,
+        left_key: PropertyKeyId,
+        right: usize,
+        right_key: PropertyKeyId,
+        comparison: IntegerComparison,
+    },
+    Boolean(crate::algebra::BoundBooleanExpression),
 }
 
 impl GraphPatternBuilder {
@@ -39,7 +42,7 @@ impl GraphPatternBuilder {
             MAX_PATTERN_PREDICATES,
             PatternLimitDimension::Predicates,
         )?;
-        self.property_comparisons.push(PropertyComparison {
+        self.property_comparisons.push(PropertyComparison::Properties {
             left,
             left_key,
             right,
@@ -47,6 +50,28 @@ impl GraphPatternBuilder {
             comparison,
         });
         self.predicate_count += 1;
+        Ok(self)
+    }
+
+    /// Attach a bounded AND/OR/NOT expression to this positive MATCH scope.
+    /// Operands can span variables, so this runs after binding, not in the
+    /// single-vertex cache. Use a value projection even for vertex-only output.
+    /// Every name and the combined predicate limit is checked before mutation.
+    pub fn filter_boolean(
+        &mut self,
+        expression: &crate::algebra::GraphBooleanExpression,
+    ) -> Result<&mut Self, PatternBuildError> {
+        let observed = self.predicate_count.saturating_add(expression.predicate_count());
+        if observed > MAX_PATTERN_PREDICATES {
+            return Err(PatternBuildError::LimitExceeded {
+                dimension: PatternLimitDimension::Predicates,
+                limit: MAX_PATTERN_PREDICATES,
+                observed,
+            });
+        }
+        let bound = expression.bind(|name| self.variable(name))?;
+        self.property_comparisons.push(PropertyComparison::Boolean(bound));
+        self.predicate_count = observed;
         Ok(self)
     }
 
@@ -67,12 +92,16 @@ impl GraphPatternBuilder {
         operators: &mut Vec<GlaOperator>,
     ) {
         for predicate in &self.property_comparisons {
-            operators.push(GlaOperator::CompareProperties {
-                left: slots[predicate.left],
-                left_key: predicate.left_key,
-                right: slots[predicate.right],
-                right_key: predicate.right_key,
-                comparison: predicate.comparison,
+            operators.push(match predicate {
+                PropertyComparison::Properties { left, left_key, right, right_key, comparison } => {
+                    GlaOperator::CompareProperties {
+                        left: slots[*left], left_key: *left_key,
+                        right: slots[*right], right_key: *right_key, comparison: *comparison,
+                    }
+                }
+                PropertyComparison::Boolean(expression) => GlaOperator::SelectBoolean {
+                    expression: expression.remap(|slot| slots[slot.ordinal() as usize]),
+                },
             });
         }
     }

@@ -7,6 +7,7 @@ mod join;
 mod policy;
 mod projection;
 use comparison::compare_properties;
+pub(crate) use comparison::charge_payload;
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::ProjectedRows;
 
@@ -313,7 +314,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                     self.visit(operators, ordinal + 1, bindings, index)?;
                 }
             }
-            GlaOperator::CompareProperties { .. } => {
+            GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. } => {
                 // The value-aware action owns the SAME property resolver as
                 // projection/aggregation. Its Boolean is only a continuation
                 // decision; no projected row is produced by this selection.
@@ -514,7 +515,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             test_vertex,
             control,
             |operator, bindings, projected, control| {
-                if matches!(operator, GlaOperator::CompareProperties { .. }) {
+                if matches!(operator, GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }) {
                     return compare_properties(operator, bindings, &mut property, control);
                 }
                 Row::collect_properties(operator, bindings, projected, &mut property, control)?;

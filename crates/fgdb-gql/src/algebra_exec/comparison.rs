@@ -16,6 +16,9 @@ pub(super) fn compare_properties<'a, E>(
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<bool, E> {
+    if let GlaOperator::SelectBoolean { expression } = operator {
+        return expression.evaluate(bindings, property, control);
+    }
     let GlaOperator::CompareProperties {
         left,
         left_key,
@@ -46,7 +49,7 @@ pub(super) fn compare_properties<'a, E>(
 /// Reserve each borrowed variable-size payload before comparing it. The two
 /// text fields are accounted separately, avoiding a potentially wrapping sum.
 /// This is logical work accounting, not preemption within Ord or a byte cap.
-fn charge_payload<E>(
+pub(crate) fn charge_payload<E>(
     value: &CanonicalScalar,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {

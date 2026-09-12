@@ -272,6 +272,7 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
                 if matches!(
                     operator,
                     crate::algebra::GlaOperator::CompareProperties { .. }
+                        | crate::algebra::GlaOperator::SelectBoolean { .. }
                 ) {
                     return super::compare_properties(operator, bindings, &mut property, control);
                 }

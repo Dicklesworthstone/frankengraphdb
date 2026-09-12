@@ -211,6 +211,11 @@ impl GraphPatternBuilder {
                             comparison,
                         });
                     }
+                    GlaOperator::SelectBoolean { expression } => {
+                        operators.push(GlaOperator::SelectBoolean {
+                            expression: expression.remap(map),
+                        });
+                    }
                     _ => unreachable!(
                         "the positive compiler emits only scan/select/expand/identity/compare"
                     ),

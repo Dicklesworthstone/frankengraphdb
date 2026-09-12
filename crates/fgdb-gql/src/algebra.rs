@@ -4,12 +4,15 @@
 //! value plans additionally support bags and scoped nullable bindings. This
 //! is not the registered FreeJoin physical implementation.
 
+mod boolean;
 mod existence;
 mod ordering;
 mod output;
 mod pattern;
 mod predicate;
 mod values;
+pub use boolean::{BoundBooleanExpression, GraphBooleanError, GraphBooleanExpression,
+    GraphBooleanOp, GraphBooleanOperand, MAX_BOOLEAN_INSTRUCTIONS};
 pub use existence::{GraphExistence, GraphMatchClause};
 pub use ordering::{GraphOrderError, GraphValueOrder};
 pub(crate) use values::{RowKey, ValueRef};
@@ -235,6 +238,11 @@ pub enum GlaOperator {
         right: BindingSlot,
         right_key: PropertyKeyId,
         comparison: IntegerComparison,
+    },
+    /// A checked three-valued expression over the complete current binding.
+    /// Only TRUE continues; UNKNOWN is not Boolean false under negation.
+    SelectBoolean {
+        expression: BoundBooleanExpression,
     },
 }
 
@@ -471,6 +479,7 @@ impl<Row> GlaPlan<Row> {
                 matches!(
                     operator,
                     GlaOperator::Select { .. } | GlaOperator::CompareProperties { .. }
+                        | GlaOperator::SelectBoolean { .. }
                 )
             })
     }
@@ -629,6 +638,10 @@ impl<Row> GlaPlan<Row> {
                     bytes.extend_from_slice(&right.0.to_be_bytes());
                     bytes.extend_from_slice(&right_key.0.to_be_bytes());
                     bytes.push(comparison.tag());
+                }
+                GlaOperator::SelectBoolean { expression } => {
+                    bytes.push(21);
+                    expression.append_transcript(&mut bytes);
                 }
             }
         }
