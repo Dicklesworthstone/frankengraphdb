@@ -352,6 +352,7 @@ pub struct PreparedGraphAggregate {
     key_output: Option<KeyProjection>,
     aggregate_names: Vec<String>,
     output_aggregates: usize,
+    output_distinct: bool,
     offset: u64,
     count: Option<u64>,
     having: Vec<GraphAggregateFilter>,
@@ -451,6 +452,7 @@ impl PreparedGraphAggregate {
             key_output: None,
             aggregate_names,
             output_aggregates,
+            output_distinct: false,
             offset,
             count,
             having: Vec::new(),
@@ -496,7 +498,7 @@ impl PreparedGraphAggregate {
     /// Repetitions and the empty selection are valid within the fixed column
     /// bound. All keys still define groups, participate in clauses and break
     /// sort ties before pagination. Equal projected rows remain separate bag
-    /// occurrences; this operation neither regroups nor performs DISTINCT.
+    /// occurrences unless with_distinct_output(true) is selected explicitly.
     /// Hidden keys retain source reads, failures and transaction observations,
     /// but their payloads are not cloned into the returned rows.
     pub fn with_key_output_columns(
@@ -528,6 +530,18 @@ impl PreparedGraphAggregate {
             })
         };
         Ok(self)
+    }
+
+    /// Select DISTINCT over the visible keys and aggregate prefix. Filtering
+    /// and complete group ordering precede duplicate elimination; pagination
+    /// follows it. Equal output tuples retain their first ranked group, even
+    /// when ranking uses hidden cells. No child matches are deduplicated.
+    /// This setting survives later projection changes. With all grouping keys
+    /// visible, uniqueness is structural and no distinct buffer is necessary.
+    #[must_use]
+    pub fn with_distinct_output(mut self, distinct: bool) -> Self {
+        self.output_distinct = distinct;
+        self
     }
 
     /// Return only the first `count` aggregate values without changing grouping
@@ -602,6 +616,9 @@ impl PreparedGraphAggregate {
                 bytes.extend_from_slice(&(*column as u64).to_be_bytes());
             }
         }
+        if self.output_distinct {
+            bytes.extend_from_slice(b"fgdb:aggregate-output-distinct:v1\0");
+        }
         bytes
     }
 
@@ -610,7 +627,7 @@ impl PreparedGraphAggregate {
     /// returned counters. Count/null/sum semantics are applied per occurrence.
     /// Keyless aggregation yields one zero/null row on empty input; keyed
     /// aggregation yields no rows, even when every key is hidden from output.
-    /// Group ordering precedes output pagination and key projection.
+    /// Group ordering and any output DISTINCT precede output pagination.
     /// Positive topology-only summaries may factor parallel occurrences into
     /// checked weights. Property reads, predicates, scoped matches, and mixed
     /// directed/undirected use of one relation keep ordinary visitation. The

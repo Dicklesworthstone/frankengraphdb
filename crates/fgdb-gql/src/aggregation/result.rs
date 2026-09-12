@@ -3,7 +3,9 @@
 //! Source and aggregation are already complete. This stage never filters child
 //! bindings or pushes LIMIT into the aggregate. Selected groups borrow their
 //! keys/state, and a finite page retains at most offset + count references.
+//! Nontrivial output DISTINCT uses a separately metered borrowed-group buffer.
 
+mod distinct;
 mod having;
 pub use having::{
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
@@ -442,6 +444,9 @@ impl PreparedGraphAggregate {
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        if self.needs_output_distinct() {
+            return self.finish_distinct_groups(groups, control);
+        }
         let offset = usize::try_from(self.offset).unwrap_or(usize::MAX);
         let count = self
             .count
