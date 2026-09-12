@@ -342,6 +342,7 @@ pub struct PreparedGraphAggregate {
     aggregates: Vec<BoundAggregate>,
     key_names: Vec<String>,
     aggregate_names: Vec<String>,
+    output_aggregates: usize,
     offset: u64,
     count: Option<u64>,
     having: Vec<GraphAggregateFilter>,
@@ -352,7 +353,8 @@ impl core::fmt::Debug for PreparedGraphAggregate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphAggregate")
             .field("key_columns", &self.keys.len())
-            .field("aggregate_columns", &self.aggregates.len())
+            .field("aggregate_columns", &self.output_aggregates)
+            .field("evaluated_aggregates", &self.aggregates.len())
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -423,6 +425,7 @@ impl PreparedGraphAggregate {
             .iter()
             .map(|aggregate| aggregate.name.to_owned())
             .collect();
+        let output_aggregates = aggregates.len();
         let aggregates = aggregates
             .iter()
             .map(|aggregate| BoundAggregate {
@@ -436,6 +439,7 @@ impl PreparedGraphAggregate {
             aggregates,
             key_names,
             aggregate_names,
+            output_aggregates,
             offset,
             count,
             having: Vec::new(),
@@ -456,7 +460,35 @@ impl PreparedGraphAggregate {
     }
     #[must_use]
     pub fn aggregate_columns(&self) -> &[String] {
+        &self.aggregate_names[..self.output_aggregates]
+    }
+
+    /// The full evaluation schema used by HAVING, ORDER BY, and aggregate
+    /// error indices. A suffix can be internal to those clauses and therefore
+    /// absent from aggregate_columns() and GraphAggregateRow::values().
+    #[must_use]
+    pub fn evaluation_aggregate_columns(&self) -> &[String] {
         &self.aggregate_names
+    }
+
+    /// Return only the first `count` aggregate values, retaining every key.
+    /// All aggregates are still evaluated and remain available to HAVING and
+    /// ORDER BY. This is late projection, not permission to omit source reads,
+    /// arithmetic, failures, or transaction observations. A zero prefix is
+    /// valid; it returns keys without exposing clause-only summary values.
+    /// Replacing this prefix never renumbers the evaluation schema.
+    pub fn with_aggregate_output_prefix(
+        mut self,
+        count: usize,
+    ) -> Result<Self, GraphAggregateBuildError> {
+        if count > self.aggregates.len() {
+            return Err(GraphAggregateBuildError::TooManyColumns {
+                limit: self.aggregates.len(),
+                observed: count,
+            });
+        }
+        self.output_aggregates = count;
+        Ok(self)
     }
 
     /// Application logical transcript: GroupAggregate(child, keys, functions),
@@ -497,6 +529,12 @@ impl PreparedGraphAggregate {
         self.append_result_transcript(&mut bytes);
         if let Some(expression) = &self.having_expression {
             expression.append_transcript(&mut bytes);
+        }
+        if self.output_aggregates != self.aggregates.len() {
+            // The unchanged self-delimiting prefix still describes the full
+            // evaluation. Identity projection preserves all existing bytes.
+            bytes.extend_from_slice(b"fgdb:aggregate-output-prefix:v1\0");
+            bytes.extend_from_slice(&(self.output_aggregates as u64).to_be_bytes());
         }
         bytes
     }
