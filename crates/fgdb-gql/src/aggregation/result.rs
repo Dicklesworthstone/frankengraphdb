@@ -16,15 +16,17 @@ use std::cmp::Ordering;
 
 pub const MAX_AGGREGATE_FILTERS: usize = 64;
 
-/// Column indices are in key_columns() or aggregate_columns(), not the child.
+/// Column indices are in key_columns() or evaluation_aggregate_columns(), not
+/// the child or the possibly shorter public aggregate output schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphAggregateColumn {
     GroupKey(usize),
     Aggregate(usize),
 }
 
-/// Integer comparisons use i128 without subtraction, truncation or float
-/// coercion. Null yields UNKNOWN (and is not retained by HAVING), including NE.
+/// Integer thresholds compare integer and exact-average cells without
+/// subtraction, truncation or floating conversion. Null yields UNKNOWN
+/// (and is not retained by HAVING), including NE.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GraphAggregateTest {
     Integer {
@@ -97,6 +99,7 @@ struct Group<'g, 'a> {
 enum Cell<'a> {
     Count(u64),
     Integer(i128),
+    Average { sum: i128, count: u64 },
     Value(ValueRef<'a>),
 }
 impl<'a> Cell<'a> {
@@ -112,6 +115,11 @@ impl<'a> Cell<'a> {
                 Self::Value(ValueRef::Scalar(&NULL))
             }
             Accumulator::Extreme(Some(value)) => Self::Value(*value),
+            Accumulator::Numeric(state) => match state.result() {
+                numeric::NumericResult::Empty => Self::Value(ValueRef::Scalar(&NULL)),
+                numeric::NumericResult::Sum(value) => Self::Integer(value),
+                numeric::NumericResult::Average { sum, count } => Self::Average { sum, count },
+            },
         }
     }
     fn is_null(self) -> bool {
@@ -125,6 +133,13 @@ impl<'a> Cell<'a> {
             _ => None,
         }
     }
+    fn numeric(self) -> Option<(i128, u64)> {
+        match self {
+            Self::Average { sum, count } => Some((sum, count)),
+            _ => self.integer().map(|value| (value, 1)),
+        }
+    }
+
     fn payload_units(self) -> usize {
         match self {
             Self::Value(value) => value.payload_units(),
@@ -135,9 +150,12 @@ impl<'a> Cell<'a> {
         match (self, other) {
             (Self::Count(left), Self::Count(right)) => left.cmp(&right),
             (Self::Integer(left), Self::Integer(right)) => left.cmp(&right),
+            (Self::Average { sum: a, count: da }, Self::Average { sum: b, count: db }) => {
+                numeric::compare_ratios((a, da), (b, db))
+            }
             (Self::Value(left), Self::Value(right)) => left.cmp(&right),
             // Comparisons select the same prepared column from two groups.
-            // A SUM's only differing variant is null, handled before this call.
+            // A numeric aggregate may instead be null, handled before this call.
             _ => unreachable!("the prepared aggregate column has one nonnull result domain"),
         }
     }
@@ -151,6 +169,7 @@ impl<'a> Group<'_, 'a> {
     }
     fn copy_owned<E>(
         self,
+        output_aggregates: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<GraphAggregateRow, E> {
         control(GlaExecutionEvent::ResultRow)?;
@@ -160,11 +179,17 @@ impl<'a> Group<'_, 'a> {
             keys.push(cell.copy_owned(control)?);
         }
         let mut values = Vec::new();
-        for state in self.state {
+        // Clause-only states remain borrowed during filtering/ranking. They
+        // never become owned output cells, even for a selected group.
+        for state in &self.state[..output_aggregates] {
             control(GlaExecutionEvent::ScratchEntry)?;
             let cell = match Cell::from_state(state) {
                 Cell::Count(value) => GraphAggregateValue::Count(value),
                 Cell::Integer(value) => GraphAggregateValue::Integer(value),
+                Cell::Average { sum, count } => GraphAggregateValue::Average(
+                    GraphExactAverage::new(sum, count)
+                        .expect("a nonnull average has a positive admitted count"),
+                ),
                 Cell::Value(value) if value.is_null() => {
                     GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
                 }
@@ -304,16 +329,17 @@ impl PreparedGraphAggregate {
                 GraphAggregateTest::IsNotNull => !cell.is_null(),
                 GraphAggregateTest::Integer { .. } if cell.is_null() => false,
                 GraphAggregateTest::Integer { comparison, value } => {
-                    let actual = cell.integer().ok_or(GqlQueryError::Source(
+                    let actual = cell.numeric().ok_or(GqlQueryError::Source(
                         GraphAggregateError::NonIntegerHaving { predicate },
                     ))?;
+                    let order = numeric::compare_ratios(actual, (value, 1));
                     match comparison {
-                        IntegerComparison::Equal => actual == value,
-                        IntegerComparison::NotEqual => actual != value,
-                        IntegerComparison::Greater => actual > value,
-                        IntegerComparison::Less => actual < value,
-                        IntegerComparison::GreaterOrEqual => actual >= value,
-                        IntegerComparison::LessOrEqual => actual <= value,
+                        IntegerComparison::Equal => order == Ordering::Equal,
+                        IntegerComparison::NotEqual => order != Ordering::Equal,
+                        IntegerComparison::Greater => order == Ordering::Greater,
+                        IntegerComparison::Less => order == Ordering::Less,
+                        IntegerComparison::GreaterOrEqual => order != Ordering::Less,
+                        IntegerComparison::LessOrEqual => order != Ordering::Greater,
                     }
                 }
             };
@@ -420,7 +446,7 @@ impl PreparedGraphAggregate {
             // copy for rejected/skipped groups. Preserve the old no-filter path.
             if self.having.is_empty() && self.having_expression.is_none() {
                 for (key, state) in groups.iter().skip(offset).take(count) {
-                    output.push(Group { key, state }.copy_owned(control)?);
+                    output.push(Group { key, state }.copy_owned(self.output_aggregates, control)?);
                 }
             } else {
                 let mut skipped = 0;
@@ -435,7 +461,7 @@ impl PreparedGraphAggregate {
                         continue;
                     }
                     if output.len() < count {
-                        output.push(group.copy_owned(control)?);
+                        output.push(group.copy_owned(self.output_aggregates, control)?);
                     }
                 }
             }
@@ -480,7 +506,7 @@ impl PreparedGraphAggregate {
             self.sift_down(&mut heap, 0, end, control)?;
         }
         for group in heap.into_iter().skip(offset).take(count) {
-            output.push(group.copy_owned(control)?);
+            output.push(group.copy_owned(self.output_aggregates, control)?);
         }
         Ok(output)
     }
@@ -490,6 +516,113 @@ impl PreparedGraphAggregate {
 mod tests {
     use super::*;
     use crate::algebra::{GraphColumn, GraphPatternBuilder};
+
+    #[test]
+    fn internal_aggregate_prefix_preserves_evaluation_schema_and_definition_identity() {
+        let base = definition(1, Some(2));
+        let bytes = base.canonical_bytes();
+        for count in 0..=2 {
+            let hidden = base.clone().with_aggregate_output_prefix(count).unwrap();
+            assert_eq!(hidden.aggregate_columns(), &base.aggregate_columns()[..count]);
+            assert_eq!(hidden.evaluation_aggregate_columns(), base.aggregate_columns());
+            assert_eq!(hidden.key_columns(), base.key_columns());
+            assert_eq!(hidden.input_pattern(), base.input_pattern());
+            assert_eq!(hidden.canonical_bytes() == bytes, count == 2);
+            assert_eq!(hidden.clone().with_aggregate_output_prefix(2).unwrap(), base);
+            let order = GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1));
+            let filter = numeric(GraphAggregateColumn::Aggregate(1), IntegerComparison::Greater, 0);
+            assert!(hidden.with_result_clauses(&[filter], &[order]).is_ok());
+        }
+        assert!(matches!(base.clone().with_aggregate_output_prefix(3),
+            Err(GraphAggregateBuildError::TooManyColumns { limit: 2, observed: 3 })));
+        assert_eq!(base.canonical_bytes(), bytes);
+    }
+
+    #[test]
+    fn internal_aggregate_projection_follows_filter_order_and_pagination() {
+        let choices = [None, Some(-7), Some(0), Some(9)];
+        for mut encoded in 0..4_usize.pow(3) {
+            let mut values = Vec::new();
+            for _ in 0..3 { values.push(choices[encoded % 4]); encoded /= 4; }
+            let input = groups(&values);
+            for ordered in [false, true] {
+                for offset in 0..=4 {
+                    for count in [None, Some(0), Some(2)] {
+                        let order = if ordered {
+                            vec![GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1))]
+                        } else { Vec::new() };
+                        let full = definition(offset, count).with_result_clauses(
+                            &[numeric(GraphAggregateColumn::Aggregate(1), IntegerComparison::GreaterOrEqual, 0)],
+                            &order,
+                        ).unwrap();
+                        let expected = run(&full, &input);
+                        for prefix in 0..=2 {
+                            let hidden = full.clone().with_aggregate_output_prefix(prefix).unwrap();
+                            let projected = run(&hidden, &input);
+                            assert_eq!(projected.len(), expected.len());
+                            for (actual, expected) in projected.iter().zip(&expected) {
+                                assert_eq!(actual.keys(), expected.keys());
+                                assert_eq!(actual.values(), &expected.values()[..prefix]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_payloads_are_not_copied_and_hidden_clause_failures_are_not_masked() {
+        let payload = CanonicalScalar::bytes(vec![3; 8192]).unwrap();
+        let mut input = Groups::new();
+        for at in 0..5 {
+            input.insert(vec![ValueRef::Vertex(VId(at))], vec![
+                Accumulator::Count(at as u64),
+                Accumulator::Extreme(Some(ValueRef::Scalar(&payload))),
+            ]);
+        }
+        let full = definition(1, Some(2)).with_result_clauses(&[], &[
+            GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1)),
+            GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(0)),
+        ]).unwrap();
+        let measure = |query: &PreparedGraphAggregate| {
+            let mut scratch = 0;
+            let rows = query.finish_groups(&input, &mut |event| {
+                scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
+            }).unwrap();
+            (rows, scratch)
+        };
+        let (visible, copied) = measure(&full);
+        let hidden = full.clone().with_aggregate_output_prefix(1).unwrap();
+        let (rows, retained) = measure(&hidden);
+        assert_eq!(ids(&rows), ids(&visible));
+        assert_eq!(copied - retained, 2 * (1 + 1 + 8192 / GRAPH_VALUE_PAYLOAD_UNIT_BYTES));
+        assert!(rows.iter().all(|row| row.values().len() == 1));
+        let mut events = 0;
+        hidden.finish_groups(&input, &mut |_| {
+            events += 1;
+            Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
+        }).unwrap();
+        for stop in 1..=events {
+            let mut at = 0;
+            let result = hidden.finish_groups(&input, &mut |_| {
+                at += 1;
+                if at == stop { Err(GqlQueryError::<GraphAggregateError<()>, _>::Interrupted(stop)) }
+                else { Ok(()) }
+            });
+            assert!(matches!(result, Err(GqlQueryError::Interrupted(value)) if value == stop));
+            assert_eq!(at, stop);
+        }
+        for count in [None, Some(0)] {
+            let refused = definition(u64::MAX, count).with_result_clauses(&[
+                numeric(GraphAggregateColumn::Aggregate(1), IntegerComparison::Greater, 0),
+            ], &[]).unwrap().with_aggregate_output_prefix(0).unwrap();
+            assert!(matches!(refused.finish_groups(&input, &mut |_| {
+                Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
+            }), Err(GqlQueryError::Source(GraphAggregateError::NonIntegerHaving { predicate: 0 }))));
+        }
+    }
 
     fn definition(offset: u64, count: Option<u64>) -> PreparedGraphAggregate {
         let mut builder = GraphPatternBuilder::new();

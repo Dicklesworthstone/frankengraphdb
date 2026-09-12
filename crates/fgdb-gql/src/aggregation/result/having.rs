@@ -2,9 +2,10 @@
 //!
 //! This is a scalar result-stage program, not a second graph executor. Every
 //! leaf is evaluated in order; neither Boolean decisions nor pagination hide
-//! invalid numeric operands. Count/u64, sum/i128 and scalar Int/i64 share the
-//! exact i128 integer comparison domain. Other scalars compare only within
-//! their canonical kind. Null and incompatible noninteger kinds are UNKNOWN.
+//! invalid numeric operands. Counts, integer sums and exact-average fractions
+//! share overflow-free rational comparisons without float conversion. Other
+//! scalars compare only within their canonical kind. Null and incompatible
+//! nonnumeric kinds are UNKNOWN.
 
 use super::*;
 use crate::algebra::ScalarPredicate;
@@ -256,8 +257,8 @@ fn compare<E, C>(
         for _ in 0..cell.payload_units() { control(GlaExecutionEvent::Work)?; }
     }
     if left.is_null() || right.is_null() { return Ok(None); }
-    let order = match (left.integer(), right.integer()) {
-        (Some(a), Some(b)) => a.cmp(&b),
+    let order = match (left.numeric(), right.numeric()) {
+        (Some(a), Some(b)) => numeric::compare_ratios(a, b),
         (Some(_), None) | (None, Some(_)) => {
             // Preserve the existing numeric HAVING domain refusal, even under
             // OR TRUE / AND FALSE. Never make adding parentheses hide it.
