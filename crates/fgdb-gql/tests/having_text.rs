@@ -147,7 +147,7 @@ fn global_empty_null_negation_aliases_and_optional_groups_preserve_semantics() {
 #[test]
 fn malformed_hidden_columns_and_structural_limits_refuse_before_catalog_access() {
     let head="MATCH (a)-[:R]->(b) RETURN a,COUNT(*) AS n,SUM(b.p) AS total GROUP BY a HAVING";
-    let mut cases=vec!["", "()", "NOT", "n>0 OR OR n<0", "(n>0", "n>0)", "n>missing", "MIN(b.p)>0",
+    let mut cases=vec!["", "()", "NOT", "n>0 OR OR n<0", "(n>0", "n>0)", "n>missing", "MIN(*)>0",
         "a.p='x'", "n+$x>0", "n>0;", "n IS TRUE", "1", "n>0 XOR n<3", "EXISTS { MATCH (a) }",
         "n>$x LIMIT $x", "n>9223372036854775808", "n< -9223372036854775809"]
         .into_iter().map(str::to_owned).collect::<Vec<_>>();

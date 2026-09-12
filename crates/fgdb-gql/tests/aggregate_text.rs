@@ -297,7 +297,7 @@ fn malformed_ungrouped_and_unsupported_aggregates_never_resolve_names() {
     for text in [
         "MATCH (a) RETURN a",
         "MATCH (a) RETURN a,COUNT(*)",
-        "MATCH (a) RETURN COUNT(*) GROUP BY a",
+        "MATCH (a) RETURN COUNT(*) GROUP BY missing",
         "MATCH (a) RETURN a,COUNT(*) GROUP BY a,a",
         "MATCH (a) RETURN a AS x,COUNT(*) GROUP BY x",
         "MATCH (a) RETURN COUNT(DISTINCT *)",

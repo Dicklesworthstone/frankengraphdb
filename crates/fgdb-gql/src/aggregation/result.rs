@@ -3,7 +3,9 @@
 //! Source and aggregation are already complete. This stage never filters child
 //! bindings or pushes LIMIT into the aggregate. Selected groups borrow their
 //! keys/state, and a finite page retains at most offset + count references.
+//! Nontrivial output DISTINCT uses a separately metered borrowed-group buffer.
 
+mod distinct;
 mod having;
 pub use having::{
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
@@ -16,8 +18,8 @@ use std::cmp::Ordering;
 
 pub const MAX_AGGREGATE_FILTERS: usize = 64;
 
-/// Column indices are in key_columns() or evaluation_aggregate_columns(), not
-/// the child or the possibly shorter public aggregate output schema.
+/// Column indices address evaluation_key_columns() or
+/// evaluation_aggregate_columns(), not the child or either projected schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphAggregateColumn {
     GroupKey(usize),
@@ -169,14 +171,21 @@ impl<'a> Group<'_, 'a> {
     }
     fn copy_owned<E>(
         self,
+        key_output: Option<&KeyProjection>,
         output_aggregates: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<GraphAggregateRow, E> {
         control(GlaExecutionEvent::ResultRow)?;
         control(GlaExecutionEvent::ScratchEntry)?;
         let mut keys = Vec::new();
-        for cell in self.key {
-            keys.push(cell.copy_owned(control)?);
+        if let Some(projection) = key_output {
+            for &column in &projection.columns {
+                keys.push(self.key[column].copy_owned(control)?);
+            }
+        } else {
+            for cell in self.key {
+                keys.push(cell.copy_owned(control)?);
+            }
         }
         let mut values = Vec::new();
         // Clause-only states remain borrowed during filtering/ranking. They
@@ -435,6 +444,9 @@ impl PreparedGraphAggregate {
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        if self.needs_output_distinct() {
+            return self.finish_distinct_groups(groups, control);
+        }
         let offset = usize::try_from(self.offset).unwrap_or(usize::MAX);
         let count = self
             .count
@@ -446,7 +458,9 @@ impl PreparedGraphAggregate {
             // copy for rejected/skipped groups. Preserve the old no-filter path.
             if self.having.is_empty() && self.having_expression.is_none() {
                 for (key, state) in groups.iter().skip(offset).take(count) {
-                    output.push(Group { key, state }.copy_owned(self.output_aggregates, control)?);
+                    output.push(Group { key, state }.copy_owned(
+                        self.key_output.as_ref(), self.output_aggregates, control,
+                    )?);
                 }
             } else {
                 let mut skipped = 0;
@@ -461,7 +475,9 @@ impl PreparedGraphAggregate {
                         continue;
                     }
                     if output.len() < count {
-                        output.push(group.copy_owned(self.output_aggregates, control)?);
+                        output.push(group.copy_owned(
+                            self.key_output.as_ref(), self.output_aggregates, control,
+                        )?);
                     }
                 }
             }
@@ -506,7 +522,9 @@ impl PreparedGraphAggregate {
             self.sift_down(&mut heap, 0, end, control)?;
         }
         for group in heap.into_iter().skip(offset).take(count) {
-            output.push(group.copy_owned(self.output_aggregates, control)?);
+            output.push(group.copy_owned(
+                self.key_output.as_ref(), self.output_aggregates, control,
+            )?);
         }
         Ok(output)
     }
@@ -1071,5 +1089,138 @@ mod tests {
                 Some(&payload)
             );
         }
+    }
+
+    #[test]
+    fn key_output_is_validated_reversible_and_independent_of_summary_projection() {
+        let base = definition(0, None);
+        let bytes = base.canonical_bytes();
+        assert_eq!(base.clone().with_key_output_columns(&[0]).unwrap(), base);
+        for columns in [&[][..], &[0][..], &[0, 0][..]] {
+            let projected = base.clone().with_key_output_columns(columns).unwrap();
+            assert_eq!(projected.key_columns().len(), columns.len());
+            assert_eq!(projected.evaluation_key_columns(), base.key_columns());
+            assert_eq!(projected.input_pattern(), base.input_pattern());
+            assert_eq!(projected.canonical_bytes() == bytes, columns == [0]);
+            assert_eq!(projected.clone().with_key_output_columns(&[0]).unwrap(), base);
+            assert_eq!(projected.clone().with_aggregate_output_prefix(0).unwrap(),
+                base.clone().with_aggregate_output_prefix(0).unwrap().with_key_output_columns(columns).unwrap());
+            assert!(projected.with_result_clauses(&[], &[
+                GraphAggregateOrder::ascending(GraphAggregateColumn::GroupKey(0)),
+            ]).is_ok());
+        }
+        assert!(matches!(base.clone().with_key_output_columns(&[1]),
+            Err(GraphAggregateBuildError::UnknownOutputColumn { column: GraphAggregateColumn::GroupKey(1) })));
+        assert!(matches!(base.clone().with_key_output_columns(&[0; MAX_PATTERN_VERTICES]),
+            Err(GraphAggregateBuildError::TooManyColumns { .. })));
+        assert_eq!(base.canonical_bytes(), bytes);
+    }
+
+    #[test]
+    fn key_projection_follows_filter_ranking_and_pages_without_collapsing_bags() {
+        for values in [[None, Some(-1), Some(2)], [Some(7), Some(7), Some(7)]] {
+            let input = groups(&values);
+            for order in [Vec::new(), vec![GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1))]] {
+                for offset in 0..=4 {
+                    for count in [None, Some(0), Some(1), Some(4)] {
+                        let full = definition(offset, count).with_result_clauses(&[
+                            GraphAggregateFilter { column: GraphAggregateColumn::Aggregate(1), test: GraphAggregateTest::IsNotNull },
+                        ], &order).unwrap();
+                        let expected = run(&full, &input);
+                        for columns in [&[][..], &[0][..], &[0, 0][..]] {
+                            for prefix in 0..=2 {
+                                let projected = full.clone().with_key_output_columns(columns).unwrap()
+                                    .with_aggregate_output_prefix(prefix).unwrap();
+                                let actual = run(&projected, &input);
+                                assert_eq!(actual.len(), expected.len());
+                                for (actual, expected) in actual.iter().zip(&expected) {
+                                    let keys: Vec<_> = columns.iter().map(|column| expected.keys()[*column].clone()).collect();
+                                    assert_eq!(actual.keys(), keys);
+                                    assert_eq!(actual.values(), &expected.values()[..prefix]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut input = Groups::new();
+        for at in 0..3 { input.insert(vec![ValueRef::Vertex(VId(at))], vec![Accumulator::Count(1),
+            Accumulator::Sum { value: 0, present: false }]); }
+        let projected = definition(0, None).with_key_output_columns(&[]).unwrap();
+        let rows = run(&projected, &input);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], rows[1]);
+        assert_eq!(rows[1], rows[2]);
+    }
+
+    #[test]
+    fn hidden_leading_keys_preserve_full_key_tie_order_and_clause_indices() {
+        let mut builder = GraphPatternBuilder::new();
+        builder.vertex("n").unwrap();
+        let input = builder.prepare_values(&[
+            GraphColumn::property("category", "n", PropertyKeyId(1)),
+            GraphColumn::vertex("identity", "n"),
+        ], 0, None).unwrap().with_duplicates();
+        let base = PreparedGraphAggregate::prepare(input, &[0, 1], &[
+            GraphAggregate::count_rows("n"),
+        ], 0, None).unwrap();
+        let low = CanonicalScalar::Int(-1);
+        let high = CanonicalScalar::Int(1);
+        let mut input = Groups::new();
+        for (key, id) in [(&low, 9), (&high, 0), (&high, 1)] {
+            input.insert(vec![ValueRef::Scalar(key), ValueRef::Vertex(VId(id))], vec![Accumulator::Count(1)]);
+        }
+        let projected = base.clone().with_key_output_columns(&[1]).unwrap().with_result_clauses(&[], &[
+            GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(0)),
+        ]).unwrap();
+        assert_eq!(projected.key_columns(), &["identity"]);
+        assert_eq!(projected.evaluation_key_columns(), &["category", "identity"]);
+        assert_eq!(ids(&run(&projected, &input)), vec![9, 0, 1]);
+        let filtered = projected.with_result_clauses(&[
+            numeric(GraphAggregateColumn::GroupKey(0), IntegerComparison::Greater, 0),
+        ], &[]).unwrap();
+        assert_eq!(ids(&run(&filtered, &input)), vec![0, 1]);
+        let permuted = base.clone().with_key_output_columns(&[1, 0]).unwrap();
+        let rows = run(&permuted, &input);
+        assert_eq!(ids(&rows), vec![9, 0, 1]);
+        assert_eq!(rows[0].keys()[1].as_scalar(), Some(&low));
+        assert_eq!(permuted.with_key_output_columns(&[0, 1]).unwrap(), base);
+    }
+
+    #[test]
+    fn hidden_key_payloads_are_not_copied_and_all_key_reads_still_execute() {
+        let payload = CanonicalScalar::bytes(vec![3; 8192]).unwrap();
+        let mut input = Groups::new();
+        input.insert(vec![ValueRef::Scalar(&payload)], vec![Accumulator::Count(1),
+            Accumulator::Sum { value: 0, present: false }]);
+        let full = definition(0, None);
+        let hidden = full.clone().with_key_output_columns(&[]).unwrap();
+        let measure = |query: &PreparedGraphAggregate| {
+            let mut scratch = 0;
+            let rows = query.finish_groups(&input, &mut |event| {
+                scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(())
+            }).unwrap();
+            (rows, scratch)
+        };
+        let (visible, copied) = measure(&full);
+        let (rows, retained) = measure(&hidden);
+        assert!(rows[0].keys().is_empty());
+        assert_eq!(rows[0].values(), visible[0].values());
+        assert_eq!(copied - retained, 1 + 8192 / GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
+        let empty = hidden.execute_governed(0, [], [], |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None), GqlQueryPolicy::new(100, 100, 10000, 10000), || Ok::<_, ()>(())).unwrap();
+        assert!(empty.value.is_empty());
+        let global = PreparedGraphAggregate::prepare(full.input_pattern().clone(), &[], &[
+            GraphAggregate::count_rows("n"),
+        ], 0, None).unwrap().with_key_output_columns(&[]).unwrap();
+        assert_eq!(global.execute_governed(0, [], [], |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None), GqlQueryPolicy::new(100, 100, 10000, 10000), || Ok::<_, ()>(())).unwrap().value.len(), 1);
+        let refused = definition(0, Some(0)).with_key_output_columns(&[]).unwrap()
+            .execute_governed(2, [VId(1), VId(2)], [], |_, _| Ok::<_, &str>(true),
+                |vid, _| if vid == VId(2) { Err("hidden input") } else { Ok(None) },
+                GqlQueryPolicy::new(100, 100, 10000, 10000), || Ok::<_, ()>(()));
+        assert!(matches!(refused, Err(GqlQueryError::Source(GraphAggregateError::Source("hidden input")))));
     }
 }
