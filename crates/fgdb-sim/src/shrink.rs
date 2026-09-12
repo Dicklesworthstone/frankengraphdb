@@ -70,7 +70,8 @@ use crate::fixture::{
 use crate::vfs::{FaultEvent, FaultPlan, Trigger};
 use asupersync::lab::LabConfig;
 use asupersync::lab::runtime::{
-    ForcedSchedule, ForcedScheduleCandidateLimits, ForcedScheduleDecodeLimits, ForcedScheduleError,
+    ForcedSchedule, ForcedScheduleArtifactError, ForcedScheduleCandidateLimits,
+    ForcedScheduleDecodeLimits,
 };
 use fgdb_crypto::Hasher;
 use std::io;
@@ -1038,7 +1039,7 @@ pub enum FixtureScheduleWorkloadArtifactError {
     /// A fault plan was malformed or noncanonical.
     InvalidFaultPlan,
     /// The embedded foundation schedule was refused.
-    Schedule(ForcedScheduleError),
+    Schedule(ForcedScheduleArtifactError),
     /// The embedded workload or one candidate index set was refused.
     Workload(FixtureWorkloadError),
     /// Decoded authorities did not reproduce a bound identity.

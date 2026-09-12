@@ -1719,7 +1719,7 @@ mod tests {
         assert!(!caps.spawn && !caps.time && !caps.entropy && !caps.io && !caps.remote);
         assert!(current.timer_driver().is_none());
         assert!(current.io().is_none());
-        assert!(current.remote_cap().is_none());
+        assert!(current.remote().is_none());
     }
 
     #[test]
@@ -1741,12 +1741,24 @@ mod tests {
                 Cx::current().expect("the inherited root carries an empty runtime mask")
             };
             let narrowed = PurposeContexts::narrow_runtime_root(&inherited);
-            narrowed.query().with_restriction(assert_empty_ambient_effects);
-            narrowed.txn().with_restriction(assert_empty_ambient_effects);
-            narrowed.commit().with_restriction(assert_empty_ambient_effects);
-            narrowed.maint().with_restriction(assert_empty_ambient_effects);
-            narrowed.repl().with_restriction(assert_empty_ambient_effects);
-            narrowed.merge_eval().with_restriction(assert_empty_ambient_effects);
+            narrowed
+                .query()
+                .with_restriction(assert_empty_ambient_effects);
+            narrowed
+                .txn()
+                .with_restriction(assert_empty_ambient_effects);
+            narrowed
+                .commit()
+                .with_restriction(assert_empty_ambient_effects);
+            narrowed
+                .maint()
+                .with_restriction(assert_empty_ambient_effects);
+            narrowed
+                .repl()
+                .with_restriction(assert_empty_ambient_effects);
+            narrowed
+                .merge_eval()
+                .with_restriction(assert_empty_ambient_effects);
             let restored = Cx::current().expect("the outer root is restored");
             assert_eq!(restored.task_id(), parent.task_id());
             assert_eq!(restored.capabilities(), parent_caps);

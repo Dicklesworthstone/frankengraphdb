@@ -37,7 +37,8 @@ use fgdb_sim::vfs::Trigger;
 
 use asupersync::lab::LabConfig;
 use asupersync::lab::runtime::{
-    ForcedScheduleCandidateLimits, ForcedScheduleCandidateTermination, ForcedScheduleError,
+    ForcedScheduleArtifactError, ForcedScheduleCandidateLimits, ForcedScheduleCandidateTermination,
+    ForcedScheduleError,
 };
 use asupersync::trace::RecorderConfig;
 use asupersync::trace::replay::ReplayEvent;
@@ -905,7 +906,7 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
             limited_schedule,
         ),
         Err(FixtureScheduleWorkloadArtifactError::Schedule(
-            ForcedScheduleError::ArtifactByteLimitExceeded { .. }
+            ForcedScheduleArtifactError::ByteLimitExceeded { .. }
         ))
     ));
     let limited_indices = FixtureScheduleWorkloadArtifactLimits {
@@ -972,7 +973,7 @@ fn lab_task_failure_and_unbounded_payload_cannot_return_successful_semantics() {
             artifact_limits,
         ),
         Err(FixtureScheduleWorkloadArtifactError::Schedule(
-            ForcedScheduleError::ArtifactVersionMismatch {
+            ForcedScheduleArtifactError::VersionMismatch {
                 expected: 1,
                 found: 2,
             }

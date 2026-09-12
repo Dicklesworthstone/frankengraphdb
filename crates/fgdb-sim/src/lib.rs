@@ -23,6 +23,9 @@
 //! stay independent implementations that can disagree.
 
 #![forbid(unsafe_code)]
+// The replay task proves Send across the nested database write/commit futures.
+// Give the trait solver enough depth without bypassing that proof.
+#![recursion_limit = "256"]
 
 pub mod artifact;
 pub mod campaign;

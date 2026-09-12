@@ -12,6 +12,9 @@
 //! * `unreachable_targets_name_an_owning_bead` — an unreachable row without an
 //!   owner is a permanent silent zero.
 
+// The embedded spine retains the complete nested write future's Send proof.
+#![recursion_limit = "256"]
+
 use fgdb_sim::ldfi::{
     ActivationRejection, BASE_HARNESS_OWNER, CampaignEntrypoint, EXPECTED_LDFI_OWNER_BEADS,
     EXPECTED_TARGET_IDS, G1_GATE, G3_GATE, G3_PHASE_OWNER, GENESIS_GATE, LOCAL_TORTURE_OWNER,

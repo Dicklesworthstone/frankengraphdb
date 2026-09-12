@@ -124,9 +124,9 @@ pub(super) fn register_indexes<E>(
             for access in std::iter::once(first).chain(additional_accesses(operators, at, first)) {
                 control(GlaExecutionEvent::Work)?;
                 let key = (access.relation, access.direction);
-                if !index.contains_key(&key) {
+                if let std::collections::btree_map::Entry::Vacant(entry) = index.entry(key) {
                     control(GlaExecutionEvent::ScratchEntry)?;
-                    index.insert(key, Default::default());
+                    entry.insert(Default::default());
                 }
             }
         }
