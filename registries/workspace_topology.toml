@@ -591,7 +591,7 @@ id = "asupersync"
 title = "asupersync"
 linkage = "linked"
 git_url = "https://github.com/Dicklesworthstone/asupersync"
-pinned_rev = "c17e51931f3223d55bd4961ff13eb3c5c4022fdf"
+pinned_rev = "78b64636e99fea4ea2d868096576021dd3b8e519"
 package_prefixes = ["asupersync"]
 known_members = [
   "asupersync",

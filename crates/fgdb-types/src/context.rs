@@ -99,7 +99,7 @@ enum RestrictionCx {
 /// A future whose ambient asupersync capability mask is narrowed for each poll.
 ///
 /// The guard is deliberately installed per poll and never crosses an await.
-/// At asupersync revision `e464a48`, ambient `Cx<cap::All>` I/O and remote
+/// In asupersync 0.5.0, ambient `Cx<cap::All>` I/O and remote
 /// accessors honor this runtime mask, but direct time and random accessors do
 /// not. This adapter therefore reduces ambient authority but does not claim to
 /// close that upstream time/random escape. The explicit purpose wrapper remains
@@ -1710,6 +1710,83 @@ mod tests {
                 assert!(Cx::is_restricted());
             });
             assert!(!Cx::is_restricted());
+        });
+    }
+
+    fn assert_empty_ambient_effects() {
+        let current = Cx::current().expect("a purpose scope installs its context");
+        let caps = current.capabilities();
+        assert!(!caps.spawn && !caps.time && !caps.entropy && !caps.io && !caps.remote);
+        assert!(current.timer_driver().is_none());
+        assert!(current.io().is_none());
+        assert!(current.remote_cap().is_none());
+    }
+
+    #[test]
+    fn purpose_scopes_preserve_inherited_runtime_ceiling_and_restore_parent() {
+        under_lab(71, |contexts, root| {
+            let parent = Cx::current().expect("lab installs its root context");
+            let parent_caps = parent.capabilities();
+            assert!(parent.timer_driver().is_some(), "positive timer control");
+            contexts.commit().with_restriction(|| {
+                let current = Cx::current().expect("commit context is installed");
+                let caps = current.capabilities();
+                assert!(caps.spawn && caps.time && caps.io);
+                assert!(!caps.entropy && !caps.remote);
+                assert!(current.timer_driver().is_some());
+            });
+
+            let inherited = {
+                let _guard = root.restrict::<cap::None>().set_current_restricted();
+                Cx::current().expect("the inherited root carries an empty runtime mask")
+            };
+            let narrowed = PurposeContexts::narrow_runtime_root(&inherited);
+            narrowed.query().with_restriction(assert_empty_ambient_effects);
+            narrowed.txn().with_restriction(assert_empty_ambient_effects);
+            narrowed.commit().with_restriction(assert_empty_ambient_effects);
+            narrowed.maint().with_restriction(assert_empty_ambient_effects);
+            narrowed.repl().with_restriction(assert_empty_ambient_effects);
+            narrowed.merge_eval().with_restriction(assert_empty_ambient_effects);
+            let restored = Cx::current().expect("the outer root is restored");
+            assert_eq!(restored.task_id(), parent.task_id());
+            assert_eq!(restored.capabilities(), parent_caps);
+            assert!(restored.timer_driver().is_some());
+        });
+    }
+
+    #[test]
+    fn purpose_futures_preserve_inherited_runtime_ceiling_on_every_poll() {
+        under_lab(72, |_contexts, root| {
+            let parent = Cx::current().expect("lab installs its root context");
+            let parent_caps = parent.capabilities();
+            assert!(parent.timer_driver().is_some(), "positive timer control");
+            let inherited = {
+                let _guard = root.restrict::<cap::None>().set_current_restricted();
+                Cx::current().expect("the inherited root carries an empty runtime mask")
+            };
+            let narrowed = PurposeContexts::narrow_runtime_root(&inherited);
+            let pending = || {
+                std::future::poll_fn(|_| {
+                    assert_empty_ambient_effects();
+                    Poll::<()>::Pending
+                })
+            };
+            let futures = [
+                narrowed.query().with_restriction_async(pending()),
+                narrowed.repl().with_restriction_async(pending()),
+                narrowed.merge_eval().with_restriction_async(pending()),
+            ];
+            let mut task = Context::from_waker(std::task::Waker::noop());
+            for future in futures {
+                let mut future = Box::pin(future);
+                for _ in 0..2 {
+                    assert!(future.as_mut().poll(&mut task).is_pending());
+                    let restored = Cx::current().expect("each poll restores the outer root");
+                    assert_eq!(restored.task_id(), parent.task_id());
+                    assert_eq!(restored.capabilities(), parent_caps);
+                    assert!(restored.timer_driver().is_some());
+                }
+            }
         });
     }
 

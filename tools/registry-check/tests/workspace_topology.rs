@@ -539,7 +539,7 @@ fn topology_neg_live_crate_declared_planned() {
 #[test]
 fn topology_neg_foundation_revision_drift() {
     let codes = codes_after(
-        "pinned_rev = \"c17e51931f3223d55bd4961ff13eb3c5c4022fdf\"",
+        "pinned_rev = \"78b64636e99fea4ea2d868096576021dd3b8e519\"",
         "pinned_rev = \"0000000000000000000000000000000000000000\"",
     );
     assert_reports(&codes, "foundation_rev_drift");

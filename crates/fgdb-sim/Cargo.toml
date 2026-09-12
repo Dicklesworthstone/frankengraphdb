@@ -22,7 +22,7 @@ workspace = true
 # one place the plan says both may be visible. Layer direction permits it:
 # composition is 13, verification is 14.
 fgdb = { path = "../fgdb" }
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "c17e51931f3223d55bd4961ff13eb3c5c4022fdf", default-features = false }
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "78b64636e99fea4ea2d868096576021dd3b8e519", version = "=0.5.0", default-features = false }
 fgdb-calibrate = { path = "../fgdb-calibrate" }
 fgdb-chronicle = { path = "../fgdb-chronicle" }
 fgdb-crypto = { path = "../fgdb-crypto" }
