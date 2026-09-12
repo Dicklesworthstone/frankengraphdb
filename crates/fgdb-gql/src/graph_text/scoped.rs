@@ -114,6 +114,23 @@ pub(super) fn resolve_pattern<'a>(
     let mut numeric = Vec::new();
     for filter in filters {
         match filter {
+            Filter::Boolean { program, at } => {
+                numeric.push(BoundFilter::Boolean(boolean::BoundBooleanTemplate::resolve(program, at, symbol)?));
+            }
+            filter @ Filter::VertexNull { .. } => {
+                numeric.push(BoundFilter::Boolean(boolean::BoundBooleanTemplate::resolve(
+                    vec![boolean::SyntaxItem::Atom(filter)], 0, symbol,
+                )?));
+            }
+            Filter::Properties { left, left_key, right, right_key, comparison } => {
+                let GraphSymbol::Property(left_key) = symbol(GraphSymbolKind::Property, left_key)? else {
+                    unreachable!("symbol domain is checked by the shared resolver")
+                };
+                let GraphSymbol::Property(right_key) = symbol(GraphSymbolKind::Property, right_key)? else {
+                    unreachable!("symbol domain is checked by the shared resolver")
+                };
+                built(left.at, builder.compare_properties(left.text, left_key, comparison, right.text, right_key))?;
+            }
             Filter::Identity { left, right, equal } => {
                 built(left.at, builder.identity(left.text, right.text, equal))?;
             }
@@ -126,7 +143,7 @@ pub(super) fn resolve_pattern<'a>(
                 let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
                     unreachable!("symbol domain is checked by the shared resolver")
                 };
-                numeric.push(BoundFilter {
+                numeric.push(BoundFilter::Property {
                     variable: variable.text.to_owned(),
                     key,
                     comparison,
@@ -178,21 +195,27 @@ pub(super) fn bind_builder(
 ) -> Result<GraphPatternBuilder, GraphPatternTextError> {
     let mut builder = builder.clone();
     for filter in filters {
-        let predicate = match filter.value.value(values) {
+        let BoundFilter::Property { variable, key, comparison, value } = filter else {
+            let BoundFilter::Boolean(template) = filter else { unreachable!("closed filter domain") };
+            let expression = template.bind(values)?;
+            built(at, builder.filter_boolean(&expression))?;
+            continue;
+        };
+        let predicate = match value.value(values) {
             GqlParameterValue::Int64(value) => VertexPredicate::IntegerProperty {
-                key: filter.key,
-                comparison: filter.comparison,
+                key: *key,
+                comparison: *comparison,
                 value,
             },
             GqlParameterValue::Scalar(value) => VertexPredicate::ScalarProperty {
-                key: filter.key,
-                predicate: value.predicate(filter.comparison),
+                key: *key,
+                predicate: value.predicate(*comparison),
             },
             GqlParameterValue::UInt64(_) => {
                 unreachable!("property arguments were type-checked at preparation")
             }
         };
-        built(at, builder.filter(&filter.variable, predicate))?;
+        built(at, builder.filter(variable, predicate))?;
     }
     Ok(builder)
 }
@@ -264,7 +287,7 @@ impl<'a> Parser<'a> {
     // Look ahead through the SAME lexer, without consuming its token budget.
     // Existing identifiers named `exists` or `not` remain identifiers unless
     // the complete EXISTS { / NOT EXISTS { introducer is present.
-    fn starts_existence(&self) -> Result<bool, GraphPatternTextError> {
+    pub(super) fn starts_existence(&self) -> Result<bool, GraphPatternTextError> {
         let mut lookahead = self.lexer.clone();
         if self.is_word("EXISTS") {
             return Ok(matches!(lookahead.next()?.kind, TokenKind::Punct(b'{')));
@@ -279,8 +302,13 @@ impl<'a> Parser<'a> {
     }
 
     fn scoped_predicates(&mut self, allow_existence: bool) -> Result<(), GraphPatternTextError> {
+        let mut has_existence = false;
+        let mut has_boolean = false;
         loop {
             if self.starts_existence()? {
+                if has_boolean {
+                    return Err(error(self.current.at, GraphPatternTextErrorKind::UnsupportedBooleanScope));
+                }
                 if !allow_existence {
                     return Err(error(
                         self.current.at,
@@ -297,8 +325,13 @@ impl<'a> Parser<'a> {
                 } else {
                     ScopeKind::Exists
                 })?;
+                has_existence = true;
             } else {
-                self.positive_predicate()?;
+                let extended = self.boolean_predicates()?;
+                if extended && has_existence {
+                    return Err(error(self.current.at, GraphPatternTextErrorKind::UnsupportedBooleanScope));
+                }
+                has_boolean |= extended;
             }
             if !self.take_word("AND")? {
                 break;
@@ -307,7 +340,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn positive_predicate(&mut self) -> Result<(), GraphPatternTextError> {
+    pub(super) fn positive_predicate(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         let left = self.variable()?;
         if self.take(b'.')? {
@@ -319,6 +352,12 @@ impl<'a> Parser<'a> {
             let key = self.name()?;
             let filter = self.property_filter(left, key)?;
             self.syntax.filters.push(filter);
+            self.predicates += 1;
+        } else if self.take_word("IS")? {
+            self.capacity(self.predicates, MAX_PATTERN_PREDICATES, PatternLimitDimension::Predicates)?;
+            let negate = self.take_word("NOT")?;
+            self.word("NULL")?;
+            self.syntax.filters.push(Filter::VertexNull { variable: left, is_null: !negate });
             self.predicates += 1;
         } else {
             self.capacity(

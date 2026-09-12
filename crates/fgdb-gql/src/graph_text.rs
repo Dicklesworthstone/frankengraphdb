@@ -6,6 +6,7 @@
 //! artifact contract; it never falls back to that parser after a refusal.
 
 mod aggregate;
+mod boolean;
 mod literal;
 mod ordering;
 mod parameters;
@@ -76,6 +77,9 @@ pub enum GraphPatternTextErrorKind {
     Expected(&'static str),
     IntegerOutOfRange,
     ScalarLiteral,
+    BooleanExpression,
+    BooleanNesting { limit: usize },
+    UnsupportedBooleanScope,
     UnknownVariable,
     UnknownSymbol(GraphSymbolKind),
     WrongSymbolKind {
@@ -256,6 +260,21 @@ struct Edge<'a> {
     destination: Name<'a>,
 }
 enum Filter<'a> {
+    Boolean {
+        program: Vec<boolean::SyntaxItem<'a>>,
+        at: usize,
+    },
+    Properties {
+        left: Name<'a>,
+        left_key: Name<'a>,
+        right: Name<'a>,
+        right_key: Name<'a>,
+        comparison: IntegerComparison,
+    },
+    VertexNull {
+        variable: Name<'a>,
+        is_null: bool,
+    },
     Property {
         variable: Name<'a>,
         key: Name<'a>,
@@ -657,11 +676,14 @@ impl<'a> Parser<'a> {
 }
 
 #[derive(Clone)]
-struct BoundFilter {
-    variable: String,
-    key: PropertyKeyId,
-    comparison: IntegerComparison,
-    value: Number,
+enum BoundFilter {
+    Property {
+        variable: String,
+        key: PropertyKeyId,
+        comparison: IntegerComparison,
+        value: Number,
+    },
+    Boolean(boolean::BoundBooleanTemplate),
 }
 #[derive(Clone)]
 struct BoundColumn {
@@ -718,6 +740,12 @@ impl PreparedGraphText {
     /// Property WHERE operands also accept single-quoted UCS_BASIC strings,
     /// TRUE/FALSE/NULL, and IS [NOT] NULL. Only doubled quotes escape a quote;
     /// quoted keywords and parameter-looking text remain literal payloads.
+    /// WHERE also supports parentheses and NOT > AND > OR precedence, with
+    /// three-valued comparisons over properties or vertex identities. The new
+    /// Boolean program evaluates leaves eagerly; only final TRUE survives.
+    /// Existing flat conjunctions retain their original lowering. Boolean
+    /// subquery operands/mixed root EXISTS expressions remain unsupported;
+    /// positive WHERE expressions inside EXISTS and OPTIONAL are supported.
     /// ORDER BY selects returned expressions or aliases, with ASC/DESC and
     /// independent NULLS FIRST/LAST (default LAST). Whole rows break ties.
     /// Ordering precedes SKIP/LIMIT; hidden sort expressions are refused.
@@ -1182,7 +1210,7 @@ mod tests {
             "MATCH (a) RETURN a;",
             "MATCH (a) RETURN a DROP GRAPH x",
             "MATCH (a) RETURN a ORDER BY missing",
-            "MATCH (a) WHERE a.n = 1 OR a.n = 2 RETURN a",
+            "MATCH (a) WHERE a.n = 1 OR OR a.n = 2 RETURN a",
             "MATCH (a) WHERE a > a RETURN a",
             "MATCH (a) WHERE a.n = 1.5 RETURN a",
             "MATCH (a) WHERE a.n = $ x RETURN a",

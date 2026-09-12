@@ -75,6 +75,18 @@ impl<'a> Parser<'a> {
         }
         let comparison = self.comparison()?;
         let at = self.current.at;
+        // A property reference wins over literal-looking variable names such
+        // as true or null. Lookahead uses the existing lexer, not text slicing.
+        if matches!(self.current.kind, TokenKind::Word(_))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
+        {
+            let right = self.variable()?;
+            self.punct(b'.', ".")?;
+            let right_key = self.name()?;
+            return Ok(Filter::Properties {
+                left: variable, left_key: key, right, right_key, comparison,
+            });
+        }
         let literal = match self.current.kind {
             TokenKind::Quoted(raw) => Some(text_scalar(raw, at)?),
             TokenKind::Word(word) if word.eq_ignore_ascii_case("TRUE") => {
