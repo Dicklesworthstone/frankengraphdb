@@ -23,8 +23,9 @@ pub enum GraphAggregateColumn {
     Aggregate(usize),
 }
 
-/// Integer comparisons use i128 without subtraction, truncation or float
-/// coercion. Null yields UNKNOWN (and is not retained by HAVING), including NE.
+/// Integer thresholds compare integer and exact-average cells without
+/// subtraction, truncation or floating conversion. Null yields UNKNOWN
+/// (and is not retained by HAVING), including NE.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GraphAggregateTest {
     Integer {
@@ -97,6 +98,7 @@ struct Group<'g, 'a> {
 enum Cell<'a> {
     Count(u64),
     Integer(i128),
+    Average { sum: i128, count: u64 },
     Value(ValueRef<'a>),
 }
 impl<'a> Cell<'a> {
@@ -112,6 +114,11 @@ impl<'a> Cell<'a> {
                 Self::Value(ValueRef::Scalar(&NULL))
             }
             Accumulator::Extreme(Some(value)) => Self::Value(*value),
+            Accumulator::Numeric(state) => match state.result() {
+                numeric::NumericResult::Empty => Self::Value(ValueRef::Scalar(&NULL)),
+                numeric::NumericResult::Sum(value) => Self::Integer(value),
+                numeric::NumericResult::Average { sum, count } => Self::Average { sum, count },
+            },
         }
     }
     fn is_null(self) -> bool {
@@ -125,6 +132,13 @@ impl<'a> Cell<'a> {
             _ => None,
         }
     }
+    fn numeric(self) -> Option<(i128, u64)> {
+        match self {
+            Self::Average { sum, count } => Some((sum, count)),
+            _ => self.integer().map(|value| (value, 1)),
+        }
+    }
+
     fn payload_units(self) -> usize {
         match self {
             Self::Value(value) => value.payload_units(),
@@ -135,9 +149,12 @@ impl<'a> Cell<'a> {
         match (self, other) {
             (Self::Count(left), Self::Count(right)) => left.cmp(&right),
             (Self::Integer(left), Self::Integer(right)) => left.cmp(&right),
+            (Self::Average { sum: a, count: da }, Self::Average { sum: b, count: db }) => {
+                numeric::compare_ratios((a, da), (b, db))
+            }
             (Self::Value(left), Self::Value(right)) => left.cmp(&right),
             // Comparisons select the same prepared column from two groups.
-            // A SUM's only differing variant is null, handled before this call.
+            // A numeric aggregate may instead be null, handled before this call.
             _ => unreachable!("the prepared aggregate column has one nonnull result domain"),
         }
     }
@@ -165,6 +182,10 @@ impl<'a> Group<'_, 'a> {
             let cell = match Cell::from_state(state) {
                 Cell::Count(value) => GraphAggregateValue::Count(value),
                 Cell::Integer(value) => GraphAggregateValue::Integer(value),
+                Cell::Average { sum, count } => GraphAggregateValue::Average(
+                    GraphExactAverage::new(sum, count)
+                        .expect("a nonnull average has a positive admitted count"),
+                ),
                 Cell::Value(value) if value.is_null() => {
                     GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
                 }
@@ -304,16 +325,17 @@ impl PreparedGraphAggregate {
                 GraphAggregateTest::IsNotNull => !cell.is_null(),
                 GraphAggregateTest::Integer { .. } if cell.is_null() => false,
                 GraphAggregateTest::Integer { comparison, value } => {
-                    let actual = cell.integer().ok_or(GqlQueryError::Source(
+                    let actual = cell.numeric().ok_or(GqlQueryError::Source(
                         GraphAggregateError::NonIntegerHaving { predicate },
                     ))?;
+                    let order = numeric::compare_ratios(actual, (value, 1));
                     match comparison {
-                        IntegerComparison::Equal => actual == value,
-                        IntegerComparison::NotEqual => actual != value,
-                        IntegerComparison::Greater => actual > value,
-                        IntegerComparison::Less => actual < value,
-                        IntegerComparison::GreaterOrEqual => actual >= value,
-                        IntegerComparison::LessOrEqual => actual <= value,
+                        IntegerComparison::Equal => order == Ordering::Equal,
+                        IntegerComparison::NotEqual => order != Ordering::Equal,
+                        IntegerComparison::Greater => order == Ordering::Greater,
+                        IntegerComparison::Less => order == Ordering::Less,
+                        IntegerComparison::GreaterOrEqual => order != Ordering::Less,
+                        IntegerComparison::LessOrEqual => order != Ordering::Greater,
                     }
                 }
             };

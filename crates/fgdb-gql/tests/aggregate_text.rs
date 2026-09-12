@@ -302,7 +302,7 @@ fn malformed_ungrouped_and_unsupported_aggregates_never_resolve_names() {
         "MATCH (a) RETURN a AS x,COUNT(*) GROUP BY x",
         "MATCH (a) RETURN COUNT(DISTINCT *)",
         "MATCH (a) RETURN SUM(*)",
-        "MATCH (a) RETURN AVG(a.n)",
+        "MATCH (a) RETURN AVG(*)",
         "MATCH (a) RETURN MIN(DISTINCT a.n)",
         "MATCH (a) RETURN COUNT(SUM(a.n))",
         "MATCH (a) RETURN COUNT(a,b)",
