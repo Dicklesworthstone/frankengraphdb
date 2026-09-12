@@ -332,6 +332,14 @@ struct BoundAggregate {
     column: Option<usize>,
 }
 
+/// Only a nonidentity output projection allocates this metadata. Evaluation
+/// continues to use the original key sequence, including its tie-break order.
+#[derive(Clone, PartialEq, Eq)]
+struct KeyProjection {
+    columns: Box<[usize]>,
+    names: Box<[String]>,
+}
+
 /// Logical GroupAggregate over an immutable ALL child. Pagination belongs to
 /// the group output, never to the child. Execution consumes each complete child
 /// binding through the one GLA visitor rather than materializing the child bag.
@@ -341,6 +349,7 @@ pub struct PreparedGraphAggregate {
     keys: Vec<usize>,
     aggregates: Vec<BoundAggregate>,
     key_names: Vec<String>,
+    key_output: Option<KeyProjection>,
     aggregate_names: Vec<String>,
     output_aggregates: usize,
     offset: u64,
@@ -352,7 +361,8 @@ pub struct PreparedGraphAggregate {
 impl core::fmt::Debug for PreparedGraphAggregate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphAggregate")
-            .field("key_columns", &self.keys.len())
+            .field("key_columns", &self.key_columns().len())
+            .field("evaluated_keys", &self.keys.len())
             .field("aggregate_columns", &self.output_aggregates)
             .field("evaluated_aggregates", &self.aggregates.len())
             .field("definition", &"[REDACTED]")
@@ -438,6 +448,7 @@ impl PreparedGraphAggregate {
             keys: keys.to_vec(),
             aggregates,
             key_names,
+            key_output: None,
             aggregate_names,
             output_aggregates,
             offset,
@@ -456,6 +467,15 @@ impl PreparedGraphAggregate {
     }
     #[must_use]
     pub fn key_columns(&self) -> &[String] {
+        match &self.key_output {
+            Some(projection) => &projection.names,
+            None => &self.key_names,
+        }
+    }
+    /// Full grouping schema used by HAVING, ORDER BY and canonical tie breaks.
+    /// Output projection never removes a key from this evaluation schema.
+    #[must_use]
+    pub fn evaluation_key_columns(&self) -> &[String] {
         &self.key_names
     }
     #[must_use]
@@ -471,12 +491,51 @@ impl PreparedGraphAggregate {
         &self.aggregate_names
     }
 
-    /// Return only the first `count` aggregate values, retaining every key.
-    /// All aggregates are still evaluated and remain available to HAVING and
-    /// ORDER BY. This is late projection, not permission to omit source reads,
-    /// arithmetic, failures, or transaction observations. A zero prefix is
-    /// valid; it returns keys without exposing clause-only summary values.
-    /// Replacing this prefix never renumbers the evaluation schema.
+    /// Select grouping-key positions for owned output, in the requested order.
+    /// Indices address evaluation_key_columns(), never a previous projection.
+    /// Repetitions and the empty selection are valid within the fixed column
+    /// bound. All keys still define groups, participate in clauses and break
+    /// sort ties before pagination. Equal projected rows remain separate bag
+    /// occurrences; this operation neither regroups nor performs DISTINCT.
+    /// Hidden keys retain source reads, failures and transaction observations,
+    /// but their payloads are not cloned into the returned rows.
+    pub fn with_key_output_columns(
+        mut self,
+        columns: &[usize],
+    ) -> Result<Self, GraphAggregateBuildError> {
+        // Reserve width for every evaluated aggregate, even a currently hidden
+        // one, so restoring its output prefix cannot invalidate this bound.
+        let width = columns.len().saturating_add(self.aggregates.len());
+        if width > MAX_PATTERN_VERTICES {
+            return Err(GraphAggregateBuildError::TooManyColumns {
+                limit: MAX_PATTERN_VERTICES,
+                observed: width,
+            });
+        }
+        for &column in columns {
+            if column >= self.keys.len() {
+                return Err(GraphAggregateBuildError::UnknownOutputColumn {
+                    column: GraphAggregateColumn::GroupKey(column),
+                });
+            }
+        }
+        self.key_output = if columns.iter().copied().eq(0..self.keys.len()) {
+            None
+        } else {
+            Some(KeyProjection {
+                columns: columns.into(),
+                names: columns.iter().map(|column| self.key_names[*column].clone()).collect(),
+            })
+        };
+        Ok(self)
+    }
+
+    /// Return only the first `count` aggregate values without changing grouping
+    /// or the key output projection. All aggregates remain evaluated and
+    /// available to HAVING and ORDER BY. This is late projection, not permission
+    /// to omit source reads, arithmetic, failures, or transaction observations.
+    /// A zero prefix hides every summary. Replacing this prefix never renumbers
+    /// the evaluation schema.
     pub fn with_aggregate_output_prefix(
         mut self,
         count: usize,
@@ -536,6 +595,13 @@ impl PreparedGraphAggregate {
             bytes.extend_from_slice(b"fgdb:aggregate-output-prefix:v1\0");
             bytes.extend_from_slice(&(self.output_aggregates as u64).to_be_bytes());
         }
+        if let Some(projection) = &self.key_output {
+            bytes.extend_from_slice(b"fgdb:aggregate-key-output:v1\0");
+            bytes.extend_from_slice(&(projection.columns.len() as u64).to_be_bytes());
+            for column in &projection.columns {
+                bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            }
+        }
         bytes
     }
 
@@ -543,7 +609,8 @@ impl PreparedGraphAggregate {
     /// deduct source work/scratch first and add that consumption back to the
     /// returned counters. Count/null/sum semantics are applied per occurrence.
     /// Keyless aggregation yields one zero/null row on empty input; keyed
-    /// aggregation yields no rows. Group ordering precedes output pagination.
+    /// aggregation yields no rows, even when every key is hidden from output.
+    /// Group ordering precedes output pagination and key projection.
     /// Positive topology-only summaries may factor parallel occurrences into
     /// checked weights. Property reads, predicates, scoped matches, and mixed
     /// directed/undirected use of one relation keep ordinary visitation. The
