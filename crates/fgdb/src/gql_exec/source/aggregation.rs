@@ -1,4 +1,4 @@
-//! Aggregate execution over the existing admitted borrowed snapshot source.
+//! Aggregate and set execution over the existing admitted borrowed snapshot source.
 
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};
 use crate::{Database, EmbeddedReadView, GqlError, ReadError};
@@ -104,4 +104,80 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
     usage
         .finish(policy, result)
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))
+}
+
+type SetResult<E> = Result<
+    GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+    GqlQueryError<fgdb_gql::GraphSetExecutionError<E>, Box<asupersync::error::Error>>,
+>;
+
+impl<V: Vfs + Clone> Database<V> {
+    /// Combine complete value relations from one pinned live frontier. Each
+    /// leaf uses the ordinary governed GLA source; work, scratch and source
+    /// admission visits accumulate across operands, not independently per leaf.
+    pub fn execute_graph_set_governed(
+        &self,
+        cx: &QueryCx,
+        query: &fgdb_gql::PreparedGraphSet,
+        policy: GqlQueryPolicy,
+    ) -> SetResult<GqlError> {
+        let as_of = self.frontier().map_err(|error| {
+            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)))
+        })?;
+        self.execute_graph_set_governed_at(cx, query, as_of, policy)
+    }
+
+    /// Pin the same exact historical sequence for every operand. Health and
+    /// frontier fences win over cancellation or a zero resource allowance.
+    pub fn execute_graph_set_governed_at(
+        &self,
+        cx: &QueryCx,
+        query: &fgdb_gql::PreparedGraphSet,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> SetResult<GqlError> {
+        self.ensure_readable()
+            .and_then(|()| self.snapshot.check_frontier(as_of))
+            .map_err(|error| {
+                GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)))
+            })?;
+        cx.with_restriction(|| query.execute_governed(
+            policy,
+            |pattern, allowance| crate::gql_exec::execute_pattern_at(
+                self, pattern, as_of, allowance, || cx.checkpoint(),
+            ),
+            || cx.checkpoint(),
+        ))
+    }
+}
+
+impl EmbeddedReadView {
+    /// Every set operand borrows this same retained immutable generation.
+    pub fn execute_graph_set_governed(
+        &self,
+        cx: &QueryCx,
+        query: &fgdb_gql::PreparedGraphSet,
+        policy: GqlQueryPolicy,
+    ) -> SetResult<GqlError> {
+        self.execute_graph_set_governed_at(cx, query, self.frontier(), policy)
+    }
+
+    pub fn execute_graph_set_governed_at(
+        &self,
+        cx: &QueryCx,
+        query: &fgdb_gql::PreparedGraphSet,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> SetResult<GqlError> {
+        self.snapshot.check_frontier(as_of).map_err(|error| {
+            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)))
+        })?;
+        cx.with_restriction(|| query.execute_governed(
+            policy,
+            |pattern, allowance| crate::gql_exec::execute_pattern_at(
+                self, pattern, as_of, allowance, || cx.checkpoint(),
+            ),
+            || cx.checkpoint(),
+        ))
+    }
 }
