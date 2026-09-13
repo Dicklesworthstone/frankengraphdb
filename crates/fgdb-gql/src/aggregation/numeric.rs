@@ -141,6 +141,19 @@ impl NumericAccumulator {
         }
     }
 
+    /// Retire membership storage after the owning group has consumed its last
+    /// input. The completed sum/count remain available to exact comparisons
+    /// and output. Only the root-group selector calls this; retired heap groups
+    /// are never admitted as mutable input accumulators again.
+    pub(super) fn release_distinct_set(&mut self) {
+        self.seen = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_distinct_values(&self) -> usize {
+        self.seen.as_ref().map_or(0, BTreeSet::len)
+    }
+
     /// Called only for a nonnull argument after the shared source read. A
     /// repeated integer is one value, even when distinct vertices/paths carry
     /// it. Charge before growing the set and mutate arithmetic only afterward:

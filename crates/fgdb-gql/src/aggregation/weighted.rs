@@ -92,6 +92,17 @@ fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
     })
 }
 
+/// The ordinary edge scan walks a BTreeMap of oriented source identities and
+/// completes every descendant scope before advancing its root. Input edge
+/// order and parallel occurrences do not break that property. Arbitrary node
+/// iterators and transformed weighted/factorized plans claim no such ordering.
+/// Keep this capability beside physical-path selection so future rewrites
+/// cannot accidentally enable group retirement under a different root order.
+pub(super) fn root_groups_are_contiguous(aggregate: &PreparedGraphAggregate) -> bool {
+    matches!(aggregate.input.plan().operators().first(), Some(GlaOperator::ScanEdges { .. }))
+        && !eligible(aggregate)
+}
+
 fn normalized(source: VId, relation: RelationId, destination: VId, undirected: bool) -> TopologyKey {
     if undirected && source > destination {
         (destination, relation, source)

@@ -7,6 +7,8 @@
 
 mod distinct;
 mod having;
+mod streaming;
+pub(super) use streaming::RootGroups;
 pub use having::{
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
     MAX_HAVING_INSTRUCTIONS,

@@ -187,6 +187,8 @@ pub enum GraphAggregateError<E> {
     NonIntegerHaving { predicate: usize },
     /// A physical weighted binding did not match its admitted topology.
     MultiplicityUnavailable,
+    /// A physical path violated its ascending, contiguous root-group contract.
+    NonMonotonicGroups,
 }
 
 impl<E> GraphAggregateError<E> {
@@ -204,6 +206,7 @@ impl<E> GraphAggregateError<E> {
                 GraphAggregateError::NonIntegerHaving { predicate }
             }
             Self::MultiplicityUnavailable => GraphAggregateError::MultiplicityUnavailable,
+            Self::NonMonotonicGroups => GraphAggregateError::NonMonotonicGroups,
         }
     }
 }
@@ -229,6 +232,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
             ),
             Self::MultiplicityUnavailable => {
                 f.write_str("aggregate binding has no admitted topology multiplicity")
+            }
+            Self::NonMonotonicGroups => {
+                f.write_str("aggregate input violated its root-group ordering contract")
             }
         }
     }
@@ -633,6 +639,11 @@ impl PreparedGraphAggregate {
     /// directed/undirected use of one relation keep ordinary visitation. The
     /// physical optimization does not change the logical transcript or source
     /// record count; its preprocessing shares the evaluator's resource meter.
+    /// A finite page grouped by the original edge-scan source identity can
+    /// retire each completed group immediately when physical access proves
+    /// contiguity. It retains one active group and a bounded ranked prefix of
+    /// compact summaries; source/index admission and cumulative scratch charges
+    /// remain independent of this live group-state bound.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_governed<'a, E, C>(
         &self,
@@ -669,6 +680,7 @@ impl PreparedGraphAggregate {
                 .charge_event(policy.evaluator, event)
                 .map_err(GqlQueryError::Evaluator)
         };
+        let mut streaming = result::RootGroups::new(self);
         let mut groups: BTreeMap<Vec<ValueRef<'a>>, Vec<Accumulator<'a>>> = BTreeMap::new();
         if self.keys.is_empty() {
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -706,6 +718,9 @@ impl PreparedGraphAggregate {
                         control(GlaExecutionEvent::Work)?;
                     }
                 }
+                if let Some(streaming) = &mut streaming {
+                    return streaming.push(&values[..columns.len()], multiplicity, control);
+                }
                 let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
                 for (at, column) in self.keys.iter().enumerate() {
                     control(GlaExecutionEvent::Work)?;
@@ -726,15 +741,13 @@ impl PreparedGraphAggregate {
                 let state = groups
                     .get_mut(key)
                     .expect("the admitted group was initialized");
-                for (at, (aggregate, state)) in self.aggregates.iter().zip(state).enumerate() {
-                    control(GlaExecutionEvent::Work)?;
-                    let value = aggregate.column.map(|column| values[column]);
-                    update(state, aggregate.function, value, multiplicity, at, control)?;
-                }
-                Ok(())
+                update_group(&self.aggregates, state, &values, multiplicity, control)
             },
         )?;
-        let value = self.finish_groups(&groups, &mut control)?;
+        let value = match streaming {
+            Some(streaming) => streaming.finish(&mut control)?,
+            None => self.finish_groups(&groups, &mut control)?,
+        };
         // Even empty and zero-count outputs observe a terminal checkpoint.
         control(GlaExecutionEvent::Work)?;
         Ok(GqlQueryExecution {
@@ -823,6 +836,21 @@ fn new_group<'a, E>(
         });
     }
     Ok(state)
+}
+
+fn update_group<'a, E, C>(
+    aggregates: &[BoundAggregate],
+    states: &mut [Accumulator<'a>],
+    values: &[ValueRef<'a>],
+    multiplicity: weighted::Multiplicity,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
+    for (at, (aggregate, state)) in aggregates.iter().zip(states).enumerate() {
+        control(GlaExecutionEvent::Work)?;
+        let value = aggregate.column.map(|column| values[column]);
+        update(state, aggregate.function, value, multiplicity, at, control)?;
+    }
+    Ok(())
 }
 
 fn update<'a, E, C>(
