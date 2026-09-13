@@ -3,6 +3,8 @@
 //! text. OPTIONAL exports names; existential names remain local to their body.
 //! Bodies without shared variables are independent, not malformed correlations.
 
+mod mutation;
+
 use super::*;
 use crate::algebra::GraphMatchClause;
 
@@ -230,6 +232,13 @@ pub(super) fn bind_builder(
 
 impl<'a> Parser<'a> {
     pub(super) fn parse_scoped_head(&mut self) -> Result<(), GraphPatternTextError> {
+        self.parse_match_prefix()?;
+        self.word("RETURN")
+    }
+
+    /// Shared read/write MATCH prefix. A mutation attaches its own typed
+    /// terminal clause instead of synthesizing a RETURN statement for parsing.
+    pub(super) fn parse_match_prefix(&mut self) -> Result<(), GraphPatternTextError> {
         self.word("MATCH")?;
         self.positive_pattern()?;
         self.syntax.root_variables = self.syntax.variables.len();
@@ -240,9 +249,8 @@ impl<'a> Parser<'a> {
             self.match_scope(ScopeKind::Optional)?;
         }
         self.syntax.return_at = self.current.at;
-        self.word("RETURN")
+        Ok(())
     }
-
     /// One positive-pattern parser, used at the root and in each scope. WALK
     /// is explicit per MATCH; a bare quantifier never silently adopts repeated-
     /// edge semantics. Counters remain definition-wide while local fields move.

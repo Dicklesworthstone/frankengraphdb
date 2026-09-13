@@ -13,6 +13,7 @@ mod evidence_limits;
 mod evidence_page;
 mod graph_text;
 mod mutation;
+mod mutation_text;
 mod overlay_evidence;
 mod parameters;
 mod parser;
@@ -26,6 +27,7 @@ pub use mutation::{
     GraphMutationIntent, GraphMutationPolicy, GraphMutationStats, GraphMutationValue,
     MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation,
 };
+pub use mutation_text::{GraphMutationTextError, GraphMutationTextErrorKind, PreparedGraphMutationText};
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use set_ops::{
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
