@@ -1,4 +1,4 @@
-//! Bounded connected-pattern text preparation, not a query interpreter.
+//! Bounded graph-pattern text preparation, not a query interpreter.
 //!
 //! Parse once, resolve graph names once, then bind typed numeric arguments into
 //! the existing GraphPatternBuilder. Execution uses the ordinary governed GLA
@@ -261,6 +261,7 @@ struct Edge<'a> {
     relation: Name<'a>,
     direction: GlaDirection,
     destination: Name<'a>,
+    walk: Option<crate::GraphWalkBounds>,
 }
 enum Filter<'a> {
     Boolean {
@@ -734,12 +735,18 @@ impl core::fmt::Debug for PreparedGraphText {
 }
 
 impl PreparedGraphText {
-    /// Prepare the bounded connected-pattern text profile. Keywords are ASCII
+    /// Prepare the bounded graph-pattern text profile. Keywords are ASCII
     /// case-insensitive; names are case-sensitive. RETURN defaults to ALL.
     /// The mandatory root may have AND-conjoined EXISTS/NOT EXISTS { MATCH }
     /// predicates, followed by correlated OPTIONAL MATCH clauses. A WHERE
     /// after OPTIONAL belongs to that child, before null extension. Scoped
-    /// children are positive connected patterns; nested scopes are refused.
+    /// children require a visible correlation; other components may be
+    /// independent. Nested scopes and wholly uncorrelated children refuse.
+    /// Comma-separated components may join through property or identity
+    /// comparisons without an edge between them. Independent scans use one
+    /// complete admitted vertex domain, preserve isolates and bag occurrences,
+    /// and conservatively retain whole-vertex transaction scan observations.
+    /// This is governed nested-loop enumeration, not a hash/FreeJoin optimizer.
     /// Property WHERE operands also accept single-quoted UCS_BASIC strings,
     /// TRUE/FALSE/NULL, and IS [NOT] NULL. Only doubled quotes escape a quote;
     /// quoted keywords and parameter-looking text remain literal payloads.
@@ -752,6 +759,15 @@ impl PreparedGraphText {
     /// ORDER BY selects returned expressions or aliases, with ASC/DESC and
     /// independent NULLS FIRST/LAST (default LAST). Whole rows break ties.
     /// Ordering precedes SKIP/LIMIT; hidden sort expressions are refused.
+    ///
+    /// An explicit MATCH WALK enables bounded `[:R*min..max]`, `[:R*k]` and
+    /// `[:R*..max]` atoms in that MATCH scope. The omitted minimum is one; zero
+    /// is explicit. Bounds are integer literals with 0 <= min <= max <= 1024.
+    /// Repeated edges and vertices contribute distinct walk occurrences; this
+    /// does not select TRAIL/SIMPLE, shortest paths or path-valued projection.
+    /// Endpoint predicates do not filter transit vertices. Every OPTIONAL or
+    /// existential MATCH opts in independently. The same head grammar feeds
+    /// aggregate queries. Bare/open-ended quantifiers and hop parameters refuse.
     ///
     /// Syntax is completely validated before calling `resolve`. Each unique
     /// (kind,name) is resolved once across ALL scopes. Unknown/wrong-kind names
@@ -1280,13 +1296,11 @@ mod tests {
                 .kind,
             GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded { .. })
         ));
-        let disconnected =
-            PreparedGraphText::prepare("MATCH (a)-[:R]->(b),(c)-[:S]->(d) RETURN *", symbols)
-                .unwrap_err();
-        assert_eq!(
-            disconnected.kind,
-            GraphPatternTextErrorKind::Build(PatternBuildError::Disconnected)
-        );
+        let disconnected = query("MATCH (a)-[:R]->(b),(c)-[:S]->(d) RETURN *");
+        assert_eq!(disconnected.columns(), &["a", "b", "c", "d"]);
+        assert!(!disconnected.plan().scans_edges());
+        assert!(disconnected.plan().reads_edges());
+        assert_eq!(disconnected.required_vertex_label(), None);
     }
 
     #[test]

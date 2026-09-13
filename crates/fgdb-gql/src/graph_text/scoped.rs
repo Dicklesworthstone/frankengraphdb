@@ -1,6 +1,9 @@
 //! Scoped MATCH parsing and lowering through the existing positive-pattern compiler.
 //! The lexer and numeric argument table are shared with ordinary and aggregate
 //! text. OPTIONAL exports names; existential names remain local to their body.
+//! Bodies without shared variables are independent, not malformed correlations.
+
+mod mutation;
 
 use super::*;
 use crate::algebra::GraphMatchClause;
@@ -101,15 +104,22 @@ pub(super) fn resolve_pattern<'a>(
         else {
             unreachable!("symbol domain is checked by the shared resolver")
         };
-        built(
-            edge.relation.at,
-            builder.edge(
+        let result = match edge.walk {
+            Some(bounds) => builder.walk(
+                edge.source.text,
+                relation,
+                edge.direction,
+                edge.destination.text,
+                bounds,
+            ),
+            None => builder.edge(
                 edge.source.text,
                 relation,
                 edge.direction,
                 edge.destination.text,
             ),
-        )?;
+        };
+        built(edge.relation.at, result)?;
     }
     let mut numeric = Vec::new();
     for filter in filters {
@@ -249,6 +259,13 @@ pub(super) fn bind_builder(
 
 impl<'a> Parser<'a> {
     pub(super) fn parse_scoped_head(&mut self) -> Result<(), GraphPatternTextError> {
+        self.parse_match_prefix()?;
+        self.word("RETURN")
+    }
+
+    /// Shared read/write MATCH prefix. A mutation attaches its own typed
+    /// terminal clause instead of synthesizing a RETURN statement for parsing.
+    pub(super) fn parse_match_prefix(&mut self) -> Result<(), GraphPatternTextError> {
         self.word("MATCH")?;
         self.positive_pattern()?;
         self.syntax.root_variables = self.syntax.variables.len();
@@ -259,13 +276,14 @@ impl<'a> Parser<'a> {
             self.match_scope(ScopeKind::Optional)?;
         }
         self.syntax.return_at = self.current.at;
-        self.word("RETURN")
+        Ok(())
     }
-
-    /// One fixed-length positive-pattern parser, used at the root and in each
-    /// scope. Counters remain definition-wide even while local fields move.
+    /// One positive-pattern parser, used at the root and in each scope. WALK
+    /// is explicit per MATCH; a bare quantifier never silently adopts repeated-
+    /// edge semantics. Counters remain definition-wide while local fields move.
     fn positive_pattern(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
+        let walk_mode = self.take_word("WALK")?;
         loop {
             let mut left = self.node()?;
             while self.is_punct(b'-') || self.is_punct(b'<') {
@@ -279,6 +297,7 @@ impl<'a> Parser<'a> {
                 self.punct(b'[', "[")?;
                 self.punct(b':', ":")?;
                 let relation = self.name()?;
+                let walk = self.pattern_walk_bounds(walk_mode)?;
                 self.punct(b']', "]")?;
                 self.punct(b'-', "-")?;
                 let outgoing = self.take(b'>')?;
@@ -300,6 +319,7 @@ impl<'a> Parser<'a> {
                     } else {
                         GlaDirection::Undirected
                     },
+                    walk,
                 });
                 self.edge_count += 1;
                 left = right;
@@ -309,6 +329,46 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(())
+    }
+
+    fn walk_hop_literal(&mut self) -> Result<u32, GraphPatternTextError> {
+        let at = self.current.at;
+        let TokenKind::Digits(digits) = self.current.kind else {
+            return Err(error(at, GraphPatternTextErrorKind::Expected("finite integer WALK hop bound")));
+        };
+        let hops = digits.parse::<u32>()
+            .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
+        self.advance()?;
+        Ok(hops)
+    }
+
+    /// Bound metadata is parsed once, before catalog resolution. This profile
+    /// accepts exact *k, inclusive *m..n, and *..n with the conventional minimum
+    /// one. Every upper bound is mandatory and checked, including LIMIT 0.
+    /// No source-text rewriting, guessed bound or implicit truncation occurs.
+    fn pattern_walk_bounds(&mut self, enabled: bool)
+        -> Result<Option<crate::GraphWalkBounds>, GraphPatternTextError> {
+        let at = self.current.at;
+        if !self.take(b'*')? { return Ok(None); }
+        if !enabled {
+            return Err(error(at, GraphPatternTextErrorKind::Expected("explicit MATCH WALK for quantified atoms")));
+        }
+        let (minimum, maximum) = if self.take(b'.')? {
+            self.punct(b'.', "..")?;
+            (1, self.walk_hop_literal()?)
+        } else {
+            let minimum = self.walk_hop_literal()?;
+            let maximum = if self.take(b'.')? {
+                self.punct(b'.', "..")?;
+                self.walk_hop_literal()?
+            } else {
+                minimum
+            };
+            (minimum, maximum)
+        };
+        crate::GraphWalkBounds::new(minimum, maximum).map(Some).map_err(|_| {
+            error(at, GraphPatternTextErrorKind::Expected("finite ordered WALK bounds within the hop limit"))
+        })
     }
 
     // Look ahead through the SAME lexer, without consuming its token budget.
@@ -444,7 +504,6 @@ impl<'a> Parser<'a> {
 
     fn match_scope(&mut self, kind: ScopeKind) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
-        let at = self.current.at;
         self.capacity(
             self.syntax.scopes.len(),
             MAX_PATTERN_IDENTITIES,
@@ -471,19 +530,10 @@ impl<'a> Parser<'a> {
                 return Err(error);
             }
         };
-        let correlated = body.variables.iter().any(|local| {
-            outer
-                .variables
-                .iter()
-                .any(|visible| visible.text == local.text)
-        });
         self.restore_pattern(outer);
-        if !correlated {
-            return Err(error(
-                at,
-                GraphPatternTextErrorKind::Build(PatternBuildError::Disconnected),
-            ));
-        }
+        // The typed scope compiler distinguishes shared-name correlations
+        // from a genuinely independent child. Never invent an outer anchor or
+        // expose existential locals merely to force a connected shape.
         if matches!(kind, ScopeKind::Optional) {
             for variable in &body.variables {
                 if !self

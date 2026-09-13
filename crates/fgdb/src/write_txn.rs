@@ -17,6 +17,7 @@ include!("write_txn_parts/gql_edge_match.rs");
 include!("write_txn_parts/gql_api.rs");
 include!("write_txn_parts/owned_prepared.rs");
 include!("write_txn_parts/limited_gql.rs");
+include!("write_txn_parts/graph_mutations.rs");
 include!("write_txn_parts/overlay_evidence.rs");
 include!("write_txn_parts/portable_evidence.rs");
 include!("write_txn_parts/evidence_limits.rs");

@@ -12,11 +12,34 @@ mod evidence_cursor;
 mod evidence_limits;
 mod evidence_page;
 mod graph_text;
+mod integer_expression;
+mod mutation;
+mod mutation_text;
 mod overlay_evidence;
 mod parameters;
 mod parser;
 mod prepared;
+mod set_ops;
+mod set_text;
+mod walk;
 
+pub use integer_expression::{
+    GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerError, GraphIntegerErrorKind,
+    GraphIntegerEvaluationError, GraphIntegerExpression, GraphIntegerOp, GraphIntegerUnary,
+    MAX_GRAPH_INTEGER_INSTRUCTIONS,
+};
+pub use mutation::{
+    GraphMutationAction, GraphMutationBatch, GraphMutationBuildError, GraphMutationError,
+    GraphMutationIntent, GraphMutationPolicy, GraphMutationStats, GraphMutationValue,
+    MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation,
+};
+pub use mutation_text::{GraphMutationTextError, GraphMutationTextErrorKind, PreparedGraphMutationText};
+pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
+pub use set_ops::{
+    GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
+    GraphSetQuantifier, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
+};
+pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};
 pub use aggregation::{
     GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
     GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder, GraphAggregateRow,
@@ -26,7 +49,7 @@ pub use aggregation::{
 };
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
-    GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GlaLimitDimension, GlaLimitExceeded, GqlQueryPolicy, GqlQueryExecution, GqlQueryError,
 };
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,
@@ -34,7 +57,8 @@ pub use evidence_artifact::{
 };
 pub use evidence_cursor::{
     GqlEvidenceCursor, GqlEvidenceCursorError, GqlEvidenceCursorLimitDimension,
-    GqlEvidenceCursorLimitExceeded, GqlEvidenceCursorLimits, GqlEvidenceCursorState,
+    GqlEvidenceCursorLimitExceeded, GqlEvidenceCursorLimits,
+    GqlEvidenceCursorState,
 };
 pub use evidence_limits::{
     GqlEvidenceLimitDimension, GqlEvidenceLimitExceeded, GqlEvidenceLimitedAuditError,

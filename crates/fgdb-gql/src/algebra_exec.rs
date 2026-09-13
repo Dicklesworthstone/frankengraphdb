@@ -222,6 +222,11 @@ fn build_index<E>(
             relation,
             direction,
             ..
+        }
+        | GlaOperator::VarLengthExpand {
+            relation,
+            direction,
+            ..
         } = operator
         {
             index.entry((*relation, *direction)).or_default();
@@ -268,6 +273,9 @@ struct Execution<F, C, P, Row> {
     active_probe: Option<usize>,
     probe_matches: [bool; crate::algebra::MAX_PATTERN_IDENTITIES],
     optional_matches: [bool; crate::algebra::MAX_PATTERN_IDENTITIES],
+    // One admitted identity stream, shared by all independent scan frames.
+    // Never materialize a Cartesian intermediate or reopen a source per row.
+    vertex_domain: Vec<VId>,
 }
 
 impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
@@ -288,6 +296,22 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
         };
         (self.control)(GlaExecutionEvent::Work)?;
         match operator {
+            GlaOperator::ScanVertices => {
+                for at in 0..self.vertex_domain.len() {
+                    let vid = self.vertex_domain[at];
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    bindings.push(Some(vid));
+                    let result = self.visit(operators, ordinal + 1, bindings, index);
+                    let _ = bindings.pop();
+                    result?;
+                    if self
+                        .active_probe
+                        .is_some_and(|group| self.probe_matches[group])
+                    {
+                        break;
+                    }
+                }
+            }
             GlaOperator::Select { slot, predicates } => {
                 let Some(vid) = bindings.get(slot.ordinal() as usize).copied().flatten() else {
                     return Ok(());
@@ -369,6 +393,35 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                     }
                 }
             }
+            GlaOperator::VarLengthExpand {
+                source,
+                relation,
+                direction,
+                bounds,
+            } => {
+                let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten()
+                else {
+                    return Ok(());
+                };
+                let mut cursor = crate::GraphWalkCursor::new(
+                    source,
+                    *bounds,
+                    index.get(&(*relation, *direction)),
+                    &mut self.control,
+                )?;
+                while let Some(destination) = cursor.next_with_control(&mut self.control)? {
+                    // The hop frontier is private to the cursor. Only the
+                    // endpoint occupies the compiler-assigned binding slot.
+                    // Rejecting it below must not prune longer walks through it.
+                    bindings.push(Some(destination));
+                    let result = self.visit(operators, ordinal + 1, bindings, index);
+                    let _ = bindings.pop();
+                    result?;
+                    if self.active_probe.is_some_and(|group| self.probe_matches[group]) {
+                        break;
+                    }
+                }
+            }
             GlaOperator::Probe { group, end, anti } => {
                 let group = *group as usize;
                 let previous = self.active_probe;
@@ -434,7 +487,6 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 let _ = (self.project)(operator, bindings, &mut self.projected, &mut self.control)?;
             }
             GlaOperator::Empty
-            | GlaOperator::ScanVertices
             | GlaOperator::ScanEdges { .. }
             | GlaOperator::Distinct
             | GlaOperator::OrderByVertexId
@@ -549,6 +601,18 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         } else {
             Index::new()
         };
+        let repeated_vertex_scan = operators
+            .iter()
+            .skip(1)
+            .any(|operator| matches!(operator, GlaOperator::ScanVertices));
+        let mut vertices = vertices.into_iter();
+        let mut vertex_domain = Vec::new();
+        if repeated_vertex_scan {
+            for vid in vertices.by_ref() {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                vertex_domain.push(vid);
+            }
+        }
         // Only the compiler-owned terminal DISTINCT selects duplicate removal.
         let distinct = matches!(operators.iter().rev().nth(2), Some(GlaOperator::Distinct));
         let mut execution = Execution {
@@ -560,9 +624,13 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             active_probe: None,
             probe_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
             optional_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
+            vertex_domain,
         };
         let mut bindings = Vec::new();
         match operators.first() {
+            Some(GlaOperator::ScanVertices) if repeated_vertex_scan => {
+                execution.visit(operators, 0, &mut bindings, &index)?;
+            }
             Some(GlaOperator::ScanVertices) => {
                 for vid in vertices {
                     (execution.control)(GlaExecutionEvent::Work)?;
