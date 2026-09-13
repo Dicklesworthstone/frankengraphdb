@@ -5,7 +5,8 @@ use crate::algebra::existence::GraphMatchKind;
 use crate::algebra::{GraphExistence, GraphMatchClause};
 
 impl GraphPatternBuilder {
-    /// Project outer values subject to correlated EXISTS / NOT EXISTS patterns.
+    /// Project outer values subject to EXISTS / NOT EXISTS patterns.
+    /// Shared names correlate; a child without shared names is independent.
     /// Inner local names never become outer projections or later correlations.
     pub fn prepare_values_with_existence(
         &self,
@@ -32,17 +33,19 @@ impl GraphPatternBuilder {
         self.prepare_values_with_clauses(&clauses, columns, offset, count)
     }
 
-    /// Compile ordered correlated OPTIONAL, EXISTS and NOT EXISTS clauses.
+    /// Compile ordered OPTIONAL, EXISTS and NOT EXISTS clauses.
     /// OPTIONAL exports new variables, nullable when its complete child has no
     /// match. Later clauses may correlate those variables but cannot rebind a
     /// null. EXISTS locals stay private. A complete optional witness remains a
     /// witness even if a later clause rejects it. ALL/DISTINCT and pagination
     /// apply only to the final correlated projection.
     ///
-    /// Each child needs an already visible correlation; other components may
-    /// scan independently. Definition-wide edge/predicate/identity/visible-name
-    /// and binding-frame caps apply; clause count is capped at 64. No runtime
-    /// input constructs a GLA scope.
+    /// Shared names are correlations; a child with none scans independently.
+    /// Independent OPTIONAL preserves the product of actual occurrences and
+    /// null-extends once on absence; independent EXISTS never multiplies rows.
+    /// Definition-wide edge/predicate/identity/visible-name and binding-frame
+    /// caps apply; clause count is capped at 64. No runtime input constructs a
+    /// GLA scope. No result cache changes source-error or cancellation order.
     pub fn prepare_values_with_clauses(
         &self,
         clauses: &[GraphMatchClause<'_>],
@@ -99,8 +102,8 @@ impl GraphPatternBuilder {
                     .map(|outer| (at, outer))
                     .or_else(|| correlation(edge.destination).map(|outer| (at, outer)))
             });
-            // A visible isolated variable is also a valid correlation anchor.
-            // Select it by index, without renaming/reindexing any expressions.
+            // Keep the old anchor choice for correlated definitions. Without
+            // any shared name, the child's own root supplies its first binding.
             let (outer_at, root) = if let Some((edge_at, outer_at)) = edge_anchor {
                 inner.edges.swap(0, edge_at);
                 if inner.variables[inner.edges[0].source].name != scope.variables[outer_at].name {
@@ -108,12 +111,13 @@ impl GraphPatternBuilder {
                     core::mem::swap(&mut edge.source, &mut edge.destination);
                     edge.direction = super::super::reverse(edge.direction);
                 }
-                (outer_at, None)
+                (Some(outer_at), None)
+            } else if let Some((inner_at, outer_at)) = (0..inner.variables.len())
+                .find_map(|at| correlation(at).map(|outer| (at, outer)))
+            {
+                (Some(outer_at), Some(inner_at))
             } else {
-                let (inner_at, outer_at) = (0..inner.variables.len())
-                    .find_map(|at| correlation(at).map(|outer| (at, outer)))
-                    .ok_or(PatternBuildError::Disconnected)?;
-                (outer_at, Some(inner_at))
+                (None, None)
             };
             let (body, inner_slots) = inner.compile_with_root(root)?;
             let inner_width = super::super::binding_width(&body);
@@ -150,18 +154,21 @@ impl GraphPatternBuilder {
                     anti: clause.kind == GraphMatchKind::NotExists,
                 }
             });
-            // An explicit inner copy preserves outer labels/identities and
-            // prevents a child predicate becoming a mandatory outer-scan label.
-            operators.push(GlaOperator::BindVertex {
-                source: scope_slots[outer_at],
-            });
             let base = width;
             let map = |slot: BindingSlot| BindingSlot(base + slot.ordinal());
-            let mut available = 1_u32;
-            emit_correlations(&mut operators, &correlations, 0, map);
+            let mut available = 0_u32;
+            if let Some(outer_at) = outer_at {
+                // Copy only an actual correlation. An unrelated nullable outer
+                // variable cannot suppress an independent child's witnesses.
+                operators.push(GlaOperator::BindVertex {
+                    source: scope_slots[outer_at],
+                });
+                emit_correlations(&mut operators, &correlations, 0, map);
+                available = 1;
+            }
             for (at, operator) in body.into_iter().enumerate() {
                 match operator {
-                    GlaOperator::ScanVertices if at == 0 => {}
+                    GlaOperator::ScanVertices if at == 0 && outer_at.is_some() => {}
                     GlaOperator::ScanVertices => {
                         // An already visible variable is a bound correlation,
                         // not a fresh Cartesian dimension. A null correlation
@@ -180,6 +187,13 @@ impl GraphPatternBuilder {
                         relation,
                         direction,
                     } if at == 0 => {
+                        if outer_at.is_none() {
+                            // A fixed edge root owns two slots. In a scope,
+                            // create its independent source then append its
+                            // destination through the ordinary expansion path.
+                            operators.push(GlaOperator::ScanVertices);
+                            available += 1;
+                        }
                         operators.push(GlaOperator::Expand {
                             source: BindingSlot(base),
                             relation,
