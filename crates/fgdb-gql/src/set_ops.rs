@@ -13,6 +13,7 @@ use crate::algebra::{GraphOrderError, GraphValueOrder, GraphValueRow, PreparedGr
 use crate::{GqlBudgetDimension, GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 
 pub const MAX_GRAPH_SET_OPERANDS: usize = 32;
+pub const MAX_GRAPH_SET_DEPTH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphSetOperation { Union, Intersect, Except }
@@ -26,6 +27,7 @@ pub enum GraphSetColumnType { Vertex, Scalar }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphSetBuildError {
     TooManyOperands { limit: usize, observed: usize },
+    TooDeep { limit: usize, observed: usize },
     ColumnCount { left: usize, right: usize },
     ColumnType { column: usize, left: GraphSetColumnType, right: GraphSetColumnType },
 }
@@ -64,6 +66,7 @@ type SetResult<T, E, C> = Result<T, GqlQueryError<GraphSetExecutionError<E>, C>>
 #[derive(Clone, PartialEq, Eq)]
 enum SetNode {
     Pattern(PreparedGraphPattern<GraphValueRow>),
+    Scope(Box<PreparedGraphSet>),
     Binary {
         operation: GraphSetOperation,
         quantifier: GraphSetQuantifier,
@@ -74,13 +77,14 @@ enum SetNode {
 
 /// Immutable relational composition. It deliberately does not expose a fake
 /// binding pattern: a set result has values, not the operands' private slots.
-/// The finite operand cap also bounds definition recursion and drop depth.
+/// Operand and depth caps also bound recursive compilation, execution and drop.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphSet {
     node: SetNode,
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
     operands: usize,
+    depth: usize,
     order: Vec<GraphValueOrder>,
     offset: u64,
     count: Option<u64>,
@@ -101,10 +105,15 @@ impl From<PreparedGraphPattern<GraphValueRow>> for PreparedGraphSet {
             ValueProjection::Property { .. } => GraphSetColumnType::Scalar,
         }).collect();
         Self {
-            columns: pattern.columns().to_vec(), types, operands: 1,
+            columns: pattern.columns().to_vec(), types, operands: 1, depth: 1,
             node: SetNode::Pattern(pattern), order: Vec::new(), offset: 0, count: None,
         }
     }
+}
+fn check_depth(depth: usize) -> Result<(), GraphSetBuildError> {
+    if depth > MAX_GRAPH_SET_DEPTH {
+        Err(GraphSetBuildError::TooDeep { limit: MAX_GRAPH_SET_DEPTH, observed: depth })
+    } else { Ok(()) }
 }
 impl PreparedGraphSet {
     /// Combine exact, position-compatible relations. Heterogeneous canonical
@@ -119,6 +128,8 @@ impl PreparedGraphSet {
                 limit: MAX_GRAPH_SET_OPERANDS, observed: operands,
             });
         }
+        let depth = 1 + self.depth.max(right.depth);
+        check_depth(depth)?;
         if self.types.len() != right.types.len() {
             return Err(GraphSetBuildError::ColumnCount { left: self.types.len(), right: right.types.len() });
         }
@@ -126,8 +137,22 @@ impl PreparedGraphSet {
             if left != right { return Err(GraphSetBuildError::ColumnType { column, left, right }); }
         }
         Ok(Self {
-            columns: self.columns.clone(), types: self.types.clone(), operands,
+            columns: self.columns.clone(), types: self.types.clone(), operands, depth,
             node: SetNode::Binary { operation, quantifier, left: Box::new(self), right: Box::new(right) },
+            order: Vec::new(), offset: 0, count: None,
+        })
+    }
+
+    /// Establish a new relational scope without replacing the input's order or
+    /// page. An outer ORDER BY or LIMIT must operate on the already selected
+    /// inner rows, not overwrite the inner selection. Sources are not copied or
+    /// rerun. Without an outer order, this scope retains the input's ordering.
+    pub fn nested(self) -> Result<Self, GraphSetBuildError> {
+        let depth = self.depth + 1;
+        check_depth(depth)?;
+        Ok(Self {
+            columns: self.columns.clone(), types: self.types.clone(),
+            operands: self.operands, depth, node: SetNode::Scope(Box::new(self)),
             order: Vec::new(), offset: 0, count: None,
         })
     }
@@ -184,6 +209,10 @@ impl PreparedGraphSet {
                 bytes.push(match operation { GraphSetOperation::Union => 0, GraphSetOperation::Intersect => 1, GraphSetOperation::Except => 2 });
                 bytes.push(match quantifier { GraphSetQuantifier::All => 0, GraphSetQuantifier::Distinct => 1 });
                 left.append_transcript(bytes); right.append_transcript(bytes);
+            }
+            SetNode::Scope(input) => {
+                bytes.push(2);
+                input.append_transcript(bytes);
             }
         }
         bytes.extend_from_slice(&(self.order.len() as u64).to_be_bytes());

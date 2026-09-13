@@ -141,6 +141,7 @@ where
                 &mut |a, b, control| compare_rows(a, b, &[], control))?;
             rows
         }
+        SetNode::Scope(input) => run(input, source, meter, operand)?,
         SetNode::Binary { operation, quantifier, left, right } => {
             let left = run(left, source, meter, operand)?;
             let right = run(right, source, meter, operand)?;
@@ -201,6 +202,8 @@ fn compare_rows<E>(a: &GraphValueRow, b: &GraphValueRow, order: &[GraphValueOrde
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fgdb_types::VId;
+
     #[test]
     fn cumulative_counters_refuse_overflow_without_mutation() {
         let mut meter = Meter { policy: GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
@@ -217,5 +220,42 @@ mod tests {
         assert!(matches!(meter.absorb::<(), ()>(&input, 0),
             Err(GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow { .. }))));
         assert_eq!(meter.rows.snapshot_records, u64::MAX);
+    }
+
+    fn scope_leaf() -> PreparedGraphSet {
+        let mut builder = crate::algebra::GraphPatternBuilder::new();
+        builder.vertex("n").unwrap();
+        builder.prepare_values(&[crate::algebra::GraphColumn::vertex("n", "n")], 0, None)
+            .unwrap().with_duplicates().into()
+    }
+
+    #[test]
+    fn nested_pages_select_before_outer_reordering_without_repeating_the_source() {
+        let inner = scope_leaf().with_order_by(&[GraphValueOrder::descending(0)]).unwrap()
+            .with_page(1, Some(3));
+        let query = inner.clone().nested().unwrap()
+            .with_order_by(&[GraphValueOrder::ascending(0)]).unwrap().with_page(0, Some(1));
+        assert_ne!(query.canonical_bytes(), inner.canonical_bytes());
+        let mut calls = 0;
+        let policy = GqlQueryPolicy::new(5, 1, 100_000, 100_000);
+        let result = query.execute_governed(policy, |pattern, remaining| {
+            calls += 1;
+            pattern.plan().execute_governed_with_properties(5, (1..=5).map(VId), [],
+                |_, _| Ok::<_, ()>(true), |_, _| Ok(None), remaining, || Ok::<_, ()>(()))
+        }, || Ok::<_, ()>(())).unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result.rows.snapshot_records, 5);
+        assert_eq!(result.value[0].get(0).unwrap().as_vertex(), Some(VId(2)));
+    }
+
+    #[test]
+    fn unary_scopes_and_binary_combinations_share_the_definition_depth_limit() {
+        let leaf = scope_leaf();
+        let mut deepest = leaf.clone();
+        for _ in 1..MAX_GRAPH_SET_DEPTH { deepest = deepest.nested().unwrap(); }
+        assert_eq!(deepest.operand_count(), 1);
+        assert!(matches!(deepest.clone().nested(), Err(GraphSetBuildError::TooDeep { .. })));
+        assert!(matches!(leaf.combine(GraphSetOperation::Union, GraphSetQuantifier::All, deepest),
+            Err(GraphSetBuildError::TooDeep { .. })));
     }
 }
