@@ -2,6 +2,9 @@
 //! No extra lexer, source query, catalog lookup or text interpolation at bind.
 //! Output references and private aggregate calls use the SAME resolver and
 //! bounded registry as ORDER BY. Hidden grouping keys keep evaluation indices.
+//! IN/NOT IN list constructors and BETWEEN/NOT BETWEEN inclusive ranges lower
+//! to the existing eager three-valued comparisons. An operand can be a public
+//! alias, grouping expression, hidden aggregate, scalar literal or parameter.
 
 use super::*;
 use crate::{GraphHavingExpression, GraphHavingOp, GraphHavingOperand, MAX_HAVING_INSTRUCTIONS};
@@ -140,9 +143,19 @@ impl HavingParser<'_, '_> {
         // Preserve an output named `not` when followed by an operand suffix.
         // NOT (...) or NOT <condition> is unary syntax, not a function call.
         let not_reference = if self.parser.is_word("NOT") {
-            let next = self.parser.lexer.clone().next()?;
+            let mut lexer = self.parser.lexer.clone();
+            let next = lexer.next()?;
+            let named = matches!(self.parser.current.kind, TokenKind::Word(word)
+                if self.returned.iter().any(|item| item.alias.text == word)
+                    || self.groups.iter().any(|group| group.property.is_none()
+                        && group.variable.text == word));
             matches!(next.kind, TokenKind::Punct(b'.' | b'=' | b'<' | b'>' | b'!'))
-                || matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IS"))
+                || matches!(next.kind, TokenKind::Word(word)
+                    if word.eq_ignore_ascii_case("IS") || word.eq_ignore_ascii_case("IN")
+                        || word.eq_ignore_ascii_case("BETWEEN"))
+                || (named && matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT"))
+                    && matches!(lexer.next()?.kind, TokenKind::Word(word)
+                        if word.eq_ignore_ascii_case("IN") || word.eq_ignore_ascii_case("BETWEEN")))
         } else { false };
         if self.parser.is_word("NOT") && !not_reference {
             self.parser.advance()?;
@@ -195,6 +208,9 @@ impl HavingParser<'_, '_> {
             self.parser.word("NULL")?;
             return self.leaf(Op::IsNull { operand: left, is_null: !negate });
         }
+        if self.parser.is_word("IN") || self.parser.is_word("BETWEEN") || self.parser.is_word("NOT") {
+            return self.membership_or_range(left);
+        }
         if matches!(self.parser.current.kind, TokenKind::Punct(b'=' | b'<' | b'>' | b'!')) {
             let comparison = self.parser.comparison()?;
             let right = self.operand()?;
@@ -209,5 +225,151 @@ impl HavingParser<'_, '_> {
             return self.leaf(Op::Truth(truth));
         }
         Err(error(at, GraphPatternTextErrorKind::Expected("HAVING comparison or null test")))
+    }
+
+    /// Reuse resolved operands, not text. A left parameter or hidden aggregate
+    /// is registered once, even when its immutable value is compared with many
+    /// members. Cloning a reference does not create another aggregate state.
+    fn membership_or_range(&mut self, left: Operand) -> Result<(), GraphPatternTextError> {
+        self.compound = true;
+        let negate = self.parser.take_word("NOT")?;
+        if self.parser.take_word("IN")? {
+            self.parser.punct(b'[', "[")?;
+            if self.parser.take(b']')? {
+                // Do not prune the left operand's hidden aggregate or its source
+                // errors merely because membership in an empty list is false.
+                self.leaf(Op::IsNull { operand: left, is_null: true })?;
+                self.leaf(Op::Truth(Some(false)))?;
+                self.emit(Op::And)?;
+            } else {
+                let mut first = true;
+                loop {
+                    self.parser.capacity(self.leaves, MAX_AGGREGATE_FILTERS,
+                        crate::algebra::PatternLimitDimension::Predicates)?;
+                    let right = self.operand()?;
+                    self.leaf(Op::Compare {
+                        left: left.clone(), comparison: IntegerComparison::Equal, right,
+                    })?;
+                    if !first { self.emit(Op::Or)?; }
+                    first = false;
+                    if self.parser.take(b']')? { break; }
+                    self.parser.punct(b',', ", or ]")?;
+                }
+            }
+        } else {
+            self.parser.word("BETWEEN")?;
+            let lower = self.operand()?;
+            self.leaf(Op::Compare {
+                left: left.clone(), comparison: IntegerComparison::GreaterOrEqual, right: lower,
+            })?;
+            // Consume only the range delimiter; the outer conjunction remains
+            // the owner of any subsequent AND. No symmetric-bound reordering.
+            self.parser.word("AND")?;
+            let upper = self.operand()?;
+            self.leaf(Op::Compare {
+                left, comparison: IntegerComparison::LessOrEqual, right: upper,
+            })?;
+            self.emit(Op::And)?;
+        }
+        if negate { self.emit(Op::Not)?; }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod compound_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        }
+    }
+
+    fn prepare(predicate: &str) -> PreparedGraphAggregate {
+        PreparedGraphAggregateText::prepare(
+            &format!("MATCH (n) RETURN COUNT(*) AS c HAVING {predicate}"), symbols,
+        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+    }
+
+    #[test]
+    fn membership_and_ranges_reuse_the_exact_having_program() {
+        for (compound, expanded) in [
+            ("c IN [0, 1, NULL]", "(c = 0 OR c = 1 OR c = NULL)"),
+            ("c NOT IN [1, 2]", "NOT (c = 1 OR c = 2)"),
+            ("c BETWEEN -1 AND 3", "(c >= -1 AND c <= 3)"),
+            ("c NOT BETWEEN 1 AND 2", "NOT (c >= 1 AND c <= 2)"),
+            ("c IN []", "(c IS NULL AND FALSE)"),
+            ("c NOT IN []", "NOT (c IS NULL AND FALSE)"),
+        ] {
+            assert_eq!(prepare(compound), prepare(expanded), "{compound}");
+        }
+    }
+
+    #[test]
+    fn hidden_aggregate_operands_share_one_summary_and_remain_hidden() {
+        for (compound, expanded) in [
+            ("MIN(n.p) IN [1, 2]", "(MIN(n.p) = 1 OR MIN(n.p) = 2)"),
+            ("c IN [MIN(n.p), MAX(n.p)]", "(c = MIN(n.p) OR c = MAX(n.p))"),
+            ("c BETWEEN MIN(n.p) AND MAX(n.p)", "(c >= MIN(n.p) AND c <= MAX(n.p))"),
+            ("MIN(n.p) NOT IN []", "NOT (MIN(n.p) IS NULL AND FALSE)"),
+        ] {
+            assert_eq!(prepare(compound), prepare(expanded), "{compound}");
+        }
+        let template = PreparedGraphAggregateText::prepare(
+            "MATCH (n) RETURN COUNT(*) AS c HAVING MIN(n.p) IN [1, 2, 3]", symbols,
+        ).unwrap();
+        assert_eq!(template.columns(), &["c"]);
+        assert_eq!(template.output_slots().len(), 1);
+    }
+
+    #[test]
+    fn left_parameter_occurrences_are_not_multiplied_by_lowering() {
+        let calls = Cell::new(0);
+        let template = PreparedGraphAggregateText::prepare(
+            "MATCH (n) RETURN COUNT(*) AS c HAVING $x IN [c, $x] AND MIN(n.p) BETWEEN $lo AND $hi",
+            |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
+        ).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(template.parameter_schema()[0].occurrences, 2);
+        let arguments = GqlParameters::new().with_int64("x", 1).unwrap()
+            .with_int64("lo", i64::MIN).unwrap().with_int64("hi", i64::MAX).unwrap();
+        let bound = template.bind_parameters(&arguments).unwrap();
+        assert_eq!(bound, template.bind_parameters(&arguments).unwrap());
+        assert_eq!(calls.get(), 1);
+        assert!(matches!(template.bind_parameters(&GqlParameters::new()).unwrap_err().kind,
+            GraphPatternTextErrorKind::MissingParameter));
+    }
+
+    #[test]
+    fn not_alias_and_prefix_negation_keep_their_distinct_roles() {
+        for predicate in ["not IN [1]", "not NOT IN [1]", "NOT not IN [1]",
+            "not BETWEEN 0 AND 2", "not NOT BETWEEN 0 AND 2", "NOT not BETWEEN 0 AND 2"] {
+            PreparedGraphAggregateText::prepare(
+                &format!("MATCH (n) RETURN COUNT(*) AS not HAVING {predicate}"), symbols,
+            ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        }
+    }
+
+    #[test]
+    fn malformed_and_excessive_membership_refuses_before_catalog_access() {
+        for predicate in ["MIN(n.p) IN [1,]", "MIN(n.p) IN [1 2]", "MIN(n.p) IN $list",
+            "MIN(n.p) BETWEEN 1", "MIN(n.p) NOT BETWEEN 1 OR 2"] {
+            let calls = Cell::new(0);
+            assert!(PreparedGraphAggregateText::prepare(
+                &format!("MATCH (n) RETURN COUNT(*) AS c HAVING {predicate}"),
+                |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
+            ).is_err(), "{predicate}");
+            assert_eq!(calls.get(), 0, "{predicate}");
+        }
+        let members = vec!["1"; MAX_AGGREGATE_FILTERS + 1].join(",");
+        let calls = Cell::new(0);
+        assert!(PreparedGraphAggregateText::prepare(
+            &format!("MATCH (n) RETURN COUNT(*) AS c HAVING MIN(n.p) IN [{members}]"),
+            |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
+        ).is_err());
+        assert_eq!(calls.get(), 0);
     }
 }
