@@ -412,16 +412,11 @@ fn definitions_are_scoped_bounded_and_change_logical_identity() {
     );
     let mut uncorrelated = GraphPatternBuilder::new();
     uncorrelated.vertex("z").unwrap();
-    assert_eq!(
-        base.prepare_values_with_existence(
-            &[GraphExistence::exists(&uncorrelated)],
-            &columns,
-            0,
-            None
-        )
-        .unwrap_err(),
-        PatternBuildError::Disconnected
-    );
+    let independent = base.prepare_values_with_existence(
+        &[GraphExistence::exists(&uncorrelated)], &columns, 0, None,
+    ).unwrap().with_duplicates();
+    assert_eq!(run(&independent, &[VId(9), VId(10)], &[]), vec![VId(9), VId(10)]);
+    assert!(run(&independent, &[], &[]).is_empty());
     assert!(matches!(
         base.prepare_values_with_existence(&[GraphExistence::exists(&base); 65], &columns, 0, None),
         Err(PatternBuildError::LimitExceeded { .. })
