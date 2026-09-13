@@ -179,6 +179,16 @@ pub enum GlaOperator {
         relation: RelationId,
         direction: GlaDirection,
     },
+    /// Append one endpoint for every WALK occurrence in the inclusive finite
+    /// interval. Repeated edges/vertices are allowed. Endpoint predicates apply
+    /// after expansion; intermediate vertices are not endpoint-filtered.
+    /// No path capture, shortest selector, TRAIL or SIMPLE mode is implied.
+    VarLengthExpand {
+        source: BindingSlot,
+        relation: RelationId,
+        direction: GlaDirection,
+        bounds: crate::GraphWalkBounds,
+    },
     /// Evaluate the enclosed binding scope once per outer occurrence. The
     /// first complete witness resolves the predicate; it is not an output row.
     Probe {
@@ -432,7 +442,28 @@ impl GlaPlan {
 impl<Row> GlaPlan<Row> {
     // This stays private to the algebra compiler and its child modules. Row and
     // terminal operator shape must be chosen together, not supplied by callers.
-    fn from_operators(operators: Vec<GlaOperator>) -> Self {
+    fn from_operators(mut operators: Vec<GlaOperator>) -> Self {
+        // WALK plans use the existing two-table admission path. It retains all
+        // intermediate vertex values and isolated zero-hop roots, and records
+        // both vertex and topology observations in transaction sources. This
+        // conservative scan-backed access is not the edge-only candidate path.
+        // Expanding the root adds no binding slot: ScanEdges already bound two.
+        if operators.iter().any(|op| matches!(op, GlaOperator::VarLengthExpand { .. })) {
+            if let Some(GlaOperator::ScanEdges { relation, direction }) = operators.first().cloned() {
+                operators[0] = GlaOperator::ScanVertices;
+                operators.insert(1, GlaOperator::Expand {
+                    source: BindingSlot(0), relation, direction,
+                });
+                // Every scope is after the root. Keep compiler-owned jump
+                // targets aligned with the one newly inserted instruction.
+                for op in &mut operators {
+                    match op {
+                        GlaOperator::Probe { end, .. } | GlaOperator::Optional { end, .. } => *end += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
         Self {
             operators,
             output: PhantomData,
@@ -457,6 +488,7 @@ impl<Row> GlaPlan<Row> {
             matches!(
                 operator,
                 GlaOperator::ScanEdges { .. } | GlaOperator::Expand { .. }
+                    | GlaOperator::VarLengthExpand { .. }
             )
         })
     }
@@ -551,6 +583,14 @@ impl<Row> GlaPlan<Row> {
                     bytes.extend_from_slice(&source.0.to_be_bytes());
                     bytes.extend_from_slice(&relation.0.to_be_bytes());
                     bytes.push(direction_tag(*direction));
+                }
+                GlaOperator::VarLengthExpand { source, relation, direction, bounds } => {
+                    bytes.push(22);
+                    bytes.extend_from_slice(&source.0.to_be_bytes());
+                    bytes.extend_from_slice(&relation.0.to_be_bytes());
+                    bytes.push(direction_tag(*direction));
+                    bytes.extend_from_slice(&bounds.minimum().to_be_bytes());
+                    bytes.extend_from_slice(&bounds.maximum().to_be_bytes());
                 }
                 GlaOperator::Project { slot } => {
                     bytes.push(6);

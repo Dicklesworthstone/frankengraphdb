@@ -115,7 +115,7 @@ impl<'a> GraphWalkCursor<'a> {
                 }
             }
             if depth == self.bounds.maximum || frame.next == frame.neighbors.len() {
-                self.stack.pop();
+                let _ = self.stack.pop();
                 continue;
             }
             let destination = frame.neighbors[frame.next];

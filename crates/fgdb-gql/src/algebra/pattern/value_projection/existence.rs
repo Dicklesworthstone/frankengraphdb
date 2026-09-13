@@ -183,6 +183,24 @@ impl GraphPatternBuilder {
                         emit_correlations(&mut operators, &correlations, available, map);
                         available += 1;
                     }
+                    GlaOperator::VarLengthExpand {
+                        source,
+                        relation,
+                        direction,
+                        bounds,
+                    } => {
+                        // A whole bounded walk appends one endpoint, not one
+                        // slot per hop. Correlations constrain that endpoint
+                        // after enumeration without filtering its transit nodes.
+                        operators.push(GlaOperator::VarLengthExpand {
+                            source: map(source),
+                            relation,
+                            direction,
+                            bounds,
+                        });
+                        emit_correlations(&mut operators, &correlations, available, map);
+                        available += 1;
+                    }
                     GlaOperator::Select { slot, predicates } => {
                         operators.push(GlaOperator::Select {
                             slot: map(slot),

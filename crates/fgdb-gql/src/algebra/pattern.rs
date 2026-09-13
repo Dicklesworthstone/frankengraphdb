@@ -1,6 +1,6 @@
 //! Connected schema-bound patterns lowered to the shared GLA evaluator.
-//! Projection may return a vertex-ID set or correlated distinct binding rows.
-//! This is a typed Rust surface, not another text grammar or a bag/path engine.
+//! Projection may return vertex IDs, correlated bindings or canonical values.
+//! Bounded WALK atoms retain endpoint bindings and edge-occurrence multiplicity.
 
 mod property_comparison;
 mod value_projection;
@@ -82,6 +82,24 @@ struct Edge {
     destination: usize,
     relation: RelationId,
     direction: GlaDirection,
+    walk: Option<crate::GraphWalkBounds>,
+}
+impl Edge {
+    fn expansion(self, source: BindingSlot, direction: GlaDirection) -> GlaOperator {
+        match self.walk {
+            Some(bounds) => GlaOperator::VarLengthExpand {
+                source,
+                relation: self.relation,
+                direction,
+                bounds,
+            },
+            None => GlaOperator::Expand {
+                source,
+                relation: self.relation,
+                direction,
+            },
+        }
+    }
 }
 #[derive(Clone, Copy)]
 struct Identity {
@@ -254,9 +272,34 @@ impl GraphPatternBuilder {
             destination,
             relation,
             direction,
+            walk: None,
         });
         Ok(self)
     }
+
+    /// Add a finite WALK atom between declared endpoints. Every matching edge
+    /// occurrence contributes, including repeated edges and vertices. Zero hops
+    /// bind the destination to the source without inventing an edge. Predicates
+    /// on the destination constrain endpoints, not intermediate vertices.
+    ///
+    /// The atom composes with fixed edges, cycles and correlated clauses through
+    /// the same compiler. It consumes one definition edge slot, regardless of
+    /// its checked hop bound. Runtime work/scratch policies govern enumeration.
+    /// Direct execution must supply the complete admitted vertex iterator as
+    /// well as topology; the database entrypoints select both automatically.
+    pub fn walk(
+        &mut self,
+        source: &str,
+        relation: RelationId,
+        direction: GlaDirection,
+        destination: &str,
+        bounds: crate::GraphWalkBounds,
+    ) -> Result<&mut Self, PatternBuildError> {
+        self.edge(source, relation, direction, destination)?;
+        self.edges.last_mut().expect("one validated atom was just added").walk = Some(bounds);
+        Ok(self)
+    }
+
     pub fn identity(
         &mut self,
         left: &str,
@@ -397,10 +440,15 @@ impl GraphPatternBuilder {
             self.select(0, BindingSlot(0), &mut operators);
         } else {
             let first = self.edges[0];
-            operators.push(GlaOperator::ScanEdges {
-                relation: first.relation,
-                direction: first.direction,
-            });
+            if first.walk.is_some() {
+                operators.push(GlaOperator::ScanVertices);
+                operators.push(first.expansion(BindingSlot(0), first.direction));
+            } else {
+                operators.push(GlaOperator::ScanEdges {
+                    relation: first.relation,
+                    direction: first.direction,
+                });
+            }
             slots[first.source] = Some(BindingSlot(0));
             if first.source == first.destination {
                 operators.push(GlaOperator::VertexIdentity {
@@ -439,11 +487,7 @@ impl GraphPatternBuilder {
                     )
                 };
                 let appended = BindingSlot(next_slot);
-                operators.push(GlaOperator::Expand {
-                    source,
-                    relation: edge.relation,
-                    direction,
-                });
+                operators.push(edge.expansion(source, direction));
                 let previous = slots[target];
                 if let Some(representative) = previous {
                     operators.push(GlaOperator::VertexIdentity {

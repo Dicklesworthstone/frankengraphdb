@@ -222,6 +222,11 @@ fn build_index<E>(
             relation,
             direction,
             ..
+        }
+        | GlaOperator::VarLengthExpand {
+            relation,
+            direction,
+            ..
         } = operator
         {
             index.entry((*relation, *direction)).or_default();
@@ -366,6 +371,35 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                         {
                             break;
                         }
+                    }
+                }
+            }
+            GlaOperator::VarLengthExpand {
+                source,
+                relation,
+                direction,
+                bounds,
+            } => {
+                let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten()
+                else {
+                    return Ok(());
+                };
+                let mut cursor = crate::GraphWalkCursor::new(
+                    source,
+                    *bounds,
+                    index.get(&(*relation, *direction)),
+                    &mut self.control,
+                )?;
+                while let Some(destination) = cursor.next_with_control(&mut self.control)? {
+                    // The hop frontier is private to the cursor. Only the
+                    // endpoint occupies the compiler-assigned binding slot.
+                    // Rejecting it below must not prune longer walks through it.
+                    bindings.push(Some(destination));
+                    let result = self.visit(operators, ordinal + 1, bindings, index);
+                    let _ = bindings.pop();
+                    result?;
+                    if self.active_probe.is_some_and(|group| self.probe_matches[group]) {
+                        break;
                     }
                 }
             }
