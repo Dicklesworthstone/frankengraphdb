@@ -2,13 +2,21 @@
 //! owns construction and binding; this facade cannot be executed as a read.
 
 use crate::{GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
-    GraphPatternTextErrorKind, PreparedGraphText};
+    GraphPatternTextErrorKind, PreparedGraphText, GraphIntegerBuildError, GraphIntegerOp};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
+
+#[derive(Clone)]
+pub(crate) enum MutationIntegerTemplateOp {
+    Bound(GraphIntegerOp),
+    Parameter { index: usize, at: usize },
+}
 
 #[derive(Clone)]
 pub(crate) enum MutationActionTemplate {
     Bound(GraphMutationAction),
     ParameterProperty { target: usize, key: PropertyKeyId, parameter: usize },
+    IntegerProperty { target: usize, key: PropertyKeyId,
+        program: Vec<MutationIntegerTemplateOp>, at: usize },
 }
 
 /// MATCH [WALK] ... SET / REMOVE / DETACH DELETE, with one parameter schema and
@@ -40,6 +48,9 @@ pub struct GraphMutationTextError {
 pub enum GraphMutationTextErrorKind {
     Query(GraphPatternTextErrorKind),
     Build(GraphMutationBuildError),
+    IntegerExpression(GraphIntegerBuildError),
+    IntegerOperand,
+    IntegerNesting { limit: usize },
 }
 impl From<GraphPatternTextError> for GraphMutationTextError {
     fn from(error: GraphPatternTextError) -> Self {

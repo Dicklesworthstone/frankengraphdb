@@ -2,8 +2,10 @@
 //! compiler. All syntax is checked before catalog callbacks. Neither selection
 //! text nor parameter text is synthesized, and execution never sees this AST.
 
+mod integer;
+
 use super::*;
-use crate::mutation_text::MutationActionTemplate;
+use crate::mutation_text::{MutationActionTemplate, MutationIntegerTemplateOp};
 use crate::{GraphMutationAction, GraphMutationBuildError, GraphMutationTextError,
     GraphMutationTextErrorKind, GraphMutationValue, GqlScalarParameter,
     MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation, PreparedGraphMutationText};
@@ -11,7 +13,10 @@ use fgdb_types::CanonicalScalar;
 
 #[derive(Clone, Copy)]
 struct Projection<'a> { variable: Name<'a>, property: Option<Name<'a>> }
-enum Operand { Column(usize), Number(Number), Literal(GqlScalarParameter) }
+enum Operand {
+    Column(usize), Number(Number), Literal(GqlScalarParameter),
+    Integer { program: Vec<MutationIntegerTemplateOp>, at: usize },
+}
 enum ActionKind<'a> {
     Property { key: Name<'a>, value: Option<Operand> },
     Label { label: Name<'a>, present: bool },
@@ -118,7 +123,7 @@ impl<'a> Parser<'a> {
                     let key = self.name()?;
                     let value = if setting {
                         self.punct(b'=', "=")?;
-                        Some(self.mutation_operand(&mut columns)?)
+                        Some(self.mutation_expression(&mut columns)?)
                     } else { None };
                     ActionKind::Property { key, value }
                 };
@@ -134,8 +139,14 @@ impl<'a> Parser<'a> {
 impl PreparedGraphMutationText {
     /// Prepare simultaneous SET/REMOVE or explicit DETACH DELETE after the
     /// existing MATCH/WALK/WHERE/OPTIONAL grammar. SET stores canonical NULL;
-    /// REMOVE unsets a property. Bare DELETE, arithmetic, CREATE, RETURN and
-    /// mixed deletion/update statements are not silently reinterpreted.
+    /// REMOVE unsets a property. Bare DELETE, CREATE, RETURN and mixed deletion/
+    /// update statements are not silently reinterpreted.
+    ///
+    /// RHS arithmetic supports checked nullable i64 +, -, *, /, %, unary signs,
+    /// parentheses, ABS, NULLIF and COALESCE with at least two arguments. Division
+    /// truncates toward zero. COALESCE skips unneeded arithmetic but the frozen
+    /// GLA projection still performs all requested property reads. Plain scalar
+    /// assignments retain their existing types; arithmetic never coerces them.
     pub fn prepare(
         statement: &str, relation: RelationId,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
@@ -202,6 +213,9 @@ impl PreparedGraphMutationText {
                         Some(Operand::Number(Number::Parameter(parameter))) => MutationActionTemplate::ParameterProperty {
                             target, key, parameter,
                         },
+                        Some(Operand::Integer { program, at }) => MutationActionTemplate::IntegerProperty {
+                            target, key, program, at,
+                        },
                     }
                 }
             });
@@ -251,6 +265,10 @@ impl PreparedGraphMutationText {
                 MutationActionTemplate::ParameterProperty { target, key, parameter } => GraphMutationAction::SetProperty {
                     target: *target, key: *key,
                     value: GraphMutationValue::Literal(scalar(values[*parameter].clone(), at)?),
+                },
+                MutationActionTemplate::IntegerProperty { target, key, program, at } => GraphMutationAction::SetProperty {
+                    target: *target, key: *key,
+                    value: GraphMutationValue::Expression(integer::bind_integer(program, &values, *at)?),
                 },
             });
         }
