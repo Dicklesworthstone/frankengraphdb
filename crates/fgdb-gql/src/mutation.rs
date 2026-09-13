@@ -10,7 +10,7 @@ mod collect;
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution,
-    GqlQueryPolicy, GqlScalarParameter};
+    GqlQueryPolicy, GqlScalarParameter, GraphIntegerError, GraphIntegerExpression};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, VId};
 
@@ -22,6 +22,9 @@ pub enum GraphMutationValue {
     Column(usize),
     /// A checked canonical operand; clones share its bounded encoded storage.
     Literal(GqlScalarParameter),
+    /// Checked nullable i64 bytecode over the same frozen selection row.
+    /// All column references are validated before storage execution begins.
+    Expression(GraphIntegerExpression),
 }
 impl core::fmt::Debug for GraphMutationValue {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -73,6 +76,7 @@ pub enum GraphMutationError<E> {
     Source(E),
     InvalidSourceStatistics,
     InputSchema { row: usize, column: usize },
+    Arithmetic { row: usize, action: usize, error: GraphIntegerError },
     ConflictingAssignment { first_row: usize, first_action: usize, row: usize, action: usize },
     EffectLimit { limit: u64, observed: u128 },
 }
@@ -82,6 +86,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
             Self::Source(error) => error.fmt(f),
             Self::InvalidSourceStatistics => f.write_str("mutation source returned inconsistent statistics"),
             Self::InputSchema { row, column } => write!(f, "mutation row {row} has an incompatible column {column}"),
+            Self::Arithmetic { row, action, error } => write!(f, "mutation row {row} action {action}: {error}"),
             Self::ConflictingAssignment { first_row, first_action, row, action } => write!(f,
                 "mutation assignments disagree: row {first_row} action {first_action}, row {row} action {action}"),
             Self::EffectLimit { limit, observed } => write!(f, "mutation effect limit exceeded: {observed} > {limit}"),
@@ -90,7 +95,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
 }
 impl<E: core::error::Error + 'static> core::error::Error for GraphMutationError<E> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self { Self::Source(error) => Some(error), _ => None }
+        match self { Self::Source(error) => Some(error), Self::Arithmetic { error, .. } => Some(error), _ => None }
     }
 }
 
@@ -182,10 +187,18 @@ impl PreparedGraphMutation {
             if !matches!(columns.get(target), Some(ValueProjection::Vertex { .. })) {
                 return Err(GraphMutationBuildError::TargetColumn { action: at, column: target });
             }
-            if let GraphMutationAction::SetProperty { value: GraphMutationValue::Column(column), .. } = action
-                && !matches!(columns.get(*column), Some(ValueProjection::Property { .. }))
-            {
-                return Err(GraphMutationBuildError::ValueColumn { action: at, column: *column });
+            if let GraphMutationAction::SetProperty { value, .. } = action {
+                let check = |column: usize| {
+                    if matches!(columns.get(column), Some(ValueProjection::Property { .. })) { Ok(()) }
+                    else { Err(GraphMutationBuildError::ValueColumn { action: at, column }) }
+                };
+                match value {
+                    GraphMutationValue::Column(column) => check(*column)?,
+                    GraphMutationValue::Expression(expression) => {
+                        for column in expression.referenced_columns() { check(column)?; }
+                    }
+                    GraphMutationValue::Literal(_) => {}
+                }
             }
             if deleting != matches!(action, GraphMutationAction::DetachDelete { .. }) {
                 return Err(GraphMutationBuildError::MixedDeletionAndUpdates);
@@ -202,9 +215,9 @@ impl PreparedGraphMutation {
 
     /// Freeze the complete selection once, then reduce simultaneous assignments.
     /// Null OPTIONAL targets are ignored, never interpreted as an identity.
-    /// Conflicting duplicates, source failure, cancellation and quota refusal
-    /// return no batch. The trusted source must use one pinned GLA snapshot or
-    /// canonical transaction overlay and preserve all observed read domains.
+    /// Conflicting duplicates, arithmetic errors, source failure, cancellation
+    /// and quota refusal return no batch. The trusted source must use one pinned
+    /// GLA snapshot or canonical transaction overlay and retain read domains.
     pub fn execute_governed<E, C>(
         &self, policy: GraphMutationPolicy,
         source: impl FnOnce(&PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy)
@@ -236,6 +249,12 @@ impl PreparedGraphMutation {
                             bytes.push(1);
                             bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
                             bytes.extend_from_slice(value.canonical_bytes());
+                        }
+                        GraphMutationValue::Expression(expression) => {
+                            bytes.push(2);
+                            let expression = expression.canonical_bytes();
+                            bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
+                            bytes.extend_from_slice(&expression);
                         }
                     }
                 }

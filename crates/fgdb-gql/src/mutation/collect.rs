@@ -1,10 +1,11 @@
-//! Simultaneous assignment reduction. All scalar references point into the
-//! frozen selection or checked literal operands until final intent ownership.
+//! Simultaneous assignment reduction. Borrowed scalars point into the frozen
+//! selection/literals; computed integers stay inline until intent ownership.
 
 use super::*;
 use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
 use crate::algebra_exec::charge_payload;
-use crate::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension};
+use crate::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
+    GraphIntegerEvaluationError};
 use std::collections::BTreeMap;
 
 type ResultOf<T, E, C> = Result<T, GqlQueryError<GraphMutationError<E>, C>>;
@@ -12,7 +13,12 @@ type ResultOf<T, E, C> = Result<T, GqlQueryError<GraphMutationError<E>, C>>;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Field { Property(PropertyKeyId), Label(LabelId), Delete }
 #[derive(Clone, Copy)]
-enum Value<'a> { Property(Option<&'a CanonicalScalar>), Label(bool), Delete }
+enum Value<'a> {
+    Property(Option<&'a CanonicalScalar>),
+    /// None is stored canonical NULL, never a property-removal intention.
+    Integer(Option<i64>),
+    Label(bool), Delete,
+}
 struct Proposal<'a> { value: Value<'a>, row: usize, action: usize }
 
 struct Meter<F> { policy: GraphMutationPolicy, evaluator: GlaExecutionStats, checkpoint: F }
@@ -44,6 +50,13 @@ fn equal<E>(left: Value<'_>, right: Value<'_>,
             for scalar in [left, right].into_iter().flatten() { charge_payload(scalar, control)?; }
             Ok(left == right)
         }
+        (Value::Integer(left), Value::Integer(right)) => Ok(left == right),
+        (Value::Integer(integer), Value::Property(scalar))
+        | (Value::Property(scalar), Value::Integer(integer)) => Ok(match (integer, scalar) {
+            (None, Some(CanonicalScalar::Null)) => true,
+            (Some(left), Some(CanonicalScalar::Int(right))) => left == *right,
+            _ => false,
+        }),
         (Value::Label(left), Value::Label(right)) => Ok(left == right),
         (Value::Delete, Value::Delete) => Ok(true),
         _ => Ok(false),
@@ -117,17 +130,27 @@ pub(super) fn execute<E, C>(
         for (action_at, action) in mutation.actions.iter().enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
             let Some(vertex) = row.values()[action.target()].as_vertex() else {
-                // Only canonical null can remain after the schema check.
+                // Only canonical null can remain after the schema check. An
+                // absent OPTIONAL target does not execute an assignment RHS.
                 continue;
             };
             let (field, value) = match action {
                 GraphMutationAction::SetProperty { key, value, .. } => {
-                    let scalar = match value {
-                        GraphMutationValue::Column(column) => row.values()[*column].as_scalar()
-                            .expect("the complete input schema was checked"),
-                        GraphMutationValue::Literal(value) => value.value(),
+                    let value = match value {
+                        GraphMutationValue::Column(column) => Value::Property(Some(
+                            row.values()[*column].as_scalar().expect("complete input schema checked"))),
+                        GraphMutationValue::Literal(value) => Value::Property(Some(value.value())),
+                        GraphMutationValue::Expression(expression) => {
+                            let value = expression.evaluate_with_control(row.values(), &mut |event| meter.event(event))
+                                .map_err(|failure| match failure {
+                                    GraphIntegerEvaluationError::Control(error) => error,
+                                    GraphIntegerEvaluationError::Value(error) => GqlQueryError::Source(
+                                        GraphMutationError::Arithmetic { row: row_at, action: action_at, error }),
+                                })?;
+                            Value::Integer(value)
+                        }
                     };
-                    (Field::Property(*key), Value::Property(Some(scalar)))
+                    (Field::Property(*key), value)
                 }
                 GraphMutationAction::RemoveProperty { key, .. } => (Field::Property(*key), Value::Property(None)),
                 GraphMutationAction::SetLabel { label, present, .. } => (Field::Label(*label), Value::Label(*present)),
@@ -165,6 +188,11 @@ pub(super) fn execute<E, C>(
             (Field::Property(key), Value::Property(value)) => {
                 if let Some(scalar) = value { reserve_copy(scalar, &mut |event| meter.event(event))?; }
                 GraphMutationIntent::Property { vertex, key, value: value.cloned() }
+            }
+            (Field::Property(key), Value::Integer(value)) => {
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+                GraphMutationIntent::Property { vertex, key,
+                    value: Some(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)) }
             }
             (Field::Label(label), Value::Label(present)) => GraphMutationIntent::Label { vertex, label, present },
             (Field::Delete, Value::Delete) => GraphMutationIntent::DetachDelete { vertex },
@@ -249,6 +277,12 @@ mod tests {
             GraphMutationAction::DetachDelete { target: 0 },
             GraphMutationAction::RemoveProperty { target: 0, key: PropertyKeyId(1) },
         ]), Err(GraphMutationBuildError::MixedDeletionAndUpdates)));
+        for column in [0, 2, usize::MAX] {
+            let expression = GraphIntegerExpression::prepare(&[crate::GraphIntegerOp::Column(column)]).unwrap();
+            assert!(matches!(PreparedGraphMutation::prepare(query(), RelationId(1), vec![
+                GraphMutationAction::SetProperty { target: 0, key: PropertyKeyId(2), value: GraphMutationValue::Expression(expression) },
+            ]), Err(GraphMutationBuildError::ValueColumn { column: found, .. }) if found == column));
+        }
     }
 
     #[test]
@@ -288,5 +322,19 @@ mod tests {
             Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension: GlaLimitDimension::ScratchEntries, observed, .. }))
                 if observed == u128::from(u64::MAX) + 1));
         assert_eq!(meter.evaluator, before);
+    }
+
+    #[test]
+    fn computed_scalars_share_assignment_equality_but_never_equal_removal() {
+        for value in [None, Some(i64::MIN), Some(0), Some(i64::MAX)] {
+            let scalar = value.map_or(CanonicalScalar::Null, CanonicalScalar::Int);
+            for (left, right) in [(Value::Integer(value), Value::Property(Some(&scalar))),
+                (Value::Property(Some(&scalar)), Value::Integer(value))] {
+                assert!(equal(left, right, &mut |_| Ok::<_, ()>(())).unwrap());
+            }
+            assert!(!equal(Value::Integer(value), Value::Property(None), &mut |_| Ok::<_, ()>(())).unwrap());
+        }
+        assert!(!equal(Value::Integer(Some(1)), Value::Property(Some(&CanonicalScalar::Bool(true))),
+            &mut |_| Ok::<_, ()>(())).unwrap());
     }
 }
