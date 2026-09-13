@@ -258,6 +258,7 @@ struct Edge<'a> {
     relation: Name<'a>,
     direction: GlaDirection,
     destination: Name<'a>,
+    walk: Option<crate::GraphWalkBounds>,
 }
 enum Filter<'a> {
     Boolean {
@@ -749,6 +750,15 @@ impl PreparedGraphText {
     /// ORDER BY selects returned expressions or aliases, with ASC/DESC and
     /// independent NULLS FIRST/LAST (default LAST). Whole rows break ties.
     /// Ordering precedes SKIP/LIMIT; hidden sort expressions are refused.
+    ///
+    /// An explicit MATCH WALK enables bounded `[:R*min..max]`, `[:R*k]` and
+    /// `[:R*..max]` atoms in that MATCH scope. The omitted minimum is one; zero
+    /// is explicit. Bounds are integer literals with 0 <= min <= max <= 1024.
+    /// Repeated edges and vertices contribute distinct walk occurrences; this
+    /// does not select TRAIL/SIMPLE, shortest paths or path-valued projection.
+    /// Endpoint predicates do not filter transit vertices. Every OPTIONAL or
+    /// existential MATCH opts in independently. The same head grammar feeds
+    /// aggregate queries. Bare/open-ended quantifiers and hop parameters refuse.
     ///
     /// Syntax is completely validated before calling `resolve`. Each unique
     /// (kind,name) is resolved once across ALL scopes. Unknown/wrong-kind names
