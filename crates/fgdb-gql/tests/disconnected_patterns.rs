@@ -307,10 +307,11 @@ fn full_independent_width_and_definition_wide_scope_bounds_are_enforced() {
     assert!(matches!(root.prepare_values_with_clauses(&overflowing, &columns, 0, None),
         Err(PatternBuildError::LimitExceeded { dimension: PatternLimitDimension::Bindings,
             limit: MAX_PATTERN_BINDINGS, observed }) if observed == MAX_PATTERN_BINDINGS + 1));
-    // Uncorrelated child clauses remain an explicit refusal in this profile.
     let mut uncorrelated = GraphPatternBuilder::new(); uncorrelated.vertex("other").unwrap();
-    assert!(matches!(root.prepare_values_with_clauses(&[GraphMatchClause::exists(&uncorrelated)], &columns, 0, None),
-        Err(PatternBuildError::Disconnected)));
+    let independent = root.prepare_values_with_clauses(
+        &[GraphMatchClause::exists(&uncorrelated)], &columns, 0, None,
+    ).unwrap();
+    assert_eq!(ids(&run(&independent, &BTreeMap::from([(VId(1), (vec![], vec![]))]), &[])), vec![some(&[1])]);
     let mut connected = GraphPatternBuilder::new(); connected.vertex("a").unwrap(); connected.vertex("b").unwrap();
     connected.edge("a", RelationId(1), GlaDirection::Forward, "b").unwrap();
     assert!(connected.prepare("a", 0, None).unwrap().plan().scans_edges());
