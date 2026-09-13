@@ -1,6 +1,7 @@
 //! Scoped MATCH parsing and lowering through the existing positive-pattern compiler.
 //! The lexer and numeric argument table are shared with ordinary and aggregate
 //! text. OPTIONAL exports names; existential names remain local to their body.
+//! Bodies without shared variables are independent, not malformed correlations.
 
 use super::*;
 use crate::algebra::GraphMatchClause;
@@ -455,7 +456,6 @@ impl<'a> Parser<'a> {
 
     fn match_scope(&mut self, kind: ScopeKind) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
-        let at = self.current.at;
         self.capacity(
             self.syntax.scopes.len(),
             MAX_PATTERN_IDENTITIES,
@@ -482,19 +482,10 @@ impl<'a> Parser<'a> {
                 return Err(error);
             }
         };
-        let correlated = body.variables.iter().any(|local| {
-            outer
-                .variables
-                .iter()
-                .any(|visible| visible.text == local.text)
-        });
         self.restore_pattern(outer);
-        if !correlated {
-            return Err(error(
-                at,
-                GraphPatternTextErrorKind::Build(PatternBuildError::Disconnected),
-            ));
-        }
+        // The typed scope compiler distinguishes shared-name correlations
+        // from a genuinely independent child. Never invent an outer anchor or
+        // expose existential locals merely to force a connected shape.
         if matches!(kind, ScopeKind::Optional) {
             for variable in &body.variables {
                 if !self
