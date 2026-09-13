@@ -51,6 +51,7 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) -> CommitSeq {
         let mut props = vec![(Q,CanonicalScalar::Int(q))];
         if let Some(p) = p { props.push((P,CanonicalScalar::Int(p))); }
         else if id == 3 { props.push((P,CanonicalScalar::Null)); }
+        props.sort_by_key(|(key,_)| *key);
         batch.create_vertex(VId(id),vec![label],props);
     }
     for (id,source,target) in [(101,1,2),(102,1,2),(103,2,3)] {
@@ -239,8 +240,12 @@ fn exact_computed_read_limits_and_source_authority_precede_result_publication() 
         let zero = GqlQueryPolicy::new(0,0,0,0);
         assert!(matches!(txn.execute_graph_set_governed(&foreign,&cx,&plan,zero),
             Err(GqlQueryError::Source(GraphSetExecutionError::Source(WriteTxnError::WrongDatabase)))));
-        assert!(matches!(db.execute_graph_set_governed_at(&cx,&plan,CommitSeq(basis.0+1),zero),
-            Err(GqlQueryError::Source(GraphSetExecutionError::Source(GqlError::Read(ReadError::BeyondFrontier { .. })))))));
+        assert!(matches!(
+            db.execute_graph_set_governed_at(&cx,&plan,CommitSeq(basis.0+1),zero),
+            Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                GqlError::Read(ReadError::BeyondFrontier { .. })
+            )))
+        ));
         txn.abort();
     });
     assert!(report.lab_test_passed(),"{report:?}");
