@@ -108,7 +108,7 @@ pub(super) fn execute<E, C>(
             meter.event(GlaExecutionEvent::Work)?;
             let valid = match expression {
                 ValueProjection::Vertex { .. } => value.is_null() || value.as_vertex().is_some(),
-                ValueProjection::Property { .. } => value.as_scalar().is_some(),
+                ValueProjection::Property { .. } => matches!(value, GraphValue::Scalar(_)),
             };
             if !valid {
                 return Err(GqlQueryError::Source(GraphMutationError::InputSchema { row: row_at, column }));
@@ -249,6 +249,44 @@ mod tests {
             GraphMutationAction::DetachDelete { target: 0 },
             GraphMutationAction::RemoveProperty { target: 0, key: PropertyKeyId(1) },
         ]), Err(GraphMutationBuildError::MixedDeletionAndUpdates)));
-        let _ = GraphValue::Scalar(CanonicalScalar::Null);
+    }
+
+    #[test]
+    fn late_rhs_source_failure_never_returns_an_earlier_partial_assignment() {
+        let value = CanonicalScalar::Int(7);
+        let reads = std::cell::Cell::new(0);
+        let result: ResultOf<GraphMutationBatch, &str, ()> = mutation().execute_governed(
+            policy(),
+            |plan, policy| plan.plan().execute_governed_with_properties(
+                2, [], [(VId(1), RelationId(1), VId(10)), (VId(2), RelationId(1), VId(11))],
+                |_, _| Ok::<_, &str>(true),
+                |vid, _| {
+                    reads.set(reads.get() + 1);
+                    if vid == VId(11) { Err("RHS property source failed") } else { Ok(Some(&value)) }
+                },
+                policy, || Ok::<_, ()>(()),
+            ),
+            || Ok::<_, ()>(()),
+        );
+        assert!(matches!(result, Err(GqlQueryError::Source(GraphMutationError::Source("RHS property source failed")))));
+        assert_eq!(reads.get(), 2, "a valid earlier match preceded the failing RHS read");
+    }
+
+    #[test]
+    fn overflow_refusal_leaves_both_mutation_counters_unchanged() {
+        let policy = GraphMutationPolicy::new(GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX), u64::MAX);
+        let mut meter = Meter { policy, checkpoint: || Ok::<_, ()>(()),
+            evaluator: GlaExecutionStats { work_units: u64::MAX, scratch_entries: 0 } };
+        let before = meter.evaluator;
+        assert!(matches!(meter.event::<(), ()>(GlaExecutionEvent::Work),
+            Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension: GlaLimitDimension::WorkUnits, observed, .. }))
+                if observed == u128::from(u64::MAX) + 1));
+        assert_eq!(meter.evaluator, before);
+        meter.evaluator = GlaExecutionStats { work_units: 0, scratch_entries: u64::MAX };
+        let before = meter.evaluator;
+        assert!(matches!(meter.event::<(), ()>(GlaExecutionEvent::ScratchEntry),
+            Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension: GlaLimitDimension::ScratchEntries, observed, .. }))
+                if observed == u128::from(u64::MAX) + 1));
+        assert_eq!(meter.evaluator, before);
     }
 }
