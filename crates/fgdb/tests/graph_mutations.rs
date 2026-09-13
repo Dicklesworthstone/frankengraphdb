@@ -150,7 +150,7 @@ fn explicit_detach_delete_deduplicates_targets_and_retires_incident_edges_durabl
         let mut txn = db.begin(&txcx).unwrap();
         let limited = GraphMutationPolicy::new(policy().query, 1);
         assert!(matches!(txn.execute_graph_mutation_governed(&mut db, &query, &plan, limited),
-            Err(GqlQueryError::Source(GraphMutationError::EffectLimit { .. })))));
+            Err(GqlQueryError::Source(GraphMutationError::EffectLimit { .. }))));
         assert_eq!(txn.vertices(&db).unwrap().len(), 3);
         assert_eq!(txn.edges(&db).unwrap().len(), 3);
         let stats = txn.execute_graph_mutation_governed(&mut db, &query, &plan, policy()).unwrap();
