@@ -17,11 +17,13 @@ mod parameters;
 mod parser;
 mod prepared;
 mod set_ops;
+mod set_text;
 mod walk;
 
+pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use set_ops::{
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
-    GraphSetQuantifier, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
+    GraphSetQuantifier, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
 };
 pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};
 pub use aggregation::{
