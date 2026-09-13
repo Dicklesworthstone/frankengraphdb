@@ -16,7 +16,9 @@ mod overlay_evidence;
 mod parameters;
 mod parser;
 mod prepared;
+mod walk;
 
+pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};
 pub use aggregation::{
     GraphExactAverage,
     GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
@@ -36,7 +38,8 @@ pub use evidence_artifact::{
 };
 pub use evidence_cursor::{
     GqlEvidenceCursor, GqlEvidenceCursorError, GqlEvidenceCursorLimitDimension,
-    GqlEvidenceCursorLimitExceeded, GqlEvidenceCursorLimits, GqlEvidenceCursorState,
+    GqlEvidenceCursorLimitExceeded, GqlEvidenceCursorLimits,
+    GqlEvidenceCursorState,
 };
 pub use evidence_limits::{
     GqlEvidenceLimitDimension, GqlEvidenceLimitExceeded, GqlEvidenceLimitedAuditError,
