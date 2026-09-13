@@ -475,6 +475,7 @@ fn scoped_text_retains_all_limits_and_errors_never_become_null_extension() {
         )
     };
     let full = run(wide()).unwrap();
+    assert_eq!(full.value.len(), 3);
     let exact = GqlQueryPolicy::new(
         4,
         3,
