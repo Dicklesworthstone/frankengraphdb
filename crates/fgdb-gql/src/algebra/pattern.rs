@@ -1,4 +1,4 @@
-//! Connected schema-bound patterns lowered to the shared GLA evaluator.
+//! Schema-bound graph components lowered to the shared GLA evaluator.
 //! Projection may return vertex IDs, correlated bindings or canonical values.
 //! Bounded WALK atoms retain endpoint bindings and edge-occurrence multiplicity.
 
@@ -15,6 +15,10 @@ pub const MAX_PATTERN_VERTICES: usize = MAX_PATTERN_EDGES + 1;
 pub const MAX_PATTERN_PREDICATES: usize = 256;
 pub const MAX_PATTERN_IDENTITIES: usize = 64;
 pub const MAX_PATTERN_NAME_BYTES: usize = 128;
+/// Definition-wide binding frames, including copied correlations and probe
+/// locals. Independent components must not evade the bounded scope inventory.
+pub const MAX_PATTERN_BINDINGS: usize =
+    MAX_PATTERN_VERTICES + MAX_PATTERN_EDGES + MAX_PATTERN_IDENTITIES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PatternLimitDimension {
@@ -23,6 +27,7 @@ pub enum PatternLimitDimension {
     Predicates,
     Identities,
     Columns,
+    Bindings,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +55,7 @@ impl core::fmt::Display for PatternBuildError {
             Self::DuplicateVariable => f.write_str("graph-pattern variable is already declared"),
             Self::UnknownVariable => f.write_str("graph pattern references an undeclared variable"),
             Self::Disconnected => {
-                f.write_str("graph-pattern edge constraints must connect every declared vertex")
+                f.write_str("graph-pattern clause requires an already visible correlation")
             }
             Self::EmptyProjection => f.write_str("binding projection requires a column"),
             Self::DuplicateProjection => f.write_str("binding projection repeats a column"),
@@ -165,7 +170,13 @@ impl<Row> PreparedGraphPattern<Row> {
     }
     #[must_use]
     pub fn required_vertex_label(&self) -> Option<LabelId> {
-        if self.logical.scans_edges() {
+        if self.logical.scans_edges()
+            || self.logical.operators().iter().skip(1)
+                .any(|op| matches!(op, GlaOperator::ScanVertices))
+        {
+            // The shared vertex domain serves every independent component.
+            // A root label cannot narrow admission or phantom observations for
+            // another component, including an OPTIONAL/EXISTS child scan.
             return None;
         }
         self.logical.operators().iter().find_map(|op| match op {
@@ -200,6 +211,17 @@ fn reverse(direction: GlaDirection) -> GlaDirection {
         GlaDirection::Reverse => GlaDirection::Forward,
         GlaDirection::Undirected => GlaDirection::Undirected,
     }
+}
+
+/// Width of a positive compiled body, including temporary closing endpoints.
+/// Count producers, not edges: each independent component has its own root.
+fn binding_width(operators: &[GlaOperator]) -> u32 {
+    operators.iter().map(|operator| match operator {
+        GlaOperator::ScanEdges { .. } => 2,
+        GlaOperator::ScanVertices | GlaOperator::Expand { .. }
+        | GlaOperator::VarLengthExpand { .. } | GlaOperator::BindVertex { .. } => 1,
+        _ => 0,
+    }).sum()
 }
 
 impl GraphPatternBuilder {
@@ -374,8 +396,8 @@ impl GraphPatternBuilder {
     }
 
     /// Prepare 1..=65 unique named columns from each complete matching binding.
-    /// Tuple-wide DISTINCT and lexicographic order precede pagination. This is
-    /// not an independent query per column, a Cartesian product, or bag output.
+    /// Tuple-wide DISTINCT and lexicographic order precede pagination. Every
+    /// row is one complete assignment, not a zip of independent projections.
     pub fn prepare_bindings(
         &self,
         projections: &[&str],
@@ -421,23 +443,34 @@ impl GraphPatternBuilder {
         })
     }
 
-    /// Both output shapes share this connected-pattern compiler. Projection
-    /// consumes its complete variable/slot map without changing traversal.
+    /// Preserve connected traversal; seed each independent component only when
+    /// no remaining edge can extend the bound frontier. Predicates and identity
+    /// constraints stay with their binding, and all outputs share the slot map.
     fn compile(&self) -> Result<(Vec<GlaOperator>, Vec<BindingSlot>), PatternBuildError> {
+        self.compile_with_root(None)
+    }
+
+    /// A correlated isolated vertex can anchor a child without rewriting the
+    /// child's names, property expressions, identity constraints or edge IDs.
+    fn compile_with_root(
+        &self,
+        root: Option<usize>,
+    ) -> Result<(Vec<GlaOperator>, Vec<BindingSlot>), PatternBuildError> {
         if self.variables.is_empty() {
             return Err(PatternBuildError::EmptyPattern);
         }
         let mut slots = vec![None; self.variables.len()];
         let mut emitted = vec![false; self.identities.len()];
+        let mut consumed = vec![false; self.edges.len()];
         let mut operators = Vec::new();
-        if self.edges.is_empty() {
-            if self.variables.len() != 1 {
-                return Err(PatternBuildError::Disconnected);
-            }
+        let mut next_slot;
+        if root.is_some() || self.edges.is_empty() {
+            let root = root.unwrap_or(0);
             operators.push(GlaOperator::ScanVertices);
-            slots[0] = Some(BindingSlot(0));
+            slots[root] = Some(BindingSlot(0));
             self.identities(&slots, &mut emitted, &mut operators);
-            self.select(0, BindingSlot(0), &mut operators);
+            self.select(root, BindingSlot(0), &mut operators);
+            next_slot = 1;
         } else {
             let first = self.edges[0];
             if first.walk.is_some() {
@@ -464,29 +497,27 @@ impl GraphPatternBuilder {
             if first.source != first.destination {
                 self.select(first.destination, BindingSlot(1), &mut operators);
             }
-            let mut consumed = vec![false; self.edges.len()];
             consumed[0] = true;
-            for next_slot in 2..=self.edges.len() as u32 {
-                let at = self
-                    .edges
-                    .iter()
-                    .enumerate()
-                    .position(|(at, edge)| {
-                        !consumed[at]
-                            && (slots[edge.source].is_some() || slots[edge.destination].is_some())
-                    })
-                    .ok_or(PatternBuildError::Disconnected)?;
+            next_slot = 2;
+        }
+        loop {
+            let connected = self.edges.iter().enumerate().position(|(at, edge)| {
+                !consumed[at]
+                    && (slots[edge.source].is_some() || slots[edge.destination].is_some())
+            });
+            if let Some(at) = connected {
                 let edge = self.edges[at];
                 let (source, target, direction) = if let Some(source) = slots[edge.source] {
                     (source, edge.destination, edge.direction)
                 } else {
                     (
-                        slots[edge.destination].expect("a connected endpoint was found"),
+                        slots[edge.destination].expect("a bound endpoint was found"),
                         edge.source,
                         reverse(edge.direction),
                     )
                 };
                 let appended = BindingSlot(next_slot);
+                next_slot += 1;
                 operators.push(edge.expansion(source, direction));
                 let previous = slots[target];
                 if let Some(representative) = previous {
@@ -503,15 +534,29 @@ impl GraphPatternBuilder {
                     self.select(target, appended, &mut operators);
                 }
                 consumed[at] = true;
+                continue;
             }
-            if slots.iter().any(Option::is_none) {
-                return Err(PatternBuildError::Disconnected);
-            }
+            // Prefer a remaining edge component before isolated vertices. This
+            // is a deterministic definition order, not data-dependent planning.
+            let seed = self.edges.iter().enumerate()
+                .find(|(at, _)| !consumed[*at])
+                .map(|(_, edge)| edge.source)
+                .or_else(|| slots.iter().position(Option::is_none));
+            let Some(seed) = seed else { break; };
+            debug_assert!(slots[seed].is_none());
+            let appended = BindingSlot(next_slot);
+            next_slot += 1;
+            operators.push(GlaOperator::ScanVertices);
+            slots[seed] = Some(appended);
+            self.identities(&slots, &mut emitted, &mut operators);
+            self.select(seed, appended, &mut operators);
         }
+        debug_assert!(consumed.iter().all(|consumed| *consumed));
         debug_assert!(emitted.iter().all(|emitted| *emitted));
+        debug_assert_eq!(next_slot, binding_width(&operators));
         let slots: Vec<_> = slots
             .into_iter()
-            .map(|slot| slot.expect("all variables are connected"))
+            .map(|slot| slot.expect("every component has been bound"))
             .collect();
         self.emit_property_comparisons(&slots, &mut operators);
         Ok((operators, slots))
@@ -724,10 +769,9 @@ mod tests {
             PatternBuildError::UnknownVariable
         );
         assert_eq!(b.prepare("a", 0, None).unwrap(), original);
-        assert_eq!(
-            builder(&["a", "b"]).prepare("a", 0, None),
-            Err(PatternBuildError::Disconnected)
-        );
+        let independent = builder(&["a", "b"]).prepare("a", 0, None).unwrap();
+        assert_eq!(independent.plan().execute([VId(1), VId(2)], [],
+            |_, _| Ok::<_, ()>(true)).unwrap(), vec![VId(1), VId(2)]);
         assert_eq!(
             GraphPatternBuilder::new().prepare("a", 0, None),
             Err(PatternBuildError::EmptyPattern)

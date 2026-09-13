@@ -18,7 +18,7 @@ pub use ordering::{GraphOrderError, GraphValueOrder};
 pub(crate) use values::{RowKey, ValueRef};
 pub use output::{GlaIdentityOutput, GlaOutput, GraphBindingRow};
 pub use pattern::{
-    GraphPatternBuilder, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
+    GraphPatternBuilder, MAX_PATTERN_BINDINGS, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
     MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError, PatternLimitDimension,
     PreparedGraphPattern,
 };
@@ -443,12 +443,14 @@ impl<Row> GlaPlan<Row> {
     // This stays private to the algebra compiler and its child modules. Row and
     // terminal operator shape must be chosen together, not supplied by callers.
     fn from_operators(mut operators: Vec<GlaOperator>) -> Self {
-        // WALK plans use the existing two-table admission path. It retains all
-        // intermediate vertex values and isolated zero-hop roots, and records
-        // both vertex and topology observations in transaction sources. This
-        // conservative scan-backed access is not the edge-only candidate path.
+        // WALK and independent scans need the complete vertex domain, not just
+        // requested edge endpoints. Normalize an edge root onto the existing
+        // two-table admission path so isolates, intermediate values, snapshot
+        // budgets and transaction scan observations all share the same source.
         // Expanding the root adds no binding slot: ScanEdges already bound two.
-        if operators.iter().any(|op| matches!(op, GlaOperator::VarLengthExpand { .. })) {
+        if operators.iter().any(|op| matches!(op,
+            GlaOperator::VarLengthExpand { .. } | GlaOperator::ScanVertices))
+        {
             if let Some(GlaOperator::ScanEdges { relation, direction }) = operators.first().cloned() {
                 operators[0] = GlaOperator::ScanVertices;
                 operators.insert(1, GlaOperator::Expand {

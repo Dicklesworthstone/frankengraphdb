@@ -39,9 +39,10 @@ impl GraphPatternBuilder {
     /// witness even if a later clause rejects it. ALL/DISTINCT and pagination
     /// apply only to the final correlated projection.
     ///
-    /// Each positive connected child needs an already visible correlation.
-    /// Definition-wide edge/predicate/identity/visible-variable caps apply;
-    /// clause count is capped at 64. No runtime input constructs a GLA scope.
+    /// Each child needs an already visible correlation; other components may
+    /// scan independently. Definition-wide edge/predicate/identity/visible-name
+    /// and binding-frame caps apply; clause count is capped at 64. No runtime
+    /// input constructs a GLA scope.
     pub fn prepare_values_with_clauses(
         &self,
         clauses: &[GraphMatchClause<'_>],
@@ -80,11 +81,8 @@ impl GraphPatternBuilder {
         // inner-join replacement for the sequence of nullable clauses.
         let mut scope = self.clone();
         let (mut operators, mut scope_slots) = self.compile()?;
-        let mut width = (if self.edges.is_empty() {
-            1
-        } else {
-            self.edges.len() + 1
-        }) as u32;
+        let mut width = super::super::binding_width(&operators);
+        let mut definition_bindings = width as usize;
         for (group, clause) in clauses.iter().enumerate() {
             let mut inner = (*clause.pattern).clone();
             if inner.variables.is_empty() {
@@ -96,29 +94,35 @@ impl GraphPatternBuilder {
                     .iter()
                     .position(|outer| outer.name == inner.variables[inner_at].name)
             };
-            let anchor = if inner.edges.is_empty() {
-                if inner.variables.len() != 1 {
-                    return Err(PatternBuildError::Disconnected);
-                }
-                correlation(0).map(|outer| (0, outer))
-            } else {
-                inner.edges.iter().enumerate().find_map(|(at, edge)| {
-                    correlation(edge.source)
-                        .map(|outer| (at, outer))
-                        .or_else(|| correlation(edge.destination).map(|outer| (at, outer)))
-                })
-            }
-            .ok_or(PatternBuildError::Disconnected)?;
-            let (edge_at, outer_at) = anchor;
-            if !inner.edges.is_empty() {
+            let edge_anchor = inner.edges.iter().enumerate().find_map(|(at, edge)| {
+                correlation(edge.source)
+                    .map(|outer| (at, outer))
+                    .or_else(|| correlation(edge.destination).map(|outer| (at, outer)))
+            });
+            // A visible isolated variable is also a valid correlation anchor.
+            // Select it by index, without renaming/reindexing any expressions.
+            let (outer_at, root) = if let Some((edge_at, outer_at)) = edge_anchor {
                 inner.edges.swap(0, edge_at);
                 if inner.variables[inner.edges[0].source].name != scope.variables[outer_at].name {
                     let edge = &mut inner.edges[0];
                     core::mem::swap(&mut edge.source, &mut edge.destination);
                     edge.direction = super::super::reverse(edge.direction);
                 }
-            }
-            let (body, inner_slots) = inner.compile()?;
+                (outer_at, None)
+            } else {
+                let (inner_at, outer_at) = (0..inner.variables.len())
+                    .find_map(|at| correlation(at).map(|outer| (at, outer)))
+                    .ok_or(PatternBuildError::Disconnected)?;
+                (outer_at, Some(inner_at))
+            };
+            let (body, inner_slots) = inner.compile_with_root(root)?;
+            let inner_width = super::super::binding_width(&body);
+            definition_bindings = definition_bindings.saturating_add(inner_width as usize);
+            check_total(
+                definition_bindings,
+                super::super::MAX_PATTERN_BINDINGS,
+                PatternLimitDimension::Bindings,
+            )?;
             let correlations: Vec<_> = inner
                 .variables
                 .iter()
@@ -158,6 +162,20 @@ impl GraphPatternBuilder {
             for (at, operator) in body.into_iter().enumerate() {
                 match operator {
                     GlaOperator::ScanVertices if at == 0 => {}
+                    GlaOperator::ScanVertices => {
+                        // An already visible variable is a bound correlation,
+                        // not a fresh Cartesian dimension. A null correlation
+                        // must fail the child, never be rebound by a new scan.
+                        if let Some((_, outer)) = correlations.iter()
+                            .find(|(inner, _)| inner.ordinal() == available)
+                        {
+                            operators.push(GlaOperator::BindVertex { source: *outer });
+                        } else {
+                            operators.push(GlaOperator::ScanVertices);
+                        }
+                        emit_correlations(&mut operators, &correlations, available, map);
+                        available += 1;
+                    }
                     GlaOperator::ScanEdges {
                         relation,
                         direction,
@@ -239,6 +257,7 @@ impl GraphPatternBuilder {
                     ),
                 }
             }
+            debug_assert_eq!(available, inner_width);
             let end = operators.len() as u32;
             if optional {
                 operators.push(GlaOperator::OptionalEnd {
@@ -259,8 +278,9 @@ impl GraphPatternBuilder {
                         scope_slots.push(map(inner_slots[at]));
                     }
                 }
-                // At most total edges + one copied anchor per clause + the
-                // root slot are live, bounded above by 129 slots, not by data.
+                // Count actual producers, including independent scan roots and
+                // copied correlations. The definition-wide cap bounds all such
+                // frames, including transient probes, before execution begins.
                 width += available;
             } else {
                 operators.push(GlaOperator::ProbeEnd {
