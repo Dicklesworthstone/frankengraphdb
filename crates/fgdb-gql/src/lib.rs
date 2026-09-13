@@ -37,6 +37,7 @@ pub use mutation_text::{GraphMutationTextError, GraphMutationTextErrorKind, Prep
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use set_ops::{
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
+    GraphSetProjection, GraphSetProjectionError, GraphSetValue,
     GraphSetQuantifier, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
 };
 pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};

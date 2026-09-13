@@ -142,6 +142,32 @@ where
             rows
         }
         SetNode::Scope(input) => run(input, source, meter, operand)?,
+        SetNode::Project { input, projection, quantifier } => {
+            let input = run(input, source, meter, operand)?;
+            let mut output = Vec::new();
+            for (row_at, row) in input.into_iter().enumerate() {
+                meter.event(GlaExecutionEvent::Work)?;
+                let row = projection::evaluate(&row, projection, &mut |event| meter.event(event))
+                    .map_err(|error| match error {
+                        projection::ProjectionFailure::Control(error) => error,
+                        projection::ProjectionFailure::Arithmetic { column, error } =>
+                            GqlQueryError::Source(GraphSetExecutionError::Projection { row: row_at, column, error }),
+                    })?;
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+                output.push(row);
+            }
+            // Canonicalize the actual projected tuple, not the hidden input.
+            // Reuse the fallible row sorter and DISTINCT kernel; no unmetered
+            // scalar comparisons and no extra graph source invocation.
+            if *quantifier == GraphSetQuantifier::Distinct {
+                merge::combine(output, Vec::new(), GraphSetOperation::Union, *quantifier,
+                    &mut |event| meter.event(event), &mut |a, b, control| compare_rows(a, b, &[], control))?
+            } else {
+                merge::sort(&mut output, &mut |event| meter.event(event),
+                    &mut |a, b, control| compare_rows(a, b, &[], control))?;
+                output
+            }
+        }
         SetNode::Binary { operation, quantifier, left, right } => {
             let left = run(left, source, meter, operand)?;
             let right = run(right, source, meter, operand)?;

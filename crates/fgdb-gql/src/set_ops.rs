@@ -8,6 +8,8 @@
 
 mod execute;
 mod merge;
+mod projection;
+pub use projection::{GraphSetProjection, GraphSetProjectionError, GraphSetValue};
 
 use crate::algebra::{GraphOrderError, GraphValueOrder, GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::{GqlBudgetDimension, GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
@@ -44,6 +46,7 @@ pub enum GraphSetExecutionError<E> {
     InputSchema { operand: usize },
     InvalidSourceStatistics { operand: usize },
     AccountingOverflow { dimension: GqlBudgetDimension },
+    Projection { row: usize, column: usize, error: crate::GraphIntegerError },
 }
 impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -52,12 +55,17 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
             Self::InputSchema { operand } => write!(f, "set operand {operand} returned an incompatible row"),
             Self::InvalidSourceStatistics { operand } => write!(f, "set operand {operand} returned inconsistent row statistics"),
             Self::AccountingOverflow { dimension } => write!(f, "set {dimension:?} accounting overflow"),
+            Self::Projection { row, column, error } => write!(f, "projection row {row} column {column}: {error}"),
         }
     }
 }
 impl<E: core::error::Error + 'static> core::error::Error for GraphSetExecutionError<E> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self { Self::Source(error) => Some(error), _ => None }
+        match self {
+            Self::Source(error) => Some(error),
+            Self::Projection { error, .. } => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -67,6 +75,11 @@ type SetResult<T, E, C> = Result<T, GqlQueryError<GraphSetExecutionError<E>, C>>
 enum SetNode {
     Pattern(PreparedGraphPattern<GraphValueRow>),
     Scope(Box<PreparedGraphSet>),
+    Project {
+        input: Box<PreparedGraphSet>,
+        projection: Vec<GraphSetProjection>,
+        quantifier: GraphSetQuantifier,
+    },
     Binary {
         operation: GraphSetOperation,
         quantifier: GraphSetQuantifier,
@@ -213,6 +226,11 @@ impl PreparedGraphSet {
             SetNode::Scope(input) => {
                 bytes.push(2);
                 input.append_transcript(bytes);
+            }
+            SetNode::Project { input, projection, quantifier } => {
+                bytes.extend_from_slice(&[3, u8::from(*quantifier == GraphSetQuantifier::Distinct)]);
+                input.append_transcript(bytes);
+                projection::append_transcript(projection, bytes);
             }
         }
         bytes.extend_from_slice(&(self.order.len() as u64).to_be_bytes());
