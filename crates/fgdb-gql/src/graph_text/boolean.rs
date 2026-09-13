@@ -4,6 +4,8 @@
 //! eager three-valued evaluation and may span several bound vertices. EXISTS
 //! remains a scoped clause, not a Boolean leaf in this deliberately bounded
 //! profile; unsupported mixtures are rejected before catalog resolution.
+//! Property IN/NOT IN lists and BETWEEN/NOT BETWEEN ranges lower to the same
+//! checked comparisons, preserving UNKNOWN, typed arguments and source errors.
 
 use super::*;
 use crate::algebra::{GraphBooleanExpression, GraphBooleanOp as Op,
@@ -149,10 +151,119 @@ impl<'a> Parser<'a> {
             parsed.extended = true;
             return parsed.push(SyntaxItem::Truth(value), at);
         }
+        if self.compound_property_predicate(parsed)? {
+            return Ok(());
+        }
         self.positive_predicate()?;
         let filter = self.syntax.filters.pop().expect("one positive predicate was just parsed");
         parsed.extended |= matches!(filter, Filter::VertexNull { .. });
         parsed.push(SyntaxItem::Atom(filter), at)
+    }
+
+    /// Look ahead with the existing bounded lexer. Never consume a partial
+    /// ordinary comparison, and do not mistake keyword-looking names for
+    /// operators. Syntax errors still precede every catalog callback.
+    fn starts_compound_property_predicate(&self) -> Result<bool, GraphPatternTextError> {
+        if !matches!(self.current.kind, TokenKind::Word(_)) {
+            return Ok(false);
+        }
+        let mut lexer = self.lexer.clone();
+        if !matches!(lexer.next()?.kind, TokenKind::Punct(b'.'))
+            || !matches!(lexer.next()?.kind, TokenKind::Word(_))
+        {
+            return Ok(false);
+        }
+        let mut token = lexer.next()?;
+        if matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT")) {
+            token = lexer.next()?;
+        }
+        Ok(matches!(token.kind, TokenKind::Word(word)
+            if word.eq_ignore_ascii_case("IN") || word.eq_ignore_ascii_case("BETWEEN")))
+    }
+
+    fn admit_compound_leaf(&mut self) -> Result<(), GraphPatternTextError> {
+        self.capacity(
+            self.predicates,
+            MAX_PATTERN_PREDICATES,
+            crate::algebra::PatternLimitDimension::Predicates,
+        )?;
+        self.predicates += 1;
+        Ok(())
+    }
+
+    fn compound_operand(
+        &mut self,
+        variable: Name<'a>,
+        key: Name<'a>,
+        comparison: IntegerComparison,
+        parsed: &mut Parsed<'a>,
+    ) -> Result<(), GraphPatternTextError> {
+        let at = self.current.at;
+        self.admit_compound_leaf()?;
+        let filter = self.property_operand(variable, key, comparison)?;
+        parsed.push(SyntaxItem::Atom(filter), at)
+    }
+
+    /// IN is a left-associated OR of equality comparisons; BETWEEN is the
+    /// conjunction of inclusive comparisons. Apply NOT to the complete result,
+    /// never to individual operands: a NULL member must remain UNKNOWN when
+    /// nothing matches. Explicit operands can be literals, typed parameters or
+    /// bound properties. These are bounded list constructors, not list-valued
+    /// parameters, subqueries, or a new scalar comparison implementation.
+    fn compound_property_predicate(
+        &mut self,
+        parsed: &mut Parsed<'a>,
+    ) -> Result<bool, GraphPatternTextError> {
+        if !self.starts_compound_property_predicate()? {
+            return Ok(false);
+        }
+        let at = self.current.at;
+        let variable = self.variable()?;
+        self.punct(b'.', ".")?;
+        let key = self.name()?;
+        let negate = self.take_word("NOT")?;
+        parsed.extended = true;
+        if self.take_word("IN")? {
+            self.punct(b'[', "[")?;
+            if self.take(b']')? {
+                // Even an empty list must resolve its left property and retain
+                // the eager evaluator's source-error boundary. IS NULL is
+                // total; (property IS NULL AND FALSE) is always FALSE, including
+                // missing/stored NULL. Negation below makes NOT IN [] TRUE.
+                self.admit_compound_leaf()?;
+                parsed.push(SyntaxItem::Atom(Filter::Null {
+                    variable, key, is_null: true,
+                }), at)?;
+                self.admit_compound_leaf()?;
+                parsed.push(SyntaxItem::Truth(Some(false)), at)?;
+                parsed.push(SyntaxItem::And, at)?;
+            } else {
+                let mut first = true;
+                loop {
+                    self.compound_operand(variable, key, IntegerComparison::Equal, parsed)?;
+                    if !first {
+                        parsed.push(SyntaxItem::Or, at)?;
+                    }
+                    first = false;
+                    if self.take(b']')? {
+                        break;
+                    }
+                    self.punct(b',', ", or ]")?;
+                }
+            }
+        } else {
+            self.word("BETWEEN")?;
+            self.compound_operand(variable, key, IntegerComparison::GreaterOrEqual, parsed)?;
+            // This AND belongs to the range, not to the surrounding Boolean
+            // conjunction. Parentheses, NOT and OR retain their usual binding.
+            self.word("AND")?;
+            self.compound_operand(variable, key, IntegerComparison::LessOrEqual, parsed)?;
+            parsed.push(SyntaxItem::And, at)?;
+        }
+        if negate {
+            parsed.push(SyntaxItem::Not, at)?;
+        }
+        Ok(true)
     }
 }
 
@@ -270,5 +381,145 @@ impl BoundBooleanTemplate {
         }
         GraphBooleanExpression::prepare(&program)
             .map_err(|_| error(self.at, GraphPatternTextErrorKind::BooleanExpression))
+    }
+}
+
+#[cfg(test)]
+mod compound_tests {
+    use super::*;
+    use crate::GqlQueryPolicy;
+    use fgdb_types::VId;
+    use std::cell::Cell;
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            _ => None,
+        }
+    }
+
+    fn prepare(predicate: &str) -> PreparedGraphPattern<GraphValueRow> {
+        PreparedGraphText::prepare(&format!("MATCH (n) WHERE {predicate} RETURN n"), symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+    }
+
+    fn rows(predicate: &str, values: &[Option<CanonicalScalar>]) -> Vec<VId> {
+        let plan = prepare(predicate);
+        let result = plan.plan().execute_governed_with_properties(
+            values.len() as u64,
+            (0..values.len()).map(|at| VId(at as u128 + 1)),
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |vid, _| Ok(values[vid.0 as usize - 1].as_ref()),
+            GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+            || Ok::<_, ()>(()),
+        ).unwrap();
+        result.value.iter().map(|row| row.values()[0].as_vertex().unwrap()).collect()
+    }
+
+    #[test]
+    fn compound_lowering_reuses_the_existing_boolean_transcript() {
+        for (compound, expanded) in [
+            ("n.p IN [1, 2, NULL]", "(n.p = 1 OR n.p = 2 OR n.p = NULL)"),
+            ("n.p NOT IN [1, 2]", "NOT (n.p = 1 OR n.p = 2)"),
+            ("n.p BETWEEN -2 AND 4", "(n.p >= -2 AND n.p <= 4)"),
+            ("n.p NOT BETWEEN 1 AND n.q", "NOT (n.p >= 1 AND n.p <= n.q)"),
+            ("n.p IN []", "(n.p IS NULL AND FALSE)"),
+            ("n.p NOT IN []", "NOT (n.p IS NULL AND FALSE)"),
+        ] {
+            assert_eq!(prepare(compound).canonical_bytes(), prepare(expanded).canonical_bytes(), "{compound}");
+        }
+    }
+
+    #[test]
+    fn membership_and_negation_preserve_unknown_and_empty_list_laws() {
+        let values = [Some(CanonicalScalar::Int(1)), Some(CanonicalScalar::Int(2)),
+            Some(CanonicalScalar::Int(3)), Some(CanonicalScalar::Null), None];
+        assert_eq!(rows("n.p IN [1, 3, 3]", &values), vec![VId(1), VId(3)]);
+        assert_eq!(rows("n.p NOT IN [1, 3]", &values), vec![VId(2)]);
+        assert_eq!(rows("n.p IN [1, NULL]", &values), vec![VId(1)]);
+        assert!(rows("n.p NOT IN [1, NULL]", &values).is_empty());
+        assert!(rows("n.p IN []", &values).is_empty());
+        assert_eq!(rows("n.p NOT IN []", &values), (1..=5).map(VId).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn ranges_are_inclusive_and_do_not_swallow_outer_boolean_operators() {
+        let values = (0..=4).map(|value| Some(CanonicalScalar::Int(value))).collect::<Vec<_>>();
+        assert_eq!(rows("n.p BETWEEN 1 AND 3", &values), vec![VId(2), VId(3), VId(4)]);
+        assert_eq!(rows("n.p NOT BETWEEN 1 AND 3", &values), vec![VId(1), VId(5)]);
+        assert!(rows("n.p BETWEEN 3 AND 1", &values).is_empty());
+        assert_eq!(rows("n.p BETWEEN 1 AND 3 AND n.p IN [2, 4] OR n.p = 0", &values), vec![VId(1), VId(3)]);
+        assert_eq!(rows("NOT n.p BETWEEN 1 AND 3", &values), vec![VId(1), VId(5)]);
+    }
+
+    #[test]
+    fn literal_keywords_and_quotes_are_operands_not_query_fragments() {
+        let value = CanonicalScalar::ucs_basic_text("x'] OR TRUE --").unwrap();
+        let values = [Some(value), Some(CanonicalScalar::ucs_basic_text("other").unwrap())];
+        assert_eq!(rows("n.p IN ['x''] OR TRUE --']", &values), vec![VId(1)]);
+        let values = [Some(CanonicalScalar::Bool(true)), Some(CanonicalScalar::Bool(false)), None];
+        assert_eq!(rows("n.p IN [TRUE]", &values), vec![VId(1)]);
+        assert_eq!(rows("n.p NOT IN [TRUE]", &values), vec![VId(2)]);
+    }
+
+    #[test]
+    fn parameters_are_bound_once_without_text_substitution_or_catalog_reentry() {
+        let calls = Cell::new(0);
+        let template = PreparedGraphText::prepare(
+            "MATCH (n) WHERE n.p IN [$x, $x] AND n.p BETWEEN $lo AND $hi RETURN n",
+            |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
+        ).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(template.parameter_schema()[0].occurrences, 2);
+        let args = GqlParameters::new().with_int64("x", 2).unwrap()
+            .with_int64("lo", i64::MIN).unwrap().with_int64("hi", i64::MAX).unwrap();
+        let first = template.bind_parameters(&args).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(first.canonical_bytes(), template.bind_parameters(&args).unwrap().canonical_bytes());
+        assert!(matches!(template.bind_parameters(&GqlParameters::new()).unwrap_err().kind,
+            GraphPatternTextErrorKind::MissingParameter));
+    }
+
+    #[test]
+    fn malformed_and_oversized_lists_refuse_before_catalog_resolution() {
+        for predicate in ["n.p IN [1,]", "n.p IN [1 2]", "n.p IN [", "n.p IN $xs",
+            "n.p BETWEEN 1", "n.p BETWEEN 1 OR 2", "n.p NOT BETWEEN AND 2"] {
+            let calls = Cell::new(0);
+            assert!(PreparedGraphText::prepare(&format!("MATCH (n) WHERE {predicate} RETURN n"),
+                |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) }).is_err(), "{predicate}");
+            assert_eq!(calls.get(), 0, "{predicate}");
+        }
+        let members = vec!["1"; MAX_PATTERN_PREDICATES + 1].join(",");
+        assert!(PreparedGraphText::prepare(
+            &format!("MATCH (n) WHERE n.p IN [{members}] RETURN n"), symbols).is_err());
+        assert!(matches!(PreparedGraphText::prepare(
+            "MATCH (n) WHERE n.unknown IN [] RETURN n", symbols).unwrap_err().kind,
+            GraphPatternTextErrorKind::UnknownSymbol(GraphSymbolKind::Property)));
+    }
+
+    #[test]
+    fn empty_membership_still_propagates_property_source_failure() {
+        for predicate in ["n.p IN []", "n.p NOT IN []", "n.p IN [1, n.q]"] {
+            let plan = prepare(predicate);
+            let value = CanonicalScalar::Int(1);
+            let result = plan.plan().execute_governed_with_properties(
+                1, [VId(1)], [], |_, _| Ok::<_, &str>(true),
+                |_, key| {
+                    if predicate.ends_with(']') && predicate.contains("n.q") && key == PropertyKeyId(1) {
+                        Ok(Some(&value))
+                    } else {
+                        Err("unreadable property")
+                    }
+                },
+                GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                || Ok::<_, &str>(()),
+            );
+            assert!(result.is_err(), "{predicate}");
+        }
     }
 }
