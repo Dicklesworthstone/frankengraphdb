@@ -12,6 +12,7 @@ mod evidence_cursor;
 mod evidence_limits;
 mod evidence_page;
 mod graph_text;
+mod integer_expression;
 mod mutation;
 mod mutation_text;
 mod overlay_evidence;
@@ -22,6 +23,11 @@ mod set_ops;
 mod set_text;
 mod walk;
 
+pub use integer_expression::{
+    GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerError, GraphIntegerErrorKind,
+    GraphIntegerEvaluationError, GraphIntegerExpression, GraphIntegerOp, GraphIntegerUnary,
+    MAX_GRAPH_INTEGER_INSTRUCTIONS,
+};
 pub use mutation::{
     GraphMutationAction, GraphMutationBatch, GraphMutationBuildError, GraphMutationError,
     GraphMutationIntent, GraphMutationPolicy, GraphMutationStats, GraphMutationValue,
@@ -45,7 +51,7 @@ pub use aggregation::{
 };
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
-    GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GlaLimitDimension, GlaLimitExceeded, GqlQueryPolicy, GqlQueryExecution, GqlQueryError,
 };
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,
