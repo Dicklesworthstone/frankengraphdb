@@ -166,7 +166,7 @@ fn malformed_unsupported_and_oversized_mutations_refuse_before_catalog_callbacks
     for text in [
         "MATCH (a) DELETE a", "MATCH (a) SET a.p=1 DETACH DELETE a",
         "MATCH (a) DETACH DELETE a SET a.p=1", "MATCH (a) SET a.p=1 RETURN a",
-        "MATCH (a) SET a.p=a.p+1", "MATCH (a) SET a.p=1,", "MATCH (a) REMOVE",
+        "MATCH (a) SET a.p=a.p+*1", "MATCH (a) SET a.p=1,", "MATCH (a) REMOVE",
         "MATCH (a) SET missing.p=1", "MATCH (a) SET a.p=other.p",
         "MATCH (a) WHERE EXISTS { MATCH (local) } SET local.p=1",
         "MATCH (a) SET a.p=9223372036854775808", "MATCH (a) SET a.p=$ value",
@@ -199,6 +199,7 @@ fn exact_proposal_budgets_include_source_work_and_scalar_payload_copies() {
     assert_eq!(run(&plan, &[VId(1), VId(2)], &[], &Props::new(), exact).unwrap().stats(), stats);
     for cap in [
         GraphMutationPolicy::new(GqlQueryPolicy::new(2, 2, stats.evaluator.work_units - 1, u64::MAX), 4),
+        GraphMutationPolicy::new(GqlQueryPolicy::new(2, 2, u64::MAX, stats.evaluator.scratch_entries - 1), 4),
         GraphMutationPolicy::new(GqlQueryPolicy::new(2, 2, u64::MAX, stats.evaluator.scratch_entries - 1), 4),
         GraphMutationPolicy::new(GqlQueryPolicy::new(2, 2, u64::MAX, u64::MAX), 3),
     ] { assert!(run(&plan, &[VId(1), VId(2)], &[], &Props::new(), cap).is_err()); }
