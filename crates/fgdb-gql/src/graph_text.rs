@@ -1,4 +1,4 @@
-//! Bounded connected-pattern text preparation, not a query interpreter.
+//! Bounded graph-pattern text preparation, not a query interpreter.
 //!
 //! Parse once, resolve graph names once, then bind typed numeric arguments into
 //! the existing GraphPatternBuilder. Execution uses the ordinary governed GLA
@@ -732,12 +732,18 @@ impl core::fmt::Debug for PreparedGraphText {
 }
 
 impl PreparedGraphText {
-    /// Prepare the bounded connected-pattern text profile. Keywords are ASCII
+    /// Prepare the bounded graph-pattern text profile. Keywords are ASCII
     /// case-insensitive; names are case-sensitive. RETURN defaults to ALL.
     /// The mandatory root may have AND-conjoined EXISTS/NOT EXISTS { MATCH }
     /// predicates, followed by correlated OPTIONAL MATCH clauses. A WHERE
     /// after OPTIONAL belongs to that child, before null extension. Scoped
-    /// children are positive connected patterns; nested scopes are refused.
+    /// children require a visible correlation; other components may be
+    /// independent. Nested scopes and wholly uncorrelated children refuse.
+    /// Comma-separated components may join through property or identity
+    /// comparisons without an edge between them. Independent scans use one
+    /// complete admitted vertex domain, preserve isolates and bag occurrences,
+    /// and conservatively retain whole-vertex transaction scan observations.
+    /// This is governed nested-loop enumeration, not a hash/FreeJoin optimizer.
     /// Property WHERE operands also accept single-quoted UCS_BASIC strings,
     /// TRUE/FALSE/NULL, and IS [NOT] NULL. Only doubled quotes escape a quote;
     /// quoted keywords and parameter-looking text remain literal payloads.
@@ -1287,13 +1293,11 @@ mod tests {
                 .kind,
             GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded { .. })
         ));
-        let disconnected =
-            PreparedGraphText::prepare("MATCH (a)-[:R]->(b),(c)-[:S]->(d) RETURN *", symbols)
-                .unwrap_err();
-        assert_eq!(
-            disconnected.kind,
-            GraphPatternTextErrorKind::Build(PatternBuildError::Disconnected)
-        );
+        let disconnected = query("MATCH (a)-[:R]->(b),(c)-[:S]->(d) RETURN *");
+        assert_eq!(disconnected.columns(), &["a", "b", "c", "d"]);
+        assert!(!disconnected.plan().scans_edges());
+        assert!(disconnected.plan().reads_edges());
+        assert_eq!(disconnected.required_vertex_label(), None);
     }
 
     #[test]
