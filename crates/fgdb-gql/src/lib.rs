@@ -15,6 +15,7 @@ mod graph_text;
 mod integer_expression;
 mod mutation;
 mod mutation_program;
+mod mutation_program_template;
 mod mutation_text;
 mod overlay_evidence;
 mod parameters;
@@ -24,6 +25,7 @@ mod set_ops;
 mod set_text;
 mod walk;
 
+pub use mutation_program_template::{GraphMutationProgramTemplateError, PreparedGraphMutationProgramTemplate};
 pub use mutation_program::{
     GraphMutationProgramBuildError, GraphMutationProgramDimension, GraphMutationProgramError,
     GraphMutationProgramStats, MAX_GRAPH_MUTATION_STATEMENTS, PreparedGraphMutationProgram,
