@@ -277,7 +277,7 @@ fn malformed_or_oversized_literals_refuse_before_catalog_calls() {
         "MATCH (n) WHERE n.p = TRUE false RETURN n",
         "MATCH (n) WHERE n.p = 'a' 'b' RETURN n",
         "MATCH (n) WHERE n.p = 'x'; RETURN n",
-        "MATCH (n) WHERE n.p = 'x' OR n.p = 'y' RETURN n",
+        "MATCH (n) WHERE n.p = 'x' OR RETURN n",
         "MATCH (n) WHERE n.p = \"x\" RETURN n",
         "MATCH (n) WHERE n.p IS NOT RETURN n",
     ] {

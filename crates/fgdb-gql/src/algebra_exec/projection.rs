@@ -52,7 +52,10 @@ impl<Row: Ord> ProjectedRows<Row> {
         let mut rows = Self::new(distinct);
         rows.capacity = match operators.last() {
             Some(GlaOperator::Limit { count: Some(0), .. }) => Some(0),
-            Some(GlaOperator::Limit { offset, count: Some(count) }) => offset
+            Some(GlaOperator::Limit {
+                offset,
+                count: Some(count),
+            }) => offset
                 .checked_add(*count)
                 .and_then(|bound| usize::try_from(bound).ok()),
             _ => None,
@@ -100,8 +103,11 @@ impl<Row: Ord> ProjectedRows<Row> {
         let largest = match &self.storage {
             Storage::Distinct(rows) => rows.last(),
             Storage::All(rows) => rows.last().map(|(row, _)| row),
-            Storage::Ranked { .. } => unreachable!("ordered value rows use their borrowed ranked key"),
-        }.expect("a nonzero full prefix has a largest row");
+            Storage::Ranked { .. } => {
+                unreachable!("ordered value rows use their borrowed ranked key")
+            }
+        }
+        .expect("a nonzero full prefix has a largest row");
         let largest: &Key = largest.borrow();
         if largest <= key {
             return Ok(false);
@@ -119,7 +125,9 @@ impl<Row: Ord> ProjectedRows<Row> {
         match &self.storage {
             Storage::Distinct(rows) => rows.contains(key),
             Storage::All(_) => false,
-            Storage::Ranked { .. } => unreachable!("ordered value rows use their borrowed ranked key"),
+            Storage::Ranked { .. } => {
+                unreachable!("ordered value rows use their borrowed ranked key")
+            }
         }
     }
 
@@ -153,7 +161,9 @@ impl<Row: Ord> ProjectedRows<Row> {
                 let inserted = rows.insert((row, ordinal));
                 debug_assert!(inserted, "each retained occurrence has a unique live slot");
             }
-            Storage::Ranked { .. } => unreachable!("ordered value rows use their checked ranked insertion"),
+            Storage::Ranked { .. } => {
+                unreachable!("ordered value rows use their checked ranked insertion")
+            }
         }
     }
 
@@ -314,25 +324,45 @@ mod tests {
                     for offset in 0..=3_u64 {
                         for count in 0..=3_u64 {
                             let mut rows = page(distinct, offset, Some(count));
-                            let capacity = if count == 0 { 0 } else { (offset + count) as usize };
+                            let capacity = if count == 0 {
+                                0
+                            } else {
+                                (offset + count) as usize
+                            };
                             let mut seen = Vec::new();
                             for &value in &input {
                                 seen.push(value);
-                                if rows.should_retain(&value, &mut |_| Ok::<_, ()>(())).unwrap() {
+                                if rows
+                                    .should_retain(&value, &mut |_| Ok::<_, ()>(()))
+                                    .unwrap()
+                                {
                                     rows.insert(value);
                                 }
                                 let mut expected = seen.clone();
                                 expected.sort_unstable();
-                                if distinct { expected.dedup(); }
+                                if distinct {
+                                    expected.dedup();
+                                }
                                 expected.truncate(capacity);
                                 assert_eq!(rows.iter().copied().collect::<Vec<_>>(), expected);
                                 assert!(rows.len() <= capacity);
                             }
                             let mut expected = input.clone();
                             expected.sort_unstable();
-                            if distinct { expected.dedup(); }
-                            assert_eq!(rows.into_rows().skip(offset as usize).take(count as usize).collect::<Vec<_>>(),
-                                expected.into_iter().skip(offset as usize).take(count as usize).collect::<Vec<_>>());
+                            if distinct {
+                                expected.dedup();
+                            }
+                            assert_eq!(
+                                rows.into_rows()
+                                    .skip(offset as usize)
+                                    .take(count as usize)
+                                    .collect::<Vec<_>>(),
+                                expected
+                                    .into_iter()
+                                    .skip(offset as usize)
+                                    .take(count as usize)
+                                    .collect::<Vec<_>>()
+                            );
                         }
                     }
                 }
@@ -346,10 +376,15 @@ mod tests {
         // merge two equal occurrences when their slot IDs collide.
         let mut rows = page(false, 0, Some(3));
         for value in [8, 10, 9, 7, 7, 6, 6, 6, 5, 6] {
-            if rows.should_retain(&value, &mut |_| Ok::<_, ()>(())).unwrap() {
+            if rows
+                .should_retain(&value, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+            {
                 rows.insert(value);
             }
-            let Storage::All(set) = &rows.storage else { unreachable!() };
+            let Storage::All(set) = &rows.storage else {
+                unreachable!()
+            };
             let slots: BTreeSet<_> = set.iter().map(|(_, slot)| *slot).collect();
             assert_eq!(slots.len(), set.len());
             assert!(slots.iter().all(|slot| *slot < 3));
@@ -372,7 +407,10 @@ mod tests {
             });
             assert_eq!(result, Err(stop));
             assert_eq!(calls, stop);
-            assert_eq!(rows.iter().map(String::as_str).collect::<Vec<_>>(), vec!["y", "z"]);
+            assert_eq!(
+                rows.iter().map(String::as_str).collect::<Vec<_>>(),
+                vec!["y", "z"]
+            );
         }
         assert!(!rows.should_retain("z", &mut |_| Ok::<_, ()>(())).unwrap());
         assert!(!rows.should_retain("zz", &mut |_| Ok::<_, ()>(())).unwrap());
@@ -388,8 +426,10 @@ mod tests {
         assert_eq!(page::<u8>(false, 1, Some(u64::MAX)).capacity, None);
         assert_eq!(page::<u8>(true, 7, None).capacity, None);
         assert_eq!(page::<u8>(true, 7, Some(3)).capacity, Some(10));
-        assert_eq!(page::<u8>(false, 0, Some(u64::MAX)).capacity,
-            usize::try_from(u64::MAX).ok());
+        assert_eq!(
+            page::<u8>(false, 0, Some(u64::MAX)).capacity,
+            usize::try_from(u64::MAX).ok()
+        );
         let rows = page::<u8>(false, u64::MAX, Some(0));
         assert!(!rows.should_retain(&1, &mut |_| Ok::<_, ()>(())).unwrap());
         assert!(rows.is_empty());

@@ -6,8 +6,8 @@ mod comparison;
 mod join;
 mod policy;
 mod projection;
-use comparison::compare_properties;
 pub(crate) use comparison::charge_payload;
+use comparison::compare_properties;
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::ProjectedRows;
 
@@ -515,7 +515,10 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             test_vertex,
             control,
             |operator, bindings, projected, control| {
-                if matches!(operator, GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }) {
+                if matches!(
+                    operator,
+                    GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
+                ) {
                     return compare_properties(operator, bindings, &mut property, control);
                 }
                 Row::collect_properties(operator, bindings, projected, &mut property, control)?;

@@ -354,7 +354,7 @@ fn malformed_or_out_of_scope_definitions_refuse_before_catalog_access() {
         "MATCH (a) WHERE EXISTS { MATCH (a) WHERE EXISTS { MATCH (a) } } RETURN a",
         "MATCH (a) WHERE EXISTS { MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) } RETURN a",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b) } RETURN a",
-        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n > 0 OR b.n < 0 RETURN a",
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n > 0 OR RETURN a",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) MATCH (b)-[:S]->(c) RETURN a",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE missing.n > 0 RETURN a",
         "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE b.n > $x } RETURN a LIMIT $x",

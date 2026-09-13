@@ -18,13 +18,11 @@ mod parser;
 mod prepared;
 
 pub use aggregation::{
-    GraphExactAverage,
     GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
     GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder, GraphAggregateRow,
-    GraphAggregateTest, GraphAggregateValue, GraphNullPlacement, MAX_AGGREGATE_FILTERS,
-    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
-    MAX_HAVING_INSTRUCTIONS,
-    PreparedGraphAggregate,
+    GraphAggregateTest, GraphAggregateValue, GraphExactAverage, GraphHavingError,
+    GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
+    MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS, PreparedGraphAggregate,
 };
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,

@@ -42,13 +42,14 @@ impl GraphPatternBuilder {
             MAX_PATTERN_PREDICATES,
             PatternLimitDimension::Predicates,
         )?;
-        self.property_comparisons.push(PropertyComparison::Properties {
-            left,
-            left_key,
-            right,
-            right_key,
-            comparison,
-        });
+        self.property_comparisons
+            .push(PropertyComparison::Properties {
+                left,
+                left_key,
+                right,
+                right_key,
+                comparison,
+            });
         self.predicate_count += 1;
         Ok(self)
     }
@@ -61,7 +62,9 @@ impl GraphPatternBuilder {
         &mut self,
         expression: &crate::algebra::GraphBooleanExpression,
     ) -> Result<&mut Self, PatternBuildError> {
-        let observed = self.predicate_count.saturating_add(expression.predicate_count());
+        let observed = self
+            .predicate_count
+            .saturating_add(expression.predicate_count());
         if observed > MAX_PATTERN_PREDICATES {
             return Err(PatternBuildError::LimitExceeded {
                 dimension: PatternLimitDimension::Predicates,
@@ -70,7 +73,8 @@ impl GraphPatternBuilder {
             });
         }
         let bound = expression.bind(|name| self.variable(name))?;
-        self.property_comparisons.push(PropertyComparison::Boolean(bound));
+        self.property_comparisons
+            .push(PropertyComparison::Boolean(bound));
         self.predicate_count = observed;
         Ok(self)
     }
@@ -93,12 +97,19 @@ impl GraphPatternBuilder {
     ) {
         for predicate in &self.property_comparisons {
             operators.push(match predicate {
-                PropertyComparison::Properties { left, left_key, right, right_key, comparison } => {
-                    GlaOperator::CompareProperties {
-                        left: slots[*left], left_key: *left_key,
-                        right: slots[*right], right_key: *right_key, comparison: *comparison,
-                    }
-                }
+                PropertyComparison::Properties {
+                    left,
+                    left_key,
+                    right,
+                    right_key,
+                    comparison,
+                } => GlaOperator::CompareProperties {
+                    left: slots[*left],
+                    left_key: *left_key,
+                    right: slots[*right],
+                    right_key: *right_key,
+                    comparison: *comparison,
+                },
                 PropertyComparison::Boolean(expression) => GlaOperator::SelectBoolean {
                     expression: expression.remap(|slot| slots[slot.ordinal() as usize]),
                 },

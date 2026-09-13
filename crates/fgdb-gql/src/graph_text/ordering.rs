@@ -23,18 +23,34 @@ impl Parser<'_> {
                 })
             } else {
                 // A returned alias wins over a same-spelled original variable.
-                self.syntax.columns.iter().position(|column| column.alias.text == name.text)
-                    .or_else(|| self.syntax.columns.iter().position(|column| {
-                        column.property.is_none() && column.variable.text == name.text
-                    }))
+                self.syntax
+                    .columns
+                    .iter()
+                    .position(|column| column.alias.text == name.text)
+                    .or_else(|| {
+                        self.syntax.columns.iter().position(|column| {
+                            column.property.is_none() && column.variable.text == name.text
+                        })
+                    })
             }
-            .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::Expected(
-                "projected ORDER BY expression or alias",
-            )))?;
-            if self.syntax.ordering.iter().any(|order| order.column == column) {
-                return Err(error(name.at, GraphPatternTextErrorKind::OrderBuild(
-                    crate::algebra::GraphOrderError::DuplicateColumn { column },
-                )));
+            .ok_or_else(|| {
+                error(
+                    name.at,
+                    GraphPatternTextErrorKind::Expected("projected ORDER BY expression or alias"),
+                )
+            })?;
+            if self
+                .syntax
+                .ordering
+                .iter()
+                .any(|order| order.column == column)
+            {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::OrderBuild(
+                        crate::algebra::GraphOrderError::DuplicateColumn { column },
+                    ),
+                ));
             }
             let descending = self.take_word("DESC")?;
             if !descending {
@@ -52,7 +68,11 @@ impl Parser<'_> {
             };
             // Unique indices into the already bounded RETURN schema bound
             // this list without a second, differently sized definition cap.
-            self.syntax.ordering.push(GraphValueOrder { column, descending, nulls_first });
+            self.syntax.ordering.push(GraphValueOrder {
+                column,
+                descending,
+                nulls_first,
+            });
             if !self.take(b',')? {
                 break;
             }

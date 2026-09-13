@@ -364,6 +364,7 @@ fn scoped_scalar_arguments_compose_with_null_extension_existence_and_group_ranki
     )
     .unwrap();
     let args = arguments
+        .clone()
         .with_int64("minimum", 1)
         .unwrap()
         .with_uint64("take", 2)
@@ -384,19 +385,44 @@ fn scoped_scalar_arguments_compose_with_null_extension_existence_and_group_ranki
     assert_eq!(summary.value.len(), 2);
     assert_eq!(summary.value[0].get(0).unwrap().as_count(), Some(2));
     assert_eq!(summary.value[1].get(1).unwrap().as_count(), Some(0));
-    let mut wrong_types = types.to_vec();
-    wrong_types.push((
+    let mut scalar_types = types.to_vec();
+    scalar_types.push((
         "minimum",
         GqlParameterType::Scalar(CanonicalScalarKind::Int),
     ));
-    assert!(
-        PreparedGraphAggregateText::prepare_with_parameter_types(
-            &format!("{head} RETURN COUNT(*) AS total HAVING total >= $minimum"),
-            &wrong_types,
-            symbols
+    let scalar_aggregate = PreparedGraphAggregateText::prepare_with_parameter_types(
+        &format!("{head} RETURN COUNT(*) AS total HAVING total >= $minimum"),
+        &scalar_types,
+        symbols,
+    )
+    .unwrap();
+    let scalar_args = arguments
+        .clone()
+        .with_scalar("minimum", CanonicalScalar::Int(3))
+        .unwrap();
+    let summary = scalar_aggregate
+        .bind_parameters(&scalar_args)
+        .unwrap()
+        .execute_governed(
+            6,
+            [VId(1), VId(2), VId(3)],
+            edges,
+            matches,
+            |_, _| Ok(None),
+            wide(),
+            || Ok::<_, ()>(()),
         )
-        .is_err()
-    );
+        .unwrap();
+    assert_eq!(summary.value.len(), 1);
+    assert_eq!(summary.value[0].get(0).unwrap().as_count(), Some(3));
+    let wrong_args = arguments.with_bool("minimum", true).unwrap();
+    assert!(matches!(
+        scalar_aggregate
+            .bind_parameters(&wrong_args)
+            .unwrap_err()
+            .kind,
+        GraphPatternTextErrorKind::ParameterTypeMismatch { .. }
+    ));
 }
 
 #[test]

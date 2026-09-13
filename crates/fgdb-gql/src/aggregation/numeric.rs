@@ -135,7 +135,10 @@ impl NumericAccumulator {
         if self.count == 0 {
             NumericResult::Empty
         } else if self.average {
-            NumericResult::Average { sum: self.sum, count: self.count }
+            NumericResult::Average {
+                sum: self.sum,
+                count: self.count,
+            }
         } else {
             NumericResult::Sum(self.sum)
         }
@@ -162,7 +165,9 @@ impl NumericAccumulator {
         &mut self,
         value: ValueRef<'_>,
         aggregate: usize,
-        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
         let ValueRef::Scalar(CanonicalScalar::Int(value)) = value else {
             return Err(GqlQueryError::Source(if self.average {
@@ -177,9 +182,13 @@ impl NumericAccumulator {
                 return Ok(());
             }
         }
-        let overflow = || GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate });
+        let overflow =
+            || GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate });
         let count = self.count.checked_add(1).ok_or_else(overflow)?;
-        let sum = self.sum.checked_add(i128::from(*value)).ok_or_else(overflow)?;
+        let sum = self
+            .sum
+            .checked_add(i128::from(*value))
+            .ok_or_else(overflow)?;
         if let Some(seen) = &mut self.seen {
             control(GlaExecutionEvent::ScratchEntry)?;
             seen.insert(*value);
@@ -201,10 +210,18 @@ mod tests {
         assert_eq!((zero.numerator(), zero.denominator()), (0, 1));
         assert_eq!(GraphExactAverage::new(6, 4), GraphExactAverage::new(3, 2));
         assert_eq!(GraphExactAverage::new(-6, 4).unwrap().to_string(), "-3/2");
-        assert_eq!(GraphExactAverage::new(i128::MIN, 2).unwrap().numerator(), i128::MIN / 2);
+        assert_eq!(
+            GraphExactAverage::new(i128::MIN, 2).unwrap().numerator(),
+            i128::MIN / 2
+        );
         let value = GraphExactAverage::new(123456789, 17).unwrap();
         assert!(!format!("{value:?}").contains("123456789"));
-        assert_eq!(GraphExactAverage::new(i128::MIN, 1).unwrap().compare_integer(i128::MIN), Ordering::Equal);
+        assert_eq!(
+            GraphExactAverage::new(i128::MIN, 1)
+                .unwrap()
+                .compare_integer(i128::MIN),
+            Ordering::Equal
+        );
     }
 
     #[test]
@@ -230,13 +247,22 @@ mod tests {
         let d = u64::MAX;
         let high = i128::MAX;
         assert_eq!(compare_ratios((high, d), (high - 1, d)), Ordering::Greater);
-        assert_eq!(compare_ratios((i128::MIN, d), (i128::MIN + 1, d)), Ordering::Less);
+        assert_eq!(
+            compare_ratios((i128::MIN, d), (i128::MIN + 1, d)),
+            Ordering::Less
+        );
         assert_eq!(compare_ratios((high, d), (high, d - 1)), Ordering::Less);
-        assert_eq!(compare_ratios((i128::MIN, d), (i128::MIN, d - 1)), Ordering::Greater);
+        assert_eq!(
+            compare_ratios((i128::MIN, d), (i128::MIN, d - 1)),
+            Ordering::Greater
+        );
         assert_eq!(compare_ratios((-1, d), (0, 1)), Ordering::Less);
         let n = i128::from(i64::MAX);
         assert_eq!(compare_ratios((2 * n - 1, 2), (n, 1)), Ordering::Less);
-        assert_eq!(compare_ratios((2 * n - 1, 2), (n - 1, 1)), Ordering::Greater);
+        assert_eq!(
+            compare_ratios((2 * n - 1, 2), (n - 1, 1)),
+            Ordering::Greater
+        );
     }
 
     #[test]
@@ -244,25 +270,48 @@ mod tests {
         let mut state = NumericAccumulator::new(true, true);
         let mut scratch = 0;
         for number in [1, 1, 5, 5, -3] {
-            state.update(ValueRef::Scalar(&CanonicalScalar::Int(number)), 0, &mut |event| {
-                scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
-                Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(())
-            }).unwrap();
+            state
+                .update(
+                    ValueRef::Scalar(&CanonicalScalar::Int(number)),
+                    0,
+                    &mut |event| {
+                        scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                        Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(())
+                    },
+                )
+                .unwrap();
         }
         assert_eq!((state.sum, state.count, scratch), (3, 3, 3));
         let original = (state.sum, state.count, state.seen.as_ref().unwrap().clone());
-        let result = state.update(ValueRef::Scalar(&CanonicalScalar::Int(9)), 0, &mut |event| {
-            if event == GlaExecutionEvent::ScratchEntry {
-                Err(GqlQueryError::<GraphAggregateError<()>, _>::Interrupted("stop"))
-            } else { Ok(()) }
-        });
+        let result = state.update(
+            ValueRef::Scalar(&CanonicalScalar::Int(9)),
+            0,
+            &mut |event| {
+                if event == GlaExecutionEvent::ScratchEntry {
+                    Err(GqlQueryError::<GraphAggregateError<()>, _>::Interrupted(
+                        "stop",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        );
         assert!(matches!(result, Err(GqlQueryError::Interrupted("stop"))));
-        assert_eq!((state.sum, state.count, state.seen.as_ref().unwrap().clone()), original);
+        assert_eq!(
+            (state.sum, state.count, state.seen.as_ref().unwrap().clone()),
+            original
+        );
         state.count = u64::MAX;
         let before = state.sum;
-        let result = state.update(ValueRef::Scalar(&CanonicalScalar::Int(9)), 2,
-            &mut |_| Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(()));
-        assert!(matches!(result, Err(GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate: 2 }))));
+        let result = state.update(ValueRef::Scalar(&CanonicalScalar::Int(9)), 2, &mut |_| {
+            Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(())
+        });
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(
+                GraphAggregateError::ArithmeticOverflow { aggregate: 2 }
+            ))
+        ));
         assert_eq!(state.sum, before);
         assert!(!state.seen.as_ref().unwrap().contains(&9));
     }

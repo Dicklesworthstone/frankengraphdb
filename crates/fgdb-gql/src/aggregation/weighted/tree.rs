@@ -43,18 +43,44 @@ impl Forest {
             let mut message = Message::new();
             for (&(source, relation, destination), &weight) in topology {
                 control(GlaExecutionEvent::Work)?;
-                if relation != edge.relation { continue; }
+                if relation != edge.relation {
+                    continue;
+                }
                 match edge.direction {
                     GlaDirection::Forward => contribute(
-                        &mut message, source, destination, weight, descendants.as_ref(), control,
+                        &mut message,
+                        source,
+                        destination,
+                        weight,
+                        descendants.as_ref(),
+                        control,
                     )?,
                     GlaDirection::Reverse => contribute(
-                        &mut message, destination, source, weight, descendants.as_ref(), control,
+                        &mut message,
+                        destination,
+                        source,
+                        weight,
+                        descendants.as_ref(),
+                        control,
                     )?,
                     GlaDirection::Undirected => {
-                        contribute(&mut message, source, destination, weight, descendants.as_ref(), control)?;
+                        contribute(
+                            &mut message,
+                            source,
+                            destination,
+                            weight,
+                            descendants.as_ref(),
+                            control,
+                        )?;
                         if source != destination {
-                            contribute(&mut message, destination, source, weight, descendants.as_ref(), control)?;
+                            contribute(
+                                &mut message,
+                                destination,
+                                source,
+                                weight,
+                                descendants.as_ref(),
+                                control,
+                            )?;
                         }
                     }
                 }
@@ -88,9 +114,12 @@ impl Forest {
         let mut weight = Multiplicity::ONE;
         for (slot, message) in &self.roots {
             control(GlaExecutionEvent::Work)?;
-            let vertex = bindings.get(*slot).copied().flatten().ok_or_else(||
-                GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable))?;
-            let Some(factor) = message.get(&vertex) else { return Ok(None); };
+            let vertex = bindings.get(*slot).copied().flatten().ok_or_else(|| {
+                GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable)
+            })?;
+            let Some(factor) = message.get(&vertex) else {
+                return Ok(None);
+            };
             weight = weight.product(*factor);
         }
         Ok(Some(weight))
@@ -107,7 +136,9 @@ fn contribute<E>(
 ) -> Result<(), E> {
     control(GlaExecutionEvent::Work)?;
     let weight = if let Some(descendants) = descendants {
-        let Some(children) = descendants.get(&child) else { return Ok(()); };
+        let Some(children) = descendants.get(&child) else {
+            return Ok(());
+        };
         weight.product(*children)
     } else {
         weight
@@ -128,30 +159,65 @@ mod tests {
     #[test]
     fn positive_sums_overflow_without_erasing_support_or_wrapping() {
         let max = Multiplicity(NonZeroU64::new(u64::MAX));
-        assert_eq!(Multiplicity::ONE.sum(Multiplicity::ONE).exact_count(), Some(2));
+        assert_eq!(
+            Multiplicity::ONE.sum(Multiplicity::ONE).exact_count(),
+            Some(2)
+        );
         assert_eq!(max.sum(Multiplicity::ONE).exact_count(), None);
-        assert_eq!(max.sum(Multiplicity::ONE).sum(Multiplicity::ONE).exact_count(), None);
+        assert_eq!(
+            max.sum(Multiplicity::ONE)
+                .sum(Multiplicity::ONE)
+                .exact_count(),
+            None
+        );
     }
 
     #[test]
     fn empty_subtrees_annihilate_overflow_and_remain_distinct_from_leaves() {
         let topology = BTreeMap::from([
-            ((VId(1), RelationId(1), VId(2)), Multiplicity(NonZeroU64::new(u64::MAX))),
-            ((VId(2), RelationId(1), VId(3)), Multiplicity::ONE.sum(Multiplicity::ONE)),
+            (
+                (VId(1), RelationId(1), VId(2)),
+                Multiplicity(NonZeroU64::new(u64::MAX)),
+            ),
+            (
+                (VId(2), RelationId(1), VId(3)),
+                Multiplicity::ONE.sum(Multiplicity::ONE),
+            ),
         ]);
         let edges = [
-            EdgeAccess { source: 0, destination: 2, relation: RelationId(1), direction: GlaDirection::Forward },
-            EdgeAccess { source: 2, destination: 3, relation: RelationId(1), direction: GlaDirection::Forward },
-            EdgeAccess { source: 2, destination: 4, relation: RelationId(9), direction: GlaDirection::Forward },
+            EdgeAccess {
+                source: 0,
+                destination: 2,
+                relation: RelationId(1),
+                direction: GlaDirection::Forward,
+            },
+            EdgeAccess {
+                source: 2,
+                destination: 3,
+                relation: RelationId(1),
+                direction: GlaDirection::Forward,
+            },
+            EdgeAccess {
+                source: 2,
+                destination: 4,
+                relation: RelationId(9),
+                direction: GlaDirection::Forward,
+            },
         ];
         let forest = Forest::build(&edges, &topology, &mut |_| Ok::<_, ()>(())).unwrap();
         assert!(forest.roots.contains_key(&0));
         assert!(forest.roots[&0].is_empty());
-        let result = forest.completion::<(), ()>(&[Some(VId(1)), Some(VId(5))], &mut |_| Ok(())).unwrap();
+        let result = forest
+            .completion::<(), ()>(&[Some(VId(1)), Some(VId(5))], &mut |_| Ok(()))
+            .unwrap();
         assert!(result.is_none());
         let nonempty = Forest::build(&edges[..2], &topology, &mut |_| Ok::<_, ()>(())).unwrap();
         assert_eq!(nonempty.roots[&0][&VId(1)].exact_count(), None);
-        assert!(matches!(nonempty.completion::<(), ()>(&[], &mut |_| Ok(())),
-            Err(GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable))));
+        assert!(matches!(
+            nonempty.completion::<(), ()>(&[], &mut |_| Ok(())),
+            Err(GqlQueryError::Source(
+                GraphAggregateError::MultiplicityUnavailable
+            ))
+        ));
     }
 }

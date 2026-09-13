@@ -15,9 +15,10 @@ pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 use scoped::{BoundScope, ScopeSyntax};
 
 use crate::algebra::{
-    GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder, GraphValueRow, IntegerComparison,
-    MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES, MAX_PATTERN_PREDICATES,
-    MAX_PATTERN_VERTICES, PatternBuildError, PreparedGraphPattern, VertexPredicate,
+    GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
+    IntegerComparison, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
+    MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError, PreparedGraphPattern,
+    VertexPredicate,
 };
 use crate::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -78,7 +79,9 @@ pub enum GraphPatternTextErrorKind {
     IntegerOutOfRange,
     ScalarLiteral,
     BooleanExpression,
-    BooleanNesting { limit: usize },
+    BooleanNesting {
+        limit: usize,
+    },
     UnsupportedBooleanScope,
     UnknownVariable,
     UnknownSymbol(GraphSymbolKind),
@@ -917,9 +920,9 @@ impl PreparedGraphText {
         if self.ordering.is_empty() {
             Ok(pattern)
         } else {
-            pattern.with_order_by(&self.ordering).map_err(|kind| {
-                error(self.return_at, GraphPatternTextErrorKind::OrderBuild(kind))
-            })
+            pattern
+                .with_order_by(&self.ordering)
+                .map_err(|kind| error(self.return_at, GraphPatternTextErrorKind::OrderBuild(kind)))
         }
     }
 }

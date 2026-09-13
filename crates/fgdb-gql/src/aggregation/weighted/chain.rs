@@ -18,7 +18,9 @@
 mod cycle;
 
 use super::*;
-use crate::algebra::{GraphColumn, GraphPatternBuilder, GlaPlan, MAX_PATTERN_IDENTITIES, MAX_PATTERN_VERTICES};
+use crate::algebra::{
+    GlaPlan, GraphColumn, GraphPatternBuilder, MAX_PATTERN_IDENTITIES, MAX_PATTERN_VERTICES,
+};
 
 type Factor = BTreeMap<(VId, VId), Multiplicity>;
 
@@ -67,7 +69,9 @@ fn prepare<E, C>(
             GlaOperator::VertexIdentity { left, right, .. } => {
                 for slot in [left, right] {
                     let at = slot.ordinal() as usize;
-                    if at >= width { return Err(unavailable()); }
+                    if at >= width {
+                        return Err(unavailable());
+                    }
                     kept[at] = true;
                 }
                 identities += 1;
@@ -75,21 +79,32 @@ fn prepare<E, C>(
             GlaOperator::ProjectValues { columns } => {
                 for column in columns {
                     control(GlaExecutionEvent::Work)?;
-                    let ValueProjection::Vertex { slot } = column else { return Ok(None); };
+                    let ValueProjection::Vertex { slot } = column else {
+                        return Ok(None);
+                    };
                     let at = slot.ordinal() as usize;
-                    if at >= width { return Err(unavailable()); }
+                    if at >= width {
+                        return Err(unavailable());
+                    }
                     kept[at] = true;
                 }
                 projection = Some(columns.as_slice());
             }
-            GlaOperator::ScanEdges { .. } | GlaOperator::Expand { .. }
-            | GlaOperator::OrderByValues | GlaOperator::Limit { offset: 0, count: None } => {}
+            GlaOperator::ScanEdges { .. }
+            | GlaOperator::Expand { .. }
+            | GlaOperator::OrderByValues
+            | GlaOperator::Limit {
+                offset: 0,
+                count: None,
+            } => {}
             _ => return Ok(None),
         }
     }
     for slot in forest.anchors() {
         control(GlaExecutionEvent::Work)?;
-        if slot >= width { return Err(unavailable()); }
+        if slot >= width {
+            return Err(unavailable());
+        }
         kept[slot] = true;
     }
     for (keep, children) in kept[..width].iter_mut().zip(&children[..width]) {
@@ -108,7 +123,9 @@ fn prepare<E, C>(
     let mut builder = GraphPatternBuilder::new();
     let mut retained = 0_usize;
     for old in 0..width {
-        if !kept[old] { continue; }
+        if !kept[old] {
+            continue;
+        }
         // One generated bounded name and the compiler-owned variable entry.
         control(GlaExecutionEvent::ScratchEntry)?;
         names[old] = format!("s{old}");
@@ -119,7 +136,9 @@ fn prepare<E, C>(
     }
     let mut routes = Vec::new();
     for destination in 1..width {
-        if !kept[destination] { continue; }
+        if !kept[destination] {
+            continue;
+        }
         control(GlaExecutionEvent::ScratchEntry)?;
         let mut route = Vec::new();
         let mut source = destination;
@@ -127,7 +146,9 @@ fn prepare<E, C>(
             control(GlaExecutionEvent::ScratchEntry)?;
             route.push(source - 1);
             source = parents[source];
-            if kept[source] { break; }
+            if kept[source] {
+                break;
+            }
         }
         for at in 0..route.len() / 2 {
             control(GlaExecutionEvent::Work)?;
@@ -136,14 +157,25 @@ fn prepare<E, C>(
         }
         let relation = RelationId(routes.len() as u64);
         control(GlaExecutionEvent::ScratchEntry)?;
-        builder.edge(&names[source], relation, GlaDirection::Forward, &names[destination])
+        builder
+            .edge(
+                &names[source],
+                relation,
+                GlaDirection::Forward,
+                &names[destination],
+            )
             .map_err(|_| unavailable())?;
         routes.push(route);
     }
     for operator in plan.operators() {
         if let GlaOperator::VertexIdentity { left, right, equal } = operator {
             control(GlaExecutionEvent::ScratchEntry)?;
-            builder.identity(&names[left.ordinal() as usize], &names[right.ordinal() as usize], *equal)
+            builder
+                .identity(
+                    &names[left.ordinal() as usize],
+                    &names[right.ordinal() as usize],
+                    *equal,
+                )
                 .map_err(|_| unavailable())?;
         }
     }
@@ -154,9 +186,14 @@ fn prepare<E, C>(
     }
     let mut projected = Vec::new();
     for (at, column) in columns.iter().enumerate() {
-        let ValueProjection::Vertex { slot } = column else { return Err(unavailable()); };
+        let ValueProjection::Vertex { slot } = column else {
+            return Err(unavailable());
+        };
         control(GlaExecutionEvent::ScratchEntry)?;
-        projected.push(GraphColumn::vertex(&aliases[at], &names[slot.ordinal() as usize]));
+        projected.push(GraphColumn::vertex(
+            &aliases[at],
+            &names[slot.ordinal() as usize],
+        ));
     }
     // Reserve the bounded typed compiler's temporary slot/flag tables, emitted
     // operators and owned output schema before preparation. This conservative
@@ -164,9 +201,16 @@ fn prepare<E, C>(
     for _ in 0..(3 * retained + 3 * routes.len() + 2 * identities + 4 * columns.len() + 4) {
         control(GlaExecutionEvent::ScratchEntry)?;
     }
-    let pattern = builder.prepare_values(&projected, 0, None)
-        .map_err(|_| unavailable())?.with_duplicates();
-    Ok(Some(Contraction { pattern, slots, width, routes }))
+    let pattern = builder
+        .prepare_values(&projected, 0, None)
+        .map_err(|_| unavailable())?
+        .with_duplicates();
+    Ok(Some(Contraction {
+        pattern,
+        slots,
+        width,
+        routes,
+    }))
 }
 
 fn add<E>(
@@ -193,13 +237,17 @@ fn oriented<E>(
     let mut result = Factor::new();
     for (&(source, relation, destination), &weight) in topology {
         control(GlaExecutionEvent::Work)?;
-        if relation != access.relation { continue; }
+        if relation != access.relation {
+            continue;
+        }
         match access.direction {
             GlaDirection::Forward => add(&mut result, source, destination, weight, control)?,
             GlaDirection::Reverse => add(&mut result, destination, source, weight, control)?,
             GlaDirection::Undirected => {
                 add(&mut result, source, destination, weight, control)?;
-                if source != destination { add(&mut result, destination, source, weight, control)?; }
+                if source != destination {
+                    add(&mut result, destination, source, weight, control)?;
+                }
             }
         }
     }
@@ -217,9 +265,16 @@ fn compose<E>(
     let mut result = Factor::new();
     for (&(source, middle), &weight) in left {
         control(GlaExecutionEvent::Work)?;
-        for (&(_, destination), &other) in right.range((middle, VId(0))..=(middle, VId(u128::MAX))) {
+        for (&(_, destination), &other) in right.range((middle, VId(0))..=(middle, VId(u128::MAX)))
+        {
             control(GlaExecutionEvent::Work)?;
-            add(&mut result, source, destination, weight.product(other), control)?;
+            add(
+                &mut result,
+                source,
+                destination,
+                weight.product(other),
+                control,
+            )?;
         }
     }
     Ok(result)
@@ -241,8 +296,13 @@ where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
-    P: FnMut(&[ValueProjection], &[Option<VId>], &mut R, &mut M, Multiplicity)
-        -> Result<(), VisitError<E, C>>,
+    P: FnMut(
+        &[ValueProjection],
+        &[Option<VId>],
+        &mut R,
+        &mut M,
+        Multiplicity,
+    ) -> Result<(), VisitError<E, C>>,
 {
     if let Some(reduced) = cycle::contract(plan, topology, accesses, forest, &mut control)? {
         return reduced.visit_bindings(vertices, forest, test_vertex, property, control, visit);
@@ -258,7 +318,9 @@ where
             let mut factor = oriented(topology, first, &mut control)?;
             for &at in &route[1..] {
                 control(GlaExecutionEvent::Work)?;
-                if factor.is_empty() { break; }
+                if factor.is_empty() {
+                    break;
+                }
                 let next = oriented(topology, accesses[at], &mut control)?;
                 factor = compose(&factor, &next, &mut control)?;
             }
@@ -277,9 +339,20 @@ where
         }
     }
     let (execution, topology, accesses) = if let Some(reduced) = &reduced {
-        (reduced.pattern.plan(), &derived, remapped_accesses.as_slice())
-    } else { (plan, topology, accesses) };
-    execution.visit_value_bindings(vertices, topology.keys().copied(), test_vertex, property, control,
+        (
+            reduced.pattern.plan(),
+            &derived,
+            remapped_accesses.as_slice(),
+        )
+    } else {
+        (plan, topology, accesses)
+    };
+    execution.visit_value_bindings(
+        vertices,
+        topology.keys().copied(),
+        test_vertex,
+        property,
+        control,
         |columns, bindings, property, control| {
             let mut original = [None; MAX_PATTERN_VERTICES];
             let forest_bindings = if let Some(reduced) = &reduced {
@@ -290,35 +363,58 @@ where
                     }
                 }
                 &original[..reduced.width]
-            } else { bindings };
-            let Some(mut weight) = forest.completion(forest_bindings, control)? else { return Ok(()); };
+            } else {
+                bindings
+            };
+            let Some(mut weight) = forest.completion(forest_bindings, control)? else {
+                return Ok(());
+            };
             for access in accesses {
                 control(GlaExecutionEvent::Work)?;
-                let source = bindings.get(access.source).copied().flatten().ok_or_else(unavailable)?;
-                let destination = bindings.get(access.destination).copied().flatten().ok_or_else(unavailable)?;
+                let source = bindings
+                    .get(access.source)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(unavailable)?;
+                let destination = bindings
+                    .get(access.destination)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(unavailable)?;
                 let key = match access.direction {
                     GlaDirection::Forward => (source, access.relation, destination),
                     GlaDirection::Reverse => (destination, access.relation, source),
-                    GlaDirection::Undirected => normalized(source, access.relation, destination, true),
+                    GlaDirection::Undirected => {
+                        normalized(source, access.relation, destination, true)
+                    }
                 };
                 weight = weight.product(topology.get(&key).copied().ok_or_else(unavailable)?);
             }
             visit(columns, bindings, property, control, weight)
-        })
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn count(n: u64) -> Multiplicity { Multiplicity(NonZeroU64::new(n)) }
+    fn count(n: u64) -> Multiplicity {
+        Multiplicity(NonZeroU64::new(n))
+    }
 
     #[test]
     fn binary_composition_preserves_endpoint_correlations_and_sums_shared_middles() {
-        let left = Factor::from([((VId(0), VId(10)), count(2)),
-            ((VId(0), VId(11)), count(3)), ((VId(u128::MAX), VId(12)), count(7))]);
-        let right = Factor::from([((VId(10), VId(20)), count(5)),
-            ((VId(11), VId(20)), count(11)), ((VId(12), VId(21)), count(13))]);
+        let left = Factor::from([
+            ((VId(0), VId(10)), count(2)),
+            ((VId(0), VId(11)), count(3)),
+            ((VId(u128::MAX), VId(12)), count(7)),
+        ]);
+        let right = Factor::from([
+            ((VId(10), VId(20)), count(5)),
+            ((VId(11), VId(20)), count(11)),
+            ((VId(12), VId(21)), count(13)),
+        ]);
         let actual = compose(&left, &right, &mut |_| Ok::<_, ()>(())).unwrap();
         assert_eq!(actual.len(), 2);
         assert_eq!(actual[&(VId(0), VId(20))].exact_count(), Some(43));
@@ -330,15 +426,24 @@ mod tests {
     fn zero_annihilates_overflow_and_every_composition_checkpoint_propagates() {
         let left = Factor::from([((VId(0), VId(u128::MAX)), Multiplicity(None))]);
         let absent = Factor::from([((VId(1), VId(2)), count(1))]);
-        assert!(compose(&left, &absent, &mut |_| Ok::<_, ()>(())).unwrap().is_empty());
+        assert!(
+            compose(&left, &absent, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_empty()
+        );
         let right = Factor::from([((VId(u128::MAX), VId(0)), count(1))]);
         let mut events = 0;
-        let completed = compose(&left, &right, &mut |_| { events += 1; Ok::<_, usize>(()) }).unwrap();
+        let completed = compose(&left, &right, &mut |_| {
+            events += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap();
         assert_eq!(completed[&(VId(0), VId(0))].exact_count(), None);
         for stop in 1..=events {
             let mut at = 0;
             let result = compose(&left, &right, &mut |_| {
-                at += 1; if at == stop { Err(stop) } else { Ok(()) }
+                at += 1;
+                if at == stop { Err(stop) } else { Ok(()) }
             });
             assert!(matches!(result, Err(value) if value == stop));
             assert_eq!(at, stop);

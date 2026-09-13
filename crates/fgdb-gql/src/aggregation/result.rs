@@ -8,11 +8,11 @@
 mod distinct;
 mod having;
 mod streaming;
-pub(super) use streaming::RootGroups;
 pub use having::{
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
     MAX_HAVING_INSTRUCTIONS,
 };
+pub(super) use streaming::RootGroups;
 
 use super::*;
 use crate::algebra::IntegerComparison;
@@ -461,7 +461,9 @@ impl PreparedGraphAggregate {
             if self.having.is_empty() && self.having_expression.is_none() {
                 for (key, state) in groups.iter().skip(offset).take(count) {
                     output.push(Group { key, state }.copy_owned(
-                        self.key_output.as_ref(), self.output_aggregates, control,
+                        self.key_output.as_ref(),
+                        self.output_aggregates,
+                        control,
                     )?);
                 }
             } else {
@@ -478,7 +480,9 @@ impl PreparedGraphAggregate {
                     }
                     if output.len() < count {
                         output.push(group.copy_owned(
-                            self.key_output.as_ref(), self.output_aggregates, control,
+                            self.key_output.as_ref(),
+                            self.output_aggregates,
+                            control,
                         )?);
                     }
                 }
@@ -525,7 +529,9 @@ impl PreparedGraphAggregate {
         }
         for group in heap.into_iter().skip(offset).take(count) {
             output.push(group.copy_owned(
-                self.key_output.as_ref(), self.output_aggregates, control,
+                self.key_output.as_ref(),
+                self.output_aggregates,
+                control,
             )?);
         }
         Ok(output)
@@ -543,18 +549,36 @@ mod tests {
         let bytes = base.canonical_bytes();
         for count in 0..=2 {
             let hidden = base.clone().with_aggregate_output_prefix(count).unwrap();
-            assert_eq!(hidden.aggregate_columns(), &base.aggregate_columns()[..count]);
-            assert_eq!(hidden.evaluation_aggregate_columns(), base.aggregate_columns());
+            assert_eq!(
+                hidden.aggregate_columns(),
+                &base.aggregate_columns()[..count]
+            );
+            assert_eq!(
+                hidden.evaluation_aggregate_columns(),
+                base.aggregate_columns()
+            );
             assert_eq!(hidden.key_columns(), base.key_columns());
             assert_eq!(hidden.input_pattern(), base.input_pattern());
             assert_eq!(hidden.canonical_bytes() == bytes, count == 2);
-            assert_eq!(hidden.clone().with_aggregate_output_prefix(2).unwrap(), base);
+            assert_eq!(
+                hidden.clone().with_aggregate_output_prefix(2).unwrap(),
+                base
+            );
             let order = GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1));
-            let filter = numeric(GraphAggregateColumn::Aggregate(1), IntegerComparison::Greater, 0);
+            let filter = numeric(
+                GraphAggregateColumn::Aggregate(1),
+                IntegerComparison::Greater,
+                0,
+            );
             assert!(hidden.with_result_clauses(&[filter], &[order]).is_ok());
         }
-        assert!(matches!(base.clone().with_aggregate_output_prefix(3),
-            Err(GraphAggregateBuildError::TooManyColumns { limit: 2, observed: 3 })));
+        assert!(matches!(
+            base.clone().with_aggregate_output_prefix(3),
+            Err(GraphAggregateBuildError::TooManyColumns {
+                limit: 2,
+                observed: 3
+            })
+        ));
         assert_eq!(base.canonical_bytes(), bytes);
     }
 
@@ -563,18 +587,31 @@ mod tests {
         let choices = [None, Some(-7), Some(0), Some(9)];
         for mut encoded in 0..4_usize.pow(3) {
             let mut values = Vec::new();
-            for _ in 0..3 { values.push(choices[encoded % 4]); encoded /= 4; }
+            for _ in 0..3 {
+                values.push(choices[encoded % 4]);
+                encoded /= 4;
+            }
             let input = groups(&values);
             for ordered in [false, true] {
                 for offset in 0..=4 {
                     for count in [None, Some(0), Some(2)] {
                         let order = if ordered {
-                            vec![GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1))]
-                        } else { Vec::new() };
-                        let full = definition(offset, count).with_result_clauses(
-                            &[numeric(GraphAggregateColumn::Aggregate(1), IntegerComparison::GreaterOrEqual, 0)],
-                            &order,
-                        ).unwrap();
+                            vec![GraphAggregateOrder::descending(
+                                GraphAggregateColumn::Aggregate(1),
+                            )]
+                        } else {
+                            Vec::new()
+                        };
+                        let full = definition(offset, count)
+                            .with_result_clauses(
+                                &[numeric(
+                                    GraphAggregateColumn::Aggregate(1),
+                                    IntegerComparison::GreaterOrEqual,
+                                    0,
+                                )],
+                                &order,
+                            )
+                            .unwrap();
                         let expected = run(&full, &input);
                         for prefix in 0..=2 {
                             let hidden = full.clone().with_aggregate_output_prefix(prefix).unwrap();
@@ -596,51 +633,85 @@ mod tests {
         let payload = CanonicalScalar::bytes(vec![3; 8192]).unwrap();
         let mut input = Groups::new();
         for at in 0..5 {
-            input.insert(vec![ValueRef::Vertex(VId(at))], vec![
-                Accumulator::Count(at as u64),
-                Accumulator::Extreme(Some(ValueRef::Scalar(&payload))),
-            ]);
+            input.insert(
+                vec![ValueRef::Vertex(VId(at))],
+                vec![
+                    Accumulator::Count(at as u64),
+                    Accumulator::Extreme(Some(ValueRef::Scalar(&payload))),
+                ],
+            );
         }
-        let full = definition(1, Some(2)).with_result_clauses(&[], &[
-            GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1)),
-            GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(0)),
-        ]).unwrap();
+        let full = definition(1, Some(2))
+            .with_result_clauses(
+                &[],
+                &[
+                    GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1)),
+                    GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(0)),
+                ],
+            )
+            .unwrap();
         let measure = |query: &PreparedGraphAggregate| {
             let mut scratch = 0;
-            let rows = query.finish_groups(&input, &mut |event| {
-                scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
-                Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
-            }).unwrap();
+            let rows = query
+                .finish_groups(&input, &mut |event| {
+                    scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                    Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
+                })
+                .unwrap();
             (rows, scratch)
         };
         let (visible, copied) = measure(&full);
         let hidden = full.clone().with_aggregate_output_prefix(1).unwrap();
         let (rows, retained) = measure(&hidden);
         assert_eq!(ids(&rows), ids(&visible));
-        assert_eq!(copied - retained, 2 * (1 + 1 + 8192 / GRAPH_VALUE_PAYLOAD_UNIT_BYTES));
+        assert_eq!(
+            copied - retained,
+            2 * (1 + 1 + 8192 / GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+        );
         assert!(rows.iter().all(|row| row.values().len() == 1));
         let mut events = 0;
-        hidden.finish_groups(&input, &mut |_| {
-            events += 1;
-            Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
-        }).unwrap();
+        hidden
+            .finish_groups(&input, &mut |_| {
+                events += 1;
+                Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
+            })
+            .unwrap();
         for stop in 1..=events {
             let mut at = 0;
             let result = hidden.finish_groups(&input, &mut |_| {
                 at += 1;
-                if at == stop { Err(GqlQueryError::<GraphAggregateError<()>, _>::Interrupted(stop)) }
-                else { Ok(()) }
+                if at == stop {
+                    Err(GqlQueryError::<GraphAggregateError<()>, _>::Interrupted(
+                        stop,
+                    ))
+                } else {
+                    Ok(())
+                }
             });
             assert!(matches!(result, Err(GqlQueryError::Interrupted(value)) if value == stop));
             assert_eq!(at, stop);
         }
         for count in [None, Some(0)] {
-            let refused = definition(u64::MAX, count).with_result_clauses(&[
-                numeric(GraphAggregateColumn::Aggregate(1), IntegerComparison::Greater, 0),
-            ], &[]).unwrap().with_aggregate_output_prefix(0).unwrap();
-            assert!(matches!(refused.finish_groups(&input, &mut |_| {
-                Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
-            }), Err(GqlQueryError::Source(GraphAggregateError::NonIntegerHaving { predicate: 0 }))));
+            let refused = definition(u64::MAX, count)
+                .with_result_clauses(
+                    &[numeric(
+                        GraphAggregateColumn::Aggregate(1),
+                        IntegerComparison::Greater,
+                        0,
+                    )],
+                    &[],
+                )
+                .unwrap()
+                .with_aggregate_output_prefix(0)
+                .unwrap();
+            assert!(matches!(
+                refused.finish_groups(&input, &mut |_| {
+                    Ok::<_, GqlQueryError<GraphAggregateError<()>, usize>>(())
+                }),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::NonIntegerHaving { predicate: 0 }
+                ))
+            ));
         }
     }
 
@@ -1104,17 +1175,40 @@ mod tests {
             assert_eq!(projected.evaluation_key_columns(), base.key_columns());
             assert_eq!(projected.input_pattern(), base.input_pattern());
             assert_eq!(projected.canonical_bytes() == bytes, columns == [0]);
-            assert_eq!(projected.clone().with_key_output_columns(&[0]).unwrap(), base);
-            assert_eq!(projected.clone().with_aggregate_output_prefix(0).unwrap(),
-                base.clone().with_aggregate_output_prefix(0).unwrap().with_key_output_columns(columns).unwrap());
-            assert!(projected.with_result_clauses(&[], &[
-                GraphAggregateOrder::ascending(GraphAggregateColumn::GroupKey(0)),
-            ]).is_ok());
+            assert_eq!(
+                projected.clone().with_key_output_columns(&[0]).unwrap(),
+                base
+            );
+            assert_eq!(
+                projected.clone().with_aggregate_output_prefix(0).unwrap(),
+                base.clone()
+                    .with_aggregate_output_prefix(0)
+                    .unwrap()
+                    .with_key_output_columns(columns)
+                    .unwrap()
+            );
+            assert!(
+                projected
+                    .with_result_clauses(
+                        &[],
+                        &[GraphAggregateOrder::ascending(
+                            GraphAggregateColumn::GroupKey(0)
+                        ),]
+                    )
+                    .is_ok()
+            );
         }
-        assert!(matches!(base.clone().with_key_output_columns(&[1]),
-            Err(GraphAggregateBuildError::UnknownOutputColumn { column: GraphAggregateColumn::GroupKey(1) })));
-        assert!(matches!(base.clone().with_key_output_columns(&[0; MAX_PATTERN_VERTICES]),
-            Err(GraphAggregateBuildError::TooManyColumns { .. })));
+        assert!(matches!(
+            base.clone().with_key_output_columns(&[1]),
+            Err(GraphAggregateBuildError::UnknownOutputColumn {
+                column: GraphAggregateColumn::GroupKey(1)
+            })
+        ));
+        assert!(matches!(
+            base.clone()
+                .with_key_output_columns(&[0; MAX_PATTERN_VERTICES]),
+            Err(GraphAggregateBuildError::TooManyColumns { .. })
+        ));
         assert_eq!(base.canonical_bytes(), bytes);
     }
 
@@ -1122,21 +1216,39 @@ mod tests {
     fn key_projection_follows_filter_ranking_and_pages_without_collapsing_bags() {
         for values in [[None, Some(-1), Some(2)], [Some(7), Some(7), Some(7)]] {
             let input = groups(&values);
-            for order in [Vec::new(), vec![GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1))]] {
+            for order in [
+                Vec::new(),
+                vec![GraphAggregateOrder::descending(
+                    GraphAggregateColumn::Aggregate(1),
+                )],
+            ] {
                 for offset in 0..=4 {
                     for count in [None, Some(0), Some(1), Some(4)] {
-                        let full = definition(offset, count).with_result_clauses(&[
-                            GraphAggregateFilter { column: GraphAggregateColumn::Aggregate(1), test: GraphAggregateTest::IsNotNull },
-                        ], &order).unwrap();
+                        let full = definition(offset, count)
+                            .with_result_clauses(
+                                &[GraphAggregateFilter {
+                                    column: GraphAggregateColumn::Aggregate(1),
+                                    test: GraphAggregateTest::IsNotNull,
+                                }],
+                                &order,
+                            )
+                            .unwrap();
                         let expected = run(&full, &input);
                         for columns in [&[][..], &[0][..], &[0, 0][..]] {
                             for prefix in 0..=2 {
-                                let projected = full.clone().with_key_output_columns(columns).unwrap()
-                                    .with_aggregate_output_prefix(prefix).unwrap();
+                                let projected = full
+                                    .clone()
+                                    .with_key_output_columns(columns)
+                                    .unwrap()
+                                    .with_aggregate_output_prefix(prefix)
+                                    .unwrap();
                                 let actual = run(&projected, &input);
                                 assert_eq!(actual.len(), expected.len());
                                 for (actual, expected) in actual.iter().zip(&expected) {
-                                    let keys: Vec<_> = columns.iter().map(|column| expected.keys()[*column].clone()).collect();
+                                    let keys: Vec<_> = columns
+                                        .iter()
+                                        .map(|column| expected.keys()[*column].clone())
+                                        .collect();
                                     assert_eq!(actual.keys(), keys);
                                     assert_eq!(actual.values(), &expected.values()[..prefix]);
                                 }
@@ -1147,8 +1259,18 @@ mod tests {
             }
         }
         let mut input = Groups::new();
-        for at in 0..3 { input.insert(vec![ValueRef::Vertex(VId(at))], vec![Accumulator::Count(1),
-            Accumulator::Sum { value: 0, present: false }]); }
+        for at in 0..3 {
+            input.insert(
+                vec![ValueRef::Vertex(VId(at))],
+                vec![
+                    Accumulator::Count(1),
+                    Accumulator::Sum {
+                        value: 0,
+                        present: false,
+                    },
+                ],
+            );
+        }
         let projected = definition(0, None).with_key_output_columns(&[]).unwrap();
         let rows = run(&projected, &input);
         assert_eq!(rows.len(), 3);
@@ -1160,28 +1282,61 @@ mod tests {
     fn hidden_leading_keys_preserve_full_key_tie_order_and_clause_indices() {
         let mut builder = GraphPatternBuilder::new();
         builder.vertex("n").unwrap();
-        let input = builder.prepare_values(&[
-            GraphColumn::property("category", "n", PropertyKeyId(1)),
-            GraphColumn::vertex("identity", "n"),
-        ], 0, None).unwrap().with_duplicates();
-        let base = PreparedGraphAggregate::prepare(input, &[0, 1], &[
-            GraphAggregate::count_rows("n"),
-        ], 0, None).unwrap();
+        let input = builder
+            .prepare_values(
+                &[
+                    GraphColumn::property("category", "n", PropertyKeyId(1)),
+                    GraphColumn::vertex("identity", "n"),
+                ],
+                0,
+                None,
+            )
+            .unwrap()
+            .with_duplicates();
+        let base = PreparedGraphAggregate::prepare(
+            input,
+            &[0, 1],
+            &[GraphAggregate::count_rows("n")],
+            0,
+            None,
+        )
+        .unwrap();
         let low = CanonicalScalar::Int(-1);
         let high = CanonicalScalar::Int(1);
         let mut input = Groups::new();
         for (key, id) in [(&low, 9), (&high, 0), (&high, 1)] {
-            input.insert(vec![ValueRef::Scalar(key), ValueRef::Vertex(VId(id))], vec![Accumulator::Count(1)]);
+            input.insert(
+                vec![ValueRef::Scalar(key), ValueRef::Vertex(VId(id))],
+                vec![Accumulator::Count(1)],
+            );
         }
-        let projected = base.clone().with_key_output_columns(&[1]).unwrap().with_result_clauses(&[], &[
-            GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(0)),
-        ]).unwrap();
+        let projected = base
+            .clone()
+            .with_key_output_columns(&[1])
+            .unwrap()
+            .with_result_clauses(
+                &[],
+                &[GraphAggregateOrder::descending(
+                    GraphAggregateColumn::Aggregate(0),
+                )],
+            )
+            .unwrap();
         assert_eq!(projected.key_columns(), &["identity"]);
-        assert_eq!(projected.evaluation_key_columns(), &["category", "identity"]);
+        assert_eq!(
+            projected.evaluation_key_columns(),
+            &["category", "identity"]
+        );
         assert_eq!(ids(&run(&projected, &input)), vec![9, 0, 1]);
-        let filtered = projected.with_result_clauses(&[
-            numeric(GraphAggregateColumn::GroupKey(0), IntegerComparison::Greater, 0),
-        ], &[]).unwrap();
+        let filtered = projected
+            .with_result_clauses(
+                &[numeric(
+                    GraphAggregateColumn::GroupKey(0),
+                    IntegerComparison::Greater,
+                    0,
+                )],
+                &[],
+            )
+            .unwrap();
         assert_eq!(ids(&run(&filtered, &input)), vec![0, 1]);
         let permuted = base.clone().with_key_output_columns(&[1, 0]).unwrap();
         let rows = run(&permuted, &input);
@@ -1194,16 +1349,26 @@ mod tests {
     fn hidden_key_payloads_are_not_copied_and_all_key_reads_still_execute() {
         let payload = CanonicalScalar::bytes(vec![3; 8192]).unwrap();
         let mut input = Groups::new();
-        input.insert(vec![ValueRef::Scalar(&payload)], vec![Accumulator::Count(1),
-            Accumulator::Sum { value: 0, present: false }]);
+        input.insert(
+            vec![ValueRef::Scalar(&payload)],
+            vec![
+                Accumulator::Count(1),
+                Accumulator::Sum {
+                    value: 0,
+                    present: false,
+                },
+            ],
+        );
         let full = definition(0, None);
         let hidden = full.clone().with_key_output_columns(&[]).unwrap();
         let measure = |query: &PreparedGraphAggregate| {
             let mut scratch = 0;
-            let rows = query.finish_groups(&input, &mut |event| {
-                scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
-                Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(())
-            }).unwrap();
+            let rows = query
+                .finish_groups(&input, &mut |event| {
+                    scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                    Ok::<_, GqlQueryError<GraphAggregateError<()>, ()>>(())
+                })
+                .unwrap();
             (rows, scratch)
         };
         let (visible, copied) = measure(&full);
@@ -1211,18 +1376,67 @@ mod tests {
         assert!(rows[0].keys().is_empty());
         assert_eq!(rows[0].values(), visible[0].values());
         assert_eq!(copied - retained, 1 + 8192 / GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
-        let empty = hidden.execute_governed(0, [], [], |_, _| Ok::<_, ()>(true),
-            |_, _| Ok(None), GqlQueryPolicy::new(100, 100, 10000, 10000), || Ok::<_, ()>(())).unwrap();
+        let empty = hidden
+            .execute_governed(
+                0,
+                [],
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                GqlQueryPolicy::new(100, 100, 10000, 10000),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
         assert!(empty.value.is_empty());
-        let global = PreparedGraphAggregate::prepare(full.input_pattern().clone(), &[], &[
-            GraphAggregate::count_rows("n"),
-        ], 0, None).unwrap().with_key_output_columns(&[]).unwrap();
-        assert_eq!(global.execute_governed(0, [], [], |_, _| Ok::<_, ()>(true),
-            |_, _| Ok(None), GqlQueryPolicy::new(100, 100, 10000, 10000), || Ok::<_, ()>(())).unwrap().value.len(), 1);
-        let refused = definition(0, Some(0)).with_key_output_columns(&[]).unwrap()
-            .execute_governed(2, [VId(1), VId(2)], [], |_, _| Ok::<_, &str>(true),
-                |vid, _| if vid == VId(2) { Err("hidden input") } else { Ok(None) },
-                GqlQueryPolicy::new(100, 100, 10000, 10000), || Ok::<_, ()>(()));
-        assert!(matches!(refused, Err(GqlQueryError::Source(GraphAggregateError::Source("hidden input")))));
+        let global = PreparedGraphAggregate::prepare(
+            full.input_pattern().clone(),
+            &[],
+            &[GraphAggregate::count_rows("n")],
+            0,
+            None,
+        )
+        .unwrap()
+        .with_key_output_columns(&[])
+        .unwrap();
+        assert_eq!(
+            global
+                .execute_governed(
+                    0,
+                    [],
+                    [],
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    GqlQueryPolicy::new(100, 100, 10000, 10000),
+                    || Ok::<_, ()>(())
+                )
+                .unwrap()
+                .value
+                .len(),
+            1
+        );
+        let refused = definition(0, Some(0))
+            .with_key_output_columns(&[])
+            .unwrap()
+            .execute_governed(
+                2,
+                [VId(1), VId(2)],
+                [],
+                |_, _| Ok::<_, &str>(true),
+                |vid, _| {
+                    if vid == VId(2) {
+                        Err("hidden input")
+                    } else {
+                        Ok(None)
+                    }
+                },
+                GqlQueryPolicy::new(100, 100, 10000, 10000),
+                || Ok::<_, ()>(()),
+            );
+        assert!(matches!(
+            refused,
+            Err(GqlQueryError::Source(GraphAggregateError::Source(
+                "hidden input"
+            )))
+        ));
     }
 }

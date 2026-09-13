@@ -10,9 +10,8 @@ mod weighted;
 pub use numeric::GraphExactAverage;
 pub use result::{
     GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder, GraphAggregateTest,
-    GraphNullPlacement, MAX_AGGREGATE_FILTERS,
-    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
-    MAX_HAVING_INSTRUCTIONS,
+    GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand, GraphNullPlacement,
+    MAX_AGGREGATE_FILTERS, MAX_HAVING_INSTRUCTIONS,
 };
 
 use crate::algebra::{
@@ -181,10 +180,18 @@ impl core::error::Error for GraphAggregateBuildError {}
 #[derive(Debug, PartialEq, Eq)]
 pub enum GraphAggregateError<E> {
     Source(E),
-    NonIntegerSum { aggregate: usize },
-    NonIntegerAverage { aggregate: usize },
-    ArithmeticOverflow { aggregate: usize },
-    NonIntegerHaving { predicate: usize },
+    NonIntegerSum {
+        aggregate: usize,
+    },
+    NonIntegerAverage {
+        aggregate: usize,
+    },
+    ArithmeticOverflow {
+        aggregate: usize,
+    },
+    NonIntegerHaving {
+        predicate: usize,
+    },
     /// A physical weighted binding did not match its admitted topology.
     MultiplicityUnavailable,
     /// A physical path violated its ascending, contiguous root-group contract.
@@ -532,7 +539,10 @@ impl PreparedGraphAggregate {
         } else {
             Some(KeyProjection {
                 columns: columns.into(),
-                names: columns.iter().map(|column| self.key_names[*column].clone()).collect(),
+                names: columns
+                    .iter()
+                    .map(|column| self.key_names[*column].clone())
+                    .collect(),
             })
         };
         Ok(self)
@@ -884,7 +894,9 @@ fn update<'a, E, C>(
             // Weighted execution never admits SUM. Preserve its ordinary
             // checked per-occurrence semantics and fail closed on misrouting.
             if multiplicity != weighted::Multiplicity::ONE {
-                return Err(GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable));
+                return Err(GqlQueryError::Source(
+                    GraphAggregateError::MultiplicityUnavailable,
+                ));
             }
             let Some(ValueRef::Scalar(CanonicalScalar::Int(value))) = value else {
                 return Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
@@ -898,9 +910,15 @@ fn update<'a, E, C>(
             // Property-aware numeric functions retain ordinary visitation.
             // Never accept a support-only/overflowed topology weight here.
             if multiplicity != weighted::Multiplicity::ONE {
-                return Err(GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable));
+                return Err(GqlQueryError::Source(
+                    GraphAggregateError::MultiplicityUnavailable,
+                ));
             }
-            state.update(value.expect("non-count argument was checked"), aggregate, control)?;
+            state.update(
+                value.expect("non-count argument was checked"),
+                aggregate,
+                control,
+            )?;
         }
         Accumulator::Extreme(current) => {
             let value = value.expect("non-count argument was checked");

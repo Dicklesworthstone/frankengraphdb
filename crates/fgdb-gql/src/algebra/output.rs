@@ -102,8 +102,17 @@ impl super::GlaPlan<GraphValueRow> {
             return Ok(None);
         };
         if !matches!(operators.first(), Some(GlaOperator::ScanEdges { .. }))
-            || !matches!(operators.get(projection_at + 1), Some(GlaOperator::OrderByValues))
-            || !matches!(operators.last(), Some(GlaOperator::Limit { offset: 0, count: None }))
+            || !matches!(
+                operators.get(projection_at + 1),
+                Some(GlaOperator::OrderByValues)
+            )
+            || !matches!(
+                operators.last(),
+                Some(GlaOperator::Limit {
+                    offset: 0,
+                    count: None
+                })
+            )
         {
             return Ok(None);
         }
@@ -119,12 +128,14 @@ impl super::GlaPlan<GraphValueRow> {
             control(GlaExecutionEvent::Work)?;
             match operator {
                 GlaOperator::Expand { source, .. }
-                    if (source.ordinal() as usize) < width && width < MAX_PATTERN_VERTICES => {
+                    if (source.ordinal() as usize) < width && width < MAX_PATTERN_VERTICES =>
+                {
                     parents[width] = source.ordinal() as usize;
                     width += 1;
                 }
                 GlaOperator::VertexIdentity { left, right, .. }
-                    if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width => {
+                    if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width =>
+                {
                     kept[left.ordinal() as usize] = true;
                     kept[right.ordinal() as usize] = true;
                 }
@@ -137,17 +148,23 @@ impl super::GlaPlan<GraphValueRow> {
                 return Ok(None);
             };
             let slot = slot.ordinal() as usize;
-            if slot >= width { return Ok(None); }
+            if slot >= width {
+                return Ok(None);
+            }
             kept[slot] = true;
         }
         // Parents always have smaller original ordinals. One reverse pass is
         // the full transitive closure, including a projected deep descendant.
         for slot in (2..width).rev() {
             control(GlaExecutionEvent::Work)?;
-            if kept[slot] { kept[parents[slot]] = true; }
+            if kept[slot] {
+                kept[parents[slot]] = true;
+            }
         }
         let retained_width = kept[..width].iter().filter(|keep| **keep).count();
-        if retained_width == width { return Ok(None); }
+        if retained_width == width {
+            return Ok(None);
+        }
 
         // Removed IDs cannot reuse compact core IDs. That would merge unrelated
         // forest roots when an early branch precedes a retained later binding.
@@ -156,7 +173,11 @@ impl super::GlaPlan<GraphValueRow> {
         let mut next_removed = retained_width;
         for keep in &kept[..width] {
             control(GlaExecutionEvent::ScratchEntry)?;
-            let next = if *keep { &mut next_kept } else { &mut next_removed };
+            let next = if *keep {
+                &mut next_kept
+            } else {
+                &mut next_removed
+            };
             slot_map.push(super::BindingSlot(*next as u32));
             *next += 1;
         }
@@ -167,10 +188,16 @@ impl super::GlaPlan<GraphValueRow> {
             control(GlaExecutionEvent::Work)?;
             let remapped = match operator {
                 GlaOperator::ScanEdges { .. } => operator.clone(),
-                GlaOperator::Expand { source, relation, direction } => {
+                GlaOperator::Expand {
+                    source,
+                    relation,
+                    direction,
+                } => {
                     let keep = kept[appended];
                     appended += 1;
-                    if !keep { continue; }
+                    if !keep {
+                        continue;
+                    }
                     GlaOperator::Expand {
                         source: slot_map[source.ordinal() as usize],
                         relation: *relation,
@@ -198,12 +225,18 @@ impl super::GlaPlan<GraphValueRow> {
                 slot: slot_map[slot.ordinal() as usize],
             });
         }
-        core.push(GlaOperator::ProjectValues { columns: remapped_columns });
+        core.push(GlaOperator::ProjectValues {
+            columns: remapped_columns,
+        });
         for operator in &operators[projection_at + 1..] {
             control(GlaExecutionEvent::ScratchEntry)?;
             core.push(operator.clone());
         }
-        Ok(Some(AggregateCore { plan: Self::from_operators(core), slot_map, retained_width }))
+        Ok(Some(AggregateCore {
+            plan: Self::from_operators(core),
+            slot_map,
+            retained_width,
+        }))
     }
 }
 
@@ -392,21 +425,31 @@ mod factorization_tests {
 
     fn prepare(text: &str) -> crate::PreparedGraphAggregate {
         PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
-            GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(
-                match name { "R" => 1, "S" => 2, _ => 3 },
-            ))),
+            GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(match name {
+                "R" => 1,
+                "S" => 2,
+                _ => 3,
+            }))),
             _ => None,
-        }).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
     }
 
     #[test]
     fn interleaved_branches_have_disjoint_slots_and_remapped_cycle_and_output() {
-        let aggregate = prepare("MATCH (a)-[:R]->(b), (b)-[:S]->(hidden)-[:T]->(leaf), \
+        let aggregate = prepare(
+            "MATCH (a)-[:R]->(b), (b)-[:S]->(hidden)-[:T]->(leaf), \
             (b)-[:R]->(c), (a)-[:T]->(d), (c)-[:S]->(a), (c)-[:R]->(unused) \
-            RETURN c,d,COUNT(*) AS n GROUP BY c,d");
+            RETURN c,d,COUNT(*) AS n GROUP BY c,d",
+        );
         let plan = aggregate.input_pattern().plan();
         let original = plan.canonical_bytes();
-        let core = plan.aggregate_core(&mut |_| Ok::<_, ()>(())).unwrap().unwrap();
+        let core = plan
+            .aggregate_core(&mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
         assert_eq!(core.retained_width, 5);
         let slots: Vec<_> = core.slot_map.iter().map(|slot| slot.ordinal()).collect();
         assert_eq!(slots, vec![0, 1, 5, 6, 2, 3, 4, 7]);
@@ -416,41 +459,84 @@ mod factorization_tests {
         assert!(core.plan.operators().iter().any(|op| matches!(op,
             GlaOperator::VertexIdentity { left, right, equal: true }
                 if left.ordinal() == 0 && right.ordinal() == 4)));
-        let sources: Vec<_> = core.plan.operators().iter().filter_map(|op| match op {
-            GlaOperator::Expand { source, .. } => Some(source.ordinal()), _ => None,
-        }).collect();
+        let sources: Vec<_> = core
+            .plan
+            .operators()
+            .iter()
+            .filter_map(|op| match op {
+                GlaOperator::Expand { source, .. } => Some(source.ordinal()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(sources, vec![1, 0, 2]);
-        let output: Vec<_> = core.plan.operators().iter().find_map(|op| match op {
-            GlaOperator::ProjectValues { columns } => Some(columns.iter().map(|column| match column {
-                super::super::ValueProjection::Vertex { slot } => slot.ordinal(),
-                _ => panic!("identity-only output"),
-            }).collect()),
-            _ => None,
-        }).unwrap();
+        let output: Vec<_> = core
+            .plan
+            .operators()
+            .iter()
+            .find_map(|op| match op {
+                GlaOperator::ProjectValues { columns } => Some(
+                    columns
+                        .iter()
+                        .map(|column| match column {
+                            super::super::ValueProjection::Vertex { slot } => slot.ordinal(),
+                            _ => panic!("identity-only output"),
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(output, vec![2, 3]);
         assert_eq!(plan.canonical_bytes(), original);
     }
 
     #[test]
     fn retained_deep_descendant_keeps_all_ancestors_but_not_its_sibling() {
-        let aggregate = prepare("MATCH (a)-[:R]->(b), (b)-[:S]->(x), (b)-[:S]->(y), \
-            (x)-[:T]->(z) RETURN z,COUNT(*) AS n GROUP BY z");
-        let core = aggregate.input_pattern().plan().aggregate_core(&mut |_| Ok::<_, ()>(()))
-            .unwrap().unwrap();
+        let aggregate = prepare(
+            "MATCH (a)-[:R]->(b), (b)-[:S]->(x), (b)-[:S]->(y), \
+            (x)-[:T]->(z) RETURN z,COUNT(*) AS n GROUP BY z",
+        );
+        let core = aggregate
+            .input_pattern()
+            .plan()
+            .aggregate_core(&mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
         assert_eq!(core.retained_width, 4);
-        assert_eq!(core.slot_map.iter().map(|slot| slot.ordinal()).collect::<Vec<_>>(),
-            vec![0, 1, 2, 4, 3]);
-        assert_eq!(core.plan.operators().iter().filter(|op| matches!(op, GlaOperator::Expand { .. })).count(), 2);
+        assert_eq!(
+            core.slot_map
+                .iter()
+                .map(|slot| slot.ordinal())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 4, 3]
+        );
+        assert_eq!(
+            core.plan
+                .operators()
+                .iter()
+                .filter(|op| matches!(op, GlaOperator::Expand { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]
     fn core_compilation_is_interruptible_and_never_mutates_the_definition() {
-        let aggregate = prepare("MATCH (a)-[:R]->(b), (b)-[:S]->(x), (x)-[:T]->(y), \
-            (b)-[:R]->(c), (c)-[:T]->(a) RETURN c,COUNT(*) AS n GROUP BY c");
+        let aggregate = prepare(
+            "MATCH (a)-[:R]->(b), (b)-[:S]->(x), (x)-[:T]->(y), \
+            (b)-[:R]->(c), (c)-[:T]->(a) RETURN c,COUNT(*) AS n GROUP BY c",
+        );
         let plan = aggregate.input_pattern().plan();
         let original = plan.canonical_bytes();
         let mut total = 0;
-        assert!(plan.aggregate_core(&mut |_| { total += 1; Ok::<_, usize>(()) }).unwrap().is_some());
+        assert!(
+            plan.aggregate_core(&mut |_| {
+                total += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap()
+            .is_some()
+        );
         for stop in 1..=total {
             let mut calls = 0;
             let result = plan.aggregate_core(&mut |_| {
@@ -466,28 +552,60 @@ mod factorization_tests {
     #[test]
     fn aggregate_core_preserves_columns_and_cannot_remove_observed_constraints() {
         for (text, expected) in [
-            ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(*) AS n", Some(1)),
+            (
+                "MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(*) AS n",
+                Some(1),
+            ),
             ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(c) AS n", None),
-            ("MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a=c RETURN COUNT(*) AS n", None),
-            ("MATCH (a)-[:R]->(b)-[:S]->(a),(b)-[:R]->(c) RETURN COUNT(*) AS n", Some(2)),
+            (
+                "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE a=c RETURN COUNT(*) AS n",
+                None,
+            ),
+            (
+                "MATCH (a)-[:R]->(b)-[:S]->(a),(b)-[:R]->(c) RETURN COUNT(*) AS n",
+                Some(2),
+            ),
             ("MATCH (a)-[:R]->(b)-[:S]->(c:L) RETURN COUNT(*) AS n", None),
             ("MATCH (a)-[:R]->(b)-[:S]->(c) RETURN COUNT(c.n) AS n", None),
-            ("MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:S]->(c) RETURN COUNT(*) AS n", None),
+            (
+                "MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:S]->(c) RETURN COUNT(*) AS n",
+                None,
+            ),
         ] {
             let aggregate = PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
-                GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(if name == "R" { 1 } else { 2 }))),
+                GraphSymbolKind::Relation => {
+                    Some(GraphSymbol::Relation(RelationId(if name == "R" {
+                        1
+                    } else {
+                        2
+                    })))
+                }
                 GraphSymbolKind::Property => Some(GraphSymbol::Property(PropertyKeyId(1))),
                 GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
-            }).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            })
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
             let plan = aggregate.input_pattern().plan();
             let original = plan.canonical_bytes();
             let reduced = plan.aggregate_core(&mut |_| Ok::<_, ()>(())).unwrap();
-            assert_eq!(reduced.as_ref().map(|core| core.retained_width - 1), expected, "{text}");
+            assert_eq!(
+                reduced.as_ref().map(|core| core.retained_width - 1),
+                expected,
+                "{text}"
+            );
             if let Some(reduced) = reduced {
                 let prefix = reduced.plan;
                 assert_eq!(prefix.operators().last(), plan.operators().last());
-                assert_eq!(prefix.operators().iter().find(|op| matches!(op, GlaOperator::ProjectValues { .. })),
-                    plan.operators().iter().find(|op| matches!(op, GlaOperator::ProjectValues { .. })));
+                assert_eq!(
+                    prefix
+                        .operators()
+                        .iter()
+                        .find(|op| matches!(op, GlaOperator::ProjectValues { .. })),
+                    plan.operators()
+                        .iter()
+                        .find(|op| matches!(op, GlaOperator::ProjectValues { .. }))
+                );
                 assert!(prefix.operators().len() < plan.operators().len());
             }
             assert_eq!(plan.canonical_bytes(), original);

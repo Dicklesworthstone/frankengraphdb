@@ -4,8 +4,8 @@
 //! bounded registry as ORDER BY. Hidden grouping keys keep evaluation indices.
 
 use super::*;
-use crate::{GraphHavingExpression, GraphHavingOp, GraphHavingOperand, MAX_HAVING_INSTRUCTIONS};
 use crate::algebra::ScalarPredicate;
+use crate::{GraphHavingExpression, GraphHavingOp, GraphHavingOperand, MAX_HAVING_INSTRUCTIONS};
 use fgdb_types::CanonicalScalar;
 
 #[derive(Clone)]
@@ -22,7 +22,9 @@ impl Operand {
             Self::Number { value, .. } => match value.value(values) {
                 GqlParameterValue::Int64(value) => GraphHavingOperand::Integer(i128::from(value)),
                 GqlParameterValue::UInt64(value) => GraphHavingOperand::Integer(i128::from(value)),
-                GqlParameterValue::Scalar(value) => GraphHavingOperand::Scalar(value.predicate(IntegerComparison::Equal)),
+                GqlParameterValue::Scalar(value) => {
+                    GraphHavingOperand::Scalar(value.predicate(IntegerComparison::Equal))
+                }
             },
         }
     }
@@ -30,8 +32,15 @@ impl Operand {
 
 #[derive(Clone)]
 enum Op {
-    Compare { left: Operand, comparison: IntegerComparison, right: Operand },
-    IsNull { operand: Operand, is_null: bool },
+    Compare {
+        left: Operand,
+        comparison: IntegerComparison,
+        right: Operand,
+    },
+    IsNull {
+        operand: Operand,
+        is_null: bool,
+    },
     Truth(Option<bool>),
     And,
     Or,
@@ -44,19 +53,44 @@ pub(super) struct HavingTemplate {
     at: usize,
 }
 impl HavingTemplate {
-    pub(super) fn attach(&self, aggregate: PreparedGraphAggregate, values: &[GqlParameterValue])
-        -> Result<PreparedGraphAggregate, GraphPatternTextError> {
-        let program = self.program.iter().map(|op| match op {
-            Op::Compare { left, comparison, right } => GraphHavingOp::Compare {
-                left: left.bind(values), comparison: *comparison, right: right.bind(values),
-            },
-            Op::IsNull { operand, is_null } => GraphHavingOp::IsNull { operand: operand.bind(values), is_null: *is_null },
-            Op::Truth(value) => GraphHavingOp::Truth(*value),
-            Op::And => GraphHavingOp::And, Op::Or => GraphHavingOp::Or, Op::Not => GraphHavingOp::Not,
-        }).collect::<Vec<_>>();
-        let failure = |_| error(self.at, GraphPatternTextErrorKind::Expected("valid bounded HAVING expression"));
+    pub(super) fn attach(
+        &self,
+        aggregate: PreparedGraphAggregate,
+        values: &[GqlParameterValue],
+    ) -> Result<PreparedGraphAggregate, GraphPatternTextError> {
+        let program = self
+            .program
+            .iter()
+            .map(|op| match op {
+                Op::Compare {
+                    left,
+                    comparison,
+                    right,
+                } => GraphHavingOp::Compare {
+                    left: left.bind(values),
+                    comparison: *comparison,
+                    right: right.bind(values),
+                },
+                Op::IsNull { operand, is_null } => GraphHavingOp::IsNull {
+                    operand: operand.bind(values),
+                    is_null: *is_null,
+                },
+                Op::Truth(value) => GraphHavingOp::Truth(*value),
+                Op::And => GraphHavingOp::And,
+                Op::Or => GraphHavingOp::Or,
+                Op::Not => GraphHavingOp::Not,
+            })
+            .collect::<Vec<_>>();
+        let failure = |_| {
+            error(
+                self.at,
+                GraphPatternTextErrorKind::Expected("valid bounded HAVING expression"),
+            )
+        };
         let expression = GraphHavingExpression::prepare(&program).map_err(failure)?;
-        aggregate.with_having_expression(&expression).map_err(failure)
+        aggregate
+            .with_having_expression(&expression)
+            .map_err(failure)
     }
 }
 
@@ -65,11 +99,20 @@ pub(super) fn parse<'a>(
     returned: &[ReturnItem<'a>],
     groups: &[Expression<'a>],
     hidden: &mut Vec<HiddenSummary<'a>>,
-)
-    -> Result<(Vec<Having>, Option<HavingTemplate>), GraphPatternTextError> {
-    if !parser.take_word("HAVING")? { return Ok((Vec::new(), None)); }
+) -> Result<(Vec<Having>, Option<HavingTemplate>), GraphPatternTextError> {
+    if !parser.take_word("HAVING")? {
+        return Ok((Vec::new(), None));
+    }
     let at = parser.current.at;
-    let mut input = HavingParser { parser, returned, groups, hidden, program: Vec::new(), leaves: 0, compound: false };
+    let mut input = HavingParser {
+        parser,
+        returned,
+        groups,
+        hidden,
+        program: Vec::new(),
+        leaves: 0,
+        compound: false,
+    };
     input.disjunction(0)?;
     // One grammar, not retry-after-error. Preserve the old flat conjunction's
     // lowering, eager numeric-domain checks, counters and transcript bytes.
@@ -78,20 +121,50 @@ pub(super) fn parse<'a>(
         let mut eligible = true;
         for op in &input.program {
             match op {
-                Op::Compare { left: Operand::Column(column), comparison,
-                    right: Operand::Number { value, legacy_int64: true } } => flat.push(Having {
-                        column: *column, test: HavingTest::Integer { comparison: *comparison, value: value.clone() },
-                    }),
-                Op::IsNull { operand: Operand::Column(column), is_null } => flat.push(Having {
-                    column: *column, test: if *is_null { HavingTest::IsNull } else { HavingTest::IsNotNull },
+                Op::Compare {
+                    left: Operand::Column(column),
+                    comparison,
+                    right:
+                        Operand::Number {
+                            value,
+                            legacy_int64: true,
+                        },
+                } => flat.push(Having {
+                    column: *column,
+                    test: HavingTest::Integer {
+                        comparison: *comparison,
+                        value: value.clone(),
+                    },
+                }),
+                Op::IsNull {
+                    operand: Operand::Column(column),
+                    is_null,
+                } => flat.push(Having {
+                    column: *column,
+                    test: if *is_null {
+                        HavingTest::IsNull
+                    } else {
+                        HavingTest::IsNotNull
+                    },
                 }),
                 Op::And => {}
-                _ => { eligible = false; break; }
+                _ => {
+                    eligible = false;
+                    break;
+                }
             }
         }
-        if eligible { return Ok((flat, None)); }
+        if eligible {
+            return Ok((flat, None));
+        }
     }
-    Ok((Vec::new(), Some(HavingTemplate { program: input.program, at })))
+    Ok((
+        Vec::new(),
+        Some(HavingTemplate {
+            program: input.program,
+            at,
+        }),
+    ))
 }
 
 struct HavingParser<'p, 'a> {
@@ -106,13 +179,20 @@ struct HavingParser<'p, 'a> {
 impl HavingParser<'_, '_> {
     fn emit(&mut self, op: Op) -> Result<(), GraphPatternTextError> {
         if self.program.len() == MAX_HAVING_INSTRUCTIONS {
-            return Err(error(self.parser.current.at, GraphPatternTextErrorKind::Expected("at most 1024 HAVING instructions")));
+            return Err(error(
+                self.parser.current.at,
+                GraphPatternTextErrorKind::Expected("at most 1024 HAVING instructions"),
+            ));
         }
         self.program.push(op);
         Ok(())
     }
     fn leaf(&mut self, op: Op) -> Result<(), GraphPatternTextError> {
-        self.parser.capacity(self.leaves, MAX_AGGREGATE_FILTERS, crate::algebra::PatternLimitDimension::Predicates)?;
+        self.parser.capacity(
+            self.leaves,
+            MAX_AGGREGATE_FILTERS,
+            crate::algebra::PatternLimitDimension::Predicates,
+        )?;
         self.leaves += 1;
         self.emit(op)
     }
@@ -135,15 +215,22 @@ impl HavingParser<'_, '_> {
     }
     fn unary(&mut self, depth: usize) -> Result<(), GraphPatternTextError> {
         if depth > 64 {
-            return Err(error(self.parser.current.at, GraphPatternTextErrorKind::Expected("HAVING nesting at most 64")));
+            return Err(error(
+                self.parser.current.at,
+                GraphPatternTextErrorKind::Expected("HAVING nesting at most 64"),
+            ));
         }
         // Preserve an output named `not` when followed by an operand suffix.
         // NOT (...) or NOT <condition> is unary syntax, not a function call.
         let not_reference = if self.parser.is_word("NOT") {
             let next = self.parser.lexer.clone().next()?;
-            matches!(next.kind, TokenKind::Punct(b'.' | b'=' | b'<' | b'>' | b'!'))
-                || matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IS"))
-        } else { false };
+            matches!(
+                next.kind,
+                TokenKind::Punct(b'.' | b'=' | b'<' | b'>' | b'!')
+            ) || matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IS"))
+        } else {
+            false
+        };
         if self.parser.is_word("NOT") && !not_reference {
             self.parser.advance()?;
             self.compound = true;
@@ -165,27 +252,51 @@ impl HavingParser<'_, '_> {
                 let next = self.parser.lexer.clone().next()?;
                 if matches!(next.kind, TokenKind::Punct(b'.' | b'('))
                     || self.returned.iter().any(|item| item.alias.text == word)
-                    || self.groups.iter().any(|group| group.property.is_none() && group.variable.text == word) {
-                    return self.parser.result_column(self.returned, self.groups, self.hidden).map(Operand::Column);
+                    || self
+                        .groups
+                        .iter()
+                        .any(|group| group.property.is_none() && group.variable.text == word)
+                {
+                    return self
+                        .parser
+                        .result_column(self.returned, self.groups, self.hidden)
+                        .map(Operand::Column);
                 }
-                if word.eq_ignore_ascii_case("TRUE") { Some(CanonicalScalar::Bool(true)) }
-                else if word.eq_ignore_ascii_case("FALSE") { Some(CanonicalScalar::Bool(false)) }
-                else if word.eq_ignore_ascii_case("NULL") { Some(CanonicalScalar::Null) }
-                else { return self.parser.result_column(self.returned, self.groups, self.hidden).map(Operand::Column); }
+                if word.eq_ignore_ascii_case("TRUE") {
+                    Some(CanonicalScalar::Bool(true))
+                } else if word.eq_ignore_ascii_case("FALSE") {
+                    Some(CanonicalScalar::Bool(false))
+                } else if word.eq_ignore_ascii_case("NULL") {
+                    Some(CanonicalScalar::Null)
+                } else {
+                    return self
+                        .parser
+                        .result_column(self.returned, self.groups, self.hidden)
+                        .map(Operand::Column);
+                }
             }
             _ => None,
         };
         if let Some(value) = scalar {
             self.parser.advance()?;
-            return ScalarPredicate::new(value, IntegerComparison::Equal).map(Operand::Scalar)
+            return ScalarPredicate::new(value, IntegerComparison::Equal)
+                .map(Operand::Scalar)
                 .map_err(|_| error(at, GraphPatternTextErrorKind::ScalarLiteral));
         }
         let kind = match self.parser.current.kind {
-            TokenKind::Parameter(name) => self.parser.parameter_types.get(name).copied().unwrap_or(GqlParameterType::Int64),
+            TokenKind::Parameter(name) => self
+                .parser
+                .parameter_types
+                .get(name)
+                .copied()
+                .unwrap_or(GqlParameterType::Int64),
             _ => GqlParameterType::Int64,
         };
         let value = self.parser.number(kind)?;
-        Ok(Operand::Number { value, legacy_int64: kind == GqlParameterType::Int64 })
+        Ok(Operand::Number {
+            value,
+            legacy_int64: kind == GqlParameterType::Int64,
+        })
     }
     fn atom(&mut self) -> Result<(), GraphPatternTextError> {
         let at = self.parser.current.at;
@@ -193,21 +304,39 @@ impl HavingParser<'_, '_> {
         if self.parser.take_word("IS")? {
             let negate = self.parser.take_word("NOT")?;
             self.parser.word("NULL")?;
-            return self.leaf(Op::IsNull { operand: left, is_null: !negate });
+            return self.leaf(Op::IsNull {
+                operand: left,
+                is_null: !negate,
+            });
         }
-        if matches!(self.parser.current.kind, TokenKind::Punct(b'=' | b'<' | b'>' | b'!')) {
+        if matches!(
+            self.parser.current.kind,
+            TokenKind::Punct(b'=' | b'<' | b'>' | b'!')
+        ) {
             let comparison = self.parser.comparison()?;
             let right = self.operand()?;
-            return self.leaf(Op::Compare { left, comparison, right });
+            return self.leaf(Op::Compare {
+                left,
+                comparison,
+                right,
+            });
         }
         if let Operand::Scalar(value) = left {
             let truth = match value.value() {
                 CanonicalScalar::Bool(value) => Some(*value),
                 CanonicalScalar::Null => None,
-                _ => return Err(error(at, GraphPatternTextErrorKind::Expected("HAVING comparison or null test"))),
+                _ => {
+                    return Err(error(
+                        at,
+                        GraphPatternTextErrorKind::Expected("HAVING comparison or null test"),
+                    ));
+                }
             };
             return self.leaf(Op::Truth(truth));
         }
-        Err(error(at, GraphPatternTextErrorKind::Expected("HAVING comparison or null test")))
+        Err(error(
+            at,
+            GraphPatternTextErrorKind::Expected("HAVING comparison or null test"),
+        ))
     }
 }

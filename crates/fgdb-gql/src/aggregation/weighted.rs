@@ -38,17 +38,29 @@ impl Multiplicity {
     }
 
     fn increment(self) -> Self {
-        Self(self.exact_count().and_then(|n| n.checked_add(1)).and_then(NonZeroU64::new))
+        Self(
+            self.exact_count()
+                .and_then(|n| n.checked_add(1))
+                .and_then(NonZeroU64::new),
+        )
     }
 
     fn product(self, other: Self) -> Self {
-        Self(self.exact_count().zip(other.exact_count())
-            .and_then(|(a, b)| a.checked_mul(b)).and_then(NonZeroU64::new))
+        Self(
+            self.exact_count()
+                .zip(other.exact_count())
+                .and_then(|(a, b)| a.checked_mul(b))
+                .and_then(NonZeroU64::new),
+        )
     }
 
     fn sum(self, other: Self) -> Self {
-        Self(self.exact_count().zip(other.exact_count())
-            .and_then(|(a, b)| a.checked_add(b)).and_then(NonZeroU64::new))
+        Self(
+            self.exact_count()
+                .zip(other.exact_count())
+                .and_then(|(a, b)| a.checked_add(b))
+                .and_then(NonZeroU64::new),
+        )
     }
 }
 
@@ -63,30 +75,51 @@ struct EdgeAccess {
 fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
     let operators = aggregate.input.plan().operators();
     if !matches!(operators.first(), Some(GlaOperator::ScanEdges { .. }))
-        || aggregate.aggregates.iter().any(|a| !matches!(a.function,
-            GraphAggregateFunction::CountRows | GraphAggregateFunction::Count
-            | GraphAggregateFunction::CountDistinct | GraphAggregateFunction::Min
-            | GraphAggregateFunction::Max))
+        || aggregate.aggregates.iter().any(|a| {
+            !matches!(
+                a.function,
+                GraphAggregateFunction::CountRows
+                    | GraphAggregateFunction::Count
+                    | GraphAggregateFunction::CountDistinct
+                    | GraphAggregateFunction::Min
+                    | GraphAggregateFunction::Max
+            )
+        })
     {
         return false;
     }
     operators.iter().all(|operator| match operator {
-        GlaOperator::ScanEdges { relation, direction }
-        | GlaOperator::Expand { relation, direction, .. } => {
-            operators.iter().all(|other| match other {
-                GlaOperator::ScanEdges { relation: other_relation, direction: other_direction }
-                | GlaOperator::Expand { relation: other_relation, direction: other_direction, .. }
-                    if relation == other_relation => {
-                    (*direction == GlaDirection::Undirected)
-                        == (*other_direction == GlaDirection::Undirected)
-                }
-                _ => true,
-            })
+        GlaOperator::ScanEdges {
+            relation,
+            direction,
         }
+        | GlaOperator::Expand {
+            relation,
+            direction,
+            ..
+        } => operators.iter().all(|other| match other {
+            GlaOperator::ScanEdges {
+                relation: other_relation,
+                direction: other_direction,
+            }
+            | GlaOperator::Expand {
+                relation: other_relation,
+                direction: other_direction,
+                ..
+            } if relation == other_relation => {
+                (*direction == GlaDirection::Undirected)
+                    == (*other_direction == GlaDirection::Undirected)
+            }
+            _ => true,
+        }),
         GlaOperator::VertexIdentity { .. }
         | GlaOperator::OrderByValues
-        | GlaOperator::Limit { offset: 0, count: None } => true,
-        GlaOperator::ProjectValues { columns } => columns.iter()
+        | GlaOperator::Limit {
+            offset: 0,
+            count: None,
+        } => true,
+        GlaOperator::ProjectValues { columns } => columns
+            .iter()
             .all(|column| matches!(column, ValueProjection::Vertex { .. })),
         _ => false,
     })
@@ -99,11 +132,18 @@ fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
 /// Keep this capability beside physical-path selection so future rewrites
 /// cannot accidentally enable group retirement under a different root order.
 pub(super) fn root_groups_are_contiguous(aggregate: &PreparedGraphAggregate) -> bool {
-    matches!(aggregate.input.plan().operators().first(), Some(GlaOperator::ScanEdges { .. }))
-        && !eligible(aggregate)
+    matches!(
+        aggregate.input.plan().operators().first(),
+        Some(GlaOperator::ScanEdges { .. })
+    ) && !eligible(aggregate)
 }
 
-fn normalized(source: VId, relation: RelationId, destination: VId, undirected: bool) -> TopologyKey {
+fn normalized(
+    source: VId,
+    relation: RelationId,
+    destination: VId,
+    undirected: bool,
+) -> TopologyKey {
     if undirected && source > destination {
         (destination, relation, source)
     } else {
@@ -128,15 +168,26 @@ where
     F: FnMut(VId, &[VertexPredicate]) -> Result<bool, VisitError<E, C>>,
     R: FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, VisitError<E, C>>,
     M: FnMut(GlaExecutionEvent) -> Result<(), VisitError<E, C>>,
-    P: FnMut(&[ValueProjection], &[Option<VId>], &mut R, &mut M, Multiplicity)
-        -> Result<(), VisitError<E, C>>,
+    P: FnMut(
+        &[ValueProjection],
+        &[Option<VId>],
+        &mut R,
+        &mut M,
+        Multiplicity,
+    ) -> Result<(), VisitError<E, C>>,
 {
     let plan = aggregate.input.plan();
     if !eligible(aggregate) {
-        return plan.visit_value_bindings(vertices, edges, test_vertex, property, control,
+        return plan.visit_value_bindings(
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            control,
             |columns, bindings, property, control| {
                 visit(columns, bindings, property, control, Multiplicity::ONE)
-            });
+            },
+        );
     }
 
     let mut accesses = Vec::new();
@@ -145,13 +196,25 @@ where
     for operator in plan.operators() {
         control(GlaExecutionEvent::Work)?;
         let access = match operator {
-            GlaOperator::ScanEdges { relation, direction } => EdgeAccess {
-                source: 0, destination: 1, relation: *relation, direction: *direction,
+            GlaOperator::ScanEdges {
+                relation,
+                direction,
+            } => EdgeAccess {
+                source: 0,
+                destination: 1,
+                relation: *relation,
+                direction: *direction,
             },
-            GlaOperator::Expand { source, relation, direction } => {
+            GlaOperator::Expand {
+                source,
+                relation,
+                direction,
+            } => {
                 let access = EdgeAccess {
-                    source: source.ordinal() as usize, destination: next_slot,
-                    relation: *relation, direction: *direction,
+                    source: source.ordinal() as usize,
+                    destination: next_slot,
+                    relation: *relation,
+                    direction: *direction,
                 };
                 next_slot += 1;
                 access
@@ -169,7 +232,12 @@ where
     let mut topology: BTreeMap<TopologyKey, Multiplicity> = BTreeMap::new();
     for (source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
-        let key = normalized(source, relation, destination, undirected.contains(&relation));
+        let key = normalized(
+            source,
+            relation,
+            destination,
+            undirected.contains(&relation),
+        );
         if let Some(count) = topology.get_mut(&key) {
             *count = count.increment();
         } else {
@@ -194,9 +262,18 @@ where
         for at in 0..accesses.len() {
             control(GlaExecutionEvent::Work)?;
             let mut access = accesses[at];
-            let unavailable = || GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable);
-            access.source = core.slot_map.get(access.source).ok_or_else(unavailable)?.ordinal() as usize;
-            access.destination = core.slot_map.get(access.destination).ok_or_else(unavailable)?.ordinal() as usize;
+            let unavailable =
+                || GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable);
+            access.source = core
+                .slot_map
+                .get(access.source)
+                .ok_or_else(unavailable)?
+                .ordinal() as usize;
+            access.destination = core
+                .slot_map
+                .get(access.destination)
+                .ok_or_else(unavailable)?
+                .ordinal() as usize;
             if access.destination >= core.retained_width {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 branches.push(access);
@@ -210,8 +287,17 @@ where
     }
     let forest = tree::Forest::build(&branches, &topology, &mut control)?;
     let execution_plan = reduced.as_ref().map_or(plan, |core| &core.plan);
-    chain::visit_bindings(execution_plan, vertices, &topology, &accesses, &forest,
-        test_vertex, property, control, visit)
+    chain::visit_bindings(
+        execution_plan,
+        vertices,
+        &topology,
+        &accesses,
+        &forest,
+        test_vertex,
+        property,
+        control,
+        visit,
+    )
 }
 
 #[cfg(test)]
@@ -224,7 +310,10 @@ mod tests {
             GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(1))),
             GraphSymbolKind::Property => Some(GraphSymbol::Property(PropertyKeyId(1))),
             GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
-        }).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
     }
 
     #[test]
@@ -236,7 +325,9 @@ mod tests {
         let two = Multiplicity::ONE.increment();
         assert_eq!(max.product(two).exact_count(), None);
         let mut weight = Multiplicity::ONE;
-        for _ in 0..63 { weight = weight.product(two); }
+        for _ in 0..63 {
+            weight = weight.product(two);
+        }
         assert_eq!(weight.exact_count(), Some(1_u64 << 63));
         weight = weight.product(two);
         assert_eq!(weight.exact_count(), None);
@@ -249,7 +340,9 @@ mod tests {
             "MATCH (a)-[:R]->(b) RETURN a,COUNT(*) AS n,COUNT(b) AS m,COUNT(DISTINCT b) AS d,MIN(b) AS lo,MAX(b) AS hi GROUP BY a",
             "MATCH (a)-[:R]-(b)-[:R]-(a) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
-        ] { assert!(eligible(&query(text)), "{text}"); }
+        ] {
+            assert!(eligible(&query(text)), "{text}");
+        }
         for text in [
             "MATCH (a) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) WHERE a.n=1 RETURN COUNT(*) AS n",
@@ -260,6 +353,8 @@ mod tests {
             "MATCH (a)-[:R]->(b)-[:R]-(c) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN COUNT(*) AS n",
-        ] { assert!(!eligible(&query(text)), "{text}"); }
+        ] {
+            assert!(!eligible(&query(text)), "{text}");
+        }
     }
 }

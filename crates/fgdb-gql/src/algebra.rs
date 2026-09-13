@@ -11,11 +11,12 @@ mod output;
 mod pattern;
 mod predicate;
 mod values;
-pub use boolean::{BoundBooleanExpression, GraphBooleanError, GraphBooleanExpression,
-    GraphBooleanOp, GraphBooleanOperand, MAX_BOOLEAN_INSTRUCTIONS};
+pub use boolean::{
+    BoundBooleanExpression, GraphBooleanError, GraphBooleanExpression, GraphBooleanOp,
+    GraphBooleanOperand, MAX_BOOLEAN_INSTRUCTIONS,
+};
 pub use existence::{GraphExistence, GraphMatchClause};
 pub use ordering::{GraphOrderError, GraphValueOrder};
-pub(crate) use values::{RowKey, ValueRef};
 pub use output::{GlaIdentityOutput, GlaOutput, GraphBindingRow};
 pub use pattern::{
     GraphPatternBuilder, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
@@ -26,6 +27,7 @@ pub use predicate::{MAX_SCALAR_PREDICATE_BYTES, ScalarPredicate, ScalarPredicate
 pub use values::{
     GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphValue, GraphValueRow, ValueProjection,
 };
+pub(crate) use values::{RowKey, ValueRef};
 
 use crate::{BoundPlan, EdgeDirection, ReturnProjection};
 use core::marker::PhantomData;
@@ -478,7 +480,8 @@ impl<Row> GlaPlan<Row> {
             || self.operators.iter().any(|operator| {
                 matches!(
                     operator,
-                    GlaOperator::Select { .. } | GlaOperator::CompareProperties { .. }
+                    GlaOperator::Select { .. }
+                        | GlaOperator::CompareProperties { .. }
                         | GlaOperator::SelectBoolean { .. }
                 )
             })

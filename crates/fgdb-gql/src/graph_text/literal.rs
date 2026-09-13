@@ -84,7 +84,11 @@ impl<'a> Parser<'a> {
             self.punct(b'.', ".")?;
             let right_key = self.name()?;
             return Ok(Filter::Properties {
-                left: variable, left_key: key, right, right_key, comparison,
+                left: variable,
+                left_key: key,
+                right,
+                right_key,
+                comparison,
             });
         }
         let literal = match self.current.kind {
