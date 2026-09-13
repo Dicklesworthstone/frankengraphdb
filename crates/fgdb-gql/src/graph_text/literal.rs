@@ -74,6 +74,19 @@ impl<'a> Parser<'a> {
             });
         }
         let comparison = self.comparison()?;
+        self.property_operand(variable, key, comparison)
+    }
+
+    /// Parse one right operand without interpreting or synthesizing query text.
+    /// Compound predicates use this same catalog, scalar and parameter path as
+    /// ordinary comparisons. Each explicit parameter occurrence is admitted
+    /// exactly once and retains its original byte offset.
+    pub(super) fn property_operand(
+        &mut self,
+        variable: Name<'a>,
+        key: Name<'a>,
+        comparison: IntegerComparison,
+    ) -> Result<Filter<'a>, GraphPatternTextError> {
         let at = self.current.at;
         // A property reference wins over literal-looking variable names such
         // as true or null. Lookahead uses the existing lexer, not text slicing.
