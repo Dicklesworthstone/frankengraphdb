@@ -12,6 +12,7 @@ mod evidence_cursor;
 mod evidence_limits;
 mod evidence_page;
 mod graph_text;
+mod mutation;
 mod overlay_evidence;
 mod parameters;
 mod parser;
@@ -20,6 +21,11 @@ mod set_ops;
 mod set_text;
 mod walk;
 
+pub use mutation::{
+    GraphMutationAction, GraphMutationBatch, GraphMutationBuildError, GraphMutationError,
+    GraphMutationIntent, GraphMutationPolicy, GraphMutationStats, GraphMutationValue,
+    MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation,
+};
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use set_ops::{
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
