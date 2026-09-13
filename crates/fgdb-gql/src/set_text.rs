@@ -23,6 +23,10 @@ pub enum GraphSetTextErrorKind {
     Pattern(GraphPatternTextErrorKind),
     SetBuild(GraphSetBuildError),
     OrderBuild(GraphOrderError),
+    ProjectionBuild(crate::GraphSetProjectionError),
+    IntegerExpression(crate::GraphIntegerBuildError),
+    IntegerOperand,
+    IntegerNesting { limit: usize },
 }
 impl core::fmt::Display for GraphSetTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -30,6 +34,9 @@ impl core::fmt::Display for GraphSetTextError {
     }
 }
 impl core::error::Error for GraphSetTextError {}
+impl From<GraphPatternTextError> for GraphSetTextError {
+    fn from(error: GraphPatternTextError) -> Self { pattern_error(0, error) }
+}
 fn fail(offset: usize, kind: GraphSetTextErrorKind) -> GraphSetTextError {
     GraphSetTextError { offset, kind }
 }
@@ -39,8 +46,33 @@ fn expected(offset: usize, item: &'static str) -> GraphSetTextError {
 fn pattern_error(base: usize, error: GraphPatternTextError) -> GraphSetTextError {
     fail(base + error.offset, GraphSetTextErrorKind::Pattern(error.kind))
 }
+fn rebase_error(base: usize, mut error: GraphSetTextError) -> GraphSetTextError {
+    error.offset += base;
+    error
+}
 fn pattern_kind(offset: usize, kind: GraphPatternTextErrorKind) -> GraphSetTextError {
     fail(offset, GraphSetTextErrorKind::Pattern(kind))
+}
+
+// Native leaf preparation owns these immutable templates. Only shared scalar
+// bytecode and catalog-bound GLA projections reach the execution boundary.
+#[derive(Clone)]
+pub(crate) enum ReadValueTemplate {
+    Column(usize),
+    Literal(crate::GqlScalarParameter),
+    Parameter { index: usize, at: usize },
+    Integer { program: Vec<crate::mutation_text::MutationIntegerTemplateOp>, at: usize },
+}
+#[derive(Clone)]
+pub(crate) struct ReadProjectionTemplate {
+    pub(crate) name: String,
+    pub(crate) value: ReadValueTemplate,
+}
+#[derive(Clone)]
+pub(crate) struct BoundSetTextInput {
+    pub(crate) selection: PreparedGraphText,
+    pub(crate) projection: Option<Vec<ReadProjectionTemplate>>,
+    pub(crate) quantifier: GraphSetQuantifier,
 }
 
 // A token view, not a lexer. Only graph_text's existing Lexer constructs these.
@@ -111,11 +143,16 @@ impl Node {
     }
     fn validate(&mut self, schemas: &[Schema]) -> Result<usize, GraphSetTextError> {
         let first = match &mut self.kind {
-            NodeKind::Leaf(at) => *at,
-            NodeKind::Scope(input) => input.validate(schemas)?,
+            NodeKind::Leaf(at) => { self.depth = schemas[*at].depth; *at }
+            NodeKind::Scope(input) => {
+                let first = input.validate(schemas)?;
+                self.depth = input.depth + 1;
+                first
+            }
             NodeKind::Binary { left, right, .. } => {
                 let l = left.validate(schemas)?;
                 let r = right.validate(schemas)?;
+                self.depth = 1 + left.depth.max(right.depth);
                 let (left, right) = (&schemas[l].types, &schemas[r].types);
                 if left.len() != right.len() {
                     return Err(fail(self.at, GraphSetTextErrorKind::SetBuild(GraphSetBuildError::ColumnCount {
@@ -132,6 +169,11 @@ impl Node {
                 l
             }
         };
+        if self.depth > MAX_GRAPH_SET_DEPTH {
+            return Err(fail(self.at, GraphSetTextErrorKind::SetBuild(GraphSetBuildError::TooDeep {
+                limit: MAX_GRAPH_SET_DEPTH, observed: self.depth,
+            })));
+        }
         let schema = &schemas[first];
         let mut used = BTreeSet::new();
         for key in &mut self.order {
@@ -165,7 +207,7 @@ impl Node {
         Ok(bound.with_page(self.offset.value(arguments), self.count.as_ref().map(|n| n.value(arguments))))
     }
 }
-struct Schema { columns: Vec<String>, types: Vec<GraphSetColumnType> }
+struct Schema { columns: Vec<String>, types: Vec<GraphSetColumnType>, depth: usize }
 struct Span { start: usize, end: usize, first_token: usize, last_token: usize }
 struct Composition<'a> {
     tokens: Vec<TextToken<'a>>,
@@ -333,7 +375,7 @@ impl<'a> Composition<'a> {
 pub struct PreparedGraphSetText {
     statement: String,
     root: Node,
-    inputs: Vec<(usize, PreparedGraphText)>,
+    inputs: Vec<(usize, BoundSetTextInput)>,
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
     parameters: Vec<GqlParameterSpec>,
@@ -355,8 +397,14 @@ impl PreparedGraphSetText {
     /// Use parentheses around an operand with a local order or page.
     ///
     /// Leaf syntax is the shared graph-pattern profile, including WALK,
-    /// OPTIONAL and EXISTS. Aggregate RETURN operands remain unsupported.
-    /// Byte/token admission is definition-wide; no branch resets those caps.
+    /// OPTIONAL and EXISTS. RETURN also accepts scalar literals, parameters and
+    /// checked nullable i64 arithmetic (+ - * / %, signs, ABS, NULLIF, COALESCE).
+    /// Computed expressions require AS aliases. They evaluate before DISTINCT,
+    /// ordering and pagination; all selected property inputs retain eager source
+    /// error behavior. Constants preserve match multiplicity. Use this same
+    /// entrypoint for a single MATCH with computed outputs or a compound set.
+    /// Aggregate RETURN operands remain unsupported. Byte/token admission is
+    /// definition-wide; no branch resets those caps.
     pub fn prepare(statement: &str, resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)
         -> Result<Self, GraphSetTextError> {
         Self::prepare_with_parameter_types(statement, &[], resolve)
@@ -385,9 +433,9 @@ impl PreparedGraphSetText {
                 .filter_map(|token| match token.kind { TextKind::Parameter(name) => Some(name), _ => None }).collect();
             let local: Vec<_> = declarations.iter().copied().filter(|(name, _)| names.contains(name)).collect();
             let input = PreparedGraphText::unresolved_for_composition(&statement[span.start..span.end], &local)
-                .map_err(|error| pattern_error(span.start, error))?;
+                .map_err(|error| rebase_error(span.start, error))?;
             let (columns, types) = input.column_schema();
-            schemas.push(Schema { columns, types });
+            schemas.push(Schema { columns, types, depth: input.depth() });
             for (spec, offset) in input.parameter_schema().iter().zip(input.parameter_offsets()) {
                 uses.push((span.start + *offset, spec.clone()));
             }
@@ -469,8 +517,8 @@ impl PreparedGraphSetText {
                 local.insert(spec.name.clone(), arguments.get(&spec.name).expect("validated argument"))
                     .expect("prepared local names are valid and unique");
             }
-            let bound = input.bind_parameters(&local).map_err(|error| pattern_error(*offset, error))?;
-            inputs.push(Some(PreparedGraphSet::from(bound)));
+            let bound = input.bind_parameters(&local).map_err(|error| rebase_error(*offset, error))?;
+            inputs.push(Some(bound));
         }
         self.root.bind(&mut inputs, arguments)
     }

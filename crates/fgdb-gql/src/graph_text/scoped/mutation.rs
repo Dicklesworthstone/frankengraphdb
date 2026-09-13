@@ -3,6 +3,7 @@
 //! text nor parameter text is synthesized, and execution never sees this AST.
 
 mod integer;
+mod return_projection;
 
 use super::*;
 use crate::mutation_text::{MutationActionTemplate, MutationIntegerTemplateOp};

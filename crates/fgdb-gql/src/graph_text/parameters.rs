@@ -3,6 +3,7 @@
 //! from a database sample, parameter spelling, value, or text substitution.
 
 use super::*;
+use crate::set_text::{BoundSetTextInput, ReadProjectionTemplate, ReadValueTemplate};
 
 impl PreparedGraphText {
     /// Prepare with explicit types for selected argument names (without `$`).
@@ -51,37 +52,98 @@ impl PreparedGraphText {
         Ok(tokens)
     }
 
-    /// Parse once and retain syntax until ALL compound operands and their
-    /// shared parameter contract have passed. Resolution cannot begin early.
+    /// Parse once and retain native syntax until ALL compound operands and
+    /// their shared parameter/output contracts have passed. Computed RETURN
+    /// reuses the same scalar parser as SET, but produces only a read relation.
     pub(crate) fn unresolved_for_composition<'a>(
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
-    ) -> Result<UnresolvedGraphText<'a>, GraphPatternTextError> {
-        let syntax = Parser::new_with_parameter_types(statement, declarations)?.parse()?;
-        Ok(UnresolvedGraphText { statement, syntax })
+    ) -> Result<UnresolvedGraphText<'a>, crate::GraphSetTextError> {
+        Parser::new_with_parameter_types(statement, declarations)?.parse_return_for_composition(statement)
     }
 }
 
-/// Preparation-only phase object. Its native syntax never enters execution.
-/// The private module owns it; composition can inspect schema and then consume
-/// it through the original graph-text catalog/compiler boundary.
+/// Preparation-only phase object. Its syntax never enters execution. For a
+/// computed RETURN, syntax.columns describe private source inputs; projection
+/// owns the real public output schema. Otherwise the original lowering remains.
 pub(crate) struct UnresolvedGraphText<'a> {
-    statement: &'a str,
-    syntax: Syntax<'a>,
+    pub(super) statement: &'a str,
+    pub(super) syntax: Syntax<'a>,
+    pub(super) projection: Option<Vec<ReadProjectionTemplate>>,
 }
 impl UnresolvedGraphText<'_> {
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
-        self.syntax.columns.iter().map(|column| (
-            column.alias.text.to_owned(),
-            if column.property.is_some() { crate::GraphSetColumnType::Scalar }
-            else { crate::GraphSetColumnType::Vertex },
-        )).unzip()
+        use crate::GraphSetColumnType::{Scalar, Vertex};
+        if let Some(projection) = &self.projection {
+            projection.iter().map(|column| {
+                let kind = match &column.value {
+                    ReadValueTemplate::Column(input) if self.syntax.columns[*input].property.is_none() => Vertex,
+                    _ => Scalar,
+                };
+                (column.name.clone(), kind)
+            }).unzip()
+        } else {
+            self.syntax.columns.iter().map(|column| (
+                column.alias.text.to_owned(), if column.property.is_some() { Scalar } else { Vertex },
+            )).unzip()
+        }
     }
+    pub(crate) fn depth(&self) -> usize { 1 + usize::from(self.projection.is_some()) }
     pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] { &self.syntax.parameters }
     pub(crate) fn parameter_offsets(&self) -> &[usize] { &self.syntax.parameter_offsets }
-    pub(crate) fn resolve(self, resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)
-        -> Result<PreparedGraphText, GraphPatternTextError> {
-        PreparedGraphText::from_syntax(self.statement, self.syntax, resolve)
+
+    pub(crate) fn resolve(self, mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)
+        -> Result<BoundSetTextInput, GraphPatternTextError> {
+        let quantifier = if self.syntax.distinct { crate::GraphSetQuantifier::Distinct }
+            else { crate::GraphSetQuantifier::All };
+        let selection = if self.projection.is_none() {
+            PreparedGraphText::from_syntax(self.statement, self.syntax, resolve)?
+        } else {
+            let syntax = self.syntax;
+            let mut cache = BTreeMap::new();
+            let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
+                let key = (kind, name.text.to_owned());
+                if let Some(value) = cache.get(&key) { return Ok(*value); }
+                let value = resolve(kind, name.text)
+                    .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
+                if value.kind() != kind {
+                    return Err(error(name.at, GraphPatternTextErrorKind::WrongSymbolKind { expected: kind, found: value.kind() }));
+                }
+                cache.insert(key, value);
+                Ok(value)
+            };
+            let (builder, filters) = scoped::resolve_pattern(
+                &syntax.variables[..syntax.root_variables], &syntax.labels, &syntax.edges,
+                syntax.filters, &mut symbol,
+            )?;
+            let mut scopes = Vec::new();
+            for scope in syntax.scopes { scopes.push(scope.resolve(&mut symbol)?); }
+            let mut columns = Vec::new();
+            for (index, column) in syntax.columns.into_iter().enumerate() {
+                let key = if let Some(name) = column.property {
+                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)? else {
+                        unreachable!("the shared resolver checked the property domain")
+                    };
+                    Some(key)
+                } else { None };
+                columns.push(BoundColumn {
+                    alias: format!("_return_input_{index}"), variable: column.variable.text.to_owned(), key,
+                });
+            }
+            let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
+            let projected: Vec<_> = columns.iter().map(BoundColumn::declaration).collect();
+            built(syntax.return_at, builder.prepare_values_with_clauses(&clauses, &projected, 0, None))?;
+            // Never push public DISTINCT or pagination into these hidden input
+            // rows: equal output values may arise from different input tuples.
+            PreparedGraphText {
+                statement: self.statement.to_owned(), builder, filters, scopes, columns,
+                ordering: Vec::new(), parameters: syntax.parameters,
+                parameter_offsets: syntax.parameter_offsets,
+                offset: Number::Literal(GqlParameterValue::UInt64(0)), count: None,
+                distinct: false, return_at: syntax.return_at,
+            }
+        };
+        Ok(BoundSetTextInput { selection, projection: self.projection, quantifier })
     }
 }
 
