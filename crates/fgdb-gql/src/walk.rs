@@ -53,9 +53,13 @@ impl GraphWalkBounds {
         Ok(Self { minimum, maximum })
     }
     #[must_use]
-    pub const fn minimum(self) -> u32 { self.minimum }
+    pub const fn minimum(self) -> u32 {
+        self.minimum
+    }
     #[must_use]
-    pub const fn maximum(self) -> u32 { self.maximum }
+    pub const fn maximum(self) -> u32 {
+        self.maximum
+    }
 }
 
 struct Frame<'a> {
@@ -91,12 +95,19 @@ impl<'a> GraphWalkCursor<'a> {
         let neighbors = if bounds.maximum == 0 {
             &[][..]
         } else {
-            adjacency.and_then(|index| index.get(&source)).map_or(&[][..], Vec::as_slice)
+            adjacency
+                .and_then(|index| index.get(&source))
+                .map_or(&[][..], Vec::as_slice)
         };
         Ok(Self {
             adjacency,
             bounds,
-            stack: vec![Frame { vertex: source, neighbors, next: 0, emitted: false }],
+            stack: vec![Frame {
+                vertex: source,
+                neighbors,
+                next: 0,
+                emitted: false,
+            }],
         })
     }
 
@@ -126,10 +137,16 @@ impl<'a> GraphWalkCursor<'a> {
             let neighbors = if depth + 1 == self.bounds.maximum {
                 &[][..]
             } else {
-                self.adjacency.and_then(|index| index.get(&destination))
+                self.adjacency
+                    .and_then(|index| index.get(&destination))
                     .map_or(&[][..], Vec::as_slice)
             };
-            self.stack.push(Frame { vertex: destination, neighbors, next: 0, emitted: false });
+            self.stack.push(Frame {
+                vertex: destination,
+                neighbors,
+                next: 0,
+                emitted: false,
+            });
         }
         Ok(None)
     }
@@ -164,13 +181,26 @@ mod tests {
 
     #[test]
     fn finite_bounds_and_isolated_zero_hops_are_explicit() {
-        assert_eq!(GraphWalkBounds::new(2, 1), Err(GraphWalkBoundsError::Reversed));
-        assert_eq!(GraphWalkBounds::new(0, MAX_GRAPH_WALK_HOPS + 1),
-            Err(GraphWalkBoundsError::TooManyHops { limit: MAX_GRAPH_WALK_HOPS, observed: MAX_GRAPH_WALK_HOPS + 1 }));
+        assert_eq!(
+            GraphWalkBounds::new(2, 1),
+            Err(GraphWalkBoundsError::Reversed)
+        );
+        assert_eq!(
+            GraphWalkBounds::new(0, MAX_GRAPH_WALK_HOPS + 1),
+            Err(GraphWalkBoundsError::TooManyHops {
+                limit: MAX_GRAPH_WALK_HOPS,
+                observed: MAX_GRAPH_WALK_HOPS + 1
+            })
+        );
         for source in [VId(0), VId(u128::MAX)] {
             for (minimum, expected) in [(0, vec![source]), (1, vec![])] {
-                let result = collect(source, GraphWalkBounds::new(minimum, 3).unwrap(), None,
-                    &mut |_| Ok::<_, ()>(())).unwrap();
+                let result = collect(
+                    source,
+                    GraphWalkBounds::new(minimum, 3).unwrap(),
+                    None,
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
                 assert_eq!(result, expected);
             }
         }
@@ -213,10 +243,14 @@ mod tests {
                             layer = next;
                         }
                         let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
-                        let rows = collect(VId(source), bounds, Some(&adjacency),
-                            &mut |_| Ok::<_, ()>(())).unwrap();
+                        let rows = collect(VId(source), bounds, Some(&adjacency), &mut |_| {
+                            Ok::<_, ()>(())
+                        })
+                        .unwrap();
                         let mut actual = BTreeMap::<VId, usize>::new();
-                        for vertex in rows { *actual.entry(vertex).or_default() += 1; }
+                        for vertex in rows {
+                            *actual.entry(vertex).or_default() += 1;
+                        }
                         assert_eq!(actual, expected, "mask={mask}, source={source}, {bounds:?}");
                     }
                 }
@@ -241,8 +275,10 @@ mod tests {
         let bounds = GraphWalkBounds::new(0, 3).unwrap();
         let mut events = Vec::new();
         let expected = collect(VId(1), bounds, Some(&adjacency), &mut |event| {
-            events.push(event); Ok::<_, usize>(())
-        }).unwrap();
+            events.push(event);
+            Ok::<_, usize>(())
+        })
+        .unwrap();
         assert!(expected.len() > 10);
         assert!(events.contains(&GlaExecutionEvent::ScratchEntry));
         assert!(events.contains(&GlaExecutionEvent::Work));
@@ -255,6 +291,9 @@ mod tests {
             assert_eq!(result, Err(stop));
             assert_eq!(seen, stop);
         }
-        assert_eq!(collect(VId(1), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap(), expected);
+        assert_eq!(
+            collect(VId(1), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap(),
+            expected
+        );
     }
 }

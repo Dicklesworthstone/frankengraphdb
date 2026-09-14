@@ -112,8 +112,8 @@ impl GraphPatternBuilder {
                     edge.direction = super::super::reverse(edge.direction);
                 }
                 (Some(outer_at), None)
-            } else if let Some((inner_at, outer_at)) = (0..inner.variables.len())
-                .find_map(|at| correlation(at).map(|outer| (at, outer)))
+            } else if let Some((inner_at, outer_at)) =
+                (0..inner.variables.len()).find_map(|at| correlation(at).map(|outer| (at, outer)))
             {
                 (Some(outer_at), Some(inner_at))
             } else {
@@ -173,7 +173,8 @@ impl GraphPatternBuilder {
                         // An already visible variable is a bound correlation,
                         // not a fresh Cartesian dimension. A null correlation
                         // must fail the child, never be rebound by a new scan.
-                        if let Some((_, outer)) = correlations.iter()
+                        if let Some((_, outer)) = correlations
+                            .iter()
                             .find(|(inner, _)| inner.ordinal() == available)
                         {
                             operators.push(GlaOperator::BindVertex { source: *outer });

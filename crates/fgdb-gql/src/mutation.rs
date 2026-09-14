@@ -9,8 +9,10 @@
 mod collect;
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
-use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution,
-    GqlQueryPolicy, GqlScalarParameter, GraphIntegerError, GraphIntegerExpression};
+use crate::{
+    GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GqlScalarParameter, GraphIntegerError, GraphIntegerExpression,
+};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, VId};
 
@@ -35,18 +37,33 @@ impl core::fmt::Debug for GraphMutationValue {
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphMutationAction {
     /// SET retains canonical NULL as a stored value. REMOVE unsets the field.
-    SetProperty { target: usize, key: PropertyKeyId, value: GraphMutationValue },
-    RemoveProperty { target: usize, key: PropertyKeyId },
-    SetLabel { target: usize, label: LabelId, present: bool },
+    SetProperty {
+        target: usize,
+        key: PropertyKeyId,
+        value: GraphMutationValue,
+    },
+    RemoveProperty {
+        target: usize,
+        key: PropertyKeyId,
+    },
+    SetLabel {
+        target: usize,
+        label: LabelId,
+        present: bool,
+    },
     /// Explicit cascade request, subject to the storage engine's write rules.
     /// A non-detaching DELETE is intentionally not represented by this variant.
-    DetachDelete { target: usize },
+    DetachDelete {
+        target: usize,
+    },
 }
 impl GraphMutationAction {
     fn target(&self) -> usize {
         match self {
-            Self::SetProperty { target, .. } | Self::RemoveProperty { target, .. }
-            | Self::SetLabel { target, .. } | Self::DetachDelete { target } => *target,
+            Self::SetProperty { target, .. }
+            | Self::RemoveProperty { target, .. }
+            | Self::SetLabel { target, .. }
+            | Self::DetachDelete { target } => *target,
         }
     }
 }
@@ -75,27 +92,61 @@ impl core::error::Error for GraphMutationBuildError {}
 pub enum GraphMutationError<E> {
     Source(E),
     InvalidSourceStatistics,
-    InputSchema { row: usize, column: usize },
-    Arithmetic { row: usize, action: usize, error: GraphIntegerError },
-    ConflictingAssignment { first_row: usize, first_action: usize, row: usize, action: usize },
-    EffectLimit { limit: u64, observed: u128 },
+    InputSchema {
+        row: usize,
+        column: usize,
+    },
+    Arithmetic {
+        row: usize,
+        action: usize,
+        error: GraphIntegerError,
+    },
+    ConflictingAssignment {
+        first_row: usize,
+        first_action: usize,
+        row: usize,
+        action: usize,
+    },
+    EffectLimit {
+        limit: u64,
+        observed: u128,
+    },
 }
 impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(error) => error.fmt(f),
-            Self::InvalidSourceStatistics => f.write_str("mutation source returned inconsistent statistics"),
-            Self::InputSchema { row, column } => write!(f, "mutation row {row} has an incompatible column {column}"),
-            Self::Arithmetic { row, action, error } => write!(f, "mutation row {row} action {action}: {error}"),
-            Self::ConflictingAssignment { first_row, first_action, row, action } => write!(f,
-                "mutation assignments disagree: row {first_row} action {first_action}, row {row} action {action}"),
-            Self::EffectLimit { limit, observed } => write!(f, "mutation effect limit exceeded: {observed} > {limit}"),
+            Self::InvalidSourceStatistics => {
+                f.write_str("mutation source returned inconsistent statistics")
+            }
+            Self::InputSchema { row, column } => {
+                write!(f, "mutation row {row} has an incompatible column {column}")
+            }
+            Self::Arithmetic { row, action, error } => {
+                write!(f, "mutation row {row} action {action}: {error}")
+            }
+            Self::ConflictingAssignment {
+                first_row,
+                first_action,
+                row,
+                action,
+            } => write!(
+                f,
+                "mutation assignments disagree: row {first_row} action {first_action}, row {row} action {action}"
+            ),
+            Self::EffectLimit { limit, observed } => {
+                write!(f, "mutation effect limit exceeded: {observed} > {limit}")
+            }
         }
     }
 }
 impl<E: core::error::Error + 'static> core::error::Error for GraphMutationError<E> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self { Self::Source(error) => Some(error), Self::Arithmetic { error, .. } => Some(error), _ => None }
+        match self {
+            Self::Source(error) => Some(error),
+            Self::Arithmetic { error, .. } => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -127,9 +178,19 @@ pub struct GraphMutationStats {
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphMutationIntent {
-    Property { vertex: VId, key: PropertyKeyId, value: Option<CanonicalScalar> },
-    Label { vertex: VId, label: LabelId, present: bool },
-    DetachDelete { vertex: VId },
+    Property {
+        vertex: VId,
+        key: PropertyKeyId,
+        value: Option<CanonicalScalar>,
+    },
+    Label {
+        vertex: VId,
+        label: LabelId,
+        present: bool,
+    },
+    DetachDelete {
+        vertex: VId,
+    },
 }
 impl core::fmt::Debug for GraphMutationIntent {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -146,11 +207,17 @@ pub struct GraphMutationBatch {
 }
 impl GraphMutationBatch {
     #[must_use]
-    pub fn intents(&self) -> &[GraphMutationIntent] { &self.intents }
+    pub fn intents(&self) -> &[GraphMutationIntent] {
+        &self.intents
+    }
     #[must_use]
-    pub const fn stats(&self) -> GraphMutationStats { self.stats }
+    pub const fn stats(&self) -> GraphMutationStats {
+        self.stats
+    }
     #[must_use]
-    pub fn into_intents(self) -> Vec<GraphMutationIntent> { self.intents }
+    pub fn into_intents(self) -> Vec<GraphMutationIntent> {
+        self.intents
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -161,8 +228,10 @@ pub struct PreparedGraphMutation {
 }
 impl core::fmt::Debug for PreparedGraphMutation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PreparedGraphMutation").field("actions", &self.actions.len())
-            .field("definition", &"[REDACTED]").finish()
+        f.debug_struct("PreparedGraphMutation")
+            .field("actions", &self.actions.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 impl PreparedGraphMutation {
@@ -171,13 +240,17 @@ impl PreparedGraphMutation {
     /// All targets are vertex columns; assignment inputs must be scalar columns.
     /// Deletion and updates cannot be mixed in one simultaneous statement.
     pub fn prepare(
-        selection: PreparedGraphPattern<GraphValueRow>, relation: RelationId,
+        selection: PreparedGraphPattern<GraphValueRow>,
+        relation: RelationId,
         actions: Vec<GraphMutationAction>,
     ) -> Result<Self, GraphMutationBuildError> {
-        if actions.is_empty() { return Err(GraphMutationBuildError::EmptyActions); }
+        if actions.is_empty() {
+            return Err(GraphMutationBuildError::EmptyActions);
+        }
         if actions.len() > MAX_GRAPH_MUTATION_ACTIONS {
             return Err(GraphMutationBuildError::TooManyActions {
-                limit: MAX_GRAPH_MUTATION_ACTIONS, observed: actions.len(),
+                limit: MAX_GRAPH_MUTATION_ACTIONS,
+                observed: actions.len(),
             });
         }
         let columns = selection.value_columns();
@@ -185,17 +258,25 @@ impl PreparedGraphMutation {
         for (at, action) in actions.iter().enumerate() {
             let target = action.target();
             if !matches!(columns.get(target), Some(ValueProjection::Vertex { .. })) {
-                return Err(GraphMutationBuildError::TargetColumn { action: at, column: target });
+                return Err(GraphMutationBuildError::TargetColumn {
+                    action: at,
+                    column: target,
+                });
             }
             if let GraphMutationAction::SetProperty { value, .. } = action {
                 let check = |column: usize| {
-                    if matches!(columns.get(column), Some(ValueProjection::Property { .. })) { Ok(()) }
-                    else { Err(GraphMutationBuildError::ValueColumn { action: at, column }) }
+                    if matches!(columns.get(column), Some(ValueProjection::Property { .. })) {
+                        Ok(())
+                    } else {
+                        Err(GraphMutationBuildError::ValueColumn { action: at, column })
+                    }
                 };
                 match value {
                     GraphMutationValue::Column(column) => check(*column)?,
                     GraphMutationValue::Expression(expression) => {
-                        for column in expression.referenced_columns() { check(column)?; }
+                        for column in expression.referenced_columns() {
+                            check(column)?;
+                        }
                     }
                     GraphMutationValue::Literal(_) => {}
                 }
@@ -204,14 +285,24 @@ impl PreparedGraphMutation {
                 return Err(GraphMutationBuildError::MixedDeletionAndUpdates);
             }
         }
-        Ok(Self { selection, relation, actions })
+        Ok(Self {
+            selection,
+            relation,
+            actions,
+        })
     }
     #[must_use]
-    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> { &self.selection }
+    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> {
+        &self.selection
+    }
     #[must_use]
-    pub const fn relation(&self) -> RelationId { self.relation }
+    pub const fn relation(&self) -> RelationId {
+        self.relation
+    }
     #[must_use]
-    pub fn actions(&self) -> &[GraphMutationAction] { &self.actions }
+    pub fn actions(&self) -> &[GraphMutationAction] {
+        &self.actions
+    }
 
     /// Freeze the complete selection once, then reduce simultaneous assignments.
     /// Null OPTIONAL targets are ignored, never interpreted as an identity.
@@ -219,9 +310,12 @@ impl PreparedGraphMutation {
     /// and quota refusal return no batch. The trusted source must use one pinned
     /// GLA snapshot or canonical transaction overlay and retain read domains.
     pub fn execute_governed<E, C>(
-        &self, policy: GraphMutationPolicy,
-        source: impl FnOnce(&PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy)
-            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        &self,
+        policy: GraphMutationPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphMutationBatch, GqlQueryError<GraphMutationError<E>, C>> {
         collect::execute(self, policy, source, checkpoint)
@@ -240,14 +334,18 @@ impl PreparedGraphMutation {
             bytes.extend_from_slice(&(action.target() as u64).to_be_bytes());
             match action {
                 GraphMutationAction::SetProperty { key, value, .. } => {
-                    bytes.push(0); bytes.extend_from_slice(&key.0.to_be_bytes());
+                    bytes.push(0);
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
                     match value {
                         GraphMutationValue::Column(column) => {
-                            bytes.push(0); bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                            bytes.push(0);
+                            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
                         }
                         GraphMutationValue::Literal(value) => {
                             bytes.push(1);
-                            bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
+                            bytes.extend_from_slice(
+                                &(value.canonical_bytes().len() as u64).to_be_bytes(),
+                            );
                             bytes.extend_from_slice(value.canonical_bytes());
                         }
                         GraphMutationValue::Expression(expression) => {
@@ -259,10 +357,13 @@ impl PreparedGraphMutation {
                     }
                 }
                 GraphMutationAction::RemoveProperty { key, .. } => {
-                    bytes.push(1); bytes.extend_from_slice(&key.0.to_be_bytes());
+                    bytes.push(1);
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
                 }
                 GraphMutationAction::SetLabel { label, present, .. } => {
-                    bytes.push(2); bytes.extend_from_slice(&label.0.to_be_bytes()); bytes.push(u8::from(*present));
+                    bytes.push(2);
+                    bytes.extend_from_slice(&label.0.to_be_bytes());
+                    bytes.push(u8::from(*present));
                 }
                 GraphMutationAction::DetachDelete { .. } => bytes.push(3),
             }

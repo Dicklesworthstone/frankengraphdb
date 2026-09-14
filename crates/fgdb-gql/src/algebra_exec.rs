@@ -417,7 +417,10 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                     let result = self.visit(operators, ordinal + 1, bindings, index);
                     let _ = bindings.pop();
                     result?;
-                    if self.active_probe.is_some_and(|group| self.probe_matches[group]) {
+                    if self
+                        .active_probe
+                        .is_some_and(|group| self.probe_matches[group])
+                    {
                         break;
                     }
                 }

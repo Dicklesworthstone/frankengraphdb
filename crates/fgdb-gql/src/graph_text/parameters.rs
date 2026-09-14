@@ -45,7 +45,9 @@ impl PreparedGraphText {
                 TokenKind::End => TextKind::End,
             };
             tokens.push(TextToken { kind, at: token.at });
-            if matches!(token.kind, TokenKind::End) { break; }
+            if matches!(token.kind, TokenKind::End) {
+                break;
+            }
             parser.advance()?;
         }
         Ok(tokens)
@@ -71,16 +73,31 @@ pub(crate) struct UnresolvedGraphText<'a> {
 }
 impl UnresolvedGraphText<'_> {
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
-        self.syntax.columns.iter().map(|column| (
-            column.alias.text.to_owned(),
-            if column.property.is_some() { crate::GraphSetColumnType::Scalar }
-            else { crate::GraphSetColumnType::Vertex },
-        )).unzip()
+        self.syntax
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.alias.text.to_owned(),
+                    if column.property.is_some() {
+                        crate::GraphSetColumnType::Scalar
+                    } else {
+                        crate::GraphSetColumnType::Vertex
+                    },
+                )
+            })
+            .unzip()
     }
-    pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] { &self.syntax.parameters }
-    pub(crate) fn parameter_offsets(&self) -> &[usize] { &self.syntax.parameter_offsets }
-    pub(crate) fn resolve(self, resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)
-        -> Result<PreparedGraphText, GraphPatternTextError> {
+    pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        &self.syntax.parameters
+    }
+    pub(crate) fn parameter_offsets(&self) -> &[usize] {
+        &self.syntax.parameter_offsets
+    }
+    pub(crate) fn resolve(
+        self,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<PreparedGraphText, GraphPatternTextError> {
         PreparedGraphText::from_syntax(self.statement, self.syntax, resolve)
     }
 }

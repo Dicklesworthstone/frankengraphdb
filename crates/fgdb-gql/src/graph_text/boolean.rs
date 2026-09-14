@@ -280,9 +280,14 @@ impl<'a> Parser<'a> {
                 // total; (property IS NULL AND FALSE) is always FALSE, including
                 // missing/stored NULL. Negation below makes NOT IN [] TRUE.
                 self.admit_compound_leaf()?;
-                parsed.push(SyntaxItem::Atom(Filter::Null {
-                    variable, key, is_null: true,
-                }), at)?;
+                parsed.push(
+                    SyntaxItem::Atom(Filter::Null {
+                        variable,
+                        key,
+                        is_null: true,
+                    }),
+                    at,
+                )?;
                 self.admit_compound_leaf()?;
                 parsed.push(SyntaxItem::Truth(Some(false)), at)?;
                 parsed.push(SyntaxItem::And, at)?;
@@ -590,16 +595,23 @@ mod compound_tests {
 
     fn rows(predicate: &str, values: &[Option<CanonicalScalar>]) -> Vec<VId> {
         let plan = prepare(predicate);
-        let result = plan.plan().execute_governed_with_properties(
-            values.len() as u64,
-            (0..values.len()).map(|at| VId(at as u128 + 1)),
-            [],
-            |_, _| Ok::<_, ()>(true),
-            |vid, _| Ok(values[vid.0 as usize - 1].as_ref()),
-            GqlQueryPolicy::new(100, 100, 100_000, 100_000),
-            || Ok::<_, ()>(()),
-        ).unwrap();
-        result.value.iter().map(|row| row.values()[0].as_vertex().unwrap()).collect()
+        let result = plan
+            .plan()
+            .execute_governed_with_properties(
+                values.len() as u64,
+                (0..values.len()).map(|at| VId(at as u128 + 1)),
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |vid, _| Ok(values[vid.0 as usize - 1].as_ref()),
+                GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        result
+            .value
+            .iter()
+            .map(|row| row.values()[0].as_vertex().unwrap())
+            .collect()
     }
 
     #[test]
@@ -612,38 +624,71 @@ mod compound_tests {
             ("n.p IN []", "(n.p IS NULL AND FALSE)"),
             ("n.p NOT IN []", "NOT (n.p IS NULL AND FALSE)"),
         ] {
-            assert_eq!(prepare(compound).canonical_bytes(), prepare(expanded).canonical_bytes(), "{compound}");
+            assert_eq!(
+                prepare(compound).canonical_bytes(),
+                prepare(expanded).canonical_bytes(),
+                "{compound}"
+            );
         }
     }
 
     #[test]
     fn membership_and_negation_preserve_unknown_and_empty_list_laws() {
-        let values = [Some(CanonicalScalar::Int(1)), Some(CanonicalScalar::Int(2)),
-            Some(CanonicalScalar::Int(3)), Some(CanonicalScalar::Null), None];
+        let values = [
+            Some(CanonicalScalar::Int(1)),
+            Some(CanonicalScalar::Int(2)),
+            Some(CanonicalScalar::Int(3)),
+            Some(CanonicalScalar::Null),
+            None,
+        ];
         assert_eq!(rows("n.p IN [1, 3, 3]", &values), vec![VId(1), VId(3)]);
         assert_eq!(rows("n.p NOT IN [1, 3]", &values), vec![VId(2)]);
         assert_eq!(rows("n.p IN [1, NULL]", &values), vec![VId(1)]);
         assert!(rows("n.p NOT IN [1, NULL]", &values).is_empty());
         assert!(rows("n.p IN []", &values).is_empty());
-        assert_eq!(rows("n.p NOT IN []", &values), (1..=5).map(VId).collect::<Vec<_>>());
+        assert_eq!(
+            rows("n.p NOT IN []", &values),
+            (1..=5).map(VId).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn ranges_are_inclusive_and_do_not_swallow_outer_boolean_operators() {
-        let values = (0..=4).map(|value| Some(CanonicalScalar::Int(value))).collect::<Vec<_>>();
-        assert_eq!(rows("n.p BETWEEN 1 AND 3", &values), vec![VId(2), VId(3), VId(4)]);
-        assert_eq!(rows("n.p NOT BETWEEN 1 AND 3", &values), vec![VId(1), VId(5)]);
+        let values = (0..=4)
+            .map(|value| Some(CanonicalScalar::Int(value)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows("n.p BETWEEN 1 AND 3", &values),
+            vec![VId(2), VId(3), VId(4)]
+        );
+        assert_eq!(
+            rows("n.p NOT BETWEEN 1 AND 3", &values),
+            vec![VId(1), VId(5)]
+        );
         assert!(rows("n.p BETWEEN 3 AND 1", &values).is_empty());
-        assert_eq!(rows("n.p BETWEEN 1 AND 3 AND n.p IN [2, 4] OR n.p = 0", &values), vec![VId(1), VId(3)]);
-        assert_eq!(rows("NOT n.p BETWEEN 1 AND 3", &values), vec![VId(1), VId(5)]);
+        assert_eq!(
+            rows("n.p BETWEEN 1 AND 3 AND n.p IN [2, 4] OR n.p = 0", &values),
+            vec![VId(1), VId(3)]
+        );
+        assert_eq!(
+            rows("NOT n.p BETWEEN 1 AND 3", &values),
+            vec![VId(1), VId(5)]
+        );
     }
 
     #[test]
     fn literal_keywords_and_quotes_are_operands_not_query_fragments() {
         let value = CanonicalScalar::ucs_basic_text("x'] OR TRUE --").unwrap();
-        let values = [Some(value), Some(CanonicalScalar::ucs_basic_text("other").unwrap())];
+        let values = [
+            Some(value),
+            Some(CanonicalScalar::ucs_basic_text("other").unwrap()),
+        ];
         assert_eq!(rows("n.p IN ['x''] OR TRUE --']", &values), vec![VId(1)]);
-        let values = [Some(CanonicalScalar::Bool(true)), Some(CanonicalScalar::Bool(false)), None];
+        let values = [
+            Some(CanonicalScalar::Bool(true)),
+            Some(CanonicalScalar::Bool(false)),
+            None,
+        ];
         assert_eq!(rows("n.p IN [TRUE]", &values), vec![VId(1)]);
         assert_eq!(rows("n.p NOT IN [TRUE]", &values), vec![VId(2)]);
     }
@@ -653,34 +698,75 @@ mod compound_tests {
         let calls = Cell::new(0);
         let template = PreparedGraphText::prepare(
             "MATCH (n) WHERE n.p IN [$x, $x] AND n.p BETWEEN $lo AND $hi RETURN n",
-            |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
-        ).unwrap();
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
         assert_eq!(calls.get(), 1);
         assert_eq!(template.parameter_schema()[0].occurrences, 2);
-        let args = GqlParameters::new().with_int64("x", 2).unwrap()
-            .with_int64("lo", i64::MIN).unwrap().with_int64("hi", i64::MAX).unwrap();
+        let args = GqlParameters::new()
+            .with_int64("x", 2)
+            .unwrap()
+            .with_int64("lo", i64::MIN)
+            .unwrap()
+            .with_int64("hi", i64::MAX)
+            .unwrap();
         let first = template.bind_parameters(&args).unwrap();
         assert_eq!(calls.get(), 1);
-        assert_eq!(first.canonical_bytes(), template.bind_parameters(&args).unwrap().canonical_bytes());
-        assert!(matches!(template.bind_parameters(&GqlParameters::new()).unwrap_err().kind,
-            GraphPatternTextErrorKind::MissingParameter));
+        assert_eq!(
+            first.canonical_bytes(),
+            template.bind_parameters(&args).unwrap().canonical_bytes()
+        );
+        assert!(matches!(
+            template
+                .bind_parameters(&GqlParameters::new())
+                .unwrap_err()
+                .kind,
+            GraphPatternTextErrorKind::MissingParameter
+        ));
     }
 
     #[test]
     fn malformed_and_oversized_lists_refuse_before_catalog_resolution() {
-        for predicate in ["n.p IN [1,]", "n.p IN [1 2]", "n.p IN [", "n.p IN $xs",
-            "n.p BETWEEN 1", "n.p BETWEEN 1 OR 2", "n.p NOT BETWEEN AND 2"] {
+        for predicate in [
+            "n.p IN [1,]",
+            "n.p IN [1 2]",
+            "n.p IN [",
+            "n.p IN $xs",
+            "n.p BETWEEN 1",
+            "n.p BETWEEN 1 OR 2",
+            "n.p NOT BETWEEN AND 2",
+        ] {
             let calls = Cell::new(0);
-            assert!(PreparedGraphText::prepare(&format!("MATCH (n) WHERE {predicate} RETURN n"),
-                |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) }).is_err(), "{predicate}");
+            assert!(
+                PreparedGraphText::prepare(
+                    &format!("MATCH (n) WHERE {predicate} RETURN n"),
+                    |kind, name| {
+                        calls.set(calls.get() + 1);
+                        symbols(kind, name)
+                    }
+                )
+                .is_err(),
+                "{predicate}"
+            );
             assert_eq!(calls.get(), 0, "{predicate}");
         }
         let members = vec!["1"; MAX_PATTERN_PREDICATES + 1].join(",");
-        assert!(PreparedGraphText::prepare(
-            &format!("MATCH (n) WHERE n.p IN [{members}] RETURN n"), symbols).is_err());
-        assert!(matches!(PreparedGraphText::prepare(
-            "MATCH (n) WHERE n.unknown IN [] RETURN n", symbols).unwrap_err().kind,
-            GraphPatternTextErrorKind::UnknownSymbol(GraphSymbolKind::Property)));
+        assert!(
+            PreparedGraphText::prepare(
+                &format!("MATCH (n) WHERE n.p IN [{members}] RETURN n"),
+                symbols
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            PreparedGraphText::prepare("MATCH (n) WHERE n.unknown IN [] RETURN n", symbols)
+                .unwrap_err()
+                .kind,
+            GraphPatternTextErrorKind::UnknownSymbol(GraphSymbolKind::Property)
+        ));
     }
 
     #[test]
@@ -689,9 +775,15 @@ mod compound_tests {
             let plan = prepare(predicate);
             let value = CanonicalScalar::Int(1);
             let result = plan.plan().execute_governed_with_properties(
-                1, [VId(1)], [], |_, _| Ok::<_, &str>(true),
+                1,
+                [VId(1)],
+                [],
+                |_, _| Ok::<_, &str>(true),
                 |_, key| {
-                    if predicate.ends_with(']') && predicate.contains("n.q") && key == PropertyKeyId(1) {
+                    if predicate.ends_with(']')
+                        && predicate.contains("n.q")
+                        && key == PropertyKeyId(1)
+                    {
                         Ok(Some(&value))
                     } else {
                         Err("unreadable property")

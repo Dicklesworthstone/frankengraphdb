@@ -394,20 +394,27 @@ fn definition_scopes_and_logical_identity_do_not_leak_existential_names() {
         &["private_local", "other"],
         &[("private_local", S, GlaDirection::Forward, "other")],
     );
-    let independent = root.prepare_values_with_clauses(
-        &[
-            GraphMatchClause::exists(&inner),
-            GraphMatchClause::optional(&disconnected),
-        ],
-        &[column, GraphColumn::vertex("fresh", "private_local")],
-        0,
-        None,
-    ).unwrap();
+    let independent = root
+        .prepare_values_with_clauses(
+            &[
+                GraphMatchClause::exists(&inner),
+                GraphMatchClause::optional(&disconnected),
+            ],
+            &[column, GraphColumn::vertex("fresh", "private_local")],
+            0,
+            None,
+        )
+        .unwrap();
     // The earlier existential witness is vertex 1; the independent OPTIONAL
     // must bind vertex 2 under the reused local name, not capture that witness.
-    assert_eq!(execute(&independent, &[VId(0), VId(1), VId(2), VId(3)], &[
-        (VId(0), R, VId(1)), (VId(2), S, VId(3)),
-    ]), vec![vec![Some(VId(0)), Some(VId(2))]]);
+    assert_eq!(
+        execute(
+            &independent,
+            &[VId(0), VId(1), VId(2), VId(3)],
+            &[(VId(0), R, VId(1)), (VId(2), S, VId(3)),]
+        ),
+        vec![vec![Some(VId(0)), Some(VId(2))]]
+    );
     let optional = root
         .prepare_values_with_clauses(
             &[GraphMatchClause::optional(&inner)],

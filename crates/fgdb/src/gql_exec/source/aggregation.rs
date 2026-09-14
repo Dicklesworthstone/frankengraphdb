@@ -122,7 +122,9 @@ impl<V: Vfs + Clone> Database<V> {
         policy: GqlQueryPolicy,
     ) -> SetResult<GqlError> {
         let as_of = self.frontier().map_err(|error| {
-            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)))
+            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(
+                error,
+            )))
         })?;
         self.execute_graph_set_governed_at(cx, query, as_of, policy)
     }
@@ -139,15 +141,21 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_readable()
             .and_then(|()| self.snapshot.check_frontier(as_of))
             .map_err(|error| {
-                GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)))
+                GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(
+                    error,
+                )))
             })?;
-        cx.with_restriction(|| query.execute_governed(
-            policy,
-            |pattern, allowance| crate::gql_exec::execute_pattern_at(
-                self, pattern, as_of, allowance, || cx.checkpoint(),
-            ),
-            || cx.checkpoint(),
-        ))
+        cx.with_restriction(|| {
+            query.execute_governed(
+                policy,
+                |pattern, allowance| {
+                    crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
+                        cx.checkpoint()
+                    })
+                },
+                || cx.checkpoint(),
+            )
+        })
     }
 }
 
@@ -170,14 +178,20 @@ impl EmbeddedReadView {
         policy: GqlQueryPolicy,
     ) -> SetResult<GqlError> {
         self.snapshot.check_frontier(as_of).map_err(|error| {
-            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)))
+            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(
+                error,
+            )))
         })?;
-        cx.with_restriction(|| query.execute_governed(
-            policy,
-            |pattern, allowance| crate::gql_exec::execute_pattern_at(
-                self, pattern, as_of, allowance, || cx.checkpoint(),
-            ),
-            || cx.checkpoint(),
-        ))
+        cx.with_restriction(|| {
+            query.execute_governed(
+                policy,
+                |pattern, allowance| {
+                    crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
+                        cx.checkpoint()
+                    })
+                },
+                || cx.checkpoint(),
+            )
+        })
     }
 }

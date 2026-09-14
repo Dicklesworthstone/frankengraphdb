@@ -171,7 +171,11 @@ impl<Row> PreparedGraphPattern<Row> {
     #[must_use]
     pub fn required_vertex_label(&self) -> Option<LabelId> {
         if self.logical.scans_edges()
-            || self.logical.operators().iter().skip(1)
+            || self
+                .logical
+                .operators()
+                .iter()
+                .skip(1)
                 .any(|op| matches!(op, GlaOperator::ScanVertices))
         {
             // The shared vertex domain serves every independent component.
@@ -216,12 +220,17 @@ fn reverse(direction: GlaDirection) -> GlaDirection {
 /// Width of a positive compiled body, including temporary closing endpoints.
 /// Count producers, not edges: each independent component has its own root.
 fn binding_width(operators: &[GlaOperator]) -> u32 {
-    operators.iter().map(|operator| match operator {
-        GlaOperator::ScanEdges { .. } => 2,
-        GlaOperator::ScanVertices | GlaOperator::Expand { .. }
-        | GlaOperator::VarLengthExpand { .. } | GlaOperator::BindVertex { .. } => 1,
-        _ => 0,
-    }).sum()
+    operators
+        .iter()
+        .map(|operator| match operator {
+            GlaOperator::ScanEdges { .. } => 2,
+            GlaOperator::ScanVertices
+            | GlaOperator::Expand { .. }
+            | GlaOperator::VarLengthExpand { .. }
+            | GlaOperator::BindVertex { .. } => 1,
+            _ => 0,
+        })
+        .sum()
 }
 
 impl GraphPatternBuilder {
@@ -318,7 +327,10 @@ impl GraphPatternBuilder {
         bounds: crate::GraphWalkBounds,
     ) -> Result<&mut Self, PatternBuildError> {
         self.edge(source, relation, direction, destination)?;
-        self.edges.last_mut().expect("one validated atom was just added").walk = Some(bounds);
+        self.edges
+            .last_mut()
+            .expect("one validated atom was just added")
+            .walk = Some(bounds);
         Ok(self)
     }
 
@@ -502,8 +514,7 @@ impl GraphPatternBuilder {
         }
         loop {
             let connected = self.edges.iter().enumerate().position(|(at, edge)| {
-                !consumed[at]
-                    && (slots[edge.source].is_some() || slots[edge.destination].is_some())
+                !consumed[at] && (slots[edge.source].is_some() || slots[edge.destination].is_some())
             });
             if let Some(at) = connected {
                 let edge = self.edges[at];
@@ -538,11 +549,16 @@ impl GraphPatternBuilder {
             }
             // Prefer a remaining edge component before isolated vertices. This
             // is a deterministic definition order, not data-dependent planning.
-            let seed = self.edges.iter().enumerate()
+            let seed = self
+                .edges
+                .iter()
+                .enumerate()
                 .find(|(at, _)| !consumed[*at])
                 .map(|(_, edge)| edge.source)
                 .or_else(|| slots.iter().position(Option::is_none));
-            let Some(seed) = seed else { break; };
+            let Some(seed) = seed else {
+                break;
+            };
             debug_assert!(slots[seed].is_none());
             let appended = BindingSlot(next_slot);
             next_slot += 1;
@@ -770,8 +786,13 @@ mod tests {
         );
         assert_eq!(b.prepare("a", 0, None).unwrap(), original);
         let independent = builder(&["a", "b"]).prepare("a", 0, None).unwrap();
-        assert_eq!(independent.plan().execute([VId(1), VId(2)], [],
-            |_, _| Ok::<_, ()>(true)).unwrap(), vec![VId(1), VId(2)]);
+        assert_eq!(
+            independent
+                .plan()
+                .execute([VId(1), VId(2)], [], |_, _| Ok::<_, ()>(true))
+                .unwrap(),
+            vec![VId(1), VId(2)]
+        );
         assert_eq!(
             GraphPatternBuilder::new().prepare("a", 0, None),
             Err(PatternBuildError::EmptyPattern)

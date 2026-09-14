@@ -1,14 +1,20 @@
 //! Immutable text-prepared query-selected mutations. The native MATCH parser
 //! owns construction and binding; this facade cannot be executed as a read.
 
-use crate::{GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
-    GraphPatternTextErrorKind, PreparedGraphText};
+use crate::{
+    GraphMutationAction, GraphMutationBuildError, GraphPatternTextError, GraphPatternTextErrorKind,
+    PreparedGraphText,
+};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 
 #[derive(Clone)]
 pub(crate) enum MutationActionTemplate {
     Bound(GraphMutationAction),
-    ParameterProperty { target: usize, key: PropertyKeyId, parameter: usize },
+    ParameterProperty {
+        target: usize,
+        key: PropertyKeyId,
+        parameter: usize,
+    },
 }
 
 /// MATCH [WALK] ... SET / REMOVE / DETACH DELETE, with one parameter schema and
@@ -26,8 +32,10 @@ pub struct PreparedGraphMutationText {
 }
 impl core::fmt::Debug for PreparedGraphMutationText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PreparedGraphMutationText").field("actions", &self.actions.len())
-            .field("definition", &"[REDACTED]").finish()
+        f.debug_struct("PreparedGraphMutationText")
+            .field("actions", &self.actions.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -43,12 +51,19 @@ pub enum GraphMutationTextErrorKind {
 }
 impl From<GraphPatternTextError> for GraphMutationTextError {
     fn from(error: GraphPatternTextError) -> Self {
-        Self { offset: error.offset, kind: GraphMutationTextErrorKind::Query(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphMutationTextErrorKind::Query(error.kind),
+        }
     }
 }
 impl core::fmt::Display for GraphMutationTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph mutation text error at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "graph mutation text error at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphMutationTextError {}

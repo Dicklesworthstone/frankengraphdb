@@ -334,9 +334,13 @@ impl<'a> Parser<'a> {
     fn walk_hop_literal(&mut self) -> Result<u32, GraphPatternTextError> {
         let at = self.current.at;
         let TokenKind::Digits(digits) = self.current.kind else {
-            return Err(error(at, GraphPatternTextErrorKind::Expected("finite integer WALK hop bound")));
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected("finite integer WALK hop bound"),
+            ));
         };
-        let hops = digits.parse::<u32>()
+        let hops = digits
+            .parse::<u32>()
             .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?;
         self.advance()?;
         Ok(hops)
@@ -346,12 +350,19 @@ impl<'a> Parser<'a> {
     /// accepts exact *k, inclusive *m..n, and *..n with the conventional minimum
     /// one. Every upper bound is mandatory and checked, including LIMIT 0.
     /// No source-text rewriting, guessed bound or implicit truncation occurs.
-    fn pattern_walk_bounds(&mut self, enabled: bool)
-        -> Result<Option<crate::GraphWalkBounds>, GraphPatternTextError> {
+    fn pattern_walk_bounds(
+        &mut self,
+        enabled: bool,
+    ) -> Result<Option<crate::GraphWalkBounds>, GraphPatternTextError> {
         let at = self.current.at;
-        if !self.take(b'*')? { return Ok(None); }
+        if !self.take(b'*')? {
+            return Ok(None);
+        }
         if !enabled {
-            return Err(error(at, GraphPatternTextErrorKind::Expected("explicit MATCH WALK for quantified atoms")));
+            return Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected("explicit MATCH WALK for quantified atoms"),
+            ));
         }
         let (minimum, maximum) = if self.take(b'.')? {
             self.punct(b'.', "..")?;
@@ -366,9 +377,16 @@ impl<'a> Parser<'a> {
             };
             (minimum, maximum)
         };
-        crate::GraphWalkBounds::new(minimum, maximum).map(Some).map_err(|_| {
-            error(at, GraphPatternTextErrorKind::Expected("finite ordered WALK bounds within the hop limit"))
-        })
+        crate::GraphWalkBounds::new(minimum, maximum)
+            .map(Some)
+            .map_err(|_| {
+                error(
+                    at,
+                    GraphPatternTextErrorKind::Expected(
+                        "finite ordered WALK bounds within the hop limit",
+                    ),
+                )
+            })
     }
 
     // Look ahead through the SAME lexer, without consuming its token budget.

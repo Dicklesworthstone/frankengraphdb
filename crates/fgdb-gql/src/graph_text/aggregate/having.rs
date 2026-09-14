@@ -325,9 +325,7 @@ impl HavingParser<'_, '_> {
                 is_null: !negate,
             });
         }
-        if self.parser.is_word("IN")
-            || self.parser.is_word("BETWEEN")
-            || self.parser.is_word("NOT")
+        if self.parser.is_word("IN") || self.parser.is_word("BETWEEN") || self.parser.is_word("NOT")
         {
             return self.membership_or_range(left);
         }
@@ -373,21 +371,33 @@ impl HavingParser<'_, '_> {
             if self.parser.take(b']')? {
                 // Do not prune the left operand's hidden aggregate or its source
                 // errors merely because membership in an empty list is false.
-                self.leaf(Op::IsNull { operand: left, is_null: true })?;
+                self.leaf(Op::IsNull {
+                    operand: left,
+                    is_null: true,
+                })?;
                 self.leaf(Op::Truth(Some(false)))?;
                 self.emit(Op::And)?;
             } else {
                 let mut first = true;
                 loop {
-                    self.parser.capacity(self.leaves, MAX_AGGREGATE_FILTERS,
-                        crate::algebra::PatternLimitDimension::Predicates)?;
+                    self.parser.capacity(
+                        self.leaves,
+                        MAX_AGGREGATE_FILTERS,
+                        crate::algebra::PatternLimitDimension::Predicates,
+                    )?;
                     let right = self.operand()?;
                     self.leaf(Op::Compare {
-                        left: left.clone(), comparison: IntegerComparison::Equal, right,
+                        left: left.clone(),
+                        comparison: IntegerComparison::Equal,
+                        right,
                     })?;
-                    if !first { self.emit(Op::Or)?; }
+                    if !first {
+                        self.emit(Op::Or)?;
+                    }
                     first = false;
-                    if self.parser.take(b']')? { break; }
+                    if self.parser.take(b']')? {
+                        break;
+                    }
                     self.parser.punct(b',', ", or ]")?;
                 }
             }
@@ -395,18 +405,24 @@ impl HavingParser<'_, '_> {
             self.parser.word("BETWEEN")?;
             let lower = self.operand()?;
             self.leaf(Op::Compare {
-                left: left.clone(), comparison: IntegerComparison::GreaterOrEqual, right: lower,
+                left: left.clone(),
+                comparison: IntegerComparison::GreaterOrEqual,
+                right: lower,
             })?;
             // Consume only the range delimiter; the outer conjunction remains
             // the owner of any subsequent AND. No symmetric-bound reordering.
             self.parser.word("AND")?;
             let upper = self.operand()?;
             self.leaf(Op::Compare {
-                left, comparison: IntegerComparison::LessOrEqual, right: upper,
+                left,
+                comparison: IntegerComparison::LessOrEqual,
+                right: upper,
             })?;
             self.emit(Op::And)?;
         }
-        if negate { self.emit(Op::Not)?; }
+        if negate {
+            self.emit(Op::Not)?;
+        }
         Ok(())
     }
 }
@@ -425,8 +441,12 @@ mod compound_tests {
 
     fn prepare(predicate: &str) -> PreparedGraphAggregate {
         PreparedGraphAggregateText::prepare(
-            &format!("MATCH (n) RETURN COUNT(*) AS c HAVING {predicate}"), symbols,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+            &format!("MATCH (n) RETURN COUNT(*) AS c HAVING {predicate}"),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
     }
 
     #[test]
@@ -447,15 +467,23 @@ mod compound_tests {
     fn hidden_aggregate_operands_share_one_summary_and_remain_hidden() {
         for (compound, expanded) in [
             ("MIN(n.p) IN [1, 2]", "(MIN(n.p) = 1 OR MIN(n.p) = 2)"),
-            ("c IN [MIN(n.p), MAX(n.p)]", "(c = MIN(n.p) OR c = MAX(n.p))"),
-            ("c BETWEEN MIN(n.p) AND MAX(n.p)", "(c >= MIN(n.p) AND c <= MAX(n.p))"),
+            (
+                "c IN [MIN(n.p), MAX(n.p)]",
+                "(c = MIN(n.p) OR c = MAX(n.p))",
+            ),
+            (
+                "c BETWEEN MIN(n.p) AND MAX(n.p)",
+                "(c >= MIN(n.p) AND c <= MAX(n.p))",
+            ),
             ("MIN(n.p) NOT IN []", "NOT (MIN(n.p) IS NULL AND FALSE)"),
         ] {
             assert_eq!(prepare(compound), prepare(expanded), "{compound}");
         }
         let template = PreparedGraphAggregateText::prepare(
-            "MATCH (n) RETURN COUNT(*) AS c HAVING MIN(n.p) IN [1, 2, 3]", symbols,
-        ).unwrap();
+            "MATCH (n) RETURN COUNT(*) AS c HAVING MIN(n.p) IN [1, 2, 3]",
+            symbols,
+        )
+        .unwrap();
         assert_eq!(template.columns(), &["c"]);
         assert_eq!(template.output_slots().len(), 1);
     }
@@ -465,46 +493,88 @@ mod compound_tests {
         let calls = Cell::new(0);
         let template = PreparedGraphAggregateText::prepare(
             "MATCH (n) RETURN COUNT(*) AS c HAVING $x IN [c, $x] AND MIN(n.p) BETWEEN $lo AND $hi",
-            |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
-        ).unwrap();
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
         assert_eq!(calls.get(), 1);
         assert_eq!(template.parameter_schema()[0].occurrences, 2);
-        let arguments = GqlParameters::new().with_int64("x", 1).unwrap()
-            .with_int64("lo", i64::MIN).unwrap().with_int64("hi", i64::MAX).unwrap();
+        let arguments = GqlParameters::new()
+            .with_int64("x", 1)
+            .unwrap()
+            .with_int64("lo", i64::MIN)
+            .unwrap()
+            .with_int64("hi", i64::MAX)
+            .unwrap();
         let bound = template.bind_parameters(&arguments).unwrap();
         assert_eq!(bound, template.bind_parameters(&arguments).unwrap());
         assert_eq!(calls.get(), 1);
-        assert!(matches!(template.bind_parameters(&GqlParameters::new()).unwrap_err().kind,
-            GraphPatternTextErrorKind::MissingParameter));
+        assert!(matches!(
+            template
+                .bind_parameters(&GqlParameters::new())
+                .unwrap_err()
+                .kind,
+            GraphPatternTextErrorKind::MissingParameter
+        ));
     }
 
     #[test]
     fn not_alias_and_prefix_negation_keep_their_distinct_roles() {
-        for predicate in ["not IN [1]", "not NOT IN [1]", "NOT not IN [1]",
-            "not BETWEEN 0 AND 2", "not NOT BETWEEN 0 AND 2", "NOT not BETWEEN 0 AND 2"] {
+        for predicate in [
+            "not IN [1]",
+            "not NOT IN [1]",
+            "NOT not IN [1]",
+            "not BETWEEN 0 AND 2",
+            "not NOT BETWEEN 0 AND 2",
+            "NOT not BETWEEN 0 AND 2",
+        ] {
             PreparedGraphAggregateText::prepare(
-                &format!("MATCH (n) RETURN COUNT(*) AS not HAVING {predicate}"), symbols,
-            ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+                &format!("MATCH (n) RETURN COUNT(*) AS not HAVING {predicate}"),
+                symbols,
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
         }
     }
 
     #[test]
     fn malformed_and_excessive_membership_refuses_before_catalog_access() {
-        for predicate in ["MIN(n.p) IN [1,]", "MIN(n.p) IN [1 2]", "MIN(n.p) IN $list",
-            "MIN(n.p) BETWEEN 1", "MIN(n.p) NOT BETWEEN 1 OR 2"] {
+        for predicate in [
+            "MIN(n.p) IN [1,]",
+            "MIN(n.p) IN [1 2]",
+            "MIN(n.p) IN $list",
+            "MIN(n.p) BETWEEN 1",
+            "MIN(n.p) NOT BETWEEN 1 OR 2",
+        ] {
             let calls = Cell::new(0);
-            assert!(PreparedGraphAggregateText::prepare(
-                &format!("MATCH (n) RETURN COUNT(*) AS c HAVING {predicate}"),
-                |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
-            ).is_err(), "{predicate}");
+            assert!(
+                PreparedGraphAggregateText::prepare(
+                    &format!("MATCH (n) RETURN COUNT(*) AS c HAVING {predicate}"),
+                    |kind, name| {
+                        calls.set(calls.get() + 1);
+                        symbols(kind, name)
+                    },
+                )
+                .is_err(),
+                "{predicate}"
+            );
             assert_eq!(calls.get(), 0, "{predicate}");
         }
         let members = vec!["1"; MAX_AGGREGATE_FILTERS + 1].join(",");
         let calls = Cell::new(0);
-        assert!(PreparedGraphAggregateText::prepare(
-            &format!("MATCH (n) RETURN COUNT(*) AS c HAVING MIN(n.p) IN [{members}]"),
-            |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
-        ).is_err());
+        assert!(
+            PreparedGraphAggregateText::prepare(
+                &format!("MATCH (n) RETURN COUNT(*) AS c HAVING MIN(n.p) IN [{members}]"),
+                |kind, name| {
+                    calls.set(calls.get() + 1);
+                    symbols(kind, name)
+                },
+            )
+            .is_err()
+        );
         assert_eq!(calls.get(), 0);
     }
 }
