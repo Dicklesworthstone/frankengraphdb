@@ -6,8 +6,8 @@ use asupersync::fs::Vfs;
 use fgdb_delta_types::{ElementId, LabelId, RelationId};
 use fgdb_strata::AdjacencyEntry;
 use fgdb_types::{
-    Acquired, CanonicalScalar, CommitCx, CommitSeq, EId, ObligationAcquireError, ObligationId,
-    PurposeObligation, TxnCx, VId,
+    Acquired, CanonicalScalar, CommitCx, CommitSeq, EId, EmbeddedTxnCompletion, EmbeddedTxnState,
+    ObligationAcquireError, ObligationId, PurposeObligation, TxnCx, VId,
 };
 
 /// Failure to prepare an atomic write or stage/finish a bounded transaction.
@@ -129,5 +129,6 @@ pub struct WriteTxn {
     /// witness models arbitrary property predicates or full predicate SSI.
     scanned_vertices: std::cell::Cell<bool>,
     scanned_edges: std::cell::Cell<bool>,
+    state: EmbeddedTxnState,
     pin: Option<PurposeObligation<Acquired>>,
 }

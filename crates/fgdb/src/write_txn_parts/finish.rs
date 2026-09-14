@@ -1,6 +1,89 @@
+// Completion owns cleanup across returns, Rust unwinding and dropped futures.
+// It never performs durable work in Drop or turns an unknown marker into abort.
+struct TxnCompletionGuard<'txn, 'db, V: Vfs + Clone> {
+    transaction: &'txn mut WriteTxn,
+    database: &'db mut Database<V>,
+    starting_frontier: CommitSeq,
+    entered_commit: bool,
+}
+
+impl<'txn, 'db, V: Vfs + Clone> TxnCompletionGuard<'txn, 'db, V> {
+    fn new(transaction: &'txn mut WriteTxn, database: &'db mut Database<V>) -> Self {
+        let starting_frontier = database.snapshot.frontier;
+        Self { transaction, database, starting_frontier, entered_commit: false }
+    }
+}
+
+impl<V: Vfs + Clone> Drop for TxnCompletionGuard<'_, '_, V> {
+    fn drop(&mut self) {
+        if !self.transaction.state.is_terminal() {
+            self.transaction.state = if self.entered_commit {
+                match self.database.state() {
+                    crate::DatabaseState::Healthy { published_frontier }
+                        if published_frontier == self.starting_frontier => EmbeddedTxnState::Aborted,
+                    crate::DatabaseState::Healthy { published_frontier }
+                        if published_frontier.0 > self.starting_frontier.0 => {
+                            // This guard has the exclusive database borrow. An
+                            // advanced healthy frontier can only be its write.
+                            EmbeddedTxnState::Completed(EmbeddedTxnCompletion::WriteCommitted {
+                                commit_seq: published_frontier,
+                            })
+                        }
+                    crate::DatabaseState::Healthy { published_frontier }
+                    | crate::DatabaseState::CommitOutcomeUnknown { published_frontier } => {
+                        EmbeddedTxnState::CommitOutcomeUnknown { published_frontier }
+                    }
+                    crate::DatabaseState::NeedsAuthoritativeRecovery(recovery) => {
+                        EmbeddedTxnState::CommittedNeedsRecovery {
+                            commit_seq: recovery.durable_frontier,
+                        }
+                    }
+                }
+            } else {
+                EmbeddedTxnState::Aborted
+            };
+        }
+        // Validation's temporary RefCell borrows and the inner commit future
+        // are already dropped. Exclusive access allows nonpanicking get_mut.
+        self.transaction.discard_terminal_workspace();
+    }
+}
+
 impl WriteTxn {
-    /// Validate the pinned read/mutation footprints, commit the prepared batch
-    /// exactly as derived, then release the pin.
+    /// Validate recorded dependencies and complete either kind of workspace.
+    /// A prepared batch returns WriteCommitted, including a normalized no-op.
+    /// With no prepared batch, return ReadClosed without writing a capsule,
+    /// marker, root or sequence. ReadClosed retains the original snapshot and
+    /// separately reports the healthy frontier through which reads validated.
+    ///
+    /// The validation contract is the existing conservative embedded read and
+    /// scan witness contract, not full SSI or the durable session protocol.
+    /// A dropped UNPOLLED future has no effect. Once polled and admitted by the
+    /// owner, every terminal return, unwind or dropped future releases the pin
+    /// and workspace; state() distinguishes abort from unknown or committed.
+    /// Wrong-owner calls preserve all state for the correct database.
+    pub async fn finish<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
+        self.finish_with_crash(database, cx, None).await
+    }
+
+    /// The same completion path with the existing production commit fault seam.
+    /// A read close performs no write and therefore cannot hit a crash point.
+    #[doc(hidden)]
+    pub async fn finish_with_crash<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+        crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
+    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
+        self.complete(database, cx, crash_at, false).await
+    }
+
+    /// Require a prepared write, validate it, commit and release its pin.
+    /// For a workspace that may be read-only, use finish's typed outcome.
     pub async fn commit<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -11,53 +94,83 @@ impl WriteTxn {
 
     /// Commit through the production crash-point path. Wrong-owner calls leave
     /// the transaction unchanged. An admitted owner's terminal attempt releases
-    /// the pin whether validation/publication succeeds or fails.
+    /// the pin even when its future is dropped before the await returns.
     pub async fn commit_with_crash<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
         cx: &CommitCx,
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
     ) -> Result<CommitSeq, WriteTxnError> {
+        match self.complete(database, cx, crash_at, true).await? {
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq } => Ok(commit_seq),
+            EmbeddedTxnCompletion::ReadClosed { .. } => {
+                unreachable!("write-only completion refuses before read close")
+            }
+        }
+    }
+
+    async fn complete<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+        crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
+        require_write: bool,
+    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
         self.ensure_database(database)?;
-        if self.prepared.is_none() {
-            self.release_pin();
+        let mut attempt = TxnCompletionGuard::new(self, database);
+        // Health must be checked even for an empty read set. No snapshot
+        // observation can bless a handle fenced by an earlier ambiguous write.
+        let validated_through = attempt.database.frontier()?;
+        if require_write && attempt.transaction.prepared.is_none() {
             return Err(WriteTxnError::NoPreparedWrite);
         }
-        let conflict = match self.transaction_conflict(database) {
-            Ok(conflict) => conflict,
-            Err(source) => {
-                self.release_pin();
-                return Err(WriteTxnError::Read(source));
-            }
-        };
-        if let Some((law, element, committed_at)) = conflict {
-            self.release_pin();
+        if let Some((law, element, committed_at)) =
+            attempt.transaction.transaction_conflict(attempt.database)?
+        {
             return Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
                 law,
                 detail: format!(
                     "transaction dependency {element:?} changed at {committed_at:?} after pinned basis {:?}",
-                    self.basis
+                    attempt.transaction.basis
                 ),
             }));
         }
-        let prepared = self
-            .prepared
-            .take()
-            .expect("the prepared write was checked immediately above");
-        self.staged.clear();
-
-        let result = database
-            .commit_prepared_with_crash(cx, prepared, crash_at)
-            .await
-            .map_err(WriteTxnError::Write);
-        self.release_pin();
-        result
+        let completion = if let Some(prepared) = attempt.transaction.prepared.take() {
+            attempt.transaction.staged.clear();
+            // Set before polling the cancellable publication future. Drop
+            // consults its retained database fence, never guesses rollback.
+            attempt.entered_commit = true;
+            let commit_seq = attempt.database
+                .commit_prepared_with_crash(cx, prepared, crash_at)
+                .await?;
+            EmbeddedTxnCompletion::WriteCommitted { commit_seq }
+        } else {
+            debug_assert!(attempt.transaction.staged.is_empty());
+            EmbeddedTxnCompletion::ReadClosed {
+                snapshot_seq: attempt.transaction.basis,
+                validated_through,
+            }
+        };
+        attempt.transaction.state = EmbeddedTxnState::Completed(completion);
+        Ok(completion)
     }
 
     /// End the transaction without publishing its prepared batch.
     pub fn abort(mut self) {
+        if !self.state.is_terminal() {
+            self.state = EmbeddedTxnState::Aborted;
+        }
+        self.discard_terminal_workspace();
+    }
+
+    fn discard_terminal_workspace(&mut self) {
         self.staged.clear();
         self.prepared = None;
+        self.read_set.get_mut().clear();
+        self.match_expansions.get_mut().clear();
+        self.scanned_vertex_labels.get_mut().clear();
+        self.scanned_vertices.set(false);
+        self.scanned_edges.set(false);
         self.release_pin();
     }
 

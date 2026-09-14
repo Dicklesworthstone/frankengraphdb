@@ -16,6 +16,7 @@ impl WriteTxn {
             scanned_vertex_labels: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             scanned_vertices: std::cell::Cell::new(false),
             scanned_edges: std::cell::Cell::new(false),
+            state: EmbeddedTxnState::Active,
             pin: Some(pin),
         })
     }
@@ -26,11 +27,18 @@ impl WriteTxn {
         self.basis
     }
 
+    /// Inspect the retained local outcome, including after a completion future
+    /// was dropped. This is not a durable outcome lookup or recovery authority.
+    #[must_use]
+    pub const fn state(&self) -> EmbeddedTxnState {
+        self.state
+    }
+
     /// Validate lifecycle and ownership before observing another handle or
     /// changing staged/conflict state. A sequence is meaningful only within
     /// the opened writer lifetime that supplied this transaction's basis.
     fn ensure_database<V: Vfs>(&self, database: &Database<V>) -> Result<(), WriteTxnError> {
-        if self.pin.is_none() {
+        if self.pin.is_none() || self.state.is_terminal() {
             return Err(WriteTxnError::Finished);
         }
         if !std::sync::Arc::ptr_eq(&self.handle_owner, &database.handle_owner) {
