@@ -13,6 +13,7 @@ mod evidence_limits;
 mod evidence_page;
 mod graph_text;
 pub mod insertion;
+mod insertion_text;
 mod integer_expression;
 mod mutation;
 mod mutation_program;
@@ -26,6 +27,7 @@ mod set_ops;
 mod set_text;
 mod walk;
 
+pub use insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind, PreparedGraphInsertText};
 pub use mutation_program_template::{
     GraphMutationProgramTemplateError, PreparedGraphMutationProgramTemplate,
 };
