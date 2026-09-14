@@ -48,7 +48,8 @@ impl<'a> Parser<'a> {
             Projection { variable, property }).collect();
         // A bound vertex with a literal-looking name retains its identity.
         // Integer operators cannot silently cast it into a scalar column.
-        let bare_vertex = if let TokenKind::Word(word) = self.current.kind {
+        let bare_vertex = if self.starts_integer_case()? { false }
+        else if let TokenKind::Word(word) = self.current.kind {
             let next = self.lexer.clone().next()?;
             !matches!(next.kind, TokenKind::Punct(b'.' | b'('))
                 && (self.syntax.variables.iter().any(|name| name.text == word)
@@ -82,9 +83,6 @@ impl<'a> Parser<'a> {
             computed.operands.push(value);
             index
         };
-        // Empty text is diagnostic metadata only. It cannot collide with any
-        // real identifier and is replaced by the actual source projection before
-        // catalog resolution. Expression identity is the interned program index.
         Ok(Expression { variable: Name { text: "", at }, property: None, computed: Some(index) })
     }
 }

@@ -2,13 +2,18 @@
 //! Only preparation sees these temporary nodes. Binding substitutes typed
 //! operands into checked bytecode, never into source text or an AST evaluator.
 
+mod conditional;
+
 use super::*;
 use crate::{GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerExpression,
     GraphIntegerOp, GraphIntegerUnary, MAX_GRAPH_INTEGER_INSTRUCTIONS};
 use fgdb_types::CanonicalScalarKind;
 
 const MAX_INTEGER_NESTING: usize = 64;
-enum ParsedOp { Atom(Operand, usize), Unary(GraphIntegerUnary), Binary(GraphIntegerBinary), Coalesce }
+enum ParsedOp {
+    Atom(Operand, usize), Unary(GraphIntegerUnary), Binary(GraphIntegerBinary), Coalesce,
+    Bound(GraphIntegerOp),
+}
 
 fn failure(at: usize, kind: GraphMutationTextErrorKind) -> GraphMutationTextError {
     GraphMutationTextError { offset: at, kind }
@@ -61,7 +66,7 @@ impl<'a> Parser<'a> {
         self.integer_sum(columns, 0, &mut parsed)?;
         if parsed.len() == 1 {
             let ParsedOp::Atom(value, _) = parsed.pop().expect("one parsed operand") else {
-                unreachable!("a unary/binary program also contains its operands")
+                unreachable!("operators and CASE also contain their operands")
             };
             // Preserve all prior scalar assignments and their transcript bytes.
             // An arithmetic operator/function, not parentheses, selects i64.
@@ -70,6 +75,7 @@ impl<'a> Parser<'a> {
         let mut program = Vec::with_capacity(parsed.len());
         for op in parsed {
             program.push(match op {
+                ParsedOp::Bound(op) => MutationIntegerTemplateOp::Bound(op),
                 ParsedOp::Unary(op) => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Unary(op)),
                 ParsedOp::Binary(op) => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Binary(op)),
                 ParsedOp::Coalesce => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Coalesce),
@@ -92,8 +98,8 @@ impl<'a> Parser<'a> {
                 ParsedOp::Atom(Operand::Integer { .. }, _) => unreachable!("atoms never recurse into expression preparation"),
             });
         }
-        // Null placeholders prove only stack/control-flow shape. Preparation
-        // never evaluates arithmetic or guesses a parameter's runtime value.
+        // Null placeholders prove stack/types/control-flow only. Preparation
+        // neither evaluates branches nor guesses a parameter's runtime value.
         let shape: Vec<_> = program.iter().map(|op| match op {
             MutationIntegerTemplateOp::Bound(op) => *op,
             MutationIntegerTemplateOp::Parameter { .. } => GraphIntegerOp::Literal(None),
@@ -135,6 +141,10 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         if depth > MAX_INTEGER_NESTING {
             return Err(failure(at, GraphMutationTextErrorKind::IntegerNesting { limit: MAX_INTEGER_NESTING }));
+        }
+        if self.starts_integer_case()? {
+            self.advance()?;
+            return self.integer_case(columns, depth + 1, program, at);
         }
         // -9223372036854775808 is one legal signed literal, not negation of
         // an unrepresentable positive integer. Other signs are checked unary IR.

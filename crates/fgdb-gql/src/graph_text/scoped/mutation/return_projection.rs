@@ -13,7 +13,6 @@ fn expression_error(source: GraphMutationTextError) -> GraphSetTextError {
         GraphMutationTextErrorKind::IntegerExpression(kind) => GraphSetTextErrorKind::IntegerExpression(kind),
         GraphMutationTextErrorKind::IntegerOperand => GraphSetTextErrorKind::IntegerOperand,
         GraphMutationTextErrorKind::IntegerNesting { limit } => GraphSetTextErrorKind::IntegerNesting { limit },
-        // The scalar parser cannot construct mutation actions or their errors.
         GraphMutationTextErrorKind::Build(_) => GraphSetTextErrorKind::Expected("read scalar expression"),
     };
     GraphSetTextError { offset: source.offset, kind }
@@ -40,7 +39,8 @@ impl<'a> Parser<'a> {
             loop {
                 self.capacity(outputs.len(), MAX_PATTERN_VERTICES, crate::algebra::PatternLimitDimension::Columns)?;
                 let at = self.current.at;
-                let bare_vertex = if let TokenKind::Word(word) = self.current.kind {
+                let bare_vertex = if self.starts_integer_case()? { false }
+                else if let TokenKind::Word(word) = self.current.kind {
                     let next = self.lexer.clone().next()?;
                     !matches!(next.kind, TokenKind::Punct(b'.' | b'('))
                         && (self.syntax.variables.iter().any(|name| name.text == word)
@@ -80,9 +80,6 @@ impl<'a> Parser<'a> {
             return Ok(UnresolvedGraphText { statement, syntax: self.syntax, projection: None });
         }
         if inputs.is_empty() {
-            // Constants still occur once for every graph match. A hidden root
-            // identity carries the bag, including isolated vertices and all
-            // parallel-edge/WALK occurrences; it never enters the public tuple.
             let variable = self.syntax.variables[0];
             let _ = self.mutation_projection(&mut inputs, variable, None)?;
         }
