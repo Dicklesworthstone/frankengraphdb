@@ -1,14 +1,16 @@
 //! Checked nullable integer expressions over a frozen, typed value row.
 //!
-//! Preparation consumes bounded postfix IR and emits private linear bytecode.
-//! Evaluation never sees source text or a parser AST. COALESCE is lazy within
-//! this bytecode; its already-projected property inputs retain the enclosing
-//! GLA source/error contract. Arithmetic is signed i64, division truncates toward
-//! zero, remainder has the dividend's sign, and overflow/zero division refuse.
+//! Preparation consumes bounded, typed postfix IR and emits private linear
+//! bytecode. CASE and COALESCE select branches lazily; already-projected inputs
+//! retain the enclosing GLA source/error contract. Arithmetic is signed i64,
+//! division truncates toward zero, and overflow/zero division refuse. Boolean
+//! conditions are a separate compile-time domain, never integer truthiness.
 //! No float, decimal, string, or vertex-to-integer coercion is performed.
 
+mod compile;
+
 use crate::GlaExecutionEvent;
-use crate::algebra::GraphValue;
+use crate::algebra::{GraphValue, IntegerComparison};
 use fgdb_types::CanonicalScalar;
 
 pub const MAX_GRAPH_INTEGER_INSTRUCTIONS: usize = 1_024;
@@ -18,8 +20,13 @@ pub enum GraphIntegerUnary { Plus, Negate, Abs }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphIntegerBinary { Add, Subtract, Multiply, Divide, Remainder, NullIf }
 
-/// Postfix construction IR. COALESCE consumes two expressions and evaluates
-/// the right expression only when the left evaluates to canonical null.
+/// Postfix construction IR. Arithmetic operands/results are nullable integers.
+/// Truth, Compare, IsNull, Not, And and Or produce private Boolean conditions.
+/// Case consumes (condition, then_integer, else_integer); only the selected
+/// result executes. Nest Case in the else operand for ordered WHEN clauses.
+/// SimpleCase consumes (selector, when, then, ..., default), evaluates its
+/// selector once, and selects the first nonnull equality. Conditions use eager
+/// three-valued Boolean evaluation; unselected CASE arms are not executed.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GraphIntegerOp {
     Column(usize),
@@ -27,6 +34,14 @@ pub enum GraphIntegerOp {
     Unary(GraphIntegerUnary),
     Binary(GraphIntegerBinary),
     Coalesce,
+    Truth(Option<bool>),
+    Compare(IntegerComparison),
+    IsNull(bool),
+    Not,
+    And,
+    Or,
+    Case,
+    SimpleCase { alternatives: usize },
 }
 impl core::fmt::Debug for GraphIntegerOp {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -36,6 +51,14 @@ impl core::fmt::Debug for GraphIntegerOp {
             Self::Unary(op) => op.fmt(f),
             Self::Binary(op) => op.fmt(f),
             Self::Coalesce => f.write_str("Coalesce"),
+            Self::Truth(_) => f.write_str("Truth([REDACTED])"),
+            Self::Compare(op) => op.fmt(f),
+            Self::IsNull(_) => f.write_str("IsNull"),
+            Self::Not => f.write_str("Not"),
+            Self::And => f.write_str("And"),
+            Self::Or => f.write_str("Or"),
+            Self::Case => f.write_str("Case"),
+            Self::SimpleCase { alternatives } => f.debug_struct("SimpleCase").field("alternatives", alternatives).finish(),
         }
     }
 }
@@ -46,6 +69,8 @@ pub enum GraphIntegerBuildError {
     TooManyInstructions { limit: usize, observed: usize },
     MissingOperand { instruction: usize },
     ExtraOperands { remaining: usize },
+    OperandType { instruction: usize },
+    EmptyCase { instruction: usize },
 }
 impl core::fmt::Display for GraphIntegerBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -88,6 +113,8 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphIntegerEvaluat
 enum Instruction {
     Column(usize), Literal(Option<i64>), Unary(GraphIntegerUnary),
     Binary(GraphIntegerBinary), JumpIfPresent(usize),
+    Truth(Option<bool>), Compare(IntegerComparison), IsNull(bool), Not, And, Or,
+    JumpUnlessTrue(usize), JumpUnlessEqual(usize), Jump(usize), Drop,
 }
 
 /// Immutable checked scalar program. It owns no database, parameter map,
@@ -105,84 +132,12 @@ impl core::fmt::Debug for GraphIntegerExpression {
     }
 }
 impl GraphIntegerExpression {
-    /// Validate the entire postfix definition before compilation. Both the
-    /// compilation worklist and runtime machine are iterative, including a
-    /// maximum-sized chain of unary operators or nested COALESCE expressions.
+    /// Validate all stack shapes and operand types, including unreachable
+    /// branches, before compiling. Compilation and evaluation are iterative.
+    /// The final result must be integer/null; Boolean-to-integer casts are not
+    /// implicit. Existing arithmetic-only definitions retain their bytecode.
     pub fn prepare(ops: &[GraphIntegerOp]) -> Result<Self, GraphIntegerBuildError> {
-        if ops.is_empty() { return Err(GraphIntegerBuildError::Empty); }
-        if ops.len() > MAX_GRAPH_INTEGER_INSTRUCTIONS {
-            return Err(GraphIntegerBuildError::TooManyInstructions {
-                limit: MAX_GRAPH_INTEGER_INSTRUCTIONS, observed: ops.len(),
-            });
-        }
-        struct Node { op: GraphIntegerOp, left: usize, right: usize }
-        let mut nodes = Vec::with_capacity(ops.len());
-        let mut roots = Vec::new();
-        for (at, &op) in ops.iter().enumerate() {
-            let missing = || GraphIntegerBuildError::MissingOperand { instruction: at };
-            let (left, right) = match op {
-                GraphIntegerOp::Column(_) | GraphIntegerOp::Literal(_) => (0, 0),
-                GraphIntegerOp::Unary(_) => (roots.pop().ok_or_else(missing)?, 0),
-                GraphIntegerOp::Binary(_) | GraphIntegerOp::Coalesce => {
-                    let right = roots.pop().ok_or_else(missing)?;
-                    (roots.pop().ok_or_else(missing)?, right)
-                }
-            };
-            roots.push(nodes.len());
-            nodes.push(Node { op, left, right });
-        }
-        if roots.len() != 1 {
-            return Err(GraphIntegerBuildError::ExtraOperands { remaining: roots.len() });
-        }
-        enum Task { Visit(usize), Emit(Instruction), CoalesceRight(usize), Patch(usize) }
-        let mut tasks = vec![Task::Visit(roots[0])];
-        let mut code = Vec::with_capacity(ops.len());
-        while let Some(task) = tasks.pop() {
-            match task {
-                Task::Visit(at) => {
-                    let node = &nodes[at];
-                    match node.op {
-                        GraphIntegerOp::Column(column) => code.push(Instruction::Column(column)),
-                        GraphIntegerOp::Literal(value) => code.push(Instruction::Literal(value)),
-                        GraphIntegerOp::Unary(op) => {
-                            tasks.push(Task::Emit(Instruction::Unary(op)));
-                            tasks.push(Task::Visit(node.left));
-                        }
-                        GraphIntegerOp::Binary(op) => {
-                            tasks.push(Task::Emit(Instruction::Binary(op)));
-                            tasks.push(Task::Visit(node.right));
-                            tasks.push(Task::Visit(node.left));
-                        }
-                        GraphIntegerOp::Coalesce => {
-                            tasks.push(Task::CoalesceRight(node.right));
-                            tasks.push(Task::Visit(node.left));
-                        }
-                    }
-                }
-                Task::Emit(op) => code.push(op),
-                Task::CoalesceRight(right) => {
-                    let jump = code.len();
-                    code.push(Instruction::JumpIfPresent(0));
-                    tasks.push(Task::Patch(jump));
-                    tasks.push(Task::Visit(right));
-                }
-                Task::Patch(jump) => code[jump] = Instruction::JumpIfPresent(code.len()),
-            }
-        }
-        // The null/fallthrough branch has the same final stack height as the
-        // taken branch. Following every fallthrough computes the exact maximum.
-        let mut depth = 0_usize;
-        let mut stack_entries = 0;
-        for op in &code {
-            match op {
-                Instruction::Column(_) | Instruction::Literal(_) => depth += 1,
-                Instruction::Binary(_) | Instruction::JumpIfPresent(_) => depth -= 1,
-                Instruction::Unary(_) => {}
-            }
-            stack_entries = stack_entries.max(depth);
-        }
-        debug_assert_eq!(depth, 1);
-        Ok(Self { code: code.into_boxed_slice(), stack_entries })
+        compile::prepare(ops)
     }
 
     pub fn referenced_columns(&self) -> impl Iterator<Item = usize> + '_ {
@@ -192,9 +147,9 @@ impl GraphIntegerExpression {
     }
 
     /// Reserve the finite private frame before allocation, then checkpoint
-    /// every executed instruction. An unselected COALESCE branch performs no
-    /// arithmetic or column lookup here. The enclosing selection still owns
-    /// eager storage reads and must not hide a source failure as a null value.
+    /// every executed instruction, including branches. Unselected CASE arms
+    /// and COALESCE fallbacks do no arithmetic or column lookup here. The
+    /// enclosing selection still owns eager storage reads and source failures.
     pub fn evaluate_with_control<E>(
         &self, values: &[GraphValue],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -202,7 +157,9 @@ impl GraphIntegerExpression {
         for _ in 0..self.stack_entries {
             control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
         }
-        let mut stack = Vec::with_capacity(self.stack_entries);
+        // Static admission proves each cell's domain. Conditions use only
+        // None/0/1 internally and can never be consumed by integer arithmetic.
+        let mut stack: Vec<Option<i64>> = Vec::with_capacity(self.stack_entries);
         let mut at = 0;
         while let Some(op) = self.code.get(at) {
             control(GlaExecutionEvent::Work).map_err(GraphIntegerEvaluationError::Control)?;
@@ -235,19 +192,65 @@ impl GraphIntegerExpression {
                 }
                 Instruction::JumpIfPresent(target) => {
                     if stack.last().expect("validated coalesce operand").is_some() {
-                        at = *target;
-                        continue;
+                        at = *target; continue;
                     }
                     let _ = stack.pop();
                 }
+                Instruction::Truth(value) => stack.push(value.map(i64::from)),
+                Instruction::Compare(comparison) => {
+                    let right = stack.pop().expect("validated comparison right operand");
+                    let left = stack.last_mut().expect("validated comparison left operand");
+                    *left = (*left).zip(right).map(|(a, b)| i64::from(match comparison {
+                        IntegerComparison::Equal => a == b,
+                        IntegerComparison::NotEqual => a != b,
+                        IntegerComparison::Less => a < b,
+                        IntegerComparison::LessOrEqual => a <= b,
+                        IntegerComparison::Greater => a > b,
+                        IntegerComparison::GreaterOrEqual => a >= b,
+                    }));
+                }
+                Instruction::IsNull(is_null) => {
+                    let value = stack.last_mut().expect("validated null operand");
+                    *value = Some(i64::from(value.is_none() == *is_null));
+                }
+                Instruction::Not => {
+                    let value = stack.last_mut().expect("validated Boolean operand");
+                    *value = (*value).map(|value| 1 - value);
+                }
+                Instruction::And | Instruction::Or => {
+                    let right = stack.pop().expect("validated Boolean right operand");
+                    let left = stack.last_mut().expect("validated Boolean left operand");
+                    *left = if matches!(op, Instruction::And) {
+                        if *left == Some(0) || right == Some(0) { Some(0) }
+                        else if left.is_none() || right.is_none() { None } else { Some(1) }
+                    } else if *left == Some(1) || right == Some(1) { Some(1) }
+                    else if left.is_none() || right.is_none() { None } else { Some(0) };
+                }
+                Instruction::JumpUnlessTrue(target) => {
+                    if stack.pop().expect("validated CASE condition") != Some(1) {
+                        at = *target; continue;
+                    }
+                }
+                Instruction::JumpUnlessEqual(target) => {
+                    let candidate = stack.pop().expect("validated WHEN operand");
+                    let selector = *stack.last().expect("validated CASE selector");
+                    if selector.is_none() || selector != candidate { at = *target; continue; }
+                    let _ = stack.pop();
+                }
+                Instruction::Jump(target) => { at = *target; continue; }
+                Instruction::Drop => { let _ = stack.pop().expect("validated unmatched selector"); }
             }
+            debug_assert!(stack.len() <= self.stack_entries);
             at += 1;
         }
+        debug_assert_eq!(stack.len(), 1);
         Ok(stack.pop().expect("one validated scalar result"))
     }
 
-    /// Explicit value-bearing application transcript. The version pins checked
-    /// i64/null arithmetic and lazy COALESCE, not a host numeric environment.
+    /// Value-bearing application transcript. Existing instruction tags remain
+    /// unchanged; added closed tags encode exact conditional jump targets and
+    /// three-valued tests. This is not a durable scalar format or host numeric
+    /// environment. No unexecuted literal or input is omitted from identity.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:checked-integer-expression:v1\0".to_vec();
@@ -272,6 +275,28 @@ impl GraphIntegerExpression {
                 Instruction::JumpIfPresent(target) => {
                     bytes.push(4); bytes.extend_from_slice(&(*target as u64).to_be_bytes());
                 }
+                Instruction::Truth(value) => bytes.extend_from_slice(&[5, match value {
+                    None => 0, Some(false) => 1, Some(true) => 2,
+                }]),
+                Instruction::Compare(comparison) => bytes.extend_from_slice(&[6, match comparison {
+                    IntegerComparison::Equal => 0, IntegerComparison::NotEqual => 1,
+                    IntegerComparison::Less => 2, IntegerComparison::LessOrEqual => 3,
+                    IntegerComparison::Greater => 4, IntegerComparison::GreaterOrEqual => 5,
+                }]),
+                Instruction::IsNull(is_null) => bytes.extend_from_slice(&[7, u8::from(*is_null)]),
+                Instruction::Not => bytes.push(8),
+                Instruction::And => bytes.push(9),
+                Instruction::Or => bytes.push(10),
+                Instruction::JumpUnlessTrue(target) => {
+                    bytes.push(11); bytes.extend_from_slice(&(*target as u64).to_be_bytes());
+                }
+                Instruction::JumpUnlessEqual(target) => {
+                    bytes.push(12); bytes.extend_from_slice(&(*target as u64).to_be_bytes());
+                }
+                Instruction::Jump(target) => {
+                    bytes.push(13); bytes.extend_from_slice(&(*target as u64).to_be_bytes());
+                }
+                Instruction::Drop => bytes.push(14),
             }
         }
         bytes
@@ -292,7 +317,6 @@ fn apply_binary(op: GraphIntegerBinary, left: Option<i64>, right: Option<i64>)
         GraphIntegerBinary::Subtract => left.checked_sub(right),
         GraphIntegerBinary::Multiply => left.checked_mul(right),
         GraphIntegerBinary::Divide => left.checked_div(right),
-        // The remainder is representable even when MIN / -1 is not.
         GraphIntegerBinary::Remainder if right == -1 => Some(0),
         GraphIntegerBinary::Remainder => left.checked_rem(right),
         GraphIntegerBinary::NullIf => unreachable!("NULLIF handled before null propagation"),
