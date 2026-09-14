@@ -2,6 +2,7 @@
 //! compiler. All syntax is checked before catalog callbacks. Neither selection
 //! text nor parameter text is synthesized, and execution never sees this AST.
 
+mod aggregate_input;
 mod integer;
 mod return_projection;
 
