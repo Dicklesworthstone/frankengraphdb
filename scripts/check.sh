@@ -1408,10 +1408,13 @@ UBS_CRITICAL_BASELINE_ASTGREP=(
 ubs_critical_ratchet() {
   local log="$1"
   local -A observed=() expected=()
-  local entry name count check line drift=0 total=0 mode="regex"
+  local entry name count check line transcript drift=0 total=0 mode="regex"
+  # UBS can retain SGR colors even with --ci and redirected stdout. Strip only
+  # presentation escapes; keep every heading and count for the exact ratchet.
+  transcript="$(sed -E $'s/\033\\[[0-9;]*m//g' "$log")" || return 1
   # The mode is read from ubs's own transcript, never guessed from PATH: the
   # table must match the analysis that actually ran on this log.
-  if grep -Fq 'ast-grep available' "$log"; then
+  if [[ "$transcript" == *'ast-grep available'* ]]; then
     mode="ast-grep"
     for entry in "${UBS_CRITICAL_BASELINE_ASTGREP[@]}"; do
       expected["${entry%=*}"]="${entry##*=}"
@@ -1430,10 +1433,14 @@ ubs_critical_ratchet() {
       *"CRITICAL ("*)
         count="${line#*CRITICAL (}"
         count="${count%% found)*}"
-        [ -n "$check" ] && observed["$check"]=$((${observed["$check"]:-0} + count))
+        if [ -z "$check" ] || [[ ! "$count" =~ ^[0-9]+$ ]]; then
+          echo "ERROR: UBS critical finding lacks a class or a valid count." >&2
+          return 1
+        fi
+        observed["$check"]=$((${observed["$check"]:-0} + 10#$count))
         ;;
     esac
-  done < "$log"
+  done <<< "$transcript"
 
   for name in "${!observed[@]}"; do
     total=$((total + observed["$name"]))
@@ -1462,6 +1469,52 @@ ubs_critical_ratchet() {
   echo "    critical ratchet: $total across ${#observed[@]} class(es), all at baseline"
   return 0
 }
+
+ubs_ratchet_transcript_fixture() (
+  local work="$1" mode log count
+  UBS_CRITICAL_BASELINE=("fixture=2")
+  UBS_CRITICAL_BASELINE_ASTGREP=("fixture=3")
+  for mode in plain colored; do
+    log="$work/ubs-$mode.log"
+    if [ "$mode" = colored ]; then
+      printf '\033[1;33m• fixture\033[0m\n  \033[31m🔥 CRITICAL\033[0m \033[1m(2 found)\033[0m\n' >"$log"
+    else
+      printf '• fixture\n  🔥 CRITICAL (2 found)\n' >"$log"
+    fi
+    ubs_critical_ratchet "$log" >"$log.verdict" 2>&1 || return 1
+  done
+  printf '\033[32mast-grep available\033[0m\n• fixture\n  🔥 CRITICAL (3 found)\n' >"$work/ubs-ast.log"
+  ubs_critical_ratchet "$work/ubs-ast.log" >"$work/ubs-ast.verdict" 2>&1 || return 1
+  # Presentation normalization must not admit increases, decreases, or unknown
+  # classes in either presentation. Missing classes must also stay nonzero.
+  for mode in plain colored; do
+    for count in 1 3; do
+      log="$work/ubs-$mode-drift-$count.log"
+      if [ "$mode" = colored ]; then
+        printf '\033[33m• fixture\033[0m\n  \033[31m🔥 CRITICAL\033[0m (%s found)\n' "$count" >"$log"
+      else
+        printf '• fixture\n  🔥 CRITICAL (%s found)\n' "$count" >"$log"
+      fi
+      if ubs_critical_ratchet "$log" >"$log.verdict" 2>&1; then return 1; fi
+    done
+    log="$work/ubs-$mode-unknown.log"
+    printf '• fixture\n  🔥 CRITICAL (2 found)\n' >"$log"
+    if [ "$mode" = colored ]; then
+      printf '\033[33m• unknown\033[0m\n  \033[31m🔥 CRITICAL\033[0m (1 found)\n' >>"$log"
+    else
+      printf '• unknown\n  🔥 CRITICAL (1 found)\n' >>"$log"
+    fi
+    if ubs_critical_ratchet "$log" >"$log.verdict" 2>&1; then return 1; fi
+  done
+  printf 'scan has no critical classes\n' >"$work/ubs-missing.log"
+  if ubs_critical_ratchet "$work/ubs-missing.log" >"$work/ubs-missing.verdict" 2>&1; then return 1; fi
+  # An otherwise matching partition must not conceal an unclassified finding
+  # or allow malformed scanner output into shell arithmetic.
+  printf '  CRITICAL (1 found)\n• fixture\n  CRITICAL (2 found)\n' >"$work/ubs-orphan.log"
+  if ubs_critical_ratchet "$work/ubs-orphan.log" >"$work/ubs-orphan.verdict" 2>&1; then return 1; fi
+  printf '• fixture\n  CRITICAL (1+1 found)\n' >"$work/ubs-invalid-count.log"
+  if ubs_critical_ratchet "$work/ubs-invalid-count.log" >"$work/ubs-invalid-count.verdict" 2>&1; then return 1; fi
+)
 
 # Emit one row per unique live (kind, artifact) pair. Multiple symbols may
 # deliberately name the same executable artifact; the artifact is one gate and
@@ -3110,6 +3163,10 @@ run_mutation_self_test() {
     || return 1
   GATE_LOG_DIR="$work/gate-logs"
   mkdir -p "$GATE_LOG_DIR"
+  if ! ubs_ratchet_transcript_fixture "$work"; then
+    echo "SELF-TEST RED: UBS transcript presentation changed the exact ratchet verdict" >&2
+    return 1
+  fi
 
   cat >"$fixture_root/scripts/fails.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -3479,6 +3536,8 @@ EOF
   landing_guidance_control "$work" || return 1
 
   echo "CHECK.SH MUTATION SELF-TEST PASS"
+  echo "  UBS ratchet: plain/colored baseline passes; AST mode selected from text;"
+  echo "    increases, decreases, unknown classes, and missing classes stay red"
   echo "  failing registered gate: RED"
   echo "  registered child outcomes: paired stdout + exit-2 UNRUN propagated;"
   echo "    bare, mixed, wrong-exit, and stderr-only evidence stayed RED"
