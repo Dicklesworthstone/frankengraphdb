@@ -14,6 +14,8 @@ mod evidence_page;
 mod graph_text;
 mod integer_expression;
 mod mutation;
+mod mutation_program;
+mod mutation_program_template;
 mod mutation_text;
 mod overlay_evidence;
 mod parameters;
@@ -23,6 +25,13 @@ mod set_ops;
 mod set_text;
 mod walk;
 
+pub use mutation_program_template::{
+    GraphMutationProgramTemplateError, PreparedGraphMutationProgramTemplate,
+};
+pub use mutation_program::{
+    GraphMutationProgramBuildError, GraphMutationProgramDimension, GraphMutationProgramError,
+    GraphMutationProgramStats, MAX_GRAPH_MUTATION_STATEMENTS, PreparedGraphMutationProgram,
+};
 pub use aggregation::{
     GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
     GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder, GraphAggregateRow,
@@ -82,7 +91,8 @@ pub use prepared::{
 };
 pub use set_ops::{
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
-    GraphSetQuantifier, MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
+    GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetValue,
+    MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};

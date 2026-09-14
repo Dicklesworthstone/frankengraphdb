@@ -102,6 +102,7 @@ pub(super) fn parse<'a>(
     returned: &[ReturnItem<'a>],
     groups: &[Expression<'a>],
     hidden: &mut Vec<HiddenSummary<'a>>,
+    computed: &mut ComputedInputs<'a>,
 ) -> Result<(Vec<Having>, Option<HavingTemplate>), GraphPatternTextError> {
     if !parser.take_word("HAVING")? {
         return Ok((Vec::new(), None));
@@ -112,6 +113,7 @@ pub(super) fn parse<'a>(
         returned,
         groups,
         hidden,
+        computed,
         program: Vec::new(),
         leaves: 0,
         compound: false,
@@ -175,6 +177,7 @@ struct HavingParser<'p, 'a> {
     returned: &'p [ReturnItem<'a>],
     groups: &'p [Expression<'a>],
     hidden: &'p mut Vec<HiddenSummary<'a>>,
+    computed: &'p mut ComputedInputs<'a>,
     program: Vec<Op>,
     leaves: usize,
     compound: bool,
@@ -275,7 +278,7 @@ impl HavingParser<'_, '_> {
                 {
                     return self
                         .parser
-                        .result_column(self.returned, self.groups, self.hidden)
+                        .result_column(self.returned, self.groups, self.hidden, self.computed)
                         .map(Operand::Column);
                 }
                 if word.eq_ignore_ascii_case("TRUE") {
@@ -287,7 +290,7 @@ impl HavingParser<'_, '_> {
                 } else {
                     return self
                         .parser
-                        .result_column(self.returned, self.groups, self.hidden)
+                        .result_column(self.returned, self.groups, self.hidden, self.computed)
                         .map(Operand::Column);
                 }
             }

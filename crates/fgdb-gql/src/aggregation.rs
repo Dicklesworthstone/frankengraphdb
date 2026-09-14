@@ -1,9 +1,11 @@
-//! Streaming grouped summaries over a compiled, unpaginated ALL pattern.
+//! Grouped summaries over a compiled, unpaginated ALL pattern.
 //!
-//! The child is evaluated by the existing GLA binding visitor. No intermediate
-//! bag of projected rows is materialized. Keys, extrema and distinct arguments
-//! borrow the admitted source until final, owned aggregate rows are released.
+//! Ordinary inputs stream through the existing GLA binding visitor without an
+//! intermediate bag. Computed input projections use a bounded materialized
+//! path and the same accumulators/result engine. Keys, extrema and distinct
+//! arguments borrow the admitted input until owned aggregate rows are released.
 
+mod computed;
 mod numeric;
 mod result;
 mod weighted;
@@ -144,6 +146,7 @@ pub enum GraphAggregateBuildError {
     UnknownOutputColumn { column: GraphAggregateColumn },
     TooManyFilters { limit: usize, observed: usize },
     DuplicateOrder { column: GraphAggregateColumn },
+    InputProjection(crate::GraphSetProjectionError),
 }
 
 impl core::fmt::Display for GraphAggregateBuildError {
@@ -170,6 +173,7 @@ impl core::fmt::Display for GraphAggregateBuildError {
             Self::DuplicateOrder { column } => {
                 write!(f, "aggregate ORDER BY repeats column {column:?}")
             }
+            Self::InputProjection(error) => error.fmt(f),
         }
     }
 }
@@ -192,6 +196,13 @@ pub enum GraphAggregateError<E> {
     NonIntegerHaving {
         predicate: usize,
     },
+    /// A computed input failed before grouping or output pagination.
+    InputExpression {
+        row: usize,
+        column: usize,
+        error: crate::GraphIntegerError,
+    },
+    ResultCountOverflow,
     /// A physical weighted binding did not match its admitted topology.
     MultiplicityUnavailable,
     /// A physical path violated its ascending, contiguous root-group contract.
@@ -212,6 +223,10 @@ impl<E> GraphAggregateError<E> {
             Self::NonIntegerHaving { predicate } => {
                 GraphAggregateError::NonIntegerHaving { predicate }
             }
+            Self::InputExpression { row, column, error } => {
+                GraphAggregateError::InputExpression { row, column, error }
+            }
+            Self::ResultCountOverflow => GraphAggregateError::ResultCountOverflow,
             Self::MultiplicityUnavailable => GraphAggregateError::MultiplicityUnavailable,
             Self::NonMonotonicGroups => GraphAggregateError::NonMonotonicGroups,
         }
@@ -237,6 +252,10 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
                 f,
                 "HAVING predicate {predicate} requires exact numeric or null input"
             ),
+            Self::InputExpression { row, column, error } => {
+                write!(f, "aggregate input row {row} column {column}: {error}")
+            }
+            Self::ResultCountOverflow => f.write_str("aggregate result count overflow"),
             Self::MultiplicityUnavailable => {
                 f.write_str("aggregate binding has no admitted topology multiplicity")
             }
@@ -250,6 +269,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphAggregateError
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Source(error) => Some(error),
+            Self::InputExpression { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -354,11 +374,12 @@ struct KeyProjection {
 }
 
 /// Logical GroupAggregate over an immutable ALL child. Pagination belongs to
-/// the group output, never to the child. Execution consumes each complete child
-/// binding through the one GLA visitor rather than materializing the child bag.
+/// the group output, never to the child. Ordinary execution visits bindings;
+/// optional computed input owns a bounded projected relation before grouping.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphAggregate {
     input: PreparedGraphPattern<GraphValueRow>,
+    computed_input: Option<Vec<crate::GraphSetProjection>>,
     keys: Vec<usize>,
     aggregates: Vec<BoundAggregate>,
     key_names: Vec<String>,
@@ -379,6 +400,7 @@ impl core::fmt::Debug for PreparedGraphAggregate {
             .field("evaluated_keys", &self.keys.len())
             .field("aggregate_columns", &self.output_aggregates)
             .field("evaluated_aggregates", &self.aggregates.len())
+            .field("computed_input", &self.computed_input.is_some())
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -387,6 +409,17 @@ impl core::fmt::Debug for PreparedGraphAggregate {
 impl PreparedGraphAggregate {
     pub fn prepare(
         input: PreparedGraphPattern<GraphValueRow>,
+        keys: &[usize],
+        aggregates: &[GraphAggregate<'_>],
+        offset: u64,
+        count: Option<u64>,
+    ) -> Result<Self, GraphAggregateBuildError> {
+        Self::prepare_input(input, None, keys, aggregates, offset, count)
+    }
+
+    fn prepare_input(
+        input: PreparedGraphPattern<GraphValueRow>,
+        computed_input: Option<Vec<crate::GraphSetProjection>>,
         keys: &[usize],
         aggregates: &[GraphAggregate<'_>],
         offset: u64,
@@ -413,7 +446,10 @@ impl PreparedGraphAggregate {
                 observed: width,
             });
         }
-        let columns = input.columns();
+        let projected_columns = computed_input.as_deref()
+            .map(|projection| computed::projected_schema(&input, projection))
+            .transpose()?;
+        let columns = projected_columns.as_deref().unwrap_or(input.columns());
         let mut names = BTreeSet::new();
         for (at, column) in keys.iter().enumerate() {
             let name = columns
@@ -459,6 +495,7 @@ impl PreparedGraphAggregate {
             .collect();
         Ok(Self {
             input,
+            computed_input,
             keys: keys.to_vec(),
             aggregates,
             key_names,
@@ -474,8 +511,9 @@ impl PreparedGraphAggregate {
         })
     }
 
-    /// Explicit child definition for source admission. This is not the summary
-    /// result and must not be independently executed to implement aggregation.
+    /// Explicit graph source for admission, not the computed input relation or
+    /// summary result. Hosts execute through execute_governed, which owns the
+    /// optional input projection as well as aggregation.
     #[must_use]
     pub fn input_pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
         &self.input
@@ -635,6 +673,7 @@ impl PreparedGraphAggregate {
         if self.output_distinct {
             bytes.extend_from_slice(b"fgdb:aggregate-output-distinct:v1\0");
         }
+        self.append_input_projection(&mut bytes);
         bytes
     }
 
@@ -654,6 +693,9 @@ impl PreparedGraphAggregate {
     /// contiguity. It retains one active group and a bounded ranked prefix of
     /// compact summaries; source/index admission and cumulative scratch charges
     /// remain independent of this live group-state bound.
+    /// Computed input projections instead use bounded owned input rows and the
+    /// same group accumulators; no physical contiguity or multiplicity shortcut
+    /// is assumed for their transformed keys and values.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_governed<'a, E, C>(
         &self,
@@ -666,6 +708,11 @@ impl PreparedGraphAggregate {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
+        if self.computed_input.is_some() {
+            return self.execute_projected_governed(
+                snapshot_records, vertices, edges, test_vertex, property, policy, checkpoint,
+            );
+        }
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         policy
             .rows
