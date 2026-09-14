@@ -35,6 +35,21 @@ impl GraphSetProjection {
     pub fn name(&self) -> &str { &self.name }
     #[must_use]
     pub fn value(&self) -> &GraphSetValue { &self.value }
+
+    /// The same row mechanism also supplies computed GroupAggregate inputs.
+    /// The owner supplies its arithmetic error vocabulary; source/control
+    /// failures pass through without wrapping or losing their original type.
+    pub(crate) fn evaluate_row_with_control<E>(
+        row: &GraphValueRow,
+        projection: &[Self],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        arithmetic: impl FnOnce(usize, GraphIntegerError) -> E,
+    ) -> Result<GraphValueRow, E> {
+        evaluate(row, projection, control).map_err(|error| match error {
+            ProjectionFailure::Control(error) => error,
+            ProjectionFailure::Arithmetic { column, error } => arithmetic(column, error),
+        })
+    }
 }
 impl core::fmt::Debug for GraphSetProjection {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -66,8 +81,8 @@ impl PreparedGraphSet {
     /// checked against scalar domains before a source can be executed, including
     /// columns in lazy branches. Individual scalar kinds are checked at runtime.
     /// A constant projection still emits once per input occurrence, not once
-    /// per distinct hidden carrier. The bounded materialized profile does not
-    /// claim spill-backed expression evaluation or arithmetic aggregate support.
+    /// per distinct hidden carrier. This is the bounded materialized profile,
+    /// not spill-backed expression evaluation.
     pub fn project(self, projection: Vec<GraphSetProjection>, quantifier: GraphSetQuantifier)
         -> Result<Self, GraphSetProjectionError> {
         use GraphSetProjectionError as Error;
