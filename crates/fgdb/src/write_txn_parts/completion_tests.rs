@@ -3,8 +3,8 @@ use asupersync::lab::run_async_under_lab;
 use crate::{DatabaseKeys, DerivedPublicationStage, MemVfs};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
-use std::cell::Cell;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
 fn keys() -> DatabaseKeys {
@@ -119,7 +119,7 @@ fn dropped_guard_classifies_real_durability_fences_and_never_recovers_from_drop(
             batch.create_vertex(VId(1), vec![], vec![]);
             transaction.write(&mut database, batch).unwrap();
             let prepared = transaction.prepared.take().unwrap();
-            let suspended = Cell::new(false);
+            let suspended = AtomicBool::new(false);
             let mut future = Box::pin(async {
                 // Exercise the production cleanup guard over real Chronicle
                 // states, then suspend at a deterministic test-owned boundary.
@@ -137,11 +137,11 @@ fn dropped_guard_classifies_real_durability_fences_and_never_recovers_from_drop(
                     &cx, prepared.template, crash, publication_failure, None,
                 ).await;
                 assert_eq!(result.is_ok(), phase == 3);
-                suspended.set(true);
+                suspended.store(true, Ordering::SeqCst);
                 std::future::pending::<()>().await;
             });
             std::future::poll_fn(|task| match future.as_mut().poll(task) {
-                Poll::Pending if suspended.get() => Poll::Ready(()),
+                Poll::Pending if suspended.load(Ordering::SeqCst) => Poll::Ready(()),
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(()) => panic!("the explicit suspension must not complete"),
             }).await;
