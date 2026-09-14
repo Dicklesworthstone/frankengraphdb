@@ -10,7 +10,12 @@ struct TxnCompletionGuard<'txn, 'db, V: Vfs + Clone> {
 impl<'txn, 'db, V: Vfs + Clone> TxnCompletionGuard<'txn, 'db, V> {
     fn new(transaction: &'txn mut WriteTxn, database: &'db mut Database<V>) -> Self {
         let starting_frontier = database.snapshot.frontier;
-        Self { transaction, database, starting_frontier, entered_commit: false }
+        Self {
+            transaction,
+            database,
+            starting_frontier,
+            entered_commit: false,
+        }
     }
 }
 
@@ -49,6 +54,31 @@ impl<V: Vfs + Clone> Drop for TxnCompletionGuard<'_, '_, V> {
     }
 }
 
+/// The sole variable-width touched-element arm is the engine-derived cascade.
+/// Check it element by element instead of hiding an uninterruptible loop inside
+/// the shared infallible collector. Other current arms touch at most one ID.
+fn validation_touches(
+    row: &fgdb_delta_types::DeltaRow,
+    touched: &mut std::collections::BTreeSet<ElementId>,
+    checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+) -> Result<(), WriteTxnError> {
+    checkpoint()?;
+    if let fgdb_delta_types::DeltaRow::DeleteVertex {
+        vid,
+        sorted_retired_incident_edges,
+        ..
+    } = row {
+        touched.insert(ElementId::Vertex(*vid));
+        for eid in sorted_retired_incident_edges {
+            checkpoint()?;
+            touched.insert(ElementId::Edge(*eid));
+        }
+    } else {
+        crate::touched_elements(row, touched);
+    }
+    Ok(())
+}
+
 impl WriteTxn {
     /// Validate recorded dependencies and complete either kind of workspace.
     /// A prepared batch returns WriteCommitted, including a normalized no-op.
@@ -62,6 +92,8 @@ impl WriteTxn {
     /// owner, every terminal return, unwind or dropped future releases the pin
     /// and workspace; state() distinguishes abort from unknown or committed.
     /// Wrong-owner calls preserve all state for the correct database.
+    /// Validation checkpoints every scalable traversal, including cascades;
+    /// no new cancellation checkpoint follows publication or read acceptance.
     pub async fn finish<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -116,6 +148,26 @@ impl WriteTxn {
         crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
         require_write: bool,
     ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
+        cx.with_restriction_async(self.complete_controlled(
+            database,
+            cx,
+            crash_at,
+            require_write,
+            || cx.checkpoint().map_err(WriteTxnError::Interrupted),
+        ))
+        .await
+    }
+
+    // The private checkpoint seam is shared verbatim by production and the
+    // interruption/unwind tests. It grants no query, write or recovery authority.
+    async fn complete_controlled<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &CommitCx,
+        crash_at: Option<fgdb_chronicle::commit::CrashPoint>,
+        require_write: bool,
+        mut checkpoint: impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<EmbeddedTxnCompletion, WriteTxnError> {
         self.ensure_database(database)?;
         let mut attempt = TxnCompletionGuard::new(self, database);
         // Health must be checked even for an empty read set. No snapshot
@@ -124,8 +176,9 @@ impl WriteTxn {
         if require_write && attempt.transaction.prepared.is_none() {
             return Err(WriteTxnError::NoPreparedWrite);
         }
-        if let Some((law, element, committed_at)) =
-            attempt.transaction.transaction_conflict(attempt.database)?
+        checkpoint()?;
+        if let Some((law, element, committed_at)) = attempt.transaction
+            .transaction_conflict(attempt.database, &mut checkpoint)?
         {
             return Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
                 law,
@@ -135,6 +188,9 @@ impl WriteTxn {
                 ),
             }));
         }
+        // The final validation checkpoint precedes BOTH kinds of acceptance.
+        // Never return Interrupted after a marker or a successful read close.
+        checkpoint()?;
         let completion = if let Some(prepared) = attempt.transaction.prepared.take() {
             attempt.transaction.staged.clear();
             // Set before polling the cancellable publication future. Drop
@@ -208,9 +264,13 @@ impl WriteTxn {
     /// ensure-existing operations still depend on their targets, and edge
     /// creation depends on its endpoints. Keep those dependencies even when
     /// canonicalization removes the corresponding mutation from the template.
-    fn mutation_footprint(&self) -> std::collections::BTreeSet<ElementId> {
+    fn mutation_footprint(
+        &self,
+        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<std::collections::BTreeSet<ElementId>, WriteTxnError> {
         let mut footprint = std::collections::BTreeSet::new();
         for pending in self.staged.iter().flat_map(|batch| &batch.rows) {
+            checkpoint()?;
             match pending {
                 PendingRow::Vertex { vid, .. }
                 | PendingRow::DeleteVertex { vid, .. }
@@ -234,24 +294,24 @@ impl WriteTxn {
         }
         if let Some(prepared) = &self.prepared {
             for coordinate in prepared.template.coordinate_entries() {
+                checkpoint()?;
                 for row in &coordinate.rows {
-                    // Include engine-derived cascade targets, not only the
-                    // identifiers the caller happened to name explicitly.
-                    crate::touched_elements(row, &mut footprint);
+                    validation_touches(row, &mut footprint, checkpoint)?;
                 }
             }
         }
-        footprint
+        Ok(footprint)
     }
 
     fn transaction_conflict<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
-    ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, ReadError> {
+        checkpoint: &mut impl FnMut() -> Result<(), WriteTxnError>,
+    ) -> Result<Option<(&'static str, ElementId, CommitSeq)>, WriteTxnError> {
         let read_set = self.read_set.borrow();
         let match_expansions = self.match_expansions.borrow();
         let scanned_vertex_labels = self.scanned_vertex_labels.borrow();
-        let mutation_footprint = self.mutation_footprint();
+        let mutation_footprint = self.mutation_footprint(checkpoint)?;
         let scanned_vertices = self.scanned_vertices.get();
         let scanned_edges = self.scanned_edges.get();
         if read_set.is_empty()
@@ -268,19 +328,25 @@ impl WriteTxn {
         // delta_since refuses a retired prefix instead of silently validating
         // against only the surviving tail. Validation precedes prepared.take().
         for batch in database.delta_since(self.basis)? {
+            checkpoint()?;
             let seq = batch.commit_seq();
             let mut touched = std::collections::BTreeSet::new();
             let mut endpoints = std::collections::BTreeSet::new();
             for coordinate in batch.coordinate_entries() {
+                checkpoint()?;
                 for row in &coordinate.rows {
+                    checkpoint()?;
                     match row {
-                        fgdb_delta_types::DeltaRow::CreateVertex { vid, labels, .. }
-                            if scanned_vertices
-                                || labels
-                                    .iter()
-                                    .any(|label| scanned_vertex_labels.contains(label)) =>
-                        {
-                            return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
+                        fgdb_delta_types::DeltaRow::CreateVertex { vid, labels, .. } => {
+                            if scanned_vertices {
+                                return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
+                            }
+                            for label in labels {
+                                checkpoint()?;
+                                if scanned_vertex_labels.contains(label) {
+                                    return Ok(Some(("FG-LAW-FCW-READ-01", ElementId::Vertex(*vid), seq)));
+                                }
+                            }
                         }
                         fgdb_delta_types::DeltaRow::LabelMembership {
                             vid,
@@ -298,22 +364,22 @@ impl WriteTxn {
                         _ => {}
                     }
                     crate::adjacency_endpoints(row, &mut endpoints);
-                    crate::touched_elements(row, &mut touched);
+                    validation_touches(row, &mut touched, checkpoint)?;
                 }
             }
-            if let Some(element) = endpoints
-                .iter()
-                .chain(touched.iter())
-                .find(|element| read_set.contains(*element))
-            {
-                return Ok(Some(("FG-LAW-FCW-READ-01", *element, seq)));
+            // Preserve read-before-write conflict precedence and each set's
+            // canonical order. Every inspected element is cancellable.
+            for element in endpoints.iter().chain(touched.iter()) {
+                checkpoint()?;
+                if read_set.contains(element) {
+                    return Ok(Some(("FG-LAW-FCW-READ-01", *element, seq)));
+                }
             }
-            if let Some(element) = endpoints
-                .iter()
-                .chain(touched.iter())
-                .find(|element| mutation_footprint.contains(*element))
-            {
-                return Ok(Some(("FG-LAW-FCW-01", *element, seq)));
+            for element in endpoints.iter().chain(touched.iter()) {
+                checkpoint()?;
+                if mutation_footprint.contains(element) {
+                    return Ok(Some(("FG-LAW-FCW-01", *element, seq)));
+                }
             }
         }
         Ok(None)
@@ -324,4 +390,9 @@ impl WriteTxn {
             let _receipt = pin.abort();
         }
     }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    include!("completion_tests.rs");
 }

@@ -36,6 +36,9 @@ pub enum WriteTxnError {
     AtomicOrdinalOverflow,
     /// A new delta family needs an explicit compound-write independence law.
     UnsupportedAtomicMutation,
+    /// Cancellation during prepublication completion/validation. No write from
+    /// this attempt reached the commit coordinator; the transaction is terminal.
+    Interrupted(Box<asupersync::error::Error>),
     Read(ReadError),
     Gql(GqlError),
     Write(WriteError),
@@ -65,6 +68,7 @@ impl core::fmt::Display for WriteTxnError {
             Self::UnsupportedAtomicMutation => formatter.write_str(
                 "atomic write contains a mutation without a defined independence law"
             ),
+            Self::Interrupted(source) => write!(formatter, "transaction completion interrupted: {source}"),
             Self::Read(source) => write!(formatter, "could not read the pinned snapshot: {source}"),
             Self::Gql(source) => write!(formatter, "transaction GQL failed: {source}"),
             Self::Write(source) => write!(formatter, "write transaction failed: {source}"),
@@ -75,6 +79,7 @@ impl core::fmt::Display for WriteTxnError {
 impl core::error::Error for WriteTxnError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::Interrupted(source) => Some(source.as_ref()),
             Self::Read(source) => Some(source),
             Self::Gql(source) => Some(source),
             Self::Write(source) => Some(source),
