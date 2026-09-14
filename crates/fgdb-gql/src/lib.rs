@@ -12,6 +12,7 @@ mod evidence_cursor;
 mod evidence_limits;
 mod evidence_page;
 mod graph_text;
+pub mod insertion;
 mod integer_expression;
 mod mutation;
 mod mutation_program;
