@@ -25,14 +25,20 @@ mod parser;
 mod prepared;
 mod set_ops;
 mod set_text;
+mod shortest_walk;
+mod temporal_aggregate_text;
 mod temporal_text;
 mod walk;
 mod write_receipt;
 
+pub use temporal_aggregate_text::{
+    BoundTemporalGraphAggregateQuery, PreparedTemporalGraphAggregateText,
+};
 pub use temporal_text::{
     BoundTemporalGraphQuery, GraphTemporalTextError, GraphTemporalTextErrorKind,
     PreparedTemporalGraphText,
 };
+pub use shortest_walk::GraphShortestWalkCursor;
 pub use write_receipt::{GraphWriteProgramReceipt, GraphWriteStepReceipt};
 pub use mutation_program_template::mixed::{
     GraphWriteProgramTemplateError, GraphWriteTemplateStatement, PreparedGraphWriteProgramTemplate,
