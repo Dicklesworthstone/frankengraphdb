@@ -121,7 +121,8 @@ pub use mutation::{
 };
 pub use mutation_text::{
     GraphDeleteTextError, GraphDeleteTextErrorKind, GraphMutationTextError,
-    GraphMutationTextErrorKind, PreparedGraphDeleteText, PreparedGraphMutationText,
+    GraphMutationTextErrorKind, GraphVertexMergeTextError, GraphVertexMergeTextErrorKind,
+    PreparedGraphDeleteText, PreparedGraphMutationText, PreparedGraphVertexMergeText,
 };
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
