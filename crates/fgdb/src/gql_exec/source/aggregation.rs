@@ -180,6 +180,17 @@ impl<V: Vfs + Clone> Database<V> {
             )
         })
     }
+
+    /// All operands of one temporal set statement read one exact sequence. No
+    /// branch may silently use the live frontier or a different retained view.
+    pub fn execute_temporal_graph_set_text_governed(
+        &self,
+        cx: &QueryCx,
+        query: &fgdb_gql::BoundTemporalGraphSetQuery,
+        policy: GqlQueryPolicy,
+    ) -> SetResult<GqlError> {
+        self.execute_graph_set_governed_at(cx, query.query(), query.as_of(), policy)
+    }
 }
 
 impl EmbeddedReadView {
@@ -216,5 +227,14 @@ impl EmbeddedReadView {
                 || cx.checkpoint(),
             )
         })
+    }
+
+    pub fn execute_temporal_graph_set_text_governed(
+        &self,
+        cx: &QueryCx,
+        query: &fgdb_gql::BoundTemporalGraphSetQuery,
+        policy: GqlQueryPolicy,
+    ) -> SetResult<GqlError> {
+        self.execute_graph_set_governed_at(cx, query.query(), query.as_of(), policy)
     }
 }
