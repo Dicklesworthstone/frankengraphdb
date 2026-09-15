@@ -253,6 +253,38 @@ impl BorrowedTables<'_> {
     }
 }
 
+/// Execute a bound `FOR SYSTEM_TIME AS OF SEQ ...` query through the same
+/// historical snapshot admission path as the explicit `_at` API. The temporal
+/// text layer selects only the sequence; it does not create another reader,
+/// authorization boundary, budget meter or result contract.
+impl<V: asupersync::fs::Vfs + Clone> crate::Database<V> {
+    pub fn execute_temporal_graph_text_governed(
+        &self,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::BoundTemporalGraphQuery,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<crate::GqlError, Box<asupersync::error::Error>>,
+    > {
+        self.execute_graph_pattern_governed_at(cx, query.pattern(), query.as_of(), policy)
+    }
+}
+
+impl crate::EmbeddedReadView {
+    pub fn execute_temporal_graph_text_governed(
+        &self,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::BoundTemporalGraphQuery,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
+        fgdb_gql::GqlQueryError<crate::GqlError, Box<asupersync::error::Error>>,
+    > {
+        self.execute_graph_pattern_governed_at(cx, query.pattern(), query.as_of(), policy)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
