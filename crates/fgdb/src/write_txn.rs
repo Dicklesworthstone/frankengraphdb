@@ -20,6 +20,7 @@ include!("write_txn_parts/limited_gql.rs");
 include!("write_txn_parts/graph_mutations.rs");
 include!("write_txn_parts/graph_insertions.rs");
 include!("write_txn_parts/graph_deletions.rs");
+include!("write_txn_parts/vertex_merge.rs");
 include!("write_txn_parts/mutation_programs.rs");
 include!("write_txn_parts/write_programs.rs");
 include!("write_txn_parts/autocommit.rs");
