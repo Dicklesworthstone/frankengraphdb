@@ -13,11 +13,10 @@ struct MergeProperty<'a> {
     key: Name<'a>,
     filter: Number,
     value: VertexMergeValueTemplate,
-    at: usize,
 }
 
 fn insert_error(at: usize, source: GraphInsertBuildError) -> GraphVertexMergeTextError {
-    GraphVertexMergeTextError { at: (), offset: at, kind: GraphVertexMergeTextErrorKind::InsertBuild(source) }
+    GraphVertexMergeTextError { offset: at, kind: GraphVertexMergeTextErrorKind::InsertBuild(source) }
 }
 fn merge_error(at: usize, source: GraphVertexMergeBuildError) -> GraphVertexMergeTextError {
     GraphVertexMergeTextError { offset: at, kind: GraphVertexMergeTextErrorKind::MergeBuild(source) }
@@ -86,7 +85,7 @@ impl<'a> Parser<'a> {
                         )).into());
                     }
                 };
-                properties.push(MergeProperty { key, filter, value, at });
+                properties.push(MergeProperty { key, filter, value });
                 if !self.take(b',')? { break; }
             }
             self.punct(b'}', "}")?;
