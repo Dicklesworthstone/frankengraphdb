@@ -8,16 +8,42 @@
 
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters,
-    GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, GraphTemporalTextError,
-    GraphTemporalTextErrorKind, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
-    PreparedGraphSet, PreparedGraphSetText,
+    GraphPatternTextErrorKind, GraphSetTextErrorKind, GraphSymbol, GraphSymbolKind,
+    MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS, PreparedGraphSet, PreparedGraphSetText,
 };
 use fgdb_types::CommitSeq;
 use std::collections::BTreeSet;
 
-fn fail(offset: usize, kind: GraphTemporalTextErrorKind) -> GraphTemporalTextError {
-    GraphTemporalTextError { offset, kind }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphTemporalSetTextErrorKind {
+    Set(GraphSetTextErrorKind),
+    MissingSystemTimeClause,
+    DuplicateSystemTimeClause,
+    InvalidSystemTimePosition,
+    InvalidSequenceSelector,
+    ConflictingParameterType,
+    MissingParameter,
+    ParameterTypeMismatch { found: GqlParameterType },
+    UnexpectedArguments,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphTemporalSetTextError {
+    pub offset: usize,
+    pub kind: GraphTemporalSetTextErrorKind,
+}
+impl core::fmt::Display for GraphTemporalSetTextError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "temporal graph set text error at byte {}: {:?}", self.offset, self.kind)
+    }
+}
+impl core::error::Error for GraphTemporalSetTextError {}
+fn fail(offset: usize, kind: GraphTemporalSetTextErrorKind) -> GraphTemporalSetTextError {
+    GraphTemporalSetTextError { offset, kind }
+}
+fn pattern(offset: usize, kind: GraphPatternTextErrorKind) -> GraphTemporalSetTextError {
+    fail(offset, GraphTemporalSetTextErrorKind::Set(GraphSetTextErrorKind::Pattern(kind)))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Selector { Literal(u64), Parameter { name: String, offset: usize } }
 #[derive(Clone, Copy)]
@@ -117,15 +143,13 @@ fn valid(name: &str) -> bool {
         && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
         && bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
-fn locate(statement: &str) -> Result<(usize, usize, Selector), GraphTemporalTextError> {
+fn locate(statement: &str) -> Result<(usize, usize, Selector), GraphTemporalSetTextError> {
     if statement.len() > MAX_GRAPH_TEXT_BYTES {
-        return Err(fail(MAX_GRAPH_TEXT_BYTES,
-            GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::DefinitionTooLarge)));
+        return Err(pattern(MAX_GRAPH_TEXT_BYTES, GraphPatternTextErrorKind::DefinitionTooLarge));
     }
     let tokens = scan(statement);
     if tokens.len() > MAX_GRAPH_TEXT_TOKENS {
-        return Err(fail(statement.len(),
-            GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::TooManyTokens)));
+        return Err(pattern(statement.len(), GraphPatternTextErrorKind::TooManyTokens));
     }
     let first_return = tokens.iter().position(|token| token.word("RETURN"));
     let mut found = Vec::new();
@@ -138,24 +162,24 @@ fn locate(statement: &str) -> Result<(usize, usize, Selector), GraphTemporalText
             || !tokens[at + 4].word("SEQ") { continue; }
         let selector = match tokens[at + 5].kind {
             Kind::Digits(raw) => Selector::Literal(raw.parse::<u64>().map_err(|_|
-                fail(tokens[at + 5].start, GraphTemporalTextErrorKind::InvalidSequenceSelector))?),
+                fail(tokens[at + 5].start, GraphTemporalSetTextErrorKind::InvalidSequenceSelector))?),
             Kind::Parameter(name) if valid(name) => Selector::Parameter {
                 name: name.to_owned(), offset: tokens[at + 5].start,
             },
-            _ => return Err(fail(tokens[at + 5].start, GraphTemporalTextErrorKind::InvalidSequenceSelector)),
+            _ => return Err(fail(tokens[at + 5].start, GraphTemporalSetTextErrorKind::InvalidSequenceSelector)),
         };
         found.push((at, tokens[at].start, tokens[at + 5].end, selector));
     }
-    if found.is_empty() { return Err(fail(loose.unwrap_or(0), GraphTemporalTextErrorKind::MissingSystemTimeClause)); }
-    if found.len() != 1 { return Err(fail(found[1].1, GraphTemporalTextErrorKind::DuplicateSystemTimeClause)); }
+    if found.is_empty() { return Err(fail(loose.unwrap_or(0), GraphTemporalSetTextErrorKind::MissingSystemTimeClause)); }
+    if found.len() != 1 { return Err(fail(found[1].1, GraphTemporalSetTextErrorKind::DuplicateSystemTimeClause)); }
     let (at, start, end, selector) = found.pop().expect("one selector");
     if first_return.is_some_and(|tail| at >= tail) {
-        return Err(fail(start, GraphTemporalTextErrorKind::InvalidSystemTimePosition));
+        return Err(fail(start, GraphTemporalSetTextErrorKind::InvalidSystemTimePosition));
     }
     if !tokens.get(at + 6).is_some_and(|next|
         next.word("WHERE") || next.word("OPTIONAL") || next.word("RETURN"))
     {
-        return Err(fail(end, GraphTemporalTextErrorKind::InvalidSystemTimePosition));
+        return Err(fail(end, GraphTemporalSetTextErrorKind::InvalidSystemTimePosition));
     }
     Ok((start, end, selector))
 }
@@ -178,22 +202,22 @@ impl core::fmt::Debug for PreparedTemporalGraphSetText {
 impl PreparedTemporalGraphSetText {
     pub fn prepare(statement: &str,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)
-        -> Result<Self, GraphTemporalTextError> {
+        -> Result<Self, GraphTemporalSetTextError> {
         Self::prepare_with_parameter_types(statement, &[], resolve)
     }
     pub fn prepare_with_parameter_types(statement: &str, declarations: &[(&str, GqlParameterType)],
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)
-        -> Result<Self, GraphTemporalTextError> {
+        -> Result<Self, GraphTemporalSetTextError> {
         let (start, end, selector) = locate(statement)?;
         let selector_offset = match &selector { Selector::Parameter { offset, .. } => *offset, _ => start };
         let temporal_name = match &selector { Selector::Parameter { name, .. } => Some(name.as_str()), _ => None };
         let mut seen = BTreeSet::new();
         for &(name, kind) in declarations {
             if !valid(name) || !seen.insert(name) {
-                return Err(fail(0, GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::ParameterDeclaration)));
+                return Err(pattern(0, GraphPatternTextErrorKind::ParameterDeclaration));
             }
             if temporal_name == Some(name) && kind != GqlParameterType::UInt64 {
-                return Err(fail(selector_offset, GraphTemporalTextErrorKind::ConflictingParameterType));
+                return Err(fail(selector_offset, GraphTemporalSetTextErrorKind::ConflictingParameterType));
             }
         }
         let mut blanked = statement.as_bytes().to_vec();
@@ -202,21 +226,17 @@ impl PreparedTemporalGraphSetText {
         let names = params(&blanked);
         for &(name, _) in declarations {
             if !names.contains(name) && temporal_name != Some(name) {
-                return Err(fail(statement.len(),
-                    GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::UnusedParameterDeclaration)));
+                return Err(pattern(statement.len(), GraphPatternTextErrorKind::UnusedParameterDeclaration));
             }
         }
         let local = declarations.iter().copied().filter(|(name, _)| names.contains(*name)).collect::<Vec<_>>();
         let inner = PreparedGraphSetText::prepare_with_parameter_types(&blanked, &local, resolve)
-            .map_err(|error| fail(error.offset, GraphTemporalTextErrorKind::Query(match error.kind {
-                crate::GraphSetTextErrorKind::Pattern(kind) => kind,
-                _ => GraphPatternTextErrorKind::Expected("valid set expression"),
-            })))?;
+            .map_err(|error| fail(error.offset, GraphTemporalSetTextErrorKind::Set(error.kind)))?;
         let mut parameters = inner.parameter_schema().to_vec();
         if let Some(name) = temporal_name {
             if let Some(spec) = parameters.iter_mut().find(|spec| spec.name == name) {
                 if spec.parameter_type != GqlParameterType::UInt64 {
-                    return Err(fail(selector_offset, GraphTemporalTextErrorKind::ConflictingParameterType));
+                    return Err(fail(selector_offset, GraphTemporalSetTextErrorKind::ConflictingParameterType));
                 }
                 spec.occurrences += 1;
             } else {
@@ -231,14 +251,14 @@ impl PreparedTemporalGraphSetText {
     #[must_use] pub fn parameter_schema(&self) -> &[GqlParameterSpec] { &self.parameters }
 
     pub fn bind_parameters(&self, arguments: &GqlParameters)
-        -> Result<BoundTemporalGraphSetQuery, GraphTemporalTextError> {
+        -> Result<BoundTemporalGraphSetQuery, GraphTemporalSetTextError> {
         let as_of = match &self.selector {
             Selector::Literal(value) => *value,
             Selector::Parameter { name, offset } => match arguments.get(name) {
-                None => return Err(fail(*offset, GraphTemporalTextErrorKind::MissingParameter)),
+                None => return Err(fail(*offset, GraphTemporalSetTextErrorKind::MissingParameter)),
                 Some(GqlParameterValue::UInt64(value)) => value,
                 Some(value) => return Err(fail(*offset,
-                    GraphTemporalTextErrorKind::ParameterTypeMismatch { found: value.parameter_type() })),
+                    GraphTemporalSetTextErrorKind::ParameterTypeMismatch { found: value.parameter_type() })),
             },
         };
         let mut local = GqlParameters::new();
@@ -248,13 +268,10 @@ impl PreparedTemporalGraphSetText {
             }
         }
         let query = self.inner.bind_parameters(&local)
-            .map_err(|error| fail(error.offset, GraphTemporalTextErrorKind::Query(match error.kind {
-                crate::GraphSetTextErrorKind::Pattern(kind) => kind,
-                _ => GraphPatternTextErrorKind::Expected("valid set binding"),
-            })))?;
+            .map_err(|error| fail(error.offset, GraphTemporalSetTextErrorKind::Set(error.kind)))?;
         let recognized = self.parameters.iter().filter(|spec| arguments.get(&spec.name).is_some()).count();
         if recognized != arguments.len() {
-            return Err(fail(self.statement.len(), GraphTemporalTextErrorKind::UnexpectedArguments));
+            return Err(fail(self.statement.len(), GraphTemporalSetTextErrorKind::UnexpectedArguments));
         }
         Ok(BoundTemporalGraphSetQuery { query, as_of: CommitSeq(as_of) })
     }
