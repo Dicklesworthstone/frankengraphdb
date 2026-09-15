@@ -68,4 +68,78 @@ impl WriteTxn {
             Ok(stats)
         })
     }
+
+    /// Execute the identical atomic mixed program but retain one ordered receipt
+    /// per successfully accepted step. Creation receipts contain the exact IDs
+    /// staged by that statement; mutation receipts contain its distinct proposal
+    /// targets. The receipt is returned only if EVERY statement, cumulative quota
+    /// check and the final acceptance checkpoint succeeds.
+    ///
+    /// Consequently a late failure exposes no successful-prefix receipt even
+    /// though an external allocator may already have issued IDs. Program rollback
+    /// cannot reclaim those IDs. A returned receipt is still transaction-local:
+    /// only a later successful finish/commit makes the staged effects durable.
+    pub fn execute_graph_write_program_returning_governed<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+        mut allocate: impl FnMut(fgdb_gql::GraphWriteIdentityRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        fgdb_gql::GraphWriteProgramReceipt,
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, A, Box<asupersync::error::Error>>,
+    > {
+        use fgdb_gql::{GraphMutationProgramError, GraphWriteIdentityRequest,
+            GraphWriteProgramError, GraphWriteStatement, GraphWriteStepError, GraphWriteStepReceipt,
+            GraphWriteStepStats};
+        let preflight = |error| GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error));
+        self.ensure_database(database).map_err(preflight)?;
+        let live = database.frontier().map_err(WriteTxnError::from).map_err(preflight)?;
+        if live != self.basis {
+            return Err(preflight(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
+        }
+        if let Some(first) = self.staged.first()
+            && self.staged.iter().all(|batch| batch.relation == first.relation)
+            && program.relation() != first.relation
+        {
+            return Err(preflight(WriteTxnError::RelationMismatch {
+                expected: first.relation, found: program.relation(),
+            }));
+        }
+        cx.with_restriction(|| {
+            let workspace = MutationProgramWorkspace::new(self);
+            let mut receipts = Vec::with_capacity(program.statements().len());
+            let stats = program.execute_governed(policy, |statement, input, remaining| {
+                match input {
+                    GraphWriteStatement::Mutation(input) => workspace.txn
+                        .execute_graph_mutation_returning_governed(database, cx, input, remaining.mutations)
+                        .map(|(stats, targets)| {
+                            receipts.push(GraphWriteStepReceipt::Mutation { targets });
+                            GraphWriteStepStats::Mutation(stats)
+                        })
+                        .map_err(GraphWriteStepError::Mutation),
+                    GraphWriteStatement::Insert(input) => workspace.txn
+                        .execute_graph_insert_returning_governed(
+                            database,
+                            cx,
+                            input,
+                            remaining.insertion_policy(),
+                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
+                        )
+                        .map(|(stats, vertices, edges)| {
+                            receipts.push(GraphWriteStepReceipt::Insert { vertices, edges });
+                            GraphWriteStepStats::Insert(stats)
+                        })
+                        .map_err(GraphWriteStepError::Insert),
+                }
+            }, || cx.checkpoint())?;
+            debug_assert_eq!(receipts.len(), stats.completed_statements);
+            let receipt = fgdb_gql::GraphWriteProgramReceipt::new(stats, receipts);
+            // Receipt construction is complete before acceptance. No fallible
+            // operation or cancellation point follows this workspace boundary.
+            workspace.accept();
+            Ok(receipt)
+        })
+    }
 }
