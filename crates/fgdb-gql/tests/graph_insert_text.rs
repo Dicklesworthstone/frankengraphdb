@@ -111,13 +111,14 @@ fn constants_preserve_walk_optional_and_edge_only_occurrences() {
 #[test]
 fn malformed_and_overlarge_statements_refuse_before_any_catalog_observation() {
     for text in [
-        "CREATE (x)", "MATCH (n) CREATE", "MATCH (n) CREATE (n)",
-        "MATCH (n) CREATE (x),(x)", "MATCH (n) CREATE (x:Copy:Copy)",
+        "CREATE", "MATCH (n) CREATE", "MATCH (n) CREATE (n)",
+        "MATCH (n) CREATE (x:Copy:Copy)", "CREATE (x),(x:Copy)",
         "MATCH (n) CREATE (x {p:1,p:2})", "MATCH (n) CREATE (x {p:n.p+})",
         "MATCH (n) CREATE (x {p:TRUE+1})", "MATCH (n) CREATE (x {p:CASE WHEN TRUE THEN 1 ELSE missing.p END})",
-        "MATCH (n) CREATE (x {p:1}),(y {q:x.p})", "MATCH (n) CREATE (n)-[:R]->(unknown)",
-        "MATCH (n) CREATE (n)-[:R]->(n),(x)", "MATCH (n) CREATE (n)-[:R]->(x {p:1})",
-        "MATCH (n) CREATE (x {p:1})-[:R]->(n)", "MATCH (n) CREATE (n)<-[:R]-(n)",
+        "MATCH (n) CREATE (x {p:1}),(y {q:x.p})", "CREATE (x {p:x.p})",
+        "CREATE (a)-[:R]-(b)", "CREATE (a)<-[:R]->(b)", "CREATE (a)-[:R*2]->(b)",
+        "MATCH (n) CREATE (n:Copy)-[:R]->(x)", "MATCH (n) CREATE (n {})-[:R]->(x)",
+        "CREATE (a)-[edge:R]->(b)", "CREATE (a)-[:R]->(b {q:a.p})",
         "MATCH (n) CREATE (x) RETURN x", "MATCH (n) CREATE (x) SET n.p=1",
     ] {
         let calls = Cell::new(0);
@@ -177,4 +178,117 @@ fn missing_optional_endpoints_are_not_silently_turned_into_partial_creations() {
     let query = prepare("MATCH (n) WHERE n.p < 0 CREATE (copy {p:1/0})");
     let result = run(&query, &[VId(1)], &[], &Props::from([((VId(1), P), CanonicalScalar::Int(2))])).unwrap();
     assert!(result.intents().is_empty(), "no matches means no property execution or allocations");
+}
+
+#[test]
+fn newly_supported_forms_have_exact_creation_effects_not_merely_relaxed_rejections() {
+    for (text, explicit, vertices, edges) in [
+        ("CREATE (x)", "MATCH (n) CREATE (x)", 1, 0),
+        ("CREATE ()", "MATCH (n) CREATE (x)", 1, 0),
+        ("MATCH (n) CREATE (x),(x)", "MATCH (n) CREATE (x)", 1, 0),
+        ("MATCH (n) CREATE (n)-[:R]->(unknown)", "MATCH (n) CREATE (unknown),(n)-[:R]->(unknown)", 1, 1),
+        ("MATCH (n) CREATE (n)-[:R]->(n),(x)", "MATCH (n) CREATE (x),(n)-[:R]->(n)", 1, 1),
+        ("MATCH (n) CREATE (n)-[:R]->(x {p:1})", "MATCH (n) CREATE (x {p:1}),(n)-[:R]->(x)", 1, 1),
+        ("MATCH (n) CREATE (x {p:1})-[:R]->(n)", "MATCH (n) CREATE (x {p:1}),(x)-[:R]->(n)", 1, 1),
+        ("MATCH (n) CREATE (n)<-[:R]-(n)", "MATCH (n) CREATE (n)-[:R]->(n)", 0, 1),
+    ] {
+        let actual = run(&prepare(text), &[VId(1)], &[], &Props::new()).unwrap();
+        let expected = run(&prepare(explicit), &[VId(1)], &[], &Props::new()).unwrap();
+        assert_eq!(actual.intents(), expected.intents(), "{text}");
+        assert_eq!((actual.stats().created_vertices, actual.stats().created_edges), (vertices, edges));
+    }
+}
+
+#[test]
+fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints() {
+    let query = prepare("CREATE (a:Copy {p:1})-[:R {p:10}]->(b {p:2})<-[:R]-(c {p:3}), \
+        (b)-[:R]->(a),(a)-[:R]->(),(:Copy)");
+    assert!(query.selection().is_none());
+    let result: ResultOf = query.execute_governed(policy(), |_, _| panic!("no graph source"), identity, || Ok(()));
+    let result = result.unwrap();
+    let mut expected = Vec::new();
+    for (index, labels, properties) in [
+        (0, vec![COPY], vec![(P, CanonicalScalar::Int(1))]),
+        (1, vec![], vec![(P, CanonicalScalar::Int(2))]),
+        (2, vec![], vec![(P, CanonicalScalar::Int(3))]),
+        (3, vec![], vec![]), (4, vec![COPY], vec![]),
+    ] { expected.push(GraphInsertIntent::Vertex { vertex: VId(100 + index), labels, properties }); }
+    for (index, source, destination, properties) in [
+        (0, 100, 101, vec![(P, CanonicalScalar::Int(10))]),
+        (1, 102, 101, vec![]), (2, 101, 100, vec![]), (3, 100, 103, vec![]),
+    ] { expected.push(GraphInsertIntent::Edge { edge: EId(1_000 + index), source: VId(source), destination: VId(destination), properties }); }
+    assert_eq!(result.intents(), expected);
+    assert_eq!((result.stats().created_vertices, result.stats().created_edges), (5, 4));
+    assert_eq!((result.stats().selection.snapshot_records, result.stats().selection.result_rows), (0, 1));
+}
+
+#[test]
+fn standalone_parameters_keep_exact_kinds_offsets_occurrences_and_lazy_case() {
+    let payload = "secret '}) CREATE (:Copy) --";
+    let kind = CanonicalScalarKind::of(&CanonicalScalar::ucs_basic_text(payload).unwrap());
+    let text = "\u{2003}CREATE (a:Copy {p:$payload,q:CASE WHEN $n=0 THEN 0 ELSE 100/$n END})-[:R {q:$n}]->(:Copy)";
+    let calls = Cell::new(0);
+    let template = PreparedGraphInsertText::prepare_with_parameter_types(text, R,
+        &[("payload", GqlParameterType::Scalar(kind))], |kind, name| {
+            calls.set(calls.get() + 1); symbols(kind, name)
+        }).unwrap();
+    assert_eq!(calls.get(), 4);
+    assert_eq!(template.statement(), text);
+    assert_eq!(template.parameter_schema().iter().find(|spec| spec.name == "n").unwrap().occurrences, 3);
+    let args = GqlParameters::new().with_text("payload", payload).unwrap().with_int64("n", 0).unwrap();
+    let query = template.bind_parameters(&args).unwrap();
+    let frozen = query.canonical_bytes();
+    let result: ResultOf = query.execute_governed(policy(), |_, _| panic!("no graph source"), identity, || Ok(()));
+    let batch = result.unwrap();
+    assert!(matches!(&batch.intents()[0], GraphInsertIntent::Vertex { properties, .. }
+        if properties == &[(P, CanonicalScalar::ucs_basic_text(payload).unwrap()), (Q, CanonicalScalar::Int(0))]));
+    assert_eq!(calls.get(), 4);
+    assert_eq!(frozen, template.bind_parameters(&args).unwrap().canonical_bytes());
+    assert_eq!(template.bind_parameters(&GqlParameters::new()).unwrap_err().offset, text.find('$').unwrap());
+    let wrong = GqlParameters::new().with_int64("payload", 7).unwrap().with_int64("n", 0).unwrap();
+    assert!(matches!(template.bind_parameters(&wrong).unwrap_err().kind,
+        GraphInsertTextErrorKind::Query(GraphPatternTextErrorKind::ParameterTypeMismatch { .. })));
+    let extra = args.with_int64("unexpected", 1).unwrap();
+    assert_eq!(template.bind_parameters(&extra).unwrap_err().offset, text.len());
+    assert!(!format!("{template:?} {query:?} {batch:?}").contains(payload));
+    for at in (0..text.len()).filter(|at| text.is_char_boundary(*at)) {
+        let _ = PreparedGraphInsertText::prepare_with_parameter_types(&text[..at], R,
+            &[("payload", GqlParameterType::Scalar(kind))], symbols);
+    }
+}
+
+#[test]
+fn connected_creation_caps_count_new_declarations_not_node_references() {
+    let text = format!("CREATE {}", (0..MAX_GRAPH_INSERT_DECLARATIONS)
+        .map(|index| format!("(n{index})")).collect::<Vec<_>>().join(","));
+    let query = prepare(&format!("{text},(n0)"));
+    assert_eq!(query.vertices_per_row(), MAX_GRAPH_INSERT_DECLARATIONS);
+    assert_eq!(query.edges_per_row(), 0);
+    let mut chain = "CREATE (n0)".to_owned();
+    for index in 1..128 { chain.push_str(&format!("-[:R]->(n{index})")); }
+    chain.push_str("-[:R]->(n0)");
+    let query = prepare(&chain);
+    assert_eq!((query.vertices_per_row(), query.edges_per_row()), (128, 128));
+    for too_large in [format!("{text},()"), format!("{chain}-[:R]->()"), format!("{chain}-[:R]->(n0)")] {
+        let calls = Cell::new(0);
+        let error = PreparedGraphInsertText::prepare(&too_large, R, |kind, name| {
+            calls.set(calls.get() + 1); symbols(kind, name)
+        }).unwrap_err();
+        assert!(matches!(error.kind, GraphInsertTextErrorKind::Build(GraphInsertBuildError::TooManyDeclarations { .. })));
+        assert_eq!(calls.get(), 0);
+    }
+}
+
+#[test]
+fn standalone_bad_properties_fail_even_with_an_empty_database_before_allocation() {
+    let query = prepare("CREATE (good {p:7})-[:R]->(bad {p:1/0})");
+    let calls = Cell::new(0);
+    let result: ResultOf = query.execute_governed(policy(), |_, _| panic!("no graph source"),
+        |request| { calls.set(calls.get() + 1); identity(request) }, || Ok(()));
+    assert!(matches!(result, Err(GqlQueryError::Source(GraphInsertError::Arithmetic { row: 0, declaration: 1, .. }))));
+    assert_eq!(calls.get(), 0);
+    let matched = prepare("MATCH (n) CREATE (good {p:7})-[:R]->(bad {p:1/0})");
+    let result = run(&matched, &[], &[], &Props::new()).unwrap();
+    assert!(result.intents().is_empty());
+    assert_eq!(result.stats().selection.result_rows, 0);
 }

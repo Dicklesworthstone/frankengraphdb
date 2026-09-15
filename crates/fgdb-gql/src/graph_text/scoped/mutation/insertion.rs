@@ -5,13 +5,13 @@
 use super::*;
 use crate::insertion::{GraphInsertBuildError, GraphInsertEdge, GraphInsertEndpoint,
     GraphInsertVertex, PreparedGraphInsert, MAX_GRAPH_INSERT_DECLARATIONS, MAX_GRAPH_INSERT_FIELDS};
-use crate::insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind,
+use crate::insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind, InsertTextInput,
     InsertEdgeTemplate, InsertVertexTemplate, PreparedGraphInsertText};
 use crate::set_text::ReadValueTemplate;
 use crate::{GraphIntegerExpression, GraphIntegerOp};
 
 type ParsedFields<'a> = Vec<(Name<'a>, ReadValueTemplate)>;
-struct NewVertex<'a> { name: Name<'a>, labels: Vec<Name<'a>>, properties: ParsedFields<'a> }
+struct NewVertex<'a> { name: Option<Name<'a>>, labels: Vec<Name<'a>>, properties: ParsedFields<'a> }
 struct NewEdge<'a> { source: GraphInsertEndpoint, destination: GraphInsertEndpoint,
     relation: Name<'a>, properties: ParsedFields<'a> }
 struct InsertionSyntax<'a> {
@@ -35,6 +35,15 @@ impl<'a> Parser<'a> {
             }));
         }
         *fields += 1;
+        Ok(())
+    }
+
+    fn insertion_declaration_capacity(&self, count: usize) -> Result<(), GraphInsertTextError> {
+        if count >= MAX_GRAPH_INSERT_DECLARATIONS {
+            return Err(insertion_build(self.current.at, GraphInsertBuildError::TooManyDeclarations {
+                limit: MAX_GRAPH_INSERT_DECLARATIONS, observed: count + 1,
+            }));
+        }
         Ok(())
     }
 
@@ -66,81 +75,93 @@ impl<'a> Parser<'a> {
         Ok(properties)
     }
 
-    fn insertion_endpoint(&self, name: Name<'a>, vertices: &[NewVertex<'a>], inputs: &mut Vec<Projection<'a>>)
-        -> Result<GraphInsertEndpoint, GraphInsertTextError> {
-        if self.syntax.variables.iter().any(|variable| variable.text == name.text) {
-            return self.mutation_projection(inputs, name, None)
-                .map(GraphInsertEndpoint::Column).map_err(Into::into);
+    /// One node grammar for standalone clauses and every endpoint in a chain.
+    /// Anonymous nodes are distinct declarations without invented identifiers.
+    /// New names enter only the endpoint registry, never the scalar read scope.
+    fn insertion_node(
+        &mut self, parsed: &mut InsertionSyntax<'a>, fields: &mut usize, pending_edges: usize,
+    ) -> Result<GraphInsertEndpoint, GraphInsertTextError> {
+        self.punct(b'(', "(")?;
+        let at = self.current.at;
+        let name = if matches!(self.current.kind, TokenKind::Word(_)) {
+            Some(self.name()?)
+        } else { None };
+        let existing = if let Some(name) = name {
+            if self.syntax.variables.iter().any(|variable| variable.text == name.text) {
+                Some(GraphInsertEndpoint::Column(self.mutation_projection(&mut parsed.projections, name, None)?))
+            } else {
+                parsed.vertices.iter().position(|vertex| vertex.name.is_some_and(|old| old.text == name.text))
+                    .map(GraphInsertEndpoint::CreatedVertex)
+            }
+        } else { None };
+        if let Some(endpoint) = existing {
+            // Even an empty property map is declaration syntax, not a second
+            // assignment to the already-bound node. Refuse instead of ignoring.
+            if self.is_punct(b':') || self.is_punct(b'{') {
+                return Err(expected(at, "bare reference to an already-bound CREATE node"));
+            }
+            self.punct(b')', ")")?;
+            return Ok(endpoint);
         }
-        vertices.iter().position(|vertex| vertex.name.text == name.text)
-            .map(GraphInsertEndpoint::CreatedVertex)
-            .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownVariable).into())
+        self.insertion_declaration_capacity(parsed.vertices.len() + parsed.edges.len() + pending_edges)?;
+        let mut labels: Vec<Name<'a>> = Vec::new();
+        while self.take(b':')? {
+            self.insertion_field_capacity(fields)?;
+            let label = self.name()?;
+            if labels.iter().any(|old| old.text == label.text) {
+                return Err(expected(label.at, "unique CREATE label"));
+            }
+            labels.push(label);
+        }
+        let properties = self.insertion_properties(&mut parsed.projections, fields)?;
+        self.punct(b')', ")")?;
+        let vertex = parsed.vertices.len();
+        parsed.vertices.push(NewVertex { name, labels, properties });
+        Ok(GraphInsertEndpoint::CreatedVertex(vertex))
     }
 
     fn insertion_clauses(&mut self) -> Result<InsertionSyntax<'a>, GraphInsertTextError> {
+        let create_at = self.current.at;
         self.word("CREATE")?;
-        let mut inputs = Vec::new();
-        let mut vertices: Vec<NewVertex<'a>> = Vec::new();
-        let mut edges = Vec::new();
+        let mut parsed = InsertionSyntax { projections: Vec::new(), vertices: Vec::new(), edges: Vec::new() };
         let mut fields = 0;
         loop {
-            let declarations = vertices.len() + edges.len();
-            if declarations >= MAX_GRAPH_INSERT_DECLARATIONS {
-                return Err(insertion_build(self.current.at, GraphInsertBuildError::TooManyDeclarations {
-                    limit: MAX_GRAPH_INSERT_DECLARATIONS, observed: declarations + 1,
-                }));
-            }
-            self.punct(b'(', "(")?;
-            let name = self.name()?;
-            let existing = self.syntax.variables.iter().any(|variable| variable.text == name.text)
-                || vertices.iter().any(|vertex| vertex.name.text == name.text);
-            let mut labels: Vec<Name<'a>> = Vec::new();
-            while self.take(b':')? {
-                self.insertion_field_capacity(&mut fields)?;
-                let label = self.name()?;
-                if labels.iter().any(|old| old.text == label.text) {
-                    return Err(expected(label.at, "unique CREATE label"));
-                }
-                labels.push(label);
-            }
-            let properties = self.insertion_properties(&mut inputs, &mut fields)?;
-            self.punct(b')', ")")?;
-            if self.take(b'-')? {
-                if !labels.is_empty() || !properties.is_empty() {
-                    return Err(expected(name.at, "declare new vertices separately before CREATE edges"));
-                }
-                let source = self.insertion_endpoint(name, &vertices, &mut inputs)?;
+            let mut left = self.insertion_node(&mut parsed, &mut fields, 0)?;
+            while self.is_punct(b'-') || self.is_punct(b'<') {
+                self.insertion_declaration_capacity(parsed.vertices.len() + parsed.edges.len())?;
+                let incoming = self.take(b'<')?;
+                self.punct(b'-', "-")?;
                 self.punct(b'[', "[")?;
                 self.punct(b':', ":")?;
                 let relation = self.name()?;
-                let properties = self.insertion_properties(&mut inputs, &mut fields)?;
+                let properties = self.insertion_properties(&mut parsed.projections, &mut fields)?;
                 self.punct(b']', "]")?;
                 self.punct(b'-', "-")?;
-                self.punct(b'>', ">")?;
-                self.punct(b'(', "(")?;
-                let destination = self.name()?;
-                self.punct(b')', ")")?;
-                let destination = self.insertion_endpoint(destination, &vertices, &mut inputs)?;
-                edges.push(NewEdge { source, destination, relation, properties });
-            } else {
-                if existing {
-                    return Err(expected(name.at, "a fresh CREATE variable or a bound edge endpoint"));
+                let outgoing = self.take(b'>')?;
+                if incoming == outgoing {
+                    return Err(expected(relation.at, "exactly one directed CREATE arrow"));
                 }
-                if !edges.is_empty() {
-                    return Err(expected(name.at, "new vertex declarations before CREATE edges"));
-                }
-                vertices.push(NewVertex { name, labels, properties });
+                // Reserve this not-yet-pushed edge while the right node may
+                // admit another vertex. A chain cannot step past the total cap.
+                let right = self.insertion_node(&mut parsed, &mut fields, 1)?;
+                let (source, destination) = if incoming { (right, left) } else { (left, right) };
+                parsed.edges.push(NewEdge { source, destination, relation, properties });
+                left = right;
             }
             if !self.take(b',')? { break; }
         }
         self.end()?;
-        if inputs.is_empty() {
-            // A hidden bound identity carries the occurrence bag even when all
-            // new properties are constants. It is neither returned nor copied.
-            let root = self.syntax.variables[0];
-            self.mutation_projection(&mut inputs, root, None)?;
+        if parsed.vertices.is_empty() && parsed.edges.is_empty() {
+            return Err(insertion_build(create_at, GraphInsertBuildError::Empty));
         }
-        Ok(InsertionSyntax { projections: inputs, vertices, edges })
+        if parsed.projections.is_empty()
+            && let Some(&root) = self.syntax.variables.first()
+        {
+            // A MATCH still carries its occurrence bag even for constants.
+            // Standalone CREATE has no graph inputs and needs no placeholder.
+            self.mutation_projection(&mut parsed.projections, root, None)?;
+        }
+        Ok(parsed)
     }
 }
 
@@ -196,27 +217,30 @@ fn bind_fields(fields: &[(PropertyKeyId, ReadValueTemplate)], values: Option<&[G
 }
 
 impl PreparedGraphInsertText {
-    /// Prepare MATCH ... CREATE (copy:Label {p:n.p+1}), (n)-[:R]->(copy).
-    /// New vertices precede edges, and edge endpoints must already be named by
-    /// MATCH or those declarations. No implicit upsert or endpoint creation is
-    /// performed. The explicit relation parameter is verified against every
-    /// created edge, and is not inferred from a relation used only by MATCH.
+    /// Prepare CREATE (a:Label {p:$value})-[:R]->(b), optionally after MATCH.
+    /// Names are declared on first occurrence and bare repetitions share their
+    /// created vertex; anonymous nodes always declare distinct vertices. Chains,
+    /// cycles, self-loops and incoming arrows lower to the same typed template.
+    /// All vertices are emitted before their edges for each input occurrence.
+    /// The explicit relation parameter is verified against every created edge.
     pub fn prepare(statement: &str, relation: RelationId,
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)
         -> Result<Self, GraphInsertTextError> {
         Self::prepare_with_parameter_types(statement, relation, &[], resolve)
     }
 
-    /// The same parser and exact argument schema cover MATCH predicates and
-    /// every created property, including CASE, arithmetic and scalar payloads.
-    /// Syntax/limits are checked before the first catalog callback; every name
-    /// and domain resolves once across both the read and creation clauses.
+    /// The original parser's parameter table covers every predicate and created
+    /// property, including CASE, arithmetic and scalar payloads. Syntax/limits
+    /// pass before catalog callbacks. Each name/domain resolves once, across
+    /// MATCH and CREATE when both are present. Standalone creation has no graph
+    /// input definition and never synthesizes one merely to validate arguments.
     pub fn prepare_with_parameter_types(statement: &str, relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)
         -> Result<Self, GraphInsertTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
-        parser.parse_match_prefix()?;
+        let matched = parser.is_word("MATCH");
+        if matched { parser.parse_match_prefix()?; }
         let at = parser.current.at;
         let parsed = parser.insertion_clauses()?;
         let syntax = parser.syntax;
@@ -232,12 +256,15 @@ impl PreparedGraphInsertText {
             cache.insert(key, value);
             Ok(value)
         };
-        let (builder, filters) = resolve_pattern(
-            &syntax.variables[..syntax.root_variables], &syntax.labels, &syntax.edges,
-            syntax.filters, &mut symbol,
-        )?;
-        let mut scopes = Vec::new();
-        for scope in syntax.scopes { scopes.push(scope.resolve(&mut symbol)?); }
+        let matching = if matched {
+            let (builder, filters) = resolve_pattern(
+                &syntax.variables[..syntax.root_variables], &syntax.labels, &syntax.edges,
+                syntax.filters, &mut symbol,
+            )?;
+            let mut scopes = Vec::new();
+            for scope in syntax.scopes { scopes.push(scope.resolve(&mut symbol)?); }
+            Some((builder, filters, scopes))
+        } else { None };
         let mut vertices = Vec::new();
         for vertex in parsed.vertices {
             let mut labels = Vec::new();
@@ -261,26 +288,33 @@ impl PreparedGraphInsertText {
             edges.push(InsertEdgeTemplate { source: edge.source, destination: edge.destination,
                 properties: resolve_properties(edge.properties, &mut symbol)? });
         }
-        let mut columns = Vec::new();
-        for (index, projection) in parsed.projections.into_iter().enumerate() {
-            let key = if let Some(name) = projection.property {
-                let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)? else {
-                    unreachable!("shared catalog resolver checked the domain")
-                };
-                Some(key)
-            } else { None };
-            columns.push(BoundColumn { alias: format!("_insert_input_{index}"),
-                variable: projection.variable.text.to_owned(), key });
-        }
-        let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
-        let projected: Vec<_> = columns.iter().map(BoundColumn::declaration).collect();
-        let shape = built(at, builder.prepare_values_with_clauses(&clauses, &projected, 0, None))?;
-        let selection = PreparedGraphText {
-            statement: statement.to_owned(), builder, filters, scopes, columns,
-            ordering: Vec::new(), parameters: syntax.parameters, parameter_offsets: syntax.parameter_offsets,
-            offset: Number::Literal(GqlParameterValue::UInt64(0)), count: None, distinct: false, return_at: at,
+        let (input, shape) = if let Some((builder, filters, scopes)) = matching {
+            let mut columns = Vec::new();
+            for (index, projection) in parsed.projections.into_iter().enumerate() {
+                let key = if let Some(name) = projection.property {
+                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)? else {
+                        unreachable!("shared catalog resolver checked the domain")
+                    };
+                    Some(key)
+                } else { None };
+                columns.push(BoundColumn { alias: format!("_insert_input_{index}"),
+                    variable: projection.variable.text.to_owned(), key });
+            }
+            let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
+            let projected: Vec<_> = columns.iter().map(BoundColumn::declaration).collect();
+            let shape = built(at, builder.prepare_values_with_clauses(&clauses, &projected, 0, None))?;
+            let selection = PreparedGraphText {
+                statement: statement.to_owned(), builder, filters, scopes, columns,
+                ordering: Vec::new(), parameters: syntax.parameters, parameter_offsets: syntax.parameter_offsets,
+                offset: Number::Literal(GqlParameterValue::UInt64(0)), count: None, distinct: false, return_at: at,
+            };
+            (InsertTextInput::Match(selection), Some(shape))
+        } else {
+            debug_assert!(parsed.projections.is_empty());
+            (InsertTextInput::Unit { statement: statement.to_owned(),
+                parameters: syntax.parameters, parameter_offsets: syntax.parameter_offsets }, None)
         };
-        let template = Self { selection, relation, vertices, edges, create_at: at };
+        let template = Self { input, relation, vertices, edges, create_at: at };
         // Catch catalog aliases collapsing distinct written keys, invalid
         // endpoint domains and all static expression columns during preparation.
         template.instantiate(shape, None)?;
@@ -288,17 +322,49 @@ impl PreparedGraphInsertText {
     }
 
     #[must_use]
-    pub fn statement(&self) -> &str { self.selection.statement() }
+    pub fn statement(&self) -> &str {
+        match &self.input {
+            InsertTextInput::Match(selection) => selection.statement(),
+            InsertTextInput::Unit { statement, .. } => statement,
+        }
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { self.selection.parameter_schema() }
-
-    pub fn bind_parameters(&self, arguments: &GqlParameters) -> Result<PreparedGraphInsert, GraphInsertTextError> {
-        let values = self.selection.checked_arguments(arguments)?;
-        let selection = self.selection.bind_values(&values)?;
-        self.instantiate(selection, Some(&values))
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        match &self.input {
+            InsertTextInput::Match(selection) => selection.parameter_schema(),
+            InsertTextInput::Unit { parameters, .. } => parameters,
+        }
     }
 
-    fn instantiate(&self, selection: PreparedGraphPattern<GraphValueRow>, values: Option<&[GqlParameterValue]>)
+    pub fn bind_parameters(&self, arguments: &GqlParameters) -> Result<PreparedGraphInsert, GraphInsertTextError> {
+        match &self.input {
+            InsertTextInput::Match(selection) => {
+                let values = selection.checked_arguments(arguments)?;
+                self.instantiate(Some(selection.bind_values(&values)?), Some(&values))
+            }
+            InsertTextInput::Unit { statement, parameters, parameter_offsets } => {
+                // Use the original registered names, positions and exact-kind
+                // acceptance law. There is no MATCH object to bind or execute.
+                let mut values = Vec::new();
+                for (spec, &at) in parameters.iter().zip(parameter_offsets) {
+                    let value = arguments.get(&spec.name)
+                        .ok_or_else(|| error(at, GraphPatternTextErrorKind::MissingParameter))?;
+                    if !spec.parameter_type.accepts(value.parameter_type()) {
+                        return Err(error(at, GraphPatternTextErrorKind::ParameterTypeMismatch {
+                            expected: spec.parameter_type, found: value.parameter_type(),
+                        }).into());
+                    }
+                    values.push(value);
+                }
+                if arguments.len() != values.len() {
+                    return Err(error(statement.len(), GraphPatternTextErrorKind::UnexpectedArguments).into());
+                }
+                self.instantiate(None, Some(&values))
+            }
+        }
+    }
+
+    fn instantiate(&self, selection: Option<PreparedGraphPattern<GraphValueRow>>, values: Option<&[GqlParameterValue]>)
         -> Result<PreparedGraphInsert, GraphInsertTextError> {
         let mut vertices = Vec::new();
         for vertex in &self.vertices {
@@ -308,6 +374,9 @@ impl PreparedGraphInsertText {
         for edge in &self.edges {
             edges.push(GraphInsertEdge { source: edge.source, destination: edge.destination, properties: bind_fields(&edge.properties, values)? });
         }
-        PreparedGraphInsert::prepare(selection, self.relation, vertices, edges).map_err(|kind| insertion_build(self.create_at, kind))
+        match selection {
+            Some(selection) => PreparedGraphInsert::prepare(selection, self.relation, vertices, edges),
+            None => PreparedGraphInsert::prepare_standalone(self.relation, vertices, edges),
+        }.map_err(|kind| insertion_build(self.create_at, kind))
     }
 }

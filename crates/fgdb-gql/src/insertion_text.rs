@@ -1,8 +1,8 @@
-//! Parse-once query-selected CREATE templates. The shared MATCH/scalar parser
-//! owns syntax; the insertion kernel owns proposals; WriteTxn owns staging.
+//! Parse-once standalone and query-selected CREATE templates. The shared
+//! MATCH/scalar parser owns syntax; insertion owns proposals; WriteTxn stages.
 
-use crate::{GraphMutationTextError, GraphMutationTextErrorKind, GraphPatternTextError,
-    GraphPatternTextErrorKind, PreparedGraphText};
+use crate::{GqlParameterSpec, GraphMutationTextError, GraphMutationTextErrorKind,
+    GraphPatternTextError, GraphPatternTextErrorKind, PreparedGraphText};
 use crate::insertion::{GraphInsertBuildError, GraphInsertEndpoint};
 use crate::set_text::ReadValueTemplate;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -52,15 +52,31 @@ pub(crate) struct InsertEdgeTemplate {
     pub properties: Vec<(PropertyKeyId, ReadValueTemplate)>,
 }
 
-/// Native bounded MATCH ... CREATE preparation with explicit identity supply
-/// at execution. Declare new named vertices before edge clauses; edge endpoints
-/// name matched vertices or those declarations. Every edge names the explicit
-/// target relation coordinate. Property values use existing matched bindings,
-/// not newly created property state. This is not standalone CREATE, MERGE,
-/// inline endpoint creation, mixed-relation insertion or write-returning.
+/// Unit statements retain their actual argument table, not a forged MATCH or
+/// an invalid PreparedGraphText. Only a matched input owns graph read syntax.
+#[derive(Clone)]
+pub(crate) enum InsertTextInput {
+    Match(PreparedGraphText),
+    Unit {
+        statement: String,
+        parameters: Vec<GqlParameterSpec>,
+        parameter_offsets: Vec<usize>,
+    },
+}
+
+/// Native bounded CREATE, optionally preceded by MATCH. Standalone CREATE
+/// initializes an empty graph or adds one structure without scanning it. Node
+/// patterns can declare vertices inline in directed chains, reuse a named node,
+/// or create anonymous nodes. A name's first occurrence declares its labels and
+/// properties; later references must be bare. Matched nodes cannot be redeclared.
+///
+/// Every edge names the explicit target relation coordinate. Property values
+/// read matched bindings or typed constants/parameters, not freshly created
+/// property state. There is no MERGE, undirected/quantified creation, arbitrary
+/// mixed-relation insertion, or write-returning in this bounded profile.
 #[derive(Clone)]
 pub struct PreparedGraphInsertText {
-    pub(crate) selection: PreparedGraphText,
+    pub(crate) input: InsertTextInput,
     pub(crate) relation: RelationId,
     pub(crate) vertices: Vec<InsertVertexTemplate>,
     pub(crate) edges: Vec<InsertEdgeTemplate>,
