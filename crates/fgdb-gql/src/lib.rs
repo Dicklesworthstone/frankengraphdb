@@ -7,6 +7,7 @@
 mod aggregation;
 pub mod algebra;
 mod algebra_exec;
+mod deletion;
 mod evidence_artifact;
 mod evidence_cursor;
 mod evidence_limits;
@@ -32,6 +33,10 @@ mod temporal_text;
 mod walk;
 mod write_receipt;
 
+pub use deletion::{
+    GraphDeleteBuildError, GraphDeleteError, GraphDeletePolicy, GraphDeleteProposal,
+    GraphDeleteStats, MAX_GRAPH_DELETE_TARGETS, PreparedGraphDelete,
+};
 pub use temporal_set_text::{
     BoundTemporalGraphSetQuery, GraphTemporalSetTextError, GraphTemporalSetTextErrorKind,
     PreparedTemporalGraphSetText,
