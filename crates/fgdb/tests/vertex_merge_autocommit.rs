@@ -60,7 +60,7 @@ fn autocommit_merge_uses_read_close_for_match_and_write_commit_for_create() {
         let before_match = db.frontier().unwrap();
         let (stats, outcome, completion) = db.execute_graph_vertex_merge_autocommit_governed(
             &txcx, &query, &commit, &definition(7), policy(),
-            |_| panic!("matched MERGE must not allocate"),
+            |_| -> Result<ElementId, ()> { panic!("matched MERGE must not allocate") },
         ).await.unwrap();
         assert_eq!(stats.created_vertices, 0);
         assert_eq!(outcome, GraphVertexMergeOutcome::Matched(VId(1)));
