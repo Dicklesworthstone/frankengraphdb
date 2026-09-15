@@ -98,7 +98,7 @@ pub use evidence_cursor::{
 };
 pub use evidence_limits::{
     GqlEvidenceLimitDimension, GqlEvidenceLimitExceeded, GqlEvidenceLimitedAuditError,
-    GqlEvidenceLimitedDecodeError, GqlEvidenceLimits,
+    GqlEvidenceLimits,
 };
 pub use evidence_page::{
     GQL_EVIDENCE_PAGE_TOKEN_LEN, GqlEvidencePage, GqlEvidencePageAuditError, GqlEvidencePageError,
@@ -120,7 +120,8 @@ pub use mutation::{
     MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation,
 };
 pub use mutation_text::{
-    GraphMutationTextError, GraphMutationTextErrorKind, PreparedGraphMutationText,
+    GraphDeleteTextError, GraphDeleteTextErrorKind, GraphMutationTextError,
+    GraphMutationTextErrorKind, PreparedGraphDeleteText, PreparedGraphMutationText,
 };
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
