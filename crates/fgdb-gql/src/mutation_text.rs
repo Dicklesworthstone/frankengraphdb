@@ -1,8 +1,10 @@
-//! Immutable text-prepared query-selected mutations. The native MATCH parser
-//! owns construction and binding; this facade cannot be executed as a read.
+//! Immutable text-prepared query-selected writes. The native MATCH parser owns
+//! construction and binding; these facades cannot be executed as reads.
 
-use crate::{GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
-    GraphPatternTextErrorKind, PreparedGraphText, GraphIntegerBuildError, GraphIntegerOp};
+use crate::{
+    GraphDeleteBuildError, GraphIntegerBuildError, GraphIntegerOp, GraphMutationAction,
+    GraphMutationBuildError, GraphPatternTextError, GraphPatternTextErrorKind, PreparedGraphText,
+};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 
 #[derive(Clone)]
@@ -24,8 +26,7 @@ pub(crate) enum MutationActionTemplate {
 /// projection is compiler metadata, never a synthesized RETURN query string.
 /// Its original statement bytes are retained only for export and diagnostics.
 /// Actions are simultaneous over one pre-statement overlay, not sequential
-/// expressions observing preceding assignments. Mutations return proposal
-/// statistics through WriteTxn; RETURN and write-returning delivery are absent.
+/// expressions observing preceding assignments.
 #[derive(Clone)]
 pub struct PreparedGraphMutationText {
     pub(crate) selection: PreparedGraphText,
@@ -63,3 +64,42 @@ impl core::fmt::Display for GraphMutationTextError {
     }
 }
 impl core::error::Error for GraphMutationTextError {}
+
+/// Native MATCH ... DELETE preparation. The generated vertex projection is
+/// compiler metadata and is never inserted into the user's source text. Storage
+/// incidence is checked later by the write-capable adapter, not by the parser.
+#[derive(Clone)]
+pub struct PreparedGraphDeleteText {
+    pub(crate) selection: PreparedGraphText,
+    pub(crate) relation: RelationId,
+    pub(crate) targets: Vec<usize>,
+}
+impl core::fmt::Debug for PreparedGraphDeleteText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphDeleteText")
+            .field("targets", &self.targets.len())
+            .field("definition", &"[REDACTED]").finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphDeleteTextError {
+    pub offset: usize,
+    pub kind: GraphDeleteTextErrorKind,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphDeleteTextErrorKind {
+    Query(GraphPatternTextErrorKind),
+    Build(GraphDeleteBuildError),
+}
+impl From<GraphPatternTextError> for GraphDeleteTextError {
+    fn from(error: GraphPatternTextError) -> Self {
+        Self { offset: error.offset, kind: GraphDeleteTextErrorKind::Query(error.kind) }
+    }
+}
+impl core::fmt::Display for GraphDeleteTextError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "graph DELETE text error at byte {}: {:?}", self.offset, self.kind)
+    }
+}
+impl core::error::Error for GraphDeleteTextError {}
