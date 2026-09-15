@@ -32,9 +32,15 @@ mod temporal_aggregate_text;
 mod temporal_set_text;
 mod temporal_text;
 mod vertex_merge;
+mod vertex_upsert;
 mod walk;
 mod write_receipt;
 
+pub use vertex_upsert::{
+    GraphVertexUpsertAction, GraphVertexUpsertBranch, GraphVertexUpsertBuildError,
+    GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
+    MAX_GRAPH_VERTEX_UPSERT_ACTIONS, PreparedGraphVertexUpsert,
+};
 pub use edge_merge::{
     GraphEdgeMergeBuildError, GraphEdgeMergeError, GraphEdgeMergeOutcome,
     GraphEdgeMergePolicy, GraphEdgeMergeRequest, GraphEdgeMergeStats,
