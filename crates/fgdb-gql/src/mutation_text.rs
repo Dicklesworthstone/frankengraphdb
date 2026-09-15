@@ -3,8 +3,8 @@
 
 use crate::insertion::GraphInsertBuildError;
 use crate::{
-    GqlScalarParameter, GraphDeleteBuildError, GraphIntegerBuildError, GraphIntegerOp,
-    GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
+    GqlScalarParameter, GraphDeleteBuildError, GraphEdgeMergeBuildError, GraphIntegerBuildError,
+    GraphIntegerOp, GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
     GraphPatternTextErrorKind, GraphVertexMergeBuildError, PreparedGraphText,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -154,3 +154,44 @@ impl core::fmt::Display for GraphVertexMergeTextError {
     }
 }
 impl core::error::Error for GraphVertexMergeTextError {}
+
+/// Native `MATCH ... MERGE (a)-[:R]->(b)` over already-bound endpoint variables.
+/// Relationship properties are intentionally absent: the current typed edge
+/// MERGE matches relation+endpoints only, so accepting a property map here would
+/// silently misstate pattern identity semantics.
+#[derive(Clone)]
+pub struct PreparedGraphEdgeMergeText {
+    pub(crate) selection: PreparedGraphText,
+    pub(crate) relation: RelationId,
+    pub(crate) source: usize,
+    pub(crate) destination: usize,
+}
+impl core::fmt::Debug for PreparedGraphEdgeMergeText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphEdgeMergeText")
+            .field("definition", &"[REDACTED]").finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphEdgeMergeTextError {
+    pub offset: usize,
+    pub kind: GraphEdgeMergeTextErrorKind,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphEdgeMergeTextErrorKind {
+    Query(GraphPatternTextErrorKind),
+    Build(GraphEdgeMergeBuildError),
+    RelationMismatch,
+}
+impl From<GraphPatternTextError> for GraphEdgeMergeTextError {
+    fn from(error: GraphPatternTextError) -> Self {
+        Self { offset: error.offset, kind: GraphEdgeMergeTextErrorKind::Query(error.kind) }
+    }
+}
+impl core::fmt::Display for GraphEdgeMergeTextError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "graph relationship MERGE text error at byte {}: {:?}", self.offset, self.kind)
+    }
+}
+impl core::error::Error for GraphEdgeMergeTextError {}
