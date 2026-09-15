@@ -27,7 +27,7 @@ impl WriteTxn {
         fgdb_gql::GraphMutationStats,
         fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
     > {
-        self.execute_graph_mutation_returning_governed(database, cx, mutation, policy)
+        self.execute_graph_mutation_governed_inner(database, cx, mutation, policy, false)
             .map(|(stats, _)| stats)
     }
 
@@ -48,6 +48,20 @@ impl WriteTxn {
         cx: &fgdb_types::QueryCx,
         mutation: &fgdb_gql::PreparedGraphMutation,
         policy: fgdb_gql::GraphMutationPolicy,
+    ) -> Result<
+        (fgdb_gql::GraphMutationStats, Vec<VId>),
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
+    > {
+        self.execute_graph_mutation_governed_inner(database, cx, mutation, policy, true)
+    }
+
+    fn execute_graph_mutation_governed_inner<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        mutation: &fgdb_gql::PreparedGraphMutation,
+        policy: fgdb_gql::GraphMutationPolicy,
+        retain_targets: bool,
     ) -> Result<
         (fgdb_gql::GraphMutationStats, Vec<VId>),
         fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
@@ -76,16 +90,20 @@ impl WriteTxn {
                 || cx.checkpoint(),
             )?;
             let stats = proposal.stats();
-            let mut target_set = std::collections::BTreeSet::new();
-            for intent in proposal.intents() {
-                let vertex = match intent {
-                    GraphMutationIntent::Property { vertex, .. }
-                    | GraphMutationIntent::Label { vertex, .. }
-                    | GraphMutationIntent::DetachDelete { vertex } => *vertex,
-                };
-                target_set.insert(vertex);
-            }
-            let targets = target_set.into_iter().collect();
+            let targets = if retain_targets {
+                let mut targets = std::collections::BTreeSet::new();
+                for intent in proposal.intents() {
+                    let vertex = match intent {
+                        GraphMutationIntent::Property { vertex, .. }
+                        | GraphMutationIntent::Label { vertex, .. }
+                        | GraphMutationIntent::DetachDelete { vertex } => *vertex,
+                    };
+                    targets.insert(vertex);
+                }
+                targets.into_iter().collect()
+            } else {
+                Vec::new()
+            };
             let mut batch = WriteBatch::new(mutation.relation());
             for intent in proposal.into_intents() {
                 // Only a private batch is changing here. Cancellation drops it
