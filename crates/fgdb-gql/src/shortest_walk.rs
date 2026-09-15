@@ -82,7 +82,10 @@ impl<'a> GraphShortestWalkCursor<'a> {
         if self.depth >= self.bounds.minimum() {
             for &vertex in &self.frontier {
                 control(GlaExecutionEvent::Work)?;
-                if self.settled.contains(&vertex) {
+                // A vertex settled on a previous admissible layer is no longer
+                // eligible. Equal-depth occurrences remain eligible even after
+                // the first one installs this layer's settled marker.
+                if self.settled.contains(&vertex) && !newly_settled.contains(&vertex) {
                     continue;
                 }
                 control(GlaExecutionEvent::ScratchEntry)?;
