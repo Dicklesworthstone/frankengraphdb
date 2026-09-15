@@ -8,7 +8,8 @@ use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::{GraphInsertPolicy, GraphInsertRequest};
 use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphMutationPolicy, GraphSymbol, GraphSymbolKind,
-    PreparedGraphInsertText, PreparedGraphMutationText,
+    GraphWriteIdentityRequest, GraphWriteProgramPolicy, GraphWriteStatement, GraphWriteStepReceipt,
+    PreparedGraphInsertText, PreparedGraphMutationText, PreparedGraphWriteProgram,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 use std::cell::RefCell;
@@ -40,6 +41,9 @@ fn insert_policy() -> GraphInsertPolicy {
 }
 fn mutation_policy() -> GraphMutationPolicy {
     GraphMutationPolicy::new(query_policy(), 1_000)
+}
+fn program_policy() -> GraphWriteProgramPolicy {
+    GraphWriteProgramPolicy::new(query_policy(), 1_000, 1_000, 1_000)
 }
 async fn seed(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) {
     let mut batch = WriteBatch::new(R);
@@ -187,6 +191,98 @@ fn aborted_success_and_late_failure_never_turn_receipts_into_publication() {
         txn.commit(&mut db, &commit).await.unwrap();
         assert!(db.vertex(VId(777)).unwrap().is_some());
         assert!(db.vertex(VId(600)).unwrap().is_none());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn mixed_program_receipt_escapes_only_after_the_whole_program_is_accepted() {
+    let ((), report) = run_async_under_lab(0x7e71_0004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+
+        let insertion = PreparedGraphInsertText::prepare("CREATE (x:Copy {p:7})", R, symbols)
+            .unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        let mutation = PreparedGraphMutationText::prepare(
+            "MATCH (x:Copy) SET x.p=x.p+1,x:Marked", R, symbols,
+        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        let program = PreparedGraphWriteProgram::prepare(vec![
+            GraphWriteStatement::Insert(insertion.clone()),
+            GraphWriteStatement::Mutation(mutation),
+        ]).unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let receipt = txn.execute_graph_write_program_returning_governed(
+            &mut db,
+            &query,
+            &program,
+            program_policy(),
+            |request| Ok::<_, ()>(match request {
+                GraphWriteIdentityRequest {
+                    statement: 0,
+                    request: GraphInsertRequest::Vertex { .. },
+                } => ElementId::Vertex(VId(900)),
+                _ => unreachable!(),
+            }),
+        ).unwrap();
+        assert_eq!(receipt.stats().completed_statements, 2);
+        assert_eq!(receipt.steps().len(), 2);
+        assert!(matches!(
+            &receipt.steps()[0],
+            GraphWriteStepReceipt::Insert { vertices, edges }
+                if vertices == &[VId(900)] && edges.is_empty()
+        ));
+        assert!(matches!(
+            &receipt.steps()[1],
+            GraphWriteStepReceipt::Mutation { targets } if targets == &[VId(900)]
+        ));
+        assert!(!format!("{receipt:?}").contains("900"));
+        assert!(db.vertex(VId(900)).unwrap().is_none());
+        assert_eq!(
+            txn.vertex(&db, VId(900)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(8))]
+        );
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(
+            db.vertex(VId(900)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(8))]
+        );
+
+        let bad_mutation = PreparedGraphMutationText::prepare(
+            "MATCH (x:Copy) SET x.p=x.p/0", R, symbols,
+        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        let failed_program = PreparedGraphWriteProgram::prepare(vec![
+            GraphWriteStatement::Insert(insertion),
+            GraphWriteStatement::Mutation(bad_mutation),
+        ]).unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let issued = RefCell::new(Vec::new());
+        let failed = txn.execute_graph_write_program_returning_governed(
+            &mut db,
+            &query,
+            &failed_program,
+            program_policy(),
+            |request| {
+                let id = match request {
+                    GraphWriteIdentityRequest {
+                        statement: 0,
+                        request: GraphInsertRequest::Vertex { .. },
+                    } => ElementId::Vertex(VId(901)),
+                    _ => unreachable!(),
+                };
+                issued.borrow_mut().push(id);
+                Ok::<_, ()>(id)
+            },
+        );
+        assert!(failed.is_err());
+        assert_eq!(&*issued.borrow(), &[ElementId::Vertex(VId(901))]);
+        assert!(txn.vertex(&db, VId(901)).unwrap().is_none(), "late program failure rolls back staged creation");
+        txn.abort();
+        assert!(db.vertex(VId(901)).unwrap().is_none());
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
