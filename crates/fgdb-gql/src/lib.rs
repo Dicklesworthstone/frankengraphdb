@@ -30,9 +30,14 @@ mod shortest_walk;
 mod temporal_aggregate_text;
 mod temporal_set_text;
 mod temporal_text;
+mod vertex_merge;
 mod walk;
 mod write_receipt;
 
+pub use vertex_merge::{
+    GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
+    GraphVertexMergePolicy, GraphVertexMergeStats, PreparedGraphVertexMerge,
+};
 pub use deletion::{
     GraphDeleteBuildError, GraphDeleteError, GraphDeletePolicy, GraphDeleteProposal,
     GraphDeleteStats, MAX_GRAPH_DELETE_TARGETS, PreparedGraphDelete,
