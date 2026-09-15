@@ -6,6 +6,7 @@ mod aggregate_input;
 mod deletion;
 mod insertion;
 mod integer;
+mod merge;
 mod return_projection;
 
 use super::*;
