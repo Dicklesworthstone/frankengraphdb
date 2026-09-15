@@ -4,6 +4,7 @@
 
 mod aggregate_input;
 mod deletion;
+mod edge_merge;
 mod insertion;
 mod integer;
 mod merge;
