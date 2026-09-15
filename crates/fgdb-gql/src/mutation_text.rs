@@ -1,11 +1,12 @@
-//! Immutable text-prepared query-selected writes. The native MATCH parser owns
+//! Immutable text-prepared query-selected writes. The native graph lexer owns
 //! construction and binding; these facades cannot be executed as reads.
 
 use crate::{
-    GraphDeleteBuildError, GraphIntegerBuildError, GraphIntegerOp, GraphMutationAction,
-    GraphMutationBuildError, GraphPatternTextError, GraphPatternTextErrorKind, PreparedGraphText,
+    GqlScalarParameter, GraphDeleteBuildError, GraphInsertBuildError, GraphIntegerBuildError,
+    GraphIntegerOp, GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
+    GraphPatternTextErrorKind, GraphVertexMergeBuildError, PreparedGraphText,
 };
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 
 #[derive(Clone)]
 pub(crate) enum MutationIntegerTemplateOp {
@@ -103,3 +104,52 @@ impl core::fmt::Display for GraphDeleteTextError {
     }
 }
 impl core::error::Error for GraphDeleteTextError {}
+
+#[derive(Clone)]
+pub(crate) enum VertexMergeValueTemplate {
+    Bound(GqlScalarParameter),
+    Parameter { index: usize, at: usize },
+}
+
+/// Native bounded `MERGE (n[:Label...] {key:value,...})`. The same property
+/// values drive exact-equality MATCH predicates and the single-vertex creation
+/// template. This profile intentionally excludes relationship patterns and
+/// ON MATCH/ON CREATE actions; those require their own ordered-write semantics.
+#[derive(Clone)]
+pub struct PreparedGraphVertexMergeText {
+    pub(crate) selection: PreparedGraphText,
+    pub(crate) relation: RelationId,
+    pub(crate) labels: Vec<LabelId>,
+    pub(crate) properties: Vec<(PropertyKeyId, VertexMergeValueTemplate)>,
+}
+impl core::fmt::Debug for PreparedGraphVertexMergeText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphVertexMergeText")
+            .field("labels", &self.labels.len())
+            .field("properties", &self.properties.len())
+            .field("definition", &"[REDACTED]").finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphVertexMergeTextError {
+    pub offset: usize,
+    pub kind: GraphVertexMergeTextErrorKind,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphVertexMergeTextErrorKind {
+    Query(GraphPatternTextErrorKind),
+    InsertBuild(GraphInsertBuildError),
+    MergeBuild(GraphVertexMergeBuildError),
+}
+impl From<GraphPatternTextError> for GraphVertexMergeTextError {
+    fn from(error: GraphPatternTextError) -> Self {
+        Self { offset: error.offset, kind: GraphVertexMergeTextErrorKind::Query(error.kind) }
+    }
+}
+impl core::fmt::Display for GraphVertexMergeTextError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "graph vertex MERGE text error at byte {}: {:?}", self.offset, self.kind)
+    }
+}
+impl core::error::Error for GraphVertexMergeTextError {}
