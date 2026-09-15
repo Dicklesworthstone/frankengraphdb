@@ -27,7 +27,7 @@ impl WriteTxn {
         fgdb_gql::insertion::GraphInsertStats,
         fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>, Box<asupersync::error::Error>>,
     > {
-        self.execute_graph_insert_returning_governed(database, cx, insertion, policy, allocate)
+        self.execute_graph_insert_governed_inner(database, cx, insertion, policy, allocate, false)
             .map(|(stats, _, _)| stats)
     }
 
@@ -50,6 +50,21 @@ impl WriteTxn {
         insertion: &fgdb_gql::insertion::PreparedGraphInsert,
         policy: fgdb_gql::insertion::GraphInsertPolicy,
         allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+    ) -> Result<
+        (fgdb_gql::insertion::GraphInsertStats, Vec<VId>, Vec<EId>),
+        fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>, Box<asupersync::error::Error>>,
+    > {
+        self.execute_graph_insert_governed_inner(database, cx, insertion, policy, allocate, true)
+    }
+
+    fn execute_graph_insert_governed_inner<V: Vfs + Clone, A>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        insertion: &fgdb_gql::insertion::PreparedGraphInsert,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+        allocate: impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, A>,
+        retain_identities: bool,
     ) -> Result<
         (fgdb_gql::insertion::GraphInsertStats, Vec<VId>, Vec<EId>),
         fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, A>, Box<asupersync::error::Error>>,
@@ -80,25 +95,27 @@ impl WriteTxn {
                 || cx.checkpoint(),
             )?;
             let stats = proposal.stats();
-            let mut vertices = Vec::with_capacity(stats.created_vertices as usize);
-            let mut edges = Vec::with_capacity(stats.created_edges as usize);
+            // Preserve the preexisting stats-only physical path: identity result
+            // vectors exist only for the explicit returning API.
+            let mut vertices = retain_identities.then(Vec::new);
+            let mut edges = retain_identities.then(Vec::new);
             let mut batch = WriteBatch::new(insertion.relation());
             for intent in proposal.into_intents() {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                 match intent {
                     GraphInsertIntent::Vertex { vertex, labels, properties } => {
-                        vertices.push(vertex);
+                        if let Some(vertices) = &mut vertices { vertices.push(vertex); }
                         batch.create_vertex(vertex, labels, properties);
                     }
                     GraphInsertIntent::Edge { edge, source, destination, properties } => {
-                        edges.push(edge);
+                        if let Some(edges) = &mut edges { edges.push(edge); }
                         batch.add_edge(edge, source, destination, properties);
                     }
                 }
             }
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             if !batch.is_empty() { self.write(database, batch).map_err(source)?; }
-            Ok((stats, vertices, edges))
+            Ok((stats, vertices.unwrap_or_default(), edges.unwrap_or_default()))
         })
     }
 }
