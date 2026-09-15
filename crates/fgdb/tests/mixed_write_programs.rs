@@ -9,6 +9,7 @@ use fgdb_gql::{
     GqlParameters, GqlQueryPolicy, GraphMutationProgramError, GraphSymbol, GraphSymbolKind,
     GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteProgramPolicy,
     GraphWriteStatement, PreparedGraphInsertText, PreparedGraphMutationText, PreparedGraphWriteProgram,
+    PreparedGraphWriteProgramTemplate,
 };
 use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId,
     EmbeddedTxnCompletion, EmbeddedTxnState, PurposeContexts, VId};
@@ -39,7 +40,8 @@ fn policy() -> GraphWriteProgramPolicy {
 }
 fn program(texts: &[&str]) -> PreparedGraphWriteProgram {
     let statements: Vec<GraphWriteStatement> = texts.iter().map(|text| {
-        if text.starts_with("CREATE") {
+        // Fixture dispatch only; the public API composes explicitly typed steps.
+        if text.starts_with("CREATE") || text.contains(" CREATE ") {
             PreparedGraphInsertText::prepare(text, R, symbols).unwrap()
                 .bind_parameters(&GqlParameters::new()).unwrap().into()
         } else {
@@ -288,6 +290,43 @@ fn deleting_a_transient_creation_does_not_license_identity_revival() {
         txn.commit(&mut db, &commit).await.unwrap();
         assert!(db.vertex(VId(1000)).unwrap().is_none());
         assert!(db.vertex(VId(777)).unwrap().is_some());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn reusable_templates_bind_before_execution_and_compose_across_invocations() {
+    let ((), report) = run_async_under_lab(0x6d17_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit(); let cx = contexts.query(); let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let template = PreparedGraphWriteProgramTemplate::prepare(vec![
+            PreparedGraphInsertText::prepare("CREATE (x:New {p:$seed})", R, symbols).unwrap().into(),
+            PreparedGraphMutationText::prepare("MATCH (x:New) SET x.p=x.p+$step", R, symbols).unwrap().into(),
+        ]).unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let first = template.bind_parameters(&GqlParameters::new().with_int64("seed", 5).unwrap().with_int64("step", 2).unwrap()).unwrap();
+        let stats = txn.execute_graph_write_program_governed(&mut db, &cx, &first, policy(), identity).unwrap();
+        assert_eq!((stats.created_vertices, stats.mutation_effects), (1, 1));
+        let before = txn.staged_effect_digest().unwrap();
+        assert!(template.bind_parameters(&GqlParameters::new().with_int64("seed", 10).unwrap()).is_err());
+        assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        let second = template.bind_parameters(&GqlParameters::new().with_int64("seed", 10).unwrap().with_int64("step", 3).unwrap()).unwrap();
+        let stats = txn.execute_graph_write_program_governed(&mut db, &cx, &second, policy(), |request| {
+            // Statement indices are program-local; the host adds an invocation
+            // namespace rather than reusing the first program's issued IDs.
+            Ok::<_, &'static str>(match identity(request)? {
+                ElementId::Vertex(id) => ElementId::Vertex(VId(id.0 + 10_000)),
+                ElementId::Edge(id) => ElementId::Edge(EId(id.0 + 10_000)),
+            })
+        }).unwrap();
+        assert_eq!((stats.created_vertices, stats.mutation_effects), (1, 2));
+        assert!(db.vertices().unwrap().is_empty());
+        txn.commit(&mut db, &commit).await.unwrap();
+        assert_eq!(db.vertex(VId(1000)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(10))]);
+        assert_eq!(db.vertex(VId(11000)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(13))]);
+        assert_eq!(db.frontier().unwrap().0, 1);
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
