@@ -106,8 +106,11 @@ fn except_and_intersect_preserve_operand_execution_at_selected_snapshot() {
             batch.create_vertex(VId(id), vec![], vec![(P, CanonicalScalar::Int(value))]);
         }
         let seq = db.write(&commit, batch).await.unwrap();
+        // INTERSECT binds more tightly than EXCEPT in the shared set parser, so
+        // this is (A INTERSECT B) EXCEPT C without hiding the temporal selector
+        // inside a parenthesized nested scope.
         let template = PreparedTemporalGraphSetText::prepare(
-            "(MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at WHERE a.p >= 2 RETURN a.p AS p INTERSECT MATCH (b) WHERE b.p <= 3 RETURN b.p AS p) EXCEPT MATCH (c) WHERE c.p = 2 RETURN c.p AS p ORDER BY p",
+            "MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at WHERE a.p >= 2 RETURN a.p AS p INTERSECT MATCH (b) WHERE b.p <= 3 RETURN b.p AS p EXCEPT MATCH (c) WHERE c.p = 2 RETURN c.p AS p ORDER BY p",
             symbols,
         ).unwrap();
         let bound = template.bind_parameters(&GqlParameters::new().with_uint64("at", seq.0).unwrap()).unwrap();
