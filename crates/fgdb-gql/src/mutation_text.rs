@@ -1,9 +1,10 @@
 //! Immutable text-prepared query-selected writes. The native graph lexer owns
 //! construction and binding; these facades cannot be executed as reads.
 
+use crate::insertion::GraphInsertBuildError;
 use crate::{
-    GqlScalarParameter, GraphDeleteBuildError, GraphInsertBuildError, GraphIntegerBuildError,
-    GraphIntegerOp, GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
+    GqlScalarParameter, GraphDeleteBuildError, GraphIntegerBuildError, GraphIntegerOp,
+    GraphMutationAction, GraphMutationBuildError, GraphPatternTextError,
     GraphPatternTextErrorKind, GraphVertexMergeBuildError, PreparedGraphText,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
