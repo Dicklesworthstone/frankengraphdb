@@ -88,7 +88,10 @@ impl GraphWriteProgramReceipt {
 impl core::fmt::Debug for GraphWriteProgramReceipt {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GraphWriteProgramReceipt")
-            .field("stats", &self.stats)
+            .field("completed_statements", &self.stats.completed_statements)
+            .field("mutation_effects", &self.stats.mutation_effects)
+            .field("created_vertices", &self.stats.created_vertices)
+            .field("created_edges", &self.stats.created_edges)
             .field("steps", &self.steps)
             .finish()
     }
