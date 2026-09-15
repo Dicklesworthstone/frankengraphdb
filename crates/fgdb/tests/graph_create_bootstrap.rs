@@ -61,6 +61,8 @@ fn verify_bootstrap(db: &Database<MemVfs>, base: u128, seed: i64) {
     for (offset, source, destination) in [(0, base, base + 1), (1, base + 1, base), (2, base, base)] {
         let edge = db.edge(EId(base + offset)).unwrap().unwrap();
         assert_eq!((edge.entry.src, edge.entry.dst, edge.entry.relation), (VId(source), VId(destination), R));
+        let properties = if offset == 0 { vec![(P, CanonicalScalar::Int(seed))] } else { vec![] };
+        assert_eq!(edge.props, properties);
     }
 }
 
@@ -94,10 +96,21 @@ fn empty_database_bootstrap_and_dependent_match_publish_once_and_reopen_with_his
         let attached = txn.execute_graph_insert_governed(&mut db, &cx, &attach,
             GraphInsertPolicy::new(read_policy(), 10, 10), |request| allocator(1_000, request)).unwrap();
         assert_eq!((attached.selection.result_rows, attached.created_vertices, attached.created_edges), (1, 1, 1));
-        let expected_vertices = txn.vertices(&db).unwrap();
-        let expected_edges = txn.edges(&db).unwrap();
+        let mut expected_vertices = txn.vertices(&db).unwrap();
+        let mut expected_edges = txn.edges(&db).unwrap();
         let committed = txn.finish(&mut db, &commit).await.unwrap().commit_seq().unwrap();
         assert_eq!(committed, CommitSeq(basis.0 + 1));
+        // All rows were created in this workspace. Staged rows carry the basis
+        // placeholder; publication supplies the actual sequence, not a new
+        // birth ordinal, property value, endpoint or retirement state.
+        for row in &mut expected_vertices {
+            assert_eq!(row.created_at, basis);
+            row.created_at = committed;
+        }
+        for row in &mut expected_edges {
+            assert_eq!(row.entry.created_at, basis);
+            row.entry.created_at = committed;
+        }
         assert_eq!(db.vertices().unwrap(), expected_vertices);
         assert_eq!(db.edges().unwrap(), expected_edges);
         verify_bootstrap(&db, 100, 10); verify_bootstrap(&db, 200, 20);
