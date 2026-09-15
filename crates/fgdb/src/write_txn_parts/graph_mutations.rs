@@ -27,6 +27,31 @@ impl WriteTxn {
         fgdb_gql::GraphMutationStats,
         fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
     > {
+        self.execute_graph_mutation_returning_governed(database, cx, mutation, policy)
+            .map(|(stats, _)| stats)
+    }
+
+    /// Stage the same simultaneous mutation and return the distinct vertex IDs
+    /// whose canonical proposal contains at least one property, label or detach-
+    /// delete intent. IDs are sorted by identity and appear once even when one
+    /// vertex has several fields changed or many MATCH occurrences collapse to
+    /// the same assignment.
+    ///
+    /// The returned IDs describe the accepted STAGED statement, not durable
+    /// state and not necessarily changed storage rows: an equal-to-current SET
+    /// can later normalize away during ordinary write preparation. The target
+    /// vector is bounded by `max_effects` and is returned only after synchronous
+    /// staging succeeds. Failure exposes no partial target receipt.
+    pub fn execute_graph_mutation_returning_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        mutation: &fgdb_gql::PreparedGraphMutation,
+        policy: fgdb_gql::GraphMutationPolicy,
+    ) -> Result<
+        (fgdb_gql::GraphMutationStats, Vec<VId>),
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
+    > {
         use fgdb_gql::{GraphMutationError, GraphMutationIntent, GqlQueryError};
         let source = |error| GqlQueryError::Source(GraphMutationError::Source(error));
         // Even an empty/zero-budget selection cannot bypass ownership, health,
@@ -51,6 +76,16 @@ impl WriteTxn {
                 || cx.checkpoint(),
             )?;
             let stats = proposal.stats();
+            let mut target_set = std::collections::BTreeSet::new();
+            for intent in proposal.intents() {
+                let vertex = match intent {
+                    GraphMutationIntent::Property { vertex, .. }
+                    | GraphMutationIntent::Label { vertex, .. }
+                    | GraphMutationIntent::DetachDelete { vertex } => *vertex,
+                };
+                target_set.insert(vertex);
+            }
+            let targets = target_set.into_iter().collect();
             let mut batch = WriteBatch::new(mutation.relation());
             for intent in proposal.into_intents() {
                 // Only a private batch is changing here. Cancellation drops it
@@ -72,7 +107,7 @@ impl WriteTxn {
             // Never report a new interruption after the workspace has changed.
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             if !batch.is_empty() { self.write(database, batch).map_err(source)?; }
-            Ok(stats)
+            Ok((stats, targets))
         })
     }
 }
