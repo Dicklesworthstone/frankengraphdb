@@ -27,6 +27,11 @@ mod set_ops;
 mod set_text;
 mod walk;
 
+pub use mutation_program::mixed::{
+    GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteProgramPolicy,
+    GraphWriteProgramStats, GraphWriteStatement, GraphWriteStepError, GraphWriteStepStats,
+    PreparedGraphWriteProgram,
+};
 pub use insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind, PreparedGraphInsertText};
 pub use mutation_program_template::{
     GraphMutationProgramTemplateError, PreparedGraphMutationProgramTemplate,

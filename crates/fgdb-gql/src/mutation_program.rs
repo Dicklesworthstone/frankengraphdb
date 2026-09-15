@@ -5,6 +5,8 @@
 //! assignments WITHIN one statement retain their simultaneous semantics.
 //! The fgdb WriteTxn adapter owns all-or-nothing workspace installation.
 
+pub(crate) mod mixed;
+
 use crate::{
     GlaExecutionStats, GlaLimitDimension, GqlBudgetDimension, GqlExecutionStats,
     GqlQueryError, GqlQueryPolicy, GraphMutationError, GraphMutationPolicy,
