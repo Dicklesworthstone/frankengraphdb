@@ -1,9 +1,10 @@
 //! Native bounded vertex MERGE frontend laws.
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::insertion::GraphInsertBuildError;
 use fgdb_gql::{
-    GqlParameterType, GqlParameters, GraphInsertBuildError, GraphPatternTextErrorKind,
-    GraphSymbol, GraphSymbolKind, GraphVertexMergeTextErrorKind, PreparedGraphVertexMergeText,
+    GqlParameterType, GqlParameters, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
+    GraphVertexMergeTextErrorKind, PreparedGraphVertexMergeText,
 };
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
 use std::cell::Cell;
