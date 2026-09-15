@@ -98,7 +98,7 @@ pub use evidence_cursor::{
 };
 pub use evidence_limits::{
     GqlEvidenceLimitDimension, GqlEvidenceLimitExceeded, GqlEvidenceLimitedAuditError,
-    GqlEvidenceLimits,
+    GqlEvidenceLimitedDecodeError, GqlEvidenceLimits,
 };
 pub use evidence_page::{
     GQL_EVIDENCE_PAGE_TOKEN_LEN, GqlEvidencePage, GqlEvidencePageAuditError, GqlEvidencePageError,
