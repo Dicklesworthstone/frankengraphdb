@@ -288,7 +288,7 @@ impl PreparedTemporalGraphText {
             && declarations.iter().find(|(declared, _)| *declared == name)
                 .is_some_and(|(_, kind)| *kind != GqlParameterType::UInt64)
         {
-            let offset = match selector { SequenceSelector::Parameter { offset, .. } => offset, _ => start };
+            let offset = match &selector { SequenceSelector::Parameter { offset, .. } => *offset, _ => start };
             return Err(failure(offset, GraphTemporalTextErrorKind::ConflictingParameterType));
         }
         let mut blanked = statement.as_bytes().to_vec();
@@ -308,7 +308,7 @@ impl PreparedTemporalGraphText {
         if let Some(name) = temporal_name {
             if let Some(spec) = parameters.iter_mut().find(|spec| spec.name == name) {
                 if spec.parameter_type != GqlParameterType::UInt64 {
-                    let offset = match selector { SequenceSelector::Parameter { offset, .. } => offset, _ => start };
+                    let offset = match &selector { SequenceSelector::Parameter { offset, .. } => *offset, _ => start };
                     return Err(failure(offset, GraphTemporalTextErrorKind::ConflictingParameterType));
                 }
                 spec.occurrences += 1;
