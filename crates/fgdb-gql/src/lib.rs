@@ -120,9 +120,10 @@ pub use mutation::{
     MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation,
 };
 pub use mutation_text::{
-    GraphDeleteTextError, GraphDeleteTextErrorKind, GraphMutationTextError,
-    GraphMutationTextErrorKind, GraphVertexMergeTextError, GraphVertexMergeTextErrorKind,
-    PreparedGraphDeleteText, PreparedGraphMutationText, PreparedGraphVertexMergeText,
+    GraphDeleteTextError, GraphDeleteTextErrorKind, GraphEdgeMergeTextError,
+    GraphEdgeMergeTextErrorKind, GraphMutationTextError, GraphMutationTextErrorKind,
+    GraphVertexMergeTextError, GraphVertexMergeTextErrorKind, PreparedGraphDeleteText,
+    PreparedGraphEdgeMergeText, PreparedGraphMutationText, PreparedGraphVertexMergeText,
 };
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
