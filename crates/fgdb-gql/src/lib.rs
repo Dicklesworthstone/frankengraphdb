@@ -27,10 +27,15 @@ mod set_ops;
 mod set_text;
 mod shortest_walk;
 mod temporal_aggregate_text;
+mod temporal_set_text;
 mod temporal_text;
 mod walk;
 mod write_receipt;
 
+pub use temporal_set_text::{
+    BoundTemporalGraphSetQuery, GraphTemporalSetTextError, GraphTemporalSetTextErrorKind,
+    PreparedTemporalGraphSetText,
+};
 pub use temporal_aggregate_text::{
     BoundTemporalGraphAggregateQuery, PreparedTemporalGraphAggregateText,
 };
