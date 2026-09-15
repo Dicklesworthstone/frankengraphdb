@@ -45,6 +45,18 @@ impl<V: Vfs + Clone> Database<V> {
             })?;
         cx.with_restriction(|| execute_at(self, aggregate, as_of, policy, || cx.checkpoint()))
     }
+
+    /// Execute one bound temporal aggregate through the exact historical
+    /// aggregate path above. The text wrapper selects only `as_of`; it neither
+    /// re-admits the source nor creates a second grouping/resource contract.
+    pub fn execute_temporal_graph_aggregate_text_governed(
+        &self,
+        cx: &QueryCx,
+        query: &fgdb_gql::BoundTemporalGraphAggregateQuery,
+        policy: GqlQueryPolicy,
+    ) -> AggregateResult<GqlError> {
+        self.execute_graph_aggregate_governed_at(cx, query.aggregate(), query.as_of(), policy)
+    }
 }
 
 impl EmbeddedReadView {
@@ -69,6 +81,17 @@ impl EmbeddedReadView {
             GqlQueryError::Source(GraphAggregateError::Source(GqlError::Read(error)))
         })?;
         cx.with_restriction(|| execute_at(self, aggregate, as_of, policy, || cx.checkpoint()))
+    }
+
+    /// Pinned views may move backward only within the retained generation they
+    /// own. The existing `_at` frontier check remains the authority.
+    pub fn execute_temporal_graph_aggregate_text_governed(
+        &self,
+        cx: &QueryCx,
+        query: &fgdb_gql::BoundTemporalGraphAggregateQuery,
+        policy: GqlQueryPolicy,
+    ) -> AggregateResult<GqlError> {
+        self.execute_graph_aggregate_governed_at(cx, query.aggregate(), query.as_of(), policy)
     }
 }
 
