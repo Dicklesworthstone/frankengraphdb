@@ -1,12 +1,11 @@
 //! Native bounded single-vertex MERGE on the shared graph-text lexer.
 
 use super::*;
-use crate::insertion::{GraphInsertVertex, PreparedGraphInsert};
+use crate::insertion::{GraphInsertBuildError, GraphInsertVertex, PreparedGraphInsert};
 use crate::mutation_text::VertexMergeValueTemplate;
 use crate::{
-    GraphInsertBuildError, GraphMutationValue, GraphVertexMergeBuildError,
-    GraphVertexMergeTextError, GraphVertexMergeTextErrorKind, PreparedGraphVertexMerge,
-    PreparedGraphVertexMergeText,
+    GraphMutationValue, GraphVertexMergeBuildError, GraphVertexMergeTextError,
+    GraphVertexMergeTextErrorKind, PreparedGraphVertexMerge, PreparedGraphVertexMergeText,
 };
 
 struct MergeProperty<'a> {
