@@ -1,7 +1,9 @@
-//! Query-selected graph creation through the existing GLA and write pipeline.
+//! Graph creation through the existing GLA and write pipeline.
 //!
 //! Every selected occurrence creates its own vertices and edges. A declaration
 //! can connect a matched vertex to a vertex created for that SAME occurrence.
+//! Standalone creation consumes the relational unit: one zero-column occurrence,
+//! not a synthetic graph vertex, a scan, or an empty match that creates nothing.
 //! Properties are frozen before identity allocation. The caller supplies fresh
 //! typed identities; no identity is inferred from graph size, time or row data.
 //! Proposals are private staging inputs, not durable effects or commit receipts.
@@ -67,7 +69,8 @@ impl core::fmt::Display for GraphInsertBuildError {
 impl core::error::Error for GraphInsertBuildError {}
 
 /// Calls occur in canonical selected-row order: vertices, then edges per row.
-/// A request is not an ID and grants no allocation authority by itself.
+/// Standalone creation has exactly row zero. A request is not an ID and grants
+/// no allocation authority by itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphInsertRequest {
     Vertex { row: usize, vertex: usize },
@@ -133,6 +136,7 @@ impl GraphInsertPolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphInsertStats {
+    /// Standalone creation admits zero graph records and one unit occurrence.
     pub selection: GqlExecutionStats,
     pub evaluator: GlaExecutionStats,
     pub created_vertices: u64,
@@ -182,7 +186,8 @@ struct Edge { source: GraphInsertEndpoint, destination: GraphInsertEndpoint, pro
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphInsert {
-    selection: PreparedGraphPattern<GraphValueRow>,
+    /// None is the relational unit, not an empty MATCH result.
+    selection: Option<PreparedGraphPattern<GraphValueRow>>,
     relation: RelationId,
     vertices: Vec<Vertex>,
     edges: Vec<Edge>,
@@ -190,7 +195,8 @@ pub struct PreparedGraphInsert {
 impl core::fmt::Debug for PreparedGraphInsert {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphInsert").field("vertices_per_row", &self.vertices.len())
-            .field("edges_per_row", &self.edges.len()).field("definition", &"[REDACTED]").finish()
+            .field("edges_per_row", &self.edges.len()).field("standalone", &self.selection.is_none())
+            .field("definition", &"[REDACTED]").finish()
     }
 }
 impl PreparedGraphInsert {
@@ -200,6 +206,23 @@ impl PreparedGraphInsert {
     /// All created edges use the explicit WriteBatch relation coordinate.
     pub fn prepare(
         selection: PreparedGraphPattern<GraphValueRow>, relation: RelationId,
+        vertices: Vec<GraphInsertVertex>, edges: Vec<GraphInsertEdge>,
+    ) -> Result<Self, GraphInsertBuildError> {
+        Self::prepare_input(Some(selection), relation, vertices, edges)
+    }
+
+    /// Create one structure without scanning the graph. The source schema is
+    /// empty, so every column reference (even in an unselected CASE branch)
+    /// refuses during preparation. Edges may refer to the created vertices.
+    /// Constants and already-bound scalar programs use the ordinary collector.
+    pub fn prepare_standalone(
+        relation: RelationId, vertices: Vec<GraphInsertVertex>, edges: Vec<GraphInsertEdge>,
+    ) -> Result<Self, GraphInsertBuildError> {
+        Self::prepare_input(None, relation, vertices, edges)
+    }
+
+    fn prepare_input(
+        selection: Option<PreparedGraphPattern<GraphValueRow>>, relation: RelationId,
         vertices: Vec<GraphInsertVertex>, edges: Vec<GraphInsertEdge>,
     ) -> Result<Self, GraphInsertBuildError> {
         let declarations = vertices.len().saturating_add(edges.len());
@@ -213,7 +236,7 @@ impl PreparedGraphInsert {
         if fields > MAX_GRAPH_INSERT_FIELDS {
             return Err(GraphInsertBuildError::TooManyFields { limit: MAX_GRAPH_INSERT_FIELDS, observed: fields });
         }
-        let columns = selection.value_columns();
+        let columns = selection.as_ref().map_or(&[][..], |pattern| pattern.value_columns());
         for (edge, declaration) in edges.iter().enumerate() {
             for endpoint in [declaration.source, declaration.destination] {
                 match endpoint {
@@ -251,8 +274,9 @@ impl PreparedGraphInsert {
         Ok(Self { selection, relation, vertices: bound_vertices, edges: bound_edges })
     }
 
+    /// None denotes standalone creation with one zero-column input occurrence.
     #[must_use]
-    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> { &self.selection }
+    pub fn selection(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> { self.selection.as_ref() }
     #[must_use]
     pub const fn relation(&self) -> RelationId { self.relation }
     #[must_use]
@@ -262,8 +286,10 @@ impl PreparedGraphInsert {
 
     /// Execute the frozen selection once; validate every row/endpoint/property;
     /// then allocate typed IDs and assemble one complete private proposal.
+    /// The source callback is not called for standalone creation: its unit
+    /// occurrence consumes the selected-row allowance but admits no graph rows.
     /// No allocator call precedes data validation and creation-count admission.
-    /// Empty selections allocate no IDs. Duplicate occurrences are NOT merged.
+    /// Empty MATCH selections allocate no IDs. Duplicate occurrences are NOT merged.
     ///
     /// Allocators must supply fresh identities under the host's identity policy.
     /// Already issued IDs are not reclaimed on failure or cancellation. Duplicate
@@ -282,11 +308,17 @@ impl PreparedGraphInsert {
     }
 
     /// Application definition, not a durable effect encoding or allocation log.
+    /// Existing MATCH definitions retain their bytes. Unit-input definitions
+    /// have a distinct domain and cannot collide with a graph-selected template.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"fgdb:query-graph-insert:v1\0".to_vec();
+        let mut bytes = if self.selection.is_some() {
+            b"fgdb:query-graph-insert:v1\0".to_vec()
+        } else {
+            b"fgdb:standalone-graph-insert:v1\0".to_vec()
+        };
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
-        let selection = self.selection.canonical_bytes();
+        let selection = self.selection.as_ref().map(|pattern| pattern.canonical_bytes()).unwrap_or_default();
         bytes.extend_from_slice(&(selection.len() as u64).to_be_bytes());
         bytes.extend_from_slice(&selection);
         bytes.extend_from_slice(&(self.vertices.len() as u64).to_be_bytes());
