@@ -8,6 +8,7 @@ mod aggregation;
 pub mod algebra;
 mod algebra_exec;
 mod deletion;
+mod edge_merge;
 mod evidence_artifact;
 mod evidence_cursor;
 mod evidence_limits;
@@ -34,6 +35,11 @@ mod vertex_merge;
 mod walk;
 mod write_receipt;
 
+pub use edge_merge::{
+    GraphEdgeMergeBuildError, GraphEdgeMergeError, GraphEdgeMergeOutcome,
+    GraphEdgeMergePolicy, GraphEdgeMergeRequest, GraphEdgeMergeStats,
+    MAX_GRAPH_EDGE_MERGE_PROPERTIES, PreparedGraphEdgeMerge,
+};
 pub use vertex_merge::{
     GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
     GraphVertexMergePolicy, GraphVertexMergeStats, PreparedGraphVertexMerge,
