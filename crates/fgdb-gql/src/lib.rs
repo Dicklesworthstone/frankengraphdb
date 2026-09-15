@@ -26,7 +26,9 @@ mod prepared;
 mod set_ops;
 mod set_text;
 mod walk;
+mod write_receipt;
 
+pub use write_receipt::{GraphWriteProgramReceipt, GraphWriteStepReceipt};
 pub use mutation_program_template::mixed::{
     GraphWriteProgramTemplateError, GraphWriteTemplateStatement, PreparedGraphWriteProgramTemplate,
 };
