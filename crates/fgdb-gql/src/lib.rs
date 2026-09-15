@@ -27,6 +27,9 @@ mod set_ops;
 mod set_text;
 mod walk;
 
+pub use mutation_program_template::mixed::{
+    GraphWriteProgramTemplateError, GraphWriteTemplateStatement, PreparedGraphWriteProgramTemplate,
+};
 pub use mutation_program::mixed::{
     GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteProgramPolicy,
     GraphWriteProgramStats, GraphWriteStatement, GraphWriteStepError, GraphWriteStepStats,

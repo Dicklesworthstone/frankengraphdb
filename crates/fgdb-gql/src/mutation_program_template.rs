@@ -4,10 +4,13 @@
 //! composes those already-checked definitions; it does not parse a second script
 //! language, choose an ambient catalog or grant storage authority.
 
+pub(crate) mod mixed;
+
 use crate::{
     GqlParameterSpec, GqlParameters, GraphMutationProgramBuildError, GraphMutationTextError,
     MAX_GRAPH_MUTATION_STATEMENTS, PreparedGraphMutationProgram, PreparedGraphMutationText,
 };
+use fgdb_delta_types::RelationId;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +46,68 @@ impl core::error::Error for GraphMutationProgramTemplateError {
     }
 }
 
+/// Shared schema law for mutation-only and mixed write programs. The iterator
+/// borrows already-prepared schemas and never copies/reparses source text.
+fn program_parameters<'a>(
+    inputs: impl ExactSizeIterator<Item = (RelationId, &'a [GqlParameterSpec])>,
+) -> Result<Vec<GqlParameterSpec>, GraphMutationProgramTemplateError> {
+    use GraphMutationProgramTemplateError as Error;
+    let count = inputs.len();
+    if count == 0 { return Err(Error::Definition(GraphMutationProgramBuildError::Empty)); }
+    if count > MAX_GRAPH_MUTATION_STATEMENTS {
+        return Err(Error::Definition(GraphMutationProgramBuildError::TooManyStatements {
+            limit: MAX_GRAPH_MUTATION_STATEMENTS, observed: count,
+        }));
+    }
+    let mut relation = None;
+    let mut parameters: Vec<GqlParameterSpec> = Vec::new();
+    let mut origins = Vec::new();
+    let mut index = BTreeMap::<String, usize>::new();
+    for (statement, (coordinate, schema)) in inputs.enumerate() {
+        if let Some(expected) = relation {
+            if coordinate != expected {
+                return Err(Error::Definition(GraphMutationProgramBuildError::MixedRelation { statement }));
+            }
+        } else { relation = Some(coordinate); }
+        for spec in schema {
+            if let Some(&at) = index.get(&spec.name) {
+                let previous = &mut parameters[at];
+                if previous.parameter_type != spec.parameter_type {
+                    return Err(Error::ConflictingParameterTypes {
+                        parameter: at, first_statement: origins[at], statement,
+                    });
+                }
+                // Each input's shared lexer caps occurrences; 64 admitted
+                // statements cannot overflow usize even on wasm32.
+                previous.occurrences += spec.occurrences;
+                previous.requires_positive |= spec.requires_positive;
+            } else {
+                index.insert(spec.name.clone(), parameters.len());
+                origins.push(statement);
+                parameters.push(spec.clone());
+            }
+        }
+    }
+    Ok(parameters)
+}
+
+fn check_program_arguments(parameters: &[GqlParameterSpec], arguments: &GqlParameters)
+    -> Result<(), GraphMutationProgramTemplateError> {
+    let recognized = parameters.iter().filter(|spec| arguments.get(&spec.name).is_some()).count();
+    if recognized != arguments.len() { return Err(GraphMutationProgramTemplateError::UnexpectedArguments); }
+    Ok(())
+}
+fn local_arguments(schema: &[GqlParameterSpec], arguments: &GqlParameters) -> GqlParameters {
+    let mut local = GqlParameters::new();
+    for spec in schema {
+        if let Some(value) = arguments.get(&spec.name) {
+            local.insert(spec.name.clone(), value)
+                .expect("prepared argument names are valid and locally unique");
+        }
+    }
+    local
+}
+
 /// One reusable program schema across separately prepared statements. The host
 /// must prepare them under the same catalog/authority contract, just as it must
 /// for a typed program. All statements are bound successfully BEFORE the result
@@ -66,42 +131,7 @@ impl core::fmt::Debug for PreparedGraphMutationProgramTemplate {
 impl PreparedGraphMutationProgramTemplate {
     pub fn prepare(statements: Vec<PreparedGraphMutationText>)
         -> Result<Self, GraphMutationProgramTemplateError> {
-        use GraphMutationProgramTemplateError as Error;
-        if statements.is_empty() {
-            return Err(Error::Definition(GraphMutationProgramBuildError::Empty));
-        }
-        if statements.len() > MAX_GRAPH_MUTATION_STATEMENTS {
-            return Err(Error::Definition(GraphMutationProgramBuildError::TooManyStatements {
-                limit: MAX_GRAPH_MUTATION_STATEMENTS, observed: statements.len(),
-            }));
-        }
-        let relation = statements[0].relation;
-        let mut parameters: Vec<GqlParameterSpec> = Vec::new();
-        let mut origins = Vec::new();
-        let mut index = BTreeMap::new();
-        for (statement, input) in statements.iter().enumerate() {
-            if input.relation != relation {
-                return Err(Error::Definition(GraphMutationProgramBuildError::MixedRelation { statement }));
-            }
-            for spec in input.parameter_schema() {
-                if let Some(&at) = index.get(&spec.name) {
-                    let previous: &mut GqlParameterSpec = &mut parameters[at];
-                    if previous.parameter_type != spec.parameter_type {
-                        return Err(Error::ConflictingParameterTypes {
-                            parameter: at, first_statement: origins[at], statement,
-                        });
-                    }
-                    // Each input's shared lexer caps occurrences; 64 admitted
-                    // statements cannot overflow usize even on wasm32.
-                    previous.occurrences += spec.occurrences;
-                    previous.requires_positive |= spec.requires_positive;
-                } else {
-                    index.insert(spec.name.clone(), parameters.len());
-                    origins.push(statement);
-                    parameters.push(spec.clone());
-                }
-            }
-        }
+        let parameters = program_parameters(statements.iter().map(|input| (input.relation, input.parameter_schema())))?;
         Ok(Self { statements: statements.into_boxed_slice(), parameters })
     }
 
@@ -118,20 +148,10 @@ impl PreparedGraphMutationProgramTemplate {
     /// error offsets. A failure discards all already-bound private plans.
     pub fn bind_parameters(&self, arguments: &GqlParameters)
         -> Result<PreparedGraphMutationProgram, GraphMutationProgramTemplateError> {
-        let recognized = self.parameters.iter()
-            .filter(|spec| arguments.get(&spec.name).is_some()).count();
-        if recognized != arguments.len() {
-            return Err(GraphMutationProgramTemplateError::UnexpectedArguments);
-        }
+        check_program_arguments(&self.parameters, arguments)?;
         let mut statements = Vec::with_capacity(self.statements.len());
         for (statement, input) in self.statements.iter().enumerate() {
-            let mut local = GqlParameters::new();
-            for spec in input.parameter_schema() {
-                if let Some(value) = arguments.get(&spec.name) {
-                    local.insert(spec.name.clone(), value)
-                        .expect("prepared argument names are valid and locally unique");
-                }
-            }
+            let local = local_arguments(input.parameter_schema(), arguments);
             let bound = input.bind_parameters(&local)
                 .map_err(|source| GraphMutationProgramTemplateError::Bind { statement, source })?;
             statements.push(bound);
