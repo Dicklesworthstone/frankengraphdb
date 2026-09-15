@@ -3,6 +3,7 @@
 //! text nor parameter text is synthesized, and execution never sees this AST.
 
 mod aggregate_input;
+mod deletion;
 mod insertion;
 mod integer;
 mod return_projection;
