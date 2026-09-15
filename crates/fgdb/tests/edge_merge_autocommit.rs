@@ -5,8 +5,8 @@ use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphEdgeMergeError, GraphEdgeMergeOutcome,
-    GraphEdgeMergePolicy, GraphScalarParameter as _, GraphSymbol, GraphSymbolKind,
-    GqlScalarParameter, PreparedGraphEdgeMerge, PreparedGraphText,
+    GraphEdgeMergePolicy, GraphSymbol, GraphSymbolKind, GqlScalarParameter,
+    PreparedGraphEdgeMerge, PreparedGraphText,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
     PurposeContexts, VId};
@@ -69,8 +69,8 @@ fn autocommit_relationship_merge_read_closes_match_and_commits_create() {
         assert_eq!(stats.created_edges, 1);
         assert_eq!(outcome, GraphEdgeMergeOutcome::Created(EId(20)));
         assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }));
-        assert_eq!((db.edge(EId(20)).unwrap().unwrap().entry.src,
-            db.edge(EId(20)).unwrap().unwrap().entry.dst), (VId(2), VId(3)));
+        let edge = db.edge(EId(20)).unwrap().unwrap();
+        assert_eq!((edge.entry.src, edge.entry.dst), (VId(2), VId(3)));
         assert_eq!(txcx.outstanding_obligations(), baseline);
     });
     assert!(report.lab_test_passed(), "{report:?}");
