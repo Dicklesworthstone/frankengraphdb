@@ -262,6 +262,7 @@ struct Edge<'a> {
     direction: GlaDirection,
     destination: Name<'a>,
     walk: Option<crate::GraphWalkBounds>,
+    search: crate::algebra::GraphWalkSearch,
 }
 enum Filter<'a> {
     Boolean {
@@ -764,10 +765,16 @@ impl PreparedGraphText {
     /// `[:R*..max]` atoms in that MATCH scope. The omitted minimum is one; zero
     /// is explicit. Bounds are integer literals with 0 <= min <= max <= 1024.
     /// Repeated edges and vertices contribute distinct walk occurrences; this
-    /// does not select TRAIL/SIMPLE, shortest paths or path-valued projection.
+    /// does not select TRAIL/SIMPLE or path-valued projection. The explicit
+    /// MATCH ALL SHORTEST WALK prefix selects all tied minimum-hop occurrences
+    /// within the interval, separately for each endpoint pair. This native
+    /// profile requires exactly one quantified atom in its positive pattern;
+    /// compound shortest-path patterns refuse rather than selecting each atom
+    /// independently and pretending to minimize total path length.
     /// Endpoint predicates do not filter transit vertices. Every OPTIONAL or
     /// existential MATCH opts in independently. The same head grammar feeds
-    /// aggregate queries. Bare/open-ended quantifiers and hop parameters refuse.
+    /// aggregate queries and query-selected writes. Bare/open-ended quantifiers,
+    /// hop parameters, weighted search and captured paths remain unsupported.
     ///
     /// Syntax is completely validated before calling `resolve`. Each unique
     /// (kind,name) is resolved once across ALL scopes. Unknown/wrong-kind names
