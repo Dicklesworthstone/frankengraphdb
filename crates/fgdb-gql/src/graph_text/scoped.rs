@@ -2,6 +2,10 @@
 //! The lexer and numeric argument table are shared with ordinary and aggregate
 //! text. OPTIONAL exports names; existential names remain local to their body.
 //! Bodies without shared variables are independent, not malformed correlations.
+//! MATCH ANY SHORTEST WALK selects one occurrence per endpoint pair; MATCH ALL
+//! SHORTEST WALK keeps every tie. Both require one finite quantified atom in
+//! each selected positive pattern. They share all ordinary MATCH consumers and
+//! never imply a global DISTINCT or a captured path value.
 
 mod mutation;
 
@@ -106,6 +110,13 @@ pub(super) fn resolve_pattern<'a>(
         };
         let result = match edge.walk {
             Some(bounds) if edge.search == GraphWalkSearch::AllShortest => builder.shortest_walk(
+                edge.source.text,
+                relation,
+                edge.direction,
+                edge.destination.text,
+                bounds,
+            ),
+            Some(bounds) if edge.search == GraphWalkSearch::AnyShortest => builder.any_shortest_walk(
                 edge.source.text,
                 relation,
                 edge.direction,
@@ -291,7 +302,14 @@ impl<'a> Parser<'a> {
     fn positive_pattern(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         let selector_at = self.current.at;
-        let shortest = self.take_word("ALL")?;
+        let search = if self.take_word("ALL")? {
+            GraphWalkSearch::AllShortest
+        } else if self.take_word("ANY")? {
+            GraphWalkSearch::AnyShortest
+        } else {
+            GraphWalkSearch::All
+        };
+        let shortest = search != GraphWalkSearch::All;
         let walk_mode = if shortest {
             self.word("SHORTEST")?;
             self.word("WALK")?;
@@ -308,7 +326,7 @@ impl<'a> Parser<'a> {
                 // never silently substitute independent atom-wise shortest.
                 if shortest && self.syntax.edges.len() != first_edge {
                     return Err(error(self.current.at, GraphPatternTextErrorKind::Expected(
-                        "one bounded atom in ALL SHORTEST WALK",
+                        "one bounded atom in shortest WALK",
                     )));
                 }
                 self.capacity(
@@ -325,7 +343,7 @@ impl<'a> Parser<'a> {
                 let walk = self.pattern_walk_bounds(walk_mode)?;
                 if shortest && walk.is_none() {
                     return Err(error(bound_at, GraphPatternTextErrorKind::Expected(
-                        "finite quantified atom in ALL SHORTEST WALK",
+                        "finite quantified atom in shortest WALK",
                     )));
                 }
                 self.punct(b']', "]")?;
@@ -350,14 +368,14 @@ impl<'a> Parser<'a> {
                         GlaDirection::Undirected
                     },
                     walk,
-                    search: if shortest { GraphWalkSearch::AllShortest } else { GraphWalkSearch::All },
+                    search,
                 });
                 self.edge_count += 1;
                 left = right;
             }
             if shortest && self.is_punct(b',') {
                 return Err(error(self.current.at, GraphPatternTextErrorKind::Expected(
-                    "one bounded atom in ALL SHORTEST WALK",
+                    "one bounded atom in shortest WALK",
                 )));
             }
             if !self.take(b',')? {
@@ -366,7 +384,7 @@ impl<'a> Parser<'a> {
         }
         if shortest && self.syntax.edges.len() == first_edge {
             return Err(error(selector_at, GraphPatternTextErrorKind::Expected(
-                "one bounded atom in ALL SHORTEST WALK",
+                "one bounded atom in shortest WALK",
             )));
         }
         Ok(())

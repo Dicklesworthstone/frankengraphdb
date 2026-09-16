@@ -108,7 +108,7 @@ fn each_match_scope_retains_its_own_explicit_search_selector() {
 #[test]
 fn unsupported_shortest_shapes_refuse_even_with_limit_zero_and_before_catalog() {
     for text in ["MATCH SHORTEST WALK (a)-[:R*1..3]->(b) RETURN a",
-        "MATCH ANY SHORTEST WALK (a)-[:R*1..3]->(b) RETURN a",
+        "MATCH ANY CHEAPEST WALK (a)-[:R*1..3]->(b) RETURN a",
         "MATCH ALL SHORTEST (a)-[:R*1..3]->(b) RETURN a",
         "MATCH ALL SHORTEST WALK (a) RETURN a",
         "MATCH ALL SHORTEST WALK (a)-[:R]->(b) RETURN a",
