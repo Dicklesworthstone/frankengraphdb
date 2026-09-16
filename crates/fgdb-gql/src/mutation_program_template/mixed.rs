@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::{
+    GraphDeleteTextError, PreparedGraphDeleteText,
     GraphEdgeMergeTextError, GraphEdgeUpsertTextError, GraphInsertTextError, GraphVertexMergeTextError,
     GraphVertexUpsertTextError, GraphWriteStatement, PreparedGraphEdgeMergeText,
     PreparedGraphEdgeUpsertText, PreparedGraphInsertText, PreparedGraphVertexMergeText,
@@ -18,6 +19,7 @@ pub enum GraphWriteTemplateStatement {
     VertexUpsert(PreparedGraphVertexUpsertText),
     EdgeMerge(PreparedGraphEdgeMergeText),
     EdgeUpsert(PreparedGraphEdgeUpsertText),
+    Delete(PreparedGraphDeleteText),
 }
 impl From<PreparedGraphMutationText> for GraphWriteTemplateStatement {
     fn from(value: PreparedGraphMutationText) -> Self { Self::Mutation(value) }
@@ -37,6 +39,9 @@ impl From<PreparedGraphEdgeMergeText> for GraphWriteTemplateStatement {
 impl From<PreparedGraphEdgeUpsertText> for GraphWriteTemplateStatement {
     fn from(value: PreparedGraphEdgeUpsertText) -> Self { Self::EdgeUpsert(value) }
 }
+impl From<PreparedGraphDeleteText> for GraphWriteTemplateStatement {
+    fn from(value: PreparedGraphDeleteText) -> Self { Self::Delete(value) }
+}
 impl GraphWriteTemplateStatement {
     #[must_use]
     pub fn relation(&self) -> RelationId {
@@ -47,6 +52,7 @@ impl GraphWriteTemplateStatement {
             Self::VertexUpsert(input) => input.relation(),
             Self::EdgeMerge(input) => input.relation,
             Self::EdgeUpsert(input) => input.merge.relation,
+            Self::Delete(input) => input.relation,
         }
     }
     #[must_use]
@@ -58,6 +64,7 @@ impl GraphWriteTemplateStatement {
             Self::VertexUpsert(input) => input.parameter_schema(),
             Self::EdgeMerge(input) => input.parameter_schema(),
             Self::EdgeUpsert(input) => input.parameter_schema(),
+            Self::Delete(input) => input.parameter_schema(),
         }
     }
     /// Explicit source access. Debug remains redacted for every variant.
@@ -70,6 +77,7 @@ impl GraphWriteTemplateStatement {
             Self::VertexUpsert(input) => input.statement(),
             Self::EdgeMerge(input) => input.statement(),
             Self::EdgeUpsert(input) => input.statement(),
+            Self::Delete(input) => input.statement(),
         }
     }
 }
@@ -82,6 +90,7 @@ pub enum GraphWriteProgramTemplateError {
     VertexUpsertBind { statement: usize, source: GraphVertexUpsertTextError },
     EdgeMergeBind { statement: usize, source: GraphEdgeMergeTextError },
     EdgeUpsertBind { statement: usize, source: GraphEdgeUpsertTextError },
+    DeleteBind { statement: usize, source: GraphDeleteTextError },
 }
 impl From<GraphMutationProgramTemplateError> for GraphWriteProgramTemplateError {
     fn from(error: GraphMutationProgramTemplateError) -> Self { Self::Program(error) }
@@ -95,6 +104,7 @@ impl core::fmt::Display for GraphWriteProgramTemplateError {
             Self::VertexUpsertBind { statement, source } => write!(f, "write program vertex upsert statement {statement}: {source}"),
             Self::EdgeMergeBind { statement, source } => write!(f, "write program relationship MERGE statement {statement}: {source}"),
             Self::EdgeUpsertBind { statement, source } => write!(f, "write program relationship upsert statement {statement}: {source}"),
+            Self::DeleteBind { statement, source } => write!(f, "write program plain DELETE statement {statement}: {source}"),
         }
     }
 }
@@ -107,6 +117,7 @@ impl core::error::Error for GraphWriteProgramTemplateError {
             Self::VertexUpsertBind { source, .. } => Some(source),
             Self::EdgeMergeBind { source, .. } => Some(source),
             Self::EdgeUpsertBind { source, .. } => Some(source),
+            Self::DeleteBind { source, .. } => Some(source),
         }
     }
 }
@@ -154,6 +165,8 @@ impl PreparedGraphWriteProgramTemplate {
                     input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::EdgeMergeBind { statement, source })?),
                 GraphWriteTemplateStatement::EdgeUpsert(input) => GraphWriteStatement::EdgeUpsert(
                     input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::EdgeUpsertBind { statement, source })?),
+                GraphWriteTemplateStatement::Delete(input) => GraphWriteStatement::Delete(
+                    input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::DeleteBind { statement, source })?),
             };
             statements.push(bound);
         }

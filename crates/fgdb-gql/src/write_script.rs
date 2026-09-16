@@ -67,6 +67,7 @@ impl GraphWriteScriptError {
             W::VertexUpsertBind { statement, source } => Some((*statement, source.offset)),
             W::EdgeMergeBind { statement, source } => Some((*statement, source.offset)),
             W::EdgeUpsertBind { statement, source } => Some((*statement, source.offset)),
+            W::DeleteBind { statement, source } => Some((*statement, source.offset)),
             W::Program(M::Bind { statement, source }) => Some((*statement, source.offset)),
             W::Program(M::ConflictingParameterTypes { statement, .. })
             | W::Program(M::Definition(GraphMutationProgramBuildError::MixedRelation { statement })) => {
@@ -113,10 +114,12 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
     }
 }
 
-/// Semicolon-separated native CREATE, MATCH mutation and vertex/relationship
-/// MERGE statements, including ON MATCH/ON CREATE. One final semicolon is legal;
-/// empty statements, reads, transaction-control commands and unsupported syntax
-/// refuse. Variables are statement-local; later MATCH reads earlier staged work.
+/// Semicolon-separated native CREATE, MATCH mutation, plain DELETE and
+/// vertex/relationship MERGE, including ON MATCH/ON CREATE. DELETE remains
+/// non-detaching; only explicit DETACH DELETE permits cascades. One final
+/// semicolon is legal; empty statements, reads, transaction-control commands
+/// and unsupported syntax refuse. Variables are statement-local; later MATCH
+/// reads earlier staged work.
 ///
 /// Every statement shares one relation coordinate and one frozen name-to-symbol
 /// resolution per (kind, name). This does not negotiate catalog epochs or grant

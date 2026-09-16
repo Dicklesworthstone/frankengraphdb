@@ -30,18 +30,19 @@ fn one_native_script_dispatches_every_supported_write_kind() {
         MERGE (n:Person {p:3});\n\
         MERGE (n:Person {p:4}) ON CREATE SET n.q=5;\n\
         MATCH (a:Person),(b:Person) WHERE a.p=1 AND b.p=3 MERGE (a)-[:R]->(b);\n\
-        MATCH (a:Person),(b:Person) WHERE a.p=3 AND b.p=4 MERGE (a)-[e:R]->(b) ON MATCH SET e.q=6 ON CREATE SET e.q=7;\n";
+        MATCH (a:Person),(b:Person) WHERE a.p=3 AND b.p=4 MERGE (a)-[e:R]->(b) ON MATCH SET e.q=6 ON CREATE SET e.q=7;\n\
+        MATCH (n:Person) WHERE n.p=999 DELETE n;\n";
     let script = PreparedGraphWriteScript::prepare(text, R, symbols).unwrap();
     let program = script.bind_parameters(&GqlParameters::new()).unwrap();
     assert!(matches!(program.statements(), [GraphWriteStatement::Insert(_),
         GraphWriteStatement::Mutation(_), GraphWriteStatement::VertexMerge(_),
         GraphWriteStatement::VertexUpsert(_), GraphWriteStatement::EdgeMerge(_),
-        GraphWriteStatement::EdgeUpsert(_)]));
+        GraphWriteStatement::EdgeUpsert(_), GraphWriteStatement::Delete(_)]));
     assert_eq!(script.script(), text);
     for (index, template) in script.statements().iter().enumerate() {
         assert_eq!(&text[script.statement_span(index).unwrap()], template.statement());
     }
-    assert_eq!(script.statement_span(6), None);
+    assert_eq!(script.statement_span(7), None);
     assert!(!format!("{script:?} {program:?}").contains("Person"));
 }
 
@@ -126,7 +127,7 @@ fn malformed_framing_and_nonwrite_commands_never_reach_the_catalog() {
     for text in ["", "  ", ";", "CREATE (n);;", "CREATE (n); ;CREATE (m)",
         "CREATE (n {p:'unfinished});CREATE (m)", "CREATE (n;CREATE (m)",
         "CREATE (n];CREATE (m)", "CREATE (n);BEGIN", "CREATE (n);COMMIT",
-        "CREATE (n);MATCH (n) RETURN n", "CREATE (n);MATCH (n) DELETE n"] {
+        "CREATE (n);MATCH (n) RETURN n", "CREATE (n);ROLLBACK"] {
         let calls = Cell::new(0);
         assert!(PreparedGraphWriteScript::prepare(text, R, |kind, name| {
             calls.set(calls.get() + 1); symbols(kind, name)

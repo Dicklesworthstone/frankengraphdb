@@ -1,11 +1,11 @@
 //! Script framing and dispatch use the SAME native lexer and MATCH-prefix parser.
-//! The six existing statement compilers own all statement semantics and lowering.
+//! Existing statement compilers own all statement semantics and lowering.
 
 use super::*;
 use crate::{
     GraphMutationProgramTemplateError, GraphWriteProgramTemplateError,
     GraphWriteScriptError, GraphWriteScriptErrorKind, GraphWriteTemplateStatement,
-    MAX_GRAPH_MUTATION_STATEMENTS, MAX_GRAPH_WRITE_SCRIPT_BYTES,
+    MAX_GRAPH_MUTATION_STATEMENTS, MAX_GRAPH_WRITE_SCRIPT_BYTES, PreparedGraphDeleteText,
     PreparedGraphEdgeMergeText, PreparedGraphEdgeUpsertText, PreparedGraphInsertText,
     PreparedGraphVertexMergeText, PreparedGraphVertexUpsertText, PreparedGraphWriteProgramTemplate,
     PreparedGraphWriteScript,
@@ -19,7 +19,7 @@ struct Statement<'a> {
     last_on: Option<usize>,
 }
 #[derive(Clone, Copy)]
-enum Kind { Mutation, Insert, VertexMerge, VertexUpsert, EdgeMerge, EdgeUpsert }
+enum Kind { Mutation, Insert, VertexMerge, VertexUpsert, EdgeMerge, EdgeUpsert, Delete }
 
 fn refusal(statement: usize, offset: usize, kind: GraphWriteScriptErrorKind) -> GraphWriteScriptError {
     GraphWriteScriptError { statement: Some(statement), offset, kind }
@@ -128,6 +128,7 @@ fn classify(text: &str, statement: &Statement<'_>, declarations: &[(&str, GqlPar
     let matched = parser.is_word("MATCH");
     if matched { parser.parse_match_prefix()?; }
     if parser.is_word("CREATE") { return Ok(Kind::Insert); }
+    if matched && parser.is_word("DELETE") { return Ok(Kind::Delete); }
     if matched && (parser.is_word("SET") || parser.is_word("REMOVE") || parser.is_word("DETACH")) {
         return Ok(Kind::Mutation);
     }
@@ -210,6 +211,8 @@ impl PreparedGraphWriteScript {
                     .map(Into::into).map_err(|source| GraphWriteProgramTemplateError::EdgeMergeBind { statement, source }),
                 Kind::EdgeUpsert => PreparedGraphEdgeUpsertText::prepare_with_parameter_types(text, relation, local, &mut catalog)
                     .map(Into::into).map_err(|source| GraphWriteProgramTemplateError::EdgeUpsertBind { statement, source }),
+                Kind::Delete => PreparedGraphDeleteText::prepare_with_parameter_types(text, relation, local, &mut catalog)
+                    .map(Into::into).map_err(|source| GraphWriteProgramTemplateError::DeleteBind { statement, source }),
             };
             statements.push(prepared.map_err(|source| GraphWriteScriptError::program(&spans, source))?);
         }
