@@ -28,6 +28,9 @@ impl WriteTxn {
 
     /// The same plain DELETE with the exact distinct staged target identities.
     /// This is a transaction-local receipt, not a durability acknowledgement.
+    /// Returned source/work/scratch totals include the incident-edge validation
+    /// and delete proposals, under the SAME allowance as MATCH. Storage overlay
+    /// materialization and preparation are not bounded-memory query execution.
     pub fn execute_graph_delete_returning_governed<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -38,7 +41,8 @@ impl WriteTxn {
         (fgdb_gql::GraphDeleteStats, Vec<VId>),
         fgdb_gql::GqlQueryError<fgdb_gql::GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>,
     > {
-        use fgdb_gql::{GraphDeleteError, GqlQueryError};
+        use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded,
+            GqlBudgetDimension, GraphDeleteError, GqlQueryError};
         let source = |error| GqlQueryError::Source(GraphDeleteError::Source(error));
 
         self.ensure_database(database).map_err(source)?;
@@ -61,7 +65,7 @@ impl WriteTxn {
                 |pattern, budget| self.execute_graph_pattern_governed(database, cx, pattern, budget),
                 || cx.checkpoint(),
             )?;
-            let stats = proposal.stats();
+            let mut stats = proposal.stats();
             let targets = proposal.into_targets();
             if targets.is_empty() {
                 return Ok((stats, targets));
@@ -71,25 +75,52 @@ impl WriteTxn {
             // by the transaction disappear here; staged edge creations appear.
             // edges() retains both point and scan dependencies for completion.
             let edges = self.edges(database).map_err(source)?;
-            for target in &targets {
+            let records = u64::try_from(edges.len()).ok()
+                .and_then(|count| stats.selection.snapshot_records.checked_add(count))
+                .ok_or(GqlQueryError::Source(GraphDeleteError::InvalidSourceStatistics))?;
+            policy.query.rows.check(GqlBudgetDimension::SnapshotRecords, records)
+                .map_err(GqlQueryError::Rows)?;
+            stats.selection.snapshot_records = records;
+            let mut event = |kind: GlaExecutionEvent| -> Result<(),
+                GqlQueryError<GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>>
+            {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                for edge in &edges {
-                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-                    if edge.entry.src == *target || edge.entry.dst == *target {
-                        return Err(GqlQueryError::Source(GraphDeleteError::IncidentRelationships));
+                let work = u128::from(stats.evaluator.work_units) + 1;
+                let scratch = u128::from(stats.evaluator.scratch_entries)
+                    + u128::from(kind == GlaExecutionEvent::ScratchEntry);
+                for (observed, limit, dimension) in [
+                    (work, policy.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
+                    (scratch, policy.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+                ] {
+                    if observed > u128::from(limit) {
+                        return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
                     }
+                }
+                stats.evaluator.work_units = work as u64;
+                stats.evaluator.scratch_entries = scratch as u64;
+                Ok(())
+            };
+
+            // The proposal is sorted and unique. Scan edges once rather than
+            // rescanning every edge for every target; do not allocate an index.
+            for edge in &edges {
+                event(GlaExecutionEvent::Work)?;
+                if targets.binary_search(&edge.entry.src).is_ok()
+                    || targets.binary_search(&edge.entry.dst).is_ok()
+                {
+                    return Err(GqlQueryError::Source(GraphDeleteError::IncidentRelationships));
                 }
             }
 
             let mut batch = WriteBatch::new(deletion.relation());
             for target in &targets {
-                cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                event(GlaExecutionEvent::ScratchEntry)?;
                 // Storage still uses its ordinary vertex-delete representation.
                 // The proof above guarantees its cascade set is empty in this
                 // workspace; concurrent topology changes are caught at finish.
                 batch.delete_vertex(*target);
             }
-            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            event(GlaExecutionEvent::Work)?;
             self.write(database, batch).map_err(source)?;
             Ok((stats, targets))
         })
