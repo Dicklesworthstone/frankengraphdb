@@ -26,7 +26,7 @@ impl PreparedGraphAggregate {
         offset: u64,
         count: Option<u64>,
     ) -> Result<Self, GraphAggregateBuildError> {
-        Self::prepare_input(input, Some(projection), keys, aggregates, offset, count)
+        Self::prepare_input(input, Some(projection), None, keys, aggregates, offset, count)
     }
 
     /// The optional value transformation between matching and aggregation.
@@ -97,7 +97,7 @@ impl PreparedGraphAggregate {
         Ok(GqlQueryExecution { value, rows, evaluator })
     }
 
-    fn summarize_projected_rows<'a, E, C>(
+    pub(super) fn summarize_projected_rows<'a, E, C>(
         &self,
         input: &'a [GraphValueRow],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,

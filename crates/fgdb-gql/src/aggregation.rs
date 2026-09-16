@@ -1,12 +1,13 @@
-//! Grouped summaries over a compiled, unpaginated ALL pattern.
+//! Grouped summaries over a compiled pattern or single-source row pipeline.
 //!
 //! Ordinary inputs stream through the existing GLA binding visitor without an
-//! intermediate bag. Computed input projections use a bounded materialized
-//! path and the same accumulators/result engine. Keys, extrema and distinct
-//! arguments borrow the admitted input until owned aggregate rows are released.
+//! intermediate bag. Computed inputs and relational pipelines use a bounded
+//! materialized path and the same accumulators/result engine. Keys, extrema and
+//! distinct arguments borrow the admitted input until owned rows are released.
 
 mod computed;
 mod numeric;
+mod relational;
 mod result;
 mod weighted;
 pub use numeric::GraphExactAverage;
@@ -137,6 +138,8 @@ impl core::fmt::Debug for GraphAggregate<'_> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphAggregateBuildError {
     RequiresUnpaginatedAll,
+    RequiresSingleGraphSource,
+    RelationalInput(crate::GraphSetBuildError),
     EmptyAggregates,
     TooManyColumns { limit: usize, observed: usize },
     UnknownColumn { column: usize },
@@ -155,6 +158,10 @@ impl core::fmt::Display for GraphAggregateBuildError {
             Self::RequiresUnpaginatedAll => {
                 f.write_str("aggregate input must preserve duplicates and have no pagination")
             }
+            Self::RequiresSingleGraphSource => {
+                f.write_str("aggregate row pipeline requires exactly one graph source")
+            }
+            Self::RelationalInput(error) => error.fmt(f),
             Self::EmptyAggregates => f.write_str("at least one aggregate is required"),
             Self::TooManyColumns { limit, observed } => {
                 write!(f, "aggregate output has {observed} columns, limit {limit}")
@@ -184,6 +191,8 @@ impl core::error::Error for GraphAggregateBuildError {}
 #[derive(Debug, PartialEq, Eq)]
 pub enum GraphAggregateError<E> {
     Source(E),
+    /// A completed row stage failed before grouping; keep its typed cause.
+    InputRelation(crate::GraphSetExecutionError<E>),
     NonIntegerSum {
         aggregate: usize,
     },
@@ -213,6 +222,7 @@ impl<E> GraphAggregateError<E> {
     pub fn map_source<T>(self, map: impl FnOnce(E) -> T) -> GraphAggregateError<T> {
         match self {
             Self::Source(error) => GraphAggregateError::Source(map(error)),
+            Self::InputRelation(error) => GraphAggregateError::InputRelation(error.map_source(map)),
             Self::NonIntegerSum { aggregate } => GraphAggregateError::NonIntegerSum { aggregate },
             Self::NonIntegerAverage { aggregate } => {
                 GraphAggregateError::NonIntegerAverage { aggregate }
@@ -236,6 +246,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(error) => core::fmt::Display::fmt(error, f),
+            Self::InputRelation(error) => write!(f, "aggregate input relation: {error}"),
             Self::NonIntegerSum { aggregate } => write!(
                 f,
                 "SUM_INT aggregate {aggregate} requires integer or null input"
@@ -269,6 +280,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphAggregateError
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Source(error) => Some(error),
+            Self::InputRelation(error) => Some(error),
             Self::InputExpression { error, .. } => Some(error),
             _ => None,
         }
@@ -373,13 +385,15 @@ struct KeyProjection {
     names: Box<[String]>,
 }
 
-/// Logical GroupAggregate over an immutable ALL child. Pagination belongs to
-/// the group output, never to the child. Ordinary execution visits bindings;
-/// optional computed input owns a bounded projected relation before grouping.
+/// Logical GroupAggregate over an immutable child. Ordinary ALL patterns stream
+/// directly; computed input and explicit single-source relational pipelines own
+/// bounded rows before grouping. A pipeline's existing pages remain input
+/// boundaries; offset/count here apply separately to the group output.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphAggregate {
     input: PreparedGraphPattern<GraphValueRow>,
     computed_input: Option<Vec<crate::GraphSetProjection>>,
+    relational_input: Option<crate::PreparedGraphSet>,
     keys: Vec<usize>,
     aggregates: Vec<BoundAggregate>,
     key_names: Vec<String>,
@@ -401,6 +415,7 @@ impl core::fmt::Debug for PreparedGraphAggregate {
             .field("aggregate_columns", &self.output_aggregates)
             .field("evaluated_aggregates", &self.aggregates.len())
             .field("computed_input", &self.computed_input.is_some())
+            .field("relational_input", &self.relational_input.is_some())
             .field("definition", &"[REDACTED]")
             .finish()
     }
@@ -414,25 +429,27 @@ impl PreparedGraphAggregate {
         offset: u64,
         count: Option<u64>,
     ) -> Result<Self, GraphAggregateBuildError> {
-        Self::prepare_input(input, None, keys, aggregates, offset, count)
+        Self::prepare_input(input, None, None, keys, aggregates, offset, count)
     }
 
     fn prepare_input(
         input: PreparedGraphPattern<GraphValueRow>,
         computed_input: Option<Vec<crate::GraphSetProjection>>,
+        relational_input: Option<crate::PreparedGraphSet>,
         keys: &[usize],
         aggregates: &[GraphAggregate<'_>],
         offset: u64,
         count: Option<u64>,
     ) -> Result<Self, GraphAggregateBuildError> {
-        if !input.preserves_duplicates()
-            || !matches!(
-                input.plan().operators().last(),
-                Some(GlaOperator::Limit {
-                    offset: 0,
-                    count: None
-                })
-            )
+        if relational_input.is_none()
+            && (!input.preserves_duplicates()
+                || !matches!(
+                    input.plan().operators().last(),
+                    Some(GlaOperator::Limit {
+                        offset: 0,
+                        count: None
+                    })
+                ))
         {
             return Err(GraphAggregateBuildError::RequiresUnpaginatedAll);
         }
@@ -449,7 +466,8 @@ impl PreparedGraphAggregate {
         let projected_columns = computed_input.as_deref()
             .map(|projection| computed::projected_schema(&input, projection))
             .transpose()?;
-        let columns = projected_columns.as_deref().unwrap_or(input.columns());
+        let columns = relational_input.as_ref().map(crate::PreparedGraphSet::columns)
+            .or(projected_columns.as_deref()).unwrap_or(input.columns());
         let mut names = BTreeSet::new();
         for (at, column) in keys.iter().enumerate() {
             let name = columns
@@ -496,6 +514,7 @@ impl PreparedGraphAggregate {
         Ok(Self {
             input,
             computed_input,
+            relational_input,
             keys: keys.to_vec(),
             aggregates,
             key_names,
@@ -511,9 +530,9 @@ impl PreparedGraphAggregate {
         })
     }
 
-    /// Explicit graph source for admission, not the computed input relation or
-    /// summary result. Hosts execute through execute_governed, which owns the
-    /// optional input projection as well as aggregation.
+    /// The actual sole graph source for storage admission, not the transformed
+    /// relation or group output. execute_governed owns every row stage, including
+    /// any local page or DISTINCT, before invoking the shared group engine.
     #[must_use]
     pub fn input_pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
         &self.input
@@ -674,6 +693,12 @@ impl PreparedGraphAggregate {
             bytes.extend_from_slice(b"fgdb:aggregate-output-distinct:v1\0");
         }
         self.append_input_projection(&mut bytes);
+        if let Some(input) = &self.relational_input {
+            bytes.extend_from_slice(b"fgdb:aggregate-relational-input:v1\0");
+            let relation = input.canonical_bytes();
+            bytes.extend_from_slice(&(relation.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&relation);
+        }
         bytes
     }
 
@@ -693,9 +718,9 @@ impl PreparedGraphAggregate {
     /// contiguity. It retains one active group and a bounded ranked prefix of
     /// compact summaries; source/index admission and cumulative scratch charges
     /// remain independent of this live group-state bound.
-    /// Computed input projections instead use bounded owned input rows and the
-    /// same group accumulators; no physical contiguity or multiplicity shortcut
-    /// is assumed for their transformed keys and values.
+    /// Computed inputs and explicit relational pipelines instead use bounded
+    /// owned rows and the same group accumulators. Their transformed keys and
+    /// values never enter the physical contiguity or multiplicity shortcut.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_governed<'a, E, C>(
         &self,
@@ -708,6 +733,11 @@ impl PreparedGraphAggregate {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
+        if self.relational_input.is_some() {
+            return self.execute_relational_governed(
+                snapshot_records, vertices, edges, test_vertex, property, policy, checkpoint,
+            );
+        }
         if self.computed_input.is_some() {
             return self.execute_projected_governed(
                 snapshot_records, vertices, edges, test_vertex, property, policy, checkpoint,

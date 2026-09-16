@@ -42,13 +42,25 @@ impl core::fmt::Display for GraphSetBuildError {
 }
 impl core::error::Error for GraphSetBuildError {}
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum GraphSetExecutionError<E> {
     Source(E),
     InputSchema { operand: usize },
     InvalidSourceStatistics { operand: usize },
     AccountingOverflow { dimension: GqlBudgetDimension },
     Projection { row: usize, column: usize, error: crate::GraphIntegerError },
+}
+impl<E> GraphSetExecutionError<E> {
+    /// Preserve relational failures while translating only the host source.
+    pub fn map_source<T>(self, map: impl FnOnce(E) -> T) -> GraphSetExecutionError<T> {
+        match self {
+            Self::Source(source) => GraphSetExecutionError::Source(map(source)),
+            Self::InputSchema { operand } => GraphSetExecutionError::InputSchema { operand },
+            Self::InvalidSourceStatistics { operand } => GraphSetExecutionError::InvalidSourceStatistics { operand },
+            Self::AccountingOverflow { dimension } => GraphSetExecutionError::AccountingOverflow { dimension },
+            Self::Projection { row, column, error } => GraphSetExecutionError::Projection { row, column, error },
+        }
+    }
 }
 impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -135,6 +147,27 @@ fn check_depth(depth: usize) -> Result<(), GraphSetBuildError> {
     } else { Ok(()) }
 }
 impl PreparedGraphSet {
+    /// The actual sole graph leaf, for a host that admits that source once.
+    /// This does not turn a relation into a pattern or flatten any row stage.
+    /// Binary sets require a multi-source admission owner and refuse here.
+    pub(crate) fn single_pattern_input(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
+        let mut current = self;
+        loop {
+            match &current.node {
+                SetNode::Pattern(pattern) => return Some(pattern),
+                SetNode::Scope(input) | SetNode::Project { input, .. }
+                | SetNode::Filter { input, .. } => current = input,
+                SetNode::Binary { .. } => return None,
+            }
+        }
+    }
+
+    /// Combining a relational stage with a new owner must include that owner
+    /// in the same depth bound, not reset admission at a subsystem boundary.
+    pub(crate) fn check_parent_depth(&self) -> Result<(), GraphSetBuildError> {
+        check_depth(self.depth + 1)
+    }
+
     /// Combine exact, position-compatible relations. Heterogeneous canonical
     /// scalar kinds remain distinct; there is no implicit numeric coercion.
     pub fn combine(
