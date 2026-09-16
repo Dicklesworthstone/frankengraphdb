@@ -8,7 +8,7 @@ use crate::set_text::{ReadFilterOp, ReadFilterOperand, ReadPageNumber};
 use crate::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp, GraphSetQuantifier};
 
 const MAX_FILTER_NESTING: usize = 64;
-type RowSchema<'a> = Vec<(Name<'a>, GraphSetColumnType)>;
+pub(super) type RowSchema<'a> = Vec<(Name<'a>, GraphSetColumnType)>;
 
 fn expected(at: usize, item: &'static str) -> GraphSetTextError {
     GraphSetTextError { offset: at, kind: GraphSetTextErrorKind::Expected(item) }
@@ -37,8 +37,24 @@ fn emit(code: &mut Vec<ReadFilterOp>, op: ReadFilterOp, at: usize) -> Result<(),
 }
 
 impl<'a> Parser<'a> {
-    pub(super) fn row_pipeline(&mut self, mut schema: RowSchema<'a>)
+    pub(super) fn row_pipeline(&mut self, schema: RowSchema<'a>)
         -> Result<Vec<ReadStageTemplate>, GraphSetTextError> {
+        let (mut stages, schema, mut depth) = self.row_pipeline_prefix(schema)?;
+        let at = self.current.at;
+        self.word("RETURN")?;
+        let distinct = self.take_word("DISTINCT")?;
+        if !distinct { self.take_word("ALL")?; }
+        let quantifier = if distinct { GraphSetQuantifier::Distinct } else { GraphSetQuantifier::All };
+        let (projection, _) = self.row_projection(&schema)?;
+        append_stage(&mut stages, ReadStageTemplate::Project { at, projection, quantifier }, &mut depth)?;
+        Ok(stages)
+    }
+
+    /// Parse complete WITH stages but leave their terminal RETURN to its typed
+    /// owner. Ordinary value projection and exact aggregation share this path;
+    /// neither has to rewrite or reparse a prefix as a different statement.
+    pub(super) fn row_pipeline_prefix(&mut self, mut schema: RowSchema<'a>)
+        -> Result<(Vec<ReadStageTemplate>, RowSchema<'a>, usize), GraphSetTextError> {
         let mut stages = Vec::new();
         // The MATCH input and first WITH projection each own one relational node.
         let mut depth = 2;
@@ -58,17 +74,15 @@ impl<'a> Parser<'a> {
                 append_stage(&mut stages, ReadStageTemplate::Filter { at, code }, &mut depth)?;
             }
             let at = self.current.at;
-            let more = self.take_word("WITH")?;
-            if !more { self.word("RETURN")?; }
+            if !self.take_word("WITH")? { break; }
             let distinct = self.take_word("DISTINCT")?;
             if !distinct { self.take_word("ALL")?; }
             let quantifier = if distinct { GraphSetQuantifier::Distinct } else { GraphSetQuantifier::All };
             let (projection, next_schema) = self.row_projection(&schema)?;
             append_stage(&mut stages, ReadStageTemplate::Project { at, projection, quantifier }, &mut depth)?;
             schema = next_schema;
-            if !more { break; }
         }
-        Ok(stages)
+        Ok((stages, schema, depth))
     }
 
     fn row_projection(&mut self, schema: &[(Name<'a>, GraphSetColumnType)])
@@ -105,7 +119,7 @@ impl<'a> Parser<'a> {
         Ok((projection, next_schema))
     }
 
-    fn row_page(&mut self, schema: &[(Name<'a>, GraphSetColumnType)])
+    pub(super) fn row_page(&mut self, schema: &[(Name<'a>, GraphSetColumnType)])
         -> Result<Option<ReadStageTemplate>, GraphSetTextError> {
         let at = self.current.at;
         let mut present = false;
@@ -151,7 +165,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn row_disjunction(&mut self, schema: &[(Name<'a>, GraphSetColumnType)], depth: usize,
+    pub(super) fn row_disjunction(&mut self, schema: &[(Name<'a>, GraphSetColumnType)], depth: usize,
         code: &mut Vec<ReadFilterOp>) -> Result<(), GraphSetTextError> {
         self.row_conjunction(schema, depth, code)?;
         while self.is_word("OR") {

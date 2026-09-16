@@ -26,6 +26,7 @@ mod mutation_text;
 mod overlay_evidence;
 mod parameters;
 mod parser;
+mod pipeline_aggregate_text;
 mod prepared;
 mod set_ops;
 mod set_text;
@@ -40,6 +41,10 @@ mod walk;
 mod write_receipt;
 mod write_script;
 
+pub use pipeline_aggregate_text::{
+    GraphPipelineAggregateTextError, GraphPipelineAggregateTextErrorKind,
+    PreparedGraphPipelineAggregateText,
+};
 pub use write_script::{
     BoundGraphWriteScriptBatch, GraphWriteScriptBatchError, GraphWriteScriptBatchLocation,
     GraphWriteScriptError, GraphWriteScriptErrorKind, GraphWriteScriptExecutionError,

@@ -2,6 +2,7 @@
 //! precedence compiler. Only terminal semantics differ: no action or write is
 //! constructed. Hidden source columns retain every requested property read.
 
+mod aggregate;
 mod pipeline;
 
 use super::*;
@@ -20,6 +21,23 @@ fn expression_error(source: GraphMutationTextError) -> GraphSetTextError {
     GraphSetTextError { offset: source.offset, kind }
 }
 
+struct GraphProjectionHead<'a> {
+    with: bool,
+    inputs: Vec<Projection<'a>>,
+    outputs: Vec<(Name<'a>, Operand)>,
+}
+impl<'a> GraphProjectionHead<'a> {
+    fn schema(&self) -> pipeline::RowSchema<'a> {
+        self.outputs.iter().map(|(name, operand)| {
+            let kind = match operand {
+                Operand::Column(input) if self.inputs[*input].property.is_none() => GraphSetColumnType::Vertex,
+                _ => GraphSetColumnType::Scalar,
+            };
+            (*name, kind)
+        }).collect()
+    }
+}
+
 impl<'a> Parser<'a> {
     /// Parse a MATCH leaf exactly once. Composition owns the enclosing set
     /// delimiters and pagination; this parser owns names, expressions and the
@@ -27,6 +45,15 @@ impl<'a> Parser<'a> {
     pub(in crate::graph_text) fn parse_return_for_composition(mut self, statement: &'a str)
         -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
         self.parse_match_prefix()?;
+        let head = self.graph_projection_head()?;
+        let pipeline = if head.with { self.row_pipeline(head.schema())? } else { Vec::new() };
+        self.end()?;
+        self.finish_graph_projection(statement, head, pipeline)
+    }
+
+    /// Shared graph-to-row boundary. Exact grouped RETURN uses this same first
+    /// WITH projection and row-stage parser, not a synthetic RETURN statement.
+    fn graph_projection_head(&mut self) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
         let with = self.take_word("WITH")?;
         if !with { self.word("RETURN")?; }
         self.syntax.distinct = self.take_word("DISTINCT")?;
@@ -71,17 +98,12 @@ impl<'a> Parser<'a> {
                 if !self.take(b',')? { break; }
             }
         }
-        let pipeline = if with {
-            let schema = outputs.iter().map(|(name, operand)| {
-                let kind = match operand {
-                    Operand::Column(input) if inputs[*input].property.is_none() => GraphSetColumnType::Vertex,
-                    _ => GraphSetColumnType::Scalar,
-                };
-                (*name, kind)
-            }).collect();
-            self.row_pipeline(schema)?
-        } else { Vec::new() };
-        self.end()?;
+        Ok(GraphProjectionHead { with, inputs, outputs })
+    }
+
+    fn finish_graph_projection(mut self, statement: &'a str, head: GraphProjectionHead<'a>,
+        pipeline: Vec<ReadStageTemplate>) -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
+        let GraphProjectionHead { with, mut inputs, outputs } = head;
         if !with && outputs.iter().all(|(_, operand)| matches!(operand, Operand::Column(_))) {
             // Keep the existing plan/counters/transcript for plain projections,
             // including repeated fields under different public aliases.
@@ -126,16 +148,23 @@ impl BoundSetTextInput {
     pub(crate) fn bind_parameters(&self, arguments: &GqlParameters)
         -> Result<PreparedGraphSet, GraphSetTextError> {
         let values = self.selection.checked_arguments(arguments)?;
-        let mut input: PreparedGraphSet = self.selection.bind_values(&values)?.into();
+        self.bind_values(&values)
+    }
+
+    /// Only callers that checked the COMPLETE native argument table may use
+    /// this path. Shared grouped terminals need that same table for HAVING/page.
+    pub(crate) fn bind_values(&self, values: &[GqlParameterValue])
+        -> Result<PreparedGraphSet, GraphSetTextError> {
+        let mut input: PreparedGraphSet = self.selection.bind_values(values)?.into();
         if let Some(projection) = &self.projection {
-            input = bind_projection(input, projection, self.quantifier, &values, self.selection.return_at)?;
+            input = bind_projection(input, projection, self.quantifier, values, self.selection.return_at)?;
         }
         for stage in &self.pipeline {
             input = match stage {
                 ReadStageTemplate::Project { at, projection, quantifier } =>
-                    bind_projection(input, projection, *quantifier, &values, *at)?,
+                    bind_projection(input, projection, *quantifier, values, *at)?,
                 ReadStageTemplate::Filter { at, code } => {
-                    let code = pipeline::bind_filter(code, Some(&values))?;
+                    let code = pipeline::bind_filter(code, Some(values))?;
                     input.filter(&code).map_err(|kind| GraphSetTextError {
                         offset: *at, kind: GraphSetTextErrorKind::FilterBuild(kind),
                     })?
@@ -146,8 +175,8 @@ impl BoundSetTextInput {
                             offset: *at, kind: GraphSetTextErrorKind::OrderBuild(kind),
                         })?;
                     }
-                    input.with_page(pipeline::page_value(offset, &values),
-                        count.as_ref().map(|count| pipeline::page_value(count, &values)))
+                    input.with_page(pipeline::page_value(offset, values),
+                        count.as_ref().map(|count| pipeline::page_value(count, values)))
                 }
             };
         }
