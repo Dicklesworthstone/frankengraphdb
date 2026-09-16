@@ -10,6 +10,7 @@ use crate::insertion::{
     GraphInsertStats, PreparedGraphInsert,
 };
 use crate::{
+    GraphDeleteError, GraphDeletePolicy, GraphDeleteStats, PreparedGraphDelete,
     GraphEdgeMergeError, GraphEdgeMergePolicy, GraphEdgeMergeStats, PreparedGraphEdgeMerge,
     GraphEdgeUpsertError, GraphEdgeUpsertPolicy, GraphEdgeUpsertStats, PreparedGraphEdgeUpsert,
     GraphVertexMergeError, GraphVertexMergePolicy, GraphVertexMergeStats,
@@ -26,6 +27,8 @@ pub enum GraphWriteStatement {
     VertexUpsert(PreparedGraphVertexUpsert),
     EdgeMerge(PreparedGraphEdgeMerge),
     EdgeUpsert(PreparedGraphEdgeUpsert),
+    /// Non-detaching deletion; the host must validate canonical incidence.
+    Delete(PreparedGraphDelete),
 }
 impl GraphWriteStatement {
     #[must_use]
@@ -37,6 +40,7 @@ impl GraphWriteStatement {
             Self::VertexUpsert(statement) => statement.merge().relation(),
             Self::EdgeMerge(statement) => statement.relation(),
             Self::EdgeUpsert(statement) => statement.merge().relation(),
+            Self::Delete(statement) => statement.relation(),
         }
     }
 }
@@ -57,6 +61,9 @@ impl From<PreparedGraphEdgeMerge> for GraphWriteStatement {
 }
 impl From<PreparedGraphEdgeUpsert> for GraphWriteStatement {
     fn from(value: PreparedGraphEdgeUpsert) -> Self { Self::EdgeUpsert(value) }
+}
+impl From<PreparedGraphDelete> for GraphWriteStatement {
+    fn from(value: PreparedGraphDelete) -> Self { Self::Delete(value) }
 }
 
 /// Identity requests are local to a statement AND its selected occurrence.
@@ -112,6 +119,11 @@ impl GraphWriteProgramPolicy {
     pub const fn edge_upsert_policy(self) -> GraphEdgeUpsertPolicy {
         GraphEdgeUpsertPolicy::new(self.edge_merge_policy(), self.mutations.max_effects)
     }
+    /// Each distinct plain-DELETE target is one mutation effect.
+    #[must_use]
+    pub const fn deletion_policy(self) -> GraphDeletePolicy {
+        GraphDeletePolicy::new(self.mutations.query, self.mutations.max_effects)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +134,7 @@ pub enum GraphWriteStepStats {
     VertexUpsert(GraphVertexUpsertStats),
     EdgeMerge(GraphEdgeMergeStats),
     EdgeUpsert(GraphEdgeUpsertStats),
+    Delete(GraphDeleteStats),
 }
 #[derive(Debug)]
 pub enum GraphWriteStepError<E, A, C> {
@@ -131,6 +144,7 @@ pub enum GraphWriteStepError<E, A, C> {
     VertexUpsert(GqlQueryError<GraphVertexUpsertError<E, A>, C>),
     EdgeMerge(GqlQueryError<GraphEdgeMergeError<E, A>, C>),
     EdgeUpsert(GqlQueryError<GraphEdgeUpsertError<E, A>, C>),
+    Delete(GqlQueryError<GraphDeleteError<E>, C>),
 }
 impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
     core::fmt::Display for GraphWriteStepError<E, A, C> {
@@ -142,6 +156,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
             Self::VertexUpsert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
             Self::EdgeUpsert(error) => error.fmt(f),
+            Self::Delete(error) => error.fmt(f),
         }
     }
 }
@@ -155,6 +170,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
             Self::VertexUpsert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
             Self::EdgeUpsert(error) => Some(error),
+            Self::Delete(error) => Some(error),
         }
     }
 }
@@ -169,6 +185,7 @@ pub enum GraphWriteProgramError<E, A, C> {
     VertexUpsert { statement: usize, source: GqlQueryError<GraphVertexUpsertError<E, A>, C> },
     EdgeMerge { statement: usize, source: GqlQueryError<GraphEdgeMergeError<E, A>, C> },
     EdgeUpsert { statement: usize, source: GqlQueryError<GraphEdgeUpsertError<E, A>, C> },
+    Delete { statement: usize, source: GqlQueryError<GraphDeleteError<E>, C> },
     CreationBudget {
         statement: usize,
         dimension: GraphInsertLimitDimension,
@@ -189,6 +206,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
             Self::VertexUpsert { statement, source } => write!(f, "write program vertex upsert step {statement}: {source}"),
             Self::EdgeMerge { statement, source } => write!(f, "write program relationship MERGE step {statement}: {source}"),
             Self::EdgeUpsert { statement, source } => write!(f, "write program relationship upsert step {statement}: {source}"),
+            Self::Delete { statement, source } => write!(f, "write program plain DELETE step {statement}: {source}"),
             Self::CreationBudget { statement, dimension, limit, observed } =>
                 write!(f, "write program step {statement} created {dimension:?}: {observed} > {limit}"),
         }
@@ -204,6 +222,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
             Self::VertexUpsert { source, .. } => Some(source),
             Self::EdgeMerge { source, .. } => Some(source),
             Self::EdgeUpsert { source, .. } => Some(source),
+            Self::Delete { source, .. } => Some(source),
             Self::CreationBudget { .. } => None,
         }
     }
@@ -213,8 +232,9 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
 pub struct GraphWriteProgramStats {
     pub completed_statements: usize,
     /// Source records and selected occurrences summed over all statements.
-    /// Includes relationship MERGE's edge-existence scan, not only its MATCH.
-    /// Vertex MERGE's internal creation unit is not a fabricated MATCH result.
+    /// Includes relationship MERGE's existence and plain DELETE's incidence
+    /// scans, not only MATCH. Vertex MERGE's internal creation unit is not a
+    /// fabricated MATCH result.
     pub selection: GqlExecutionStats,
     pub evaluator: GlaExecutionStats,
     /// Distinct updated/deleted vertex visits summed over statements, including
@@ -279,6 +299,7 @@ impl PreparedGraphWriteProgram {
                 GraphWriteStatement::VertexUpsert(value) => (3, value.canonical_bytes()),
                 GraphWriteStatement::EdgeMerge(value) => (4, value.canonical_bytes()),
                 GraphWriteStatement::EdgeUpsert(value) => (5, value.canonical_bytes()),
+                GraphWriteStatement::Delete(value) => (6, value.canonical_bytes()),
             };
             bytes.push(kind);
             bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
@@ -316,6 +337,7 @@ impl PreparedGraphWriteProgram {
                 GraphWriteStepError::VertexUpsert(error) => meter.vertex_upsert_failure(statement, error),
                 GraphWriteStepError::EdgeMerge(error) => meter.edge_merge_failure(statement, error),
                 GraphWriteStepError::EdgeUpsert(error) => meter.edge_upsert_failure(statement, error),
+                GraphWriteStepError::Delete(error) => meter.delete_failure(statement, error),
             })?;
             match (input, stats) {
                 (GraphWriteStatement::Mutation(input), GraphWriteStepStats::Mutation(stats)) => {
@@ -335,6 +357,9 @@ impl PreparedGraphWriteProgram {
                 }
                 (GraphWriteStatement::EdgeUpsert(input), GraphWriteStepStats::EdgeUpsert(stats)) => {
                     meter.absorb_edge_upsert(statement, input, stats)?;
+                }
+                (GraphWriteStatement::Delete(input), GraphWriteStepStats::Delete(stats)) => {
+                    meter.absorb_delete(statement, input, stats)?;
                 }
                 _ => return Err(GraphMutationProgramError::InvalidStatistics { statement }.into()),
             }
@@ -419,6 +444,34 @@ impl MixedMeter {
             Some(observed) if observed > u128::from(limit) =>
                 GraphWriteProgramError::CreationBudget { statement, dimension, limit, observed },
             _ => GraphMutationProgramError::InvalidStatistics { statement }.into(),
+        }
+    }
+
+    fn absorb_delete<E, A, C>(&mut self, statement: usize, input: &PreparedGraphDelete, stats: GraphDeleteStats)
+        -> Result<(), GraphWriteProgramError<E, A, C>> {
+        // Distinct targets each owe exactly one deletion intent. The common
+        // meter checks target bounds, all cumulative dimensions and overflow.
+        // Host stats already include incidence records/work: never add twice.
+        self.common.absorb(statement, input.target_columns().len(), GraphMutationStats {
+            selection: stats.selection,
+            evaluator: stats.evaluator,
+            target_vertices: stats.target_vertices,
+            effects: stats.target_vertices,
+        })?;
+        Ok(())
+    }
+
+    fn delete_failure<E, A, C>(&self, statement: usize, source: GqlQueryError<GraphDeleteError<E>, C>)
+        -> GraphWriteProgramError<E, A, C> {
+        match source {
+            GqlQueryError::Rows(error) => self.common.translate(statement, GqlQueryError::Rows(error)).into(),
+            GqlQueryError::Evaluator(error) => self.common.translate(statement, GqlQueryError::Evaluator(error)).into(),
+            GqlQueryError::Source(GraphDeleteError::TargetLimit { limit, observed }) => {
+                self.common.translate(statement, GqlQueryError::Source(
+                    GraphMutationError::EffectLimit { limit, observed },
+                )).into()
+            }
+            source => GraphWriteProgramError::Delete { statement, source },
         }
     }
 }

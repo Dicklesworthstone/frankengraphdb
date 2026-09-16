@@ -18,15 +18,27 @@ pub enum GraphWriteStepReceipt {
     VertexUpsert { outcome: GraphVertexMergeOutcome },
     EdgeMerge { outcome: GraphEdgeMergeOutcome },
     EdgeUpsert { outcome: GraphEdgeMergeOutcome },
+    /// Distinct non-detaching DELETE targets, sorted by vertex identity.
+    Delete { targets: Vec<VId> },
 }
 
 impl GraphWriteStepReceipt {
     #[must_use]
     pub fn mutation_targets(&self) -> Option<&[VId]> {
         match self {
-            Self::Mutation { targets } => Some(targets),
+            Self::Mutation { targets } | Self::Delete { targets } => Some(targets),
             Self::Insert { .. } | Self::VertexMerge { .. } | Self::VertexUpsert { .. }
             | Self::EdgeMerge { .. } | Self::EdgeUpsert { .. } => None,
+        }
+    }
+
+    /// Exact targets for a plain DELETE step, including Some(empty) when no
+    /// vertex matched. This does not describe arbitrary DETACH mutation steps.
+    #[must_use]
+    pub fn deleted_vertices(&self) -> Option<&[VId]> {
+        match self {
+            Self::Delete { targets } => Some(targets),
+            _ => None,
         }
     }
 
@@ -42,7 +54,8 @@ impl GraphWriteStepReceipt {
             }
             Self::VertexMerge { outcome: GraphVertexMergeOutcome::Matched(_) }
             | Self::VertexUpsert { outcome: GraphVertexMergeOutcome::Matched(_) } => Some(&[]),
-            Self::Mutation { .. } | Self::EdgeMerge { .. } | Self::EdgeUpsert { .. } => None,
+            Self::Mutation { .. } | Self::EdgeMerge { .. } | Self::EdgeUpsert { .. }
+            | Self::Delete { .. } => None,
         }
     }
 
@@ -55,7 +68,8 @@ impl GraphWriteStepReceipt {
                 Some(core::slice::from_ref(edge))
             }
             Self::EdgeMerge { .. } | Self::EdgeUpsert { .. } => Some(&[]),
-            Self::Mutation { .. } | Self::VertexMerge { .. } | Self::VertexUpsert { .. } => None,
+            Self::Mutation { .. } | Self::VertexMerge { .. } | Self::VertexUpsert { .. }
+            | Self::Delete { .. } => None,
         }
     }
 
@@ -64,7 +78,7 @@ impl GraphWriteStepReceipt {
         match self {
             Self::VertexMerge { outcome } | Self::VertexUpsert { outcome } => Some(*outcome),
             Self::Mutation { .. } | Self::Insert { .. } | Self::EdgeMerge { .. }
-            | Self::EdgeUpsert { .. } => None,
+            | Self::EdgeUpsert { .. } | Self::Delete { .. } => None,
         }
     }
 
@@ -75,7 +89,7 @@ impl GraphWriteStepReceipt {
         match self {
             Self::EdgeMerge { outcome } | Self::EdgeUpsert { outcome } => Some(*outcome),
             Self::Mutation { .. } | Self::Insert { .. } | Self::VertexMerge { .. }
-            | Self::VertexUpsert { .. } => None,
+            | Self::VertexUpsert { .. } | Self::Delete { .. } => None,
         }
     }
 }
@@ -102,6 +116,8 @@ impl core::fmt::Debug for GraphWriteStepReceipt {
                 .field("outcome", outcome).finish(),
             Self::EdgeUpsert { outcome } => f.debug_struct("EdgeUpsert")
                 .field("outcome", outcome).finish(),
+            Self::Delete { targets } => f.debug_struct("Delete")
+                .field("targets", &targets.len()).field("identities", &"[REDACTED]").finish(),
         }
     }
 }
@@ -225,6 +241,23 @@ mod tests {
             assert_eq!(step.merged_vertex(), None);
             assert_ne!(step, GraphWriteStepReceipt::EdgeMerge { outcome });
             assert!(!format!("{step:?}").contains(&u128::MAX.to_string()));
+        }
+    }
+
+    #[test]
+    fn plain_delete_receipts_are_distinct_and_never_expose_identities_in_debug() {
+        for targets in [vec![], vec![VId(u128::MAX)]] {
+            let step = GraphWriteStepReceipt::Delete { targets: targets.clone() };
+            assert_eq!(step.deleted_vertices(), Some(targets.as_slice()));
+            assert_eq!(step.mutation_targets(), Some(targets.as_slice()));
+            assert_eq!(step.created_vertices(), None);
+            assert_eq!(step.created_edges(), None);
+            assert_eq!(step.merged_vertex(), None);
+            assert_eq!(step.merged_edge(), None);
+            assert!(!format!("{step:?}").contains(&u128::MAX.to_string()));
+            let mutation = GraphWriteStepReceipt::Mutation { targets };
+            assert_ne!(step, mutation);
+            assert_eq!(mutation.deleted_vertices(), None);
         }
     }
 }
