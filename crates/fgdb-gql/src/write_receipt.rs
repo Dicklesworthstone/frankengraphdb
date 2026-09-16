@@ -5,7 +5,7 @@
 //! The fgdb transaction adapter constructs them only after the complete program
 //! crosses its final acceptance boundary. Debug never exposes graph identities.
 
-use crate::GraphWriteProgramStats;
+use crate::{GraphVertexMergeOutcome, GraphWriteProgramStats};
 use fgdb_types::{EId, VId};
 
 #[derive(Clone, PartialEq, Eq)]
@@ -14,6 +14,8 @@ pub enum GraphWriteStepReceipt {
     Mutation { targets: Vec<VId> },
     /// Created IDs in occurrence/declaration order for this insertion step.
     Insert { vertices: Vec<VId>, edges: Vec<EId> },
+    VertexMerge { outcome: GraphVertexMergeOutcome },
+    VertexUpsert { outcome: GraphVertexMergeOutcome },
 }
 
 impl GraphWriteStepReceipt {
@@ -21,14 +23,22 @@ impl GraphWriteStepReceipt {
     pub fn mutation_targets(&self) -> Option<&[VId]> {
         match self {
             Self::Mutation { targets } => Some(targets),
-            Self::Insert { .. } => None,
+            Self::Insert { .. } | Self::VertexMerge { .. } | Self::VertexUpsert { .. } => None,
         }
     }
 
+    /// Creation-bearing step kinds return Some, including an empty slice for a
+    /// matched MERGE. Matched identities are available through merged_vertex.
     #[must_use]
     pub fn created_vertices(&self) -> Option<&[VId]> {
         match self {
             Self::Insert { vertices, .. } => Some(vertices),
+            Self::VertexMerge { outcome: GraphVertexMergeOutcome::Created(vertex) }
+            | Self::VertexUpsert { outcome: GraphVertexMergeOutcome::Created(vertex) } => {
+                Some(core::slice::from_ref(vertex))
+            }
+            Self::VertexMerge { outcome: GraphVertexMergeOutcome::Matched(_) }
+            | Self::VertexUpsert { outcome: GraphVertexMergeOutcome::Matched(_) } => Some(&[]),
             Self::Mutation { .. } => None,
         }
     }
@@ -37,7 +47,15 @@ impl GraphWriteStepReceipt {
     pub fn created_edges(&self) -> Option<&[EId]> {
         match self {
             Self::Insert { edges, .. } => Some(edges),
-            Self::Mutation { .. } => None,
+            Self::Mutation { .. } | Self::VertexMerge { .. } | Self::VertexUpsert { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn merged_vertex(&self) -> Option<GraphVertexMergeOutcome> {
+        match self {
+            Self::VertexMerge { outcome } | Self::VertexUpsert { outcome } => Some(*outcome),
+            Self::Mutation { .. } | Self::Insert { .. } => None,
         }
     }
 }
@@ -56,6 +74,10 @@ impl core::fmt::Debug for GraphWriteStepReceipt {
                 .field("edges", &edges.len())
                 .field("identities", &"[REDACTED]")
                 .finish(),
+            Self::VertexMerge { outcome } => f.debug_struct("VertexMerge")
+                .field("outcome", outcome).finish(),
+            Self::VertexUpsert { outcome } => f.debug_struct("VertexUpsert")
+                .field("outcome", outcome).finish(),
         }
     }
 }
@@ -128,5 +150,27 @@ mod tests {
         let debug = format!("{receipt:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains(&u128::MAX.to_string()));
+    }
+
+    #[test]
+    fn merge_receipts_distinguish_matches_from_creations_without_leaking_ids() {
+        let vertex = VId(u128::MAX);
+        for step in [
+            GraphWriteStepReceipt::VertexMerge { outcome: GraphVertexMergeOutcome::Matched(vertex) },
+            GraphWriteStepReceipt::VertexUpsert { outcome: GraphVertexMergeOutcome::Matched(vertex) },
+        ] {
+            assert_eq!(step.merged_vertex(), Some(GraphVertexMergeOutcome::Matched(vertex)));
+            assert_eq!(step.created_vertices(), Some(&[][..]));
+            assert_eq!(step.created_edges(), None);
+            assert!(!format!("{step:?}").contains(&u128::MAX.to_string()));
+        }
+        for step in [
+            GraphWriteStepReceipt::VertexMerge { outcome: GraphVertexMergeOutcome::Created(vertex) },
+            GraphWriteStepReceipt::VertexUpsert { outcome: GraphVertexMergeOutcome::Created(vertex) },
+        ] {
+            assert_eq!(step.merged_vertex(), Some(GraphVertexMergeOutcome::Created(vertex)));
+            assert_eq!(step.created_vertices(), Some(&[vertex][..]));
+            assert!(!format!("{step:?}").contains(&u128::MAX.to_string()));
+        }
     }
 }

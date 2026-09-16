@@ -3,12 +3,18 @@
 //! contract. This module neither parses scripts nor executes partially bound work.
 
 use super::*;
-use crate::{GraphInsertTextError, GraphWriteStatement, PreparedGraphInsertText, PreparedGraphWriteProgram};
+use crate::{
+    GraphInsertTextError, GraphVertexMergeTextError, GraphVertexUpsertTextError,
+    GraphWriteStatement, PreparedGraphInsertText, PreparedGraphVertexMergeText,
+    PreparedGraphVertexUpsertText, PreparedGraphWriteProgram,
+};
 
 #[derive(Clone, Debug)]
 pub enum GraphWriteTemplateStatement {
     Mutation(PreparedGraphMutationText),
     Insert(PreparedGraphInsertText),
+    VertexMerge(PreparedGraphVertexMergeText),
+    VertexUpsert(PreparedGraphVertexUpsertText),
 }
 impl From<PreparedGraphMutationText> for GraphWriteTemplateStatement {
     fn from(value: PreparedGraphMutationText) -> Self { Self::Mutation(value) }
@@ -16,19 +22,40 @@ impl From<PreparedGraphMutationText> for GraphWriteTemplateStatement {
 impl From<PreparedGraphInsertText> for GraphWriteTemplateStatement {
     fn from(value: PreparedGraphInsertText) -> Self { Self::Insert(value) }
 }
+impl From<PreparedGraphVertexMergeText> for GraphWriteTemplateStatement {
+    fn from(value: PreparedGraphVertexMergeText) -> Self { Self::VertexMerge(value) }
+}
+impl From<PreparedGraphVertexUpsertText> for GraphWriteTemplateStatement {
+    fn from(value: PreparedGraphVertexUpsertText) -> Self { Self::VertexUpsert(value) }
+}
 impl GraphWriteTemplateStatement {
     #[must_use]
     pub fn relation(&self) -> RelationId {
-        match self { Self::Mutation(input) => input.relation, Self::Insert(input) => input.relation }
+        match self {
+            Self::Mutation(input) => input.relation,
+            Self::Insert(input) => input.relation,
+            Self::VertexMerge(input) => input.relation,
+            Self::VertexUpsert(input) => input.relation(),
+        }
     }
     #[must_use]
     pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
-        match self { Self::Mutation(input) => input.parameter_schema(), Self::Insert(input) => input.parameter_schema() }
+        match self {
+            Self::Mutation(input) => input.parameter_schema(),
+            Self::Insert(input) => input.parameter_schema(),
+            Self::VertexMerge(input) => input.parameter_schema(),
+            Self::VertexUpsert(input) => input.parameter_schema(),
+        }
     }
-    /// Explicit source access. Debug remains redacted for both variants.
+    /// Explicit source access. Debug remains redacted for every variant.
     #[must_use]
     pub fn statement(&self) -> &str {
-        match self { Self::Mutation(input) => input.statement(), Self::Insert(input) => input.statement() }
+        match self {
+            Self::Mutation(input) => input.statement(),
+            Self::Insert(input) => input.statement(),
+            Self::VertexMerge(input) => input.statement(),
+            Self::VertexUpsert(input) => input.statement(),
+        }
     }
 }
 
@@ -36,6 +63,8 @@ impl GraphWriteTemplateStatement {
 pub enum GraphWriteProgramTemplateError {
     Program(GraphMutationProgramTemplateError),
     InsertBind { statement: usize, source: GraphInsertTextError },
+    VertexMergeBind { statement: usize, source: GraphVertexMergeTextError },
+    VertexUpsertBind { statement: usize, source: GraphVertexUpsertTextError },
 }
 impl From<GraphMutationProgramTemplateError> for GraphWriteProgramTemplateError {
     fn from(error: GraphMutationProgramTemplateError) -> Self { Self::Program(error) }
@@ -45,19 +74,26 @@ impl core::fmt::Display for GraphWriteProgramTemplateError {
         match self {
             Self::Program(error) => error.fmt(f),
             Self::InsertBind { statement, source } => write!(f, "write program creation statement {statement}: {source}"),
+            Self::VertexMergeBind { statement, source } => write!(f, "write program vertex MERGE statement {statement}: {source}"),
+            Self::VertexUpsertBind { statement, source } => write!(f, "write program vertex upsert statement {statement}: {source}"),
         }
     }
 }
 impl core::error::Error for GraphWriteProgramTemplateError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self { Self::Program(error) => Some(error), Self::InsertBind { source, .. } => Some(source) }
+        match self {
+            Self::Program(error) => Some(error),
+            Self::InsertBind { source, .. } => Some(source),
+            Self::VertexMergeBind { source, .. } => Some(source),
+            Self::VertexUpsertBind { source, .. } => Some(source),
+        }
     }
 }
 
-/// One exact parameter contract for precompiled creation and mutation steps.
-/// All bindings complete before an executable program is returned. Rebinding
-/// performs no catalog access, source parsing, allocation of graph identities,
-/// database observation or staging. Scalar payloads retain their shared storage.
+/// One exact parameter contract for precompiled creation, mutation and MERGE
+/// steps. All bindings complete before an executable program is returned.
+/// Rebinding performs no catalog access, source parsing, graph-ID allocation,
+/// database observation or staging. Scalar payloads retain shared storage.
 #[derive(Clone)]
 pub struct PreparedGraphWriteProgramTemplate {
     statements: Box<[GraphWriteTemplateStatement]>,
@@ -89,6 +125,10 @@ impl PreparedGraphWriteProgramTemplate {
                     input.bind_parameters(&local).map_err(|source| GraphMutationProgramTemplateError::Bind { statement, source })?),
                 GraphWriteTemplateStatement::Insert(input) => GraphWriteStatement::Insert(
                     input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::InsertBind { statement, source })?),
+                GraphWriteTemplateStatement::VertexMerge(input) => GraphWriteStatement::VertexMerge(
+                    input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::VertexMergeBind { statement, source })?),
+                GraphWriteTemplateStatement::VertexUpsert(input) => GraphWriteStatement::VertexUpsert(
+                    input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::VertexUpsertBind { statement, source })?),
             };
             statements.push(bound);
         }
@@ -102,7 +142,7 @@ mod tests {
     use super::*;
     use crate::{GqlParameterType, GraphInsertTextErrorKind, GraphPatternTextErrorKind,
         GraphSymbol, GraphSymbolKind};
-    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_delta_types::{LabelId, PropertyKeyId};
     use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
     use std::cell::Cell;
 
@@ -111,6 +151,7 @@ mod tests {
         match (kind, name) {
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(LabelId(1))),
             _ => None,
         }
     }
@@ -207,8 +248,43 @@ mod tests {
         let bound = new.bind_parameters(&args).unwrap();
         let inputs = bound.statements().iter().map(|step| match step {
             GraphWriteStatement::Mutation(input) => input.clone(),
-            GraphWriteStatement::Insert(_) => panic!("unexpected creation"),
+            _ => panic!("unexpected non-mutation step"),
         }).collect();
         assert_eq!(PreparedGraphMutationProgram::prepare(inputs).unwrap(), old.bind_parameters(&args).unwrap());
+    }
+
+    #[test]
+    fn native_merges_share_one_parameter_contract_and_bind_without_catalog_access() {
+        let calls = Cell::new(0);
+        let mut resolve = |kind, name: &str| { calls.set(calls.get() + 1); symbols(kind, name) };
+        let merge = PreparedGraphVertexMergeText::prepare(
+            "MERGE (n:Person {p:$key})", R, &mut resolve,
+        ).unwrap();
+        let upsert = PreparedGraphVertexUpsertText::prepare(
+            "MERGE (n:Person {p:$key}) ON MATCH SET n.q=$value ON CREATE SET n.q=0",
+            R, &mut resolve,
+        ).unwrap();
+        let update = PreparedGraphMutationText::prepare(
+            "MATCH (n:Person) WHERE n.p=$key SET n.q=$value", R, &mut resolve,
+        ).unwrap();
+        let resolved = calls.get();
+        let template = PreparedGraphWriteProgramTemplate::prepare(vec![
+            merge.clone().into(), upsert.clone().into(), update.clone().into(),
+        ]).unwrap();
+        let args = GqlParameters::new().with_int64("key", 7).unwrap().with_int64("value", 9).unwrap();
+        let actual = template.bind_parameters(&args).unwrap();
+        let expected = PreparedGraphWriteProgram::prepare(vec![
+            merge.bind_parameters(&GqlParameters::new().with_int64("key", 7).unwrap()).unwrap().into(),
+            upsert.bind_parameters(&args).unwrap().into(),
+            update.bind_parameters(&args).unwrap().into(),
+        ]).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual, template.bind_parameters(&args).unwrap());
+        assert_eq!(calls.get(), resolved);
+        assert!(!format!("{template:?} {actual:?}").contains("Person"));
+        assert!(matches!(template.bind_parameters(&GqlParameters::new().with_int64("key", 7).unwrap()),
+            Err(GraphWriteProgramTemplateError::VertexUpsertBind { statement: 1, .. })));
+        assert!(matches!(template.bind_parameters(&GqlParameters::new()),
+            Err(GraphWriteProgramTemplateError::VertexMergeBind { statement: 0, .. })));
     }
 }

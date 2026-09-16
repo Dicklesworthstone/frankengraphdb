@@ -1,11 +1,11 @@
-// Mixed write programs reuse the existing private program guard and BOTH
-// ordinary staging paths. This file owns orchestration, not another writer.
+// Mixed write programs reuse the existing private program guard and ordinary
+// staging paths. This file owns orchestration, not another writer or matcher.
 
 impl WriteTxn {
-    /// Stage CREATE, SET/REMOVE and DETACH DELETE as one atomic operation inside
-    /// this transaction. Each step sees its predecessor's canonical overlay;
-    /// assignments within a step remain frozen and simultaneous. No intermediate
-    /// step commits. On success, the caller still explicitly finishes/commits.
+    /// Stage CREATE, SET/REMOVE, DETACH DELETE and vertex MERGE (including
+    /// ON MATCH/ON CREATE actions) as one atomic operation inside this transaction.
+    /// Each step sees its predecessor's canonical overlay; assignments within a
+    /// step remain frozen and simultaneous. No intermediate step commits.
     ///
     /// Any error, cancellation or Rust unwind restores the exact prior staged
     /// workspace, including its already-prepared write. Read observations are
@@ -15,8 +15,9 @@ impl WriteTxn {
     /// Identity requests carry the program statement index and row-local request.
     /// The caller's allocation policy must also distinguish separate executions.
     /// Issued identities are NOT reclaimed on rollback. No allocator request
-    /// precedes owner, health, basis and coordinate preflight; ordinary insertion
-    /// validates a step's data/counts before asking for any of its identities.
+    /// precedes owner, health, basis and coordinate preflight. MERGE's create
+    /// branch observes the same remaining creation cap as ordinary insertion;
+    /// an existing match does not need creation allowance or a fresh identity.
     ///
     /// Quotas sum source visits, selected occurrences, work, scratch, mutation
     /// intents, created vertices and created edges, including later-canceled
@@ -60,6 +61,16 @@ impl WriteTxn {
                         database, cx, input, remaining.insertion_policy(),
                         |request| allocate(GraphWriteIdentityRequest { statement, request }),
                     ).map(GraphWriteStepStats::Insert).map_err(GraphWriteStepError::Insert),
+                    GraphWriteStatement::VertexMerge(input) => workspace.txn.execute_graph_vertex_merge_governed(
+                        database, cx, input, remaining.vertex_merge_policy(),
+                        |request| allocate(GraphWriteIdentityRequest { statement, request }),
+                    ).map(|(stats, _)| GraphWriteStepStats::VertexMerge(stats))
+                        .map_err(GraphWriteStepError::VertexMerge),
+                    GraphWriteStatement::VertexUpsert(input) => workspace.txn.execute_graph_vertex_upsert_governed(
+                        database, cx, input, remaining.vertex_upsert_policy(),
+                        |request| allocate(GraphWriteIdentityRequest { statement, request }),
+                    ).map(|(stats, _)| GraphWriteStepStats::VertexUpsert(stats))
+                        .map_err(GraphWriteStepError::VertexUpsert),
                 }
             }, || cx.checkpoint())?;
             // All quota checks and the final checkpoint ran before acceptance.
@@ -70,15 +81,14 @@ impl WriteTxn {
     }
 
     /// Execute the identical atomic mixed program but retain one ordered receipt
-    /// per successfully accepted step. Creation receipts contain the exact IDs
-    /// staged by that statement; mutation receipts contain its distinct proposal
-    /// targets. The receipt is returned only if EVERY statement, cumulative quota
-    /// check and the final acceptance checkpoint succeeds.
+    /// per successfully accepted step. Creation receipts contain exact staged
+    /// IDs; mutation receipts contain distinct proposal targets; MERGE receipts
+    /// distinguish matched from created identities. No successful-prefix receipt
+    /// escapes if ANY statement, quota check or final checkpoint fails.
     ///
-    /// Consequently a late failure exposes no successful-prefix receipt even
-    /// though an external allocator may already have issued IDs. Program rollback
-    /// cannot reclaim those IDs. A returned receipt is still transaction-local:
-    /// only a later successful finish/commit makes the staged effects durable.
+    /// Program rollback cannot reclaim external identities. A returned receipt
+    /// is still transaction-local: only a later successful finish/commit makes
+    /// the staged effects durable.
     pub fn execute_graph_write_program_returning_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -132,6 +142,26 @@ impl WriteTxn {
                             GraphWriteStepStats::Insert(stats)
                         })
                         .map_err(GraphWriteStepError::Insert),
+                    GraphWriteStatement::VertexMerge(input) => workspace.txn
+                        .execute_graph_vertex_merge_governed(
+                            database, cx, input, remaining.vertex_merge_policy(),
+                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
+                        )
+                        .map(|(stats, outcome)| {
+                            receipts.push(GraphWriteStepReceipt::VertexMerge { outcome });
+                            GraphWriteStepStats::VertexMerge(stats)
+                        })
+                        .map_err(GraphWriteStepError::VertexMerge),
+                    GraphWriteStatement::VertexUpsert(input) => workspace.txn
+                        .execute_graph_vertex_upsert_governed(
+                            database, cx, input, remaining.vertex_upsert_policy(),
+                            |request| allocate(GraphWriteIdentityRequest { statement, request }),
+                        )
+                        .map(|(stats, outcome)| {
+                            receipts.push(GraphWriteStepReceipt::VertexUpsert { outcome });
+                            GraphWriteStepStats::VertexUpsert(stats)
+                        })
+                        .map_err(GraphWriteStepError::VertexUpsert),
                 }
             }, || cx.checkpoint())?;
             debug_assert_eq!(receipts.len(), stats.completed_statements);

@@ -60,6 +60,7 @@ fn step(statement: usize, input: &GraphWriteStatement, remaining: GraphWriteProg
                         1000 + statement as u128 * 100 + row as u128 * 10 + edge as u128)),
                 })
             }, || Ok(())).map(|batch| GraphWriteStepStats::Insert(batch.stats())).map_err(GraphWriteStepError::Insert),
+        _ => panic!("this fixture contains only mutation and insertion statements"),
     }
 }
 fn run(input: &PreparedGraphWriteProgram, allowance: GraphWriteProgramPolicy) -> Result<GraphWriteProgramStats, Error> {
