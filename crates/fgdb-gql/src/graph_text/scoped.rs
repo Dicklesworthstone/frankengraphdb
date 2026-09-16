@@ -2,6 +2,8 @@
 //! The lexer and numeric argument table are shared with ordinary and aggregate
 //! text. Required MATCH and OPTIONAL export names; existential names stay local.
 //! Bodies without shared variables are independent, not malformed correlations.
+//! Child WHERE may read visible outer vertices absent from its positive pattern;
+//! those values are captured with null intact, not introduced as node matches.
 //! MATCH ANY SHORTEST WALK selects one occurrence per endpoint pair; MATCH ALL
 //! SHORTEST WALK keeps every tie. Both require one finite quantified atom in
 //! each selected positive pattern. They share all ordinary MATCH consumers and
@@ -28,6 +30,7 @@ impl ScopeKind {
 
 struct PatternSyntax<'a> {
     variables: Vec<Name<'a>>,
+    captures: Vec<Name<'a>>,
     labels: Vec<(Name<'a>, Name<'a>)>,
     edges: Vec<Edge<'a>>,
     filters: Vec<Filter<'a>>,
@@ -73,8 +76,9 @@ impl<'a> ScopeSyntax<'a> {
         self,
         symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
     ) -> Result<BoundScope, GraphPatternTextError> {
-        let (builder, filters) = resolve_pattern(
+        let (builder, filters) = resolve_pattern_with_captures(
             &self.body.variables,
+            &self.body.captures,
             &self.body.labels,
             &self.body.edges,
             self.body.filters,
@@ -98,9 +102,25 @@ pub(super) fn resolve_pattern<'a>(
     filters: Vec<Filter<'a>>,
     symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
 ) -> Result<(GraphPatternBuilder, Vec<BoundFilter>), GraphPatternTextError> {
+    resolve_pattern_with_captures(variables, &[], labels, edges, filters, symbol)
+}
+
+fn resolve_pattern_with_captures<'a>(
+    variables: &[Name<'a>],
+    captures: &[Name<'a>],
+    labels: &[(Name<'a>, Name<'a>)],
+    edges: &[Edge<'a>],
+    filters: Vec<Filter<'a>>,
+    symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
+) -> Result<(GraphPatternBuilder, Vec<BoundFilter>), GraphPatternTextError> {
     let mut builder = GraphPatternBuilder::new();
     for name in variables {
-        built(name.at, builder.vertex(name.text))?;
+        let declared = if captures.iter().any(|capture| capture.text == name.text) {
+            builder.outer_vertex(name.text)
+        } else {
+            builder.vertex(name.text)
+        };
+        built(name.at, declared)?;
     }
     for &(variable, label) in labels {
         let GraphSymbol::Label(label_id) = symbol(GraphSymbolKind::Label, label)? else {
@@ -283,6 +303,48 @@ pub(super) fn bind_builder(
     Ok(builder)
 }
 
+// The native parser has already validated every operand against the union of
+// child-pattern names and visible outer names. Retain only actual captures,
+// in first-reference order, not every visible name. This is preparation-only
+// symbol collection over the SAME bounded predicate IR, never evaluation.
+fn predicate_captures<'a>(
+    variables: &mut Vec<Name<'a>>,
+    filters: &[Filter<'a>],
+) -> Result<Vec<Name<'a>>, GraphPatternTextError> {
+    let mut captures = Vec::new();
+    let mut pending: Vec<_> = filters.iter().rev().collect();
+    while let Some(filter) = pending.pop() {
+        let names = match filter {
+            Filter::Boolean { program, .. } => {
+                for item in program.iter().rev() {
+                    if let boolean::SyntaxItem::Atom(atom) = item { pending.push(atom); }
+                }
+                continue;
+            }
+            Filter::Properties { left, right, .. } | Filter::Identity { left, right, .. } => {
+                [Some(*left), Some(*right)]
+            }
+            Filter::VertexNull { variable, .. } | Filter::Property { variable, .. }
+            | Filter::Scalar { variable, .. } | Filter::Null { variable, .. } => {
+                [Some(*variable), None]
+            }
+        };
+        for name in names.into_iter().flatten() {
+            if variables.iter().any(|variable| variable.text == name.text) { continue; }
+            if variables.len() == MAX_PATTERN_VERTICES {
+                return Err(error(name.at, GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                    dimension: crate::algebra::PatternLimitDimension::Vertices,
+                    limit: MAX_PATTERN_VERTICES,
+                    observed: variables.len() + 1,
+                })));
+            }
+            variables.push(name);
+            captures.push(name);
+        }
+    }
+    Ok(captures)
+}
+
 impl<'a> Parser<'a> {
     pub(super) fn parse_scoped_head(&mut self) -> Result<(), GraphPatternTextError> {
         self.parse_match_prefix()?;
@@ -291,9 +353,9 @@ impl<'a> Parser<'a> {
 
     /// Shared read/write MATCH prefix. Required and OPTIONAL clauses may be
     /// interleaved after the mandatory root; each retains its own predicates,
-    /// search selector and position. The existing positive-child grammar still
-    /// requires predicate variables to occur in that child's pattern and refuses
-    /// nested existential bodies. A mutation attaches its own terminal clause.
+    /// search selector and position. Child predicates may capture visible outer
+    /// values without matching those vertices. Nested existential bodies remain
+    /// unsupported. A mutation attaches its own typed terminal clause.
     pub(super) fn parse_match_prefix(&mut self) -> Result<(), GraphPatternTextError> {
         self.word("MATCH")?;
         self.positive_pattern()?;
@@ -583,6 +645,7 @@ impl<'a> Parser<'a> {
     fn take_pattern(&mut self) -> PatternSyntax<'a> {
         PatternSyntax {
             variables: core::mem::take(&mut self.syntax.variables),
+            captures: Vec::new(),
             labels: core::mem::take(&mut self.syntax.labels),
             edges: core::mem::take(&mut self.syntax.edges),
             filters: core::mem::take(&mut self.syntax.filters),
@@ -609,13 +672,27 @@ impl<'a> Parser<'a> {
         let parsed = (|| {
             self.word("MATCH")?;
             self.positive_pattern()?;
+            let matched_variables = self.syntax.variables.len();
             if self.take_word("WHERE")? {
+                // The positive pattern is complete. Temporarily expose the
+                // containing symbol table to the SAME predicate parser, without
+                // inserting nodes or altering its name/parameter/token grammar.
+                // Each table has at most 65 names, so their union is bounded.
+                // Unused names are removed before any body is resolved/lowered.
+                for &name in &outer.variables {
+                    if !self.syntax.variables.iter().any(|local| local.text == name.text) {
+                        self.syntax.variables.push(name);
+                    }
+                }
                 self.scoped_predicates(false)?;
             }
             if !kind.exports_bindings() {
                 self.punct(b'}', "}")?;
             }
-            Ok::<_, GraphPatternTextError>(self.take_pattern())
+            let mut body = self.take_pattern();
+            body.variables.truncate(matched_variables);
+            body.captures = predicate_captures(&mut body.variables, &body.filters)?;
+            Ok::<_, GraphPatternTextError>(body)
         })();
         let body = match parsed {
             Ok(body) => body,
@@ -625,9 +702,8 @@ impl<'a> Parser<'a> {
             }
         };
         self.restore_pattern(outer);
-        // The typed scope compiler distinguishes shared-name correlations
-        // from a genuinely independent child. Never invent an outer anchor or
-        // expose existential locals merely to force a connected shape.
+        // Captures already name visible values. Only actual new matched names
+        // are exported; existential locals never enter the containing table.
         if kind.exports_bindings() {
             for variable in &body.variables {
                 if !self
