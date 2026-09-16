@@ -165,6 +165,7 @@ pub use prepared::{
     GqlExecutionBudget, GqlExecutionStats, PreparedGqlQuery,
 };
 pub use set_ops::{
+    GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp,
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
     GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetValue,
     MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,

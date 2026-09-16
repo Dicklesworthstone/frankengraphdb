@@ -142,6 +142,20 @@ where
             rows
         }
         SetNode::Scope(input) => run(input, source, meter, operand)?,
+        SetNode::Filter { input, predicate } => {
+            let input = run(input, source, meter, operand)?;
+            let mut output = Vec::new();
+            for row in input {
+                meter.event(GlaExecutionEvent::Work)?;
+                if predicate.evaluate(&row, &mut |event| meter.event(event))? {
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    // Move the admitted row. Filtering does not clone payloads
+                    // or alter the child's multiplicity and selected ordering.
+                    output.push(row);
+                }
+            }
+            output
+        }
         SetNode::Project { input, projection, quantifier } => {
             let input = run(input, source, meter, operand)?;
             let mut output = Vec::new();

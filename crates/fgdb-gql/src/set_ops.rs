@@ -7,8 +7,10 @@
 //! engine, incremental derivative, or full GQL conformance claim.
 
 mod execute;
+mod filter;
 mod merge;
 mod projection;
+pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub use projection::{GraphSetProjection, GraphSetProjectionError, GraphSetValue};
 
 use crate::algebra::{GraphOrderError, GraphValueOrder, GraphValueRow, PreparedGraphPattern, ValueProjection};
@@ -75,6 +77,10 @@ type SetResult<T, E, C> = Result<T, GqlQueryError<GraphSetExecutionError<E>, C>>
 enum SetNode {
     Pattern(PreparedGraphPattern<GraphValueRow>),
     Scope(Box<PreparedGraphSet>),
+    Filter {
+        input: Box<PreparedGraphSet>,
+        predicate: filter::RowPredicate,
+    },
     Project {
         input: Box<PreparedGraphSet>,
         projection: Vec<GraphSetProjection>,
@@ -226,6 +232,11 @@ impl PreparedGraphSet {
             SetNode::Scope(input) => {
                 bytes.push(2);
                 input.append_transcript(bytes);
+            }
+            SetNode::Filter { input, predicate } => {
+                bytes.push(4);
+                input.append_transcript(bytes);
+                predicate.append_transcript(bytes);
             }
             SetNode::Project { input, projection, quantifier } => {
                 bytes.extend_from_slice(&[3, u8::from(*quantifier == GraphSetQuantifier::Distinct)]);
