@@ -28,6 +28,7 @@ include!("write_txn_parts/write_programs.rs");
 include!("write_txn_parts/autocommit.rs");
 include!("write_txn_parts/autocommit_delete.rs");
 include!("write_txn_parts/autocommit_merge.rs");
+include!("write_txn_parts/autocommit_upsert.rs");
 include!("write_txn_parts/autocommit_edge_merge.rs");
 include!("write_txn_parts/overlay_evidence.rs");
 include!("write_txn_parts/portable_evidence.rs");
