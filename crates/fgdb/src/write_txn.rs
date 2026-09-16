@@ -15,6 +15,7 @@ include!("write_txn_parts/gql_node.rs");
 include!("write_txn_parts/gql_overlay_graph.rs");
 include!("write_txn_parts/gql_edge_match.rs");
 include!("write_txn_parts/gql_api.rs");
+include!("write_txn_parts/set_queries.rs");
 include!("write_txn_parts/owned_prepared.rs");
 include!("write_txn_parts/limited_gql.rs");
 include!("write_txn_parts/graph_mutations.rs");
