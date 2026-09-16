@@ -11,7 +11,7 @@
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryPolicy, GqlScalarParameter};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{EId, VId};
+use fgdb_types::EId;
 
 pub const MAX_GRAPH_EDGE_MERGE_PROPERTIES: usize = 256;
 
@@ -33,10 +33,20 @@ impl core::error::Error for GraphEdgeMergeBuildError {}
 pub struct GraphEdgeMergePolicy {
     /// Cumulative MATCH + endpoint reduction + relationship existence scan.
     pub query: GqlQueryPolicy,
+    /// Creation proposals only. Zero permits Matched and NoInput outcomes but
+    /// rejects a missing relationship before external identity allocation.
+    pub max_created_edges: u64,
 }
 impl GraphEdgeMergePolicy {
     #[must_use]
-    pub const fn new(query: GqlQueryPolicy) -> Self { Self { query } }
+    pub const fn new(query: GqlQueryPolicy) -> Self {
+        Self { query, max_created_edges: 1 }
+    }
+    #[must_use]
+    pub const fn with_creation_limit(mut self, limit: u64) -> Self {
+        self.max_created_edges = limit;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +95,7 @@ pub enum GraphEdgeMergeError<E, A> {
     NullEndpoint { row: usize, column: usize },
     AmbiguousEndpointPairs { observed: u64 },
     AmbiguousRelationships { observed: u64 },
+    CreationLimit { limit: u64, observed: u128 },
     IdentityKind,
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for GraphEdgeMergeError<E, A> {
@@ -97,6 +108,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for GraphE
             Self::NullEndpoint { row, column } => write!(f, "relationship MERGE row {row} has null endpoint column {column}"),
             Self::AmbiguousEndpointPairs { observed } => write!(f, "relationship MERGE selected {observed} distinct endpoint pairs; one required"),
             Self::AmbiguousRelationships { observed } => write!(f, "relationship MERGE found {observed} parallel relationships; one required"),
+            Self::CreationLimit { limit, observed } => write!(f, "relationship MERGE creation limit exceeded: {observed} > {limit}"),
             Self::IdentityKind => f.write_str("relationship MERGE allocator returned a non-edge identity"),
         }
     }

@@ -183,6 +183,15 @@ impl WriteTxn {
                 ));
             }
 
+            // Match and NoInput do not spend creation quota. A missing edge does:
+            // refuse before payload cloning or any external identity is issued.
+            if policy.max_created_edges == 0 {
+                return Err(GqlQueryError::Source(GraphEdgeMergeError::CreationLimit {
+                    limit: policy.max_created_edges,
+                    observed: 1,
+                }));
+            }
+
             // Freeze creation payload before allocation. The prepared definition
             // already admitted scalar sizes/types; reserve one logical entry per
             // owned property copy under the same evaluator allowance.
