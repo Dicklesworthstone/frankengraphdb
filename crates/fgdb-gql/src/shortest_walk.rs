@@ -48,7 +48,26 @@ impl<'a> GraphShortestWalkCursor<'a> {
     /// Return one endpoint occurrence. A complete layer is processed before its
     /// first result is released so equal-depth alternatives cannot be mistaken
     /// for longer paths. Source/work/scratch refusal returns no fabricated row.
+    /// A refusal is terminal: discard retained traversal state and return `None`
+    /// on later calls without invoking the controller again.
     pub fn next_with_control<E>(
+        &mut self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<VId>, E> {
+        let result = self.next_controlled(control);
+        if result.is_err() {
+            // A layer may already have buffered rows or installed settlement
+            // markers. Neither can safely survive a failed layer transition.
+            self.done = true;
+            self.frontier = Vec::new();
+            self.pending = Vec::new();
+            self.pending_at = 0;
+            self.settled.clear();
+        }
+        result
+    }
+
+    fn next_controlled<E>(
         &mut self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<VId>, E> {
@@ -275,5 +294,66 @@ mod tests {
             assert_eq!(seen, stop);
         }
         assert_eq!(collect(VId(1), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap(), expected);
+    }
+
+    #[test]
+    fn every_refusal_discards_partial_state_and_fuses_the_cursor() {
+        let adjacency = BTreeMap::from([
+            (VId(1), vec![VId(2), VId(2), VId(3)]),
+            (VId(2), vec![VId(3), VId(4)]),
+            (VId(3), vec![VId(4)]),
+        ]);
+        for minimum in 0..=1 {
+            let bounds = GraphWalkBounds::new(minimum, 3).unwrap();
+            let mut calls = 0;
+            collect(VId(1), bounds, Some(&adjacency), &mut |_| {
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+
+            // The first boundary is construction; no cursor exists to resume
+            // after a construction refusal. Exercise every subsequent boundary.
+            for stop in 2..=calls {
+                let mut seen = 0;
+                let mut control = |_| {
+                    seen += 1;
+                    if seen == stop {
+                        Err(stop)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let mut cursor =
+                    GraphShortestWalkCursor::new(VId(1), bounds, Some(&adjacency), &mut control)
+                        .unwrap();
+                loop {
+                    match cursor.next_with_control(&mut control) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => panic!("missed refusal at boundary {stop}"),
+                        Err(error) => {
+                            assert_eq!(error, stop);
+                            break;
+                        }
+                    }
+                }
+                assert_eq!(seen, stop);
+                assert!(cursor.done);
+                assert!(cursor.frontier.is_empty());
+                assert!(cursor.pending.is_empty());
+                assert!(cursor.settled.is_empty());
+                assert_eq!(cursor.pending_at, 0);
+                assert_eq!(cursor.frontier.capacity(), 0);
+                assert_eq!(cursor.pending.capacity(), 0);
+
+                for _ in 0..3 {
+                    // Any callback after refusal would return this sentinel.
+                    assert_eq!(
+                        cursor.next_with_control(&mut |_| Err::<(), _>(usize::MAX)),
+                        Ok(None)
+                    );
+                }
+            }
+        }
     }
 }
