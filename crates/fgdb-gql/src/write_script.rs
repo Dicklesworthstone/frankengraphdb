@@ -86,11 +86,20 @@ impl GraphWriteScriptError {
 /// Binding is completed before entering the database's program executor.
 /// Program errors retain the ordinary staging/commit outcome vocabulary: an
 /// unknown or committed-needs-recovery outcome is never relabeled a bind failure
-/// or a successful rollback. No execution receipt accompanies either error arm.
+/// or a successful rollback. No execution receipt accompanies an error arm.
 #[derive(Debug)]
 pub enum GraphWriteScriptExecutionError<E, A, C> {
     Binding(GraphWriteScriptError),
     Program(crate::GraphWriteProgramError<E, A, C>),
+    /// The entire batch was refused before any execution began.
+    BatchBinding(GraphWriteScriptBatchError),
+    /// Preserve the original program/commit error plus its record coordinates.
+    /// None identifies infrastructure or final whole-program acceptance, not
+    /// an invented failing record. This arm alone says nothing about durability.
+    BatchProgram {
+        location: Option<GraphWriteScriptBatchLocation>,
+        source: crate::GraphWriteProgramError<E, A, C>,
+    },
 }
 
 impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
@@ -100,6 +109,14 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
         match self {
             Self::Binding(source) => source.fmt(f),
             Self::Program(source) => source.fmt(f),
+            Self::BatchBinding(source) => source.fmt(f),
+            Self::BatchProgram { location, source } => {
+                if let Some(location) = location {
+                    write!(f, "graph write script batch argument set {}, statement {} at bytes {}..{}: ",
+                        location.argument_set, location.statement, location.span.start, location.span.end)?;
+                }
+                source.fmt(f)
+            }
         }
     }
 }
@@ -110,6 +127,8 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
         match self {
             Self::Binding(source) => Some(source),
             Self::Program(source) => Some(source),
+            Self::BatchBinding(source) => Some(source),
+            Self::BatchProgram { source, .. } => Some(source),
         }
     }
 }
@@ -235,6 +254,52 @@ impl BoundGraphWriteScriptBatch {
     pub fn into_program(self) -> PreparedGraphWriteProgram { self.program }
     #[must_use]
     pub const fn argument_sets(&self) -> usize { self.argument_sets }
+
+    /// Locate a failure without changing its typed source or commit outcome.
+    /// Boundary indices at/after the full program length have no input record.
+    /// The ordinary autocommit executor wraps begin/finish errors in Preflight;
+    /// those infrastructure errors must not be attributed to the first record.
+    #[must_use]
+    pub fn execution_error<E, A, C>(
+        &self,
+        source: crate::GraphWriteProgramError<E, A, C>,
+    ) -> GraphWriteScriptExecutionError<E, A, C> {
+        use crate::{GraphMutationProgramError as M, GraphWriteProgramError as W};
+        let flat = match &source {
+            W::Insert { statement, .. }
+            | W::VertexMerge { statement, .. }
+            | W::VertexUpsert { statement, .. }
+            | W::EdgeMerge { statement, .. }
+            | W::EdgeUpsert { statement, .. }
+            | W::Delete { statement, .. }
+            | W::CreationBudget { statement, .. }
+            | W::Program(M::Statement { statement, .. }
+                | M::Budget { statement, .. } | M::InvalidStatistics { statement }) => Some(*statement),
+            W::Program(M::Interrupted { completed_statements, .. }) => Some(*completed_statements),
+            W::Program(M::Preflight(_)) => None,
+        };
+        GraphWriteScriptExecutionError::BatchProgram {
+            location: flat.and_then(|statement| self.location(statement)),
+            source,
+        }
+    }
+
+    /// Slice one input record's ordered outcomes from a complete program receipt.
+    /// Partial/malformed receipt shapes refuse instead of exposing a successful
+    /// prefix as a completed batch. Shape checking is NOT proof that a receipt
+    /// belongs to this definition or that its transaction committed.
+    #[must_use]
+    pub fn record_receipts<'r>(
+        &self,
+        receipt: &'r crate::GraphWriteProgramReceipt,
+        argument_set: usize,
+    ) -> Option<&'r [crate::GraphWriteStepReceipt]> {
+        let count = self.program.statements().len();
+        if receipt.stats().completed_statements != count || receipt.steps().len() != count {
+            return None;
+        }
+        receipt.steps().get(self.statement_range(argument_set)?)
+    }
 
     /// The corresponding contiguous slice of a successful program receipt.
     #[must_use]
