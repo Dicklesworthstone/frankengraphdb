@@ -33,9 +33,13 @@ mod temporal_set_text;
 mod temporal_text;
 mod vertex_merge;
 mod vertex_upsert;
+mod vertex_upsert_text;
 mod walk;
 mod write_receipt;
 
+pub use vertex_upsert_text::{
+    GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexUpsertText,
+};
 pub use vertex_upsert::{
     GraphVertexUpsertAction, GraphVertexUpsertBranch, GraphVertexUpsertBuildError,
     GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
