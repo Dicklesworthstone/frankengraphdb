@@ -54,8 +54,9 @@ pub enum GlaDirection {
 }
 
 /// Search semantics of one finite WALK atom, not a terminal row quantifier.
-/// Both modes retain edge-occurrence multiplicity; DISTINCT remains a separate
-/// output operation. This profile returns endpoints, not captured path values.
+/// ALL modes retain edge-occurrence multiplicity; ANY selects one occurrence
+/// per endpoint pair. DISTINCT remains a separate output operation. This
+/// profile returns endpoints, not captured path values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphWalkSearch {
     /// Every walk whose length lies in the admitted interval.
@@ -65,6 +66,11 @@ pub enum GraphWalkSearch {
     /// unrestricted shortest-path search. Each atom selects independently of
     /// surrounding joins. No weighted, TRAIL or SIMPLE search is implied.
     AllShortest,
+    /// One minimum-length occurrence within the interval per endpoint pair.
+    /// Equal-depth prefixes coalesce before expansion, not after enumerating
+    /// all ties. Surrounding binding occurrences still multiply independently.
+    /// No captured route is selected or exposed by this endpoint-only profile.
+    AnyShortest,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,8 +202,8 @@ pub enum GlaOperator {
         direction: GlaDirection,
     },
     /// Append one endpoint for every selected WALK occurrence in the inclusive
-    /// finite interval. Search is explicit: ordinary enumeration or all tied
-    /// shortest occurrences per endpoint pair. Endpoint predicates apply after
+    /// finite interval. Search explicitly selects all walks, all shortest ties
+    /// or one shortest occurrence per endpoint pair. Predicates apply after
     /// expansion; intermediate vertices are not endpoint-filtered. No captured
     /// path, weighted search, TRAIL or SIMPLE mode is implied.
     VarLengthExpand {
@@ -627,11 +633,12 @@ impl<Row> GlaPlan<Row> {
                     bounds,
                     search,
                 } => {
-                    // Preserve the original All transcript byte-for-byte. The
-                    // new selector has its own tag even when outputs coincide.
+                    // Preserve existing transcripts byte-for-byte. Every
+                    // selector has its own tag even when outputs coincide.
                     bytes.push(match search {
                         GraphWalkSearch::All => 22,
                         GraphWalkSearch::AllShortest => 23,
+                        GraphWalkSearch::AnyShortest => 24,
                     });
                     bytes.extend_from_slice(&source.0.to_be_bytes());
                     bytes.extend_from_slice(&relation.0.to_be_bytes());

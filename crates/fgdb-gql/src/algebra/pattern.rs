@@ -362,6 +362,28 @@ impl GraphPatternBuilder {
         Ok(self)
     }
 
+    /// Add an ANY SHORTEST WALK atom: one endpoint occurrence per pair within
+    /// the finite interval. Equal-depth prefixes coalesce during search, so
+    /// this does not enumerate every tied route before deduplicating output.
+    /// Each incoming binding occurrence executes independently. Endpoint
+    /// predicates, scopes and outer multiplicities retain their ordinary laws.
+    /// Like shortest_walk, this is per-atom and returns no captured path.
+    pub fn any_shortest_walk(
+        &mut self,
+        source: &str,
+        relation: RelationId,
+        direction: GlaDirection,
+        destination: &str,
+        bounds: crate::GraphWalkBounds,
+    ) -> Result<&mut Self, PatternBuildError> {
+        self.walk(source, relation, direction, destination, bounds)?;
+        self.edges
+            .last_mut()
+            .expect("one validated WALK atom was just added")
+            .search = GraphWalkSearch::AnyShortest;
+        Ok(self)
+    }
+
     pub fn identity(
         &mut self,
         left: &str,

@@ -177,6 +177,10 @@ impl<'a> WalkExpansion<'a> {
                 crate::GraphShortestWalkCursor::new(source, bounds, adjacency, control)
                     .map(Self::AllShortest)
             }
+            GraphWalkSearch::AnyShortest => {
+                crate::GraphShortestWalkCursor::new_any(source, bounds, adjacency, control)
+                    .map(Self::AllShortest)
+            }
         }
     }
 
