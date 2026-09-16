@@ -11,7 +11,6 @@ use crate::{
 struct ParsedEdgeUpsert<'a> {
     source: Name<'a>,
     destination: Name<'a>,
-    relationship: Name<'a>,
     relation: Name<'a>,
     on_match: Vec<(Name<'a>, EdgeUpsertValueTemplate)>,
     on_create: Vec<(Name<'a>, EdgeUpsertValueTemplate)>,
@@ -122,7 +121,7 @@ impl<'a> Parser<'a> {
         }
         self.end()?;
         let (source, destination) = if incoming { (right, left) } else { (left, right) };
-        Ok(ParsedEdgeUpsert { source, destination, relationship, relation, on_match, on_create })
+        Ok(ParsedEdgeUpsert { source, destination, relation, on_match, on_create })
     }
 }
 
@@ -191,7 +190,6 @@ impl PreparedGraphEdgeUpsertText {
         };
         let on_match = resolve_actions(parsed.on_match)?;
         let on_create = resolve_actions(parsed.on_create)?;
-        drop(resolve_actions);
 
         let columns = projections.into_iter().enumerate().map(|(index, projection)| BoundColumn {
             alias: format!("_edge_upsert_{index}"), variable: projection.variable.text.to_owned(), key: None,

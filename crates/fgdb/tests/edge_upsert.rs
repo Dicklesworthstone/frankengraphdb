@@ -154,3 +154,163 @@ fn create_branch_action_limit_rolls_back_created_edge() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn native_autocommit_creates_then_updates_with_no_second_identity() {
+    let ((), report) = run_async_under_lab(0xed9e_3101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let template = fgdb_gql::PreparedGraphEdgeUpsertText::prepare(
+            "MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (a)-[e:R]->(b) ON CREATE SET e.w=$fresh ON MATCH SET e.w=$seen",
+            R, |kind, name| match (kind, name) {
+                (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
+                (GraphSymbolKind::Property, "w") => Some(GraphSymbol::Property(W)),
+                _ => symbols(kind, name),
+            },
+        ).unwrap();
+        let args = GqlParameters::new().with_int64("left", 2).unwrap().with_int64("right", 3).unwrap()
+            .with_int64("fresh", 200).unwrap().with_int64("seen", 100).unwrap();
+        let prepared = template.bind_parameters(&args).unwrap();
+        let (created, outcome, completion) = db.execute_graph_edge_upsert_autocommit_governed(
+            &txcx, &query, &commit, &prepared, policy(1),
+            |_| Ok::<_, ()>(ElementId::Edge(EId(20))),
+        ).await.unwrap();
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Created(EId(20)));
+        assert!(matches!(completion, fgdb_types::EmbeddedTxnCompletion::WriteCommitted { .. }));
+        assert_eq!(created.evaluator.work_units, created.merge.evaluator.work_units + 2);
+        assert_eq!(created.evaluator.scratch_entries, created.merge.evaluator.scratch_entries + 1);
+        assert_eq!(db.edge(EId(20)).unwrap().unwrap().props, vec![(W, CanonicalScalar::Int(200))]);
+
+        let mut no_creations = policy(1);
+        no_creations.merge.max_created_edges = 0;
+        let (_, outcome, completion) = db.execute_graph_edge_upsert_autocommit_governed(
+            &txcx, &query, &commit, &prepared, no_creations,
+            |_| -> Result<ElementId, ()> { panic!("existing relationship must not allocate") },
+        ).await.unwrap();
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(20)));
+        assert!(matches!(completion, fgdb_types::EmbeddedTxnCompletion::WriteCommitted { .. }));
+        assert_eq!(db.edge(EId(20)).unwrap().unwrap().props, vec![(W, CanonicalScalar::Int(100))]);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn exact_branch_work_and_scratch_limits_accept_and_one_below_rolls_back() {
+    let ((), report) = run_async_under_lab(0xed9e_3102, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let prepared = upsert(2, 3);
+        let mut reference = db.begin(&txcx).unwrap();
+        let (expected, _) = reference.execute_graph_edge_upsert_governed(
+            &mut db, &query, &prepared, policy(1),
+            |_| Ok::<_, ()>(ElementId::Edge(EId(30))),
+        ).unwrap();
+        reference.abort();
+        for mode in 0..3 {
+            let mut limits = policy(1);
+            limits.merge.query = GqlQueryPolicy::new(
+                expected.merge.match_selection.snapshot_records + expected.merge.overlay_edges,
+                expected.merge.match_selection.result_rows,
+                expected.evaluator.work_units - u64::from(mode == 0),
+                expected.evaluator.scratch_entries - u64::from(mode == 1),
+            );
+            let mut txn = db.begin(&txcx).unwrap();
+            let before = txn.staged_effect_digest().unwrap();
+            let eid = EId(40 + mode as u128);
+            let result = txn.execute_graph_edge_upsert_governed(
+                &mut db, &query, &prepared, limits,
+                |_| Ok::<_, ()>(ElementId::Edge(eid)),
+            );
+            if mode < 2 {
+                let Err(GqlQueryError::Evaluator(error)) = result else {
+                    panic!("expected branch resource refusal for mode {mode}");
+                };
+                assert_eq!(error.dimension, if mode == 0 {
+                    fgdb_gql::GlaLimitDimension::WorkUnits
+                } else { fgdb_gql::GlaLimitDimension::ScratchEntries });
+                assert_eq!(txn.staged_effect_digest().unwrap(), before);
+                assert!(txn.edge(&db, eid).unwrap().is_none());
+            } else {
+                assert_eq!(result.unwrap().0, expected);
+                assert_eq!(txn.edge(&db, eid).unwrap().unwrap().props, vec![(W, CanonicalScalar::Int(200))]);
+            }
+            txn.abort();
+        }
+        assert_eq!(db.edges().unwrap().len(), 1);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn refused_action_keeps_outer_prefix_and_negative_relationship_witness() {
+    let ((), report) = run_async_under_lab(0xed9e_3103, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(9), vec![], vec![]);
+        txn.write(&mut db, prefix).unwrap();
+        let before = txn.staged_effect_digest().unwrap();
+        let allocations = std::cell::Cell::new(0);
+        assert!(txn.execute_graph_edge_upsert_governed(
+            &mut db, &query, &upsert(2, 3), policy(0), |_| {
+                allocations.set(allocations.get() + 1);
+                Ok::<_, ()>(ElementId::Edge(EId(20)))
+            },
+        ).is_err());
+        assert_eq!(allocations.get(), 1, "rollback does not rewind the allocator");
+        assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        assert!(txn.vertex(&db, VId(9)).unwrap().is_some());
+        assert!(txn.edge(&db, EId(20)).unwrap().is_none());
+        let mut concurrent = WriteBatch::new(R);
+        concurrent.add_edge(EId(21), VId(2), VId(3), vec![]);
+        db.write(&commit, concurrent).await.unwrap();
+        assert!(txn.finish(&mut db, &commit).await.is_err(), "failed MERGE still observed absence");
+        assert!(db.vertex(VId(9)).unwrap().is_none());
+        assert!(db.edge(EId(21)).unwrap().is_some());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn inactive_create_actions_need_no_quota_and_matching_can_remain_read_only() {
+    let ((), report) = run_async_under_lab(0xed9e_3104, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let base = upsert(1, 2);
+        let prepared = PreparedGraphEdgeUpsert::prepare(base.merge().clone(), vec![], base.on_create().to_vec()).unwrap();
+        let mut limits = policy(0);
+        limits.merge.max_created_edges = 0;
+        let before = db.frontier().unwrap();
+        let (stats, outcome, completion) = db.execute_graph_edge_upsert_autocommit_governed(
+            &txcx, &query, &commit, &prepared, limits,
+            |_| -> Result<ElementId, ()> { panic!("matched branch cannot allocate") },
+        ).await.unwrap();
+        assert_eq!(outcome, GraphEdgeMergeOutcome::Matched(EId(10)));
+        assert_eq!(stats.action_effects, 0);
+        assert!(matches!(completion, fgdb_types::EmbeddedTxnCompletion::ReadClosed { .. }));
+        assert_eq!(db.frontier().unwrap(), before);
+        assert_eq!(db.edge(EId(10)).unwrap().unwrap().props, vec![(W, CanonicalScalar::Int(1))]);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

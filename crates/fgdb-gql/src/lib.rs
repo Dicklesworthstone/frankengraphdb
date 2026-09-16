@@ -9,6 +9,8 @@ pub mod algebra;
 mod algebra_exec;
 mod deletion;
 mod edge_merge;
+mod edge_upsert;
+mod edge_upsert_text;
 mod evidence_artifact;
 mod evidence_cursor;
 mod evidence_limits;
@@ -37,6 +39,14 @@ mod vertex_upsert_text;
 mod walk;
 mod write_receipt;
 
+pub use edge_upsert::{
+    GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError,
+    GraphEdgeUpsertError, GraphEdgeUpsertPolicy, GraphEdgeUpsertStats,
+    MAX_GRAPH_EDGE_UPSERT_ACTIONS, PreparedGraphEdgeUpsert,
+};
+pub use edge_upsert_text::{
+    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertText,
+};
 pub use vertex_upsert_text::{
     GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexUpsertText,
 };

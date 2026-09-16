@@ -39,7 +39,9 @@ impl core::error::Error for GraphEdgeUpsertBuildError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphEdgeUpsertPolicy {
+    /// One query allowance covers MERGE, property copies and final acceptance.
     pub merge: GraphEdgeMergePolicy,
+    /// Number of proposals in the selected branch, independent of creation.
     pub max_actions: u64,
 }
 impl GraphEdgeUpsertPolicy {
@@ -54,6 +56,9 @@ pub struct GraphEdgeUpsertStats {
     pub merge: crate::GraphEdgeMergeStats,
     pub branch: GraphEdgeUpsertBranch,
     pub action_effects: u64,
+    /// Cumulative MERGE plus branch work/scratch. Do not add merge.evaluator
+    /// again. Logical entries do not measure allocator or durable I/O costs.
+    pub evaluator: crate::GlaExecutionStats,
 }
 
 #[derive(Debug)]
