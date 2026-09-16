@@ -42,8 +42,8 @@ mod write_script;
 
 pub use write_script::{
     BoundGraphWriteScriptBatch, GraphWriteScriptBatchError, GraphWriteScriptBatchLocation,
-    GraphWriteScriptError, GraphWriteScriptErrorKind, MAX_GRAPH_WRITE_SCRIPT_BYTES,
-    PreparedGraphWriteScript,
+    GraphWriteScriptError, GraphWriteScriptErrorKind, GraphWriteScriptExecutionError,
+    MAX_GRAPH_WRITE_SCRIPT_BYTES, PreparedGraphWriteScript,
 };
 
 pub use edge_upsert::{

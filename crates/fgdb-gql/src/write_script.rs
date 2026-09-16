@@ -82,6 +82,37 @@ impl GraphWriteScriptError {
     }
 }
 
+/// Binding is completed before entering the database's program executor.
+/// Program errors retain the ordinary staging/commit outcome vocabulary: an
+/// unknown or committed-needs-recovery outcome is never relabeled a bind failure
+/// or a successful rollback. No execution receipt accompanies either error arm.
+#[derive(Debug)]
+pub enum GraphWriteScriptExecutionError<E, A, C> {
+    Binding(GraphWriteScriptError),
+    Program(crate::GraphWriteProgramError<E, A, C>),
+}
+
+impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
+    core::fmt::Display for GraphWriteScriptExecutionError<E, A, C>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Binding(source) => source.fmt(f),
+            Self::Program(source) => source.fmt(f),
+        }
+    }
+}
+impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
+    C: core::error::Error + 'static> core::error::Error for GraphWriteScriptExecutionError<E, A, C>
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Binding(source) => Some(source),
+            Self::Program(source) => Some(source),
+        }
+    }
+}
+
 /// Semicolon-separated native CREATE, MATCH mutation and vertex/relationship
 /// MERGE statements, including ON MATCH/ON CREATE. One final semicolon is legal;
 /// empty statements, reads, transaction-control commands and unsupported syntax

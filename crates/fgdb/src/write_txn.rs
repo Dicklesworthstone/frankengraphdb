@@ -26,6 +26,7 @@ include!("write_txn_parts/edge_merge.rs");
 include!("write_txn_parts/edge_upsert.rs");
 include!("write_txn_parts/mutation_programs.rs");
 include!("write_txn_parts/write_programs.rs");
+include!("write_txn_parts/write_scripts.rs");
 include!("write_txn_parts/autocommit.rs");
 include!("write_txn_parts/autocommit_delete.rs");
 include!("write_txn_parts/autocommit_merge.rs");
