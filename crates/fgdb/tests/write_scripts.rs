@@ -123,3 +123,98 @@ fn late_script_failure_rolls_back_all_script_steps_but_preserves_outer_work() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+fn record(left: i64, right: i64, weight: i64) -> GqlParameters {
+    GqlParameters::new().with_int64("left", left).unwrap().with_int64("right", right).unwrap()
+        .with_int64("created", weight).unwrap().with_int64("matched", weight).unwrap()
+}
+
+#[test]
+fn parameter_batch_ingests_shared_vertices_and_edges_with_one_durable_completion() {
+    let ((), report) = run_async_under_lab(0x5c71_0003, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let before = db.frontier().unwrap();
+        let batch = script().bind_parameter_sets(&[
+            record(1, 2, 10), record(2, 3, 20), record(1, 2, 30),
+        ]).unwrap();
+        let allowance = GraphWriteProgramPolicy { max_created_vertices: 3, ..policy(2) };
+        let mut allocations = 0;
+        let (receipt, completion) = db.execute_graph_write_program_returning_autocommit_governed(
+            &txcx, &query, &commit, batch.program(), allowance, |request| {
+                allocations += 1;
+                let location = batch.location(request.statement).unwrap();
+                Ok::<_, ()>(match (location.argument_set, location.statement) {
+                    (0, 0) => ElementId::Vertex(VId(1)),
+                    (0, 1) => ElementId::Vertex(VId(2)),
+                    (1, 1) => ElementId::Vertex(VId(3)),
+                    (0, 2) => ElementId::Edge(EId(10)),
+                    (1, 2) => ElementId::Edge(EId(11)),
+                    _ => panic!("an existing vertex or edge requested a second identity"),
+                })
+            },
+        ).await.unwrap();
+        assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }));
+        assert_eq!(db.frontier().unwrap().0, before.0 + 1, "the batch publishes exactly one commit");
+        assert_eq!(allocations, 5);
+        assert_eq!(receipt.stats().completed_statements, 9);
+        assert_eq!((receipt.stats().created_vertices, receipt.stats().created_edges), (3, 2));
+        assert_eq!(receipt.stats().mutation_effects, 3);
+        let third = &receipt.steps()[batch.statement_range(2).unwrap()];
+        assert_eq!(third[2].merged_edge(), Some(GraphEdgeMergeOutcome::Matched(EId(10))));
+        assert_eq!(db.edge(EId(10)).unwrap().unwrap().props, vec![(Q, CanonicalScalar::Int(30))]);
+        assert_eq!(db.edge(EId(11)).unwrap().unwrap().props, vec![(Q, CanonicalScalar::Int(20))]);
+        assert!(db.vertex(VId(3)).unwrap().is_some());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn batch_creation_quota_is_shared_across_records_and_late_refusal_rolls_back_every_record() {
+    let ((), report) = run_async_under_lab(0x5c71_0004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut prefix = WriteBatch::new(R);
+        prefix.create_vertex(VId(99), vec![], vec![]);
+        txn.write(&mut db, prefix).unwrap();
+        let before = txn.staged_effect_digest().unwrap();
+        let batch = script().bind_parameter_sets(&[record(1, 2, 10), record(2, 3, 20)]).unwrap();
+        let mut allocations = 0;
+        let result = txn.execute_graph_write_program_returning_governed(
+            &mut db, &query, batch.program(),
+            GraphWriteProgramPolicy { max_created_vertices: 3, ..policy(1) }, |request| {
+                allocations += 1;
+                Ok::<_, ()>(match request.statement {
+                    0 => ElementId::Vertex(VId(1)),
+                    1 => ElementId::Vertex(VId(2)),
+                    2 => ElementId::Edge(EId(10)),
+                    4 => ElementId::Vertex(VId(3)),
+                    _ => panic!("second relationship must refuse before allocating"),
+                })
+            },
+        );
+        let fgdb_gql::GraphWriteProgramError::CreationBudget { statement, limit, observed, .. } = result.unwrap_err() else {
+            panic!("expected cumulative creation refusal")
+        };
+        assert_eq!((statement, limit, observed), (5, 1, 2));
+        let location = batch.location(statement).unwrap();
+        assert_eq!((location.argument_set, location.statement), (1, 2));
+        assert_eq!(allocations, 4);
+        assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        for id in 1..=3 { assert!(txn.vertex(&db, VId(id)).unwrap().is_none()); }
+        assert!(txn.edge(&db, EId(10)).unwrap().is_none());
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert!(db.vertex(VId(99)).unwrap().is_some());
+        assert!(db.vertex(VId(1)).unwrap().is_none());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -41,6 +41,7 @@ mod write_receipt;
 mod write_script;
 
 pub use write_script::{
+    BoundGraphWriteScriptBatch, GraphWriteScriptBatchError, GraphWriteScriptBatchLocation,
     GraphWriteScriptError, GraphWriteScriptErrorKind, MAX_GRAPH_WRITE_SCRIPT_BYTES,
     PreparedGraphWriteScript,
 };

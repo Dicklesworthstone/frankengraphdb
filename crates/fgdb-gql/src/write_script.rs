@@ -128,3 +128,124 @@ impl PreparedGraphWriteScript {
             .map_err(|source| GraphWriteScriptError::program(&self.spans, source))
     }
 }
+
+/// A batch is still ONE ordinary atomic program. Its limit counts the expanded
+/// statements across all parameter sets; batching never multiplies work quotas.
+#[derive(Debug)]
+pub enum GraphWriteScriptBatchError {
+    Empty,
+    TooManyStatements { limit: usize, observed: u128 },
+    Arguments { argument_set: usize, source: GraphWriteScriptError },
+    Definition(GraphMutationProgramBuildError),
+}
+impl core::fmt::Display for GraphWriteScriptBatchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("graph write script batch requires at least one argument set"),
+            Self::TooManyStatements { limit, observed } =>
+                write!(f, "graph write script batch expands to {observed} statements; limit {limit}"),
+            Self::Arguments { argument_set, source } =>
+                write!(f, "graph write script batch argument set {argument_set}: {source}"),
+            Self::Definition(source) => source.fmt(f),
+        }
+    }
+}
+impl core::error::Error for GraphWriteScriptBatchError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Arguments { source, .. } => Some(source),
+            Self::Definition(source) => Some(source),
+            Self::Empty | Self::TooManyStatements { .. } => None,
+        }
+    }
+}
+
+/// Translate a flat program statement/identity request/receipt index back to
+/// its zero-based input-record index and original script statement and bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphWriteScriptBatchLocation {
+    pub argument_set: usize,
+    pub statement: usize,
+    pub span: Range<usize>,
+}
+
+/// All parameter sets have been checked and lowered before this value exists.
+/// Later sets execute after earlier sets in the canonical transaction overlay.
+/// Give program() to the ordinary WriteTxn or autocommit program API: one shared
+/// allowance, one rollback boundary, one completion and no partial receipts.
+///
+/// This is bounded ingestion, not an unbounded bulk loader or a sequence of
+/// independently committed records. The expanded batch retains the ordinary
+/// 64-statement maximum. Identity allocation remains external and is never
+/// rewound by rollback. Its flat request indices can be translated by location().
+#[derive(Clone)]
+pub struct BoundGraphWriteScriptBatch {
+    program: PreparedGraphWriteProgram,
+    argument_sets: usize,
+    spans: Box<[Range<usize>]>,
+}
+impl core::fmt::Debug for BoundGraphWriteScriptBatch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BoundGraphWriteScriptBatch")
+            .field("argument_sets", &self.argument_sets)
+            .field("statements", &self.program.statements().len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
+impl BoundGraphWriteScriptBatch {
+    #[must_use]
+    pub fn program(&self) -> &PreparedGraphWriteProgram { &self.program }
+    #[must_use]
+    pub fn into_program(self) -> PreparedGraphWriteProgram { self.program }
+    #[must_use]
+    pub const fn argument_sets(&self) -> usize { self.argument_sets }
+
+    /// The corresponding contiguous slice of a successful program receipt.
+    #[must_use]
+    pub fn statement_range(&self, argument_set: usize) -> Option<Range<usize>> {
+        if argument_set >= self.argument_sets { return None; }
+        let start = argument_set * self.spans.len();
+        Some(start..start + self.spans.len())
+    }
+
+    #[must_use]
+    pub fn location(&self, flat_statement: usize) -> Option<GraphWriteScriptBatchLocation> {
+        if flat_statement >= self.program.statements().len() { return None; }
+        let statement = flat_statement % self.spans.len();
+        Some(GraphWriteScriptBatchLocation {
+            argument_set: flat_statement / self.spans.len(),
+            statement,
+            span: self.spans[statement].clone(),
+        })
+    }
+}
+
+impl PreparedGraphWriteScript {
+    /// Bind a finite list of input records into ONE atomic write program.
+    /// Admission of the expanded statement count precedes all value binding.
+    /// Any invalid record discards the entire private bound prefix. No parsing,
+    /// catalog access, identity allocation, database read or mutation occurs.
+    pub fn bind_parameter_sets(&self, arguments: &[GqlParameters])
+        -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptBatchError>
+    {
+        if arguments.is_empty() { return Err(GraphWriteScriptBatchError::Empty); }
+        let observed = arguments.len() as u128 * self.spans.len() as u128;
+        if observed > crate::MAX_GRAPH_MUTATION_STATEMENTS as u128 {
+            return Err(GraphWriteScriptBatchError::TooManyStatements {
+                limit: crate::MAX_GRAPH_MUTATION_STATEMENTS, observed,
+            });
+        }
+        let mut statements = Vec::with_capacity(observed as usize);
+        for (argument_set, values) in arguments.iter().enumerate() {
+            let program = self.bind_parameters(values)
+                .map_err(|source| GraphWriteScriptBatchError::Arguments { argument_set, source })?;
+            statements.extend(program.statements().iter().cloned());
+        }
+        let program = PreparedGraphWriteProgram::prepare(statements)
+            .map_err(GraphWriteScriptBatchError::Definition)?;
+        Ok(BoundGraphWriteScriptBatch {
+            program, argument_sets: arguments.len(), spans: self.spans.clone(),
+        })
+    }
+}

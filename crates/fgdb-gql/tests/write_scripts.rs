@@ -164,3 +164,54 @@ fn whole_script_and_per_statement_limits_are_checked_before_catalog_access() {
         GraphWriteScriptErrorKind::Syntax(GraphPatternTextErrorKind::TooManyTokens)));
     assert_eq!(calls.get(), 0);
 }
+
+#[test]
+fn parameter_batches_bind_in_record_order_and_preserve_request_and_receipt_coordinates() {
+    let text = "MERGE (n:Person {p:$key});\nMATCH (n:Person) WHERE n.p=$key SET n.q=$value";
+    let script = PreparedGraphWriteScript::prepare(text, R, symbols).unwrap();
+    let arguments = (0..3).map(|value| GqlParameters::new().with_int64("key", value).unwrap()
+        .with_int64("value", value + 10).unwrap()).collect::<Vec<_>>();
+    let batch = script.bind_parameter_sets(&arguments).unwrap();
+    let explicit = PreparedGraphWriteProgram::prepare(arguments.iter().flat_map(|args|
+        script.bind_parameters(args).unwrap().statements().to_vec()).collect()).unwrap();
+    assert_eq!(batch.program(), &explicit);
+    assert_eq!(batch.argument_sets(), 3);
+    for index in 0..6 {
+        let location = batch.location(index).unwrap();
+        assert_eq!((location.argument_set, location.statement), (index / 2, index % 2));
+        assert_eq!(location.span, script.statement_span(index % 2).unwrap());
+        assert_eq!(batch.statement_range(index / 2), Some(index / 2 * 2..index / 2 * 2 + 2));
+    }
+    assert_eq!(batch.location(6), None);
+    assert_eq!(batch.location(usize::MAX), None);
+    assert_eq!(batch.statement_range(3), None);
+    assert_eq!(batch.statement_range(usize::MAX), None);
+    assert_eq!(batch.clone().into_program(), explicit);
+    assert!(!format!("{batch:?}").contains("Person"));
+}
+
+#[test]
+fn batch_admission_counts_expanded_statements_before_binding_any_record() {
+    use fgdb_gql::GraphWriteScriptBatchError;
+    let script = PreparedGraphWriteScript::prepare("CREATE (n {p:$key});MATCH (n) SET n.q=$key", R, symbols).unwrap();
+    assert!(matches!(script.bind_parameter_sets(&[]), Err(GraphWriteScriptBatchError::Empty)));
+    let bad_values = vec![GqlParameters::new(); 33];
+    assert!(matches!(script.bind_parameter_sets(&bad_values),
+        Err(GraphWriteScriptBatchError::TooManyStatements { limit: 64, observed: 66 })));
+    let values = vec![GqlParameters::new().with_int64("key", 1).unwrap(); 32];
+    assert_eq!(script.bind_parameter_sets(&values).unwrap().program().statements().len(), 64);
+}
+
+#[test]
+fn late_batch_argument_failure_retains_record_statement_and_original_byte_offset() {
+    let text = "CREATE (n {p:'λ'});\nMATCH (n) SET n.q=$value";
+    let script = PreparedGraphWriteScript::prepare(text, R, symbols).unwrap();
+    let valid = GqlParameters::new().with_int64("value", 1).unwrap();
+    let error = script.bind_parameter_sets(&[valid.clone(), valid, GqlParameters::new()]).unwrap_err();
+    let fgdb_gql::GraphWriteScriptBatchError::Arguments { argument_set, source } = error else {
+        panic!("expected indexed argument failure")
+    };
+    assert_eq!(argument_set, 2);
+    assert_eq!(source.statement, Some(1));
+    assert_eq!(source.offset, text.find('$').unwrap());
+}
