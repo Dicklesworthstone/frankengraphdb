@@ -11,6 +11,8 @@ use crate::{GlaExecutionEvent, GraphWalkBounds};
 use fgdb_types::VId;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod unique;
+
 /// Iterative BFS frontier governed by the same logical work/scratch controls as
 /// ordinary WALK. The adjacency is derived query scratch from one admitted
 /// snapshot. Duplicate neighbors are distinct edge occurrences.
@@ -23,6 +25,7 @@ pub struct GraphShortestWalkCursor<'a> {
     pending: Vec<VId>,
     pending_at: usize,
     done: bool,
+    one_per_endpoint: bool,
 }
 
 impl<'a> GraphShortestWalkCursor<'a> {
@@ -42,6 +45,7 @@ impl<'a> GraphShortestWalkCursor<'a> {
             pending: Vec::new(),
             pending_at: 0,
             done: false,
+            one_per_endpoint: false,
         })
     }
 
@@ -91,6 +95,9 @@ impl<'a> GraphShortestWalkCursor<'a> {
         &mut self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<(), E> {
+        if self.one_per_endpoint {
+            return self.fill_unique_layer(control);
+        }
         control(GlaExecutionEvent::Work)?;
         if self.depth > self.bounds.maximum() || self.frontier.is_empty() {
             self.done = true;
