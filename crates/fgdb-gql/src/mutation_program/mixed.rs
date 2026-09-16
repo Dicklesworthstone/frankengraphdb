@@ -268,10 +268,21 @@ impl core::fmt::Debug for PreparedGraphWriteProgram {
 }
 impl PreparedGraphWriteProgram {
     pub fn prepare(statements: Vec<GraphWriteStatement>) -> Result<Self, GraphMutationProgramBuildError> {
+        Self::prepare_with_statement_limit(statements, MAX_GRAPH_MUTATION_STATEMENTS)
+    }
+
+    // Only the native parameter-batch binder may request a larger admission.
+    // It checks the full expansion before binding any record. Reuse ALL other
+    // definition laws; execution still has one meter and one acceptance point.
+    pub(crate) fn prepare_with_statement_limit(
+        statements: Vec<GraphWriteStatement>,
+        limit: usize,
+    ) -> Result<Self, GraphMutationProgramBuildError> {
+        let limit = limit.min(crate::PreparedGraphWriteScript::MAX_BATCH_STATEMENTS);
         if statements.is_empty() { return Err(GraphMutationProgramBuildError::Empty); }
-        if statements.len() > MAX_GRAPH_MUTATION_STATEMENTS {
+        if statements.len() > limit {
             return Err(GraphMutationProgramBuildError::TooManyStatements {
-                limit: MAX_GRAPH_MUTATION_STATEMENTS, observed: statements.len(),
+                limit, observed: statements.len(),
             });
         }
         let relation = statements[0].relation();
@@ -282,6 +293,11 @@ impl PreparedGraphWriteProgram {
     }
     #[must_use]
     pub fn statements(&self) -> &[GraphWriteStatement] { &self.statements }
+
+    // Transfer bound definitions into an admitted batch without deep-cloning
+    // each record's program a second time.
+    pub(crate) fn into_statements(self) -> Box<[GraphWriteStatement]> { self.statements }
+
     #[must_use]
     pub fn relation(&self) -> RelationId { self.statements[0].relation() }
 

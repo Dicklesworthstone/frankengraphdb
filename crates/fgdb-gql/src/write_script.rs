@@ -209,8 +209,9 @@ pub struct GraphWriteScriptBatchLocation {
 /// allowance, one rollback boundary, one completion and no partial receipts.
 ///
 /// This is bounded ingestion, not an unbounded bulk loader or a sequence of
-/// independently committed records. The expanded batch retains the ordinary
-/// 64-statement maximum. Identity allocation remains external and is never
+/// independently committed records. The default expansion cap is 64 statements;
+/// larger batches require explicit admission through bind_parameter_sets_with_limit.
+/// Identity allocation remains external and is never
 /// rewound by rollback. Its flat request indices can be translated by location().
 #[derive(Clone)]
 pub struct BoundGraphWriteScriptBatch {
@@ -263,20 +264,43 @@ impl PreparedGraphWriteScript {
     pub fn bind_parameter_sets(&self, arguments: &[GqlParameters])
         -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptBatchError>
     {
+        self.bind_parameter_sets_with_limit(arguments, crate::MAX_GRAPH_MUTATION_STATEMENTS)
+    }
+
+    /// Hard ceiling for explicitly admitted parameter-batch expansions. The
+    /// script definition itself still contains at most 64 native statements.
+    /// This bounds statement instances, not allocator bytes or storage work.
+    pub const MAX_BATCH_STATEMENTS: usize = 65_536;
+
+    /// Bind a larger finite ingestion batch without splitting its transaction.
+    /// The effective cap is min(max_statements, MAX_BATCH_STATEMENTS). Count
+    /// admission precedes EVERY value binding and allocation of the expanded
+    /// program; an invalid later record discards the entire bound prefix.
+    ///
+    /// Prepared statement definitions are moved, not cloned again, into one
+    /// record-major program. It has exactly the ordinary program's shared
+    /// execution allowance, rollback boundary and final acceptance checkpoint.
+    /// No per-record commit, retry or quota refresh is introduced. Binding is
+    /// definition work, not charged execution work; this is not streaming or
+    /// a bounded-byte bulk storage loader.
+    pub fn bind_parameter_sets_with_limit(
+        &self,
+        arguments: &[GqlParameters],
+        max_statements: usize,
+    ) -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptBatchError> {
         if arguments.is_empty() { return Err(GraphWriteScriptBatchError::Empty); }
         let observed = arguments.len() as u128 * self.spans.len() as u128;
-        if observed > crate::MAX_GRAPH_MUTATION_STATEMENTS as u128 {
-            return Err(GraphWriteScriptBatchError::TooManyStatements {
-                limit: crate::MAX_GRAPH_MUTATION_STATEMENTS, observed,
-            });
+        let limit = max_statements.min(Self::MAX_BATCH_STATEMENTS);
+        if observed > limit as u128 {
+            return Err(GraphWriteScriptBatchError::TooManyStatements { limit, observed });
         }
         let mut statements = Vec::with_capacity(observed as usize);
         for (argument_set, values) in arguments.iter().enumerate() {
             let program = self.bind_parameters(values)
                 .map_err(|source| GraphWriteScriptBatchError::Arguments { argument_set, source })?;
-            statements.extend(program.statements().iter().cloned());
+            statements.extend(program.into_statements().into_vec());
         }
-        let program = PreparedGraphWriteProgram::prepare(statements)
+        let program = PreparedGraphWriteProgram::prepare_with_statement_limit(statements, limit)
             .map_err(GraphWriteScriptBatchError::Definition)?;
         Ok(BoundGraphWriteScriptBatch {
             program, argument_sets: arguments.len(), spans: self.spans.clone(),
