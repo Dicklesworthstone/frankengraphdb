@@ -53,6 +53,20 @@ pub enum GlaDirection {
     Undirected,
 }
 
+/// Search semantics of one finite WALK atom, not a terminal row quantifier.
+/// Both modes retain edge-occurrence multiplicity; DISTINCT remains a separate
+/// output operation. This profile returns endpoints, not captured path values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphWalkSearch {
+    /// Every walk whose length lies in the admitted interval.
+    All,
+    /// Every tied minimum-length walk in that interval for each endpoint pair.
+    /// A lower bound delays settlement; it is not a filter applied after an
+    /// unrestricted shortest-path search. Each atom selects independently of
+    /// surrounding joins. No weighted, TRAIL or SIMPLE search is implied.
+    AllShortest,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntegerComparison {
     Equal,
@@ -181,15 +195,17 @@ pub enum GlaOperator {
         relation: RelationId,
         direction: GlaDirection,
     },
-    /// Append one endpoint for every WALK occurrence in the inclusive finite
-    /// interval. Repeated edges/vertices are allowed. Endpoint predicates apply
-    /// after expansion; intermediate vertices are not endpoint-filtered.
-    /// No path capture, shortest selector, TRAIL or SIMPLE mode is implied.
+    /// Append one endpoint for every selected WALK occurrence in the inclusive
+    /// finite interval. Search is explicit: ordinary enumeration or all tied
+    /// shortest occurrences per endpoint pair. Endpoint predicates apply after
+    /// expansion; intermediate vertices are not endpoint-filtered. No captured
+    /// path, weighted search, TRAIL or SIMPLE mode is implied.
     VarLengthExpand {
         source: BindingSlot,
         relation: RelationId,
         direction: GlaDirection,
         bounds: crate::GraphWalkBounds,
+        search: GraphWalkSearch,
     },
     /// Evaluate the enclosed binding scope once per outer occurrence. The
     /// first complete witness resolves the predicate; it is not an output row.
@@ -609,8 +625,14 @@ impl<Row> GlaPlan<Row> {
                     relation,
                     direction,
                     bounds,
+                    search,
                 } => {
-                    bytes.push(22);
+                    // Preserve the original All transcript byte-for-byte. The
+                    // new selector has its own tag even when outputs coincide.
+                    bytes.push(match search {
+                        GraphWalkSearch::All => 22,
+                        GraphWalkSearch::AllShortest => 23,
+                    });
                     bytes.extend_from_slice(&source.0.to_be_bytes());
                     bytes.extend_from_slice(&relation.0.to_be_bytes());
                     bytes.push(direction_tag(*direction));

@@ -221,6 +221,7 @@ impl GraphPatternBuilder {
                         relation,
                         direction,
                         bounds,
+                        search,
                     } => {
                         // A whole bounded walk appends one endpoint, not one
                         // slot per hop. Correlations constrain that endpoint
@@ -230,6 +231,7 @@ impl GraphPatternBuilder {
                             relation,
                             direction,
                             bounds,
+                            search,
                         });
                         emit_correlations(&mut operators, &correlations, available, map);
                         available += 1;

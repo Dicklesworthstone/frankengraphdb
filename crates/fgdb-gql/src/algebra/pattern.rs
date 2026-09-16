@@ -5,7 +5,7 @@
 mod property_comparison;
 mod value_projection;
 
-use super::{BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, VertexPredicate};
+use super::{BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphWalkSearch, VertexPredicate};
 use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_types::VId;
 use property_comparison::PropertyComparison;
@@ -88,6 +88,7 @@ struct Edge {
     relation: RelationId,
     direction: GlaDirection,
     walk: Option<crate::GraphWalkBounds>,
+    search: GraphWalkSearch,
 }
 impl Edge {
     fn expansion(self, source: BindingSlot, direction: GlaDirection) -> GlaOperator {
@@ -97,6 +98,7 @@ impl Edge {
                 relation: self.relation,
                 direction,
                 bounds,
+                search: self.search,
             },
             None => GlaOperator::Expand {
                 source,
@@ -304,6 +306,7 @@ impl GraphPatternBuilder {
             relation,
             direction,
             walk: None,
+            search: GraphWalkSearch::All,
         });
         Ok(self)
     }
@@ -331,6 +334,31 @@ impl GraphPatternBuilder {
             .last_mut()
             .expect("one validated atom was just added")
             .walk = Some(bounds);
+        Ok(self)
+    }
+
+    /// Add an ALL SHORTEST WALK atom. Each endpoint pair retains all tied
+    /// minimum-hop occurrences WITHIN bounds, including parallel edges. This
+    /// is a selector on this atom, not a shortest-total-length optimization of
+    /// a surrounding multi-atom pattern. Destination predicates remain outside
+    /// traversal, so rejecting an endpoint never removes a transit vertex.
+    ///
+    /// The existing breadth-first cursor executes the atom under the same
+    /// work/scratch controls, slot mapping and snapshot admission as WALK.
+    /// Output is endpoint-only; no path values or weighted search are implied.
+    pub fn shortest_walk(
+        &mut self,
+        source: &str,
+        relation: RelationId,
+        direction: GlaDirection,
+        destination: &str,
+        bounds: crate::GraphWalkBounds,
+    ) -> Result<&mut Self, PatternBuildError> {
+        self.walk(source, relation, direction, destination, bounds)?;
+        self.edges
+            .last_mut()
+            .expect("one validated WALK atom was just added")
+            .search = GraphWalkSearch::AllShortest;
         Ok(self)
     }
 

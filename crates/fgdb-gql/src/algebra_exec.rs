@@ -12,7 +12,7 @@ pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::ProjectedRows;
 
 use crate::algebra::{
-    GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, VertexPredicate,
+    GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphWalkSearch, VertexPredicate,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, VId};
@@ -153,6 +153,43 @@ fn charge(
 
 type Adjacency = BTreeMap<VId, Vec<VId>>;
 type Index = BTreeMap<(RelationId, GlaDirection), Adjacency>;
+
+// Both search kernels borrow the SAME admitted index and feed the same binding
+// continuation. Search is a prepared logical choice, never an adaptive fallback
+// or a post-filter over all walks. Ordinary WALK's event sequence is unchanged.
+enum WalkExpansion<'a> {
+    All(crate::GraphWalkCursor<'a>),
+    AllShortest(crate::GraphShortestWalkCursor<'a>),
+}
+impl<'a> WalkExpansion<'a> {
+    fn new<E>(
+        search: GraphWalkSearch,
+        source: VId,
+        bounds: crate::GraphWalkBounds,
+        adjacency: Option<&'a Adjacency>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        match search {
+            GraphWalkSearch::All => {
+                crate::GraphWalkCursor::new(source, bounds, adjacency, control).map(Self::All)
+            }
+            GraphWalkSearch::AllShortest => {
+                crate::GraphShortestWalkCursor::new(source, bounds, adjacency, control)
+                    .map(Self::AllShortest)
+            }
+        }
+    }
+
+    fn next_with_control<E>(
+        &mut self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<VId>, E> {
+        match self {
+            Self::All(cursor) => cursor.next_with_control(control),
+            Self::AllShortest(cursor) => cursor.next_with_control(control),
+        }
+    }
+}
 
 fn push_neighbor<E>(
     adjacency: &mut Adjacency,
@@ -398,12 +435,14 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 relation,
                 direction,
                 bounds,
+                search,
             } => {
                 let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten()
                 else {
                     return Ok(());
                 };
-                let mut cursor = crate::GraphWalkCursor::new(
+                let mut cursor = WalkExpansion::new(
+                    *search,
                     source,
                     *bounds,
                     index.get(&(*relation, *direction)),
@@ -412,7 +451,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 while let Some(destination) = cursor.next_with_control(&mut self.control)? {
                     // The hop frontier is private to the cursor. Only the
                     // endpoint occupies the compiler-assigned binding slot.
-                    // Rejecting it below must not prune longer walks through it.
+                    // Rejecting it below must not prune transit through it.
                     bindings.push(Some(destination));
                     let result = self.visit(operators, ordinal + 1, bindings, index);
                     let _ = bindings.pop();
