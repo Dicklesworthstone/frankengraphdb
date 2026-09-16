@@ -48,6 +48,7 @@ impl<'a> GraphShortestWalkCursor<'a> {
     /// Return one endpoint occurrence. A complete layer is processed before its
     /// first result is released so equal-depth alternatives cannot be mistaken
     /// for longer paths. Source/work/scratch refusal returns no fabricated row.
+    /// Every endpoint delivery, including buffered ones, charges a work event.
     /// A refusal is terminal: discard retained traversal state and return `None`
     /// on later calls without invoking the controller again.
     pub fn next_with_control<E>(
@@ -73,6 +74,9 @@ impl<'a> GraphShortestWalkCursor<'a> {
     ) -> Result<Option<VId>, E> {
         loop {
             if let Some(&value) = self.pending.get(self.pending_at) {
+                // Layer admission does not authorize later delivery: the caller
+                // may have cancelled or exhausted its budget between pulls.
+                control(GlaExecutionEvent::Work)?;
                 self.pending_at += 1;
                 return Ok(Some(value));
             }
@@ -355,5 +359,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn cancellation_between_buffered_results_returns_no_more_rows() {
+        let adjacency = BTreeMap::from([(VId(1), vec![VId(2), VId(3)])]);
+        let bounds = GraphWalkBounds::new(1, 1).unwrap();
+        let mut cursor = GraphShortestWalkCursor::new(
+            VId(1),
+            bounds,
+            Some(&adjacency),
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+        assert_eq!(
+            cursor.next_with_control(&mut |_| Ok::<_, ()>(())),
+            Ok(Some(VId(2)))
+        );
+        assert_eq!(cursor.pending.len() - cursor.pending_at, 1);
+
+        let mut checks = 0;
+        assert_eq!(
+            cursor.next_with_control(&mut |event| {
+                checks += 1;
+                assert!(matches!(event, GlaExecutionEvent::Work));
+                Err("cancelled")
+            }),
+            Err("cancelled")
+        );
+        assert_eq!(checks, 1);
+        assert_eq!(
+            cursor.next_with_control(&mut |_| Err::<(), _>("must not resume")),
+            Ok(None)
+        );
+        assert!(cursor.pending.is_empty());
+        assert!(cursor.frontier.is_empty());
+        assert!(cursor.settled.is_empty());
+    }
+
+    #[test]
+    fn each_buffered_parallel_occurrence_charges_delivery_work() {
+        let adjacency = BTreeMap::from([(VId(1), vec![VId(2), VId(3), VId(3)])]);
+        let bounds = GraphWalkBounds::new(1, 1).unwrap();
+        let mut cursor = GraphShortestWalkCursor::new(
+            VId(1),
+            bounds,
+            Some(&adjacency),
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+        assert_eq!(
+            cursor.next_with_control(&mut |_| Ok::<_, ()>(())),
+            Ok(Some(VId(2)))
+        );
+
+        for remaining in (0..2).rev() {
+            let mut work = 0;
+            assert_eq!(
+                cursor.next_with_control(&mut |event| {
+                    assert!(matches!(event, GlaExecutionEvent::Work));
+                    work += 1;
+                    Ok::<_, ()>(())
+                }),
+                Ok(Some(VId(3)))
+            );
+            assert_eq!(work, 1);
+            assert_eq!(cursor.pending.len() - cursor.pending_at, remaining);
+        }
+        assert_eq!(
+            cursor.next_with_control(&mut |_| Ok::<_, ()>(())),
+            Ok(None)
+        );
     }
 }
