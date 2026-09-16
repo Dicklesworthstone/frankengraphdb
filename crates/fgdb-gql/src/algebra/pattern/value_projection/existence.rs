@@ -1,4 +1,4 @@
-//! Scoped left/semi/anti joins lowered through the positive-pattern compiler.
+//! Ordered inner/left/semi/anti joins lowered through the positive-pattern compiler.
 
 use super::*;
 use crate::algebra::existence::GraphMatchKind;
@@ -33,15 +33,17 @@ impl GraphPatternBuilder {
         self.prepare_values_with_clauses(&clauses, columns, offset, count)
     }
 
-    /// Compile ordered OPTIONAL, EXISTS and NOT EXISTS clauses.
-    /// OPTIONAL exports new variables, nullable when its complete child has no
-    /// match. Later clauses may correlate those variables but cannot rebind a
-    /// null. EXISTS locals stay private. A complete optional witness remains a
-    /// witness even if a later clause rejects it. ALL/DISTINCT and pagination
+    /// Compile ordered required MATCH, OPTIONAL, EXISTS and NOT EXISTS clauses.
+    /// Required and OPTIONAL clauses export new variables. Required absence
+    /// eliminates the incoming occurrence; OPTIONAL absence null-extends it.
+    /// Later clauses may correlate those variables but cannot rebind a null.
+    /// EXISTS locals stay private. A complete optional witness remains a witness
+    /// even if a later required clause rejects it. ALL/DISTINCT and pagination
     /// apply only to the final correlated projection.
     ///
     /// Shared names are correlations; a child with none scans independently.
-    /// Independent OPTIONAL preserves the product of actual occurrences and
+    /// Independent required MATCH preserves the product of actual occurrences,
+    /// without inventing a row for an empty child. Independent OPTIONAL instead
     /// null-extends once on absence; independent EXISTS never multiplies rows.
     /// Definition-wide edge/predicate/identity/visible-name and binding-frame
     /// caps apply; clause count is capped at 64. No runtime input constructs a
@@ -141,19 +143,23 @@ impl GraphPatternBuilder {
                 .collect();
             let start = operators.len();
             let optional = clause.kind == GraphMatchKind::Optional;
-            operators.push(if optional {
-                GlaOperator::Optional {
+            let required = clause.kind == GraphMatchKind::Required;
+            if optional {
+                operators.push(GlaOperator::Optional {
                     group: group as u32,
                     end: 0,
                     slots: 0,
-                }
-            } else {
-                GlaOperator::Probe {
+                });
+            } else if !required {
+                operators.push(GlaOperator::Probe {
                     group: group as u32,
                     end: 0,
                     anti: clause.kind == GraphMatchKind::NotExists,
-                }
-            });
+                });
+            }
+            // Required MATCH is the ordinary positive continuation, not a probe
+            // or a nullable scope. Emit it at this exact point; moving it into
+            // a preceding OPTIONAL would change which rows are null-extended.
             let base = width;
             let map = |slot: BindingSlot| BindingSlot(base + slot.ordinal());
             let mut available = 0_u32;
@@ -285,6 +291,17 @@ impl GraphPatternBuilder {
                     end,
                     slots: available,
                 };
+            } else if !required {
+                operators.push(GlaOperator::ProbeEnd {
+                    group: group as u32,
+                });
+                operators[start] = GlaOperator::Probe {
+                    group: group as u32,
+                    end,
+                    anti: clause.kind == GraphMatchKind::NotExists,
+                };
+            }
+            if optional || required {
                 for (at, variable) in inner.variables.iter().enumerate() {
                     if !scope
                         .variables
@@ -299,15 +316,6 @@ impl GraphPatternBuilder {
                 // copied correlations. The definition-wide cap bounds all such
                 // frames, including transient probes, before execution begins.
                 width += available;
-            } else {
-                operators.push(GlaOperator::ProbeEnd {
-                    group: group as u32,
-                });
-                operators[start] = GlaOperator::Probe {
-                    group: group as u32,
-                    end,
-                    anti: clause.kind == GraphMatchKind::NotExists,
-                };
             }
         }
         let variables = scope.checked_value_columns(columns)?;

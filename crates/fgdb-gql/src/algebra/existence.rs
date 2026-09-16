@@ -1,4 +1,4 @@
-//! Correlated graph clauses over positive connected graph patterns.
+//! Ordered graph clauses over positive graph patterns.
 
 use super::GraphPatternBuilder;
 
@@ -40,17 +40,19 @@ impl core::fmt::Debug for GraphExistence<'_> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GraphMatchKind {
+    Required,
     Optional,
     Exists,
     NotExists,
 }
 
-/// An ordered correlated clause. OPTIONAL exports its newly introduced vertex
-/// variables to later clauses and output, using real null bindings on absence.
-/// EXISTS and NOT EXISTS keep new names clause-local and never multiply the
-/// incoming bag. Each positive child must connect to at least one variable
-/// already visible at this point; same-spelled visible names are correlations.
-/// Predicates inside a child participate in matching, before null extension.
+/// An ordered graph clause. Required MATCH and OPTIONAL export their new
+/// vertex variables to later clauses and output. Required MATCH retains every
+/// complete witness and eliminates an incoming row on absence; OPTIONAL instead
+/// null-extends that row once. EXISTS and NOT EXISTS keep new names clause-local
+/// and never multiply the incoming bag. Shared names are bound correlations;
+/// a child without shared names is independent. A null correlation cannot be
+/// rebound, including by a zero-hop walk. Predicates belong to their own clause.
 #[derive(Clone, Copy)]
 pub struct GraphMatchClause<'a> {
     pub(crate) pattern: &'a GraphPatternBuilder,
@@ -58,6 +60,17 @@ pub struct GraphMatchClause<'a> {
 }
 
 impl<'a> GraphMatchClause<'a> {
+    /// Join this positive pattern to each incoming occurrence at this point in
+    /// the clause sequence. This does not flatten or move a preceding OPTIONAL,
+    /// and failure of this clause never turns an earlier witness into absence.
+    #[must_use]
+    pub const fn required(pattern: &'a GraphPatternBuilder) -> Self {
+        Self {
+            pattern,
+            kind: GraphMatchKind::Required,
+        }
+    }
+
     #[must_use]
     pub const fn optional(pattern: &'a GraphPatternBuilder) -> Self {
         Self {
