@@ -11,6 +11,7 @@ use crate::insertion::{
 };
 use crate::{
     GraphEdgeMergeError, GraphEdgeMergePolicy, GraphEdgeMergeStats, PreparedGraphEdgeMerge,
+    GraphEdgeUpsertError, GraphEdgeUpsertPolicy, GraphEdgeUpsertStats, PreparedGraphEdgeUpsert,
     GraphVertexMergeError, GraphVertexMergePolicy, GraphVertexMergeStats,
     GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
     PreparedGraphVertexMerge, PreparedGraphVertexUpsert,
@@ -24,6 +25,7 @@ pub enum GraphWriteStatement {
     VertexMerge(PreparedGraphVertexMerge),
     VertexUpsert(PreparedGraphVertexUpsert),
     EdgeMerge(PreparedGraphEdgeMerge),
+    EdgeUpsert(PreparedGraphEdgeUpsert),
 }
 impl GraphWriteStatement {
     #[must_use]
@@ -34,6 +36,7 @@ impl GraphWriteStatement {
             Self::VertexMerge(statement) => statement.relation(),
             Self::VertexUpsert(statement) => statement.merge().relation(),
             Self::EdgeMerge(statement) => statement.relation(),
+            Self::EdgeUpsert(statement) => statement.merge().relation(),
         }
     }
 }
@@ -51,6 +54,9 @@ impl From<PreparedGraphVertexUpsert> for GraphWriteStatement {
 }
 impl From<PreparedGraphEdgeMerge> for GraphWriteStatement {
     fn from(value: PreparedGraphEdgeMerge) -> Self { Self::EdgeMerge(value) }
+}
+impl From<PreparedGraphEdgeUpsert> for GraphWriteStatement {
+    fn from(value: PreparedGraphEdgeUpsert) -> Self { Self::EdgeUpsert(value) }
 }
 
 /// Identity requests are local to a statement AND its selected occurrence.
@@ -102,6 +108,10 @@ impl GraphWriteProgramPolicy {
         GraphEdgeMergePolicy::new(self.mutations.query)
             .with_creation_limit(self.max_created_edges)
     }
+    #[must_use]
+    pub const fn edge_upsert_policy(self) -> GraphEdgeUpsertPolicy {
+        GraphEdgeUpsertPolicy::new(self.edge_merge_policy(), self.mutations.max_effects)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +121,7 @@ pub enum GraphWriteStepStats {
     VertexMerge(GraphVertexMergeStats),
     VertexUpsert(GraphVertexUpsertStats),
     EdgeMerge(GraphEdgeMergeStats),
+    EdgeUpsert(GraphEdgeUpsertStats),
 }
 #[derive(Debug)]
 pub enum GraphWriteStepError<E, A, C> {
@@ -119,6 +130,7 @@ pub enum GraphWriteStepError<E, A, C> {
     VertexMerge(GqlQueryError<GraphVertexMergeError<E, A>, C>),
     VertexUpsert(GqlQueryError<GraphVertexUpsertError<E, A>, C>),
     EdgeMerge(GqlQueryError<GraphEdgeMergeError<E, A>, C>),
+    EdgeUpsert(GqlQueryError<GraphEdgeUpsertError<E, A>, C>),
 }
 impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
     core::fmt::Display for GraphWriteStepError<E, A, C> {
@@ -129,6 +141,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
             Self::VertexMerge(error) => error.fmt(f),
             Self::VertexUpsert(error) => error.fmt(f),
             Self::EdgeMerge(error) => error.fmt(f),
+            Self::EdgeUpsert(error) => error.fmt(f),
         }
     }
 }
@@ -141,6 +154,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
             Self::VertexMerge(error) => Some(error),
             Self::VertexUpsert(error) => Some(error),
             Self::EdgeMerge(error) => Some(error),
+            Self::EdgeUpsert(error) => Some(error),
         }
     }
 }
@@ -154,6 +168,7 @@ pub enum GraphWriteProgramError<E, A, C> {
     VertexMerge { statement: usize, source: GqlQueryError<GraphVertexMergeError<E, A>, C> },
     VertexUpsert { statement: usize, source: GqlQueryError<GraphVertexUpsertError<E, A>, C> },
     EdgeMerge { statement: usize, source: GqlQueryError<GraphEdgeMergeError<E, A>, C> },
+    EdgeUpsert { statement: usize, source: GqlQueryError<GraphEdgeUpsertError<E, A>, C> },
     CreationBudget {
         statement: usize,
         dimension: GraphInsertLimitDimension,
@@ -173,6 +188,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
             Self::VertexMerge { statement, source } => write!(f, "write program vertex MERGE step {statement}: {source}"),
             Self::VertexUpsert { statement, source } => write!(f, "write program vertex upsert step {statement}: {source}"),
             Self::EdgeMerge { statement, source } => write!(f, "write program relationship MERGE step {statement}: {source}"),
+            Self::EdgeUpsert { statement, source } => write!(f, "write program relationship upsert step {statement}: {source}"),
             Self::CreationBudget { statement, dimension, limit, observed } =>
                 write!(f, "write program step {statement} created {dimension:?}: {observed} > {limit}"),
         }
@@ -187,6 +203,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
             Self::VertexMerge { source, .. } => Some(source),
             Self::VertexUpsert { source, .. } => Some(source),
             Self::EdgeMerge { source, .. } => Some(source),
+            Self::EdgeUpsert { source, .. } => Some(source),
             Self::CreationBudget { .. } => None,
         }
     }
@@ -202,6 +219,7 @@ pub struct GraphWriteProgramStats {
     pub evaluator: GlaExecutionStats,
     /// Distinct updated/deleted vertex visits summed over statements, including
     /// one visit for each nonempty selected vertex-upsert action branch.
+    /// Relationship-property actions do not count as vertex visits.
     pub target_vertex_visits: u64,
     pub mutation_effects: u64,
     pub created_vertices: u64,
@@ -260,6 +278,7 @@ impl PreparedGraphWriteProgram {
                 GraphWriteStatement::VertexMerge(value) => (2, value.canonical_bytes()),
                 GraphWriteStatement::VertexUpsert(value) => (3, value.canonical_bytes()),
                 GraphWriteStatement::EdgeMerge(value) => (4, value.canonical_bytes()),
+                GraphWriteStatement::EdgeUpsert(value) => (5, value.canonical_bytes()),
             };
             bytes.push(kind);
             bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
@@ -296,6 +315,7 @@ impl PreparedGraphWriteProgram {
                 GraphWriteStepError::VertexMerge(error) => meter.vertex_merge_failure(statement, error),
                 GraphWriteStepError::VertexUpsert(error) => meter.vertex_upsert_failure(statement, error),
                 GraphWriteStepError::EdgeMerge(error) => meter.edge_merge_failure(statement, error),
+                GraphWriteStepError::EdgeUpsert(error) => meter.edge_upsert_failure(statement, error),
             })?;
             match (input, stats) {
                 (GraphWriteStatement::Mutation(input), GraphWriteStepStats::Mutation(stats)) => {
@@ -312,6 +332,9 @@ impl PreparedGraphWriteProgram {
                 }
                 (GraphWriteStatement::EdgeMerge(_), GraphWriteStepStats::EdgeMerge(stats)) => {
                     meter.absorb_edge_merge(statement, stats)?;
+                }
+                (GraphWriteStatement::EdgeUpsert(input), GraphWriteStepStats::EdgeUpsert(stats)) => {
+                    meter.absorb_edge_upsert(statement, input, stats)?;
                 }
                 _ => return Err(GraphMutationProgramError::InvalidStatistics { statement }.into()),
             }

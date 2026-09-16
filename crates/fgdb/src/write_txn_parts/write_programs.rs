@@ -2,11 +2,11 @@
 // staging paths. This file owns orchestration, not another writer or matcher.
 
 impl WriteTxn {
-    /// Stage CREATE, SET/REMOVE, DETACH DELETE, vertex MERGE (including
-    /// ON MATCH/ON CREATE actions) and directed relationship MERGE as one atomic
-    /// operation inside this transaction. Each step sees its predecessor's
-    /// canonical overlay; assignments within a step remain frozen and
-    /// simultaneous. No intermediate step commits.
+    /// Stage CREATE, SET/REMOVE, DETACH DELETE, vertex MERGE and directed
+    /// relationship MERGE, including ON MATCH/ON CREATE actions on either
+    /// element kind, as one atomic operation inside this transaction. Each step
+    /// sees its predecessor's canonical overlay; assignments within a step
+    /// remain frozen and simultaneous. No intermediate step commits.
     ///
     /// Any error, cancellation or Rust unwind restores the exact prior staged
     /// workspace, including its already-prepared write. Read observations are
@@ -81,6 +81,14 @@ impl WriteTxn {
                         }),
                     ).map(|(stats, _)| GraphWriteStepStats::EdgeMerge(stats))
                         .map_err(GraphWriteStepError::EdgeMerge),
+                    GraphWriteStatement::EdgeUpsert(input) => workspace.txn.execute_graph_edge_upsert_governed(
+                        database, cx, input, remaining.edge_upsert_policy(),
+                        |_| allocate(GraphWriteIdentityRequest {
+                            statement,
+                            request: fgdb_gql::insertion::GraphInsertRequest::Edge { row: 0, edge: 0 },
+                        }),
+                    ).map(|(stats, _)| GraphWriteStepStats::EdgeUpsert(stats))
+                        .map_err(GraphWriteStepError::EdgeUpsert),
                 }
             }, || cx.checkpoint())?;
             // All quota checks and the final checkpoint ran before acceptance.
@@ -186,6 +194,19 @@ impl WriteTxn {
                             GraphWriteStepStats::EdgeMerge(stats)
                         })
                         .map_err(GraphWriteStepError::EdgeMerge),
+                    GraphWriteStatement::EdgeUpsert(input) => workspace.txn
+                        .execute_graph_edge_upsert_governed(
+                            database, cx, input, remaining.edge_upsert_policy(),
+                            |_| allocate(GraphWriteIdentityRequest {
+                                statement,
+                                request: fgdb_gql::insertion::GraphInsertRequest::Edge { row: 0, edge: 0 },
+                            }),
+                        )
+                        .map(|(stats, outcome)| {
+                            receipts.push(GraphWriteStepReceipt::EdgeUpsert { outcome });
+                            GraphWriteStepStats::EdgeUpsert(stats)
+                        })
+                        .map_err(GraphWriteStepError::EdgeUpsert),
                 }
             }, || cx.checkpoint())?;
             debug_assert_eq!(receipts.len(), stats.completed_statements);

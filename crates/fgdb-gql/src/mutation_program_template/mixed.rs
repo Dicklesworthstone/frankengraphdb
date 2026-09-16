@@ -4,10 +4,10 @@
 
 use super::*;
 use crate::{
-    GraphEdgeMergeTextError, GraphInsertTextError, GraphVertexMergeTextError,
+    GraphEdgeMergeTextError, GraphEdgeUpsertTextError, GraphInsertTextError, GraphVertexMergeTextError,
     GraphVertexUpsertTextError, GraphWriteStatement, PreparedGraphEdgeMergeText,
-    PreparedGraphInsertText, PreparedGraphVertexMergeText, PreparedGraphVertexUpsertText,
-    PreparedGraphWriteProgram,
+    PreparedGraphEdgeUpsertText, PreparedGraphInsertText, PreparedGraphVertexMergeText,
+    PreparedGraphVertexUpsertText, PreparedGraphWriteProgram,
 };
 
 #[derive(Clone, Debug)]
@@ -17,6 +17,7 @@ pub enum GraphWriteTemplateStatement {
     VertexMerge(PreparedGraphVertexMergeText),
     VertexUpsert(PreparedGraphVertexUpsertText),
     EdgeMerge(PreparedGraphEdgeMergeText),
+    EdgeUpsert(PreparedGraphEdgeUpsertText),
 }
 impl From<PreparedGraphMutationText> for GraphWriteTemplateStatement {
     fn from(value: PreparedGraphMutationText) -> Self { Self::Mutation(value) }
@@ -33,6 +34,9 @@ impl From<PreparedGraphVertexUpsertText> for GraphWriteTemplateStatement {
 impl From<PreparedGraphEdgeMergeText> for GraphWriteTemplateStatement {
     fn from(value: PreparedGraphEdgeMergeText) -> Self { Self::EdgeMerge(value) }
 }
+impl From<PreparedGraphEdgeUpsertText> for GraphWriteTemplateStatement {
+    fn from(value: PreparedGraphEdgeUpsertText) -> Self { Self::EdgeUpsert(value) }
+}
 impl GraphWriteTemplateStatement {
     #[must_use]
     pub fn relation(&self) -> RelationId {
@@ -42,6 +46,7 @@ impl GraphWriteTemplateStatement {
             Self::VertexMerge(input) => input.relation,
             Self::VertexUpsert(input) => input.relation(),
             Self::EdgeMerge(input) => input.relation,
+            Self::EdgeUpsert(input) => input.merge.relation,
         }
     }
     #[must_use]
@@ -52,6 +57,7 @@ impl GraphWriteTemplateStatement {
             Self::VertexMerge(input) => input.parameter_schema(),
             Self::VertexUpsert(input) => input.parameter_schema(),
             Self::EdgeMerge(input) => input.parameter_schema(),
+            Self::EdgeUpsert(input) => input.parameter_schema(),
         }
     }
     /// Explicit source access. Debug remains redacted for every variant.
@@ -63,6 +69,7 @@ impl GraphWriteTemplateStatement {
             Self::VertexMerge(input) => input.statement(),
             Self::VertexUpsert(input) => input.statement(),
             Self::EdgeMerge(input) => input.statement(),
+            Self::EdgeUpsert(input) => input.statement(),
         }
     }
 }
@@ -74,6 +81,7 @@ pub enum GraphWriteProgramTemplateError {
     VertexMergeBind { statement: usize, source: GraphVertexMergeTextError },
     VertexUpsertBind { statement: usize, source: GraphVertexUpsertTextError },
     EdgeMergeBind { statement: usize, source: GraphEdgeMergeTextError },
+    EdgeUpsertBind { statement: usize, source: GraphEdgeUpsertTextError },
 }
 impl From<GraphMutationProgramTemplateError> for GraphWriteProgramTemplateError {
     fn from(error: GraphMutationProgramTemplateError) -> Self { Self::Program(error) }
@@ -86,6 +94,7 @@ impl core::fmt::Display for GraphWriteProgramTemplateError {
             Self::VertexMergeBind { statement, source } => write!(f, "write program vertex MERGE statement {statement}: {source}"),
             Self::VertexUpsertBind { statement, source } => write!(f, "write program vertex upsert statement {statement}: {source}"),
             Self::EdgeMergeBind { statement, source } => write!(f, "write program relationship MERGE statement {statement}: {source}"),
+            Self::EdgeUpsertBind { statement, source } => write!(f, "write program relationship upsert statement {statement}: {source}"),
         }
     }
 }
@@ -97,6 +106,7 @@ impl core::error::Error for GraphWriteProgramTemplateError {
             Self::VertexMergeBind { source, .. } => Some(source),
             Self::VertexUpsertBind { source, .. } => Some(source),
             Self::EdgeMergeBind { source, .. } => Some(source),
+            Self::EdgeUpsertBind { source, .. } => Some(source),
         }
     }
 }
@@ -142,6 +152,8 @@ impl PreparedGraphWriteProgramTemplate {
                     input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::VertexUpsertBind { statement, source })?),
                 GraphWriteTemplateStatement::EdgeMerge(input) => GraphWriteStatement::EdgeMerge(
                     input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::EdgeMergeBind { statement, source })?),
+                GraphWriteTemplateStatement::EdgeUpsert(input) => GraphWriteStatement::EdgeUpsert(
+                    input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::EdgeUpsertBind { statement, source })?),
             };
             statements.push(bound);
         }

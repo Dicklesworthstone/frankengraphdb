@@ -2,7 +2,7 @@
 //! MATCH rows for a create branch or losing its separate creation allowance.
 
 use super::*;
-use crate::GraphVertexUpsertBranch;
+use crate::{GraphEdgeUpsertBranch, GraphVertexUpsertBranch};
 
 impl MixedMeter {
     pub(super) fn absorb_vertex_merge<E, A, C>(
@@ -98,6 +98,43 @@ impl MixedMeter {
         Ok(())
     }
 
+    pub(super) fn absorb_edge_upsert<E, A, C>(
+        &mut self,
+        statement: usize,
+        input: &PreparedGraphEdgeUpsert,
+        stats: GraphEdgeUpsertStats,
+    ) -> Result<(), GraphWriteProgramError<E, A, C>> {
+        let (branch, actions) = if stats.merge.match_selection.result_rows == 0 {
+            (GraphEdgeUpsertBranch::NoInput, &[][..])
+        } else if stats.merge.created_edges == 1 {
+            (GraphEdgeUpsertBranch::Create, input.on_create())
+        } else {
+            (GraphEdgeUpsertBranch::Match, input.on_match())
+        };
+        let effects = u128::from(stats.action_effects);
+        // One owned entry/work event per action and a final acceptance event.
+        // Widen before addition; wrapped or underreported totals are invalid.
+        if stats.branch != branch || effects != actions.len() as u128
+            || u128::from(stats.evaluator.work_units)
+                != u128::from(stats.merge.evaluator.work_units) + effects + 1
+            || u128::from(stats.evaluator.scratch_entries)
+                != u128::from(stats.merge.evaluator.scratch_entries) + effects
+        {
+            return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
+        }
+        let effects = self.common.add(
+            statement, GraphMutationProgramDimension::Effects, stats.action_effects,
+        )?;
+        // The total already includes MERGE. Reuse its source/creation validation
+        // with the cumulative evaluator, never charge the nested work twice.
+        self.absorb_edge_merge(statement, GraphEdgeMergeStats {
+            evaluator: stats.evaluator, ..stats.merge
+        })?;
+        self.common.stats.effects = effects;
+        // Updating an edge is not a vertex visit.
+        Ok(())
+    }
+
     pub(super) fn vertex_merge_failure<E, A, C>(
         &self,
         statement: usize,
@@ -148,6 +185,29 @@ impl MixedMeter {
             GqlQueryError::Source(GraphEdgeMergeError::CreationLimit { observed, .. }) =>
                 self.creation_failure(statement, GraphInsertLimitDimension::Edges, observed),
             source => GraphWriteProgramError::EdgeMerge { statement, source },
+        }
+    }
+
+    pub(super) fn edge_upsert_failure<E, A, C>(
+        &self,
+        statement: usize,
+        source: GqlQueryError<GraphEdgeUpsertError<E, A>, C>,
+    ) -> GraphWriteProgramError<E, A, C> {
+        match source {
+            GqlQueryError::Rows(error) => self.common.translate(statement, GqlQueryError::Rows(error)).into(),
+            GqlQueryError::Evaluator(error) => self.common.translate(statement, GqlQueryError::Evaluator(error)).into(),
+            GqlQueryError::Source(GraphEdgeUpsertError::Merge(GraphEdgeMergeError::CreationLimit { observed, .. })) =>
+                self.creation_failure(statement, GraphInsertLimitDimension::Edges, observed),
+            GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit { observed: local, .. }) => {
+                let dimension = GraphMutationProgramDimension::Effects;
+                let (used, limit) = self.common.counter(dimension);
+                match local.checked_add(u128::from(used)) {
+                    Some(observed) if observed > u128::from(limit) =>
+                        GraphMutationProgramError::Budget { statement, dimension, limit, observed }.into(),
+                    _ => GraphMutationProgramError::InvalidStatistics { statement }.into(),
+                }
+            }
+            source => GraphWriteProgramError::EdgeUpsert { statement, source },
         }
     }
 }

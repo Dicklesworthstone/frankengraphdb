@@ -17,6 +17,7 @@ pub enum GraphWriteStepReceipt {
     VertexMerge { outcome: GraphVertexMergeOutcome },
     VertexUpsert { outcome: GraphVertexMergeOutcome },
     EdgeMerge { outcome: GraphEdgeMergeOutcome },
+    EdgeUpsert { outcome: GraphEdgeMergeOutcome },
 }
 
 impl GraphWriteStepReceipt {
@@ -25,7 +26,7 @@ impl GraphWriteStepReceipt {
         match self {
             Self::Mutation { targets } => Some(targets),
             Self::Insert { .. } | Self::VertexMerge { .. } | Self::VertexUpsert { .. }
-            | Self::EdgeMerge { .. } => None,
+            | Self::EdgeMerge { .. } | Self::EdgeUpsert { .. } => None,
         }
     }
 
@@ -41,7 +42,7 @@ impl GraphWriteStepReceipt {
             }
             Self::VertexMerge { outcome: GraphVertexMergeOutcome::Matched(_) }
             | Self::VertexUpsert { outcome: GraphVertexMergeOutcome::Matched(_) } => Some(&[]),
-            Self::Mutation { .. } | Self::EdgeMerge { .. } => None,
+            Self::Mutation { .. } | Self::EdgeMerge { .. } | Self::EdgeUpsert { .. } => None,
         }
     }
 
@@ -49,10 +50,11 @@ impl GraphWriteStepReceipt {
     pub fn created_edges(&self) -> Option<&[EId]> {
         match self {
             Self::Insert { edges, .. } => Some(edges),
-            Self::EdgeMerge { outcome: GraphEdgeMergeOutcome::Created(edge) } => {
+            Self::EdgeMerge { outcome: GraphEdgeMergeOutcome::Created(edge) }
+            | Self::EdgeUpsert { outcome: GraphEdgeMergeOutcome::Created(edge) } => {
                 Some(core::slice::from_ref(edge))
             }
-            Self::EdgeMerge { .. } => Some(&[]),
+            Self::EdgeMerge { .. } | Self::EdgeUpsert { .. } => Some(&[]),
             Self::Mutation { .. } | Self::VertexMerge { .. } | Self::VertexUpsert { .. } => None,
         }
     }
@@ -61,7 +63,8 @@ impl GraphWriteStepReceipt {
     pub const fn merged_vertex(&self) -> Option<GraphVertexMergeOutcome> {
         match self {
             Self::VertexMerge { outcome } | Self::VertexUpsert { outcome } => Some(*outcome),
-            Self::Mutation { .. } | Self::Insert { .. } | Self::EdgeMerge { .. } => None,
+            Self::Mutation { .. } | Self::Insert { .. } | Self::EdgeMerge { .. }
+            | Self::EdgeUpsert { .. } => None,
         }
     }
 
@@ -70,7 +73,7 @@ impl GraphWriteStepReceipt {
     #[must_use]
     pub const fn merged_edge(&self) -> Option<GraphEdgeMergeOutcome> {
         match self {
-            Self::EdgeMerge { outcome } => Some(*outcome),
+            Self::EdgeMerge { outcome } | Self::EdgeUpsert { outcome } => Some(*outcome),
             Self::Mutation { .. } | Self::Insert { .. } | Self::VertexMerge { .. }
             | Self::VertexUpsert { .. } => None,
         }
@@ -96,6 +99,8 @@ impl core::fmt::Debug for GraphWriteStepReceipt {
             Self::VertexUpsert { outcome } => f.debug_struct("VertexUpsert")
                 .field("outcome", outcome).finish(),
             Self::EdgeMerge { outcome } => f.debug_struct("EdgeMerge")
+                .field("outcome", outcome).finish(),
+            Self::EdgeUpsert { outcome } => f.debug_struct("EdgeUpsert")
                 .field("outcome", outcome).finish(),
         }
     }
@@ -203,6 +208,22 @@ mod tests {
             assert_eq!(step.created_edges(), Some(if outcome.created() { core::slice::from_ref(&edge) } else { &[] }));
             assert_eq!(step.created_vertices(), None);
             assert_eq!(step.merged_vertex(), None);
+            assert!(!format!("{step:?}").contains(&u128::MAX.to_string()));
+        }
+    }
+
+    #[test]
+    fn relationship_upsert_receipts_keep_kind_and_hide_identifiers() {
+        let edge = EId(u128::MAX);
+        for outcome in [GraphEdgeMergeOutcome::NoInput, GraphEdgeMergeOutcome::Matched(edge),
+            GraphEdgeMergeOutcome::Created(edge)] {
+            let step = GraphWriteStepReceipt::EdgeUpsert { outcome };
+            assert_eq!(step.merged_edge(), Some(outcome));
+            assert_eq!(step.created_edges(), Some(if outcome.created() { core::slice::from_ref(&edge) } else { &[] }));
+            assert_eq!(step.mutation_targets(), None);
+            assert_eq!(step.created_vertices(), None);
+            assert_eq!(step.merged_vertex(), None);
+            assert_ne!(step, GraphWriteStepReceipt::EdgeMerge { outcome });
             assert!(!format!("{step:?}").contains(&u128::MAX.to_string()));
         }
     }
