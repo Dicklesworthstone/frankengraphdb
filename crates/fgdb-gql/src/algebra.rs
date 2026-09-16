@@ -239,6 +239,12 @@ pub enum GlaOperator {
     BindVertex {
         source: BindingSlot,
     },
+    /// Copy an outer predicate operand, INCLUDING a null binding. Unlike
+    /// BindVertex, this is a value capture, not a positive node match. It never
+    /// scans a vertex or replaces null with a fabricated graph identity.
+    BindOuterVertex {
+        source: BindingSlot,
+    },
     Project {
         slot: BindingSlot,
     },
@@ -707,6 +713,10 @@ impl<Row> GlaPlan<Row> {
                 }
                 GlaOperator::BindVertex { source } => {
                     bytes.push(16);
+                    bytes.extend_from_slice(&source.0.to_be_bytes());
+                }
+                GlaOperator::BindOuterVertex { source } => {
+                    bytes.push(25);
                     bytes.extend_from_slice(&source.0.to_be_bytes());
                 }
                 GlaOperator::Optional { group, end, slots } => {

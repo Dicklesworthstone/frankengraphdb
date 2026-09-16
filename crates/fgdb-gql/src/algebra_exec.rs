@@ -354,7 +354,23 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 }
             }
             GlaOperator::Select { slot, predicates } => {
-                let Some(vid) = bindings.get(slot.ordinal() as usize).copied().flatten() else {
+                let Some(value) = bindings.get(slot.ordinal() as usize).copied() else {
+                    return Ok(());
+                };
+                let Some(vid) = value else {
+                    // Only a nullable value capture can reach this selection
+                    // without a positive vertex match. Its property operands
+                    // are null, not an unreadable or fabricated vertex. Reuse
+                    // the ordinary missing-property predicate semantics; no
+                    // source callback or identity-keyed cache entry is created.
+                    for predicate in predicates {
+                        for _ in 0..predicate.comparison_work_units() {
+                            (self.control)(GlaExecutionEvent::Work)?;
+                        }
+                    }
+                    if predicates.iter().all(|predicate| predicate.matches(&[], &[])) {
+                        self.visit(operators, ordinal + 1, bindings, index)?;
+                    }
                     return Ok(());
                 };
                 let key = (ordinal, vid);
@@ -523,6 +539,14 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 };
                 (self.control)(GlaExecutionEvent::ScratchEntry)?;
                 bindings.push(Some(value));
+                let result = self.visit(operators, ordinal + 1, bindings, index);
+                let _ = bindings.pop();
+                result?;
+            }
+            GlaOperator::BindOuterVertex { source } => {
+                let value = bindings[source.ordinal() as usize];
+                (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                bindings.push(value);
                 let result = self.visit(operators, ordinal + 1, bindings, index);
                 let _ = bindings.pop();
                 result?;
@@ -967,9 +991,9 @@ mod tests {
     #[test]
     fn work_limit_interrupts_path_fanout_even_when_limit_is_one() {
         let mut plan = bound(true);
+        let mut edges = Vec::new();
         plan.limit = Some(1);
         let logical = GlaPlan::lower(&plan);
-        let mut edges = Vec::new();
         for i in 2..22 {
             edges.push((VId(1), RelationId(1), VId(i)));
             for j in 100..120 {

@@ -36,12 +36,14 @@ impl GraphPatternBuilder {
     /// Compile ordered required MATCH, OPTIONAL, EXISTS and NOT EXISTS clauses.
     /// Required and OPTIONAL clauses export new variables. Required absence
     /// eliminates the incoming occurrence; OPTIONAL absence null-extends it.
-    /// Later clauses may correlate those variables but cannot rebind a null.
+    /// Later positive patterns cannot rebind a null. Explicit outer_vertex
+    /// operands instead capture the original nullable value for predicates.
     /// EXISTS locals stay private. A complete optional witness remains a witness
     /// even if a later required clause rejects it. ALL/DISTINCT and pagination
     /// apply only to the final correlated projection.
     ///
-    /// Shared names are correlations; a child with none scans independently.
+    /// Shared pattern names are correlations; a child with none scans independently.
+    /// Predicate-only captures neither anchor nor constrain a positive scan.
     /// Independent required MATCH preserves the product of actual occurrences,
     /// without inventing a row for an empty child. Independent OPTIONAL instead
     /// null-extends once on absence; independent EXISTS never multiplies rows.
@@ -93,6 +95,14 @@ impl GraphPatternBuilder {
             if inner.variables.is_empty() {
                 return Err(PatternBuildError::EmptyPattern);
             }
+            let mut captures = Vec::new();
+            for (at, variable) in inner.variables.iter().enumerate() {
+                if variable.outer {
+                    let outer = scope.variable(&variable.name)
+                        .map_err(|_| PatternBuildError::UnknownOuterVertex)?;
+                    captures.push((at, scope_slots[outer]));
+                }
+            }
             let correlation = |inner_at: usize| {
                 scope
                     .variables
@@ -104,8 +114,8 @@ impl GraphPatternBuilder {
                     .map(|outer| (at, outer))
                     .or_else(|| correlation(edge.destination).map(|outer| (at, outer)))
             });
-            // Keep the old anchor choice for correlated definitions. Without
-            // any shared name, the child's own root supplies its first binding.
+            // Only positive pattern vertices may anchor traversal. A predicate
+            // capture can be null and must not suppress independent witnesses.
             let (outer_at, root) = if let Some((edge_at, outer_at)) = edge_anchor {
                 inner.edges.swap(0, edge_at);
                 if inner.variables[inner.edges[0].source].name != scope.variables[outer_at].name {
@@ -115,7 +125,8 @@ impl GraphPatternBuilder {
                 }
                 (Some(outer_at), None)
             } else if let Some((inner_at, outer_at)) =
-                (0..inner.variables.len()).find_map(|at| correlation(at).map(|outer| (at, outer)))
+                (0..inner.variables.len()).filter(|&at| !inner.variables[at].outer)
+                    .find_map(|at| correlation(at).map(|outer| (at, outer)))
             {
                 (Some(outer_at), Some(inner_at))
             } else {
@@ -129,10 +140,13 @@ impl GraphPatternBuilder {
                 super::super::MAX_PATTERN_BINDINGS,
                 PatternLimitDimension::Bindings,
             )?;
+            let captures: Vec<_> = captures.into_iter()
+                .map(|(at, outer)| (inner_slots[at], outer)).collect();
             let correlations: Vec<_> = inner
                 .variables
                 .iter()
                 .enumerate()
+                .filter(|(_, variable)| !variable.outer)
                 .filter_map(|(at, variable)| {
                     scope
                         .variables
@@ -176,10 +190,15 @@ impl GraphPatternBuilder {
                 match operator {
                     GlaOperator::ScanVertices if at == 0 && outer_at.is_some() => {}
                     GlaOperator::ScanVertices => {
-                        // An already visible variable is a bound correlation,
-                        // not a fresh Cartesian dimension. A null correlation
-                        // must fail the child, never be rebound by a new scan.
-                        if let Some((_, outer)) = correlations
+                        // A captured operand keeps null; a matched correlation
+                        // must reject it. Neither is another graph scan. Do not
+                        // emit NULL = NULL for captures: they are value copies,
+                        // not additional positive identity constraints.
+                        if let Some((_, outer)) = captures.iter()
+                            .find(|(inner, _)| inner.ordinal() == available)
+                        {
+                            operators.push(GlaOperator::BindOuterVertex { source: *outer });
+                        } else if let Some((_, outer)) = correlations
                             .iter()
                             .find(|(inner, _)| inner.ordinal() == available)
                         {

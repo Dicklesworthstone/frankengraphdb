@@ -36,6 +36,9 @@ pub enum PatternBuildError {
     InvalidVariableName,
     DuplicateVariable,
     UnknownVariable,
+    OuterVertexRequiresScope,
+    UnknownOuterVertex,
+    OuterVertexInPattern,
     Disconnected,
     EmptyProjection,
     DuplicateProjection,
@@ -54,6 +57,9 @@ impl core::fmt::Display for PatternBuildError {
             Self::InvalidVariableName => f.write_str("invalid graph-pattern variable name"),
             Self::DuplicateVariable => f.write_str("graph-pattern variable is already declared"),
             Self::UnknownVariable => f.write_str("graph pattern references an undeclared variable"),
+            Self::OuterVertexRequiresScope => f.write_str("outer vertex operands require a containing graph clause"),
+            Self::UnknownOuterVertex => f.write_str("outer vertex operand is not visible at this clause"),
+            Self::OuterVertexInPattern => f.write_str("an outer predicate operand cannot be an edge endpoint"),
             Self::Disconnected => {
                 f.write_str("graph-pattern clause requires an already visible correlation")
             }
@@ -80,6 +86,7 @@ impl core::error::Error for PatternBuildError {}
 struct Variable {
     name: String,
     predicates: Vec<VertexPredicate>,
+    outer: bool,
 }
 #[derive(Clone, Copy)]
 struct Edge {
@@ -229,7 +236,8 @@ fn binding_width(operators: &[GlaOperator]) -> u32 {
             GlaOperator::ScanVertices
             | GlaOperator::Expand { .. }
             | GlaOperator::VarLengthExpand { .. }
-            | GlaOperator::BindVertex { .. } => 1,
+            | GlaOperator::BindVertex { .. }
+            | GlaOperator::BindOuterVertex { .. } => 1,
             _ => 0,
         })
         .sum()
@@ -268,9 +276,24 @@ impl GraphPatternBuilder {
         self.variables.push(Variable {
             name: name.to_owned(),
             predicates: Vec::new(),
+            outer: false,
         });
         Ok(self)
     }
+
+    /// Capture a visible outer vertex VALUE for a clause's predicates. Unlike
+    /// vertex(), this does not require a positive node match and preserves an
+    /// outer null for IS NULL and three-valued Boolean expressions. It may not
+    /// occur in an edge atom. The containing required/optional/existential
+    /// clause resolves it by name; standalone preparation refuses captures.
+    /// At least one ordinary pattern vertex is still required in the child.
+    /// Captures consume the ordinary variable and definition-wide frame caps.
+    pub fn outer_vertex(&mut self, name: &str) -> Result<&mut Self, PatternBuildError> {
+        self.vertex(name)?;
+        self.variables.last_mut().expect("one validated variable was added").outer = true;
+        Ok(self)
+    }
+
     pub fn filter(
         &mut self,
         variable: &str,
@@ -295,6 +318,9 @@ impl GraphPatternBuilder {
     ) -> Result<&mut Self, PatternBuildError> {
         let source = self.variable(source)?;
         let destination = self.variable(destination)?;
+        if self.variables[source].outer || self.variables[destination].outer {
+            return Err(PatternBuildError::OuterVertexInPattern);
+        }
         check_next(
             self.edges.len(),
             MAX_PATTERN_EDGES,
@@ -363,7 +389,7 @@ impl GraphPatternBuilder {
     }
 
     /// Add an ANY SHORTEST WALK atom: one endpoint occurrence per pair within
-    /// the finite interval. Equal-depth prefixes coalesce during search, so
+    /// the finite interval. Equal-depth prefixes coalesce before expansion, so
     /// this does not enumerate every tied route before deduplicating output.
     /// Each incoming binding occurrence executes independently. Endpoint
     /// predicates, scopes and outer multiplicities retain their ordinary laws.
@@ -509,25 +535,28 @@ impl GraphPatternBuilder {
     /// no remaining edge can extend the bound frontier. Predicates and identity
     /// constraints stay with their binding, and all outputs share the slot map.
     fn compile(&self) -> Result<(Vec<GlaOperator>, Vec<BindingSlot>), PatternBuildError> {
+        if self.variables.iter().any(|variable| variable.outer) {
+            return Err(PatternBuildError::OuterVertexRequiresScope);
+        }
         self.compile_with_root(None)
     }
 
     /// A correlated isolated vertex can anchor a child without rewriting the
     /// child's names, property expressions, identity constraints or edge IDs.
+    /// Only the scope compiler may resolve outer operands in this private body.
     fn compile_with_root(
         &self,
         root: Option<usize>,
     ) -> Result<(Vec<GlaOperator>, Vec<BindingSlot>), PatternBuildError> {
-        if self.variables.is_empty() {
-            return Err(PatternBuildError::EmptyPattern);
-        }
+        let first_local = self.variables.iter().position(|variable| !variable.outer)
+            .ok_or(PatternBuildError::EmptyPattern)?;
         let mut slots = vec![None; self.variables.len()];
         let mut emitted = vec![false; self.identities.len()];
         let mut consumed = vec![false; self.edges.len()];
         let mut operators = Vec::new();
         let mut next_slot;
         if root.is_some() || self.edges.is_empty() {
-            let root = root.unwrap_or(0);
+            let root = root.unwrap_or(first_local);
             operators.push(GlaOperator::ScanVertices);
             slots[root] = Some(BindingSlot(0));
             self.identities(&slots, &mut emitted, &mut operators);
