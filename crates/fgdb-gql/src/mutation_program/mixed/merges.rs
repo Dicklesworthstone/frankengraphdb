@@ -60,6 +60,44 @@ impl MixedMeter {
         Ok(())
     }
 
+    pub(super) fn absorb_edge_merge<E, A, C>(
+        &mut self,
+        statement: usize,
+        stats: GraphEdgeMergeStats,
+    ) -> Result<(), GraphWriteProgramError<E, A, C>> {
+        let no_input = stats.match_selection.result_rows == 0;
+        if stats.created_edges > 1
+            || (no_input && (stats.overlay_edges != 0 || stats.created_edges != 0))
+            || (!no_input && stats.created_edges == 0 && stats.overlay_edges == 0)
+        {
+            return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
+        }
+        // The existence scan is additional source work, not part of MATCH's
+        // snapshot count. Charge it exactly once, including read-only matches.
+        // Widen BEFORE adding so hostile stats cannot wrap at u64::MAX.
+        let records = u128::from(stats.match_selection.snapshot_records) + u128::from(stats.overlay_edges);
+        let dimension = GraphMutationProgramDimension::SnapshotRecords;
+        let (used, limit) = self.common.counter(dimension);
+        let observed = u128::from(used) + records;
+        if observed > u128::from(limit) {
+            return Err(GraphMutationProgramError::Budget {
+                statement, dimension, limit, observed,
+            }.into());
+        }
+        let edges = self.add_creation(statement, GraphInsertLimitDimension::Edges, stats.created_edges)?;
+        self.common.absorb(statement, 0, GraphMutationStats {
+            selection: GqlExecutionStats {
+                snapshot_records: records as u64,
+                result_rows: stats.match_selection.result_rows,
+            },
+            evaluator: stats.evaluator,
+            target_vertices: 0,
+            effects: 0,
+        })?;
+        self.edges = edges;
+        Ok(())
+    }
+
     pub(super) fn vertex_merge_failure<E, A, C>(
         &self,
         statement: usize,
@@ -96,6 +134,20 @@ impl MixedMeter {
                 }
             }
             source => GraphWriteProgramError::VertexUpsert { statement, source },
+        }
+    }
+
+    pub(super) fn edge_merge_failure<E, A, C>(
+        &self,
+        statement: usize,
+        source: GqlQueryError<GraphEdgeMergeError<E, A>, C>,
+    ) -> GraphWriteProgramError<E, A, C> {
+        match source {
+            GqlQueryError::Rows(error) => self.common.translate(statement, GqlQueryError::Rows(error)).into(),
+            GqlQueryError::Evaluator(error) => self.common.translate(statement, GqlQueryError::Evaluator(error)).into(),
+            GqlQueryError::Source(GraphEdgeMergeError::CreationLimit { observed, .. }) =>
+                self.creation_failure(statement, GraphInsertLimitDimension::Edges, observed),
+            source => GraphWriteProgramError::EdgeMerge { statement, source },
         }
     }
 }

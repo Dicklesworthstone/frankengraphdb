@@ -4,9 +4,10 @@
 
 use super::*;
 use crate::{
-    GraphInsertTextError, GraphVertexMergeTextError, GraphVertexUpsertTextError,
-    GraphWriteStatement, PreparedGraphInsertText, PreparedGraphVertexMergeText,
-    PreparedGraphVertexUpsertText, PreparedGraphWriteProgram,
+    GraphEdgeMergeTextError, GraphInsertTextError, GraphVertexMergeTextError,
+    GraphVertexUpsertTextError, GraphWriteStatement, PreparedGraphEdgeMergeText,
+    PreparedGraphInsertText, PreparedGraphVertexMergeText, PreparedGraphVertexUpsertText,
+    PreparedGraphWriteProgram,
 };
 
 #[derive(Clone, Debug)]
@@ -15,6 +16,7 @@ pub enum GraphWriteTemplateStatement {
     Insert(PreparedGraphInsertText),
     VertexMerge(PreparedGraphVertexMergeText),
     VertexUpsert(PreparedGraphVertexUpsertText),
+    EdgeMerge(PreparedGraphEdgeMergeText),
 }
 impl From<PreparedGraphMutationText> for GraphWriteTemplateStatement {
     fn from(value: PreparedGraphMutationText) -> Self { Self::Mutation(value) }
@@ -28,6 +30,9 @@ impl From<PreparedGraphVertexMergeText> for GraphWriteTemplateStatement {
 impl From<PreparedGraphVertexUpsertText> for GraphWriteTemplateStatement {
     fn from(value: PreparedGraphVertexUpsertText) -> Self { Self::VertexUpsert(value) }
 }
+impl From<PreparedGraphEdgeMergeText> for GraphWriteTemplateStatement {
+    fn from(value: PreparedGraphEdgeMergeText) -> Self { Self::EdgeMerge(value) }
+}
 impl GraphWriteTemplateStatement {
     #[must_use]
     pub fn relation(&self) -> RelationId {
@@ -36,6 +41,7 @@ impl GraphWriteTemplateStatement {
             Self::Insert(input) => input.relation,
             Self::VertexMerge(input) => input.relation,
             Self::VertexUpsert(input) => input.relation(),
+            Self::EdgeMerge(input) => input.relation,
         }
     }
     #[must_use]
@@ -45,6 +51,7 @@ impl GraphWriteTemplateStatement {
             Self::Insert(input) => input.parameter_schema(),
             Self::VertexMerge(input) => input.parameter_schema(),
             Self::VertexUpsert(input) => input.parameter_schema(),
+            Self::EdgeMerge(input) => input.parameter_schema(),
         }
     }
     /// Explicit source access. Debug remains redacted for every variant.
@@ -55,6 +62,7 @@ impl GraphWriteTemplateStatement {
             Self::Insert(input) => input.statement(),
             Self::VertexMerge(input) => input.statement(),
             Self::VertexUpsert(input) => input.statement(),
+            Self::EdgeMerge(input) => input.statement(),
         }
     }
 }
@@ -65,6 +73,7 @@ pub enum GraphWriteProgramTemplateError {
     InsertBind { statement: usize, source: GraphInsertTextError },
     VertexMergeBind { statement: usize, source: GraphVertexMergeTextError },
     VertexUpsertBind { statement: usize, source: GraphVertexUpsertTextError },
+    EdgeMergeBind { statement: usize, source: GraphEdgeMergeTextError },
 }
 impl From<GraphMutationProgramTemplateError> for GraphWriteProgramTemplateError {
     fn from(error: GraphMutationProgramTemplateError) -> Self { Self::Program(error) }
@@ -76,6 +85,7 @@ impl core::fmt::Display for GraphWriteProgramTemplateError {
             Self::InsertBind { statement, source } => write!(f, "write program creation statement {statement}: {source}"),
             Self::VertexMergeBind { statement, source } => write!(f, "write program vertex MERGE statement {statement}: {source}"),
             Self::VertexUpsertBind { statement, source } => write!(f, "write program vertex upsert statement {statement}: {source}"),
+            Self::EdgeMergeBind { statement, source } => write!(f, "write program relationship MERGE statement {statement}: {source}"),
         }
     }
 }
@@ -86,6 +96,7 @@ impl core::error::Error for GraphWriteProgramTemplateError {
             Self::InsertBind { source, .. } => Some(source),
             Self::VertexMergeBind { source, .. } => Some(source),
             Self::VertexUpsertBind { source, .. } => Some(source),
+            Self::EdgeMergeBind { source, .. } => Some(source),
         }
     }
 }
@@ -129,6 +140,8 @@ impl PreparedGraphWriteProgramTemplate {
                     input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::VertexMergeBind { statement, source })?),
                 GraphWriteTemplateStatement::VertexUpsert(input) => GraphWriteStatement::VertexUpsert(
                     input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::VertexUpsertBind { statement, source })?),
+                GraphWriteTemplateStatement::EdgeMerge(input) => GraphWriteStatement::EdgeMerge(
+                    input.bind_parameters(&local).map_err(|source| GraphWriteProgramTemplateError::EdgeMergeBind { statement, source })?),
             };
             statements.push(bound);
         }
@@ -152,6 +165,7 @@ mod tests {
             (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
             (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
             (GraphSymbolKind::Label, "Person") => Some(GraphSymbol::Label(LabelId(1))),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
             _ => None,
         }
     }

@@ -10,6 +10,7 @@ use crate::insertion::{
     GraphInsertStats, PreparedGraphInsert,
 };
 use crate::{
+    GraphEdgeMergeError, GraphEdgeMergePolicy, GraphEdgeMergeStats, PreparedGraphEdgeMerge,
     GraphVertexMergeError, GraphVertexMergePolicy, GraphVertexMergeStats,
     GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
     PreparedGraphVertexMerge, PreparedGraphVertexUpsert,
@@ -22,6 +23,7 @@ pub enum GraphWriteStatement {
     Insert(PreparedGraphInsert),
     VertexMerge(PreparedGraphVertexMerge),
     VertexUpsert(PreparedGraphVertexUpsert),
+    EdgeMerge(PreparedGraphEdgeMerge),
 }
 impl GraphWriteStatement {
     #[must_use]
@@ -31,6 +33,7 @@ impl GraphWriteStatement {
             Self::Insert(statement) => statement.relation(),
             Self::VertexMerge(statement) => statement.relation(),
             Self::VertexUpsert(statement) => statement.merge().relation(),
+            Self::EdgeMerge(statement) => statement.relation(),
         }
     }
 }
@@ -46,12 +49,16 @@ impl From<PreparedGraphVertexMerge> for GraphWriteStatement {
 impl From<PreparedGraphVertexUpsert> for GraphWriteStatement {
     fn from(value: PreparedGraphVertexUpsert) -> Self { Self::VertexUpsert(value) }
 }
+impl From<PreparedGraphEdgeMerge> for GraphWriteStatement {
+    fn from(value: PreparedGraphEdgeMerge) -> Self { Self::EdgeMerge(value) }
+}
 
 /// Identity requests are local to a statement AND its selected occurrence.
 /// The host must also distinguish separate program invocations. Rollback never
 /// rewinds an external allocator or licenses reusing an already-issued identity.
 /// A vertex MERGE creation requests Vertex { row: 0, vertex: 0 } exactly once;
-/// its matched branch never calls the allocator.
+/// an edge MERGE requests Edge { row: 0, edge: 0 }. Matched and NoInput branches
+/// never call the allocator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphWriteIdentityRequest {
     pub statement: usize,
@@ -90,6 +97,11 @@ impl GraphWriteProgramPolicy {
     pub const fn vertex_upsert_policy(self) -> GraphVertexUpsertPolicy {
         GraphVertexUpsertPolicy::new(self.vertex_merge_policy(), self.mutations.max_effects)
     }
+    #[must_use]
+    pub const fn edge_merge_policy(self) -> GraphEdgeMergePolicy {
+        GraphEdgeMergePolicy::new(self.mutations.query)
+            .with_creation_limit(self.max_created_edges)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +110,7 @@ pub enum GraphWriteStepStats {
     Insert(GraphInsertStats),
     VertexMerge(GraphVertexMergeStats),
     VertexUpsert(GraphVertexUpsertStats),
+    EdgeMerge(GraphEdgeMergeStats),
 }
 #[derive(Debug)]
 pub enum GraphWriteStepError<E, A, C> {
@@ -105,6 +118,7 @@ pub enum GraphWriteStepError<E, A, C> {
     Insert(GqlQueryError<GraphInsertError<E, A>, C>),
     VertexMerge(GqlQueryError<GraphVertexMergeError<E, A>, C>),
     VertexUpsert(GqlQueryError<GraphVertexUpsertError<E, A>, C>),
+    EdgeMerge(GqlQueryError<GraphEdgeMergeError<E, A>, C>),
 }
 impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
     core::fmt::Display for GraphWriteStepError<E, A, C> {
@@ -114,6 +128,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
             Self::Insert(error) => error.fmt(f),
             Self::VertexMerge(error) => error.fmt(f),
             Self::VertexUpsert(error) => error.fmt(f),
+            Self::EdgeMerge(error) => error.fmt(f),
         }
     }
 }
@@ -125,6 +140,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
             Self::Insert(error) => Some(error),
             Self::VertexMerge(error) => Some(error),
             Self::VertexUpsert(error) => Some(error),
+            Self::EdgeMerge(error) => Some(error),
         }
     }
 }
@@ -137,6 +153,7 @@ pub enum GraphWriteProgramError<E, A, C> {
     Insert { statement: usize, source: GqlQueryError<GraphInsertError<E, A>, C> },
     VertexMerge { statement: usize, source: GqlQueryError<GraphVertexMergeError<E, A>, C> },
     VertexUpsert { statement: usize, source: GqlQueryError<GraphVertexUpsertError<E, A>, C> },
+    EdgeMerge { statement: usize, source: GqlQueryError<GraphEdgeMergeError<E, A>, C> },
     CreationBudget {
         statement: usize,
         dimension: GraphInsertLimitDimension,
@@ -155,6 +172,7 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
             Self::Insert { statement, source } => write!(f, "write program creation step {statement}: {source}"),
             Self::VertexMerge { statement, source } => write!(f, "write program vertex MERGE step {statement}: {source}"),
             Self::VertexUpsert { statement, source } => write!(f, "write program vertex upsert step {statement}: {source}"),
+            Self::EdgeMerge { statement, source } => write!(f, "write program relationship MERGE step {statement}: {source}"),
             Self::CreationBudget { statement, dimension, limit, observed } =>
                 write!(f, "write program step {statement} created {dimension:?}: {observed} > {limit}"),
         }
@@ -168,6 +186,7 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
             Self::Insert { source, .. } => Some(source),
             Self::VertexMerge { source, .. } => Some(source),
             Self::VertexUpsert { source, .. } => Some(source),
+            Self::EdgeMerge { source, .. } => Some(source),
             Self::CreationBudget { .. } => None,
         }
     }
@@ -177,7 +196,8 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
 pub struct GraphWriteProgramStats {
     pub completed_statements: usize,
     /// Source records and selected occurrences summed over all statements.
-    /// MERGE's internal creation unit is not a fabricated MATCH result.
+    /// Includes relationship MERGE's edge-existence scan, not only its MATCH.
+    /// Vertex MERGE's internal creation unit is not a fabricated MATCH result.
     pub selection: GqlExecutionStats,
     pub evaluator: GlaExecutionStats,
     /// Distinct updated/deleted vertex visits summed over statements, including
@@ -229,6 +249,7 @@ impl PreparedGraphWriteProgram {
 
     /// The transcript binds ordered statement kinds and definitions. It is not
     /// a durable operation ID, identity-allocation log or commit acknowledgment.
+    #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:mixed-write-program:v1\0".to_vec();
         bytes.extend_from_slice(&(self.statements.len() as u64).to_be_bytes());
@@ -238,6 +259,7 @@ impl PreparedGraphWriteProgram {
                 GraphWriteStatement::Insert(value) => (1, value.canonical_bytes()),
                 GraphWriteStatement::VertexMerge(value) => (2, value.canonical_bytes()),
                 GraphWriteStatement::VertexUpsert(value) => (3, value.canonical_bytes()),
+                GraphWriteStatement::EdgeMerge(value) => (4, value.canonical_bytes()),
             };
             bytes.push(kind);
             bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
@@ -273,6 +295,7 @@ impl PreparedGraphWriteProgram {
                 GraphWriteStepError::Insert(error) => meter.insert_failure(statement, error),
                 GraphWriteStepError::VertexMerge(error) => meter.vertex_merge_failure(statement, error),
                 GraphWriteStepError::VertexUpsert(error) => meter.vertex_upsert_failure(statement, error),
+                GraphWriteStepError::EdgeMerge(error) => meter.edge_merge_failure(statement, error),
             })?;
             match (input, stats) {
                 (GraphWriteStatement::Mutation(input), GraphWriteStepStats::Mutation(stats)) => {
@@ -286,6 +309,9 @@ impl PreparedGraphWriteProgram {
                 }
                 (GraphWriteStatement::VertexUpsert(input), GraphWriteStepStats::VertexUpsert(stats)) => {
                     meter.absorb_vertex_upsert(statement, input, stats)?;
+                }
+                (GraphWriteStatement::EdgeMerge(_), GraphWriteStepStats::EdgeMerge(stats)) => {
+                    meter.absorb_edge_merge(statement, stats)?;
                 }
                 _ => return Err(GraphMutationProgramError::InvalidStatistics { statement }.into()),
             }

@@ -2,10 +2,11 @@
 // staging paths. This file owns orchestration, not another writer or matcher.
 
 impl WriteTxn {
-    /// Stage CREATE, SET/REMOVE, DETACH DELETE and vertex MERGE (including
-    /// ON MATCH/ON CREATE actions) as one atomic operation inside this transaction.
-    /// Each step sees its predecessor's canonical overlay; assignments within a
-    /// step remain frozen and simultaneous. No intermediate step commits.
+    /// Stage CREATE, SET/REMOVE, DETACH DELETE, vertex MERGE (including
+    /// ON MATCH/ON CREATE actions) and directed relationship MERGE as one atomic
+    /// operation inside this transaction. Each step sees its predecessor's
+    /// canonical overlay; assignments within a step remain frozen and
+    /// simultaneous. No intermediate step commits.
     ///
     /// Any error, cancellation or Rust unwind restores the exact prior staged
     /// workspace, including its already-prepared write. Read observations are
@@ -17,12 +18,13 @@ impl WriteTxn {
     /// Issued identities are NOT reclaimed on rollback. No allocator request
     /// precedes owner, health, basis and coordinate preflight. MERGE's create
     /// branch observes the same remaining creation cap as ordinary insertion;
-    /// an existing match does not need creation allowance or a fresh identity.
+    /// existing matches and empty endpoint selections do not allocate identities.
     ///
-    /// Quotas sum source visits, selected occurrences, work, scratch, mutation
-    /// intents, created vertices and created edges, including later-canceled
-    /// effects. They do not cover allocator service work, cloning the initial
-    /// prepared workspace, repeated storage preparation, cascades or commit I/O.
+    /// Quotas sum source visits (including relationship existence scans),
+    /// selected occurrences, work, scratch, mutation intents, created vertices
+    /// and created edges, including later-canceled effects. They do not cover
+    /// allocator service work, cloning the initial prepared workspace, repeated
+    /// storage preparation, cascades or commit I/O.
     pub fn execute_graph_write_program_governed<V: Vfs + Clone, A>(
         &mut self,
         database: &mut Database<V>,
@@ -71,6 +73,14 @@ impl WriteTxn {
                         |request| allocate(GraphWriteIdentityRequest { statement, request }),
                     ).map(|(stats, _)| GraphWriteStepStats::VertexUpsert(stats))
                         .map_err(GraphWriteStepError::VertexUpsert),
+                    GraphWriteStatement::EdgeMerge(input) => workspace.txn.execute_graph_edge_merge_governed(
+                        database, cx, input, remaining.edge_merge_policy(),
+                        |_| allocate(GraphWriteIdentityRequest {
+                            statement,
+                            request: fgdb_gql::insertion::GraphInsertRequest::Edge { row: 0, edge: 0 },
+                        }),
+                    ).map(|(stats, _)| GraphWriteStepStats::EdgeMerge(stats))
+                        .map_err(GraphWriteStepError::EdgeMerge),
                 }
             }, || cx.checkpoint())?;
             // All quota checks and the final checkpoint ran before acceptance.
@@ -83,8 +93,9 @@ impl WriteTxn {
     /// Execute the identical atomic mixed program but retain one ordered receipt
     /// per successfully accepted step. Creation receipts contain exact staged
     /// IDs; mutation receipts contain distinct proposal targets; MERGE receipts
-    /// distinguish matched from created identities. No successful-prefix receipt
-    /// escapes if ANY statement, quota check or final checkpoint fails.
+    /// distinguish matched from created identities and missing endpoint input.
+    /// No successful-prefix receipt escapes if ANY statement, quota check or
+    /// final checkpoint fails.
     ///
     /// Program rollback cannot reclaim external identities. A returned receipt
     /// is still transaction-local: only a later successful finish/commit makes
@@ -162,6 +173,19 @@ impl WriteTxn {
                             GraphWriteStepStats::VertexUpsert(stats)
                         })
                         .map_err(GraphWriteStepError::VertexUpsert),
+                    GraphWriteStatement::EdgeMerge(input) => workspace.txn
+                        .execute_graph_edge_merge_governed(
+                            database, cx, input, remaining.edge_merge_policy(),
+                            |_| allocate(GraphWriteIdentityRequest {
+                                statement,
+                                request: fgdb_gql::insertion::GraphInsertRequest::Edge { row: 0, edge: 0 },
+                            }),
+                        )
+                        .map(|(stats, outcome)| {
+                            receipts.push(GraphWriteStepReceipt::EdgeMerge { outcome });
+                            GraphWriteStepStats::EdgeMerge(stats)
+                        })
+                        .map_err(GraphWriteStepError::EdgeMerge),
                 }
             }, || cx.checkpoint())?;
             debug_assert_eq!(receipts.len(), stats.completed_statements);
