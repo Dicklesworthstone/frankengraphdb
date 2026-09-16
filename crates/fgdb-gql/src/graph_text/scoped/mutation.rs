@@ -10,6 +10,7 @@ mod insertion;
 mod integer;
 mod merge;
 mod return_projection;
+mod script;
 
 use super::*;
 use crate::mutation_text::{MutationActionTemplate, MutationIntegerTemplateOp};

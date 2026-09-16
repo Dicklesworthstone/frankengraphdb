@@ -38,6 +38,12 @@ mod vertex_upsert;
 mod vertex_upsert_text;
 mod walk;
 mod write_receipt;
+mod write_script;
+
+pub use write_script::{
+    GraphWriteScriptError, GraphWriteScriptErrorKind, MAX_GRAPH_WRITE_SCRIPT_BYTES,
+    PreparedGraphWriteScript,
+};
 
 pub use edge_upsert::{
     GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError,

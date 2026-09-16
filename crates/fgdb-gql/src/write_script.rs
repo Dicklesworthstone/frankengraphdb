@@ -1,0 +1,130 @@
+//! Native, reusable write scripts lower to the existing atomic write program.
+//!
+//! The script is preparation metadata only. Binding returns the same typed
+//! program as explicit statement composition; no source text enters execution.
+
+use crate::{
+    GqlParameterSpec, GqlParameters, GraphMutationProgramBuildError,
+    GraphMutationProgramTemplateError, GraphPatternTextError, GraphPatternTextErrorKind,
+    GraphWriteProgramTemplateError, GraphWriteTemplateStatement, PreparedGraphWriteProgram,
+    PreparedGraphWriteProgramTemplate,
+};
+use core::ops::Range;
+
+/// Whole-script admission. Individual statements retain their native byte and
+/// token limits, and a script retains the existing 64-statement program bound.
+pub const MAX_GRAPH_WRITE_SCRIPT_BYTES: usize =
+    crate::MAX_GRAPH_TEXT_BYTES * crate::MAX_GRAPH_MUTATION_STATEMENTS;
+
+#[derive(Debug)]
+pub enum GraphWriteScriptErrorKind {
+    DefinitionTooLarge { limit: usize, observed: usize },
+    EmptyStatement,
+    TooManyStatements { limit: usize, observed: usize },
+    Syntax(GraphPatternTextErrorKind),
+    /// Native statement preparation, parameter binding or program-schema error.
+    /// Nested statement offsets remain local; the enclosing offset is global.
+    Program(GraphWriteProgramTemplateError),
+}
+
+/// A zero-based statement index and UTF-8 byte offset into the ORIGINAL script.
+/// Script-wide declaration/schema errors without a statement use None and zero.
+/// Names, source bytes and supplied parameter values are not included.
+#[derive(Debug)]
+pub struct GraphWriteScriptError {
+    pub statement: Option<usize>,
+    pub offset: usize,
+    pub kind: GraphWriteScriptErrorKind,
+}
+impl core::fmt::Display for GraphWriteScriptError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "graph write script")?;
+        if let Some(statement) = self.statement {
+            write!(f, " statement {statement}")?;
+        }
+        write!(f, " at byte {}: {:?}", self.offset, self.kind)
+    }
+}
+impl core::error::Error for GraphWriteScriptError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match &self.kind {
+            GraphWriteScriptErrorKind::Program(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+impl GraphWriteScriptError {
+    pub(crate) fn syntax(statement: Option<usize>, base: usize, source: GraphPatternTextError) -> Self {
+        Self { statement, offset: base + source.offset, kind: GraphWriteScriptErrorKind::Syntax(source.kind) }
+    }
+
+    pub(crate) fn program(spans: &[Range<usize>], source: GraphWriteProgramTemplateError) -> Self {
+        use GraphMutationProgramTemplateError as M;
+        use GraphWriteProgramTemplateError as W;
+        let location = match &source {
+            W::InsertBind { statement, source } => Some((*statement, source.offset)),
+            W::VertexMergeBind { statement, source } => Some((*statement, source.offset)),
+            W::VertexUpsertBind { statement, source } => Some((*statement, source.offset)),
+            W::EdgeMergeBind { statement, source } => Some((*statement, source.offset)),
+            W::EdgeUpsertBind { statement, source } => Some((*statement, source.offset)),
+            W::Program(M::Bind { statement, source }) => Some((*statement, source.offset)),
+            W::Program(M::ConflictingParameterTypes { statement, .. })
+            | W::Program(M::Definition(GraphMutationProgramBuildError::MixedRelation { statement })) => {
+                Some((*statement, 0))
+            }
+            W::Program(M::Definition(_) | M::UnexpectedArguments) => None,
+        };
+        let (statement, offset) = match location {
+            Some((statement, offset)) => (Some(statement), spans[statement].start + offset),
+            None => (None, 0),
+        };
+        Self { statement, offset, kind: GraphWriteScriptErrorKind::Program(source) }
+    }
+}
+
+/// Semicolon-separated native CREATE, MATCH mutation and vertex/relationship
+/// MERGE statements, including ON MATCH/ON CREATE. One final semicolon is legal;
+/// empty statements, reads, transaction-control commands and unsupported syntax
+/// refuse. Variables are statement-local; later MATCH reads earlier staged work.
+///
+/// Every statement shares one relation coordinate and one frozen name-to-symbol
+/// resolution per (kind, name). This does not negotiate catalog epochs or grant
+/// authorization. Bind the COMPLETE script before giving its typed program to
+/// WriteTxn or Database's ordinary program-autocommit API. The existing program
+/// engine owns cumulative execution quotas, rollback, identities and durability.
+#[derive(Clone)]
+pub struct PreparedGraphWriteScript {
+    pub(crate) script: String,
+    pub(crate) program: PreparedGraphWriteProgramTemplate,
+    pub(crate) spans: Box<[Range<usize>]>,
+}
+impl core::fmt::Debug for PreparedGraphWriteScript {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedGraphWriteScript")
+            .field("statements", &self.spans.len())
+            .field("parameters", &self.program.parameter_schema().len())
+            .field("definition", &"[REDACTED]")
+            .finish()
+    }
+}
+impl PreparedGraphWriteScript {
+    #[must_use]
+    pub fn script(&self) -> &str { &self.script }
+    #[must_use]
+    pub fn statements(&self) -> &[GraphWriteTemplateStatement] { self.program.statements() }
+    #[must_use]
+    pub fn statement_span(&self, statement: usize) -> Option<Range<usize>> {
+        self.spans.get(statement).cloned()
+    }
+    #[must_use]
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { self.program.parameter_schema() }
+
+    /// No reparsing, catalog access, identity allocation, database observation
+    /// or staging. A failure discards every already-bound private statement.
+    pub fn bind_parameters(&self, arguments: &GqlParameters)
+        -> Result<PreparedGraphWriteProgram, GraphWriteScriptError>
+    {
+        self.program.bind_parameters(arguments)
+            .map_err(|source| GraphWriteScriptError::program(&self.spans, source))
+    }
+}
