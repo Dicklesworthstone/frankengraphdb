@@ -1,116 +1,57 @@
-// Relational composition pins one real source coordinate for every GLA leaf.
-// PreparedGraphSet owns projection/filter/set/page semantics and the one meter;
-// these adapters only supply the existing durable or canonical-overlay reader.
+// Relational pipelines use the EXISTING set-query entrypoints. Durable and
+// pinned readers live in gql_exec/source/aggregation.rs; WriteTxn's reader is
+// compiled inside query_source from aggregate_queries.rs. Defining additional
+// inherent methods here gives all three public types duplicate methods.
+// Keep this included file as a regression at the shared public API boundary,
+// not a second source adapter, forwarding API, or alternate transaction reader.
 
-impl<V: Vfs + Clone> Database<V> {
-    /// Execute a prepared relational query at the current durable frontier.
-    /// Includes native WITH pipelines, computed RETURN and UNION/INTERSECT/EXCEPT.
-    /// Preparation/binding is separate: no query text or catalog callback enters
-    /// execution. The immutable database borrow and one exact sequence prevent
-    /// different operands from observing different generations.
-    pub fn execute_graph_set_governed(
-        &self,
-        cx: &fgdb_types::QueryCx,
-        query: &fgdb_gql::PreparedGraphSet,
-        policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<
-        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphSetExecutionError<GqlError>, Box<asupersync::error::Error>>,
-    > {
-        use fgdb_gql::{GqlQueryError, GraphSetExecutionError};
-        let as_of = self.frontier().map_err(|error|
-            GqlQueryError::Source(GraphSetExecutionError::Source(GqlError::Read(error))))?;
-        self.execute_graph_set_governed_at(cx, query, as_of, policy)
-    }
+#[cfg(test)]
+mod relational_reader_owner_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSetExecutionError,
+        GraphSymbol, GraphSymbolKind, PreparedGraphSetText};
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 
-    /// All leaves read this same retained sequence, even beneath empty sets or
-    /// LIMIT 0. Source visits, traversal and relational work share one allowance.
-    /// Only the final page consumes the external result-row allowance. No
-    /// partial rows, success certificate or durable marker is issued on error.
-    pub fn execute_graph_set_governed_at(
-        &self,
-        cx: &fgdb_types::QueryCx,
-        query: &fgdb_gql::PreparedGraphSet,
-        as_of: CommitSeq,
-        policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<
-        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphSetExecutionError<GqlError>, Box<asupersync::error::Error>>,
-    > {
-        use fgdb_gql::{GqlQueryError, GraphSetExecutionError};
-        // Health/history refusal precedes outer evaluator admission, including
-        // a zero allowance. Each leaf retains the ordinary read preflight too.
-        self.ensure_readable().and_then(|()| self.snapshot.check_frontier(as_of))
-            .map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(GqlError::Read(error))))?;
-        cx.with_restriction(|| query.execute_governed(policy,
-            |pattern, remaining| self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining),
-            || cx.checkpoint()))
-    }
-}
-
-impl crate::EmbeddedReadView {
-    /// Execute against this view's immutable generation, not a live writer.
-    pub fn execute_graph_set_governed(
-        &self,
-        cx: &fgdb_types::QueryCx,
-        query: &fgdb_gql::PreparedGraphSet,
-        policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<
-        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphSetExecutionError<GqlError>, Box<asupersync::error::Error>>,
-    > {
-        self.execute_graph_set_governed_at(cx, query, self.frontier(), policy)
-    }
-
-    /// Historical relational execution is confined to this view's retained
-    /// history and frontier. A newer writer sequence cannot enter a later arm.
-    pub fn execute_graph_set_governed_at(
-        &self,
-        cx: &fgdb_types::QueryCx,
-        query: &fgdb_gql::PreparedGraphSet,
-        as_of: CommitSeq,
-        policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<
-        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphSetExecutionError<GqlError>, Box<asupersync::error::Error>>,
-    > {
-        use fgdb_gql::{GqlQueryError, GraphSetExecutionError};
-        self.snapshot.check_frontier(as_of)
-            .map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(GqlError::Read(error))))?;
-        cx.with_restriction(|| query.execute_governed(policy,
-            |pattern, remaining| self.execute_graph_pattern_governed_at(cx, pattern, as_of, remaining),
-            || cx.checkpoint()))
-    }
-}
-
-impl WriteTxn {
-    /// Execute all relational leaves over this transaction's original basis and
-    /// canonical staged effects. The immutable borrows exclude intervening
-    /// mutation. Existing pattern reads retain observations and phantom-scan
-    /// witnesses even if a later filter, page, arithmetic error or cancellation
-    /// discards their rows. No successful prefix or partial result escapes.
-    ///
-    /// This neither stages effects nor completes the transaction. Explicit
-    /// finish/commit retains its ordinary conflict and completion semantics.
-    /// Limits price existing source/evaluator work, not commit I/O or a spill
-    /// engine. Set source counts are visits summed across leaves, not unique IDs.
-    pub fn execute_graph_set_governed<V: Vfs + Clone>(
-        &self,
-        database: &Database<V>,
-        cx: &fgdb_types::QueryCx,
-        query: &fgdb_gql::PreparedGraphSet,
-        policy: fgdb_gql::GqlQueryPolicy,
-    ) -> Result<
-        fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>,
-        fgdb_gql::GqlQueryError<fgdb_gql::GraphSetExecutionError<WriteTxnError>, Box<asupersync::error::Error>>,
-    > {
-        use fgdb_gql::{GqlQueryError, GraphSetExecutionError};
-        // Reuse the actual owner/lifecycle/health/history preflight rather than
-        // allowing a zero set budget to hide a wrong or finished transaction.
-        let _ = self.query_snapshot(database)
-            .map_err(|error| GqlQueryError::Source(GraphSetExecutionError::Source(error)))?;
-        cx.with_restriction(|| query.execute_governed(policy,
-            |pattern, remaining| self.execute_graph_pattern_governed(database, cx, pattern, remaining),
-            || cx.checkpoint()))
+    #[test]
+    fn one_canonical_reader_serves_live_history_pinned_and_transaction_pipelines() {
+        let ((), report) = run_async_under_lab(0x51ce_a601, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit(); let cx = contexts.query(); let txcx = contexts.txn();
+            let keys = crate::DatabaseKeys::new([0xa6; 32], DatabaseSecurityNamespaceId([0xa7; 32]), [0xa8; 32]);
+            let mut db = Database::open_memory(&commit, keys.clone()).await.unwrap();
+            let other = Database::open_memory(&commit, keys).await.unwrap();
+            let key = fgdb_delta_types::PropertyKeyId(1);
+            let mut batch = WriteBatch::new(RelationId(1));
+            batch.create_vertex(VId(1), vec![], vec![(key, CanonicalScalar::Int(4))]);
+            batch.create_vertex(VId(2), vec![], vec![(key, CanonicalScalar::Int(7))]);
+            let basis = db.write(&commit, batch).await.unwrap();
+            let query = PreparedGraphSetText::prepare(
+                "MATCH (n) WITH n.p AS x WHERE x > 0 RETURN x", |kind, name| {
+                    if kind == GraphSymbolKind::Property && name == "p" {
+                        Some(GraphSymbol::Property(key))
+                    } else { None }
+                },
+            ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            let policy = GqlQueryPolicy::new(100, 100, 100_000, 100_000);
+            let zero = GqlQueryPolicy::new(0, 0, 0, 0);
+            let pinned = db.read_session().unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let expected = db.execute_graph_set_governed(&cx, &query, policy).unwrap().value;
+            assert_eq!(expected.len(), 2);
+            assert_eq!(db.execute_graph_set_governed_at(&cx, &query, basis, policy).unwrap().value, expected);
+            assert_eq!(pinned.execute_graph_set_governed(&cx, &query, policy).unwrap().value, expected);
+            assert_eq!(pinned.execute_graph_set_governed_at(&cx, &query, basis, policy).unwrap().value, expected);
+            assert!(matches!(txn.execute_graph_set_governed(&other, &cx, &query, zero),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Source(WriteTxnError::WrongDatabase)))));
+            assert_eq!(txn.execute_graph_set_governed(&db, &cx, &query, policy).unwrap().value, expected);
+            assert!(matches!(db.execute_graph_set_governed_at(&cx, &query, CommitSeq(basis.0 + 1), zero),
+                Err(GqlQueryError::Source(GraphSetExecutionError::Source(
+                    GqlError::Read(crate::ReadError::BeyondFrontier { .. }))))));
+            assert!(matches!(txn.finish(&mut db, &commit).await.unwrap(), EmbeddedTxnCompletion::ReadClosed { .. }));
+            assert_eq!(db.frontier().unwrap(), basis);
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
