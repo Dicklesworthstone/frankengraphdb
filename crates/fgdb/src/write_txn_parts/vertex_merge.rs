@@ -152,7 +152,9 @@ impl WriteTxn {
                         .expect("successful reduction is within the scratch limit"),
                 ),
             };
-            let insertion_policy = fgdb_gql::insertion::GraphInsertPolicy::new(remaining, 1, 0);
+            let insertion_policy = fgdb_gql::insertion::GraphInsertPolicy::new(
+                remaining, policy.max_created_vertices, 0,
+            );
             let created = self.execute_graph_insert_returning_governed(
                 database, cx, merge.creation(), insertion_policy, &mut allocate,
             );

@@ -33,10 +33,21 @@ pub struct GraphVertexMergePolicy {
     /// One cumulative allowance for match selection, uniqueness reduction and
     /// the standalone creation arm when it is needed.
     pub query: GqlQueryPolicy,
+    /// Creation proposals, not matched vertices. Zero still permits a match,
+    /// but refuses a missing vertex before requesting an external identity.
+    pub max_created_vertices: u64,
 }
 impl GraphVertexMergePolicy {
     #[must_use]
-    pub const fn new(query: GqlQueryPolicy) -> Self { Self { query } }
+    pub const fn new(query: GqlQueryPolicy) -> Self {
+        Self { query, max_created_vertices: 1 }
+    }
+
+    #[must_use]
+    pub const fn with_creation_limit(mut self, limit: u64) -> Self {
+        self.max_created_vertices = limit;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
