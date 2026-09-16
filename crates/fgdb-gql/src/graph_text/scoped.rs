@@ -1,6 +1,6 @@
-//! Scoped MATCH parsing and lowering through the existing positive-pattern compiler.
+//! Ordered MATCH parsing and lowering through the existing positive-pattern compiler.
 //! The lexer and numeric argument table are shared with ordinary and aggregate
-//! text. OPTIONAL exports names; existential names remain local to their body.
+//! text. Required MATCH and OPTIONAL export names; existential names stay local.
 //! Bodies without shared variables are independent, not malformed correlations.
 //! MATCH ANY SHORTEST WALK selects one occurrence per endpoint pair; MATCH ALL
 //! SHORTEST WALK keeps every tie. Both require one finite quantified atom in
@@ -14,9 +14,16 @@ use crate::algebra::{GraphMatchClause, GraphWalkSearch};
 
 #[derive(Clone, Copy)]
 enum ScopeKind {
+    Required,
     Optional,
     Exists,
     NotExists,
+}
+
+impl ScopeKind {
+    fn exports_bindings(self) -> bool {
+        matches!(self, Self::Required | Self::Optional)
+    }
 }
 
 struct PatternSyntax<'a> {
@@ -41,6 +48,7 @@ pub(super) struct BoundScope {
 impl BoundScope {
     pub(super) fn clause(&self) -> GraphMatchClause<'_> {
         match self.kind {
+            ScopeKind::Required => GraphMatchClause::required(&self.builder),
             ScopeKind::Optional => GraphMatchClause::optional(&self.builder),
             ScopeKind::Exists => GraphMatchClause::exists(&self.builder),
             ScopeKind::NotExists => GraphMatchClause::not_exists(&self.builder),
@@ -281,8 +289,11 @@ impl<'a> Parser<'a> {
         self.word("RETURN")
     }
 
-    /// Shared read/write MATCH prefix. A mutation attaches its own typed
-    /// terminal clause instead of synthesizing a RETURN statement for parsing.
+    /// Shared read/write MATCH prefix. Required and OPTIONAL clauses may be
+    /// interleaved after the mandatory root; each retains its own predicates,
+    /// search selector and position. The existing positive-child grammar still
+    /// requires predicate variables to occur in that child's pattern and refuses
+    /// nested existential bodies. A mutation attaches its own terminal clause.
     pub(super) fn parse_match_prefix(&mut self) -> Result<(), GraphPatternTextError> {
         self.word("MATCH")?;
         self.positive_pattern()?;
@@ -290,8 +301,14 @@ impl<'a> Parser<'a> {
         if self.take_word("WHERE")? {
             self.scoped_predicates(true)?;
         }
-        while self.take_word("OPTIONAL")? {
-            self.match_scope(ScopeKind::Optional)?;
+        loop {
+            if self.take_word("OPTIONAL")? {
+                self.match_scope(ScopeKind::Optional)?;
+            } else if self.is_word("MATCH") {
+                self.match_scope(ScopeKind::Required)?;
+            } else {
+                break;
+            }
         }
         self.syntax.return_at = self.current.at;
         Ok(())
@@ -595,7 +612,7 @@ impl<'a> Parser<'a> {
             if self.take_word("WHERE")? {
                 self.scoped_predicates(false)?;
             }
-            if !matches!(kind, ScopeKind::Optional) {
+            if !kind.exports_bindings() {
                 self.punct(b'}', "}")?;
             }
             Ok::<_, GraphPatternTextError>(self.take_pattern())
@@ -611,7 +628,7 @@ impl<'a> Parser<'a> {
         // The typed scope compiler distinguishes shared-name correlations
         // from a genuinely independent child. Never invent an outer anchor or
         // expose existential locals merely to force a connected shape.
-        if matches!(kind, ScopeKind::Optional) {
+        if kind.exports_bindings() {
             for variable in &body.variables {
                 if !self
                     .syntax
