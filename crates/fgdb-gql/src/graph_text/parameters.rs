@@ -3,7 +3,7 @@
 //! from a database sample, parameter spelling, value, or text substitution.
 
 use super::*;
-use crate::set_text::{BoundSetTextInput, ReadProjectionTemplate, ReadValueTemplate};
+use crate::set_text::{BoundSetTextInput, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate};
 
 impl PreparedGraphText {
     /// Prepare with explicit types for selected argument names (without `$`).
@@ -70,11 +70,12 @@ pub(crate) struct UnresolvedGraphText<'a> {
     pub(super) statement: &'a str,
     pub(super) syntax: Syntax<'a>,
     pub(super) projection: Option<Vec<ReadProjectionTemplate>>,
+    pub(super) pipeline: Vec<ReadStageTemplate>,
 }
 impl UnresolvedGraphText<'_> {
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
         use crate::GraphSetColumnType::{Scalar, Vertex};
-        if let Some(projection) = &self.projection {
+        let (mut names, mut types): (Vec<String>, Vec<crate::GraphSetColumnType>) = if let Some(projection) = &self.projection {
             projection.iter().map(|column| {
                 let kind = match &column.value {
                     ReadValueTemplate::Column(input) if self.syntax.columns[*input].property.is_none() => Vertex,
@@ -86,9 +87,23 @@ impl UnresolvedGraphText<'_> {
             self.syntax.columns.iter().map(|column| (
                 column.alias.text.to_owned(), if column.property.is_some() { Scalar } else { Vertex },
             )).unzip()
+        };
+        for stage in &self.pipeline {
+            if let ReadStageTemplate::Project { projection, .. } = stage {
+                let next = projection.iter().map(|column| match &column.value {
+                    ReadValueTemplate::Column(input) => types[*input],
+                    _ => Scalar,
+                }).collect();
+                names = projection.iter().map(|column| column.name.clone()).collect();
+                types = next;
+            }
         }
+        (names, types)
     }
-    pub(crate) fn depth(&self) -> usize { 1 + usize::from(self.projection.is_some()) }
+    pub(crate) fn depth(&self) -> usize {
+        1 + usize::from(self.projection.is_some()) + self.pipeline.iter()
+            .filter(|stage| !matches!(stage, ReadStageTemplate::Page { .. })).count()
+    }
     pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] { &self.syntax.parameters }
     pub(crate) fn parameter_offsets(&self) -> &[usize] { &self.syntax.parameter_offsets }
 
@@ -143,7 +158,7 @@ impl UnresolvedGraphText<'_> {
                 distinct: false, return_at: syntax.return_at,
             }
         };
-        Ok(BoundSetTextInput { selection, projection: self.projection, quantifier })
+        Ok(BoundSetTextInput { selection, projection: self.projection, quantifier, pipeline: self.pipeline })
     }
 }
 

@@ -24,6 +24,7 @@ pub enum GraphSetTextErrorKind {
     SetBuild(GraphSetBuildError),
     OrderBuild(GraphOrderError),
     ProjectionBuild(crate::GraphSetProjectionError),
+    FilterBuild(crate::GraphSetFilterError),
     IntegerExpression(crate::GraphIntegerBuildError),
     IntegerOperand,
     IntegerNesting { limit: usize },
@@ -69,10 +70,34 @@ pub(crate) struct ReadProjectionTemplate {
     pub(crate) value: ReadValueTemplate,
 }
 #[derive(Clone)]
+pub(crate) enum ReadPageNumber { Literal(u64), Parameter(usize) }
+#[derive(Clone)]
+pub(crate) enum ReadFilterOperand {
+    Column(usize),
+    Literal(crate::GqlScalarParameter),
+    Parameter { index: usize, at: usize },
+}
+#[derive(Clone)]
+pub(crate) enum ReadFilterOp {
+    Compare { left: ReadFilterOperand, comparison: crate::algebra::IntegerComparison, right: ReadFilterOperand },
+    IsNull { operand: ReadFilterOperand, is_null: bool },
+    Truth(Option<bool>),
+    Not,
+    And,
+    Or,
+}
+#[derive(Clone)]
+pub(crate) enum ReadStageTemplate {
+    Project { at: usize, projection: Vec<ReadProjectionTemplate>, quantifier: GraphSetQuantifier },
+    Filter { at: usize, code: Vec<ReadFilterOp> },
+    Page { at: usize, order: Vec<GraphValueOrder>, offset: ReadPageNumber, count: Option<ReadPageNumber> },
+}
+#[derive(Clone)]
 pub(crate) struct BoundSetTextInput {
     pub(crate) selection: PreparedGraphText,
     pub(crate) projection: Option<Vec<ReadProjectionTemplate>>,
     pub(crate) quantifier: GraphSetQuantifier,
+    pub(crate) pipeline: Vec<ReadStageTemplate>,
 }
 
 // A token view, not a lexer. Only graph_text's existing Lexer constructs these.
@@ -403,6 +428,17 @@ impl PreparedGraphSetText {
     /// ordering and pagination; all selected property inputs retain eager source
     /// error behavior. Constants preserve match multiplicity. Use this same
     /// entrypoint for a single MATCH with computed outputs or a compound set.
+    ///
+    /// WITH adds bounded row stages after MATCH: projection/renaming (including
+    /// the same checked arithmetic/CASE), optional DISTINCT, ORDER BY/SKIP/LIMIT,
+    /// then optional WHERE over the projected aliases. Repeated WITH stages end
+    /// in RETURN. A stage's page precedes its following WHERE and next stage;
+    /// only explicitly projected names survive. WHERE supports comparisons,
+    /// IS [NOT] NULL and NOT/AND/OR with three-valued semantics. Project computed
+    /// predicate operands first. Later row expressions never dereference graph
+    /// properties, reopen MATCH, aggregate, UNWIND or write. Those forms refuse
+    /// rather than silently escaping the row scope. Every leaf still executes
+    /// once under the existing materialized set engine and cumulative budget.
     /// Aggregate RETURN operands remain unsupported. Byte/token admission is
     /// definition-wide; no branch resets those caps.
     pub fn prepare(statement: &str, resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)

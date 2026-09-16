@@ -10,6 +10,12 @@ use crate::{GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerExpression,
 use fgdb_types::CanonicalScalarKind;
 
 const MAX_INTEGER_NESTING: usize = 64;
+// The precedence/CASE compiler is shared by graph assignments and relational
+// stages. A row scope resolves only admitted aliases, never ambient graph names.
+enum ExpressionColumns<'columns, 'text> {
+    Graph(&'columns mut Vec<Projection<'text>>),
+    Row(&'columns [(Name<'text>, crate::GraphSetColumnType)]),
+}
 enum ParsedOp {
     Atom(Operand, usize), Unary(GraphIntegerUnary), Binary(GraphIntegerBinary), Coalesce,
     Bound(GraphIntegerOp),
@@ -61,6 +67,16 @@ pub(super) fn bind_integer(program: &[MutationIntegerTemplateOp], values: &[GqlP
 impl<'a> Parser<'a> {
     pub(super) fn mutation_expression(&mut self, columns: &mut Vec<Projection<'a>>)
         -> Result<Operand, GraphMutationTextError> {
+        self.checked_expression(&mut ExpressionColumns::Graph(columns))
+    }
+
+    pub(super) fn row_expression(&mut self, columns: &[(Name<'a>, crate::GraphSetColumnType)])
+        -> Result<Operand, GraphMutationTextError> {
+        self.checked_expression(&mut ExpressionColumns::Row(columns))
+    }
+
+    fn checked_expression(&mut self, columns: &mut ExpressionColumns<'_, 'a>)
+        -> Result<Operand, GraphMutationTextError> {
         let at = self.current.at;
         let mut parsed = Vec::new();
         self.integer_sum(columns, 0, &mut parsed)?;
@@ -79,7 +95,13 @@ impl<'a> Parser<'a> {
                 ParsedOp::Unary(op) => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Unary(op)),
                 ParsedOp::Binary(op) => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Binary(op)),
                 ParsedOp::Coalesce => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Coalesce),
-                ParsedOp::Atom(Operand::Column(column), _) => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Column(column)),
+                ParsedOp::Atom(Operand::Column(column), at) => {
+                    if let ExpressionColumns::Row(schema) = columns
+                        && schema[column].1 != crate::GraphSetColumnType::Scalar {
+                        return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
+                    }
+                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Column(column))
+                }
                 ParsedOp::Atom(Operand::Literal(value), at) =>
                     MutationIntegerTemplateOp::Bound(GraphIntegerOp::Literal(integer_scalar(value.value(), at)?)),
                 ParsedOp::Atom(Operand::Number(Number::Literal(value)), at) =>
@@ -109,7 +131,7 @@ impl<'a> Parser<'a> {
         Ok(Operand::Integer { program, at })
     }
 
-    fn integer_sum(&mut self, columns: &mut Vec<Projection<'a>>, depth: usize, program: &mut Vec<ParsedOp>)
+    fn integer_sum(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
         -> Result<(), GraphMutationTextError> {
         self.integer_product(columns, depth, program)?;
         loop {
@@ -122,7 +144,7 @@ impl<'a> Parser<'a> {
         }
         Ok(())
     }
-    fn integer_product(&mut self, columns: &mut Vec<Projection<'a>>, depth: usize, program: &mut Vec<ParsedOp>)
+    fn integer_product(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
         -> Result<(), GraphMutationTextError> {
         self.integer_unary(columns, depth, program)?;
         loop {
@@ -136,7 +158,7 @@ impl<'a> Parser<'a> {
         }
         Ok(())
     }
-    fn integer_unary(&mut self, columns: &mut Vec<Projection<'a>>, depth: usize, program: &mut Vec<ParsedOp>)
+    fn integer_unary(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
         -> Result<(), GraphMutationTextError> {
         let at = self.current.at;
         if depth > MAX_INTEGER_NESTING {
@@ -188,7 +210,28 @@ impl<'a> Parser<'a> {
             self.punct(b')', ")")?;
             return Ok(());
         }
-        let operand = self.mutation_operand(columns)?;
+        let operand = match columns {
+            ExpressionColumns::Graph(columns) => self.mutation_operand(columns)?,
+            ExpressionColumns::Row(schema) => self.row_operand(schema)?,
+        };
         emit(program, ParsedOp::Atom(operand, at), at)
+    }
+
+    pub(super) fn row_operand(&mut self, schema: &[(Name<'a>, crate::GraphSetColumnType)])
+        -> Result<Operand, GraphPatternTextError> {
+        if let TokenKind::Word(word) = self.current.kind {
+            if let Some(column) = schema.iter().position(|(name, _)| name.text == word) {
+                self.advance()?;
+                return Ok(Operand::Column(column));
+            }
+            if !(word.eq_ignore_ascii_case("TRUE") || word.eq_ignore_ascii_case("FALSE")
+                || word.eq_ignore_ascii_case("NULL"))
+                || matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {
+                return Err(error(self.current.at, GraphPatternTextErrorKind::UnknownVariable));
+            }
+        }
+        // Only literals/parameters remain. In particular, no root variable or
+        // property lookup can reach the graph operand branch of this helper.
+        self.mutation_operand(&mut Vec::new())
     }
 }

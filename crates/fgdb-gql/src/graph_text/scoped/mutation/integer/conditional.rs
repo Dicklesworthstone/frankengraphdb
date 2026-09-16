@@ -19,7 +19,7 @@ impl<'a> Parser<'a> {
         let next = self.lexer.clone().next()?;
         Ok(match next.kind {
             TokenKind::Word(word) => !["AS", "THEN", "ELSE", "END", "AND", "OR", "RETURN", "SET",
-                "REMOVE", "GROUP", "HAVING", "ORDER", "SKIP", "LIMIT"].iter()
+                "REMOVE", "GROUP", "HAVING", "ORDER", "SKIP", "LIMIT", "WITH", "WHERE"].iter()
                 .any(|suffix| word.eq_ignore_ascii_case(suffix)),
             TokenKind::Digits(_) | TokenKind::Parameter(_) | TokenKind::Quoted(_)
             | TokenKind::Punct(b'(' | b'+' | b'-') => true,
@@ -28,7 +28,7 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn integer_case(
-        &mut self, columns: &mut Vec<Projection<'a>>, depth: usize,
+        &mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize,
         program: &mut Vec<ParsedOp>, at: usize,
     ) -> Result<(), GraphMutationTextError> {
         if depth > MAX_INTEGER_NESTING {
@@ -59,7 +59,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn case_disjunction(&mut self, columns: &mut Vec<Projection<'a>>, depth: usize, program: &mut Vec<ParsedOp>)
+    fn case_disjunction(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
         -> Result<(), GraphMutationTextError> {
         self.case_conjunction(columns, depth, program)?;
         while self.is_word("OR") {
@@ -70,7 +70,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn case_conjunction(&mut self, columns: &mut Vec<Projection<'a>>, depth: usize, program: &mut Vec<ParsedOp>)
+    fn case_conjunction(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
         -> Result<(), GraphMutationTextError> {
         self.case_negation(columns, depth, program)?;
         while self.is_word("AND") {
@@ -81,7 +81,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn case_negation(&mut self, columns: &mut Vec<Projection<'a>>, depth: usize, program: &mut Vec<ParsedOp>)
+    fn case_negation(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
         -> Result<(), GraphMutationTextError> {
         let at = self.current.at;
         if depth > MAX_INTEGER_NESTING {

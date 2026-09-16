@@ -2,10 +2,12 @@
 //! precedence compiler. Only terminal semantics differ: no action or write is
 //! constructed. Hidden source columns retain every requested property read.
 
+mod pipeline;
+
 use super::*;
 use crate::graph_text::parameters::UnresolvedGraphText;
-use crate::set_text::{BoundSetTextInput, ReadProjectionTemplate, ReadValueTemplate};
-use crate::{GraphSetProjection, GraphSetValue, GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSet};
+use crate::set_text::{BoundSetTextInput, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate};
+use crate::{GraphSetColumnType, GraphSetProjection, GraphSetValue, GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSet};
 
 fn expression_error(source: GraphMutationTextError) -> GraphSetTextError {
     let kind = match source.kind {
@@ -25,7 +27,8 @@ impl<'a> Parser<'a> {
     pub(in crate::graph_text) fn parse_return_for_composition(mut self, statement: &'a str)
         -> Result<UnresolvedGraphText<'a>, GraphSetTextError> {
         self.parse_match_prefix()?;
-        self.word("RETURN")?;
+        let with = self.take_word("WITH")?;
+        if !with { self.word("RETURN")?; }
         self.syntax.distinct = self.take_word("DISTINCT")?;
         if !self.syntax.distinct { self.take_word("ALL")?; }
         let mut inputs = Vec::<Projection<'a>>::new();
@@ -68,8 +71,18 @@ impl<'a> Parser<'a> {
                 if !self.take(b',')? { break; }
             }
         }
+        let pipeline = if with {
+            let schema = outputs.iter().map(|(name, operand)| {
+                let kind = match operand {
+                    Operand::Column(input) if inputs[*input].property.is_none() => GraphSetColumnType::Vertex,
+                    _ => GraphSetColumnType::Scalar,
+                };
+                (*name, kind)
+            }).collect();
+            self.row_pipeline(schema)?
+        } else { Vec::new() };
         self.end()?;
-        if outputs.iter().all(|(_, operand)| matches!(operand, Operand::Column(_))) {
+        if !with && outputs.iter().all(|(_, operand)| matches!(operand, Operand::Column(_))) {
             // Keep the existing plan/counters/transcript for plain projections,
             // including repeated fields under different public aliases.
             self.syntax.columns = outputs.into_iter().map(|(alias, operand)| {
@@ -77,7 +90,7 @@ impl<'a> Parser<'a> {
                 let source = inputs[index];
                 Column { variable: source.variable, property: source.property, alias }
             }).collect();
-            return Ok(UnresolvedGraphText { statement, syntax: self.syntax, projection: None });
+            return Ok(UnresolvedGraphText { statement, syntax: self.syntax, projection: None, pipeline });
         }
         if inputs.is_empty() {
             let variable = self.syntax.variables[0];
@@ -88,18 +101,22 @@ impl<'a> Parser<'a> {
         }).collect();
         let mut projection = Vec::new();
         for (alias, operand) in outputs {
-            let value = match operand {
-                Operand::Column(input) => ReadValueTemplate::Column(input),
-                Operand::Literal(value) => ReadValueTemplate::Literal(value),
-                Operand::Number(Number::Literal(value)) => ReadValueTemplate::Literal(scalar(value, alias.at)?),
-                Operand::Number(Number::Parameter(index)) => ReadValueTemplate::Parameter {
-                    index, at: self.syntax.parameter_offsets[index],
-                },
-                Operand::Integer { program, at } => ReadValueTemplate::Integer { program, at },
-            };
+            let value = self.read_value_template(operand, alias.at)?;
             projection.push(ReadProjectionTemplate { name: alias.text.to_owned(), value });
         }
-        Ok(UnresolvedGraphText { statement, syntax: self.syntax, projection: Some(projection) })
+        Ok(UnresolvedGraphText { statement, syntax: self.syntax, projection: Some(projection), pipeline })
+    }
+
+    fn read_value_template(&self, operand: Operand, at: usize) -> Result<ReadValueTemplate, GraphPatternTextError> {
+        Ok(match operand {
+            Operand::Column(input) => ReadValueTemplate::Column(input),
+            Operand::Literal(value) => ReadValueTemplate::Literal(value),
+            Operand::Number(Number::Literal(value)) => ReadValueTemplate::Literal(scalar(value, at)?),
+            Operand::Number(Number::Parameter(index)) => ReadValueTemplate::Parameter {
+                index, at: self.syntax.parameter_offsets[index],
+            },
+            Operand::Integer { program, at } => ReadValueTemplate::Integer { program, at },
+        })
     }
 }
 
@@ -109,21 +126,50 @@ impl BoundSetTextInput {
     pub(crate) fn bind_parameters(&self, arguments: &GqlParameters)
         -> Result<PreparedGraphSet, GraphSetTextError> {
         let values = self.selection.checked_arguments(arguments)?;
-        let input: PreparedGraphSet = self.selection.bind_values(&values)?.into();
-        let Some(projection) = &self.projection else { return Ok(input); };
-        let mut columns = Vec::new();
-        for output in projection {
-            let value = match &output.value {
-                ReadValueTemplate::Column(input) => GraphSetValue::Column(*input),
-                ReadValueTemplate::Literal(value) => GraphSetValue::Literal(value.clone()),
-                ReadValueTemplate::Parameter { index, at } => GraphSetValue::Literal(scalar(values[*index].clone(), *at)?),
-                ReadValueTemplate::Integer { program, at } => GraphSetValue::Integer(
-                    integer::bind_integer(program, &values, *at).map_err(expression_error)?),
-            };
-            columns.push(GraphSetProjection::new(output.name.clone(), value));
+        let mut input: PreparedGraphSet = self.selection.bind_values(&values)?.into();
+        if let Some(projection) = &self.projection {
+            input = bind_projection(input, projection, self.quantifier, &values, self.selection.return_at)?;
         }
-        input.project(columns, self.quantifier).map_err(|kind| GraphSetTextError {
-            offset: self.selection.return_at, kind: GraphSetTextErrorKind::ProjectionBuild(kind),
-        })
+        for stage in &self.pipeline {
+            input = match stage {
+                ReadStageTemplate::Project { at, projection, quantifier } =>
+                    bind_projection(input, projection, *quantifier, &values, *at)?,
+                ReadStageTemplate::Filter { at, code } => {
+                    let code = pipeline::bind_filter(code, Some(&values))?;
+                    input.filter(&code).map_err(|kind| GraphSetTextError {
+                        offset: *at, kind: GraphSetTextErrorKind::FilterBuild(kind),
+                    })?
+                }
+                ReadStageTemplate::Page { at, order, offset, count } => {
+                    if !order.is_empty() {
+                        input = input.with_order_by(order).map_err(|kind| GraphSetTextError {
+                            offset: *at, kind: GraphSetTextErrorKind::OrderBuild(kind),
+                        })?;
+                    }
+                    input.with_page(pipeline::page_value(offset, &values),
+                        count.as_ref().map(|count| pipeline::page_value(count, &values)))
+                }
+            };
+        }
+        Ok(input)
     }
+}
+
+fn bind_projection(input: PreparedGraphSet, projection: &[ReadProjectionTemplate],
+    quantifier: crate::GraphSetQuantifier, values: &[GqlParameterValue], at: usize)
+    -> Result<PreparedGraphSet, GraphSetTextError> {
+    let mut columns = Vec::new();
+    for output in projection {
+        let value = match &output.value {
+            ReadValueTemplate::Column(input) => GraphSetValue::Column(*input),
+            ReadValueTemplate::Literal(value) => GraphSetValue::Literal(value.clone()),
+            ReadValueTemplate::Parameter { index, at } => GraphSetValue::Literal(scalar(values[*index].clone(), *at)?),
+            ReadValueTemplate::Integer { program, at } => GraphSetValue::Integer(
+                integer::bind_integer(program, values, *at).map_err(expression_error)?),
+        };
+        columns.push(GraphSetProjection::new(output.name.clone(), value));
+    }
+    input.project(columns, quantifier).map_err(|kind| GraphSetTextError {
+        offset: at, kind: GraphSetTextErrorKind::ProjectionBuild(kind),
+    })
 }

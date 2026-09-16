@@ -39,6 +39,14 @@ impl core::fmt::Debug for GraphSetPredicateOp {
         f.write_str("GraphSetPredicateOp([REDACTED])")
     }
 }
+impl GraphSetPredicateOp {
+    // Native preparation validates even parameterized filters before catalog
+    // callbacks. Placeholder scalar values prove structure, never truth.
+    pub(crate) fn validate_schema(types: &[GraphSetColumnType], code: &[Self])
+        -> Result<(), GraphSetFilterError> {
+        RowPredicate::prepare(types, code).map(|_| ())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphSetFilterError {
