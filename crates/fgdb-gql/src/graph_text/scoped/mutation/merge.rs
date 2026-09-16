@@ -36,10 +36,6 @@ fn upsert_merge_error(error: GraphVertexMergeTextError) -> GraphVertexUpsertText
 }
 
 impl<'a> Parser<'a> {
-    /// Parse only the MERGE pattern and stop on the following token. The plain
-    /// MERGE entrypoint calls `end()` immediately; the upsert entrypoint consumes
-    /// bounded ON MATCH/ON CREATE clauses first. One lexer/parameter table serves
-    /// both surfaces.
     fn vertex_merge_pattern(
         &mut self,
     ) -> Result<(Name<'a>, Vec<Name<'a>>, Vec<MergeProperty<'a>>), GraphVertexMergeTextError> {
@@ -377,7 +373,7 @@ impl PreparedGraphVertexUpsertText {
             cache.insert(key, value);
             Ok(value)
         };
-        let mut resolve_actions = |parsed: Vec<ParsedUpsertAction<'a>>| -> Result<Vec<VertexUpsertActionTemplate>, GraphPatternTextError> {
+        let mut resolve_actions = |parsed| -> Result<Vec<VertexUpsertActionTemplate>, GraphPatternTextError> {
             parsed.into_iter().map(|action| Ok(match action {
                 ParsedUpsertAction::Property { key, value } => {
                     let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
@@ -395,6 +391,7 @@ impl PreparedGraphVertexUpsertText {
         };
         let on_match = resolve_actions(parsed_match)?;
         let on_create = resolve_actions(parsed_create)?;
+        drop(resolve_actions);
         let merge = resolve_merge_template(
             statement, relation, syntax, variable, labels, properties, &mut symbol,
         ).map_err(upsert_merge_error)?;
