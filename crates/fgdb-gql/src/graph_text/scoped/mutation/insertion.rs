@@ -306,6 +306,17 @@ fn bind_fields(
                 };
                 GraphMutationValue::Expression(expression)
             }
+            ReadValueTemplate::List(_) | ReadValueTemplate::Index { .. }
+            | ReadValueTemplate::Size(_) => {
+                // Scalar properties only: list construction is a read-surface
+                // capability, not a stored property encoding.
+                return Err(GraphInsertTextError {
+                    offset: 0,
+                    kind: GraphInsertTextErrorKind::Expression(
+                        GraphMutationTextErrorKind::IntegerOperand,
+                    ),
+                });
+            }
         };
         properties.push((*key, value));
     }
