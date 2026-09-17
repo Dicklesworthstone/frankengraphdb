@@ -50,6 +50,9 @@ fn main() {
             "version-chain",
             "cold-reopen",
             "compaction-under-load",
+            "gql-point-lookup",
+            "gql-two-hop",
+            "gql-aggregate",
         ]
     } else {
         vec![&which]

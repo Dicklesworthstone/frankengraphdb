@@ -32,6 +32,9 @@ const BIN_SHAPES: &[&str] = &[
     "version-chain",
     "cold-reopen",
     "compaction-under-load",
+    "gql-point-lookup",
+    "gql-two-hop",
+    "gql-aggregate",
 ];
 
 fn runtime_cx() -> PurposeContexts {
@@ -51,13 +54,16 @@ fn shape_dispatch_arms_match_binary_list() {
     // real I/O; instead, the test verifies the unknown-name path closes the
     // dispatch and the binary list is non-empty + carries every name we
     // know the library to support.
-    assert_eq!(BIN_SHAPES.len(), 6, "six published shapes today");
+    assert_eq!(BIN_SHAPES.len(), 9, "nine published shapes today");
     assert!(BIN_SHAPES.contains(&"ingest-power-law"));
     assert!(BIN_SHAPES.contains(&"bulk-load"));
     assert!(BIN_SHAPES.contains(&"point-reads-supernode"));
     assert!(BIN_SHAPES.contains(&"version-chain"));
     assert!(BIN_SHAPES.contains(&"cold-reopen"));
     assert!(BIN_SHAPES.contains(&"compaction-under-load"));
+    assert!(BIN_SHAPES.contains(&"gql-point-lookup"));
+    assert!(BIN_SHAPES.contains(&"gql-two-hop"));
+    assert!(BIN_SHAPES.contains(&"gql-aggregate"));
 }
 
 #[test]
@@ -106,4 +112,18 @@ fn point_reads_supernode_shape_verifies_both_adjacency_faces() {
     let result = runtime
         .block_on(async { run_shape("point-reads-supernode", &cx.query(), &cx.commit()).await });
     result.expect("point-reads-supernode shape must verify both faces");
+}
+
+#[test]
+fn gql_shapes_verify_generated_answers_on_reopened_durable_graphs() {
+    let runtime = RuntimeBuilder::new().build().expect("runtime builds");
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    runtime.block_on(async {
+        for shape in ["gql-point-lookup", "gql-two-hop", "gql-aggregate"] {
+            fgdb_bench::run_gql_shape(shape, &contexts.query(), &contexts.commit(), 16, 16)
+                .await
+                .expect("every answer must match the independent generator");
+        }
+    });
 }

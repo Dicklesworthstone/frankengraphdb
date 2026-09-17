@@ -54,6 +54,18 @@ use std::time::{Duration, Instant};
 
 pub const KNOWS: RelationId = RelationId(1);
 pub const WEIGHT: PropertyKeyId = PropertyKeyId(7);
+
+// GQL read-path fixtures (fgdb-8pe7). Labels and properties live in dedicated
+// id spaces so the GQL resolver can map names to them without colliding with
+// the adjacency fixtures above.
+pub const PERSON: LabelId = LabelId(3);
+pub const K_KEY: PropertyKeyId = PropertyKeyId(8);
+pub const NAME: PropertyKeyId = PropertyKeyId(9);
+pub const TEAM: PropertyKeyId = PropertyKeyId(10);
+pub const AGE: PropertyKeyId = PropertyKeyId(11);
+/// Production fixture; witnesses pass a smaller explicit size.
+pub const GQL_READ_VERTEX_COUNT: usize = 50_000;
+pub const GQL_READ_PROBES: usize = 1_000;
 pub const K_OID: [u8; 32] = [0x5a; 32];
 pub const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
 
@@ -1002,6 +1014,262 @@ pub async fn shape_compaction_under_load(cx: &CommitCx) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// GQL read-path shapes (fgdb-8pe7)
+// ---------------------------------------------------------------------------
+
+/// GQL fixture: the power-law `Model` plus per-vertex GQL attributes
+/// (label PERSON; k, name, team, age properties). Returns the open durable
+/// handle, the model, and the attribute table keyed by vertex.
+///
+/// The attribute table IS the correctness oracle: every shape compares the
+/// rows the engine returns against values derived from this table and the
+/// model's adjacency — never from an engine read.
+async fn load_gql_fixture(
+    query_cx: &QueryCx,
+    cx: &CommitCx,
+    dir: &Path,
+    vertices: usize,
+) -> Result<(Database, Model), String> {
+    let model = Model::preferential_attachment(vertices, 6, LOAD_SEED ^ 0x67_51);
+    let mut db = Database::create(cx, dir, keys())
+        .await
+        .map_err(|error| format!("create: {error}"))?;
+    let vertex_rows = (0..vertices).map(|k| {
+        let [key, name, team, age] = gql_attributes(k);
+        BulkRow::Vertex(BulkVertex {
+            key: k.to_string(),
+            labels: vec![PERSON],
+            props: vec![
+                (K_KEY, CanonicalScalar::Int(key)),
+                (NAME, CanonicalScalar::Int(name)),
+                (TEAM, CanonicalScalar::Int(team)),
+                (AGE, CanonicalScalar::Int(age)),
+            ],
+        })
+    });
+    let edge_rows = model.edges.iter().map(|(eid, src, dst)| {
+        BulkRow::Edge(BulkEdge {
+            key: format!("edge-{}", eid.0),
+            source: src.0.to_string(),
+            destination: dst.0.to_string(),
+            relation: KNOWS,
+            props: Vec::new(),
+        })
+    });
+    let checkpoint = db
+        .bulk_load(
+            query_cx,
+            cx,
+            vertex_rows.chain(edge_rows),
+            BulkLoadPolicy::new(256, KNOWS),
+        )
+        .await
+        .map_err(|error| format!("GQL fixture bulk load: {error}"))?;
+    if checkpoint.vertices.len() != vertices || checkpoint.edges.len() != model.edges.len() {
+        return Err("GQL fixture checkpoint omitted generated records".to_string());
+    }
+    drop(db);
+    let db = Database::open(cx, dir, keys())
+        .await
+        .map_err(|error| format!("reopen: {error}"))?;
+    Ok((db, model))
+}
+
+fn gql_attributes(k: usize) -> [i64; 4] {
+    let k = k as i64;
+    [k, (k * 7919) % 100_003, k % 8, 20 + (k * 31) % 45]
+}
+
+/// Digest over returned rows: 64-bit FNV-1a over each cell's exact value
+/// bytes. Same answers => same digest; used for the byte-identical
+/// before/after comparison the optimization requires.
+fn digest_rows(rows: &[Vec<fgdb::QueryValue>]) -> Result<String, String> {
+    fn mix(hash: &mut u64, bytes: &[u8]) {
+        for byte in bytes {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    let mut hash = 0xcbf29ce484222325u64;
+    for row in rows {
+        mix(&mut hash, &(row.len() as u64).to_be_bytes());
+        for cell in row {
+            match cell {
+                fgdb::QueryValue::Count(value) => {
+                    mix(&mut hash, b"C");
+                    mix(&mut hash, &value.to_be_bytes());
+                }
+                fgdb::QueryValue::Integer(value) => {
+                    mix(&mut hash, b"I");
+                    mix(&mut hash, &value.to_be_bytes());
+                }
+                fgdb::QueryValue::Average(average) => {
+                    mix(&mut hash, b"A");
+                    mix(&mut hash, &average.numerator().to_be_bytes());
+                    mix(&mut hash, &average.denominator().to_be_bytes());
+                }
+                fgdb::QueryValue::Value(value) => {
+                    mix(&mut hash, b"V");
+                    let bytes = value
+                        .canonical_bytes()
+                        .map_err(|error| format!("result encoding: {error}"))?;
+                    mix(&mut hash, &bytes);
+                }
+            }
+        }
+    }
+    Ok(format!("{hash:016x}"))
+}
+
+fn gql_symbols(kind: fgdb_gql::GraphSymbolKind, name: &str) -> Option<fgdb_gql::GraphSymbol> {
+    use fgdb_gql::{GraphSymbol as S, GraphSymbolKind as K};
+    match (kind, name) {
+        (K::Label, "Person") => Some(S::Label(PERSON)),
+        (K::Relation, "KNOWS") => Some(S::Relation(KNOWS)),
+        (K::Property, "k") => Some(S::Property(K_KEY)),
+        (K::Property, "name") => Some(S::Property(NAME)),
+        (K::Property, "team") => Some(S::Property(TEAM)),
+        (K::Property, "age") => Some(S::Property(AGE)),
+        _ => None,
+    }
+}
+
+/// Execute the published workload with an explicit fixture size. Production
+/// dispatch supplies 50k vertices; integration witnesses use the same path
+/// with a small graph. Every result is checked before any metrics are emitted.
+pub async fn run_gql_shape(
+    name: &str,
+    query_cx: &QueryCx,
+    cx: &CommitCx,
+    vertices: usize,
+    probes: usize,
+) -> Result<(), String> {
+    use fgdb::{PreparedNativeRead, QueryResult, QueryValue};
+    use fgdb_gql::algebra::GraphValue;
+    use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphExactAverage};
+    if vertices < 7 || probes == 0 || probes > vertices {
+        return Err("GQL fixture needs >=7 vertices and 1..=vertices distinct probes".to_string());
+    }
+    let text = match name {
+        "gql-point-lookup" => "MATCH (n:Person) WHERE n.k = $k RETURN n.name AS name",
+        "gql-two-hop" => {
+            "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE a.k = $k RETURN COUNT(c) AS hops"
+        }
+        "gql-aggregate" => {
+            "MATCH (p:Person) RETURN p.team AS team, COUNT(*) AS members, AVG(p.age) AS age \
+             GROUP BY p.team ORDER BY team"
+        }
+        _ => return Err(format!("unknown GQL shape {name:?}")),
+    };
+    let (db, model) = load_gql_fixture(query_cx, cx, &scratch(name), vertices).await?;
+    let scalar = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
+    // These expectations only consume the generator, not database results.
+    let mut groups = BTreeMap::<i64, (u64, i128)>::new();
+    for k in 0..vertices {
+        let [_, _, team, age] = gql_attributes(k);
+        let group = groups.entry(team).or_default();
+        group.0 += 1;
+        group.1 += i128::from(age);
+    }
+    let aggregate_rows: Vec<_> = groups
+        .iter()
+        .map(|(&team, &(count, sum))| {
+            vec![
+                scalar(team),
+                QueryValue::Count(count),
+                QueryValue::Average(GraphExactAverage::new(sum, count).expect("nonempty group")),
+            ]
+        })
+        .collect();
+    let parameters = |k: usize| -> Result<GqlParameters, String> {
+        if name == "gql-aggregate" {
+            Ok(GqlParameters::new())
+        } else {
+            GqlParameters::new()
+                .with_int64("k", k as i64)
+                .map_err(|error| format!("parameter: {error}"))
+        }
+    };
+    let initial = parameters(0)?;
+    let started = Instant::now();
+    let prepared = PreparedNativeRead::prepare(text, &initial, gql_symbols)
+        .map_err(|error| format!("prepare {name}: {error}"))?;
+    let prepare = started.elapsed();
+    let policy = GqlQueryPolicy::new(10_000_000, 10_000_000, 1_000_000_000, 1_000_000_000);
+    let mut samples = Vec::with_capacity(probes);
+    let mut rows_returned = 0usize;
+    let mut result_digests = String::new();
+    for probe in 0..probes {
+        // Spread distinct point parameters across the full ID range.
+        let k = probe * vertices / probes;
+        let params = parameters(k)?;
+        let expected = match name {
+            "gql-point-lookup" => vec![vec![scalar(gql_attributes(k)[1])]],
+            "gql-two-hop" => {
+                let count: usize = model
+                    .out_adjacency
+                    .get(&VId(k as u128))
+                    .into_iter()
+                    .flatten()
+                    .map(|middle| model.out_adjacency.get(middle).map_or(0, Vec::len))
+                    .sum();
+                vec![vec![QueryValue::Count(count as u64)]]
+            }
+            _ => aggregate_rows.clone(),
+        };
+        let started = Instant::now();
+        let result = prepared
+            .execute(&db, query_cx, &params, policy)
+            .map_err(|error| format!("execute {name} probe {probe}: {error}"))?;
+        let elapsed = started.elapsed();
+        let QueryResult::Rows { rows, .. } = result else {
+            return Err(format!("{name} returned a non-row result"));
+        };
+        if rows != expected {
+            return Err(format!(
+                "{name} probe {probe} differs from generator: actual={} expected={}",
+                digest_rows(&rows)?,
+                digest_rows(&expected)?
+            ));
+        }
+        rows_returned += rows.len();
+        result_digests.push_str(&digest_rows(&rows)?);
+        samples.push(elapsed);
+    }
+    let execute: Duration = samples.iter().sum();
+    // Include every query boundary in one compact deterministic digest.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in result_digests.bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    emit(
+        "shape_result",
+        &[
+            ("shape", name.to_string()),
+            ("vertices", vertices.to_string()),
+            ("edges", model.edges.len().to_string()),
+            ("queries", probes.to_string()),
+            ("total_us", (prepare + execute).as_micros().to_string()),
+            ("prepare_us", prepare.as_micros().to_string()),
+            ("execute_us", execute.as_micros().to_string()),
+            ("p50_us", percentile_us(&samples, 0.5).to_string()),
+            ("p99_us", percentile_us(&samples, 0.99).to_string()),
+            ("rows_returned", rows_returned.to_string()),
+            ("result_digest", format!("{hash:016x}")),
+            ("correctness", "verified".to_string()),
+            ("durability", "fsync-on-reopened".to_string()),
+            ("seed", (LOAD_SEED ^ 0x67_51).to_string()),
+            (
+                "timing",
+                "prepare-once; execute-includes-bind; verification-excluded".to_string(),
+            ),
+            ("empirical_gate_activated", "false".to_string()),
+        ],
+    );
+    Ok(())
+}
+
 /// Dispatch one named shape. Names are the published contract of the binary's
 /// shape selector; an unknown name is a caller error, not a silent skip.
 pub async fn run_shape(name: &str, query_cx: &QueryCx, cx: &CommitCx) -> Result<(), String> {
@@ -1013,6 +1281,9 @@ pub async fn run_shape(name: &str, query_cx: &QueryCx, cx: &CommitCx) -> Result<
         "version-chain" => shape_version_chain(cx).await,
         "cold-reopen" => shape_cold_reopen(cx).await,
         "compaction-under-load" => shape_compaction_under_load(cx).await,
+        "gql-point-lookup" | "gql-two-hop" | "gql-aggregate" => {
+            run_gql_shape(name, query_cx, cx, GQL_READ_VERTEX_COUNT, GQL_READ_PROBES).await
+        }
         other => Err(format!("unknown shape {other:?}")),
     }
 }

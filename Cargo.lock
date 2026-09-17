@@ -498,6 +498,7 @@ dependencies = [
  "asupersync",
  "fgdb",
  "fgdb-delta-types",
+ "fgdb-gql",
  "fgdb-types",
 ]
 
