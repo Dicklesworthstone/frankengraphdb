@@ -248,37 +248,84 @@ fn bound_degree_charges_stay_constant_as_unrelated_edges_grow() {
     assert!(charged[0].1.1 > 0);
 }
 
-/// One commit building `total` edges where the bound vertex owns exactly
-/// `degree` of them (alternating in/out), everything else fanned from other
-/// vertices. Returns the commit sequence.
+/// Builds `total` edges across chunked commits (bounded per-commit cost; a
+/// single 50k-edge batch makes lab setup the bottleneck, not the query) where
+/// the bound vertex owns exactly `degree` of them (alternating in/out),
+/// everything else fanned from other vertices. Returns the final commit.
 async fn graph_of_degree(
     db: &mut Database<MemVfs>,
     cx: &fgdb_types::CommitCx,
     total: usize,
     degree: usize,
 ) -> CommitSeq {
-    let mut batch = WriteBatch::new(R);
-    batch.create_vertex(VId(0), vec![], vec![(N, CanonicalScalar::Int(BOUND))]);
     let others = 32;
-    for id in 1..=others as u128 {
-        batch.create_vertex(VId(id), vec![], vec![]);
-    }
-    for at in 0..total {
-        let eid = EId(50_000_000 + at as u128);
-        let (src, dst) = if at < degree {
-            if at % 2 == 0 {
-                (VId(0), VId(1 + (at as u128) % (others as u128)))
-            } else {
-                (VId(1 + (at as u128) % (others as u128)), VId(0))
+    let mut seq = CommitSeq(0);
+    let mut at = 0_usize;
+    while at < total {
+        let mut batch = WriteBatch::new(R);
+        if seq.0 == 0 {
+            batch.create_vertex(VId(0), vec![], vec![(N, CanonicalScalar::Int(BOUND))]);
+            for id in 1..=others as u128 {
+                batch.create_vertex(VId(id), vec![], vec![]);
             }
-        } else {
-            let a = 1 + (at as u128) % (others as u128);
-            let b = 1 + ((at * 7 + 3) as u128) % (others as u128);
-            (VId(a), VId(b))
-        };
-        batch.add_edge(eid, src, dst, vec![]);
+        }
+        let end = (at + 1_000).min(total);
+        for index in at..end {
+            let eid = EId(50_000_000 + index as u128);
+            let (src, dst) = if index < degree {
+                if index % 2 == 0 {
+                    (VId(0), VId(1 + (index as u128) % (others as u128)))
+                } else {
+                    (VId(1 + (index as u128) % (others as u128)), VId(0))
+                }
+            } else {
+                let a = 1 + (index as u128) % (others as u128);
+                let b = 1 + ((index * 7 + 3) as u128) % (others as u128);
+                (VId(a), VId(b))
+            };
+            batch.add_edge(eid, src, dst, vec![]);
+        }
+        at = end;
+        seq = db.write(cx, batch).await.unwrap();
     }
-    db.write(cx, batch).await.unwrap()
+    seq
+}
+
+#[test]
+fn indexed_admission_still_refuses_at_snapshot_record_budget() {
+    let (result, report) = run_async_under_lab(0xa26_0070, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query_cx = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 1..=4 {
+            batch.create_vertex(VId(id), vec![], vec![(N, CanonicalScalar::Int(BOUND))]);
+        }
+        for id in 1..=3 {
+            batch.add_edge(EId(id), VId(id), VId(id + 1), vec![]);
+        }
+        let at = db.write(&commit, batch).await.unwrap();
+        let names = RelationBind::new()
+            .with_relation("R", R)
+            .with_property("n", N);
+        let template = PreparedGqlTemplate::prepare(ID_TEXT, &names).unwrap();
+        let args = GqlParameters::new().with_int64("n", BOUND).unwrap();
+        let query = template.bind_parameters(&args).unwrap();
+        let pinned = GqlQueryPolicy::new(2, 1_000_000, 100_000, 100_000);
+        db.execute_prepared_query_governed_at(&query_cx, &query, at, pinned)
+    });
+    assert!(
+        matches!(
+            &result,
+            Err(fgdb_gql::GqlQueryError::Rows(fgdb_gql::GqlBudgetExceeded {
+                dimension: fgdb_gql::GqlBudgetDimension::SnapshotRecords,
+                ..
+            }))
+        ),
+        "expected snapshot-record refusal, got {result:?}"
+    );
+    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]
