@@ -137,8 +137,11 @@ pub use fgdb_gql::{BoundPlan, RelationBind};
 /// beside its rows (fgdb-gate-genesis-lce.1): snapshot seq plus statement and
 /// bind digests, so the same graph state, text, and bind are auditable as
 /// byte-identical.
-pub use gql_cert::{GqlCertificate, GqlPlanCertificate};
-pub use query::{QueryError, QueryResult, QueryValue, QueryWriteError};
+pub use gql_cert::{GqlCertificate, GqlPlanCertificate, NativeReadClass};
+pub use query::{
+    NativeExplainCertificate, PreparedNativeRead, QueryError, QueryResult, QueryValue,
+    QueryWriteError,
+};
 pub use write_txn::{WriteTxn, WriteTxnError};
 
 /// The in-memory [`Vfs`](asupersync::fs::Vfs) behind the embedded spine's
@@ -2778,15 +2781,19 @@ impl<V: Vfs + Clone> Database<V> {
                     props,
                     ensure,
                 } => {
-                    let triple_live = triple_is_live(
-                        &self.writer,
-                        &prefix_edges,
-                        &prefix_deleted_edges,
-                        src,
-                        dst,
-                        batch.relation,
-                    );
-                    if ensure && triple_live {
+                    // Parallel edges are legal: only ENSURE observes whether
+                    // the triple already exists. Plain insertion checks EId
+                    // uniqueness below, without scanning committed edges.
+                    if ensure
+                        && triple_is_live(
+                            &self.writer,
+                            &prefix_edges,
+                            &prefix_deleted_edges,
+                            src,
+                            dst,
+                            batch.relation,
+                        )
+                    {
                         continue;
                     }
                     if prefix_deleted_edges.contains(&eid) {
@@ -4802,6 +4809,8 @@ fn triple_is_live(
         }
     }
     for eid in writer.live_incident_edges(src) {
+        #[cfg(test)]
+        commit_growth_laws::INCIDENT_VISITS.with(|count| count.set(count.get() + 1));
         if prefix_deleted_edges.contains(&eid) {
             continue;
         }
@@ -5079,5 +5088,66 @@ mod version_transcript_laws {
                     .expect("encodes")
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod commit_growth_laws {
+    use super::*;
+
+    std::thread_local! {
+        pub(super) static INCIDENT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn plain_edge_preparation_work_does_not_grow_with_committed_history() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut db = runtime.block_on(Database::open_memory(&cx, keys)).unwrap();
+        let mut initial = WriteBatch::new(RelationId(1));
+        for vid in [VId(1), VId(2), VId(3)] {
+            initial.create_vertex(vid, vec![], vec![]);
+        }
+        runtime.block_on(db.write(&cx, initial)).unwrap();
+        let mut samples = Vec::new();
+        for commit in 1..=40u128 {
+            let mut batch = WriteBatch::new(RelationId(1));
+            for offset in 0..8 {
+                batch.add_edge(EId(commit * 8 + offset), VId(1), VId(2), vec![]);
+            }
+            runtime.block_on(db.write(&cx, batch)).unwrap();
+            if commit == 10 || commit == 40 {
+                let mut next = WriteBatch::new(RelationId(1));
+                next.add_edge(EId(10_000), VId(1), VId(3), vec![]);
+                INCIDENT_VISITS.with(|count| count.set(0));
+                db.prepare_write(next).unwrap();
+                samples.push(INCIDENT_VISITS.with(std::cell::Cell::get));
+            }
+        }
+        // Plain insertion must still CREATE edges: neighbours answers distinct
+        // destinations, and the final commit's parallel edges are all live.
+        assert!(
+            samples[1] <= samples[0].max(1) * 2,
+            "plain insertion scanned committed history: early={} late={}",
+            samples[0],
+            samples[1]
+        );
+        assert_eq!(
+            db.neighbours(VId(1), RelationId(1)).unwrap(),
+            vec![VId(2)],
+            "plain add_edge rows must survive the guarded preparation"
+        );
+        // The loop committed EIds 8..=320; every plain-inserted row is live.
+        let all = db.edges().unwrap();
+        assert_eq!(all.len(), 320);
+        assert!(all.iter().any(|record| record.entry.eid == EId(320)));
+        assert!(all.iter().all(|record| record.entry.eid != EId(10_000)));
     }
 }
