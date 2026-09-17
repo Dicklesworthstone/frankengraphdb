@@ -702,6 +702,61 @@ impl PropertyRange {
     }
 }
 
+/// UCS_BASIC ordering is UTF-8 lexicographic order, hence scalar-value order.
+/// Carry past maximal scalars and skip the surrogate gap. An exhausted prefix
+/// has no text successor; the binding boundary is its exclusive upper bound.
+fn prefix_successor(prefix: &str) -> Option<String> {
+    for (at, scalar) in prefix.char_indices().rev() {
+        if scalar == char::MAX {
+            continue;
+        }
+        let next = if scalar == '\u{d7ff}' {
+            '\u{e000}'
+        } else {
+            char::from_u32(u32::from(scalar) + 1).expect("nonmaximal nonsurrogate successor")
+        };
+        let mut successor = String::with_capacity(at + next.len_utf8());
+        successor.push_str(&prefix[..at]);
+        successor.push(next);
+        return Some(successor);
+    }
+    None
+}
+
+fn prefix_range(key: PropertyKeyId, prefix: &str) -> Option<PropertyRange> {
+    let lower = CanonicalScalar::ucs_basic_text(prefix).ok()?.encode().ok()?;
+    let mut range = PropertyRange::new(key, &lower);
+    // Restrict even the empty and all-maximal prefix to UCS_BASIC, not other
+    // collations: STARTS WITH evaluates spelling, never a collation sort key.
+    range.upper = vec![lower[0], lower[1] + 1];
+    range.lower = lower;
+    if let Some(successor) = prefix_successor(prefix) {
+        range.upper = CanonicalScalar::ucs_basic_text(&successor).ok()?.encode().ok()?;
+    }
+    Some(range)
+}
+
+impl PropertyEqualityIndex {
+    /// Refuse pruning if any historical property could raise NonText, or uses
+    /// nonbinary ordering. Two ordered seeks inspect type/binding boundaries;
+    /// no whole-property scan and no additional maintained index are needed.
+    fn prefix_types_are_safe(&self, range: &PropertyRange) -> bool {
+        let null = CanonicalScalar::Null.encode().expect("null encoding");
+        let after_null = (range.key, std::sync::Arc::from(null));
+        if let Some(((key, encoded), _)) = self.candidates.iter_from(&after_null, false).next()
+            && *key == range.key
+            && encoded.as_ref() < &range.lower[..2]
+        {
+            return false;
+        }
+        let after_binary = (
+            range.key,
+            std::sync::Arc::from(vec![range.lower[0], range.lower[1] + 1]),
+        );
+        !matches!(self.candidates.iter_from(&after_binary, true).next(), Some(((key, _), _)) if *key == range.key)
+    }
+}
+
 /// Whether property-bound single-domain scans use the maintained index.
 const PROPERTY_INDEX_SERVING: bool = true;
 
@@ -722,6 +777,7 @@ fn bound_vertices<'a, E, Row>(
     let prefix = &logical.operators()[1..];
     if !prefix.iter().all(|op| match op {
         GlaOperator::Select { slot, .. } => slot.ordinal() == 0,
+        GlaOperator::SelectBoolean { expression } => expression.starts_with_conjunct().is_some(),
         GlaOperator::Project { .. }
         | GlaOperator::Distinct
         | GlaOperator::OrderByVertexId
@@ -734,6 +790,34 @@ fn bound_vertices<'a, E, Row>(
         _ => false,
     }) {
         return Ok(None);
+    }
+    if let Some((key, text)) = prefix.iter().find_map(|operator| match operator {
+        GlaOperator::SelectBoolean { expression } => expression.starts_with_conjunct(),
+        _ => None,
+    }) {
+        let Some(range) = prefix_range(key, text) else {
+            return Ok(None);
+        };
+        if !snapshot.property_index.prefix_types_are_safe(&range) {
+            return Ok(None);
+        }
+        let candidates = snapshot.property_index.range_candidates(&range, control)?;
+        let mut rows = Vec::new();
+        for vid in &candidates {
+            control(SourceEvent::Work)?;
+            control(SourceEvent::SnapshotRecord)?;
+            if let Some(row) = snapshot.property_index.visible_row(&snapshot.patches, *vid, as_of, control)? {
+                // Historical membership is only a candidate superset. Recheck
+                // spelling on the visible row; retain all original GLA filters.
+                if row.props.iter().any(|(property, value)| {
+                    *property == key && matches!(value, CanonicalScalar::Text(value) if value.as_str().starts_with(text))
+                }) {
+                    control(SourceEvent::ScratchEntry)?;
+                    rows.push(row);
+                }
+            }
+        }
+        return Ok(Some((rows, candidates.len() as u64)));
     }
     let mut equality: Option<(PropertyKeyId, CanonicalScalar)> = None;
     let mut bound_predicates: &[VertexPredicate] = &[];
