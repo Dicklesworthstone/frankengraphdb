@@ -1,12 +1,24 @@
 //! Typed postfix admission and iterative control-flow compilation.
-//! CASE branches merge at one integer stack cell. The compile-time frame bound
+//! CASE branches merge at one scalar stack cell. The compile-time frame bound
 //! is the maximum over reachable branches, not a scan through mutually
-//! exclusive code. Boolean cells are private and cannot escape as integers.
+//! exclusive code. Integer preparation retains its strict root contract.
 
 use super::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind { Integer, Boolean }
+enum Kind { Null, Integer, Boolean, Text, Dynamic }
+
+impl Kind {
+    fn accepts(self, actual: Self) -> bool {
+        actual == self || matches!(actual, Self::Null | Self::Dynamic)
+    }
+    fn merge(self, other: Self) -> Option<Self> {
+        if self == other || other == Self::Null { Some(self) }
+        else if self == Self::Null { Some(other) }
+        else if self == Self::Dynamic || other == Self::Dynamic { Some(Self::Dynamic) }
+        else { None }
+    }
+}
 struct Node {
     op: GraphIntegerOp,
     children: Vec<usize>,
@@ -15,6 +27,14 @@ struct Node {
 }
 
 pub(super) fn prepare(ops: &[GraphIntegerOp]) -> Result<GraphIntegerExpression, GraphIntegerBuildError> {
+    prepare_root(ops, true)
+}
+
+pub(super) fn prepare_scalar(ops: &[GraphIntegerOp]) -> Result<GraphIntegerExpression, GraphIntegerBuildError> {
+    prepare_root(ops, false)
+}
+
+fn prepare_root(ops: &[GraphIntegerOp], integer_root: bool) -> Result<GraphIntegerExpression, GraphIntegerBuildError> {
     use GraphIntegerOp as Op;
     if ops.is_empty() { return Err(GraphIntegerBuildError::Empty); }
     if ops.len() > MAX_GRAPH_INTEGER_INSTRUCTIONS {
@@ -24,15 +44,18 @@ pub(super) fn prepare(ops: &[GraphIntegerOp]) -> Result<GraphIntegerExpression, 
     }
     let mut nodes: Vec<Node> = Vec::with_capacity(ops.len());
     let mut roots: Vec<usize> = Vec::new();
-    for (at, &op) in ops.iter().enumerate() {
+    for (at, op) in ops.iter().enumerate() {
         let missing = || GraphIntegerBuildError::MissingOperand { instruction: at };
+        let wrong = || GraphIntegerBuildError::OperandType { instruction: at };
         let arity = match op {
-            Op::Column(_) | Op::Literal(_) | Op::Truth(_) => 0,
-            Op::Unary(_) | Op::IsNull(_) | Op::Not => 1,
-            Op::Binary(_) | Op::Coalesce | Op::Compare(_) | Op::And | Op::Or => 2,
-            Op::Case => 3,
+            Op::Column(_) | Op::Literal(_) | Op::Truth(_) | Op::Scalar(_) | Op::ScalarColumn(_) => 0,
+            Op::Unary(_) | Op::IsNull(_) | Op::Not | Op::Upper | Op::Lower | Op::Trim | Op::CharLength => 1,
+            Op::Binary(_) | Op::Coalesce | Op::Compare(_) | Op::And | Op::Or
+            | Op::Concat | Op::StartsWith | Op::EndsWith | Op::Contains => 2,
+            Op::Case | Op::Substring => 3,
+            Op::InList { members } => members.checked_add(1).ok_or_else(missing)?,
             Op::SimpleCase { alternatives } => {
-                if alternatives == 0 {
+                if *alternatives == 0 {
                     return Err(GraphIntegerBuildError::EmptyCase { instruction: at });
                 }
                 alternatives.checked_mul(2).and_then(|n| n.checked_add(2)).ok_or_else(missing)?
@@ -40,43 +63,81 @@ pub(super) fn prepare(ops: &[GraphIntegerOp]) -> Result<GraphIntegerExpression, 
         };
         if roots.len() < arity { return Err(missing()); }
         let children = roots.split_off(roots.len() - arity);
+        let child_kind = |position: usize| nodes[children[position]].kind;
         for (position, &child) in children.iter().enumerate() {
             let expected = match op {
-                Op::Not | Op::And | Op::Or => Kind::Boolean,
-                Op::Case if position == 0 => Kind::Boolean,
-                _ => Kind::Integer,
+                Op::Unary(_) | Op::Binary(_) => Some(Kind::Integer),
+                Op::Not | Op::And | Op::Or => Some(Kind::Boolean),
+                Op::Case if position == 0 => Some(Kind::Boolean),
+                Op::Upper | Op::Lower | Op::Trim | Op::CharLength | Op::Concat
+                | Op::StartsWith | Op::EndsWith | Op::Contains => Some(Kind::Text),
+                Op::Substring => Some(if position == 0 { Kind::Text } else { Kind::Integer }),
+                _ => None,
             };
-            if nodes[child].kind != expected {
-                return Err(GraphIntegerBuildError::OperandType { instruction: at });
+            if expected.is_some_and(|expected| !expected.accepts(nodes[child].kind)) {
+                return Err(wrong());
             }
         }
+        // Keep checking exact domains even if another member is dynamic/null.
+        let merge_positions = |positions: &[usize]| -> Result<Kind, GraphIntegerBuildError> {
+            let mut known = Kind::Null;
+            let mut dynamic = false;
+            for &position in positions {
+                let kind = child_kind(position);
+                if kind == Kind::Dynamic { dynamic = true; }
+                else { known = known.merge(kind).ok_or_else(wrong)?; }
+            }
+            Ok(if dynamic { Kind::Dynamic } else { known })
+        };
         let kind = match op {
-            Op::Truth(_) | Op::Compare(_) | Op::IsNull(_) | Op::Not | Op::And | Op::Or => Kind::Boolean,
+            Op::Literal(None) | Op::Truth(None) => Kind::Null,
+            Op::Scalar(value) => match value.value() {
+                CanonicalScalar::Null => Kind::Null,
+                CanonicalScalar::Int(_) => Kind::Integer,
+                CanonicalScalar::Bool(_) => Kind::Boolean,
+                CanonicalScalar::Text(_) => Kind::Text,
+                _ => return Err(wrong()),
+            },
+            Op::ScalarColumn(_) => Kind::Dynamic,
+            Op::Coalesce => merge_positions(&[0, 1])?,
+            Op::Case => merge_positions(&[1, 2])?,
+            Op::Compare(_) => { merge_positions(&[0, 1])?; Kind::Boolean }
+            Op::InList { .. } => {
+                merge_positions(&(0..arity).collect::<Vec<_>>())?;
+                Kind::Boolean
+            }
+            Op::SimpleCase { alternatives } => {
+                let mut candidates = vec![0];
+                candidates.extend((0..*alternatives).map(|arm| 1 + 2 * arm));
+                merge_positions(&candidates)?;
+                let mut results: Vec<_> = (0..*alternatives).map(|arm| 2 + 2 * arm).collect();
+                results.push(arity - 1);
+                merge_positions(&results)?
+            }
+            Op::Truth(_) | Op::IsNull(_) | Op::Not | Op::And | Op::Or
+            | Op::StartsWith | Op::EndsWith | Op::Contains => Kind::Boolean,
+            Op::Upper | Op::Lower | Op::Trim | Op::Substring | Op::Concat => Kind::Text,
             _ => Kind::Integer,
         };
         let peak = match op {
-            Op::Column(_) | Op::Literal(_) | Op::Truth(_) => 1,
-            Op::Unary(_) | Op::IsNull(_) | Op::Not => nodes[children[0]].peak,
-            Op::Binary(_) | Op::Compare(_) | Op::And | Op::Or =>
-                nodes[children[0]].peak.max(1 + nodes[children[1]].peak),
             Op::Coalesce | Op::Case => children.iter().map(|&child| nodes[child].peak).max().unwrap_or(1),
             Op::SimpleCase { alternatives } => {
                 let mut peak = nodes[children[0]].peak.max(nodes[*children.last().expect("CASE default")].peak);
-                for arm in 0..alternatives {
-                    // Only the candidate value runs with the selector retained.
+                for arm in 0..*alternatives {
                     peak = peak.max(1 + nodes[children[1 + 2 * arm]].peak);
                     peak = peak.max(nodes[children[2 + 2 * arm]].peak);
                 }
                 peak
             }
+            _ => children.iter().enumerate().map(|(held, &child)| held + nodes[child].peak).max().unwrap_or(1),
         };
         roots.push(nodes.len());
-        nodes.push(Node { op, children, kind, peak });
+        nodes.push(Node { op: op.clone(), children, kind, peak });
     }
     if roots.len() != 1 {
         return Err(GraphIntegerBuildError::ExtraOperands { remaining: roots.len() });
     }
-    if nodes[roots[0]].kind != Kind::Integer {
+    if integer_root && !matches!(nodes[roots[0]].kind, Kind::Integer | Kind::Null) {
         return Err(GraphIntegerBuildError::OperandType { instruction: ops.len() });
     }
     let stack_entries = nodes[roots[0]].peak;
@@ -95,30 +156,47 @@ pub(super) fn prepare(ops: &[GraphIntegerOp]) -> Result<GraphIntegerExpression, 
         match task {
             Task::Visit(at) => {
                 let node = &nodes[at];
-                let unary = match node.op {
-                    Op::Unary(op) => Some(Instruction::Unary(op)),
-                    Op::IsNull(is_null) => Some(Instruction::IsNull(is_null)),
+                let unary = match &node.op {
+                    Op::Unary(op) => Some(Instruction::Unary(*op)),
+                    Op::IsNull(is_null) => Some(Instruction::IsNull(*is_null)),
                     Op::Not => Some(Instruction::Not),
+                    Op::Upper => Some(Instruction::Upper),
+                    Op::Lower => Some(Instruction::Lower),
+                    Op::Trim => Some(Instruction::Trim),
+                    Op::CharLength => Some(Instruction::CharLength),
                     _ => None,
                 };
                 if let Some(op) = unary {
                     tasks.push(Task::Emit(op)); tasks.push(Task::Visit(node.children[0])); continue;
                 }
-                let binary = match node.op {
-                    Op::Binary(op) => Some(Instruction::Binary(op)),
-                    Op::Compare(op) => Some(Instruction::Compare(op)),
+                let binary = match &node.op {
+                    Op::Binary(op) => Some(Instruction::Binary(*op)),
+                    Op::Compare(op) => Some(Instruction::Compare(*op)),
                     Op::And => Some(Instruction::And),
                     Op::Or => Some(Instruction::Or),
+                    Op::Concat => Some(Instruction::Concat),
+                    Op::StartsWith => Some(Instruction::StartsWith),
+                    Op::EndsWith => Some(Instruction::EndsWith),
+                    Op::Contains => Some(Instruction::Contains),
                     _ => None,
                 };
                 if let Some(op) = binary {
                     tasks.push(Task::Emit(op)); tasks.push(Task::Visit(node.children[1]));
                     tasks.push(Task::Visit(node.children[0])); continue;
                 }
-                match node.op {
-                    Op::Column(column) => code.push(Instruction::Column(column)),
-                    Op::Literal(value) => code.push(Instruction::Literal(value)),
-                    Op::Truth(value) => code.push(Instruction::Truth(value)),
+                match &node.op {
+                    Op::Column(column) => code.push(Instruction::Column(*column)),
+                    Op::ScalarColumn(column) => code.push(Instruction::ScalarColumn(*column)),
+                    Op::Scalar(value) => code.push(Instruction::Scalar(value.clone())),
+                    Op::Literal(value) => code.push(Instruction::Literal(*value)),
+                    Op::Truth(value) => code.push(Instruction::Truth(*value)),
+                    Op::Substring | Op::InList { .. } => {
+                        tasks.push(Task::Emit(match &node.op {
+                            Op::InList { members } => Instruction::InList { members: *members },
+                            _ => Instruction::Substring,
+                        }));
+                        tasks.extend(node.children.iter().rev().map(|&child| Task::Visit(child)));
+                    }
                     Op::Coalesce => {
                         tasks.push(Task::CoalesceRight(node.children[1]));
                         tasks.push(Task::Visit(node.children[0]));
@@ -132,7 +210,8 @@ pub(super) fn prepare(ops: &[GraphIntegerOp]) -> Result<GraphIntegerExpression, 
                         tasks.push(Task::Visit(node.children[0]));
                     }
                     Op::Unary(_) | Op::IsNull(_) | Op::Not | Op::Binary(_)
-                    | Op::Compare(_) | Op::And | Op::Or => unreachable!("operator emitted above"),
+                    | Op::Compare(_) | Op::And | Op::Or | Op::Upper | Op::Lower | Op::Trim
+                    | Op::CharLength | Op::Concat | Op::StartsWith | Op::EndsWith | Op::Contains => unreachable!("operator emitted above"),
                 }
             }
             Task::Emit(op) => code.push(op),
@@ -152,8 +231,8 @@ pub(super) fn prepare(ops: &[GraphIntegerOp]) -> Result<GraphIntegerExpression, 
             }
             Task::PatchJump(exit) => code[exit] = Instruction::Jump(code.len()),
             Task::SwitchNext { node, arm, exits } => {
-                let Op::SimpleCase { alternatives } = nodes[node].op else { unreachable!("checked switch") };
-                if arm == alternatives {
+                let Op::SimpleCase { alternatives } = &nodes[node].op else { unreachable!("checked switch") };
+                if arm == *alternatives {
                     code.push(Instruction::Drop);
                     tasks.push(Task::SwitchDone(exits));
                     tasks.push(Task::Visit(*nodes[node].children.last().expect("checked switch default")));

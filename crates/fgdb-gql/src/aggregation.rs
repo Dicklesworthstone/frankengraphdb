@@ -18,7 +18,7 @@ pub use result::{
 };
 
 use crate::algebra::{
-    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphValue, GraphValueRow, MAX_PATTERN_NAME_BYTES,
+    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphPath, GraphValue, GraphValueRow, MAX_PATTERN_NAME_BYTES,
     MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection, VertexPredicate,
 };
 use crate::{
@@ -26,7 +26,7 @@ use crate::{
     GqlQueryExecution, GqlQueryPolicy,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -733,6 +733,11 @@ impl PreparedGraphAggregate {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
+        if self.input.plan().operators().iter().any(|operator| matches!(operator,
+            GlaOperator::CapturePath { .. } | GlaOperator::SelectPathLength { .. }
+            | GlaOperator::SelectPathNull { .. })) {
+            return Err(GqlQueryError::IdentifiedEdgesRequired);
+        }
         if self.relational_input.is_some() {
             return self.execute_relational_governed(
                 snapshot_records, vertices, edges, test_vertex, property, policy, checkpoint,
@@ -800,6 +805,7 @@ impl PreparedGraphAggregate {
                             };
                             ValueRef::Scalar(value.unwrap_or(&NULL))
                         }
+                        ValueProjection::Path { .. } => return Err(GqlQueryError::IdentifiedEdgesRequired),
                     };
                     for _ in 0..values[at].payload_units() {
                         control(GlaExecutionEvent::Work)?;
@@ -847,12 +853,15 @@ impl PreparedGraphAggregate {
 
 static NULL: CanonicalScalar = CanonicalScalar::Null;
 
-// Ordering is the same disjoint Scalar/Vertex ordering as GraphValue. Borrowed
+// Ordering is the same disjoint typed-cell ordering as GraphValue. Borrowed
 // keys and distinct arguments remain tied to one immutable source execution.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ValueRef<'a> {
     Scalar(&'a CanonicalScalar),
     Vertex(VId),
+    Path(&'a GraphPath),
+    Vertices(&'a [VId]),
+    Edges(&'a [EId]),
 }
 impl ValueRef<'_> {
     fn is_null(self) -> bool {
@@ -867,6 +876,9 @@ impl ValueRef<'_> {
             Self::Scalar(CanonicalScalar::Timestamp(value)) => {
                 value.zone().map_or(0, |zone| zone.identifier().len())
             }
+            Self::Path(value) => core::mem::size_of_val(value.steps()),
+            Self::Vertices(value) => core::mem::size_of_val(value),
+            Self::Edges(value) => core::mem::size_of_val(value),
             _ => 0,
         };
         bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
@@ -882,6 +894,9 @@ impl ValueRef<'_> {
         Ok(match self {
             Self::Scalar(value) => GraphValue::Scalar(value.clone()),
             Self::Vertex(value) => GraphValue::Vertex(value),
+            Self::Path(value) => GraphValue::Path(value.clone()),
+            Self::Vertices(value) => GraphValue::Vertices(value.into()),
+            Self::Edges(value) => GraphValue::Edges(value.into()),
         })
     }
 }

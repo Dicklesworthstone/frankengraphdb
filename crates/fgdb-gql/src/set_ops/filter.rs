@@ -56,6 +56,7 @@ pub enum GraphSetFilterError {
     InvalidStack { instruction: usize },
     UnknownInput { instruction: usize, column: usize },
     InvalidVertexComparison { instruction: usize },
+    InvalidValueComparison { instruction: usize },
     SetBuild(GraphSetBuildError),
 }
 impl core::fmt::Display for GraphSetFilterError {
@@ -94,6 +95,10 @@ impl RowPredicate {
                 GraphSetPredicateOp::Compare { left, comparison, right } => {
                     let left = domain(left)?;
                     let right = domain(right)?;
+                    if matches!(left, GraphSetColumnType::Path | GraphSetColumnType::Vertices | GraphSetColumnType::Edges)
+                        || matches!(right, GraphSetColumnType::Path | GraphSetColumnType::Vertices | GraphSetColumnType::Edges) {
+                        return Err(Error::InvalidValueComparison { instruction });
+                    }
                     if (left == GraphSetColumnType::Vertex || right == GraphSetColumnType::Vertex)
                         && !(left == right && matches!(comparison, IntegerComparison::Equal | IntegerComparison::NotEqual)) {
                         return Err(Error::InvalidVertexComparison { instruction });
@@ -189,7 +194,7 @@ impl RowPredicate {
 }
 
 #[derive(Clone, Copy)]
-enum Cell<'a> { Scalar(&'a CanonicalScalar), Vertex(fgdb_types::VId) }
+enum Cell<'a> { Scalar(&'a CanonicalScalar), Vertex(fgdb_types::VId), Incompatible }
 impl Cell<'_> {
     fn is_null(self) -> bool { matches!(self, Self::Scalar(CanonicalScalar::Null)) }
 }
@@ -200,6 +205,7 @@ fn resolve<'a, E>(operand: &'a GraphSetOperand, row: &'a GraphValueRow,
         GraphSetOperand::Column(column) => match &row.values()[*column] {
             GraphValue::Vertex(value) => Cell::Vertex(*value),
             GraphValue::Scalar(value) => Cell::Scalar(value),
+            GraphValue::Path(_) | GraphValue::Vertices(_) | GraphValue::Edges(_) => Cell::Incompatible,
         },
         GraphSetOperand::Literal(value) => Cell::Scalar(value.value()),
     })

@@ -356,7 +356,7 @@ impl Properties {
         let mut projection = Vec::new();
         for (at, (key, value)) in fields.into_iter().enumerate() {
             let check = |column| {
-                if matches!(columns.get(column), Some(ValueProjection::Property { .. })) { Ok(()) }
+                if columns.get(column).is_some_and(|column| crate::GraphSetColumnType::from(column) == crate::GraphSetColumnType::Scalar) { Ok(()) }
                 else { Err(GraphInsertBuildError::ValueColumn { declaration, column }) }
             };
             let value = match value {

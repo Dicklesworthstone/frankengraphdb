@@ -11,12 +11,22 @@ impl Parser<'_> {
         self.word("BY")?;
         loop {
             let name = self.name()?;
-            let property = if self.take(b'.')? {
+            let function = if self.take(b'(')? {
+                let function = Self::path_function(name)?;
+                let variable = self.path_variable()?;
+                self.punct(b')', ")")?;
+                Some((variable, function))
+            } else { None };
+            let property = if function.is_none() && self.take(b'.')? {
                 Some(self.name()?)
             } else {
                 None
             };
-            let column = if let Some(property) = property {
+            let column = if let Some((variable, function)) = function {
+                self.syntax.columns.iter().position(|column| {
+                    column.variable.text == variable.text && column.path == Some(function)
+                })
+            } else if let Some(property) = property {
                 self.syntax.columns.iter().position(|column| {
                     column.variable.text == name.text
                         && column.property.is_some_and(|key| key.text == property.text)
@@ -30,6 +40,7 @@ impl Parser<'_> {
                     .or_else(|| {
                         self.syntax.columns.iter().position(|column| {
                             column.property.is_none() && column.variable.text == name.text
+                                && matches!(column.path, None | Some(GraphPathFunction::Value))
                         })
                     })
             }

@@ -68,6 +68,7 @@ impl<Checkpoint> Meter<Checkpoint> {
         match error {
             GqlQueryError::Source(error) => GqlQueryError::Source(GraphSetExecutionError::Source(error)),
             GqlQueryError::Interrupted(error) => GqlQueryError::Interrupted(error),
+            GqlQueryError::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
             GqlQueryError::Evaluator(error) => {
                 let (used, limit) = match error.dimension {
                     GlaLimitDimension::WorkUnits => (self.evaluator.work_units, self.policy.evaluator.max_work_units),

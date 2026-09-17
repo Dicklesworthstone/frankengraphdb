@@ -115,6 +115,9 @@ impl PreparedGraphAggregate {
                 values[at] = match value {
                     GraphValue::Vertex(vertex) => ValueRef::Vertex(*vertex),
                     GraphValue::Scalar(scalar) => ValueRef::Scalar(scalar),
+                    GraphValue::Path(path) => ValueRef::Path(path),
+                    GraphValue::Vertices(vertices) => ValueRef::Vertices(vertices),
+                    GraphValue::Edges(edges) => ValueRef::Edges(edges),
                 };
                 for _ in 0..values[at].payload_units() { control(GlaExecutionEvent::Work)?; }
             }

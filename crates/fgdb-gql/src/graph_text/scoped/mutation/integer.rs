@@ -33,7 +33,7 @@ fn emit(program: &mut Vec<ParsedOp>, op: ParsedOp, at: usize) -> Result<(), Grap
     Ok(())
 }
 
-pub(super) fn bind_integer(program: &[MutationIntegerTemplateOp], values: &[GqlParameterValue], at: usize)
+pub(in crate::graph_text) fn bind_integer(program: &[MutationIntegerTemplateOp], values: &[GqlParameterValue], at: usize)
     -> Result<GraphIntegerExpression, GraphMutationTextError> {
     let mut ops = Vec::with_capacity(program.len());
     for op in program {
@@ -50,6 +50,29 @@ pub(super) fn bind_integer(program: &[MutationIntegerTemplateOp], values: &[GqlP
 }
 
 impl<'a> Parser<'a> {
+    pub(in crate::graph_text) fn bind_boolean_scalar(program: &[MutationIntegerTemplateOp], values: &[GqlParameterValue], at: usize)
+        -> Result<GraphIntegerExpression, GraphPatternTextError> {
+        bind_integer(program, values, at).map_err(|source| error(source.offset, GraphPatternTextErrorKind::BooleanExpression))
+    }
+
+    pub(in crate::graph_text) fn boolean_scalar_expression(&mut self)
+        -> Result<(Vec<(Name<'a>, Name<'a>)>, Vec<MutationIntegerTemplateOp>), GraphPatternTextError> {
+        let at = self.current.at;
+        let mut columns = Vec::new();
+        let operand = self.mutation_expression(&mut columns)
+            .map_err(|source| error(source.offset, GraphPatternTextErrorKind::BooleanExpression))?;
+        let program = match operand {
+            Operand::Integer { program, .. } => program,
+            Operand::Column(column) => vec![MutationIntegerTemplateOp::Bound(GraphIntegerOp::ScalarColumn(column))],
+            Operand::Literal(value) => vec![MutationIntegerTemplateOp::Bound(GraphIntegerOp::Scalar(value.predicate(IntegerComparison::Equal)))],
+            Operand::Number(Number::Literal(value)) => vec![MutationIntegerTemplateOp::Bound(GraphIntegerOp::Scalar(scalar(value, at)?.predicate(IntegerComparison::Equal)))],
+            Operand::Number(Number::Parameter(index)) => vec![MutationIntegerTemplateOp::Parameter { index, at }],
+        };
+        let columns = columns.into_iter().map(|column| column.property.map(|key| (column.variable, key))
+            .ok_or_else(|| error(at, GraphPatternTextErrorKind::BooleanExpression))).collect::<Result<Vec<_>, _>>()?;
+        Ok((columns, program))
+    }
+
     pub(super) fn mutation_expression(&mut self, columns: &mut Vec<Projection<'a>>)
         -> Result<Operand, GraphMutationTextError> {
         self.checked_expression(&mut ExpressionColumns::Graph(columns))

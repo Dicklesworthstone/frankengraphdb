@@ -144,6 +144,9 @@ fn same_basis_staged_engine_inserts_are_disjoint_and_loser_cannot_publish() {
         let basis = db.frontier().unwrap();
         let mut first = db.begin(&txcx).unwrap();
         let mut second = db.begin(&txcx).unwrap();
+        // Both insertions depend on the same observed vertex population.
+        assert_eq!(first.vertices(&db).unwrap().into_iter().map(|row| row.vid).collect::<Vec<_>>(), vec![VId(7)]);
+        assert_eq!(second.vertices(&db).unwrap().into_iter().map(|row| row.vid).collect::<Vec<_>>(), vec![VId(7)]);
         let create = insertion("INSERT (a:Person {p:1})-[:R]->(b:Person {p:2})");
         let (_, first_vertices, first_edges) = first.execute_graph_insert_returning_engine_governed(
             &mut db, &query, &create, insert_policy(),
@@ -163,8 +166,8 @@ fn same_basis_staged_engine_inserts_are_disjoint_and_loser_cannot_publish() {
         assert!(db.vertex(first_vertices[0]).unwrap().is_none());
         let committed = first.commit(&mut db, &commit).await.unwrap();
         assert!(matches!(second.commit(&mut db, &commit).await,
-            Err(WriteTxnError::SnapshotAdvanced { pinned, live })
-                if pinned == basis && live == committed));
+            Err(WriteTxnError::Write(WriteError::FirstCommitterWins { .. }))));
+        assert_eq!(db.frontier().unwrap(), committed);
         for id in &second_vertices {
             assert!(db.vertex(*id).unwrap().is_none());
         }

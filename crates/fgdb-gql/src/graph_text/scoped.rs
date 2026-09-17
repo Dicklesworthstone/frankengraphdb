@@ -581,7 +581,7 @@ impl<'a> Parser<'a> {
     fn scoped_predicates(&mut self, allow_existence: bool) -> Result<(), GraphPatternTextError> {
         let mut has_existence = false;
         let mut has_boolean = false;
-        let path_predicates = self.syntax.path.is_some();
+        let path_predicates = allow_existence && self.syntax.path.is_some();
         loop {
             if self.starts_existence()? {
                 if has_boolean {
