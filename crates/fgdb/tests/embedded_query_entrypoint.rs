@@ -398,7 +398,13 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let db = seeded(&contexts.commit()).await;
         let cx = contexts.query();
-        for text in ["EXPLAIN RETURN 1", "MATCH (n:Missing) RETURN n"] {
+        for (text, expected_facade) in [
+            ("EXPLAIN RETURN 1", fgdb::NativeReadClass::Set),
+            (
+                "MATCH (n:Missing) RETURN n",
+                fgdb::NativeReadClass::Aggregate,
+            ),
+        ] {
             let mut runs = Vec::new();
             for _ in 0..2 {
                 let mut calls = BTreeMap::new();
@@ -412,10 +418,18 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
                     },
                     policy(),
                 );
-                let QueryError::Unsupported { diagnostics } = result.unwrap_err() else {
-                    panic!("unsupported/unknown text must retain structural diagnostics")
+                let error = result.unwrap_err();
+                let QueryError::Refused { facade, source } = &error else {
+                    panic!("{text}: expected typed refusal, got {error:?}")
                 };
-                assert!(!diagnostics.is_empty());
+                assert_eq!(*facade, expected_facade, "{text}");
+                let offset = match source.as_ref() {
+                    QueryError::SetText(error) => error.offset,
+                    QueryError::PatternText(error) => error.offset,
+                    other => panic!("{text}: wrong typed source: {other:?}"),
+                };
+                assert!(offset > 0 && offset <= text.len(), "{text}: {offset}");
+                let diagnostics = error.to_string();
                 assert!(
                     calls.values().all(|count| *count == 1),
                     "misses must be cached too"
@@ -517,7 +531,12 @@ fn direct_write(
                 .bind_parameters(args)
                 .unwrap();
             let (_, targets, edges) = txn
-                .execute_graph_delete_elements_returning_governed(db, cx, &bound, policy.deletion_policy())
+                .execute_graph_delete_elements_returning_governed(
+                    db,
+                    cx,
+                    &bound,
+                    policy.deletion_policy(),
+                )
                 .unwrap();
             GraphWriteStepReceipt::Delete { targets, edges }
         }

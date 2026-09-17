@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema"]}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded"]}"##,
     "\n"
 );
 
@@ -459,6 +459,11 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                 }
                 rows += 1;
             }
+            "progress" => {
+                exact_fields(event, &["v", "event", "rows", "seq"]);
+                event.get("rows").unsigned();
+                event.get("seq").unsigned();
+            }
             "schema" => {
                 assert_eq!(index, 1);
                 assert_eq!(event, &schema);
@@ -476,6 +481,12 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                         assert!(columns.is_some());
                         assert_eq!(event.get("count").unsigned(), rows);
                         event.get("seq").unsigned();
+                    }
+                    "loaded" => {
+                        exact_fields(event, &["v", "event", "kind", "seq", "count", "statements"]);
+                        event.get("seq").unsigned();
+                        event.get("count").unsigned();
+                        event.get("statements").unsigned();
                     }
                     "written" => {
                         exact_fields(event, &["v", "event", "kind", "seq", "statements"]);

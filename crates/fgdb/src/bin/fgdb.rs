@@ -2,6 +2,8 @@
 //! symbol IDs remain explicit until the library supplies a durable catalog.
 #![forbid(unsafe_code)]
 
+mod load;
+
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, QueryResult, QueryValue};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -21,7 +23,7 @@ use std::{
 };
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema"]}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded"]}"##,
     "\n"
 );
 const HELP: &str = "fgdb - embedded graph database
@@ -30,6 +32,7 @@ Usage: fgdb [--robot] <command>
   write --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
   query --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
   replay --db <dir> --key-file <file> [bindings] [--param name=value]... --certificate <file>
+  load --db <dir> --key-file <file> [bindings] --input <file.ndjson> [--rows-per-chunk N] [--checkpoint <file>]
   robot schema
   help
 Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
@@ -128,6 +131,9 @@ struct Options {
     coordinate: RelationId,
     certify_to: Option<PathBuf>,
     certificate: Option<PathBuf>,
+    input: Option<PathBuf>,
+    rows_per_chunk: usize,
+    checkpoint: Option<PathBuf>,
 }
 impl Options {
     fn resolve(&self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -161,6 +167,9 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut coordinate = RelationId(1);
     let mut certify_to = None;
     let mut certificate = None;
+    let mut input = None;
+    let mut rows_per_chunk = None;
+    let mut checkpoint = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg.starts_with("--") {
@@ -171,13 +180,28 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 "--db" if db.is_none() => db = Some(PathBuf::from(value)),
                 "--key-file" if key.is_none() => key = Some(PathBuf::from(value)),
                 "--tzdb-file" if tzdb_file.is_none() => tzdb_file = Some(PathBuf::from(value)),
+                "--input" if command == "load" && input.is_none() => {
+                    input = Some(PathBuf::from(value))
+                }
+                "--checkpoint" if command == "load" && checkpoint.is_none() => {
+                    checkpoint = Some(PathBuf::from(value))
+                }
+                "--rows-per-chunk" if command == "load" && rows_per_chunk.is_none() => {
+                    let rows: usize = value
+                        .parse()
+                        .map_err(|_| Failure::usage("rows-per-chunk must be a positive integer"))?;
+                    if rows == 0 {
+                        return Err(Failure::usage("rows-per-chunk must be positive"));
+                    }
+                    rows_per_chunk = Some(rows);
+                }
                 "--certify-to" if command == "query" && certify_to.is_none() => {
                     certify_to = Some(PathBuf::from(value));
                 }
                 "--certificate" if command == "replay" && certificate.is_none() => {
                     certificate = Some(PathBuf::from(value));
                 }
-                "--param" if !create => {
+                "--param" if !create && command != "load" => {
                     let (name, raw) = value
                         .split_once('=')
                         .ok_or_else(|| Failure::usage("expected --param name=value"))?;
@@ -213,7 +237,11 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 }
                 _ => return Err(Failure::usage("unknown, duplicate, or inapplicable flag")),
             }
-        } else if create || command == "replay" || text.replace(arg.clone()).is_some() {
+        } else if create
+            || command == "replay"
+            || command == "load"
+            || text.replace(arg.clone()).is_some()
+        {
             return Err(Failure::usage(
                 "expected exactly one GQL argument for query/write, none for create",
             ));
@@ -222,10 +250,13 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     if command == "replay" && certificate.is_none() {
         return Err(Failure::usage("--certificate required"));
     }
+    if command == "load" && input.is_none() {
+        return Err(Failure::usage("--input required"));
+    }
     Ok(Options {
         db: db.ok_or_else(|| Failure::usage("--db required"))?,
         key: key.ok_or_else(|| Failure::usage("--key-file required"))?,
-        text: if create || command == "replay" {
+        text: if create || command == "replay" || command == "load" {
             String::new()
         } else {
             text.ok_or_else(|| Failure::usage("GQL argument required"))?
@@ -239,6 +270,9 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         coordinate,
         certify_to,
         certificate,
+        input,
+        rows_per_chunk: rows_per_chunk.unwrap_or(1000),
+        checkpoint,
     })
 }
 fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
@@ -410,7 +444,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             }
             Ok(())
         }
-        Some(command @ ("create" | "query" | "write" | "replay")) => {
+        Some(command @ ("create" | "query" | "write" | "replay" | "load")) => {
             let mut options = parse(&args[1..], command)?;
             let runtime = RuntimeBuilder::new().build().map_err(Failure::io)?;
             let root = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -431,6 +465,9 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;
                     return if robot { emit(out, &format!(r#"{{"v":1,"event":"result","kind":"created","seq":{seq}}}"#)) } else { writeln!(out, "created (seq {seq})").map_err(Failure::io) };
+                }
+                if command == "load" {
+                    return load::run(&mut db, &contexts, &options, artifact.as_deref(), robot, out).await;
                 }
                 if command == "write" {
                     let declarations: Vec<_> = options.params.parameter_types().filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_))).collect();

@@ -8,6 +8,7 @@ struct MutationProgramWorkspace<'txn> {
     txn: &'txn mut WriteTxn,
     staged_len: usize,
     prepared: Option<PreparedWrite>,
+    program_multi_relation: bool,
     accepted: bool,
 }
 impl<'txn> MutationProgramWorkspace<'txn> {
@@ -17,7 +18,8 @@ impl<'txn> MutationProgramWorkspace<'txn> {
         // re-prepared against a different basis on failure. The current copy is
         // still needed by the first statement's canonical overlay selection.
         let prepared = txn.prepared.clone();
-        Self { txn, staged_len, prepared, accepted: false }
+        let program_multi_relation = txn.program_multi_relation;
+        Self { txn, staged_len, prepared, program_multi_relation, accepted: false }
     }
     fn accept(mut self) {
         self.accepted = true;
@@ -25,6 +27,8 @@ impl<'txn> MutationProgramWorkspace<'txn> {
 }
 impl Drop for MutationProgramWorkspace<'_> {
     fn drop(&mut self) {
+        // Scope permission never escapes, including accepted or nested workspaces.
+        self.txn.program_multi_relation = self.program_multi_relation;
         if self.accepted { return; }
         let appended = self.txn.staged.len() > self.staged_len;
         let discarded = core::mem::replace(&mut self.txn.prepared, self.prepared.take());

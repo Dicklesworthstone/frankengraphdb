@@ -129,6 +129,8 @@ mod gql_exec;
 mod memvfs;
 mod prepared_write;
 mod query;
+mod scrub;
+pub use scrub::{LostCapsule, ScrubCrashPoint, ScrubSummary};
 mod write_txn;
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented

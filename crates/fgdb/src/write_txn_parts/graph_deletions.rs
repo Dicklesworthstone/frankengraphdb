@@ -68,6 +68,7 @@ impl WriteTxn {
             return Err(source(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
         }
         if let Some(first) = self.staged.first()
+            && !self.program_multi_relation
             && self.staged.iter().all(|batch| batch.relation == first.relation)
             && deletion.relation() != first.relation
         {

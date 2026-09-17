@@ -113,14 +113,6 @@ impl WriteTxn {
         if live != self.basis {
             return Err(source(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
         }
-        if let Some(first) = self.staged.first()
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
-            && insertion.relation() != first.relation
-        {
-            return Err(source(WriteTxnError::RelationMismatch {
-                expected: first.relation, found: insertion.relation(),
-            }));
-        }
         cx.with_restriction(|| {
             let proposal = insertion.execute_governed(
                 policy,
@@ -133,7 +125,10 @@ impl WriteTxn {
             // vectors exist only for the explicit returning API.
             let mut vertices = retain_identities.then(Vec::new);
             let mut edges = retain_identities.then(Vec::new);
+            // Vertex declarations must lead the shared initializer prefix.
+            // Edge groups retain declaration order within each relation.
             let mut batch = WriteBatch::new(insertion.relation());
+            let mut groups = std::collections::BTreeMap::new();
             for intent in proposal.into_intents() {
                 cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
                 match intent {
@@ -141,14 +136,29 @@ impl WriteTxn {
                         if let Some(vertices) = &mut vertices { vertices.push(vertex); }
                         batch.create_vertex(vertex, labels, properties);
                     }
-                    GraphInsertIntent::Edge { edge, source, destination, properties } => {
+                    GraphInsertIntent::Edge { edge, relation, source, destination, properties } => {
                         if let Some(edges) = &mut edges { edges.push(edge); }
-                        batch.add_edge(edge, source, destination, properties);
+                        groups.entry(relation).or_insert_with(|| WriteBatch::new(relation))
+                            .add_edge(edge, source, destination, properties);
                     }
                 }
             }
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
-            if !batch.is_empty() { self.write(database, batch).map_err(source)?; }
+            let mut batches = Vec::with_capacity(groups.len() + usize::from(!batch.is_empty()));
+            if !batch.is_empty() { batches.push(batch); }
+            batches.extend(groups.into_values());
+            if let Some(first) = batches.first() {
+                let relation = first.relation;
+                if batches.iter().all(|batch| batch.relation == relation)
+                    && self.staged.iter().all(|batch| batch.relation == relation)
+                {
+                    let mut combined = batches.remove(0);
+                    for batch in batches { combined.rows.extend(batch.rows); }
+                    self.write(database, combined).map_err(source)?;
+                } else {
+                    self.write_atomic(database, batches).map_err(source)?;
+                }
+            }
             Ok((stats, vertices.unwrap_or_default(), edges.unwrap_or_default()))
         })
     }

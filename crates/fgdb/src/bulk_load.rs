@@ -84,6 +84,8 @@ pub enum BulkLoadErrorKind {
         source: EdgePropertyPatchError,
     },
     Write(WriteTxnError),
+    /// The chunk is durable, but the caller could not persist/announce it.
+    Checkpoint(std::io::Error),
 }
 #[derive(Debug)]
 pub struct BulkLoadError {
@@ -134,6 +136,29 @@ impl<V: Vfs + Clone> Database<V> {
     where
         I: IntoIterator<Item = BulkRow>,
         I::IntoIter: Clone,
+    {
+        self.bulk_load_with_checkpoint(cx, commit_cx, source, policy, crash, |_| Ok(()))
+            .await
+    }
+
+    /// Invoke `acknowledged` after each successful durable commit and before
+    /// starting another chunk. A hook error stops ingestion with the durable
+    /// chunk in `committed` and no `pending` candidate. The hook must not label
+    /// an unacknowledged write as committed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bulk_load_with_checkpoint<I, F>(
+        &mut self,
+        cx: &QueryCx,
+        commit_cx: &CommitCx,
+        source: I,
+        policy: BulkLoadPolicy,
+        crash: Option<(usize, CrashPoint)>,
+        mut acknowledged: F,
+    ) -> Result<BulkLoadCheckpoint, BulkLoadError>
+    where
+        I: IntoIterator<Item = BulkRow>,
+        I::IntoIter: Clone,
+        F: FnMut(&BulkLoadCheckpoint) -> Result<(), std::io::Error>,
     {
         let mut committed = policy.resume.clone().unwrap_or_default();
         let mut source = source.into_iter();
@@ -332,6 +357,13 @@ impl<V: Vfs + Clone> Database<V> {
                     committed.frontier = frontier;
                     committed.next_row += rows;
                     committed.committed_chunks += 1;
+                    if let Err(error) = acknowledged(&committed) {
+                        return Err(BulkLoadError {
+                            kind: BulkLoadErrorKind::Checkpoint(error),
+                            committed,
+                            pending: None,
+                        });
+                    }
                 }
                 Err(source) => {
                     let mut pending = committed.clone();

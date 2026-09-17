@@ -433,9 +433,10 @@ fn infrastructure_refusal_is_not_mislabeled_as_a_record_failure() {
         prefix.create_vertex(VId(999), vec![], vec![]);
         txn.write(&mut db, prefix).unwrap();
         let digest = txn.staged_effect_digest().unwrap();
+        let mut foreign = Database::open_memory(&commit, keys()).await.unwrap();
         let error = txn
             .execute_bound_graph_write_script_batch_governed(
-                &mut db,
+                &mut foreign,
                 &query,
                 &batch,
                 policy(40, 40),
@@ -447,11 +448,37 @@ fn infrastructure_refusal_is_not_mislabeled_as_a_record_failure() {
             GraphWriteScriptExecutionError::BatchProgram {
                 location: None,
                 source: GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(
-                    WriteTxnError::RelationMismatch { .. }
+                    WriteTxnError::WrongDatabase
                 )),
             }
         ));
         assert_eq!(txn.staged_effect_digest().unwrap(), digest);
+        let basis = db.frontier().unwrap();
+        let receipt = txn
+            .execute_bound_graph_write_script_batch_governed(
+                &mut db,
+                &query,
+                &batch,
+                policy(40, 40),
+                |request| Ok::<_, ()>(ElementId::Vertex(VId(
+                    1000 + (request.statement / 2) as u128,
+                ))),
+            )
+            .unwrap();
+        assert_eq!(receipt.stats().created_vertices, 40);
+        assert_eq!(receipt.stats().mutation_effects, 40);
+        assert!(txn.vertex(&db, VId(999)).unwrap().is_some());
+        for index in 0..40_u128 {
+            assert_eq!(
+                txn.vertex(&db, VId(1000 + index)).unwrap().unwrap().props,
+                vec![
+                    (P, CanonicalScalar::Int(index as i64)),
+                    (Q, CanonicalScalar::Int(index as i64 + 10)),
+                ],
+            );
+        }
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert!(db.vertices().unwrap().is_empty());
         txn.abort();
         assert_eq!(txcx.outstanding_obligations(), 0);
     });

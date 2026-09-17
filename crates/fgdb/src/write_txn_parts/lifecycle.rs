@@ -11,6 +11,7 @@ impl WriteTxn {
             basis,
             staged: Vec::new(),
             prepared: None,
+            program_multi_relation: false,
             read_set: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             match_expansions: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             scanned_vertex_labels: std::cell::RefCell::new(std::collections::BTreeSet::new()),
@@ -51,6 +52,8 @@ impl WriteTxn {
     /// Once `write_atomic` has explicitly staged several relation groups,
     /// subsequent writes re-enter that same composition check, including the
     /// immutable shared-initializer prefix when one is present.
+    /// Mixed write programs may enter this composition check when their next
+    /// statement first changes relation, under their whole-program rollback guard.
     pub fn write<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -66,7 +69,8 @@ impl WriteTxn {
             });
         }
         if let Some(first) = self.staged.first()
-            && self.staged.iter().any(|staged| staged.relation != first.relation)
+            && (self.staged.iter().any(|staged| staged.relation != first.relation)
+                || (self.program_multi_relation && batch.relation != first.relation))
         {
             return self.write_atomic(database, vec![batch]);
         }

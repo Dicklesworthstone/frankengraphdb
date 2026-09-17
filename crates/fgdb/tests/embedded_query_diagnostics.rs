@@ -1,9 +1,9 @@
 //! Typed refusal selection and robot diagnostics for embedded native reads.
 use asupersync::{Budget, runtime::RuntimeBuilder};
-use fgdb::{Database, DatabaseKeys, NativeReadClass, QueryError};
+use fgdb::{Database, DatabaseKeys, NativeReadClass, QueryError, QueryResult, QueryValue};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::*;
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
+use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
 const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(1);
@@ -31,24 +31,24 @@ fn policy() -> GqlQueryPolicy {
 // window around an unrelated token. The source retains its typed error kind.
 const CASES: &[(&str, NativeReadClass, &str)] = &[
     (
-        "MATCH (a:Person)-[k:R]->(b:Person) RETURN k.since",
+        "MATCH (a:Person)-[k:R]->(b:Person) RETURN k.since.",
         NativeReadClass::Pattern,
-        "k.since",
+        "since.",
     ),
     (
-        "MATCH (a:Person)-[k:R]->(b:Person) WHERE k.since > 3 RETURN a.p",
+        "MATCH (a:Person)-[k:R]->(b:Person) WHERE k.since > RETURN a.p",
         NativeReadClass::Pattern,
-        "k.since",
+        "RETURN",
     ),
     (
-        "MATCH (a:Person)-[:R]->()-[:R]->(b:Person) RETURN b.p",
+        "MATCH (a:Person)-[:R]->(m)-[:R]->(b:Person) RETURN b.p.",
         NativeReadClass::Pattern,
-        "()",
+        "p.",
     ),
     (
-        "MATCH (a:Person)-[r:R*1..3]->(b:Person) RETURN b.p",
+        "MATCH (a:Person)-[r:R]->(b:Person) RETURN r.since.",
         NativeReadClass::Pattern,
-        "*1..3",
+        "since.",
     ),
     (
         "MATCH (p:Person) RETURN labels(p)",
@@ -71,9 +71,9 @@ const CASES: &[(&str, NativeReadClass, &str)] = &[
         "NOT EXISTS { (p)-[:R]->() }",
     ),
     (
-        "MATCH (p:Person) RETURN p.p ORDER BY p.age",
+        "MATCH (p:Person) RETURN p.p AS x UNION ALL MATCH (q:Person) RETURN q.p AS x ORDER BY missing",
         NativeReadClass::Set,
-        "p.age",
+        "missing",
     ),
     (
         "MATCH (a:Person) INSERT (a)-[:R]->(b:Person), (a)-[:S]->(c:Person)",
@@ -154,6 +154,8 @@ fn accepted_statements_still_accept() {
         let mut batch = fgdb::WriteBatch::new(R);
         batch.create_vertex(VId(1), vec![PERSON], vec![(P, CanonicalScalar::Int(7))]);
         batch.create_vertex(VId(2), vec![PERSON], vec![(P, CanonicalScalar::Int(9))]);
+        batch.add_edge(EId(1), VId(1), VId(2), vec![(P, CanonicalScalar::Int(11))]);
+        batch.add_edge(EId(2), VId(2), VId(1), vec![(P, CanonicalScalar::Int(2))]);
         db.write(&contexts.commit(), batch).await.unwrap();
         let accepted = [
             "MATCH (n:Person) RETURN n.p",
@@ -166,6 +168,17 @@ fn accepted_statements_still_accept() {
             "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ 1 RETURN COUNT(*) AS c",
             "MATCH (a:Person) FOR SYSTEM_TIME AS OF SEQ 1 RETURN a.p AS p UNION ALL MATCH (b:Person) RETURN b.p AS p",
         ];
+        for (text, column, values) in [
+            ("MATCH (a:Person)-[k:R]->(b:Person) RETURN k.since ORDER BY k.since", "since", vec![2, 11]),
+            ("MATCH (a:Person)-[k:R]->(b:Person) WHERE k.since > 3 RETURN a.p", "p", vec![7]),
+            ("MATCH (a:Person)-[:R]->()-[:R]->(b:Person) RETURN b.p ORDER BY b.p", "p", vec![7, 9]),
+        ] {
+            let result = db.query(&contexts.query(), text, &GqlParameters::new(), symbols, policy()).unwrap();
+            assert_eq!(result, QueryResult::Rows {
+                columns: vec![column.to_owned()],
+                rows: values.into_iter().map(|n| vec![QueryValue::Value(fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(n)))]).collect(),
+            }, "{text}");
+        }
         for text in accepted {
             db.query(&contexts.query(), text, &GqlParameters::new(), symbols, policy())
                 .unwrap_or_else(|error| panic!("{text} must still accept: {error}"));
@@ -221,8 +234,27 @@ fn robot_error_event_carries_furthest_progress_message() {
         .lines()
         .find(|line| line.contains(r#""event":"error""#))
         .expect("robot error event");
-    assert_eq!(
-        line,
-        r#"{"v":1,"event":"error","class":"query","diagnostics":["unsupported query construct: graph-pattern text error at byte 43: Expected(\"end of statement\")"]}"#
+    assert!(line.contains(r#""class":"query""#), "{line}");
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let expected = runtime.block_on(async {
+        let db = Database::open_memory(&contexts.commit(), keys())
+            .await
+            .unwrap();
+        db.query(
+            &contexts.query(),
+            CASES[0].0,
+            &GqlParameters::new(),
+            symbols,
+            policy(),
+        )
+        .unwrap_err()
+        .to_string()
+    });
+    let escaped = expected.replace('\\', "\\\\").replace('"', "\\\"");
+    assert!(
+        line.contains(&format!("\"diagnostics\":[\"{escaped}\"]")),
+        "{line}"
     );
 }

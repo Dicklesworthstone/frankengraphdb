@@ -38,6 +38,8 @@ impl WriteTxn {
     /// sees its predecessor's canonical overlay; assignments within a step
     /// remain frozen and simultaneous. No intermediate step commits.
     /// Plain DELETE refuses incident relationships; it never becomes a cascade.
+    /// Statements may name different relations; their effects must satisfy
+    /// `write_atomic` composition, including the shared-initializer prefix rules.
     ///
     /// Any error, cancellation or Rust unwind restores the exact prior staged
     /// workspace, including its already-prepared write. Read observations are
@@ -47,7 +49,7 @@ impl WriteTxn {
     /// Identity requests carry the program statement index and row-local request.
     /// The caller's allocation policy must also distinguish separate executions.
     /// Issued identities are NOT reclaimed on rollback. No allocator request
-    /// precedes owner, health, basis and coordinate preflight. MERGE's create
+    /// precedes owner, health and basis preflight. MERGE's create
     /// branch observes the same remaining creation cap as ordinary insertion;
     /// existing matches and empty endpoint selections do not allocate identities.
     ///
@@ -75,16 +77,9 @@ impl WriteTxn {
         if live != self.basis {
             return Err(preflight(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
         }
-        if let Some(first) = self.staged.first()
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
-            && program.relation() != first.relation
-        {
-            return Err(preflight(WriteTxnError::RelationMismatch {
-                expected: first.relation, found: program.relation(),
-            }));
-        }
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
+            workspace.txn.program_multi_relation = true;
             let stats = program.execute_governed(policy, |statement, input, remaining| {
                 match input {
                     GraphWriteStatement::Mutation(input) => workspace.txn.execute_graph_mutation_governed(
@@ -162,16 +157,9 @@ impl WriteTxn {
         if live != self.basis {
             return Err(preflight(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live }));
         }
-        if let Some(first) = self.staged.first()
-            && self.staged.iter().all(|batch| batch.relation == first.relation)
-            && program.relation() != first.relation
-        {
-            return Err(preflight(WriteTxnError::RelationMismatch {
-                expected: first.relation, found: program.relation(),
-            }));
-        }
         cx.with_restriction(|| {
             let workspace = MutationProgramWorkspace::new(self);
+            workspace.txn.program_multi_relation = true;
             let mut receipts = Vec::with_capacity(program.statements().len());
             let stats = program.execute_governed(policy, |statement, input, remaining| {
                 match input {

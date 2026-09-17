@@ -139,6 +139,8 @@ pub struct WriteTxn {
     basis: CommitSeq,
     staged: Vec<WriteBatch>,
     prepared: Option<PreparedWrite>,
+    /// Enabled only while a mixed write program owns its rollback workspace.
+    program_multi_relation: bool,
     read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
     match_expansions: std::cell::RefCell<std::collections::BTreeSet<(VId, RelationId)>>,
     scanned_vertex_labels: std::cell::RefCell<std::collections::BTreeSet<LabelId>>,
