@@ -1285,7 +1285,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         let mut value = Vec::new();
         for row in execution.projected.into_rows().skip(offset).take(count) {
             (execution.control)(GlaExecutionEvent::ResultRow)?;
-            value.push(row);
+            value.push(row.retain_visible(self.visible_columns));
         }
         Ok(value)
     }
