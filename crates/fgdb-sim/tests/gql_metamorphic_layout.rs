@@ -259,13 +259,13 @@ fn run<V: Vfs + Clone>(
     battery(at)
         .into_iter()
         .map(|(name, text, params)| {
-            let result = db
-                .query(cx, &text, &params, symbols, policy())
-                .unwrap_or_else(|error| panic!("{name} at={at:?} query={text}: {error:?}"));
-            let QueryResult::Rows { rows, .. } = &result else {
-                panic!("{name} must return rows");
-            };
-            let _ = rows;
+            let result = db.query(cx, &text, &params, symbols, policy());
+            assert!(result.is_ok(), "{name} at={at:?} query={text}: {result:?}");
+            let result = result.expect("query success asserted");
+            assert!(
+                matches!(result, QueryResult::Rows { .. }),
+                "{name}: expected rows"
+            );
             (name, result)
         })
         .collect()
@@ -308,10 +308,10 @@ fn seeded_history_answers_identically_across_layouts_and_open_paths() {
                 "two AS OF sequences differ"
             );
             for (name, result) in &baseline {
-                let QueryResult::Rows { rows, .. } = result else {
-                    unreachable!()
-                };
-                assert!(!rows.is_empty(), "{name}: baseline witnesses required");
+                assert!(
+                    matches!(result, QueryResult::Rows { rows, .. } if !rows.is_empty()),
+                    "{name}: baseline witnesses required"
+                );
             }
             let store = fgdb_strata::store::BlockStore::open_with_vfs(
                 &commit,
