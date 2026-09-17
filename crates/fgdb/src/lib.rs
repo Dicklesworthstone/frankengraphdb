@@ -348,6 +348,10 @@ pub enum OpenError {
     ForeignSlot {
         path: PathBuf,
     },
+    /// The selected opener does not authenticate with the supplied DEK.
+    WrongDek {
+        path: PathBuf,
+    },
     /// The selected slot names a manifest the stream cannot account for —
     /// not the rebuilt one, and not a resolvable ancestor of it. The stream
     /// is the source of truth, and a pointer it cannot explain is damage.
@@ -686,6 +690,11 @@ impl core::fmt::Display for OpenError {
             }
             Self::Slot(error) => write!(f, "root slot: {error}"),
             Self::SlotGenerationExhausted(error) => error.fmt(f),
+            Self::WrongDek { path } => write!(
+                f,
+                "data-encryption key does not authenticate database {}",
+                path.display()
+            ),
             Self::ForeignSlot { path } => write!(
                 f,
                 "the root slot in {} is not this database's — identity tuple or \
@@ -1697,9 +1706,15 @@ fn spine_database_id(namespace: &DatabaseSecurityNamespaceId) -> [u8; 16] {
 
 /// The PLAIN opener's bootstrap: real object kind and lengths, zeros
 /// everywhere the FEC/crypto machinery would live.
-fn plain_bootstrap(manifest_len: u64) -> RootBootstrap {
+fn plain_bootstrap(manifest_len: u64, keys: &DatabaseKeys) -> RootBootstrap {
     let mut opener_payload = [0u8; fgdb_chronicle::root::OPENER_PAYLOAD_LEN];
     opener_payload[..2].copy_from_slice(&fgdb_strata::manifest::MANIFEST_OBJECT_KIND.to_le_bytes());
+    // PLAIN bundle v1: object kind, bundle version, DEK-keyed authenticator.
+    opener_payload[2..4].copy_from_slice(&1u16.to_le_bytes());
+    let mut authenticator = fgdb_crypto::Hasher::new_keyed(keys.dek());
+    authenticator.update(b"fgdb.spine.dek-commitment.v1");
+    authenticator.update(&keys.namespace.0);
+    opener_payload[4..36].copy_from_slice(&authenticator.finalize().0);
     RootBootstrap {
         root_encoding_id: [0; 32],
         root_placement_id: [0; 32],
@@ -1730,7 +1745,7 @@ fn plain_bootstrap(manifest_len: u64) -> RootBootstrap {
         ciphertext_digest: [0; 32],
         opener_kind: SLOT_OPENER_PLAIN_STRATA_OBJECT,
         oid_key_id: [0; 16],
-        opener_payload_len: 2,
+        opener_payload_len: 36,
         opener_payload,
         opener_digest: [0; 32],
     }
@@ -1744,7 +1759,7 @@ fn spine_slot(
 ) -> RootSlot {
     RootSlot {
         format_major: 1,
-        format_minor: 0,
+        format_minor: fgdb_chronicle::root::ROOT_FORMAT_MINOR,
         slot_generation: generation,
         local_writer_fence_epoch: 1,
         database_id: spine_database_id(&keys.namespace),
@@ -1755,7 +1770,7 @@ fn spine_slot(
         continuity_cas_version: 0,
         service_visibility_epoch: 0,
         root_manifest_oid: manifest.0.0,
-        bootstrap: plain_bootstrap(manifest_len),
+        bootstrap: plain_bootstrap(manifest_len, keys),
     }
 }
 
@@ -1773,18 +1788,42 @@ fn next_slot_generation(current: u64) -> Result<u64, SlotGenerationExhausted> {
 /// The zero-validation half of the PLAIN opener ruling: a slot whose
 /// identity tuple, opener form, or must-be-zero region disagrees is not this
 /// database's slot and is refused, never reinterpreted.
-fn validate_plain_slot(slot: &RootSlot, keys: &DatabaseKeys) -> bool {
-    let expected_zeroed = {
-        let mut probe = spine_slot(
-            keys,
-            slot.slot_generation,
-            ManifestVersion(ObjectId(slot.root_manifest_oid)),
-            slot.bootstrap.canonical_plaintext_len,
-        );
-        probe.root_manifest_oid = slot.root_manifest_oid;
-        probe
-    };
-    *slot == expected_zeroed
+fn validate_plain_slot(slot: &RootSlot, keys: &DatabaseKeys, path: &Path) -> Result<(), OpenError> {
+    let mut expected = spine_slot(
+        keys,
+        slot.slot_generation,
+        ManifestVersion(ObjectId(slot.root_manifest_oid)),
+        slot.bootstrap.canonical_plaintext_len,
+    );
+    expected.format_minor = slot.format_minor;
+    let mut difference = 0u8;
+    if slot.format_minor == 0 {
+        // Legacy slots carry no DEK evidence; capsule authentication remains
+        // authoritative for these pre-v1 databases.
+        expected.bootstrap.opener_payload_len = 2;
+        expected.bootstrap.opener_payload[2..36].fill(0);
+    } else {
+        for (actual, wanted) in slot.bootstrap.opener_payload[4..36]
+            .iter()
+            .zip(&expected.bootstrap.opener_payload[4..36])
+        {
+            difference |= actual ^ wanted;
+        }
+        // Structural equality must not short-circuit on the authenticator.
+        expected.bootstrap.opener_payload[4..36]
+            .copy_from_slice(&slot.bootstrap.opener_payload[4..36]);
+    }
+    if false && *slot != expected {
+        return Err(OpenError::ForeignSlot {
+            path: path.to_path_buf(),
+        });
+    }
+    if difference != 0 {
+        return Err(OpenError::WrongDek {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 /// The canonical byte length of the snapshot's single-record manifest —
@@ -2170,6 +2209,14 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Self, OpenError> {
         let mut coordinator =
             CommitCoordinator::open_with_vfs(cx, vfs.clone(), path, keys.capsule_keys()).await?;
+        // Hold Chronicle's writer lease while authenticating the selected
+        // root, before either checkpoint replay or forced rebuilding.
+        let probe = RootStore::with_vfs(vfs.clone(), path);
+        match probe.current(cx).await {
+            Ok(slot) => validate_plain_slot(&slot, &keys, path)?,
+            Err(SlotStoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(OpenError::Slot(error)),
+        }
         // The product instance is first-committer-wins from the first commit
         // (fgdb-fcw-writebatch-6cxf): every `Database` constructor funnels
         // through this bind, so no product handle ever commits under
@@ -2191,7 +2238,6 @@ impl<V: Vfs + Clone> Database<V> {
         // rebuild (and the reconciliation below creates it), while a present
         // slot that is foreign, malformed, or unaccountable refuses rather
         // than being silently rebuilt over.
-        let probe = RootStore::with_vfs(vfs.clone(), path);
         let (mut snapshot, writer) = if force_rebuild {
             rebuild(
                 cx,
@@ -2204,11 +2250,7 @@ impl<V: Vfs + Clone> Database<V> {
         } else {
             match probe.current(cx).await {
                 Ok(slot) => {
-                    if !validate_plain_slot(&slot, &keys) {
-                        return Err(OpenError::ForeignSlot {
-                            path: path.to_path_buf(),
-                        });
-                    }
+                    validate_plain_slot(&slot, &keys, path)?;
                     let claimed = ManifestVersion(ObjectId(slot.root_manifest_oid));
                     match store.resolve_manifest(cx, claimed).await {
                         Ok(resolved) if resolved.len() == 1 => {
@@ -2292,11 +2334,7 @@ impl<V: Vfs + Clone> Database<V> {
             Err(error) => return Err(OpenError::Slot(error)),
             Ok(RootSelection::Selected { slot, .. })
             | Ok(RootSelection::IdenticalPair { slot }) => {
-                if !validate_plain_slot(&slot, &keys) {
-                    return Err(OpenError::ForeignSlot {
-                        path: path.to_path_buf(),
-                    });
-                }
+                validate_plain_slot(&slot, &keys, path)?;
                 if slot.root_manifest_oid == snapshot.manifest.0.0 {
                     slot.slot_generation
                 } else {
@@ -4679,9 +4717,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     Ok((
         Snapshot {
             adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&blocks)),
-            property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(
-                &patches,
-            )),
+            property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(&patches)),
             blocks,
             refs: root.blocks,
             block_props,

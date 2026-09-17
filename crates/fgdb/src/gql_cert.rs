@@ -38,6 +38,10 @@ pub trait NativeCertificatePlan {
     fn parameter_schema(&self) -> &[fgdb_gql::GqlParameterSpec];
 }
 
+const NATIVE_RESULT_CERTIFICATE_DOMAIN_V1: &[u8] = b"fgdb:native-result-certificate:v1";
+const NATIVE_RESULT_DIGEST_DOMAIN_V1: &[u8] = b"fgdb:native-ordered-result-digest:v1";
+const NATIVE_VALUES_DIGEST_DOMAIN_V1: &[u8] = b"fgdb:native-parameter-values:v1";
+
 /// Identity evidence only: neither result correctness nor replay execution.
 /// The digest identifies the template independently of argument values and
 /// snapshot selection; `verifies_at` separately checks the selected frontier.
@@ -565,6 +569,97 @@ pub fn digest_bind(bind: &RelationBind) -> Digest {
     hash(&bind.canonical_bytes())
 }
 
+/// One certified native read result: the plan certificate it executed under,
+/// the parameter values it was bound with, and the exact ordered result bytes.
+///
+/// This is the replay unit for FG-INV-19's local grade: certificate + these
+/// bindings re-executed at the certified snapshot must be byte-identical.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeResultCertificate {
+    pub plan: NativePlanCertificate,
+    pub values_digest: Digest,
+    pub result_digest: Digest,
+    pub statement: String,
+    pub facade_class: NativeReadClass,
+    pub snapshot_identity: Digest,
+    pub database_identity: Digest,
+}
+
+impl NativeResultCertificate {
+    /// Versioned envelope: plan digest, snapshot seq, bound parameter values
+    /// digest and canonical result digest. In-memory only in this slice.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.to_vec();
+        bytes.extend_from_slice(&self.plan.digest.0);
+        bytes.extend_from_slice(&self.plan.snapshot_seq.0.to_be_bytes());
+        bytes.extend_from_slice(&self.values_digest.0);
+        bytes.extend_from_slice(&self.result_digest.0);
+        bytes.extend_from_slice(&self.snapshot_identity.0);
+        bytes.extend_from_slice(&self.database_identity.0);
+        bytes.push(self.facade_class as u8);
+        bytes.extend_from_slice(&(self.statement.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(self.statement.as_bytes());
+        bytes
+    }
+}
+
+pub(crate) fn native_values_digest(values: &fgdb_gql::GqlParameters) -> Digest {
+    let mut hasher = Hasher::new();
+    hasher.update(NATIVE_VALUES_DIGEST_DOMAIN_V1);
+    hasher.update(&values.canonical_bytes());
+    hasher.finalize()
+}
+
+/// Canonical ordered result transcript for native read rows. Cells carry
+/// variant tags so Count/Integer/Average/Value never collide; GraphValue
+/// cells reuse the admitted scalar/row canonical encoding.
+pub(crate) fn native_result_digest(
+    plan: &NativePlanCertificate,
+    values: &fgdb_gql::GqlParameters,
+    columns: &[String],
+    rows: &[Vec<crate::QueryValue>],
+) -> Result<Digest, fgdb_types::ScalarEncodeError> {
+    let mut hasher = Hasher::new();
+    hasher.update(NATIVE_RESULT_DIGEST_DOMAIN_V1);
+    hasher.update(&plan.digest.0);
+    hasher.update(&plan.snapshot_seq.0.to_be_bytes());
+    hasher.update(&values.canonical_bytes());
+    hasher.update(&(columns.len() as u64).to_be_bytes());
+    for column in columns {
+        hasher.update(&(column.len() as u64).to_be_bytes());
+        hasher.update(column.as_bytes());
+    }
+    hasher.update(&(rows.len() as u64).to_be_bytes());
+    for row in rows {
+        hasher.update(&(row.len() as u64).to_be_bytes());
+        for cell in row {
+            match cell {
+                crate::QueryValue::Count(count) => {
+                    hasher.update(&[0]);
+                    hasher.update(&count.to_be_bytes());
+                }
+                crate::QueryValue::Integer(value) => {
+                    hasher.update(&[1]);
+                    hasher.update(&value.to_be_bytes());
+                }
+                crate::QueryValue::Average(average) => {
+                    hasher.update(&[2]);
+                    hasher.update(&average.numerator().to_be_bytes());
+                    hasher.update(&average.denominator().to_be_bytes());
+                }
+                crate::QueryValue::Value(value) => {
+                    hasher.update(&[3]);
+                    let encoded = value.canonical_bytes()?;
+                    hasher.update(&(encoded.len() as u64).to_be_bytes());
+                    hasher.update(&encoded);
+                }
+            }
+        }
+    }
+    Ok(hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -820,5 +915,45 @@ mod tests {
         prepared.schema[0].parameter_type = fgdb_gql::GqlParameterType::Int64;
         prepared.bytes[2] = 4;
         assert!(!certificate.verifies(&prepared));
+    }
+
+    #[test]
+    fn native_result_digest_binds_order_columns_and_lossless_cell_domains() {
+        use crate::QueryValue;
+        use fgdb_gql::{GqlParameters, GraphExactAverage};
+        let plan = NativePlanCertificate {
+            digest: fgdb_crypto::Digest([7; 32]),
+            snapshot_seq: CommitSeq(1),
+        };
+        let params = GqlParameters::new();
+        let columns = vec!["value".to_owned()];
+        let rows = vec![vec![QueryValue::Count(1)], vec![QueryValue::Integer(2)]];
+        let digest = super::native_result_digest(&plan, &params, &columns, &rows).unwrap();
+        let mut reversed = rows.clone();
+        reversed.reverse();
+        assert_ne!(
+            digest,
+            super::native_result_digest(&plan, &params, &columns, &reversed).unwrap()
+        );
+        assert_ne!(
+            digest,
+            super::native_result_digest(&plan, &params, &["other".to_owned()], &rows).unwrap()
+        );
+        let same_magnitude = [
+            QueryValue::Count(1),
+            QueryValue::Integer(1),
+            QueryValue::Average(GraphExactAverage::new(1, 1).unwrap()),
+        ];
+        let digests: Vec<_> = same_magnitude
+            .into_iter()
+            .map(|cell| {
+                super::native_result_digest(&plan, &params, &columns, &[vec![cell]]).unwrap()
+            })
+            .collect();
+        for i in 0..digests.len() {
+            for j in 0..i {
+                assert_ne!(digests[i], digests[j]);
+            }
+        }
     }
 }

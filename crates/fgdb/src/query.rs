@@ -12,7 +12,8 @@ type Cancel = Box<asupersync::error::Error>;
 
 #[path = "query_explain.rs"]
 mod explain;
-pub use explain::{NativeExplainCertificate, PreparedNativeRead};
+pub use crate::gql_cert::NativeResultCertificate;
+pub use explain::{NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact
 /// averages retain their native domains instead of narrowing to scalar Int.
