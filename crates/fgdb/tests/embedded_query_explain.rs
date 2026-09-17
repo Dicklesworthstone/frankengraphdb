@@ -142,8 +142,8 @@ fn explain_refuses_writes_and_covers_every_read_class() {
             .unwrap();
         for (name, class, statements) in READS {
             for (statement_index, text) in statements.into_iter().enumerate() {
-                let (rows, cert) = explain(&db, text, &params, true)
-                    .expect("read statement must EXPLAIN");
+                let (rows, cert) =
+                    explain(&db, text, &params, true).expect("read statement must EXPLAIN");
                 let prepared = fgdb::PreparedNativeRead::prepare(text, &params, symbols).unwrap();
                 assert_eq!(prepared.facade_class(), class, "{text}");
                 assert!(cert.unwrap().verifies(&prepared), "{text}");
@@ -210,7 +210,7 @@ fn explain_refuses_writes_and_covers_every_read_class() {
                 false,
             )
             .unwrap_err();
-        assert!(matches!(err, QueryError::Unsupported { .. }), "{err:?}");
+        assert!(matches!(err, QueryError::Refused { .. }), "{err:?}");
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -255,13 +255,13 @@ fn explain_never_executes_and_never_charges_the_budget() {
             "EXPLAIN (UNKNOWN) MATCH (n) RETURN n",
             "EXPLAIN (CERTIFICATE",
         ] {
-            assert!(
-                matches!(
-                    db.query(&cx, text, &params, symbols, tight),
-                    Err(QueryError::Unsupported { .. })
-                ),
-                "{text}"
-            );
+            let error = db.query(&cx, text, &params, symbols, tight).unwrap_err();
+            let correct = if text.contains("INSERT") {
+                matches!(error, QueryError::Refused { .. })
+            } else {
+                matches!(error, QueryError::Unsupported { .. })
+            };
+            assert!(correct, "{text}: {error:?}");
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -349,7 +349,7 @@ fn certificates_are_deterministic_value_free_and_type_sensitive() {
                 symbols,
                 true
             ),
-            Err(QueryError::Unsupported { .. })
+            Err(QueryError::Refused { .. })
         ));
     });
     assert!(report.lab_test_passed(), "{report:?}");

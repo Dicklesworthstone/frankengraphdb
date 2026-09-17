@@ -412,15 +412,16 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
                     },
                     policy(),
                 );
-                let QueryError::Unsupported { diagnostics } = result.unwrap_err() else {
-                    panic!("unsupported/unknown text must retain structural diagnostics")
+                let QueryError::Refused { facade, source } = result.unwrap_err() else {
+                    panic!("unsupported/unknown text must retain typed parser diagnostics")
                 };
-                assert!(!diagnostics.is_empty());
+                let diagnostic = source.to_string();
+                assert!(!diagnostic.is_empty());
                 assert!(
                     calls.values().all(|count| *count == 1),
                     "misses must be cached too"
                 );
-                runs.push((diagnostics, calls));
+                runs.push((facade, diagnostic, calls));
             }
             assert_eq!(runs[0], runs[1]);
         }

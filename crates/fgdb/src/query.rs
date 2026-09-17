@@ -36,7 +36,14 @@ pub enum QueryResult {
 /// refusal. Unsupported includes structural parser diagnostics, never values.
 #[derive(Debug)]
 pub enum QueryError {
-    Unsupported { diagnostics: Vec<String> },
+    Unsupported {
+        diagnostics: Vec<String>,
+    },
+    /// The furthest-progressing native parser, retaining its original error.
+    Refused {
+        facade: crate::NativeReadClass,
+        source: Box<QueryError>,
+    },
     PatternText(GraphPatternTextError),
     SetText(GraphSetTextError),
     PipelineText(GraphPipelineAggregateTextError),
@@ -52,6 +59,7 @@ impl core::fmt::Display for QueryError {
             Self::Unsupported { diagnostics } => {
                 write!(f, "unsupported query construct: {}", diagnostics.join("; "))
             }
+            Self::Refused { source, .. } => write!(f, "unsupported query construct: {source}"),
             Self::PatternText(e) => e.fmt(f),
             Self::SetText(e) => e.fmt(f),
             Self::PipelineText(e) => e.fmt(f),
@@ -63,7 +71,14 @@ impl core::fmt::Display for QueryError {
         }
     }
 }
-impl core::error::Error for QueryError {}
+impl core::error::Error for QueryError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Refused { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum QueryWriteError<A> {

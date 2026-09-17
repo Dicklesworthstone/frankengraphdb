@@ -26,6 +26,11 @@ pub enum PreparedNativeRead {
 impl PreparedNativeRead {
     /// Classify using native parsers, from more specific grammars to general ones.
     /// Resolution, including misses, is frozen across all grammar probes.
+    /// Refusals select the largest typed byte offset. Ties prefer temporal
+    /// pattern, aggregate, then set when the native selector parser recognizes
+    /// a system-time clause; otherwise pattern, aggregate, pipeline, then set.
+    /// MissingSystemTimeClause is not a candidate. Successful probe order is
+    /// unchanged, and selection never parses diagnostic strings.
     pub fn prepare(
         text: &str,
         params: &GqlParameters,
@@ -45,14 +50,40 @@ impl PreparedNativeRead {
                 matches!(kind, GqlParameterType::Scalar(_) | GqlParameterType::List)
             })
             .collect();
-        let mut diagnostics = Vec::new();
+        let mut best = None;
+        let mut consider = |offset, priority, facade, source| {
+            if best
+                .as_ref()
+                .is_none_or(|(old_offset, old_priority, _, _)| {
+                    offset > *old_offset || (offset == *old_offset && priority < *old_priority)
+                })
+            {
+                best = Some((offset, priority, facade, source));
+            }
+        };
         match PreparedTemporalGraphAggregateText::prepare_with_parameter_types(
             text,
             &declarations,
             &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::TemporalAggregate(prepared)),
-            Err(error) => diagnostics.push(error.to_string()),
+            Err(error) => {
+                if !matches!(
+                    error.kind,
+                    GraphTemporalTextErrorKind::MissingSystemTimeClause
+                        | GraphTemporalTextErrorKind::Query(
+                            GraphPatternTextErrorKind::DefinitionTooLarge
+                                | GraphPatternTextErrorKind::TooManyTokens
+                        )
+                ) {
+                    consider(
+                        error.offset,
+                        1,
+                        NativeReadClass::TemporalAggregate,
+                        QueryError::TemporalText(error),
+                    );
+                }
+            }
         }
         match PreparedTemporalGraphText::prepare_with_parameter_types(
             text,
@@ -60,7 +91,23 @@ impl PreparedNativeRead {
             &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::TemporalPattern(prepared)),
-            Err(error) => diagnostics.push(error.to_string()),
+            Err(error) => {
+                if !matches!(
+                    error.kind,
+                    GraphTemporalTextErrorKind::MissingSystemTimeClause
+                        | GraphTemporalTextErrorKind::Query(
+                            GraphPatternTextErrorKind::DefinitionTooLarge
+                                | GraphPatternTextErrorKind::TooManyTokens
+                        )
+                ) {
+                    consider(
+                        error.offset,
+                        0,
+                        NativeReadClass::TemporalPattern,
+                        QueryError::TemporalText(error),
+                    );
+                }
+            }
         }
         match PreparedTemporalGraphSetText::prepare_with_parameter_types(
             text,
@@ -68,7 +115,23 @@ impl PreparedNativeRead {
             &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::TemporalSet(prepared)),
-            Err(error) => diagnostics.push(error.to_string()),
+            Err(error) => {
+                if !matches!(
+                    error.kind,
+                    GraphTemporalSetTextErrorKind::MissingSystemTimeClause
+                        | GraphTemporalSetTextErrorKind::Set(GraphSetTextErrorKind::Pattern(
+                            GraphPatternTextErrorKind::DefinitionTooLarge
+                                | GraphPatternTextErrorKind::TooManyTokens
+                        ))
+                ) {
+                    consider(
+                        error.offset,
+                        2,
+                        NativeReadClass::TemporalSet,
+                        QueryError::TemporalSetText(error),
+                    );
+                }
+            }
         }
         match PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
             text,
@@ -76,7 +139,12 @@ impl PreparedNativeRead {
             &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::PipelineAggregate(prepared)),
-            Err(error) => diagnostics.push(error.to_string()),
+            Err(error) => consider(
+                error.offset,
+                5,
+                NativeReadClass::PipelineAggregate,
+                QueryError::PipelineText(error),
+            ),
         }
         match PreparedGraphAggregateText::prepare_with_parameter_types(
             text,
@@ -84,20 +152,37 @@ impl PreparedNativeRead {
             &mut resolve,
         ) {
             Ok(prepared) => return Ok(Self::Aggregate(prepared)),
-            Err(error) => diagnostics.push(error.to_string()),
+            Err(error) => consider(
+                error.offset,
+                4,
+                NativeReadClass::Aggregate,
+                QueryError::PatternText(error),
+            ),
         }
         match PreparedGraphText::prepare_with_parameter_types(text, &declarations, &mut resolve) {
             Ok(prepared) => return Ok(Self::Pattern(prepared)),
-            Err(error) => diagnostics.push(error.to_string()),
+            Err(error) => consider(
+                error.offset,
+                3,
+                NativeReadClass::Pattern,
+                QueryError::PatternText(error),
+            ),
         }
         match PreparedGraphSetText::prepare_with_parameter_types(text, &declarations, &mut resolve)
         {
-            Ok(prepared) => Ok(Self::Set(prepared)),
-            Err(error) => {
-                diagnostics.push(error.to_string());
-                Err(QueryError::Unsupported { diagnostics })
-            }
+            Ok(prepared) => return Ok(Self::Set(prepared)),
+            Err(error) => consider(
+                error.offset,
+                6,
+                NativeReadClass::Set,
+                QueryError::SetText(error),
+            ),
         }
+        let (_, _, facade, source) = best.expect("non-temporal parsers always supply a refusal");
+        Err(QueryError::Refused {
+            facade,
+            source: Box::new(source),
+        })
     }
 
     /// Return the native template's inferred and explicitly declared parameters.
