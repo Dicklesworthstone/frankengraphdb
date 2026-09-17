@@ -37,6 +37,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod coalesced;
 pub mod compact;
 pub mod edge_props;
 pub mod manifest;
