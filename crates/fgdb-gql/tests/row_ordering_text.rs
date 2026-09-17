@@ -235,7 +235,7 @@ fn aliases_star_and_bad_order_references_are_resolved_before_catalog_access() {
     assert!(PreparedGraphText::prepare("MATCH (a) RETURN a ORDER BY a", symbols).is_ok());
     for tail in [
         "ORDER BY missing",
-        "ORDER BY x.payload",
+        "ORDER BY x.payload +",
         "ORDER BY rank,rank DESC",
         "ORDER rank",
         "ORDER BY",
@@ -256,6 +256,28 @@ fn aliases_star_and_bad_order_references_are_resolved_before_catalog_access() {
         assert!(result.is_err(), "{tail}");
         assert_eq!(calls.get(), 0, "{tail}");
     }
+    // A non-projected property is an evaluation key, not a public cell.
+    let hidden = text("MATCH (x) RETURN x.score AS rank ORDER BY x.payload");
+    let scores = [CanonicalScalar::Int(10), CanonicalScalar::Int(20)];
+    let payloads = [CanonicalScalar::Int(2), CanonicalScalar::Int(1)];
+    let rows = hidden
+        .plan()
+        .execute_with_properties_control(
+            [VId(0), VId(1)],
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |vid, key| Ok(Some(if key == SCORE {
+                &scores[vid.0 as usize]
+            } else {
+                &payloads[vid.0 as usize]
+            })),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let visible: Vec<Vec<CanonicalScalar>> = rows.iter().map(|row| {
+        row.values().iter().map(|value| value.as_scalar().unwrap().clone()).collect()
+    }).collect();
+    assert_eq!(visible, vec![vec![CanonicalScalar::Int(20)], vec![CanonicalScalar::Int(10)]]);
     let alias = text("MATCH (a)-[:R]->(b) RETURN a AS b,b AS other ORDER BY b DESC");
     assert_eq!(ordering(&alias), &[GraphValueOrder::descending(0)]);
     let star = text("MATCH (a)-[:R]->(b) RETURN * ORDER BY b DESC");
