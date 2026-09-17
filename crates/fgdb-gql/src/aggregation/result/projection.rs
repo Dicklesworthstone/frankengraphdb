@@ -177,6 +177,58 @@ struct ProjectedGroup<'g, 'a> {
 
 
 impl PreparedGraphAggregate {
+    /// Construct an untransformed COUNT/SUM/AVG result from a delta maintainer.
+    /// Keys use the evaluation grouping order and retain their typed domains.
+    /// This validates shape and result domains, not the maintained arithmetic.
+    /// Callers admit their owned payloads before construction; no copy occurs.
+    pub fn incremental_row(
+        &self,
+        keys: Vec<GraphValue>,
+        values: Vec<GraphAggregateValue>,
+    ) -> Option<GraphAggregateRow> {
+        if !self.supports_incremental_maintenance()
+            || keys.len() != self.keys.len()
+            || values.len() != self.aggregates.len()
+        {
+            return None;
+        }
+        for (key, column) in keys.iter().zip(&self.keys) {
+            let valid = match self.input.value_columns().get(*column)? {
+                crate::algebra::ValueProjection::Property { .. } => {
+                    matches!(key, GraphValue::Scalar(_))
+                }
+                crate::algebra::ValueProjection::Vertex { .. } => {
+                    matches!(key, GraphValue::Vertex(_)) || key.is_null()
+                }
+                _ => false,
+            };
+            if !valid || !key.validate_bounds() {
+                return None;
+            }
+        }
+        for (aggregate, value) in self.aggregates.iter().zip(&values) {
+            let valid = match aggregate.function {
+                GraphAggregateFunction::CountRows | GraphAggregateFunction::Count => {
+                    matches!(value, GraphAggregateValue::Count(_))
+                }
+                GraphAggregateFunction::SumInt => {
+                    matches!(value, GraphAggregateValue::Integer(_)) || value.is_null()
+                }
+                GraphAggregateFunction::AverageInt => {
+                    matches!(value, GraphAggregateValue::Average(_)) || value.is_null()
+                }
+                _ => false,
+            };
+            if !valid {
+                return None;
+            }
+        }
+        Some(GraphAggregateRow {
+            keys: keys.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+        })
+    }
+
     fn compare_projected<E>(
         &self, left: &ProjectedGroup<'_, '_>, right: &ProjectedGroup<'_, '_>,
         distinct: bool,
@@ -324,4 +376,66 @@ fn compare_cell<E>(
         }
     };
     Ok(result)
+}
+
+#[cfg(test)]
+mod incremental_row_tests {
+    use super::*;
+    use crate::algebra::{GraphColumn, GraphPatternBuilder};
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::VId;
+
+    fn shape(keys: &[usize], count: Option<u64>) -> PreparedGraphAggregate {
+        let mut input = GraphPatternBuilder::new();
+        input.vertex("n").unwrap();
+        let input = input.prepare_values(&[
+            GraphColumn::property("group", "n", PropertyKeyId(1)),
+            GraphColumn::property("score", "n", PropertyKeyId(2)),
+        ], 0, None).unwrap().with_duplicates();
+        PreparedGraphAggregate::prepare(input, keys, &[
+            GraphAggregate::count_rows("rows"), GraphAggregate::sum_int("sum", 1),
+            GraphAggregate::average_int("average", 1),
+        ], 0, count).unwrap()
+    }
+    fn values() -> Vec<GraphAggregateValue> {
+        vec![GraphAggregateValue::Count(2), GraphAggregateValue::Integer(3),
+             GraphAggregateValue::Average(GraphExactAverage::new(3, 2).unwrap())]
+    }
+
+    #[test]
+    fn maintained_rows_preserve_key_and_exact_result_domains() {
+        let query = shape(&[0], None);
+        let key = GraphValue::Scalar(CanonicalScalar::ucs_basic_text("group").unwrap());
+        let row = query.incremental_row(vec![key.clone()], values()).unwrap();
+        assert_eq!(row.keys(), &[key]);
+        assert_eq!(row.values(), values());
+        assert!(query.incremental_row(Vec::new(), values()).is_none());
+        assert!(query.incremental_row(vec![GraphValue::Vertex(VId(1))], values()).is_none());
+        let null = GraphValue::Scalar(CanonicalScalar::Null);
+        let mut wrong = values();
+        wrong[0] = GraphAggregateValue::Integer(2);
+        assert!(query.incremental_row(vec![null.clone()], wrong).is_none());
+        let mut wrong = values();
+        wrong[2] = GraphAggregateValue::Integer(1);
+        assert!(query.incremental_row(vec![null.clone()], wrong).is_none());
+        assert!(query.incremental_row(vec![null], vec![GraphAggregateValue::Count(1)]).is_none());
+    }
+
+    #[test]
+    fn empty_global_and_all_null_group_rows_remain_distinct_from_transformed_output() {
+        let null = GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        let global = shape(&[], None).incremental_row(Vec::new(), vec![
+            GraphAggregateValue::Count(0), null.clone(), null.clone(),
+        ]).unwrap();
+        assert!(global.keys().is_empty());
+        assert_eq!(global.get(0).unwrap().as_count(), Some(0));
+        let query = shape(&[0], None);
+        let key = GraphValue::Scalar(CanonicalScalar::Null);
+        let grouped = query.incremental_row(vec![key.clone()], vec![
+            GraphAggregateValue::Count(2), null.clone(), null,
+        ]).unwrap();
+        assert_eq!(grouped.keys(), &[key.clone()]);
+        assert_eq!(grouped.get(0).unwrap().as_count(), Some(2));
+        assert!(shape(&[0], Some(1)).incremental_row(vec![key], values()).is_none());
+    }
 }
