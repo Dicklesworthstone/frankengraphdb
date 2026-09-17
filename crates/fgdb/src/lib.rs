@@ -139,8 +139,8 @@ pub use fgdb_gql::{BoundPlan, RelationBind};
 /// byte-identical.
 pub use gql_cert::{GqlCertificate, GqlPlanCertificate, NativeReadClass};
 pub use query::{
-    NativeExplainCertificate, PreparedNativeRead, QueryError, QueryResult, QueryValue,
-    QueryWriteError,
+    NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead, QueryError,
+    QueryResult, QueryValue, QueryWriteError, ReplayRefusal,
 };
 pub use write_txn::{WriteTxn, WriteTxnError};
 
