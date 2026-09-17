@@ -457,6 +457,14 @@ impl<'a> Parser<'a> {
             text,
             at: self.current.at,
         };
+        if text.starts_with(Self::ANONYMOUS_PREFIX) {
+            return Err(error(
+                name.at,
+                GraphPatternTextErrorKind::Expected(
+                    "identifier outside the reserved __fgdb_anonymous_ namespace",
+                ),
+            ));
+        }
         self.advance()?;
         Ok(name)
     }
@@ -473,18 +481,30 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
     fn require_property_variable(&self, name: Name<'a>) -> Result<(), GraphPatternTextError> {
-        if self.syntax.variables.iter().any(|variable| variable.text == name.text)
+        if self
+            .syntax
+            .variables
+            .iter()
+            .any(|variable| variable.text == name.text)
             || self.syntax.edges.iter().any(|edge| {
                 edge.walk.is_none()
-                    && edge.variable.is_some_and(|variable| variable.text == name.text)
+                    && edge
+                        .variable
+                        .is_some_and(|variable| variable.text == name.text)
             })
         {
             return Ok(());
         }
         if self.syntax.path.is_some_and(|path| path.text == name.text)
-            || self.syntax.edges.iter().any(|edge| edge.variable.is_some_and(|variable| variable.text == name.text))
+            || self.syntax.edges.iter().any(|edge| {
+                edge.variable
+                    .is_some_and(|variable| variable.text == name.text)
+            })
         {
-            return Err(error(name.at, GraphPatternTextErrorKind::Expected("single fixed-length relationship or vertex")));
+            return Err(error(
+                name.at,
+                GraphPatternTextErrorKind::Expected("single fixed-length relationship or vertex"),
+            ));
         }
         Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable))
     }
@@ -512,29 +532,134 @@ impl<'a> Parser<'a> {
             }),
         ))
     }
+    /// Reserved namespace prefix for anonymous pattern-node bindings. The
+    /// lexer's identifier grammar admits it and `name()` refuses it for
+    /// user-written identifiers, making the names unreferenceable public
+    /// syntax while remaining ordinary validated builder variables.
+    const ANONYMOUS_PREFIX: &str = "__fgdb_anonymous_";
+
+    fn anonymous_name(ordinal: usize) -> &'static str {
+        const ANONYMOUS_NAMES: [&str; MAX_PATTERN_VERTICES] = [
+            "__fgdb_anonymous_0",
+            "__fgdb_anonymous_1",
+            "__fgdb_anonymous_2",
+            "__fgdb_anonymous_3",
+            "__fgdb_anonymous_4",
+            "__fgdb_anonymous_5",
+            "__fgdb_anonymous_6",
+            "__fgdb_anonymous_7",
+            "__fgdb_anonymous_8",
+            "__fgdb_anonymous_9",
+            "__fgdb_anonymous_10",
+            "__fgdb_anonymous_11",
+            "__fgdb_anonymous_12",
+            "__fgdb_anonymous_13",
+            "__fgdb_anonymous_14",
+            "__fgdb_anonymous_15",
+            "__fgdb_anonymous_16",
+            "__fgdb_anonymous_17",
+            "__fgdb_anonymous_18",
+            "__fgdb_anonymous_19",
+            "__fgdb_anonymous_20",
+            "__fgdb_anonymous_21",
+            "__fgdb_anonymous_22",
+            "__fgdb_anonymous_23",
+            "__fgdb_anonymous_24",
+            "__fgdb_anonymous_25",
+            "__fgdb_anonymous_26",
+            "__fgdb_anonymous_27",
+            "__fgdb_anonymous_28",
+            "__fgdb_anonymous_29",
+            "__fgdb_anonymous_30",
+            "__fgdb_anonymous_31",
+            "__fgdb_anonymous_32",
+            "__fgdb_anonymous_33",
+            "__fgdb_anonymous_34",
+            "__fgdb_anonymous_35",
+            "__fgdb_anonymous_36",
+            "__fgdb_anonymous_37",
+            "__fgdb_anonymous_38",
+            "__fgdb_anonymous_39",
+            "__fgdb_anonymous_40",
+            "__fgdb_anonymous_41",
+            "__fgdb_anonymous_42",
+            "__fgdb_anonymous_43",
+            "__fgdb_anonymous_44",
+            "__fgdb_anonymous_45",
+            "__fgdb_anonymous_46",
+            "__fgdb_anonymous_47",
+            "__fgdb_anonymous_48",
+            "__fgdb_anonymous_49",
+            "__fgdb_anonymous_50",
+            "__fgdb_anonymous_51",
+            "__fgdb_anonymous_52",
+            "__fgdb_anonymous_53",
+            "__fgdb_anonymous_54",
+            "__fgdb_anonymous_55",
+            "__fgdb_anonymous_56",
+            "__fgdb_anonymous_57",
+            "__fgdb_anonymous_58",
+            "__fgdb_anonymous_59",
+            "__fgdb_anonymous_60",
+            "__fgdb_anonymous_61",
+            "__fgdb_anonymous_62",
+            "__fgdb_anonymous_63",
+            "__fgdb_anonymous_64",
+        ];
+        ANONYMOUS_NAMES[ordinal]
+    }
     fn node(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         self.punct(b'(', "(")?;
-        let name = self.name()?;
-        if self.syntax.path.is_some_and(|path| path.text == name.text) {
-            return Err(error(
-                name.at,
-                GraphPatternTextErrorKind::Expected("vertex distinct from path binding"),
-            ));
-        }
-        if !self
-            .syntax
-            .variables
-            .iter()
-            .any(|var| var.text == name.text)
-        {
+        let name = if matches!(self.current.kind, TokenKind::Punct(b')' | b':')) {
             self.capacity(
                 self.syntax.variables.len(),
                 MAX_PATTERN_VERTICES,
                 PatternLimitDimension::Vertices,
             )?;
-            self.syntax.variables.push(name);
-        }
+            // Anonymous node: synthesize a private binding under the reserved
+            // `__fgdb_anonymous_` prefix, skipping every user-written name and
+            // every prior synthesis. The names are still validated builder
+            // variables, so scoped bodies, boolean templates and property
+            // filters work unchanged; they are invisible because `name()`
+            // refuses the prefix and the RETURN * expansion skips it.
+            let mut ordinal = 0usize;
+            while self
+                .syntax
+                .variables
+                .iter()
+                .any(|var| var.text == Self::anonymous_name(ordinal))
+            {
+                ordinal += 1;
+            }
+            self.syntax.variables.push(Name {
+                text: Self::anonymous_name(ordinal),
+                at: self.current.at,
+            });
+            *self.syntax.variables.last().expect("just pushed")
+        } else {
+            let name = self.name()?;
+            if self.syntax.path.is_some_and(|path| path.text == name.text) {
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Expected("vertex distinct from path binding"),
+                ));
+            }
+            if !self
+                .syntax
+                .variables
+                .iter()
+                .any(|var| var.text == name.text)
+            {
+                self.capacity(
+                    self.syntax.variables.len(),
+                    MAX_PATTERN_VERTICES,
+                    PatternLimitDimension::Vertices,
+                )?;
+                self.syntax.variables.push(name);
+            }
+            name
+        };
         while self.take(b':')? {
             self.capacity(
                 self.predicates,
@@ -588,7 +713,9 @@ impl<'a> Parser<'a> {
                 if matches!(predicate, Filter::Properties { .. }) {
                     return Err(error(
                         at,
-                        GraphPatternTextErrorKind::Expected("literal or typed parameter in node map"),
+                        GraphPatternTextErrorKind::Expected(
+                            "literal or typed parameter in node map",
+                        ),
                     ));
                 }
                 self.syntax.filters.push(predicate);
@@ -724,14 +851,19 @@ impl<'a> Parser<'a> {
             self.take_word("ALL")?;
         }
         if self.take(b'*')? {
-            self.syntax
-                .columns
-                .extend(self.syntax.variables.iter().copied().map(|name| Column {
-                    variable: name,
-                    property: None,
-                    path: None,
-                    alias: name,
-                }));
+            self.syntax.columns.extend(
+                self.syntax
+                    .variables
+                    .iter()
+                    .copied()
+                    .filter(|name| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
+                    .map(|name| Column {
+                        variable: name,
+                        property: None,
+                        path: None,
+                        alias: name,
+                    }),
+            );
             if let Some(name) = self.syntax.path {
                 self.capacity(
                     self.syntax.columns.len(),
@@ -1057,9 +1189,11 @@ impl PreparedGraphText {
                 alias: column.alias.text.to_owned(),
                 variable: column.variable.text.to_owned(),
                 key,
-                path: if key.is_some() && syntax.edges.iter().any(|edge| {
-                    edge.variable.is_some_and(|name| name.text == column.variable.text)
-                }) {
+                path: if key.is_some()
+                    && syntax.edges.iter().any(|edge| {
+                        edge.variable
+                            .is_some_and(|name| name.text == column.variable.text)
+                    }) {
                     Some(GraphPathFunction::Edge)
                 } else {
                     column.path
@@ -1507,6 +1641,115 @@ mod tests {
     }
 
     #[test]
+    fn anonymous_nodes_match_named_middle_reference() {
+        let edges: Vec<(VId, RelationId, VId)> = vec![
+            (VId(1), RelationId(1), VId(2)),
+            // A duplicate occurrence: anonymous matching must preserve
+            // multiplicities exactly like the named spelling.
+            (VId(1), RelationId(1), VId(2)),
+            (VId(2), RelationId(1), VId(3)),
+            (VId(3), RelationId(1), VId(1)),
+            (VId(4), RelationId(1), VId(2)),
+        ];
+        let anonymous = query("MATCH (a)-[:R]->()-[:R]->(c) RETURN a,c");
+        let named = query("MATCH (a)-[:R]->(m)-[:R]->(c) RETURN a,c");
+        let anonymous_start = query("MATCH ()-[:R]->(x) RETURN x");
+        let named_start = query("MATCH (m)-[:R]->(x) RETURN x");
+        let run = |pattern: &PreparedGraphPattern<GraphValueRow>| -> Vec<Vec<VId>> {
+            pattern
+                .plan()
+                .execute_governed_with_properties(
+                    edges.len() as u64,
+                    [],
+                    edges.iter().copied(),
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap()
+                .value
+                .iter()
+                .map(|row| {
+                    vertex_rows(std::slice::from_ref(row))
+                        .pop()
+                        .expect("one row")
+                })
+                .collect()
+        };
+        // Independent complete-assignment enumeration: one row per (a, m, c)
+        // assignment weighted by the edge-occurrence product.
+        let mut expected = Vec::new();
+        for a in 1..=4 {
+            for middle in 1..=4 {
+                for c in 1..=4 {
+                    let multiplicity = edges
+                        .iter()
+                        .filter(|&&(s, _, d)| s == VId(a) && d == VId(middle))
+                        .count()
+                        * edges
+                            .iter()
+                            .filter(|&&(s, _, d)| s == VId(middle) && d == VId(c))
+                            .count();
+                    for _ in 0..multiplicity {
+                        expected.push(vec![VId(a), VId(c)]);
+                    }
+                }
+            }
+        }
+        expected.sort();
+        let anonymous_rows = vertex_rows(
+            &anonymous
+                .plan()
+                .execute_governed_with_properties(
+                    edges.len() as u64,
+                    [],
+                    edges.iter().copied(),
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap()
+                .value,
+        );
+        assert!(
+            !anonymous_rows.is_empty(),
+            "anti-vacuity: two-hop rows exist"
+        );
+        assert_eq!(anonymous_rows, expected);
+        assert_eq!(anonymous_rows, run(&named));
+        let mut start_expected: Vec<Vec<VId>> = edges.iter().map(|&(_, _, d)| vec![d]).collect();
+        start_expected.sort();
+        assert_eq!(run(&anonymous_start), start_expected);
+        assert_eq!(run(&anonymous_start), run(&named_start));
+    }
+
+    #[test]
+    fn anonymous_bindings_stay_private_and_reserved() {
+        // RETURN * must not leak synthesized bindings.
+        let pattern = query("MATCH (a)-[:R]->() RETURN *");
+        assert_eq!(pattern.columns(), &["a"]);
+        // User-written identifiers may never use the reserved namespace.
+        for text in [
+            "MATCH (n), (__fgdb_anonymous_0) RETURN n",
+            "MATCH (n:__fgdb_anonymous_0) RETURN n",
+            "MATCH (n), (__fgdb_anonymous_63)-[:R]->(n) RETURN n",
+        ] {
+            let failure = PreparedGraphText::prepare(text, symbols).unwrap_err();
+            assert!(
+                matches!(
+                    failure.kind,
+                    GraphPatternTextErrorKind::Expected(
+                        "identifier outside the reserved __fgdb_anonymous_ namespace"
+                    )
+                ),
+                "{text}: {failure:?}"
+            );
+        }
+    }
+
+    #[test]
     fn binding_reuses_resolved_structure_and_enforces_exact_typed_arguments() {
         let calls = Cell::new(0);
         let source = "MATCH (n:L) WHERE n.n >= $x AND n.n <= $x RETURN n SKIP $page LIMIT $page";
@@ -1949,8 +2192,14 @@ mod tests {
                 "MATCH (a {n:'O''Brien 🦀, $x: RETURN'}) RETURN a",
                 "MATCH (a) WHERE a.n='O''Brien 🦀, $x: RETURN' RETURN a",
             ),
-            ("MATCH (a {n:TRUE}) RETURN a", "MATCH (a) WHERE a.n=TRUE RETURN a"),
-            ("MATCH (a {n:NULL}) RETURN a", "MATCH (a) WHERE a.n=NULL RETURN a"),
+            (
+                "MATCH (a {n:TRUE}) RETURN a",
+                "MATCH (a) WHERE a.n=TRUE RETURN a",
+            ),
+            (
+                "MATCH (a {n:NULL}) RETURN a",
+                "MATCH (a) WHERE a.n=NULL RETURN a",
+            ),
         ] {
             assert_eq!(query(inline), query(expanded), "{inline}");
         }
@@ -2043,10 +2292,14 @@ mod tests {
             "MATCH (a {n:'unterminated}) RETURN a",
         ] {
             let mut calls = 0;
-            assert!(PreparedGraphText::prepare(text, |kind, name| {
-                calls += 1;
-                symbols(kind, name)
-            }).is_err(), "{text}");
+            assert!(
+                PreparedGraphText::prepare(text, |kind, name| {
+                    calls += 1;
+                    symbols(kind, name)
+                })
+                .is_err(),
+                "{text}"
+            );
             assert_eq!(calls, 0, "{text}");
         }
         let entries = (0..MAX_PATTERN_PREDICATES)
@@ -2073,10 +2326,15 @@ mod tests {
             let failure = PreparedGraphText::prepare(&text, |kind, name| {
                 calls += 1;
                 resolve(kind, name)
-            }).unwrap_err();
-            assert!(matches!(failure.kind, GraphPatternTextErrorKind::Build(
-                PatternBuildError::LimitExceeded { limit: MAX_PATTERN_PREDICATES, .. }
-            )));
+            })
+            .unwrap_err();
+            assert!(matches!(
+                failure.kind,
+                GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                    limit: MAX_PATTERN_PREDICATES,
+                    ..
+                })
+            ));
             assert_eq!(calls, 0);
         }
     }
