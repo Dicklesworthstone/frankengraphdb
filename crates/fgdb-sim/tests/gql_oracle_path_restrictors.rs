@@ -3,7 +3,7 @@
 //! WALK permits repeated vertices and edges; TRAIL forbids repeated edge IDs;
 //! ACYCLIC forbids every repeated vertex; SIMPLE permits only first == last.
 //! A SIMPLE closure (including a self-loop) is terminal. Zero hops is valid.
-//! TRAIL is refused by the native compiler: refusal is NOT execution coverage.
+//! TRAIL executes against the same replayed snapshots as every other restrictor.
 //! Accepted spelling: MATCH route = SIMPLE (a)-[:R*0..3]->(b).
 //! RETURN ALL endpoints sort lexicographically with multiplicity. Captures sort
 //! by (start, [(edge ID, next vertex)]), not by hop count or node sequence.
@@ -233,7 +233,7 @@ fn execute(db: &Database, cx: &QueryCx, case: Case, at: Option<CommitSeq>) -> Ro
 }
 fn cases() -> Vec<Case> {
     let mut cases = Vec::new();
-    for mode in [Mode::Walk, Mode::Acyclic, Mode::Simple] {
+    for mode in [Mode::Walk, Mode::Trail, Mode::Acyclic, Mode::Simple] {
         for direction in [Direction::Out, Direction::In, Direction::Both] {
             for (minimum, maximum) in [(0, 0), (0, 3), (2, 4), (4, 4)] {
                 for capture in [false, true] {
@@ -293,7 +293,29 @@ fn topology_coverage(graph: &ReferenceGraph) {
             .any(|p| admits(p, Mode::Trail) && !admits(p, Mode::Acyclic)),
         "comparison mutation must distinguish TRAIL from ACYCLIC"
     );
+    let cycle_then_exit = walks
+        .iter()
+        .find(|p| p.edges == [EId(10), EId(14), EId(16), EId(13)])
+        .expect("1 -> 2 -> 4 -> 1 -> 3 cycle followed by exit exists");
+    assert!(admits(cycle_then_exit, Mode::Trail));
+    assert!(!admits(cycle_then_exit, Mode::Simple));
+    assert!(!admits(cycle_then_exit, Mode::Acyclic));
+    assert!(
+        walks
+            .iter()
+            .any(|p| admits(p, Mode::Trail) && !admits(p, Mode::Simple)),
+        "TRAIL minus SIMPLE must be non-empty"
+    );
+    for (edges, accepted) in [(vec![EId(17)], true), (vec![EId(17), EId(17)], false)] {
+        let path = walks.iter().find(|p| p.edges == edges).expect("loop walk");
+        assert_eq!(admits(path, Mode::Trail), accepted, "loop used once only");
+    }
     let undirected = enumerate(graph, 2, 2, Direction::Both);
+    let parallel_return = undirected
+        .iter()
+        .find(|p| p.edges == [EId(10), EId(11)] && p.vertices == [VId(1), VId(2), VId(1)])
+        .expect("parallel edges form a two-edge return trail");
+    assert!(admits(parallel_return, Mode::Trail));
     assert!(
         undirected
             .iter()
@@ -302,12 +324,12 @@ fn topology_coverage(graph: &ReferenceGraph) {
     );
 }
 fn verify(graph: &ReferenceGraph, results: &[(Case, Rows)], seed: u64, at: Option<CommitSeq>) {
-    topology_coverage(graph);
     for (case, actual) in results {
         let paths = enumerate(graph, case.minimum, case.maximum, case.direction);
         let wanted = expected(&paths, *case);
         assert_eq!(actual, &wanted, "seed={seed} query={}", case.text(at));
     }
+    topology_coverage(graph);
 }
 
 #[test]
@@ -360,20 +382,6 @@ fn seeded_path_restrictors_match_independent_reference() {
             let mut deletion = WriteBatch::new(R);
             deletion.delete_edge(EId(12));
             let after = db.write(&commit, deletion).await.expect("delete commits");
-            // Refused TRAIL is recorded, never silently omitted or called coverage.
-            for capture in [false, true] {
-                let refused = Case {
-                    mode: Mode::Trail,
-                    direction: Direction::Out,
-                    minimum: 0,
-                    maximum: 3,
-                    capture,
-                };
-                assert!(
-                    PreparedGraphText::prepare(&refused.text(None), symbols).is_err(),
-                    "TRAIL now accepted: extend execution differential"
-                );
-            }
             let results: Vec<_> = [None, Some(before), Some(after)]
                 .into_iter()
                 .map(|at| {
