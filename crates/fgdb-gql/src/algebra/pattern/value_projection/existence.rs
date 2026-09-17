@@ -307,7 +307,7 @@ impl GraphPatternBuilder {
                     }
                     GlaOperator::SelectBoolean { expression } => {
                         operators.push(GlaOperator::SelectBoolean {
-                            expression: expression.remap(map),
+                            expression: expression.remap_elements(map, |capture| capture),
                         });
                     }
                     _ => unreachable!(
@@ -363,6 +363,10 @@ impl GraphPatternBuilder {
                 },
                 GraphColumn::Property { key, .. } => ValueProjection::Property {
                     slot: scope_slots[variable],
+                    key: *key,
+                },
+                GraphColumn::EdgeProperty { key, .. } => ValueProjection::EdgeProperty {
+                    capture: variable as u32,
                     key: *key,
                 },
                 GraphColumn::Path { function, .. } => ValueProjection::Path {
@@ -428,6 +432,13 @@ impl GraphPatternBuilder {
                 GraphColumn::Path { variable, function, .. } => {
                     let capture = self.path_capture(variable)?;
                     if (*function == GraphPathFunction::Edge) != self.path_captures[capture].edge_identity {
+                        return Err(PatternBuildError::InvalidPathCapture);
+                    }
+                    capture
+                },
+                GraphColumn::EdgeProperty { variable, .. } => {
+                    let capture = self.path_capture(variable)?;
+                    if !self.path_captures[capture].edge_identity {
                         return Err(PatternBuildError::InvalidPathCapture);
                     }
                     capture

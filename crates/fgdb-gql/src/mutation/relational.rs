@@ -7,8 +7,8 @@ use crate::PreparedGraphSet;
 impl PreparedGraphMutation {
     /// Select targets and RHS values from a completed single-source relation.
     /// All projections, filters, DISTINCT and pages run before assignments.
-    /// Action indices address the final relation, never the graph leaf. Vertex
-    /// identities must survive as vertex-typed columns; scalar values cannot
+    /// Action indices address the final relation, never the graph leaf. Element
+    /// identities must survive as vertex/edge-typed columns; scalar values cannot
     /// fabricate targets. Null targets retain the ordinary no-assignment rule.
     ///
     /// Existing WriteTxn, autocommit and atomic-program mutation entrypoints

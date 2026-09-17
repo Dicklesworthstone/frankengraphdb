@@ -100,7 +100,9 @@ impl<'a> Parser<'a> {
         columns.push(Projection {
             variable,
             property,
-            path: None,
+            path: self.syntax.edges.iter().any(|edge| {
+                edge.variable.is_some_and(|name| name.text == variable.text)
+            }).then_some(GraphPathFunction::Edge),
         });
         Ok(at)
     }
@@ -114,7 +116,7 @@ impl<'a> Parser<'a> {
         if matches!(self.current.kind, TokenKind::Word(_))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
         {
-            let variable = self.variable()?;
+            let variable = self.property_variable()?;
             self.punct(b'.', ".")?;
             let key = self.name()?;
             return self
@@ -199,11 +201,18 @@ impl<'a> Parser<'a> {
                         },
                     ));
                 }
-                let variable = self.variable()?;
+                let variable = if deleting {
+                    self.variable()?
+                } else {
+                    self.property_variable()?
+                };
                 let target = self.mutation_projection(&mut columns, variable, None)?;
                 let kind = if deleting {
                     ActionKind::Delete
                 } else if self.take(b':')? {
+                    if !self.syntax.variables.iter().any(|name| name.text == variable.text) {
+                        return Err(error(variable.at, GraphPatternTextErrorKind::Expected("vertex label target")).into());
+                    }
                     ActionKind::Label {
                         label: self.name()?,
                         present: setting,
@@ -378,7 +387,7 @@ impl PreparedGraphMutationText {
                 alias: format!("_mutation_{index}"),
                 variable: projection.variable.text.to_owned(),
                 key,
-                path: None,
+                path: projection.path,
             });
         }
         let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();

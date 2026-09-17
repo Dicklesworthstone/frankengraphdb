@@ -270,6 +270,17 @@ mod sealed {
         ) -> Result<(), E> {
             Self::collect_properties(operator, bindings, projected, property, control)
         }
+        fn collect_element_properties<'a, E>(
+            operator: &GlaOperator,
+            bindings: &[Option<VId>],
+            paths: &[Option<super::super::GraphPath>],
+            projected: &mut ProjectedRows<Self>,
+            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            _edge_property: &mut impl FnMut(fgdb_types::EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            Self::collect_properties_with_paths(operator, bindings, paths, projected, property, control)
+        }
     }
 
     impl Projection for VId {
@@ -355,6 +366,22 @@ mod sealed {
     }
 
     impl PropertyProjection for GraphValueRow {
+        fn collect_element_properties<'a, E>(
+            operator: &GlaOperator,
+            bindings: &[Option<VId>],
+            paths: &[Option<super::super::GraphPath>],
+            projected: &mut ProjectedRows<Self>,
+            property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            edge_property: &mut impl FnMut(fgdb_types::EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+            control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        ) -> Result<(), E> {
+            let GlaOperator::ProjectValues { columns } = operator else {
+                unreachable!("the private value-plan constructor owns its projection shape")
+            };
+            super::super::values::collect_values_with_element_properties(
+                columns, bindings, paths, projected, property, edge_property, control,
+            )
+        }
         fn collect_properties_with_paths<'a, E>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],

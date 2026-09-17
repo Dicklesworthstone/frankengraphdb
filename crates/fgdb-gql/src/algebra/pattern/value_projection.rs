@@ -56,6 +56,10 @@ impl GraphPatternBuilder {
                     slot: slots[variable],
                     key: *key,
                 },
+                GraphColumn::EdgeProperty { key, .. } => ValueProjection::EdgeProperty {
+                    capture: variable as u32,
+                    key: *key,
+                },
                 GraphColumn::Path { function, .. } => ValueProjection::Path {
                     capture: variable as u32,
                     function: *function,

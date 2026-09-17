@@ -72,6 +72,11 @@ pub enum GraphColumn<'a> {
         variable: &'a str,
         key: PropertyKeyId,
     },
+    EdgeProperty {
+        name: &'a str,
+        variable: &'a str,
+        key: PropertyKeyId,
+    },
     Path {
         name: &'a str,
         variable: &'a str,
@@ -103,9 +108,14 @@ impl<'a> GraphColumn<'a> {
     }
 
     #[must_use]
+    pub const fn edge_property(name: &'a str, variable: &'a str, key: PropertyKeyId) -> Self {
+        Self::EdgeProperty { name, variable, key }
+    }
+
+    #[must_use]
     pub const fn name(self) -> &'a str {
         match self {
-            Self::Vertex { name, .. } | Self::Property { name, .. } | Self::Path { name, .. } => {
+            Self::Vertex { name, .. } | Self::Property { name, .. } | Self::EdgeProperty { name, .. } | Self::Path { name, .. } => {
                 name
             }
         }
@@ -115,6 +125,7 @@ impl<'a> GraphColumn<'a> {
         match self {
             Self::Vertex { variable, .. }
             | Self::Property { variable, .. }
+            | Self::EdgeProperty { variable, .. }
             | Self::Path { variable, .. } => variable,
         }
     }
@@ -136,6 +147,10 @@ pub enum ValueProjection {
     },
     Property {
         slot: BindingSlot,
+        key: PropertyKeyId,
+    },
+    EdgeProperty {
+        capture: u32,
         key: PropertyKeyId,
     },
     Path {
@@ -604,6 +619,19 @@ pub(super) fn collect_values_with_paths<'a, E>(
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
+    collect_values_with_element_properties(columns, bindings, paths, projected, property,
+        &mut |_, _| panic!("edge properties require an explicit edge property source"), control)
+}
+
+pub(super) fn collect_values_with_element_properties<'a, E>(
+    columns: &[ValueProjection],
+    bindings: &[Option<VId>],
+    paths: &[Option<GraphPath>],
+    projected: &mut ProjectedRows<GraphValueRow>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
     let null = CanonicalScalar::Null;
     let mut computed: [Option<GraphValue>; MAX_PATTERN_VERTICES] = core::array::from_fn(|_| None);
     for (at, column) in columns.iter().enumerate() {
@@ -650,6 +678,18 @@ pub(super) fn collect_values_with_paths<'a, E>(
                 // Never consult the source with a fabricated identity.
                 let value = match bindings[slot.ordinal() as usize] {
                     Some(vid) => property(vid, *key)?,
+                    None => None,
+                };
+                ValueRef::Scalar(value.unwrap_or(&null))
+            }
+            ValueProjection::EdgeProperty { capture, key } => {
+                let value = match paths.get(*capture as usize).and_then(Option::as_ref) {
+                    Some(path) => {
+                        let [(edge, _)] = path.steps() else {
+                            unreachable!("edge property captures contain exactly one relationship")
+                        };
+                        edge_property(*edge, *key)?
+                    }
                     None => None,
                 };
                 ValueRef::Scalar(value.unwrap_or(&null))

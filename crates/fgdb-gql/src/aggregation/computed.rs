@@ -47,6 +47,24 @@ impl PreparedGraphAggregate {
         self.computed_input.as_deref()
     }
 
+    /// Execute an identified source whose property expressions refer to vertices.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_identified_properties<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        self.execute_governed_with_element_properties(
+            snapshot_records, vertices, edges, test_vertex, property, |_, _| Ok(None),
+            policy, checkpoint,
+        )
+    }
+
     /// Summarize paths using the real edge identities of one admitted source.
     /// This is the identified counterpart of execute_governed, not another
     /// matcher or aggregate implementation. Uncaptured inputs retain their
@@ -63,13 +81,14 @@ impl PreparedGraphAggregate {
     /// must be the real source identities, not ordinals assigned to edge triples.
     /// This is bounded materialization, not spill-backed path aggregation.
     #[allow(clippy::too_many_arguments)]
-    pub fn execute_governed_with_identified_properties<'a, E, C>(
+    pub fn execute_governed_with_element_properties<'a, E, C>(
         &self,
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
@@ -89,9 +108,9 @@ impl PreparedGraphAggregate {
                 |pattern, remaining| {
                     let (vertices, edges) = admitted.take()
                         .expect("single-source aggregate preparation admits exactly one leaf");
-                    pattern.plan().execute_governed_with_identified_properties(
+                    pattern.plan().execute_governed_with_element_properties(
                         snapshot_records, vertices, edges, &mut test_vertex, &mut property,
-                        remaining, || (*checkpoint.borrow_mut())(),
+                        &mut edge_property, remaining, || (*checkpoint.borrow_mut())(),
                     )
                 },
                 || (*checkpoint.borrow_mut())(),
@@ -103,8 +122,8 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let source = self.input.plan().execute_governed_with_identified_properties(
-            snapshot_records, vertices, edges, test_vertex, property,
+        let source = self.input.plan().execute_governed_with_element_properties(
+            snapshot_records, vertices, edges, test_vertex, property, edge_property,
             source_policy, &mut checkpoint,
         ).map_err(|error| error.map_source(GraphAggregateError::Source))?;
         self.finish_materialized_governed(source, policy, checkpoint)

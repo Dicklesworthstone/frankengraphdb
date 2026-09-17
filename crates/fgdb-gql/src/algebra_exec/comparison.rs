@@ -1,16 +1,63 @@
 //! Borrowed, binding-dependent property selection in the shared GLA visitor.
 
 use crate::GlaExecutionEvent;
-use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator};
+use crate::algebra::{BindingSlot, GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, VId};
 
 /// Both source reads are explicit and fallible; no source failure is a missing
 /// value. A null binding has no property source and rejects without a read.
-/// This predicate depends on the complete pair and deliberately does NOT use
-/// the ordinary Select cache keyed only by operator and one vertex identity.
-/// The source must supply the same immutable generation as projection reads.
-pub(super) fn compare_properties<'a, E>(
+/// Mixed vertex/captured-edge scalar comparisons execute through the same
+/// three-valued engine once bound; each read names its disjoint identity
+/// domain and an unreadable source always propagates.
+pub(crate) fn compare_element_properties<'a, E>(
+        operator: &GlaOperator,
+        bindings: &[Option<VId>],
+        paths: &[Option<crate::algebra::GraphPath>],
+        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        edge_property: &mut impl FnMut(fgdb_types::EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+    if let GlaOperator::SelectBoolean { expression } = operator {
+        return expression.evaluate_elements(bindings, paths, property, edge_property, control);
+    }
+    let GlaOperator::CompareProperties {
+        left,
+        left_key,
+        right,
+        right_key,
+        comparison,
+    } = operator
+    else {
+        unreachable!("the compiler dispatches only a binding property comparison")
+    };
+    let vertex = |slot: &BindingSlot| -> Option<VId> {
+        bindings.get(slot.ordinal() as usize).copied().flatten()
+    };
+    let edge = |slot: &BindingSlot| -> Option<fgdb_types::EId> {
+        paths.get(slot.ordinal() as usize).and_then(Option::as_ref).and_then(|path| match path.steps() {
+            [(edge, _)] => Some(*edge),
+            _ => None,
+        })
+    };
+    let left = match (vertex(left), edge(left)) {
+        (_, Some(captured)) => edge_property(captured, *left_key)?,
+        (Some(identity), None) => property(identity, *left_key)?,
+        (None, None) => return Ok(false),
+    };
+    control(GlaExecutionEvent::Work)?;
+    let right = match (vertex(right), edge(right)) {
+        (_, Some(captured)) => edge_property(captured, *right_key)?,
+        (Some(identity), None) => property(identity, *right_key)?,
+        (None, None) => return Ok(false),
+    };
+    for value in [left, right].into_iter().flatten() {
+        charge_payload(value, control)?;
+    }
+    control(GlaExecutionEvent::Work)?;
+    Ok(comparison.accepts_scalar_pair(left, right))
+}
+pub(crate) fn compare_properties<'a, E>(
     operator: &GlaOperator,
     bindings: &[Option<VId>],
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,

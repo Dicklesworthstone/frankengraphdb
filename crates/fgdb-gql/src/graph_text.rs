@@ -472,6 +472,28 @@ impl<'a> Parser<'a> {
         }
         Ok(name)
     }
+    fn require_property_variable(&self, name: Name<'a>) -> Result<(), GraphPatternTextError> {
+        if self.syntax.variables.iter().any(|variable| variable.text == name.text)
+            || self.syntax.edges.iter().any(|edge| {
+                edge.walk.is_none()
+                    && edge.variable.is_some_and(|variable| variable.text == name.text)
+            })
+        {
+            return Ok(());
+        }
+        if self.syntax.path.is_some_and(|path| path.text == name.text)
+            || self.syntax.edges.iter().any(|edge| edge.variable.is_some_and(|variable| variable.text == name.text))
+        {
+            return Err(error(name.at, GraphPatternTextErrorKind::Expected("single fixed-length relationship or vertex")));
+        }
+        Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable))
+    }
+
+    fn property_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+        let name = self.name()?;
+        self.require_property_variable(name)?;
+        Ok(name)
+    }
     fn capacity(
         &self,
         count: usize,
@@ -738,7 +760,13 @@ impl<'a> Parser<'a> {
                     edge.variable
                         .is_some_and(|name| name.text == expression.text)
                 }) {
-                    (expression, None, Some(GraphPathFunction::Edge))
+                    let property = if self.take(b'.')? {
+                        self.require_property_variable(expression)?;
+                        Some(self.name()?)
+                    } else {
+                        None
+                    };
+                    (expression, property, Some(GraphPathFunction::Edge))
                 } else {
                     if !self
                         .syntax
@@ -854,6 +882,11 @@ struct BoundColumn {
 }
 impl BoundColumn {
     fn declaration(&self) -> GraphColumn<'_> {
+        if self.path == Some(GraphPathFunction::Edge) {
+            if let Some(key) = self.key {
+                return GraphColumn::edge_property(&self.alias, &self.variable, key);
+            }
+        }
         if let Some(function) = self.path {
             return GraphColumn::path(&self.alias, &self.variable, function);
         }
@@ -997,7 +1030,13 @@ impl PreparedGraphText {
                 alias: column.alias.text.to_owned(),
                 variable: column.variable.text.to_owned(),
                 key,
-                path: column.path,
+                path: if key.is_some() && syntax.edges.iter().any(|edge| {
+                    edge.variable.is_some_and(|name| name.text == column.variable.text)
+                }) {
+                    Some(GraphPathFunction::Edge)
+                } else {
+                    column.path
+                },
             });
         }
         // Compile the actual scope topology for structural validation. Do not

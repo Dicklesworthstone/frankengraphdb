@@ -135,6 +135,7 @@ fn stats(completed_statements: usize) -> GraphWriteProgramStats {
         },
         evaluator: GlaExecutionStats::default(),
         target_vertex_visits: 80,
+        target_edge_visits: 0,
         mutation_effects: 80,
         created_vertices: 80,
         created_edges: 0,
@@ -155,6 +156,7 @@ fn record_receipts_require_a_complete_shape_and_preserve_order_without_copying()
             } else {
                 GraphWriteStepReceipt::Mutation {
                     targets: vec![vertex],
+                    edges: Vec::new(),
                 }
             }
         })

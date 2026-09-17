@@ -21,7 +21,9 @@ use fgdb_delta_types::{
     LogicalDeltaTemplate, OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
     canonicalize,
 };
-use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId, VId};
+use fgdb_types::{
+    BranchId, CanonicalScalar, CanonicalTimestamp, EId, GraphId, ObjectId, TzdbResolver, VId,
+};
 
 fn oid(seed: u8) -> ObjectId {
     ObjectId([seed; 32])
@@ -223,6 +225,86 @@ type FieldEdit = (&'static str, fn(&mut DeltaRow));
 // ---------------------------------------------------------------------------
 // Round trip
 // ---------------------------------------------------------------------------
+
+#[test]
+fn zoned_timestamp_template_round_trips_through_resolver() {
+    const TZDB: ObjectId = ObjectId([0x71; 32]);
+    const ZONE: &str = "America/New_York";
+    struct FixtureTzdb;
+    impl TzdbResolver for FixtureTzdb {
+        fn contains_tzdb(&self, tzdb_oid: &ObjectId) -> bool {
+            *tzdb_oid == TZDB
+        }
+
+        fn canonical_utc_offset_seconds(
+            &self,
+            tzdb_oid: &ObjectId,
+            zone_identifier: &str,
+            _instant_utc_nanos: i128,
+        ) -> Option<i32> {
+            (*tzdb_oid == TZDB && zone_identifier == ZONE).then_some(-18_000)
+        }
+    }
+    impl fgdb_types::CollationResolver for FixtureTzdb {
+        fn artifact_available(&self, _: &ObjectId) -> bool {
+            false
+        }
+
+        fn canonical_sort_key_len(
+            &self,
+            _: &fgdb_types::NonBinaryTextBinding,
+            _: &str,
+        ) -> Result<usize, fgdb_types::CollationResolverError> {
+            Err(fgdb_types::CollationResolverError::new(1))
+        }
+
+        fn write_canonical_sort_key(
+            &self,
+            _: &fgdb_types::NonBinaryTextBinding,
+            _: &str,
+            _: &mut [u8],
+        ) -> Result<usize, fgdb_types::CollationResolverError> {
+            Err(fgdb_types::CollationResolverError::new(1))
+        }
+
+        fn canonical_sort_key_matches(
+            &self,
+            _: &fgdb_types::NonBinaryTextBinding,
+            _: &str,
+            _: &[u8],
+        ) -> Result<bool, fgdb_types::CollationResolverError> {
+            Err(fgdb_types::CollationResolverError::new(1))
+        }
+    }
+    let zoned = CanonicalScalar::Timestamp(
+        CanonicalTimestamp::zoned(1_735_689_600_123_456_789, -18_000, ZONE, TZDB, &FixtureTzdb)
+            .expect("fixture zone is canonical"),
+    );
+    let row = DeltaRow::CreateVertex {
+        vid: VId(21),
+        birth_ordinal: 5,
+        labels: vec![LabelId(3)],
+        props: vec![(PropertyKeyId(6), zoned.clone())],
+        valid_time: None,
+    };
+    let template =
+        LogicalDeltaTemplate::build(oid(0x11), [0x22; 32], vec![entry(1, 1, 3, vec![row])])
+            .expect("builds");
+    let encoded = template.canonical_bytes().expect("encodes");
+    let decoded = LogicalDeltaTemplate::decode_canonical_with_resolver(&encoded, &FixtureTzdb)
+        .expect("zoned property decodes under the pinned resolver");
+    assert_eq!(decoded, template);
+    let DeltaRow::CreateVertex { props, .. } = &decoded.coordinate_entries()[0].rows[0] else {
+        panic!("row shape changed");
+    };
+    assert_eq!(props[0].1, zoned);
+
+    // Without a resolver the same bytes stay unreadable, typed.
+    assert_eq!(
+        LogicalDeltaTemplate::decode_canonical(&encoded),
+        Err(CanonicalError::Scalar)
+    );
+}
 
 #[test]
 fn every_row_family_round_trips() {

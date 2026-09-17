@@ -306,7 +306,8 @@ fn bind_fields(
                 };
                 GraphMutationValue::Expression(expression)
             }
-            ReadValueTemplate::List(_) | ReadValueTemplate::Index { .. }
+            ReadValueTemplate::List(_)
+            | ReadValueTemplate::Index { .. }
             | ReadValueTemplate::Size(_) => {
                 // Scalar properties only: list construction is a read-surface
                 // capability, not a stored property encoding.

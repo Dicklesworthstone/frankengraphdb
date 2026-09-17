@@ -22,7 +22,9 @@ fn append_stage(
     depth: &mut usize,
 ) -> Result<(), GraphSetTextError> {
     let (at, growth) = match &stage {
-        ReadStageTemplate::Project { at, .. } | ReadStageTemplate::Filter { at, .. } | ReadStageTemplate::Unwind { at, .. } => (*at, 1),
+        ReadStageTemplate::Project { at, .. }
+        | ReadStageTemplate::Filter { at, .. }
+        | ReadStageTemplate::Unwind { at, .. } => (*at, 1),
         ReadStageTemplate::Page { at, .. } => (*at, 0),
     };
     *depth += growth;
@@ -203,9 +205,15 @@ impl<'a> Parser<'a> {
         Ok((projection, next_schema))
     }
 
-    pub(super) fn unwind_stage(&mut self, schema: &mut RowSchema<'a>, at: usize) -> Result<ReadStageTemplate, GraphSetTextError> {
+    pub(super) fn unwind_stage(
+        &mut self,
+        schema: &mut RowSchema<'a>,
+        at: usize,
+    ) -> Result<ReadStageTemplate, GraphSetTextError> {
         if let TokenKind::Parameter(name) = self.current.kind {
-            self.parameter_types.entry(name.to_owned()).or_insert(GqlParameterType::List);
+            self.parameter_types
+                .entry(name.to_owned())
+                .or_insert(GqlParameterType::List);
         }
         let value = self.read_row_value(schema, 0)?;
         self.word("AS")?;
@@ -213,9 +221,17 @@ impl<'a> Parser<'a> {
         if schema.iter().any(|(name, _)| name.text == alias.text) {
             return Err(expected(alias.at, "new UNWIND alias"));
         }
-        self.capacity(schema.len(), MAX_PATTERN_VERTICES, crate::algebra::PatternLimitDimension::Columns)?;
+        self.capacity(
+            schema.len(),
+            MAX_PATTERN_VERTICES,
+            crate::algebra::PatternLimitDimension::Columns,
+        )?;
         schema.push((alias, GraphSetColumnType::Any));
-        Ok(ReadStageTemplate::Unwind { at, name: alias.text.to_owned(), value })
+        Ok(ReadStageTemplate::Unwind {
+            at,
+            name: alias.text.to_owned(),
+            value,
+        })
     }
 
     pub(super) fn row_page(

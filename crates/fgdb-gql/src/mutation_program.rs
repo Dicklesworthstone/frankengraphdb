@@ -123,6 +123,7 @@ pub struct GraphMutationProgramStats {
     pub selection: GqlExecutionStats,
     pub evaluator: GlaExecutionStats,
     pub target_vertex_visits: u64,
+    pub target_edge_visits: u64,
     pub effects: u64,
 }
 impl Default for GraphMutationProgramStats {
@@ -135,6 +136,7 @@ impl Default for GraphMutationProgramStats {
             },
             evaluator: GlaExecutionStats::default(),
             target_vertex_visits: 0,
+            target_edge_visits: 0,
             effects: 0,
         }
     }
@@ -323,8 +325,9 @@ impl ProgramMeter {
         stats: GraphMutationStats,
     ) -> Result<(), GraphMutationProgramError<E, C>> {
         use GraphMutationProgramDimension as D;
-        if stats.target_vertices > stats.effects
-            || (stats.target_vertices == 0) != (stats.effects == 0)
+        let targets = u128::from(stats.target_vertices) + u128::from(stats.target_edges);
+        if targets > u128::from(stats.effects)
+            || (targets == 0) != (stats.effects == 0)
             || u128::from(stats.effects) > u128::from(stats.selection.result_rows) * actions as u128
         {
             return Err(GraphMutationProgramError::InvalidStatistics { statement });
@@ -355,6 +358,11 @@ impl ProgramMeter {
                 .stats
                 .target_vertex_visits
                 .checked_add(stats.target_vertices)
+                .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?,
+            target_edge_visits: self
+                .stats
+                .target_edge_visits
+                .checked_add(stats.target_edges)
                 .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?,
             effects: self.add(statement, D::Effects, stats.effects)?,
         };

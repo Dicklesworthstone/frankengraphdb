@@ -31,8 +31,18 @@ impl<'a> Parser<'a> {
                 ));
             }
             let variable = self.name()?;
-            let edge = self.syntax.edges.iter().any(|edge| edge.variable.is_some_and(|name| name.text == variable.text));
-            if !edge && !self.syntax.variables.iter().any(|name| name.text == variable.text) {
+            let edge = self
+                .syntax
+                .edges
+                .iter()
+                .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text));
+            if !edge
+                && !self
+                    .syntax
+                    .variables
+                    .iter()
+                    .any(|name| name.text == variable.text)
+            {
                 return Err(error(variable.at, GraphPatternTextErrorKind::UnknownVariable).into());
             }
             let target = self.mutation_projection(&mut columns, variable, None)?;

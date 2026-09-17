@@ -313,6 +313,8 @@ pub struct GraphWriteProgramStats {
     /// one visit for each nonempty selected vertex-upsert action branch.
     /// Relationship-property actions do not count as vertex visits.
     pub target_vertex_visits: u64,
+    /// Distinct updated/deleted edge visits summed over statements.
+    pub target_edge_visits: u64,
     pub mutation_effects: u64,
     pub created_vertices: u64,
     pub created_edges: u64,
@@ -511,6 +513,7 @@ impl PreparedGraphWriteProgram {
             selection: stats.selection,
             evaluator: stats.evaluator,
             target_vertex_visits: stats.target_vertex_visits,
+            target_edge_visits: stats.target_edge_visits,
             mutation_effects: stats.effects,
             created_vertices: meter.vertices,
             created_edges: meter.edges,
@@ -591,6 +594,7 @@ impl MixedMeter {
                 selection: stats.selection,
                 evaluator: stats.evaluator,
                 target_vertices: 0,
+                target_edges: 0,
                 effects: 0,
             },
         )?;
@@ -657,7 +661,8 @@ impl MixedMeter {
             GraphMutationStats {
                 selection: stats.selection,
                 evaluator: stats.evaluator,
-                target_vertices: targets,
+                target_vertices: stats.target_vertices,
+                target_edges: stats.target_edges,
                 effects: targets,
             },
         )?;

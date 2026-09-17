@@ -348,7 +348,7 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
         let at = self.current.at;
-        let variable = self.variable()?;
+        let variable = self.property_variable()?;
         self.punct(b'.', ".")?;
         let key = self.name()?;
         let negate = self.take_word("NOT")?;
@@ -456,6 +456,7 @@ enum Item {
 pub(super) struct BoundBooleanTemplate {
     program: Vec<Item>,
     at: usize,
+    edge_variables: Vec<String>,
 }
 
 impl BoundBooleanTemplate {
@@ -560,6 +561,13 @@ impl BoundBooleanTemplate {
         for instruction in &self.program {
             encode_item(bytes, instruction);
         }
+        if !self.edge_variables.is_empty() {
+            bytes.extend_from_slice(b"edge-properties\0");
+            bytes.extend_from_slice(&(self.edge_variables.len() as u64).to_be_bytes());
+            for variable in &self.edge_variables {
+                append_name(bytes, variable);
+            }
+        }
     }
 }
 
@@ -614,6 +622,7 @@ impl BoundBooleanTemplate {
     pub(super) fn resolve<'a>(
         program: Vec<SyntaxItem<'a>>,
         at: usize,
+        edges: &[Edge<'a>],
         symbol: &mut impl FnMut(GraphSymbolKind, Name<'a>) -> Result<GraphSymbol, GraphPatternTextError>,
     ) -> Result<Self, GraphPatternTextError> {
         let mut property = |name| {
@@ -706,16 +715,35 @@ impl BoundBooleanTemplate {
                 }),
             });
         }
+        let edge_variables = edges.iter().filter_map(|edge| edge.variable)
+            .filter(|name| resolved.iter().any(|item| match item {
+                Item::Atom(Atom::Property { variable, .. } | Atom::Scalar { variable, .. }
+                    | Atom::Null { variable, .. }) => variable == name.text,
+                Item::Atom(Atom::Properties { left, right, .. }) => left == name.text || right == name.text,
+                Item::Expression { columns, .. } => columns.iter().any(|(variable, _)| variable == name.text),
+                _ => false,
+            }))
+            .map(|name| name.text.to_owned()).collect();
         Ok(Self {
             program: resolved,
             at,
+            edge_variables,
         })
+    }
+
+    fn property_operand<'a>(&self, variable: &'a str, key: PropertyKeyId) -> Operand<'a> {
+        if self.edge_variables.iter().any(|name| name == variable) {
+            Operand::EdgeProperty { variable, key }
+        } else {
+            Operand::Property { variable, key }
+        }
     }
 
     pub(super) fn bind(
         &self,
         values: &[GqlParameterValue],
     ) -> Result<GraphBooleanExpression, GraphPatternTextError> {
+        let property = |variable, key| self.property_operand(variable, key);
         // Finish the operand storage before taking any references into it.
         // Canonical scalar arguments reuse their checked Arc/encoding; numeric
         // operands encode once for this bound immutable expression.
@@ -756,10 +784,7 @@ impl BoundBooleanTemplate {
             .map(|item| match item {
                 Item::Expression { columns, .. } => columns
                     .iter()
-                    .map(|(variable, key)| Operand::Property {
-                        variable,
-                        key: *key,
-                    })
+                    .map(|(variable, key)| property(variable, *key))
                     .collect(),
                 _ => Vec::new(),
             })
@@ -784,10 +809,7 @@ impl BoundBooleanTemplate {
                         comparison,
                         ..
                     } => Op::Compare {
-                        left: Operand::Property {
-                            variable,
-                            key: *key,
-                        },
+                        left: property(variable, *key),
                         comparison: *comparison,
                         right: Operand::CheckedLiteral(
                             literal.as_ref().expect("bound numeric/scalar literal"),
@@ -798,10 +820,7 @@ impl BoundBooleanTemplate {
                         key,
                         predicate,
                     } => Op::Compare {
-                        left: Operand::Property {
-                            variable,
-                            key: *key,
-                        },
+                        left: property(variable, *key),
                         comparison: predicate.comparison(),
                         right: Operand::CheckedLiteral(
                             literal.as_ref().expect("bound scalar literal"),
@@ -812,10 +831,7 @@ impl BoundBooleanTemplate {
                         key,
                         is_null,
                     } => Op::IsNull {
-                        operand: Operand::Property {
-                            variable,
-                            key: *key,
-                        },
+                        operand: property(variable, *key),
                         is_null: *is_null,
                     },
                     Atom::VertexNull { variable, is_null } => Op::IsNull {
@@ -838,15 +854,9 @@ impl BoundBooleanTemplate {
                         right_key,
                         comparison,
                     } => Op::Compare {
-                        left: Operand::Property {
-                            variable: left,
-                            key: *left_key,
-                        },
+                        left: property(left, *left_key),
                         comparison: *comparison,
-                        right: Operand::Property {
-                            variable: right,
-                            key: *right_key,
-                        },
+                        right: property(right, *right_key),
                     },
                 },
             });

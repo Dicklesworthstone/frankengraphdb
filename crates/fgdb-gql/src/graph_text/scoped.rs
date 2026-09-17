@@ -203,6 +203,21 @@ fn resolve_pattern_with_captures<'a>(
     }
     let mut numeric = Vec::new();
     for filter in filters {
+        let edge_property = |name: Name<'_>| edges.iter().any(|edge| {
+            edge.variable.is_some_and(|variable| variable.text == name.text)
+        });
+        let uses_edge = match &filter {
+            Filter::Property { variable, .. } | Filter::Scalar { variable, .. }
+            | Filter::Null { variable, .. } => edge_property(*variable),
+            Filter::Properties { left, right, .. } => edge_property(*left) || edge_property(*right),
+            _ => false,
+        };
+        if uses_edge {
+            numeric.push(BoundFilter::Boolean(boolean::BoundBooleanTemplate::resolve(
+                vec![boolean::SyntaxItem::Atom(filter)], 0, edges, symbol,
+            )?));
+            continue;
+        }
         match filter {
             Filter::PathCapture(name) => {
                 built(name.at, builder.capture_path(name.text))?;
@@ -230,7 +245,7 @@ fn resolve_pattern_with_captures<'a>(
             }
             Filter::Boolean { program, at } => {
                 numeric.push(BoundFilter::Boolean(
-                    boolean::BoundBooleanTemplate::resolve(program, at, symbol)?,
+                    boolean::BoundBooleanTemplate::resolve(program, at, edges, symbol)?,
                 ));
             }
             filter @ Filter::VertexNull { .. } => {
@@ -238,6 +253,7 @@ fn resolve_pattern_with_captures<'a>(
                     boolean::BoundBooleanTemplate::resolve(
                         vec![boolean::SyntaxItem::Atom(filter)],
                         0,
+                        edges,
                         symbol,
                     )?,
                 ));
@@ -385,6 +401,7 @@ pub(super) fn bind_builder(
 fn predicate_captures<'a>(
     variables: &mut Vec<Name<'a>>,
     filters: &[Filter<'a>],
+    edges: &[Edge<'a>],
 ) -> Result<Vec<Name<'a>>, GraphPatternTextError> {
     let mut captures = Vec::new();
     let mut pending: Vec<_> = filters.iter().rev().collect();
@@ -413,6 +430,9 @@ fn predicate_captures<'a>(
             | Filter::Null { variable, .. } => [Some(*variable), None],
         };
         for name in names.into_iter().flatten() {
+            if edges.iter().any(|edge| edge.variable.is_some_and(|variable| variable.text == name.text)) {
+                continue;
+            }
             if variables.iter().any(|variable| variable.text == name.text) {
                 continue;
             }
@@ -787,7 +807,11 @@ impl<'a> Parser<'a> {
 
     pub(super) fn positive_predicate(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
-        let left = self.variable()?;
+        let left = if matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {
+            self.property_variable()?
+        } else {
+            self.variable()?
+        };
         if self.take(b'.')? {
             self.capacity(
                 self.predicates,
@@ -901,7 +925,7 @@ impl<'a> Parser<'a> {
             }
             let mut body = self.take_pattern();
             body.variables.truncate(matched_variables);
-            body.captures = predicate_captures(&mut body.variables, &body.filters)?;
+            body.captures = predicate_captures(&mut body.variables, &body.filters, &body.edges)?;
             Ok::<_, GraphPatternTextError>(body)
         })();
         self.read_row_bindings = row_bindings;

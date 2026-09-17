@@ -10,9 +10,10 @@ use fgdb_types::{EId, VId};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphWriteStepReceipt {
-    /// Distinct canonical mutation targets, sorted by vertex identity.
+    /// Distinct canonical mutation targets, sorted within each identity domain.
     Mutation {
         targets: Vec<VId>,
+        edges: Vec<EId>,
     },
     /// Created IDs in occurrence/declaration order for this insertion step.
     Insert {
@@ -42,12 +43,20 @@ impl GraphWriteStepReceipt {
     #[must_use]
     pub fn mutation_targets(&self) -> Option<&[VId]> {
         match self {
-            Self::Mutation { targets } | Self::Delete { targets, .. } => Some(targets),
+            Self::Mutation { targets, .. } | Self::Delete { targets, .. } => Some(targets),
             Self::Insert { .. }
             | Self::VertexMerge { .. }
             | Self::VertexUpsert { .. }
             | Self::EdgeMerge { .. }
             | Self::EdgeUpsert { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn mutation_edges(&self) -> Option<&[EId]> {
+        match self {
+            Self::Mutation { edges, .. } | Self::Delete { edges, .. } => Some(edges),
+            _ => None,
         }
     }
 
@@ -142,9 +151,10 @@ impl GraphWriteStepReceipt {
 impl core::fmt::Debug for GraphWriteStepReceipt {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Mutation { targets } => f
+            Self::Mutation { targets, edges } => f
                 .debug_struct("Mutation")
                 .field("targets", &targets.len())
+                .field("edges", &edges.len())
                 .field("identities", &"[REDACTED]")
                 .finish(),
             Self::Insert { vertices, edges } => f
@@ -225,6 +235,7 @@ mod tests {
     fn accessors_preserve_step_kind_and_debug_redacts_identities() {
         let mutation = GraphWriteStepReceipt::Mutation {
             targets: vec![VId(u128::MAX)],
+            edges: Vec::new(),
         };
         assert_eq!(mutation.mutation_targets(), Some(&[VId(u128::MAX)][..]));
         assert_eq!(mutation.created_vertices(), None);
@@ -242,6 +253,7 @@ mod tests {
             },
             evaluator: GlaExecutionStats::default(),
             target_vertex_visits: 1,
+            target_edge_visits: 0,
             mutation_effects: 1,
             created_vertices: 1,
             created_edges: 1,
@@ -354,7 +366,7 @@ mod tests {
             assert_eq!(step.merged_vertex(), None);
             assert_eq!(step.merged_edge(), None);
             assert!(!format!("{step:?}").contains(&u128::MAX.to_string()));
-            let mutation = GraphWriteStepReceipt::Mutation { targets };
+            let mutation = GraphWriteStepReceipt::Mutation { targets, edges: Vec::new() };
             assert_ne!(step, mutation);
             assert_eq!(mutation.deleted_vertices(), None);
         }

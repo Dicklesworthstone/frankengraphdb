@@ -27,6 +27,7 @@ impl MixedMeter {
                 selection: stats.match_selection,
                 evaluator: stats.evaluator,
                 target_vertices: 0,
+                target_edges: 0,
                 effects: 0,
             },
         )?;
@@ -115,6 +116,7 @@ impl MixedMeter {
                 },
                 evaluator: stats.evaluator,
                 target_vertices: 0,
+                target_edges: 0,
                 effects: 0,
             },
         )?;
@@ -152,6 +154,9 @@ impl MixedMeter {
             GraphMutationProgramDimension::Effects,
             stats.action_effects,
         )?;
+        let targets = self.common.stats.target_edge_visits
+            .checked_add(u64::from(stats.action_effects != 0))
+            .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?;
         // The total already includes MERGE. Reuse its source/creation validation
         // with the cumulative evaluator, never charge the nested work twice.
         self.absorb_edge_merge(
@@ -162,7 +167,7 @@ impl MixedMeter {
             },
         )?;
         self.common.stats.effects = effects;
-        // Updating an edge is not a vertex visit.
+        self.common.stats.target_edge_visits = targets;
         Ok(())
     }
 

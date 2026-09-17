@@ -6,8 +6,7 @@ mod comparison;
 mod join;
 mod policy;
 mod projection;
-pub(crate) use comparison::charge_payload;
-use comparison::compare_properties;
+pub(crate) use comparison::{charge_payload, compare_element_properties, compare_properties};
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::ProjectedRows;
 
@@ -1115,6 +1114,36 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                     &mut property,
                     control,
                 )?;
+                Ok(false)
+            },
+        )
+    }
+
+    /// Execute scalar properties in their disjoint vertex and edge identity domains.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_element_properties_control<'a, E>(
+        &self,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<Row>, E> {
+        if !self.requires_identified_edges() {
+            return self.execute_with_properties_control(
+                vertices, edges.into_iter().map(|(_, s, r, d)| (s, r, d)),
+                test_vertex, property, control,
+            );
+        }
+        let identified = build_identified_index(self.operators(), edges, &mut control)?;
+        self.execute_projected_index(
+            vertices, Index::new(), Some(identified), test_vertex, control,
+            |operator, bindings, paths, projected, control| {
+                if matches!(operator, GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }) {
+                    return compare_element_properties(operator, bindings, paths, &mut property, &mut edge_property, control);
+                }
+                Row::collect_element_properties(operator, bindings, paths, projected, &mut property, &mut edge_property, control)?;
                 Ok(false)
             },
         )

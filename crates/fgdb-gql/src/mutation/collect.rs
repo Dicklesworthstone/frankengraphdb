@@ -8,9 +8,21 @@ use crate::{
     GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
     GraphIntegerEvaluationError,
 };
+use fgdb_delta_types::ElementId;
 use std::collections::BTreeMap;
 
 type ResultOf<T, E, C> = Result<T, GqlQueryError<GraphMutationError<E>, C>>;
+
+fn property_intent(
+    target: ElementId,
+    key: PropertyKeyId,
+    value: Option<CanonicalScalar>,
+) -> GraphMutationIntent {
+    match target {
+        ElementId::Vertex(vertex) => GraphMutationIntent::Property { vertex, key, value },
+        ElementId::Edge(edge) => GraphMutationIntent::EdgeProperty { edge, key, value },
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Field {
@@ -187,7 +199,7 @@ pub(super) fn execute<E, C>(
     };
     meter.event(GlaExecutionEvent::Work)?;
     let columns = &mutation.columns;
-    let mut proposals = BTreeMap::<(VId, Field), Proposal<'_>>::new();
+    let mut proposals = BTreeMap::<(ElementId, Field), Proposal<'_>>::new();
     for (row_at, row) in selected.value.iter().enumerate() {
         meter.event(GlaExecutionEvent::Work)?;
         if row.len() != columns.len() {
@@ -208,7 +220,12 @@ pub(super) fn execute<E, C>(
         }
         for (action_at, action) in mutation.actions.iter().enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
-            let Some(vertex) = row.values()[action.target()].as_vertex() else {
+            let target_value = &row.values()[action.target()];
+            let target = if let Some(vertex) = target_value.as_vertex() {
+                ElementId::Vertex(vertex)
+            } else if let Some(edge) = target_value.as_edge() {
+                ElementId::Edge(edge)
+            } else {
                 // Only canonical null can remain after the schema check. An
                 // absent OPTIONAL target does not execute an assignment RHS.
                 continue;
@@ -250,7 +267,7 @@ pub(super) fn execute<E, C>(
                 }
                 GraphMutationAction::DetachDelete { .. } => (Field::Delete, Value::Delete),
             };
-            if let Some(previous) = proposals.get(&(vertex, field)) {
+            if let Some(previous) = proposals.get(&(target, field)) {
                 if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
                     return Err(GqlQueryError::Source(
                         GraphMutationError::ConflictingAssignment {
@@ -271,7 +288,7 @@ pub(super) fn execute<E, C>(
                 }
                 meter.event(GlaExecutionEvent::ScratchEntry)?;
                 proposals.insert(
-                    (vertex, field),
+                    (target, field),
                     Proposal {
                         value,
                         row: row_at,
@@ -282,40 +299,36 @@ pub(super) fn execute<E, C>(
         }
     }
     let mut intents = Vec::new();
-    let mut previous_vertex = None;
+    let mut previous_target = None;
     let mut target_vertices = 0_u64;
-    for ((vertex, field), proposal) in proposals {
+    let mut target_edges = 0_u64;
+    for ((target, field), proposal) in proposals {
         meter.event(GlaExecutionEvent::Work)?;
-        if previous_vertex != Some(vertex) {
-            target_vertices += 1;
-            previous_vertex = Some(vertex);
+        if previous_target != Some(target) {
+            match target {
+                ElementId::Vertex(_) => target_vertices += 1,
+                ElementId::Edge(_) => target_edges += 1,
+            }
+            previous_target = Some(target);
         }
         meter.event(GlaExecutionEvent::ScratchEntry)?;
-        let intent = match (field, proposal.value) {
-            (Field::Property(key), Value::Property(value)) => {
+        let intent = match (target, field, proposal.value) {
+            (target, Field::Property(key), Value::Property(value)) => {
                 if let Some(scalar) = value {
                     reserve_copy(scalar, &mut |event| meter.event(event))?;
                 }
-                GraphMutationIntent::Property {
-                    vertex,
-                    key,
-                    value: value.cloned(),
-                }
+                property_intent(target, key, value.cloned())
             }
-            (Field::Property(key), Value::Computed(value)) => {
+            (target, Field::Property(key), Value::Computed(value)) => {
                 meter.event(GlaExecutionEvent::ScratchEntry)?;
-                GraphMutationIntent::Property {
-                    vertex,
-                    key,
-                    value: Some(value),
-                }
+                property_intent(target, key, Some(value))
             }
-            (Field::Label(label), Value::Label(present)) => GraphMutationIntent::Label {
+            (ElementId::Vertex(vertex), Field::Label(label), Value::Label(present)) => GraphMutationIntent::Label {
                 vertex,
                 label,
                 present,
             },
-            (Field::Delete, Value::Delete) => GraphMutationIntent::DetachDelete { vertex },
+            (ElementId::Vertex(vertex), Field::Delete, Value::Delete) => GraphMutationIntent::DetachDelete { vertex },
             _ => unreachable!("field and proposal are constructed together"),
         };
         intents.push(intent);
@@ -325,6 +338,7 @@ pub(super) fn execute<E, C>(
         selection: selected.rows,
         evaluator: meter.evaluator,
         target_vertices,
+        target_edges,
         effects: intents.len() as u64,
     };
     Ok(GraphMutationBatch { intents, stats })

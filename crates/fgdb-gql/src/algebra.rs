@@ -571,13 +571,26 @@ impl<Row> GlaPlan<Row> {
             .any(|op| matches!(op, GlaOperator::CapturePath { .. }))
     }
 
-    /// Property projections require a real source even without a predicate.
+    /// Scalar property projections require a real vertex source even without
+    /// a predicate. Edge-property plans additionally need the element accessor.
     #[must_use]
     pub fn projects_properties(&self) -> bool {
         self.operators.iter().any(|operator| match operator {
             GlaOperator::ProjectValues { columns } => columns
                 .iter()
                 .any(|column| matches!(column, ValueProjection::Property { .. })),
+            _ => false,
+        })
+    }
+
+    /// Captured relationship payloads need the explicit edge property source.
+    #[must_use]
+    pub fn projects_edge_properties(&self) -> bool {
+        self.operators.iter().any(|operator| match operator {
+            GlaOperator::ProjectValues { columns } => columns
+                .iter()
+                .any(|column| matches!(column, ValueProjection::EdgeProperty { .. })),
+            GlaOperator::SelectBoolean { expression } => expression.contains_edge_property(),
             _ => false,
         })
     }
@@ -594,7 +607,6 @@ impl<Row> GlaPlan<Row> {
                 )
             })
     }
-
     /// Application transcript, not an Appendix A durable format. Existing
     /// scalar tags/bytes are unchanged. Tuple projection and ordering have
     /// distinct tags, so neither column order nor tuple identity is erased.
@@ -719,6 +731,11 @@ impl<Row> GlaPlan<Row> {
                             ValueProjection::Property { slot, key } => {
                                 bytes.push(1);
                                 bytes.extend_from_slice(&slot.0.to_be_bytes());
+                                bytes.extend_from_slice(&key.0.to_be_bytes());
+                            }
+                            ValueProjection::EdgeProperty { capture, key } => {
+                                bytes.push(3);
+                                bytes.extend_from_slice(&capture.to_be_bytes());
                                 bytes.extend_from_slice(&key.0.to_be_bytes());
                             }
                             ValueProjection::Path { capture, function } => {

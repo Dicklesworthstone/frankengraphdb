@@ -1,8 +1,8 @@
-//! Query-selected vertex mutations over the existing typed GLA relation.
+//! Query-selected element mutations over the existing typed GLA relation.
 //!
 //! Matching and every right-hand value are evaluated before any write is
 //! staged. Repeated identical assignments collapse; inconsistent assignments
-//! to the same vertex field refuse rather than depend on traversal order.
+//! to the same element field refuse rather than depend on traversal order.
 //! These are statement-local proposals, NOT a second durable effect format.
 //! The embedded adapter submits them through ordinary WriteTxn preparation.
 
@@ -15,7 +15,7 @@ use crate::{
     GqlScalarParameter, GraphIntegerError, GraphIntegerExpression, GraphSetColumnType,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 
 pub const MAX_GRAPH_MUTATION_ACTIONS: usize = 256;
 
@@ -159,7 +159,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphMutationError<
 
 /// Bounds selection plus canonical proposal materialization. Query result_rows
 /// bounds completed selection rows before assignment deduplication; max_effects bounds
-/// distinct vertex/field intents. Storage preparation and cascade/commit costs
+/// distinct element/field intents. Storage preparation and cascade/commit costs
 /// retain their own existing contracts and are not priced by these counters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphMutationPolicy {
@@ -180,6 +180,7 @@ pub struct GraphMutationStats {
     pub selection: GqlExecutionStats,
     pub evaluator: GlaExecutionStats,
     pub target_vertices: u64,
+    pub target_edges: u64,
     pub effects: u64,
 }
 
@@ -187,6 +188,11 @@ pub struct GraphMutationStats {
 pub enum GraphMutationIntent {
     Property {
         vertex: VId,
+        key: PropertyKeyId,
+        value: Option<CanonicalScalar>,
+    },
+    EdgeProperty {
+        edge: EId,
         key: PropertyKeyId,
         value: Option<CanonicalScalar>,
     },
@@ -246,7 +252,7 @@ impl core::fmt::Debug for PreparedGraphMutation {
 impl PreparedGraphMutation {
     /// The caller supplies the existing WriteBatch relation coordinate. It is
     /// never guessed from a MATCH relation, a result value, or an ambient catalog.
-    /// All targets are vertex columns; assignment inputs must be scalar columns.
+    /// Property targets are vertex or edge columns; assignment inputs are scalar.
     /// Deletion and updates cannot be mixed in one simultaneous statement.
     pub fn prepare(
         selection: PreparedGraphPattern<GraphValueRow>,
@@ -282,7 +288,18 @@ impl PreparedGraphMutation {
         let deleting = matches!(actions[0], GraphMutationAction::DetachDelete { .. });
         for (at, action) in actions.iter().enumerate() {
             let target = action.target();
-            if columns.get(target) != Some(&GraphSetColumnType::Vertex) {
+            let valid_target = match action {
+                GraphMutationAction::SetProperty { .. }
+                | GraphMutationAction::RemoveProperty { .. } => matches!(
+                    columns.get(target),
+                    Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
+                ),
+                GraphMutationAction::SetLabel { .. }
+                | GraphMutationAction::DetachDelete { .. } => {
+                    columns.get(target) == Some(&GraphSetColumnType::Vertex)
+                }
+            };
+            if !valid_target {
                 return Err(GraphMutationBuildError::TargetColumn {
                     action: at,
                     column: target,

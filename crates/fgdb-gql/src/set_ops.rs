@@ -52,7 +52,7 @@ impl From<&ValueProjection> for GraphSetColumnType {
         use crate::algebra::GraphPathFunction;
         match column {
             ValueProjection::Vertex { .. } => Self::Vertex,
-            ValueProjection::Property { .. } => Self::Scalar,
+            ValueProjection::Property { .. } | ValueProjection::EdgeProperty { .. } => Self::Scalar,
             ValueProjection::Path { function, .. } => match function {
                 GraphPathFunction::Value => Self::Path,
                 GraphPathFunction::Length => Self::Scalar,

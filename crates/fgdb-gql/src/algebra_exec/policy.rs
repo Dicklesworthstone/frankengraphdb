@@ -220,7 +220,7 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
-            if self.requires_identified_edges() {
+            if self.requires_identified_edges() || self.projects_edge_properties() {
                 return Err(GqlQueryError::IdentifiedEdgesRequired);
             }
             self.execute_with_properties_control(
@@ -233,6 +233,32 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         })
     }
 
+    /// Read captured relationship payloads under the same meter as vertex payloads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_properties<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
+        governed(snapshot_records, policy, checkpoint, |meter| {
+            self.execute_with_element_properties_control(
+                vertices, edges,
+                |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
+                |vid, key| property(vid, key).map_err(GqlQueryError::Source),
+                |eid, key| edge_property(eid, key).map_err(GqlQueryError::Source),
+                |event| meter.observe(event),
+            )
+        })
+    }
+}
+
+impl<Row: GlaOutput> GlaPlan<Row> {
     /// Preserve source EIds for captured paths under the ordinary query meter.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_governed_with_identified_properties<'a, E, C>(
@@ -246,6 +272,9 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
+            if self.projects_edge_properties() {
+                return Err(GqlQueryError::IdentifiedEdgesRequired);
+            }
             self.execute_with_identified_properties_control(
                 vertices,
                 edges,

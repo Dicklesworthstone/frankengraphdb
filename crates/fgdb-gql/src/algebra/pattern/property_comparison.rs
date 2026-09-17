@@ -72,7 +72,7 @@ impl GraphPatternBuilder {
                 observed,
             });
         }
-        let bound = expression.bind(|name| self.variable(name))?;
+        let bound = expression.bind(|name| self.variable(name), |name| self.path_capture(name))?;
         self.property_comparisons
             .push(PropertyComparison::Boolean(bound));
         self.predicate_count = observed;

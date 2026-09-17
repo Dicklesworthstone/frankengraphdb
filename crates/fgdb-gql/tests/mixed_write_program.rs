@@ -339,6 +339,7 @@ fn wrong_kind_or_inconsistent_creation_statistics_cannot_be_accepted() {
                             selection: stats.selection,
                             evaluator: stats.evaluator,
                             target_vertices: 0,
+                            target_edges: 0,
                             effects: 0,
                         }));
                     }

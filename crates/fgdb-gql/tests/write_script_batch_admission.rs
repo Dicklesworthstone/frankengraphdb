@@ -47,6 +47,7 @@ fn step_stats() -> GraphWriteStepStats {
             scratch_entries: 2,
         },
         target_vertices: 1,
+        target_edges: 0,
         effects: 1,
     })
 }

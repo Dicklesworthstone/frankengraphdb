@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{GlaExecutionEvent, GraphIntegerEvaluationError};
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::sync::Arc;
 
 pub const MAX_BOOLEAN_INSTRUCTIONS: usize = 1024;
@@ -22,6 +22,10 @@ pub const MAX_BOOLEAN_INSTRUCTIONS: usize = 1024;
 pub enum GraphBooleanOperand<'a> {
     Vertex(&'a str),
     Property {
+        variable: &'a str,
+        key: PropertyKeyId,
+    },
+    EdgeProperty {
         variable: &'a str,
         key: PropertyKeyId,
     },
@@ -115,6 +119,7 @@ impl core::error::Error for GraphBooleanError {
 enum Operand<S> {
     Vertex(S),
     Property { variable: S, key: PropertyKeyId },
+    EdgeProperty { variable: S, key: PropertyKeyId },
     Literal(ScalarPredicate),
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -139,11 +144,15 @@ enum Instruction<S> {
 }
 
 impl<S> Operand<S> {
-    fn try_map<T, E>(&self, map: &mut impl FnMut(&S) -> Result<T, E>) -> Result<Operand<T>, E> {
+    fn try_map<T, E>(&self, map: &mut impl FnMut(&S, bool) -> Result<T, E>) -> Result<Operand<T>, E> {
         Ok(match self {
-            Self::Vertex(slot) => Operand::Vertex(map(slot)?),
+            Self::Vertex(slot) => Operand::Vertex(map(slot, false)?),
             Self::Property { variable, key } => Operand::Property {
-                variable: map(variable)?,
+                variable: map(variable, false)?,
+                key: *key,
+            },
+            Self::EdgeProperty { variable, key } => Operand::EdgeProperty {
+                variable: map(variable, true)?,
                 key: *key,
             },
             Self::Literal(value) => Operand::Literal(value.clone()),
@@ -151,7 +160,7 @@ impl<S> Operand<S> {
     }
 }
 impl<S> Instruction<S> {
-    fn try_map<T, E>(&self, map: &mut impl FnMut(&S) -> Result<T, E>) -> Result<Instruction<T>, E> {
+    fn try_map<T, E>(&self, map: &mut impl FnMut(&S, bool) -> Result<T, E>) -> Result<Instruction<T>, E> {
         Ok(match self {
             Self::Compare {
                 left,
@@ -221,6 +230,10 @@ fn own(operand: GraphBooleanOperand<'_>) -> Result<Operand<String>, GraphBoolean
     Ok(match operand {
         GraphBooleanOperand::Vertex(variable) => Operand::Vertex(name(variable)?),
         GraphBooleanOperand::Property { variable, key } => Operand::Property {
+            variable: name(variable)?,
+            key,
+        },
+        GraphBooleanOperand::EdgeProperty { variable, key } => Operand::EdgeProperty {
             variable: name(variable)?,
             key,
         },
@@ -364,14 +377,16 @@ impl GraphBooleanExpression {
 
     pub(crate) fn bind(
         &self,
-        mut variable: impl FnMut(&str) -> Result<usize, PatternBuildError>,
+        mut binding: impl FnMut(&str) -> Result<usize, PatternBuildError>,
+        mut capture: impl FnMut(&str) -> Result<usize, PatternBuildError>,
     ) -> Result<BoundBooleanExpression, PatternBuildError> {
         let program = self
             .program
             .iter()
             .map(|instruction| {
-                instruction.try_map(&mut |name: &String| {
-                    variable(name).map(|slot| BindingSlot(slot as u32))
+                instruction.try_map(&mut |name: &String, edge| {
+                    if edge { capture(name) } else { binding(name) }
+                        .map(|slot| BindingSlot(slot as u32))
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -379,7 +394,23 @@ impl GraphBooleanExpression {
             program: program.into(),
         })
     }
+
+    /// Whether any operand reads a captured relationship property. Such a
+    /// program needs the element-property executor, never a vertex-only one.
+    #[must_use]
+    pub(crate) fn contains_edge_property(&self) -> bool {
+        fn operand<S>(operand: &Operand<S>) -> bool {
+            matches!(operand, Operand::EdgeProperty { .. })
+        }
+        self.program.iter().any(|instruction| match instruction {
+            Instruction::Compare { left, right, .. } => operand(left) || operand(right),
+            Instruction::IsNull { operand: checked, .. } => operand(checked),
+            Instruction::Expression { columns, .. } => columns.iter().any(operand),
+            Instruction::Truth(_) | Instruction::And | Instruction::Or | Instruction::Not => false,
+        })
+    }
 }
+
 
 /// Compiler-owned slot program. There is no public unchecked constructor.
 #[derive(Clone, PartialEq, Eq)]
@@ -395,6 +426,21 @@ impl core::fmt::Debug for BoundBooleanExpression {
     }
 }
 
+impl BoundBooleanExpression {
+    /// Whether any already-bound operand reads a captured relationship property.
+    #[must_use]
+    pub(crate) fn contains_edge_property(&self) -> bool {
+        fn operand<S>(operand: &Operand<S>) -> bool {
+            matches!(operand, Operand::EdgeProperty { .. })
+        }
+        self.program.iter().any(|instruction| match instruction {
+            Instruction::Compare { left, right, .. } => operand(left) || operand(right),
+            Instruction::IsNull { operand: checked, .. } => operand(checked),
+            Instruction::Expression { columns, .. } => columns.iter().any(operand),
+            Instruction::Truth(_) | Instruction::And | Instruction::Or | Instruction::Not => false,
+        })
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Truth {
     False,
@@ -451,7 +497,9 @@ impl Value<'_> {
 fn resolve<'source: 'borrow, 'borrow, E>(
     operand: &'borrow Operand<BindingSlot>,
     bindings: &[Option<VId>],
+    paths: &[Option<super::GraphPath>],
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'source CanonicalScalar>, E>,
+    edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'source CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Value<'borrow>, E> {
     control(GlaExecutionEvent::Work)?;
@@ -462,6 +510,17 @@ fn resolve<'source: 'borrow, 'borrow, E>(
         Operand::Property { variable, key } => Value::Scalar(
             match bindings.get(variable.ordinal() as usize).copied().flatten() {
                 Some(vertex) => property(vertex, *key)?,
+                None => None,
+            },
+        ),
+        Operand::EdgeProperty { variable, key } => Value::Scalar(
+            match paths.get(variable.ordinal() as usize).and_then(Option::as_ref) {
+                Some(path) => {
+                    let [(edge, _)] = path.steps() else {
+                        unreachable!("edge property captures contain exactly one relationship")
+                    };
+                    edge_property(*edge, *key)?
+                }
                 None => None,
             },
         ),
@@ -495,12 +554,16 @@ fn compare(left: &Value<'_>, right: &Value<'_>, comparison: IntegerComparison) -
 
 impl BoundBooleanExpression {
     pub(crate) fn remap(&self, mut map: impl FnMut(BindingSlot) -> BindingSlot) -> Self {
+        self.remap_elements(&mut map, |capture| capture)
+    }
+
+    pub(crate) fn remap_elements(&self, mut map: impl FnMut(BindingSlot) -> BindingSlot, mut capture: impl FnMut(u32) -> u32) -> Self {
         let program = self
             .program
             .iter()
             .map(|instruction| {
                 let result: Result<_, core::convert::Infallible> =
-                    instruction.try_map(&mut |slot| Ok(map(*slot)));
+                    instruction.try_map(&mut |slot, edge| Ok(if edge { BindingSlot(capture(slot.ordinal())) } else { map(*slot) }));
                 match result {
                     Ok(value) => value,
                     Err(never) => match never {},
@@ -530,6 +593,18 @@ impl BoundBooleanExpression {
         property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
+        self.evaluate_elements(bindings, &[], property,
+            &mut |_, _| panic!("edge properties require an explicit edge property source"), control)
+    }
+
+    pub(crate) fn evaluate_elements<'a, E>(
+        &self,
+        bindings: &[Option<VId>],
+        paths: &[Option<super::GraphPath>],
+        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
         let mut stack = [Truth::Unknown; MAX_PATTERN_PREDICATES];
         let mut depth = 0_usize;
         for instruction in self.program.iter() {
@@ -540,8 +615,8 @@ impl BoundBooleanExpression {
                     comparison,
                     right,
                 } => {
-                    let left = resolve(left, bindings, property, control)?;
-                    let right = resolve(right, bindings, property, control)?;
+                    let left = resolve(left, bindings, paths, property, edge_property, control)?;
+                    let right = resolve(right, bindings, paths, property, edge_property, control)?;
                     for value in [&left, &right] {
                         if let Value::Scalar(Some(value)) = value {
                             crate::algebra_exec::charge_payload(value, control)?;
@@ -550,7 +625,7 @@ impl BoundBooleanExpression {
                     compare(&left, &right, *comparison)
                 }
                 Instruction::IsNull { operand, is_null } => Truth::from(Some(
-                    resolve(operand, bindings, property, control)?.is_null() == *is_null,
+                    resolve(operand, bindings, paths, property, edge_property, control)?.is_null() == *is_null,
                 )),
                 Instruction::Expression {
                     expression,
@@ -561,7 +636,7 @@ impl BoundBooleanExpression {
                     }
                     let mut values = Vec::with_capacity(columns.len());
                     for column in columns {
-                        let value = match resolve(column, bindings, property, control)? {
+                        let value = match resolve(column, bindings, paths, property, edge_property, control)? {
                             Value::Vertex(Some(vertex)) => GraphValue::Vertex(vertex),
                             Value::Scalar(Some(value)) => {
                                 crate::algebra_exec::charge_payload(value, control)?;
@@ -660,6 +735,11 @@ fn append_operand(operand: &Operand<BindingSlot>, bytes: &mut Vec<u8>) {
             bytes.extend_from_slice(&variable.ordinal().to_be_bytes());
             bytes.extend_from_slice(&key.0.to_be_bytes());
         }
+        Operand::EdgeProperty { variable, key } => {
+            bytes.push(3);
+            bytes.extend_from_slice(&variable.ordinal().to_be_bytes());
+            bytes.extend_from_slice(&key.0.to_be_bytes());
+        }
         Operand::Literal(value) => {
             bytes.push(2);
             let encoded = value.canonical_value_bytes();
@@ -678,11 +758,17 @@ mod tests {
     fn bound(ops: &[Op<'_>]) -> BoundBooleanExpression {
         GraphBooleanExpression::prepare(ops)
             .unwrap()
-            .bind(|name| match name {
-                "a" => Ok(0),
-                "b" => Ok(1),
-                _ => Err(PatternBuildError::UnknownVariable),
-            })
+            .bind(
+                |name| match name {
+                    "a" => Ok(0),
+                    "b" => Ok(1),
+                    _ => Err(PatternBuildError::UnknownVariable),
+                },
+                |name| match name {
+                    "a" | "b" => Ok(0),
+                    _ => Err(PatternBuildError::UnknownVariable),
+                },
+            )
             .unwrap()
     }
 
@@ -892,10 +978,10 @@ mod tests {
             stored.canonical_value_bytes().as_ptr(),
             scalar.canonical_value_bytes().as_ptr()
         ));
-        let first = first.bind(|_| Ok(0)).unwrap();
-        let renamed = build("renamed").bind(|_| Ok(0)).unwrap();
         let mut one = Vec::new();
         let mut two = Vec::new();
+        let first = first.bind(|_| Ok(0), |_| Ok(0)).unwrap();
+        let renamed = build("renamed").bind(|_| Ok(0), |_| Ok(0)).unwrap();
         first.append_transcript(&mut one);
         renamed.append_transcript(&mut two);
         assert_eq!(one, two);

@@ -41,6 +41,7 @@ fn first() -> GraphMutationStats {
             scratch_entries: 3,
         },
         target_vertices: 2,
+        target_edges: 0,
         effects: 2,
     }
 }
@@ -55,6 +56,7 @@ fn second() -> GraphMutationStats {
             scratch_entries: 4,
         },
         target_vertices: 3,
+        target_edges: 0,
         effects: 3,
     }
 }
@@ -341,6 +343,7 @@ fn no_match_steps_do_not_short_circuit_and_invalid_or_overflowed_statistics_refu
                             scratch_entries: 0,
                         },
                         target_vertices: 0,
+                        target_edges: 0,
                         effects: 0,
                     }
                 } else {
@@ -377,6 +380,7 @@ fn no_match_steps_do_not_short_circuit_and_invalid_or_overflowed_statistics_refu
                 },
                 evaluator: GlaExecutionStats::default(),
                 target_vertices: 0,
+                target_edges: 0,
                 effects: 0,
             })
         },

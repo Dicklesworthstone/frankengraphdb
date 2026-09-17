@@ -93,7 +93,7 @@ impl<'a> Parser<'a> {
         if matches!(self.current.kind, TokenKind::Word(_))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.'))
         {
-            let right = self.variable()?;
+            let right = self.property_variable()?;
             self.punct(b'.', ".")?;
             let right_key = self.name()?;
             return Ok(Filter::Properties {
