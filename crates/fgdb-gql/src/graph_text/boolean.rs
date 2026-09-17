@@ -495,6 +495,11 @@ impl BoundBooleanTemplate {
                     Filter::Boolean { .. } => {
                         return Err(error(at, GraphPatternTextErrorKind::BooleanExpression));
                     }
+                    // Path predicates bind only at the root scope (see
+                    // scoped::predicate_captures); a Boolean program refuses them.
+                    Filter::PathCapture(_) | Filter::PathLength { .. } | Filter::PathNull { .. } => {
+                        return Err(error(at, GraphPatternTextErrorKind::Expected("root path predicate")));
+                    }
                 }),
             });
         }
