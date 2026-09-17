@@ -7,9 +7,12 @@ use fgdb_delta_types::{ElementId, RelationId};
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::*;
 use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
-use std::collections::BTreeMap;
 
 type Cancel = Box<asupersync::error::Error>;
+
+#[path = "query_explain.rs"]
+mod explain;
+pub use explain::PreparedNativeRead;
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact
 /// averages retain their native domains instead of narrowing to scalar Int.
@@ -125,140 +128,10 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         text: &str,
         params: &GqlParameters,
-        mut resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
         budget: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
-        let mut symbols = BTreeMap::new();
-        let mut resolve = |kind, name: &str| {
-            *symbols
-                .entry((kind, name.to_owned()))
-                .or_insert_with(|| resolver(kind, name))
-        };
-        // Numeric arguments keep native inference; explicit scalar declarations
-        // reach every prepare_with_parameter_types facade uniformly.
-        let declarations: Vec<(&str, GqlParameterType)> = params
-            .parameter_types()
-            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
-            .collect();
-        let mut diagnostics = Vec::new();
-        match PreparedTemporalGraphAggregateText::prepare_with_parameter_types(
-            text,
-            &declarations,
-            &mut resolve,
-        ) {
-            Ok(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::TemporalText)?;
-                let columns = prepared.columns().to_vec();
-                let result = self
-                    .execute_temporal_graph_aggregate_text_governed(cx, &query, budget)
-                    .map_err(QueryError::Aggregate)?;
-                return Ok(aggregates(columns, prepared.output_slots(), result.value));
-            }
-            Err(error) => diagnostics.push(error.to_string()),
-        }
-        match PreparedTemporalGraphText::prepare_with_parameter_types(
-            text,
-            &declarations,
-            &mut resolve,
-        ) {
-            Ok(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::TemporalText)?;
-                let columns = query.pattern().columns().to_vec();
-                let result = self
-                    .execute_graph_pattern_governed_at(cx, query.pattern(), query.as_of(), budget)
-                    .map_err(QueryError::Pattern)?;
-                return Ok(values(columns, result.value));
-            }
-            Err(error) => diagnostics.push(error.to_string()),
-        }
-        match PreparedTemporalGraphSetText::prepare_with_parameter_types(
-            text,
-            &declarations,
-            &mut resolve,
-        ) {
-            Ok(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::TemporalSetText)?;
-                let result = self
-                    .execute_graph_set_governed_at(cx, query.query(), query.as_of(), budget)
-                    .map_err(QueryError::Set)?;
-                return Ok(values(prepared.columns().to_vec(), result.value));
-            }
-            Err(error) => diagnostics.push(error.to_string()),
-        }
-        match PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
-            text,
-            &declarations,
-            &mut resolve,
-        ) {
-            Ok(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::PipelineText)?;
-                let result = self
-                    .execute_graph_aggregate_governed(cx, &query, budget)
-                    .map_err(QueryError::Aggregate)?;
-                return Ok(aggregates(
-                    prepared.columns().to_vec(),
-                    prepared.output_slots(),
-                    result.value,
-                ));
-            }
-            Err(error) => diagnostics.push(error.to_string()),
-        }
-        match PreparedGraphAggregateText::prepare_with_parameter_types(
-            text,
-            &declarations,
-            &mut resolve,
-        ) {
-            Ok(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::PatternText)?;
-                let result = self
-                    .execute_graph_aggregate_governed(cx, &query, budget)
-                    .map_err(QueryError::Aggregate)?;
-                return Ok(aggregates(
-                    prepared.columns().to_vec(),
-                    prepared.output_slots(),
-                    result.value,
-                ));
-            }
-            Err(error) => diagnostics.push(error.to_string()),
-        }
-        match PreparedGraphText::prepare_with_parameter_types(text, &declarations, &mut resolve) {
-            Ok(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::PatternText)?;
-                let result = self
-                    .execute_graph_pattern_governed(cx, &query, budget)
-                    .map_err(QueryError::Pattern)?;
-                return Ok(values(query.columns().to_vec(), result.value));
-            }
-            Err(error) => diagnostics.push(error.to_string()),
-        }
-        match PreparedGraphSetText::prepare_with_parameter_types(text, &declarations, &mut resolve)
-        {
-            Ok(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::SetText)?;
-                let result = self
-                    .execute_graph_set_governed(cx, &query, budget)
-                    .map_err(QueryError::Set)?;
-                Ok(values(prepared.columns().to_vec(), result.value))
-            }
-            Err(error) => {
-                diagnostics.push(error.to_string());
-                Err(QueryError::Unsupported { diagnostics })
-            }
-        }
+        PreparedNativeRead::prepare(text, params, resolver)?.execute(self, cx, params, budget)
     }
 
     /// Autocommit counterpart. Purpose contexts, relation coordinate and identity
