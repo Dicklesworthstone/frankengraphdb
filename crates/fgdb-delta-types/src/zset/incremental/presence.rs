@@ -11,8 +11,8 @@
 //! It is an in-memory algebra operator, not durable subscription delivery.
 
 use super::{
-    Arrangement, Changes, LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight, event, grouped,
-    prepare_changes, publish_changes,
+    Arrangement, Changes, IncrementalJoin, JoinUpdate, LimbLimit, ZSet, ZSetError, ZSetEvent,
+    ZWeight, event, grouped, prepare_changes, publish_changes,
 };
 use std::collections::BTreeMap;
 
@@ -277,6 +277,162 @@ pub(super) fn presence_delta<K: Ord + Clone, L: Ord + Clone, E>(
     Ok(output)
 }
 
+/// The outer Option distinguishes an unmatched row from ANY real right value.
+/// For example, R = Option<T> represents a matching null payload as Some(None),
+/// while the left-join null extension is None. Neither is a fabricated key.
+pub type LeftJoinDelta<K, L, R> = ZSet<(K, L, Option<R>)>;
+
+/// Exact incremental left outer equijoin of nonnegative integrated bags.
+/// One ordinary arranged join owns both input relations. The only additional
+/// retained state is a right witness count per key; the left arrangement is
+/// not duplicated in a second antijoin. Null-key semantics belong to the caller
+/// just as for IncrementalPresence. This does not implement arbitrary ON filters.
+#[derive(PartialEq, Eq)]
+pub struct IncrementalLeftJoin<K: Ord, L: Ord, R: Ord> {
+    joined: IncrementalJoin<K, L, R>,
+    witnesses: ZSet<K>,
+}
+
+impl<K: Ord, L: Ord, R: Ord> Default for IncrementalLeftJoin<K, L, R> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<K: Ord, L: Ord, R: Ord> IncrementalLeftJoin<K, L, R> {
+    pub fn new() -> Self {
+        Self { joined: IncrementalJoin::new(), witnesses: ZSet::new() }
+    }
+    pub fn left_weight(&self, key: &K, value: &L) -> Option<&ZWeight> {
+        self.joined.left_weight(key, value)
+    }
+    pub fn right_weight(&self, key: &K, value: &R) -> Option<&ZWeight> {
+        self.joined.right_weight(key, value)
+    }
+    pub fn witness_counts(&self) -> &ZSet<K> {
+        &self.witnesses
+    }
+}
+impl<K: Ord, L: Ord, R: Ord> core::fmt::Debug for IncrementalLeftJoin<K, L, R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IncrementalLeftJoin")
+            .field("inputs", &self.joined)
+            .field("witness_keys", &self.witnesses.len())
+            .finish()
+    }
+}
+
+impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalLeftJoin<K, L, R> {
+    /// Prepare matched and unmatched changes against the SAME old input state.
+    /// Right projection uses signed weights, so replacement of the only witness
+    /// in one tick does not briefly publish an unmatched row. Validate each raw
+    /// input multiplicity, not only the projected total: compensating invalid
+    /// retractions cannot hide behind another right value at the same key.
+    pub fn prepare<E>(
+        &mut self,
+        delta_left: &ZSet<(K, L)>,
+        delta_right: &ZSet<(K, R)>,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<LeftJoinUpdate<'_, K, L, R>, BagJoinError<E>> {
+        event(control, ZSetEvent::Work)?;
+        let delta_counts = delta_right.map(|(key, _)| Ok(key.clone()), limbs, control)?;
+        let replacements = prepare_witnesses(&self.witnesses, &delta_counts, limbs, control)?;
+        let mut joined = self.joined.prepare(delta_left, delta_right, limbs, control)?;
+        validate_changes(&joined.left, BagInput::Left, control)?;
+        validate_changes(&joined.right, BagInput::Right, control)?;
+        let unmatched = presence_delta(
+            &joined.owner.left, &self.witnesses, &replacements, delta_left,
+            PresenceMode::NotExists, limbs, control,
+        )?;
+        // Transfer the matched delta into its nullable shape rather than
+        // retaining another clone of its keys and potentially promoted weights.
+        let mut delta = lift_matches(core::mem::take(&mut joined.delta), limbs, control)?;
+        for ((key, left), weight) in unmatched.into_updates() {
+            event(control, ZSetEvent::Work)?;
+            delta.accumulate((key, left, None), weight, limbs, control)?;
+        }
+        event(control, ZSetEvent::Work)?;
+        Ok(LeftJoinUpdate { joined, witnesses: &mut self.witnesses, replacements, delta })
+    }
+
+    pub fn apply<E>(
+        &mut self,
+        delta_left: &ZSet<(K, L)>,
+        delta_right: &ZSet<(K, R)>,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<LeftJoinDelta<K, L, R>, BagJoinError<E>> {
+        Ok(self.prepare(delta_left, delta_right, limbs, control)?.commit())
+    }
+
+    /// Explicit output snapshot. Incremental ticks never invoke this full scan.
+    pub fn snapshot<E>(
+        &self,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<LeftJoinDelta<K, L, R>, BagJoinError<E>> {
+        event(control, ZSetEvent::Work)?;
+        let matched = self.joined.snapshot(limbs, control)?;
+        let mut output = lift_matches(matched, limbs, control)?;
+        for (key, group) in &self.joined.left {
+            event(control, ZSetEvent::Work)?;
+            if self.witnesses.weight(key).is_some() {
+                continue;
+            }
+            for (left, weight) in group.iter() {
+                event(control, ZSetEvent::Work)?;
+                let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
+                output.accumulate((key.clone(), left.clone(), None), weight, limbs, control)?;
+            }
+        }
+        Ok(output)
+    }
+}
+
+fn lift_matches<K: Ord, L: Ord, R: Ord, E>(
+    matched: ZSet<(K, L, R)>,
+    limbs: LimbLimit,
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+) -> Result<LeftJoinDelta<K, L, R>, BagJoinError<E>> {
+    let mut output = ZSet::new();
+    for ((key, left, right), weight) in matched.into_updates() {
+        event(control, ZSetEvent::Work)?;
+        output.accumulate((key, left, Some(right)), weight, limbs, control)?;
+    }
+    Ok(output)
+}
+
+#[must_use = "dropping a left join update aborts both inputs and witness counts"]
+pub struct LeftJoinUpdate<'a, K: Ord, L: Ord, R: Ord> {
+    joined: JoinUpdate<'a, K, L, R>,
+    witnesses: &'a mut ZSet<K>,
+    replacements: BTreeMap<K, ZWeight>,
+    delta: LeftJoinDelta<K, L, R>,
+}
+impl<K: Ord, L: Ord, R: Ord> LeftJoinUpdate<'_, K, L, R> {
+    pub fn delta(&self) -> &LeftJoinDelta<K, L, R> {
+        &self.delta
+    }
+}
+impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> LeftJoinUpdate<'_, K, L, R> {
+    /// All participants must prepare before any commit. The same no-recoverable-
+    /// failure boundary as the underlying join/Z-set guards applies here.
+    pub fn commit(self) -> LeftJoinDelta<K, L, R> {
+        let Self { joined, witnesses, replacements, delta } = self;
+        let _ = joined.commit();
+        witnesses.publish(replacements);
+        delta
+    }
+}
+impl<K: Ord, L: Ord, R: Ord> core::fmt::Debug for LeftJoinUpdate<'_, K, L, R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LeftJoinUpdate")
+            .field("delta_support", &self.delta.len())
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +608,149 @@ mod tests {
                 assert_eq!(state, seed(PresenceMode::NotExists));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod outer_tests {
+    use super::*;
+
+    const LIMBS: LimbLimit = LimbLimit::new(16);
+    type Operator = IncrementalLeftJoin<i32, i32, i32>;
+    type Input = BTreeMap<(i32, i32), i128>;
+    type Output = BTreeMap<(i32, i32, Option<i32>), i128>;
+    fn allow(_: ZSetEvent) -> Result<(), usize> { Ok(()) }
+    fn z<T: Ord + Clone>(rows: &[(T, i128)]) -> ZSet<T> {
+        ZSet::from_updates(rows.iter().map(|(k, w)| (k.clone(), ZWeight::from_i128(*w))),
+            LIMBS, &mut allow).unwrap()
+    }
+    fn plain<T: Ord + Clone>(rows: &ZSet<T>) -> BTreeMap<T, i128> {
+        rows.iter().map(|(key, weight)| (key.clone(), weight.to_i128().unwrap())).collect()
+    }
+    // Independent whole-bag nested-loop definition, with no witness totals or
+    // three-term derivative. None appears exactly when this left row has no match.
+    fn oracle(left: &Input, right: &Input) -> Output {
+        let mut out = BTreeMap::new();
+        for (&(key, l), &lw) in left {
+            let mut found = false;
+            for (&(other, r), &rw) in right {
+                if key == other && rw > 0 {
+                    out.insert((key, l, Some(r)), lw * rw);
+                    found = true;
+                }
+            }
+            if !found { out.insert((key, l, None), lw); }
+        }
+        out
+    }
+    fn seed() -> Operator {
+        let mut state = Operator::new();
+        state.apply(&z(&[((1, 10), 2), ((2, 20), 3)]),
+            &z(&[((1, 30), 2)]), LIMBS, &mut allow).unwrap();
+        state
+    }
+
+    #[test]
+    fn all_small_simultaneous_changes_equal_the_difference_of_full_outer_joins() {
+        for old in 0..81_i128 {
+            for new in 0..81_i128 {
+                let left = z(&[((1, 10), old%3), ((1, 11), old/3%3)]);
+                let right = z(&[((1, 30), old/9%3), ((1, 31), old/27)]);
+                let next_left = z(&[((1, 10), new%3), ((1, 11), new/3%3)]);
+                let next_right = z(&[((1, 30), new/9%3), ((1, 31), new/27)]);
+                let mut state = Operator::new();
+                let mut materialized = state.apply(&left, &right, LIMBS, &mut allow).unwrap();
+                assert_eq!(plain(&materialized), oracle(&plain(&left), &plain(&right)));
+                let delta = state.apply(&next_left.minus(&left, LIMBS, &mut allow).unwrap(),
+                    &next_right.minus(&right, LIMBS, &mut allow).unwrap(), LIMBS, &mut allow).unwrap();
+                materialized.integrate(&delta, LIMBS, &mut allow).unwrap();
+                let expected = oracle(&plain(&next_left), &plain(&next_right));
+                assert_eq!(plain(&materialized), expected, "old={old}, new={new}");
+                assert_eq!(plain(&state.snapshot(LIMBS, &mut allow).unwrap()), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_witnesses_or_deleting_both_inputs_does_not_invent_a_null_row() {
+        let mut state = seed();
+        let delta = state.apply(&ZSet::new(), &z(&[((1, 30), -2), ((1, 31), 2)]),
+            LIMBS, &mut allow).unwrap();
+        assert_eq!(delta, z(&[((1, 10, Some(30)), -4), ((1, 10, Some(31)), 4)]));
+        let removed = state.apply(&z(&[((1, 10), -2)]), &z(&[((1, 31), -2)]),
+            LIMBS, &mut allow).unwrap();
+        assert_eq!(removed, z(&[((1, 10, Some(31)), -4)]));
+        assert_eq!(state.snapshot(LIMBS, &mut allow).unwrap(), z(&[((2, 20, None), 3)]));
+        state.apply(&z(&[((2, 20), -3)]), &ZSet::new(), LIMBS, &mut allow).unwrap();
+        assert_eq!(state, Operator::new());
+    }
+
+    #[test]
+    fn a_matching_null_payload_is_not_an_unmatched_row() {
+        let mut state = IncrementalLeftJoin::<i32, i32, Option<i32>>::new();
+        let left = z(&[((1, 10), 2)]);
+        let right = z(&[((1, None), 3)]);
+        assert_eq!(state.apply(&left, &right, LIMBS, &mut allow).unwrap(),
+            z(&[((1, 10, Some(None)), 6)]));
+        let delta = state.apply(&ZSet::new(), &right.negated(LIMBS, &mut allow).unwrap(),
+            LIMBS, &mut allow).unwrap();
+        assert_eq!(delta, z(&[((1, 10, Some(None)), -6), ((1, 10, None), 2)]));
+    }
+
+    #[test]
+    fn invalid_per_tuple_retractions_cannot_hide_behind_a_valid_key_total() {
+        for (left, right, input) in [
+            (ZSet::new(), z(&[((1, 30), -3), ((1, 31), 3)]), BagInput::Right),
+            (z(&[((2, 20), -4), ((2, 21), 4)]), ZSet::new(), BagInput::Left),
+        ] {
+            let mut state = seed();
+            assert_eq!(state.apply(&left, &right, LIMBS, &mut allow),
+                Err(BagJoinError::NegativeMultiplicity { input }));
+            assert_eq!(state, seed());
+        }
+    }
+
+    #[test]
+    fn every_outer_join_refusal_is_atomic_through_match_and_null_extension_preparation() {
+        let left = z(&[((1, 10), -1), ((2, 21), 1)]);
+        let right = z(&[((1, 30), -2), ((2, 31), 3)]);
+        let mut success = seed();
+        let mut calls = 0;
+        let expected = success.apply(&left, &right, LIMBS, &mut |_| {
+            calls += 1; Ok::<_, usize>(())
+        }).unwrap();
+        for stop in 1..=calls {
+            let mut state = seed();
+            let mut seen = 0;
+            assert_eq!(state.apply(&left, &right, LIMBS, &mut |_| {
+                seen += 1; if seen == stop { Err(stop) } else { Ok(()) }
+            }), Err(BagJoinError::ZSet(ZSetError::Control(stop))));
+            assert_eq!(seen, stop);
+            assert_eq!(state, seed());
+            assert_eq!(state.apply(&left, &right, LIMBS, &mut allow).unwrap(), expected);
+            assert_eq!(state, success);
+        }
+        let mut state = seed();
+        {
+            let pending = state.prepare(&left, &right, LIMBS, &mut allow).unwrap();
+            assert_eq!(pending.delta(), &expected);
+        }
+        assert_eq!(state, seed());
+    }
+
+    #[test]
+    fn product_promotion_refusal_does_not_remove_the_old_null_extension() {
+        let mut state = Operator::new();
+        let left = z(&[((1, 10), i128::MAX)]);
+        let before = state.apply(&left, &ZSet::new(), LIMBS, &mut allow).unwrap();
+        assert!(matches!(state.apply(&ZSet::new(), &z(&[((1, 30), 2)]),
+            LimbLimit::new(0), &mut allow), Err(BagJoinError::ZSet(ZSetError::Arithmetic(_)))));
+        assert_eq!(state.snapshot(LIMBS, &mut allow).unwrap(), before);
+        assert!(state.witness_counts().is_empty());
+        assert!(state.right_weight(&1, &30).is_none());
+        let delta = state.apply(&ZSet::new(), &z(&[((1, 30), 2)]), LIMBS, &mut allow).unwrap();
+        assert_eq!(delta.weight(&(1, 10, None)), Some(&ZWeight::from_i128(-i128::MAX)));
+        assert!(delta.weight(&(1, 10, Some(30))).unwrap().is_promoted());
+        assert_eq!(before.plus(&delta, LIMBS, &mut allow).unwrap(), state.snapshot(LIMBS, &mut allow).unwrap());
     }
 }
