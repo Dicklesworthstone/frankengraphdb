@@ -263,12 +263,12 @@ fn malformed_late_clauses_and_scope_overflow_refuse_before_catalog_calls() {
     let too_many = format!("MATCH (a){} RETURN a LIMIT 0", " MATCH (a)".repeat(65));
     for text in [
         "MATCH (a) MATCH RETURN a",
-        "MATCH (a) MATCH () RETURN a",
+        "MATCH (a) MATCH ( RETURN a",
         "MATCH (a) MATCH (b) WHERE missing.p=1 RETURN b",
         "MATCH (a) MATCH (b) WHERE c.p=1 MATCH (c) RETURN c",
         "MATCH (a) MATCH (b) WHERE EXISTS { MATCH (b) } RETURN b",
         "MATCH (a) WHERE EXISTS { MATCH (a) MATCH (a) } RETURN a",
-        "MATCH (a) OPTIONAL MATCH (a) MATCH (a)-[:R*1..2]->(b) RETURN b",
+        "MATCH (a) OPTIONAL MATCH (a) MATCH (a)-[:R*]->(b) RETURN b",
         "MATCH (a) MATCH ANY SHORTEST WALK (a)-[:R*1..2]->(b)-[:S]->(c) RETURN c LIMIT 0",
         &too_many,
     ] {
@@ -285,6 +285,19 @@ fn malformed_late_clauses_and_scope_overflow_refuse_before_catalog_calls() {
     }
     let maximal = format!("MATCH (a){} RETURN a", " MATCH (a)".repeat(64));
     assert_eq!(evaluate(&maximal, &[VId(1)], &[]).len(), 1);
+    // Bounded var-length in a late plain MATCH is valid GQL since bounded
+    // plain MATCH is a WALK: optional re-bind of (a), then one finite
+    // 1..2 occurrence (1->2; length 2 dies at 2), absence eliminated.
+    let optional_var = evaluate(
+        "MATCH (a) OPTIONAL MATCH (a) MATCH (a)-[:R*1..2]->(b) RETURN b",
+        &[VId(1), VId(2)],
+        &[(VId(1), R, VId(2))],
+    );
+    assert_eq!(optional_var.len(), 1);
+    assert_eq!(optional_var[0].values()[0].as_vertex(), Some(VId(2)));
+    let independent = evaluate("MATCH (a) MATCH () RETURN a", &[VId(1)], &[]);
+    assert_eq!(independent.len(), 1);
+    assert_eq!(independent[0].values()[0].as_vertex(), Some(VId(1)));
 }
 
 #[test]
