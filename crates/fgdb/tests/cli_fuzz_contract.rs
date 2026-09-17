@@ -422,7 +422,7 @@ fn check_robot_events(stdout: &str, code: i32, schema: &Json) -> Vec<Json> {
                 assert_eq!(index, events.len() - 1, "terminal must be last");
                 assert_eq!(code, 0, "success terminal requires exit code 0");
                 match event.get("kind").string() {
-                    "rows" => {
+                    "rows" | "replayed" => {
                         exact_fields(event, &["v", "event", "kind", "seq", "count"]);
                         assert!(columns.is_some());
                         assert_eq!(event.get("count").unsigned(), rows);
@@ -598,9 +598,11 @@ enum Family {
     DbPath,
     GqlText,
     RobotSchema,
+    Replay,
+    Load,
 }
 
-const FAMILIES: [Family; 7] = [
+const FAMILIES: [Family; 9] = [
     Family::RobotSchema,
     Family::Argv,
     Family::Params,
@@ -608,6 +610,8 @@ const FAMILIES: [Family; 7] = [
     Family::KeyFile,
     Family::DbPath,
     Family::GqlText,
+    Family::Replay,
+    Family::Load,
 ];
 
 struct FamilyCounts {
@@ -708,6 +712,66 @@ fn generated_case(
                 args.push(format!("unexpected{}", rng.next()));
             }
             (args, Some(index % 2 == 0))
+        }
+        Family::Replay => {
+            args = ws.args("replay", None);
+            let variant = index % 8;
+            let certificate = match variant {
+                0 | 4 => "certificate",
+                1 => "alternate-certificate",
+                2 => "missing-certificate",
+                3 => "garbage-certificate",
+                5 => "changed-statement-certificate",
+                6 => "truncated-certificate",
+                _ => return (args, Some(false)),
+            };
+            args.extend([
+                "--certificate".into(),
+                ws.root.join(certificate).to_string_lossy().into_owned(),
+                "--property".into(),
+                "p=1".into(),
+            ]);
+            if variant != 1 {
+                args.extend([
+                    "--param".into(),
+                    format!("p=int:{}", if variant == 4 { 2 + rng.below(100) } else { 1 }),
+                ]);
+            }
+            (args, Some(variant < 2))
+        }
+        Family::Load => {
+            let variant = index % 8;
+            let input = ws.root.join(format!("load-{seed}-{index}.ndjson"));
+            let checkpoint = ws.root.join(format!("checkpoint-{seed}-{index}"));
+            let vertex = format!(
+                "{{\"kind\":\"vertex\",\"key\":\"v\",\"labels\":[\"Person\"],\"props\":{{\"p\":\"int:{}\"}}}}\n",
+                rng.below(1000)
+            );
+            let suffix = match variant {
+                2 => "{\"kind\":\"vertex\",\"key\":",
+                3 => "{\"kind\":\"vertex\",\"key\":\"w\",\"labels\":[\"Unknown\"]}\n",
+                4 => "{\"kind\":\"vertex\",\"key\":\"v\",\"labels\":[]}\n",
+                5 => "{\"kind\":\"edge\",\"key\":\"e\",\"source\":\"v\",\"destination\":\"missing\",\"relation\":\"R\"}\n",
+                _ => "{\"kind\":\"edge\",\"key\":\"e\",\"source\":\"v\",\"destination\":\"v\",\"relation\":\"R\"}\n",
+            };
+            std::fs::write(&input, vertex + suffix).unwrap();
+            if variant == 6 {
+                std::fs::write(&checkpoint, format!("{{garbage{}", rng.next())).unwrap();
+            }
+            args = ws.args("load", None);
+            args.extend([
+                "--input".into(), input.to_string_lossy().into_owned(),
+                "--label".into(), "Person=1".into(),
+                "--relation".into(), "R=1".into(),
+                "--property".into(), "p=1".into(),
+                "--rows-per-chunk".into(), if variant == 7 { "0" } else { "1" }.into(),
+            ]);
+            // No checkpoint flag and an absent checkpoint file are BOTH
+            // valid fresh loads. Garbage checkpoints must fail closed.
+            if variant != 0 {
+                args.extend(["--checkpoint".into(), checkpoint.to_string_lossy().into_owned()]);
+            }
+            (args, Some(variant < 2))
         }
         Family::Argv => {
             match index % 8 {
@@ -928,6 +992,26 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
         .code,
         0
     );
+    for (name, text, parameter) in [
+        ("certificate", "MATCH (n) WHERE n.p=$p RETURN n.p AS value", true),
+        ("alternate-certificate", "MATCH (n) RETURN count(n) AS total", false),
+    ] {
+        let mut args = ws.args("query", Some(text));
+        args.extend([
+            "--property".into(), "p=1".into(),
+            "--certify-to".into(), ws.root.join(name).to_string_lossy().into_owned(),
+        ]);
+        if parameter {
+            args.extend(["--param".into(), "p=int:1".into()]);
+        }
+        assert_eq!(invoke(&args, true, &schema, &ws.secrets).code, 0);
+    }
+    let certificate = std::fs::read(ws.root.join("certificate")).unwrap();
+    std::fs::write(ws.root.join("truncated-certificate"), &certificate[..certificate.len() / 2]).unwrap();
+    std::fs::write(ws.root.join("garbage-certificate"), b"not a certificate").unwrap();
+    let mut changed = fgdb::NativeResultCertificate::decode(&certificate).unwrap();
+    changed.statement = "MATCH (n) WHERE n.p=$p RETURN n.p AS other".into();
+    std::fs::write(ws.root.join("changed-statement-certificate"), changed.canonical_bytes()).unwrap();
     let mut counts: [[FamilyCounts; 2]; FAMILIES.len()] = std::array::from_fn(|_| {
         std::array::from_fn(|_| FamilyCounts {
             success: 0,
@@ -986,7 +1070,7 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
             );
         }
     }
-    for command in ["create", "write", "query", "help", "robot-schema"] {
+    for command in ["create", "write", "query", "replay", "load", "help", "robot-schema"] {
         let modes = commands.get(command).expect("subcommand never exercised");
         assert!(modes.iter().all(|count| *count > 0), "{command}: {modes:?}");
     }
