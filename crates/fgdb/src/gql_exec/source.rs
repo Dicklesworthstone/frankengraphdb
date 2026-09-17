@@ -1004,7 +1004,8 @@ where
     }
     let mut group = None;
     let mut winner: Option<&VertexRow> = None;
-    while let Some(Reverse((vid, _, patch_at, row_at))) = heap.pop() {
+    while let Some(mut cursor) = heap.peek_mut() {
+        let Reverse((vid, _, patch_at, row_at)) = *cursor;
         control(SourceEvent::Work)?;
         if group != Some(vid) {
             if let Some(row) = winner.take().filter(|row| row.visible_at(as_of)) {
@@ -1018,7 +1019,10 @@ where
             winner = Some(row);
         }
         if let Some(next) = patch.get(row_at + 1) {
-            heap.push(Reverse((next.vid, next.created_at, patch_at, row_at + 1)));
+            // Advance this patch with one heap repair instead of pop plus push.
+            *cursor = Reverse((next.vid, next.created_at, patch_at, row_at + 1));
+        } else {
+            std::collections::binary_heap::PeekMut::pop(cursor);
         }
     }
     if let Some(row) = winner.filter(|row| row.visible_at(as_of)) {
