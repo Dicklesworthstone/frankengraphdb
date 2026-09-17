@@ -1,6 +1,8 @@
 //! Immutable text-prepared query-selected writes. The native graph lexer owns
 //! construction and binding; these facades cannot be executed as reads.
 
+use crate::GqlParameterValue;
+use crate::graph_text::Number;
 use crate::insertion::GraphInsertBuildError;
 use crate::{
     GqlScalarParameter, GraphDeleteBuildError, GraphEdgeMergeBuildError, GraphIntegerBuildError,
@@ -13,6 +15,23 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 pub(crate) enum MutationIntegerTemplateOp {
     Bound(GraphIntegerOp),
     Parameter { index: usize, at: usize },
+}
+
+impl MutationIntegerTemplateOp {
+    /// Append the resolved unbound template: retained program instructions or
+    /// a parameter hole identified by its argument index. Values never enter.
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        match self {
+            Self::Bound(op) => {
+                bytes.push(0);
+                op.append_template_transcript(bytes);
+            }
+            Self::Parameter { index, .. } => {
+                bytes.push(1);
+                bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+            }
+        }
+    }
 }
 
 #[derive(Clone)]

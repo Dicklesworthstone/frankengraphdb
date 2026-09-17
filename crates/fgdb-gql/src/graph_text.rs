@@ -231,7 +231,7 @@ impl<'a> Lexer<'a> {
 }
 
 #[derive(Clone)]
-enum Number {
+pub(crate) enum Number {
     Literal(GqlParameterValue),
     Parameter(usize),
 }
