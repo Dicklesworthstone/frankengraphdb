@@ -225,6 +225,7 @@ impl PreparedGraphAggregate {
                     GraphValue::Vertices(vertices) => ValueRef::Vertices(vertices),
                     GraphValue::Edges(edges) => ValueRef::Edges(edges),
                     GraphValue::Edge(edge) => ValueRef::Edge(*edge),
+                    GraphValue::List(values) => ValueRef::List(values),
                 };
                 for _ in 0..values[at].payload_units() {
                     control(GlaExecutionEvent::Work)?;
@@ -268,23 +269,7 @@ impl PreparedGraphAggregate {
         bytes.extend_from_slice(b"fgdb:aggregate-input-projection:v1\0");
         bytes.extend_from_slice(&(projection.len() as u64).to_be_bytes());
         for column in projection {
-            match column.value() {
-                crate::GraphSetValue::Column(input) => {
-                    bytes.push(0);
-                    bytes.extend_from_slice(&(*input as u64).to_be_bytes());
-                }
-                crate::GraphSetValue::Literal(value) => {
-                    bytes.push(1);
-                    bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
-                    bytes.extend_from_slice(value.canonical_bytes());
-                }
-                crate::GraphSetValue::Integer(expression) => {
-                    bytes.push(2);
-                    let program = expression.canonical_bytes();
-                    bytes.extend_from_slice(&(program.len() as u64).to_be_bytes());
-                    bytes.extend_from_slice(&program);
-                }
-            }
+            column.value().append_canonical_bytes(bytes);
         }
     }
 }

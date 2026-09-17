@@ -28,6 +28,11 @@ impl Operand {
                 GqlParameterValue::Scalar(value) => {
                     GraphHavingOperand::Scalar(value.predicate(IntegerComparison::Equal))
                 }
+                // List declarations refuse at the typed number parser; bind is
+                // infallible over the admitted operand domain.
+                GqlParameterValue::List(_) => {
+                    unreachable!("list parameters never become HAVING operands")
+                }
             },
         }
     }

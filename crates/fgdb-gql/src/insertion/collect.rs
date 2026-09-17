@@ -112,6 +112,25 @@ fn fields<E, A, C>(
                 .as_scalar()
                 .expect("the complete input schema was validated"),
             GraphSetValue::Literal(value) => value.value(),
+            GraphSetValue::Value(value) => match value.as_scalar() {
+                Some(scalar) => scalar,
+                // Only a scalar property field is expressible here; a vertex,
+                // edge, path or list projection is an input-schema refusal,
+                // never a silent truncation.
+                None => {
+                    return Err(GqlQueryError::Source(GraphInsertError::InputSchema {
+                        row: row_at,
+                        column: property,
+                    }));
+                }
+            },
+            // Composite set expressions cannot name one property field.
+            GraphSetValue::List(_) | GraphSetValue::Index { .. } | GraphSetValue::Size(_) => {
+                return Err(GqlQueryError::Source(GraphInsertError::InputSchema {
+                    row: row_at,
+                    column: property,
+                }));
+            }
             GraphSetValue::Integer(expression) => {
                 let value = expression
                     .evaluate_scalar_with_control(row, control)

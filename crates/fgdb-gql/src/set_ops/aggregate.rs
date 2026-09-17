@@ -147,18 +147,19 @@ impl PreparedGraphSetAggregate {
 }
 
 impl PreparedGraphSet {
-    /// Internal metadata for the shared aggregate definition. This is always
-    /// an existing graph leaf, never a schema-only or synthetic graph pattern.
-    /// Multi-source execution still visits EVERY leaf through execute_governed.
-    pub(crate) fn first_pattern_input(&self) -> &PreparedGraphPattern<GraphValueRow> {
-        let mut current = self;
-        loop {
-            match &current.node {
-                SetNode::Pattern(pattern) => return pattern,
-                SetNode::Scope(input)
-                | SetNode::Project { input, .. }
-                | SetNode::Filter { input, .. } => current = input,
-                SetNode::Binary { left, .. } => current = left,
+    /// First real graph leaf, if any. Values-only relations need no graph
+    /// metadata and never manufacture a source merely to describe their schema.
+    pub(crate) fn first_pattern_input(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
+        match &self.node {
+            SetNode::Pattern(pattern) => Some(pattern),
+            SetNode::Values => None,
+            SetNode::Scope(input)
+            | SetNode::Project { input, .. }
+            | SetNode::Unwind { input, .. }
+            | SetNode::Filter { input, .. } => input.first_pattern_input(),
+            SetNode::Binary { left, right, .. }
+            | SetNode::CrossJoin { left, right } => {
+                left.first_pattern_input().or_else(|| right.first_pattern_input())
             }
         }
     }

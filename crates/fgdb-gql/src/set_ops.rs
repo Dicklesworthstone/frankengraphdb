@@ -44,6 +44,8 @@ pub enum GraphSetColumnType {
     Vertices,
     Edges,
     Edge,
+    List,
+    Any,
 }
 impl From<&ValueProjection> for GraphSetColumnType {
     fn from(column: &ValueProjection) -> Self {
@@ -64,7 +66,7 @@ impl From<&ValueProjection> for GraphSetColumnType {
 impl GraphSetColumnType {
     pub(crate) fn accepts(self, value: &crate::algebra::GraphValue) -> bool {
         use crate::algebra::GraphValue;
-        value.is_null()
+        self == Self::Any || value.is_null()
             || matches!(
                 (self, value),
                 (Self::Vertex, GraphValue::Vertex(_))
@@ -73,6 +75,7 @@ impl GraphSetColumnType {
                     | (Self::Vertices, GraphValue::Vertices(_))
                     | (Self::Edges, GraphValue::Edges(_))
                     | (Self::Edge, GraphValue::Edge(_))
+                    | (Self::List, GraphValue::List(_))
             )
     }
 }
@@ -175,6 +178,15 @@ type SetResult<T, E, C> = Result<T, GqlQueryError<GraphSetExecutionError<E>, C>>
 #[derive(Clone, PartialEq, Eq)]
 enum SetNode {
     Pattern(PreparedGraphPattern<GraphValueRow>),
+    Values,
+    Unwind {
+        input: Box<PreparedGraphSet>,
+        value: GraphSetValue,
+    },
+    CrossJoin {
+        left: Box<PreparedGraphSet>,
+        right: Box<PreparedGraphSet>,
+    },
     Scope(Box<PreparedGraphSet>),
     Filter {
         input: Box<PreparedGraphSet>,
@@ -246,18 +258,115 @@ fn check_depth(depth: usize) -> Result<(), GraphSetBuildError> {
     }
 }
 impl PreparedGraphSet {
+    /// A zero-column, one-row relation with no graph source admission.
+    #[must_use]
+    pub fn singleton() -> Self {
+        Self {
+            node: SetNode::Values,
+            columns: Vec::new(),
+            types: Vec::new(),
+            operands: 0,
+            depth: 1,
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        }
+    }
+
+    /// Append each element of the evaluated list to its input row, preserving
+    /// input and element order. NULL and empty lists emit no rows; other
+    /// non-list values fail atomically during governed execution.
+    pub fn unwind(
+        self,
+        name: String,
+        value: GraphSetValue,
+    ) -> Result<Self, GraphSetProjectionError> {
+        use GraphSetProjectionError as Error;
+        let column = self.columns.len();
+        if column >= crate::algebra::MAX_PATTERN_VERTICES {
+            return Err(Error::TooManyColumns {
+                limit: crate::algebra::MAX_PATTERN_VERTICES,
+                observed: column + 1,
+            });
+        }
+        let depth = self.depth + 1;
+        check_depth(depth).map_err(Error::SetBuild)?;
+        projection::validate_name(&name, column)?;
+        if self.columns.contains(&name) {
+            return Err(Error::DuplicateName { column });
+        }
+        projection::value_type(&value, &self.types, column)?;
+        let mut columns = self.columns.clone();
+        columns.push(name);
+        let mut types = self.types.clone();
+        types.push(GraphSetColumnType::Any);
+        let operands = self.operands;
+        Ok(Self {
+            node: SetNode::Unwind {
+                input: Box::new(self),
+                value,
+            },
+            columns,
+            types,
+            operands,
+            depth,
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        })
+    }
+
+    /// Concatenate each left row with each right row, in left-major order.
+    /// Both children retain their own ordering/page and execute exactly once.
+    pub fn cross_join(self, right: Self) -> Result<Self, GraphSetBuildError> {
+        let operands = self.operands + right.operands;
+        if operands > MAX_GRAPH_SET_OPERANDS {
+            return Err(GraphSetBuildError::TooManyOperands {
+                limit: MAX_GRAPH_SET_OPERANDS,
+                observed: operands,
+            });
+        }
+        let depth = 1 + self.depth.max(right.depth);
+        check_depth(depth)?;
+        let mut columns = self.columns.clone();
+        columns.extend_from_slice(&right.columns);
+        let mut types = self.types.clone();
+        types.extend_from_slice(&right.types);
+        Ok(Self {
+            node: SetNode::CrossJoin {
+                left: Box::new(self),
+                right: Box::new(right),
+            },
+            columns,
+            types,
+            operands,
+            depth,
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        })
+    }
+
     /// The actual sole graph leaf, for a host that admits that source once.
     /// This does not turn a relation into a pattern or flatten any row stage.
-    /// Binary sets require a multi-source admission owner and refuse here.
+    /// Multiple graph sources require a multi-source admission owner.
     pub(crate) fn single_pattern_input(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
-        let mut current = self;
-        loop {
-            match &current.node {
-                SetNode::Pattern(pattern) => return Some(pattern),
-                SetNode::Scope(input)
-                | SetNode::Project { input, .. }
-                | SetNode::Filter { input, .. } => current = input,
-                SetNode::Binary { .. } => return None,
+        if self.operands == 1 {
+            self.first_pattern_input()
+        } else {
+            None
+        }
+    }
+
+    fn preserves_row_order(&self) -> bool {
+        match &self.node {
+            SetNode::Values | SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
+            SetNode::Pattern(_) => false,
+            SetNode::Scope(input)
+            | SetNode::Project { input, .. }
+            | SetNode::Filter { input, .. } => input.preserves_row_order(),
+            SetNode::Binary { left, right, .. } => {
+                left.preserves_row_order() || right.preserves_row_order()
             }
         }
     }
@@ -397,6 +506,17 @@ impl PreparedGraphSet {
                 let input = pattern.canonical_bytes();
                 bytes.extend_from_slice(&(input.len() as u64).to_be_bytes());
                 bytes.extend_from_slice(&input);
+            }
+            SetNode::Values => bytes.push(5),
+            SetNode::Unwind { input, value } => {
+                bytes.push(6);
+                input.append_transcript(bytes);
+                projection::append_value_transcript(value, bytes);
+            }
+            SetNode::CrossJoin { left, right } => {
+                bytes.push(7);
+                left.append_transcript(bytes);
+                right.append_transcript(bytes);
             }
             SetNode::Binary {
                 operation,

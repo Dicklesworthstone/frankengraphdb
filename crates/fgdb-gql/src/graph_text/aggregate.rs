@@ -62,6 +62,10 @@ impl Summary {
             }
             (GraphAggregateFunction::Min, Some(at)) => GraphAggregate::min(&self.alias, at),
             (GraphAggregateFunction::Max, Some(at)) => GraphAggregate::max(&self.alias, at),
+            (GraphAggregateFunction::Collect, Some(at)) => GraphAggregate::collect(&self.alias, at),
+            (GraphAggregateFunction::CollectDistinct, Some(at)) => {
+                GraphAggregate::collect_distinct(&self.alias, at)
+            }
             _ => unreachable!("private aggregate parser pairs functions and arguments"),
         }
     }
@@ -612,7 +616,7 @@ impl<'a> Parser<'a> {
         let TokenKind::Word(word) = self.current.kind else {
             return Ok(false);
         };
-        Ok(["COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX"]
+        Ok(["COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT"]
             .iter()
             .any(|name| word.eq_ignore_ascii_case(name))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
@@ -637,6 +641,7 @@ impl<'a> Parser<'a> {
                 }
                 GraphAggregateFunction::Min => "min",
                 GraphAggregateFunction::Max => "max",
+                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => "collect",
             };
             (
                 expression,
@@ -690,11 +695,13 @@ impl<'a> Parser<'a> {
             GraphAggregateFunction::Min
         } else if name.text.eq_ignore_ascii_case("MAX") {
             GraphAggregateFunction::Max
+        } else if name.text.eq_ignore_ascii_case("COLLECT") {
+            GraphAggregateFunction::Collect
         } else {
             return Err(error(
                 name.at,
                 GraphPatternTextErrorKind::Expected(
-                    "COUNT, SUM, SUM_INT, AVG, AVG_INT, MIN or MAX",
+                    "COUNT, SUM, SUM_INT, AVG, AVG_INT, MIN, MAX or COLLECT",
                 ),
             ));
         };
@@ -717,6 +724,7 @@ impl<'a> Parser<'a> {
             // plain extreme function rather than a separate variant.
             let function = match (function, distinct) {
                 (GraphAggregateFunction::Count, true) => GraphAggregateFunction::CountDistinct,
+                (GraphAggregateFunction::Collect, true) => GraphAggregateFunction::CollectDistinct,
                 (GraphAggregateFunction::SumInt, true) => GraphAggregateFunction::SumIntDistinct,
                 (GraphAggregateFunction::AverageInt, true) => {
                     GraphAggregateFunction::AverageIntDistinct
@@ -733,7 +741,7 @@ impl<'a> Parser<'a> {
                     return Err(error(
                         name.at,
                         GraphPatternTextErrorKind::Expected(
-                            "DISTINCT argument for COUNT, SUM, AVG, MIN or MAX",
+                            "DISTINCT argument for COUNT, SUM, AVG, MIN, MAX or COLLECT",
                         ),
                     ));
                 }

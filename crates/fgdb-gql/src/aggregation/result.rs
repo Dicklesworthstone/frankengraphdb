@@ -107,10 +107,11 @@ enum Cell<'a> {
     Value(ValueRef<'a>),
 }
 impl<'a> Cell<'a> {
-    fn from_state(state: &Accumulator<'a>) -> Self {
+    fn from_state(state: &'a Accumulator<'a>) -> Self {
         match state {
             Accumulator::Count(count) => Self::Count(*count),
             Accumulator::Distinct(seen) => Self::Count(seen.len() as u64),
+            Accumulator::Collect { values, .. } => Self::Value(ValueRef::List(values)),
             Accumulator::Sum {
                 value,
                 present: true,
@@ -164,8 +165,8 @@ impl<'a> Cell<'a> {
         }
     }
 }
-impl<'a> Group<'_, 'a> {
-    fn cell(self, column: GraphAggregateColumn) -> Cell<'a> {
+impl<'g, 'a: 'g> Group<'g, 'a> {
+    fn cell(self, column: GraphAggregateColumn) -> Cell<'g> {
         match column {
             GraphAggregateColumn::GroupKey(at) => Cell::Value(self.key[at]),
             GraphAggregateColumn::Aggregate(at) => Cell::from_state(&self.state[at]),

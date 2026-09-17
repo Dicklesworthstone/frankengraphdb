@@ -310,7 +310,7 @@ fn append_operand(operand: &GraphHavingOperand, bytes: &mut Vec<u8>) {
 
 fn resolve<'source: 'borrow, 'borrow, E>(
     operand: &'borrow GraphHavingOperand,
-    group: Group<'_, 'source>,
+    group: Group<'borrow, 'source>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Cell<'borrow>, E> {
     control(GlaExecutionEvent::Work)?;

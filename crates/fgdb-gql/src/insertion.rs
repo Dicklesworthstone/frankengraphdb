@@ -540,6 +540,18 @@ impl Properties {
                     bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
                     bytes.extend_from_slice(&expression);
                 }
+                // Composite projections use the enum's own canonical
+                // transcript; the discriminant byte keeps wire framing.
+                GraphSetValue::List(_)
+                | GraphSetValue::Index { .. }
+                | GraphSetValue::Size(_)
+                | GraphSetValue::Value(_) => {
+                    bytes.push(3);
+                    let mut encoded = Vec::new();
+                    expression.value().append_canonical_bytes(&mut encoded);
+                    bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(&encoded);
+                }
             }
         }
     }

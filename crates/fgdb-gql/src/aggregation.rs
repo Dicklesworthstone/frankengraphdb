@@ -41,6 +41,8 @@ pub enum GraphAggregateFunction {
     SumIntDistinct,
     AverageInt,
     AverageIntDistinct,
+    Collect,
+    CollectDistinct,
 }
 
 /// A named aggregate over a zero-based column of the child value pattern.
@@ -74,6 +76,24 @@ impl<'a> GraphAggregate<'a> {
         Self {
             name,
             function: GraphAggregateFunction::CountDistinct,
+            column: Some(column),
+        }
+    }
+    /// Collect nonnull inputs in visitation order, retaining duplicates.
+    #[must_use]
+    pub const fn collect(name: &'a str, column: usize) -> Self {
+        Self {
+            name,
+            function: GraphAggregateFunction::Collect,
+            column: Some(column),
+        }
+    }
+    /// Collect the first occurrence of each canonical nonnull input value.
+    #[must_use]
+    pub const fn collect_distinct(name: &'a str, column: usize) -> Self {
+        Self {
+            name,
+            function: GraphAggregateFunction::CollectDistinct,
             column: Some(column),
         }
     }
@@ -289,8 +309,9 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphAggregateError
 }
 
 /// Counts, sums and averages have exact domains, not lossy scalar/float casts.
-/// MIN/MAX preserve the original canonical scalar or vertex value. Empty
-/// non-count aggregates produce Value(Scalar(Null)).
+/// MIN/MAX preserve the original typed value. COLLECT returns Value(List),
+/// including an empty list for no nonnull inputs; other empty non-count
+/// aggregates produce Value(Scalar(Null)).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GraphAggregateValue {
     Count(u64),
@@ -667,6 +688,8 @@ impl PreparedGraphAggregate {
                 GraphAggregateFunction::SumIntDistinct => 6,
                 GraphAggregateFunction::AverageInt => 7,
                 GraphAggregateFunction::AverageIntDistinct => 8,
+                GraphAggregateFunction::Collect => 9,
+                GraphAggregateFunction::CollectDistinct => 10,
             });
             if let Some(column) = aggregate.column {
                 bytes.extend_from_slice(&(column as u64).to_be_bytes());
@@ -880,12 +903,18 @@ enum ValueRef<'a> {
     Vertices(&'a [VId]),
     Edges(&'a [EId]),
     Edge(EId),
+    List(&'a [GraphValue]),
 }
 impl ValueRef<'_> {
     fn is_null(self) -> bool {
         matches!(self, Self::Scalar(CanonicalScalar::Null))
     }
     fn payload_units(self) -> usize {
+        if let Self::List(values) = self {
+            return values.iter().fold(values.len(), |units, value| {
+                units.saturating_add(value.payload_units())
+            });
+        }
         let bytes = match self {
             Self::Scalar(CanonicalScalar::Bytes(value)) => value.as_slice().len(),
             Self::Scalar(CanonicalScalar::Text(value)) => {
@@ -905,6 +934,15 @@ impl ValueRef<'_> {
         self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<GraphValue, E> {
+        if let Self::List(values) = self {
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            let mut owned = Vec::new();
+            for value in values {
+                owned.push(value.copy_with_control(control)?);
+            }
+            return Ok(GraphValue::List(owned.into_boxed_slice()));
+        }
         control(GlaExecutionEvent::ScratchEntry)?;
         for _ in 0..self.payload_units() {
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -916,6 +954,7 @@ impl ValueRef<'_> {
             Self::Vertices(value) => GraphValue::Vertices(value.into()),
             Self::Edges(value) => GraphValue::Edges(value.into()),
             Self::Edge(value) => GraphValue::Edge(value),
+            Self::List(_) => unreachable!("list copying is recursively governed above"),
         })
     }
 }
@@ -926,6 +965,11 @@ enum Accumulator<'a> {
     Sum { value: i128, present: bool },
     Extreme(Option<ValueRef<'a>>),
     Numeric(numeric::NumericAccumulator),
+    Collect {
+        values: Vec<GraphValue>,
+        seen: Option<BTreeSet<ValueRef<'a>>>,
+        max_payload: usize,
+    },
 }
 
 fn new_group<'a, E>(
@@ -952,6 +996,14 @@ fn new_group<'a, E>(
             }
             GraphAggregateFunction::AverageIntDistinct => {
                 Accumulator::Numeric(numeric::NumericAccumulator::new(true, true))
+            }
+            GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => {
+                Accumulator::Collect {
+                    values: Vec::new(),
+                    seen: (aggregate.function == GraphAggregateFunction::CollectDistinct)
+                        .then(BTreeSet::new),
+                    max_payload: 0,
+                }
             }
             GraphAggregateFunction::Min | GraphAggregateFunction::Max => Accumulator::Extreme(None),
         });
@@ -997,6 +1049,38 @@ fn update<'a, E, C>(
                 control(GlaExecutionEvent::ScratchEntry)?;
                 seen.insert(value);
             }
+        }
+        Accumulator::Collect { values, seen, max_payload } => {
+            // Collection must visit every occurrence; topology weights do not
+            // retain the row order and are deliberately ineligible.
+            if multiplicity != weighted::Multiplicity::ONE {
+                return Err(GqlQueryError::Source(
+                    GraphAggregateError::MultiplicityUnavailable,
+                ));
+            }
+            let value = value.expect("nonnull collection argument was checked");
+            if let Some(seen) = seen {
+                let payload = value.payload_units();
+                *max_payload = (*max_payload).max(payload);
+                // Bound both tree searches and recursive payload comparisons
+                // before the set can inspect or retain the argument.
+                let levels = (seen.len().saturating_add(1)).ilog2() as usize + 1;
+                for _ in 0..levels.saturating_mul(24)
+                    .saturating_mul(max_payload.saturating_add(1))
+                {
+                    control(GlaExecutionEvent::Work)?;
+                }
+                if seen.contains(&value) {
+                    return Ok(());
+                }
+                control(GlaExecutionEvent::ScratchEntry)?;
+                for _ in 0..payload {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+                seen.insert(value);
+            }
+            control(GlaExecutionEvent::Work)?;
+            values.push(value.copy_owned(control)?);
         }
         Accumulator::Sum {
             value: sum,

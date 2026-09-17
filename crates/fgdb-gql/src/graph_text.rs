@@ -346,6 +346,8 @@ struct Parser<'a> {
     identities: usize,
     edge_count: usize,
     parameter_types: BTreeMap<String, GqlParameterType>,
+    read_row_bindings: Vec<Name<'a>>,
+    read_correlations: Vec<(Name<'a>, Name<'a>, usize)>,
 }
 impl<'a> Parser<'a> {
     fn new(text: &'a str) -> Result<Self, GraphPatternTextError> {
@@ -368,6 +370,8 @@ impl<'a> Parser<'a> {
             identities: 0,
             edge_count: 0,
             parameter_types: BTreeMap::new(),
+            read_row_bindings: Vec::new(),
+            read_correlations: Vec::new(),
             syntax: Syntax {
                 variables: Vec::new(),
                 path: None,
@@ -583,6 +587,14 @@ impl<'a> Parser<'a> {
                     i64::try_from(signed)
                         .map_err(|_| error(at, GraphPatternTextErrorKind::IntegerOutOfRange))?,
                 )
+            }
+            GqlParameterType::List => {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected(
+                        "list parameters are not scalar operands",
+                    ),
+                ));
             }
         };
         self.advance()?;

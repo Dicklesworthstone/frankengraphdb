@@ -127,16 +127,20 @@ impl RowPredicate {
                             | GraphSetColumnType::Vertices
                             | GraphSetColumnType::Edges
                             | GraphSetColumnType::Edge
+                            | GraphSetColumnType::List
                     ) || matches!(
                         right,
                         GraphSetColumnType::Path
                             | GraphSetColumnType::Vertices
                             | GraphSetColumnType::Edges
                             | GraphSetColumnType::Edge
+                            | GraphSetColumnType::List
                     ) {
                         return Err(Error::InvalidValueComparison { instruction });
                     }
                     if (left == GraphSetColumnType::Vertex || right == GraphSetColumnType::Vertex)
+                        && left != GraphSetColumnType::Any
+                        && right != GraphSetColumnType::Any
                         && !(left == right
                             && matches!(
                                 comparison,
@@ -292,7 +296,11 @@ fn resolve<'a, E>(
         GraphSetOperand::Column(column) => match &row.values()[*column] {
             GraphValue::Vertex(value) => Cell::Vertex(*value),
             GraphValue::Scalar(value) => Cell::Scalar(value),
-            GraphValue::Path(_) | GraphValue::Vertices(_) | GraphValue::Edges(_) | GraphValue::Edge(_) => {
+            GraphValue::Path(_)
+            | GraphValue::Vertices(_)
+            | GraphValue::Edges(_)
+            | GraphValue::Edge(_)
+            | GraphValue::List(_) => {
                 Cell::Incompatible
             }
         },
@@ -307,7 +315,7 @@ fn compare(left: Cell<'_>, right: Cell<'_>, comparison: IntegerComparison) -> Op
         (Cell::Vertex(left), Cell::Vertex(right)) => Some(match comparison {
             IntegerComparison::Equal => left == right,
             IntegerComparison::NotEqual => left != right,
-            _ => unreachable!("vertex ordering is rejected before execution"),
+            _ => return None,
         }),
         (Cell::Scalar(left), Cell::Scalar(right))
             if core::mem::discriminant(left) == core::mem::discriminant(right) =>

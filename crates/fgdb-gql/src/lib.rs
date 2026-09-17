@@ -134,8 +134,8 @@ pub use mutation_text::{
 };
 pub use overlay_evidence::GqlOverlayResultCertificate;
 pub use parameters::{
-    GqlParameterError, GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters,
-    GqlScalarParameter, PreparedGqlTemplate,
+    GqlListParameter, GqlParameterError, GqlParameterSpec, GqlParameterType, GqlParameterValue,
+    GqlParameters, GqlScalarParameter, PreparedGqlTemplate,
 };
 pub use parser::{
     BindError, BoundPlan, EdgeDirection, ParseError, ParseErrorKind, RelationBind, ReturnProjection,

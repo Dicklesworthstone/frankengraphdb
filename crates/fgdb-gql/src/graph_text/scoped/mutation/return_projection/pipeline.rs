@@ -22,7 +22,7 @@ fn append_stage(
     depth: &mut usize,
 ) -> Result<(), GraphSetTextError> {
     let (at, growth) = match &stage {
-        ReadStageTemplate::Project { at, .. } | ReadStageTemplate::Filter { at, .. } => (*at, 1),
+        ReadStageTemplate::Project { at, .. } | ReadStageTemplate::Filter { at, .. } | ReadStageTemplate::Unwind { at, .. } => (*at, 1),
         ReadStageTemplate::Page { at, .. } => (*at, 0),
     };
     *depth += growth;
@@ -101,6 +101,11 @@ impl<'a> Parser<'a> {
                 append_stage(&mut stages, page, &mut depth)?;
             }
             let at = self.current.at;
+            if self.take_word("UNWIND")? {
+                let stage = self.unwind_stage(&mut schema, at)?;
+                append_stage(&mut stages, stage, &mut depth)?;
+                continue;
+            }
             if self.take_word("WHERE")? {
                 let mut code = Vec::new();
                 self.row_disjunction(&schema, 0, &mut code)?;
@@ -168,10 +173,10 @@ impl<'a> Parser<'a> {
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
                 let at = self.current.at;
-                let operand = self.row_expression(schema).map_err(expression_error)?;
+                let value = self.read_row_value(schema, 0)?;
                 let alias = if self.take_word("AS")? {
                     self.name()?
-                } else if let Operand::Column(column) = &operand {
+                } else if let ReadValueTemplate::Column(column) = &value {
                     schema[*column].0
                 } else {
                     return Err(expected(at, "AS alias for a computed row value"));
@@ -183,13 +188,11 @@ impl<'a> Parser<'a> {
                     )
                     .into());
                 }
-                let kind = match &operand {
-                    Operand::Column(column) => schema[*column].1,
-                    _ => GraphSetColumnType::Scalar,
-                };
+                let types: Vec<_> = schema.iter().map(|(_, kind)| *kind).collect();
+                let kind = value.column_type(&types, &self.syntax.parameters);
                 projection.push(ReadProjectionTemplate {
                     name: alias.text.to_owned(),
-                    value: self.read_value_template(operand, alias.at)?,
+                    value,
                 });
                 next_schema.push((alias, kind));
                 if !self.take(b',')? {
@@ -198,6 +201,21 @@ impl<'a> Parser<'a> {
             }
         }
         Ok((projection, next_schema))
+    }
+
+    pub(super) fn unwind_stage(&mut self, schema: &mut RowSchema<'a>, at: usize) -> Result<ReadStageTemplate, GraphSetTextError> {
+        if let TokenKind::Parameter(name) = self.current.kind {
+            self.parameter_types.entry(name.to_owned()).or_insert(GqlParameterType::List);
+        }
+        let value = self.read_row_value(schema, 0)?;
+        self.word("AS")?;
+        let alias = self.name()?;
+        if schema.iter().any(|(name, _)| name.text == alias.text) {
+            return Err(expected(alias.at, "new UNWIND alias"));
+        }
+        self.capacity(schema.len(), MAX_PATTERN_VERTICES, crate::algebra::PatternLimitDimension::Columns)?;
+        schema.push((alias, GraphSetColumnType::Any));
+        Ok(ReadStageTemplate::Unwind { at, name: alias.text.to_owned(), value })
     }
 
     pub(super) fn row_page(

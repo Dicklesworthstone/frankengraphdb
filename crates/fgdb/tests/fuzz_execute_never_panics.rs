@@ -89,6 +89,7 @@ fn arguments(schema: &[GqlParameterSpec], variant: usize, frontier: u64) -> GqlP
                 },
             ),
             GqlParameterType::Scalar(_) => args.with_null(&spec.name),
+            GqlParameterType::List => args.with_list(&spec.name, Vec::new()),
         }
         .expect("generated parameter names originate in the admitted schema");
     }

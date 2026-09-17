@@ -69,6 +69,9 @@ fn pattern_kind(offset: usize, kind: GraphPatternTextErrorKind) -> GraphSetTextE
 #[derive(Clone)]
 pub(crate) enum ReadValueTemplate {
     Column(usize),
+    List(Vec<ReadValueTemplate>),
+    Index { list: Box<ReadValueTemplate>, index: Box<ReadValueTemplate> },
+    Size(Box<ReadValueTemplate>),
     Literal(crate::GqlScalarParameter),
     Parameter {
         index: usize,
@@ -78,6 +81,17 @@ pub(crate) enum ReadValueTemplate {
         program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
         at: usize,
     },
+}
+impl ReadValueTemplate {
+    pub(crate) fn column_type(&self, input: &[GraphSetColumnType], parameters: &[GqlParameterSpec]) -> GraphSetColumnType {
+        match self {
+            Self::Column(index) => input[*index],
+            Self::List(_) => GraphSetColumnType::List,
+            Self::Index { .. } => GraphSetColumnType::Any,
+            Self::Parameter { index, .. } if parameters[*index].parameter_type == GqlParameterType::List => GraphSetColumnType::List,
+            _ => GraphSetColumnType::Scalar,
+        }
+    }
 }
 #[derive(Clone)]
 pub(crate) struct ReadProjectionTemplate {
@@ -113,6 +127,7 @@ pub(crate) enum ReadFilterOp {
 }
 #[derive(Clone)]
 pub(crate) enum ReadStageTemplate {
+    Unwind { at: usize, name: String, value: ReadValueTemplate },
     Project {
         at: usize,
         projection: Vec<ReadProjectionTemplate>,
@@ -131,10 +146,16 @@ pub(crate) enum ReadStageTemplate {
 }
 #[derive(Clone)]
 pub(crate) struct BoundSetTextInput {
-    pub(crate) selection: PreparedGraphText,
+    pub(crate) selection: Option<PreparedGraphText>,
+    pub(crate) parameters: Vec<GqlParameterSpec>,
+    pub(crate) parameter_offsets: Vec<usize>,
+    pub(crate) return_at: usize,
     pub(crate) projection: Option<Vec<ReadProjectionTemplate>>,
     pub(crate) quantifier: GraphSetQuantifier,
     pub(crate) pipeline: Vec<ReadStageTemplate>,
+    pub(crate) singleton: bool,
+    pub(crate) leading: Vec<ReadStageTemplate>,
+    pub(crate) correlations: Vec<(usize, usize)>,
 }
 
 // A token view, not a lexer. Only graph_text's existing Lexer constructs these.
@@ -446,8 +467,8 @@ impl<'a> Composition<'a> {
             let height = input.depth + 1;
             return Node::new(NodeKind::Scope(Box::new(input)), at, height);
         }
-        if !self.current().word("MATCH") {
-            return Err(expected(at, "MATCH or parenthesized set expression"));
+        if !(self.current().word("MATCH") || self.current().word("UNWIND") || self.current().word("RETURN") || self.current().word("WITH")) {
+            return Err(expected(at, "read pipeline or parenthesized set expression"));
         }
         if self.spans.len() == MAX_GRAPH_SET_OPERANDS {
             return Err(fail(
@@ -538,7 +559,7 @@ impl<'a> Composition<'a> {
         }
         self.tokens
             .get(next)
-            .is_some_and(|token| token.word("MATCH") || token.punct(b'('))
+            .is_some_and(|token| token.word("MATCH") || token.word("UNWIND") || token.word("RETURN") || token.word("WITH") || token.punct(b'('))
     }
     fn tail(&mut self, node: &mut Node) -> Result<(), GraphSetTextError> {
         if self.take_word("ORDER") {

@@ -140,18 +140,43 @@ impl PreparedGraphAggregateText {
     ) -> Result<Vec<GraphSetProjection>, GraphPatternTextError> {
         let mut columns = Vec::new();
         for output in projection {
-            let value = match &output.value {
-                ReadValueTemplate::Column(input) => GraphSetValue::Column(*input),
-                ReadValueTemplate::Literal(value) => GraphSetValue::Literal(value.clone()),
-                ReadValueTemplate::Parameter { index, at } => {
-                    GraphSetValue::Literal(scalar(values[*index].clone(), *at)?)
-                }
-                ReadValueTemplate::Integer { program, at } => GraphSetValue::Integer(
-                    integer::bind_integer(program, values, *at).map_err(scalar_error)?,
-                ),
-            };
+            let value = Self::bind_input_value(&output.value, values)?;
             columns.push(GraphSetProjection::new(output.name.clone(), value));
         }
         Ok(columns)
+    }
+
+    /// Binds one template to its typed set expression. List/index/size lower
+    /// recursively so aggregate arguments admit composite list expressions
+    /// under the same admission rules as the projection language.
+    pub(in crate::graph_text) fn bind_input_value(
+        template: &ReadValueTemplate,
+        values: &[GqlParameterValue],
+    ) -> Result<GraphSetValue, GraphPatternTextError> {
+        match template {
+            ReadValueTemplate::Column(input) => Ok(GraphSetValue::Column(*input)),
+            ReadValueTemplate::Literal(value) => Ok(GraphSetValue::Literal(value.clone())),
+            ReadValueTemplate::Parameter { index, at } => {
+                Ok(GraphSetValue::Literal(scalar(values[*index].clone(), *at)?))
+            }
+            ReadValueTemplate::Integer { program, at } => Ok(GraphSetValue::Integer(
+                integer::bind_integer(program, values, *at).map_err(scalar_error)?,
+            )),
+            ReadValueTemplate::List(items) => Ok(GraphSetValue::List(
+                items
+                    .iter()
+                    .map(|item| Self::bind_input_value(item, values))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            ReadValueTemplate::Index { list, index } => Ok(GraphSetValue::Index {
+                list: Box::new(Self::bind_input_value(list, values)?),
+                index: Box::new(Self::bind_input_value(index, values)?),
+            }),
+            ReadValueTemplate::Size(inner) => {
+                Ok(GraphSetValue::Size(Box::new(Self::bind_input_value(
+                    inner, values,
+                )?)))
+            }
+        }
     }
 }

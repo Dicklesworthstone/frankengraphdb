@@ -2,12 +2,12 @@
 
 use super::{QueryError, QueryResult, aggregates, values};
 use crate::Database;
-use asupersync::fs::Vfs;
-use fgdb_gql::*;
-use fgdb_types::QueryCx;
 use crate::gql_cert::{NativeCertificatePlan, NativePlanCertificate, NativeReadClass};
+use asupersync::fs::Vfs;
 use fgdb_crypto::Digest;
+use fgdb_gql::*;
 use fgdb_types::CommitSeq;
+use fgdb_types::QueryCx;
 use std::collections::BTreeMap;
 
 /// A complete native read template, classified without binding parameter values.
@@ -35,11 +35,11 @@ impl PreparedNativeRead {
                 .entry((kind, name.to_owned()))
                 .or_insert_with(|| resolver(kind, name))
         };
-        // Numeric arguments keep native inference; explicit scalar declarations
-        // reach every prepare_with_parameter_types facade uniformly.
+        // Numeric arguments keep native inference; explicit scalar and list
+        // declarations reach every prepare_with_parameter_types facade.
         let declarations: Vec<(&str, GqlParameterType)> = params
             .parameter_types()
-            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_)))
+            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_) | GqlParameterType::List))
             .collect();
         let mut diagnostics = Vec::new();
         match PreparedTemporalGraphAggregateText::prepare_with_parameter_types(
@@ -86,7 +86,8 @@ impl PreparedNativeRead {
             Ok(prepared) => return Ok(Self::Pattern(prepared)),
             Err(error) => diagnostics.push(error.to_string()),
         }
-        match PreparedGraphSetText::prepare_with_parameter_types(text, &declarations, &mut resolve) {
+        match PreparedGraphSetText::prepare_with_parameter_types(text, &declarations, &mut resolve)
+        {
             Ok(prepared) => Ok(Self::Set(prepared)),
             Err(error) => {
                 diagnostics.push(error.to_string());
@@ -257,7 +258,9 @@ impl NativeCertificatePlan for PreparedNativeRead {
 impl NativeExplainCertificate {
     #[must_use]
     pub fn new(prepared: &PreparedNativeRead, snapshot_seq: CommitSeq) -> Self {
-        Self { certificate: NativePlanCertificate::new(prepared, snapshot_seq) }
+        Self {
+            certificate: NativePlanCertificate::new(prepared, snapshot_seq),
+        }
     }
 
     #[must_use]
@@ -287,7 +290,6 @@ pub struct ExplainRow {
     pub operator: String,
     pub detail: String,
 }
-
 
 /// Deterministic human-readable operator rows derived from the resolved
 /// template, never from an executed snapshot read.

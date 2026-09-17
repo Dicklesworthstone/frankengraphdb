@@ -76,6 +76,10 @@ pub(crate) struct UnresolvedGraphText<'a> {
     pub(super) syntax: Syntax<'a>,
     pub(super) projection: Option<Vec<ReadProjectionTemplate>>,
     pub(super) pipeline: Vec<ReadStageTemplate>,
+    pub(super) singleton: bool,
+    pub(super) leading: Vec<ReadStageTemplate>,
+    pub(super) leading_types: Vec<crate::GraphSetColumnType>,
+    pub(super) correlations: Vec<(usize, usize)>,
 }
 impl UnresolvedGraphText<'_> {
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
@@ -89,17 +93,13 @@ impl UnresolvedGraphText<'_> {
             None if column.property.is_some() => Scalar,
             None => Vertex,
         };
+        let input_types: Vec<_> = self.leading_types.iter().copied().chain(self.syntax.columns.iter().map(column_type)).collect();
         let (mut names, mut types): (Vec<String>, Vec<crate::GraphSetColumnType>) =
             if let Some(projection) = &self.projection {
                 projection
                     .iter()
                     .map(|column| {
-                        let kind = match &column.value {
-                            ReadValueTemplate::Column(input) => {
-                                column_type(&self.syntax.columns[*input])
-                            }
-                            _ => Scalar,
-                        };
+                        let kind = column.value.column_type(&input_types, &self.syntax.parameters);
                         (column.name.clone(), kind)
                     })
                     .unzip()
@@ -114,10 +114,7 @@ impl UnresolvedGraphText<'_> {
             if let ReadStageTemplate::Project { projection, .. } = stage {
                 let next = projection
                     .iter()
-                    .map(|column| match &column.value {
-                        ReadValueTemplate::Column(input) => types[*input],
-                        _ => Scalar,
-                    })
+                    .map(|column| column.value.column_type(&types, &self.syntax.parameters))
                     .collect();
                 names = projection
                     .iter()
@@ -125,11 +122,15 @@ impl UnresolvedGraphText<'_> {
                     .collect();
                 types = next;
             }
+            if let ReadStageTemplate::Unwind { name, .. } = stage {
+                names.push(name.clone());
+                types.push(crate::GraphSetColumnType::Any);
+            }
         }
         (names, types)
     }
     pub(crate) fn depth(&self) -> usize {
-        1 + usize::from(self.projection.is_some())
+        1 + self.leading.len() + usize::from(!self.leading.is_empty() && !self.singleton) + usize::from(self.projection.is_some())
             + self
                 .pipeline
                 .iter()
@@ -152,6 +153,12 @@ impl UnresolvedGraphText<'_> {
         } else {
             crate::GraphSetQuantifier::All
         };
+        let parameters = self.syntax.parameters.clone();
+        let parameter_offsets = self.syntax.parameter_offsets.clone();
+        let return_at = self.syntax.return_at;
+        if self.singleton {
+            return Ok(BoundSetTextInput { selection: None, parameters, parameter_offsets, return_at, projection: self.projection, quantifier, pipeline: self.pipeline, singleton: true, leading: self.leading, correlations: self.correlations });
+        }
         let selection = if self.projection.is_none() {
             PreparedGraphText::from_syntax(self.statement, self.syntax, resolve)?
         } else {
@@ -230,7 +237,13 @@ impl UnresolvedGraphText<'_> {
             }
         };
         Ok(BoundSetTextInput {
-            selection,
+            selection: Some(selection),
+            parameters,
+            parameter_offsets,
+            return_at,
+            singleton: false,
+            leading: self.leading,
+            correlations: self.correlations,
             projection: self.projection,
             quantifier,
             pipeline: self.pipeline,

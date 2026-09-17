@@ -218,6 +218,79 @@ where
 {
     meter.event(GlaExecutionEvent::Work)?;
     let mut rows = match &query.node {
+        SetNode::Values => {
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+            vec![GraphValueRow::from_owned_values(Vec::new())]
+        }
+        SetNode::Unwind { input, value } => {
+            let input = run(input, source, meter, operand)?;
+            let mut output = Vec::new();
+            for (row_at, row) in input.into_iter().enumerate() {
+                meter.event(GlaExecutionEvent::Work)?;
+                let column = row.len();
+                let list = projection::evaluate_value(
+                    value,
+                    &row,
+                    column,
+                    &mut |event| meter.event(event),
+                )
+                .map_err(|error| match error {
+                    projection::ProjectionFailure::Control(error) => error,
+                    projection::ProjectionFailure::Arithmetic { column, error } => {
+                        GqlQueryError::Source(GraphSetExecutionError::Projection {
+                            row: row_at,
+                            column,
+                            error,
+                        })
+                    }
+                })?;
+                let values = match list {
+                    GraphValue::List(values) => values,
+                    value if value.is_null() => continue,
+                    _ => {
+                        return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                            row: row_at,
+                            column,
+                            error: crate::GraphIntegerError {
+                                instruction: 0,
+                                kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+                            },
+                        }));
+                    }
+                };
+                for value in values.into_vec() {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    let mut cells = Vec::new();
+                    for cell in row.values() {
+                        cells.push(projection::copy_value(cell, &mut |event| meter.event(event))?);
+                    }
+                    // The evaluated element already owns its metered payload;
+                    // only the newly retained output cell needs reservation.
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    cells.push(value);
+                    output.push(GraphValueRow::from_owned_values(cells));
+                }
+            }
+            output
+        }
+        SetNode::CrossJoin { left, right } => {
+            let left = run(left, source, meter, operand)?;
+            let right = run(right, source, meter, operand)?;
+            let mut output = Vec::new();
+            for left_row in &left {
+                for right_row in &right {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    meter.event(GlaExecutionEvent::ScratchEntry)?;
+                    let mut cells = Vec::new();
+                    for cell in left_row.values().iter().chain(right_row.values()) {
+                        cells.push(projection::copy_value(cell, &mut |event| meter.event(event))?);
+                    }
+                    output.push(GraphValueRow::from_owned_values(cells));
+                }
+            }
+            output
+        }
         SetNode::Pattern(pattern) => {
             let at = *operand;
             *operand += 1;
@@ -269,6 +342,7 @@ where
             projection,
             quantifier,
         } => {
+            let preserve_order = input.preserves_row_order();
             let input = run(input, source, meter, operand)?;
             let mut output = Vec::new();
             for (row_at, row) in input.into_iter().enumerate() {
@@ -300,11 +374,13 @@ where
                     &mut |a, b, control| compare_rows(a, b, &[], control),
                 )?
             } else {
-                merge::sort(
-                    &mut output,
-                    &mut |event| meter.event(event),
-                    &mut |a, b, control| compare_rows(a, b, &[], control),
-                )?;
+                if !preserve_order {
+                    merge::sort(
+                        &mut output,
+                        &mut |event| meter.event(event),
+                        &mut |a, b, control| compare_rows(a, b, &[], control),
+                    )?;
+                }
                 output
             }
         }
@@ -361,6 +437,15 @@ fn compare_value<E>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Ordering, E> {
     control(GlaExecutionEvent::Work)?;
+    if let (GraphValue::List(left), GraphValue::List(right)) = (a, b) {
+        for (left, right) in left.iter().zip(right.iter()) {
+            let ordering = compare_value(left, right, control)?;
+            if ordering != Ordering::Equal {
+                return Ok(ordering);
+            }
+        }
+        return Ok(left.len().cmp(&right.len()));
+    }
     for value in [a, b] {
         if let Some(scalar) = value.as_scalar() {
             charge_payload(scalar, control)?;

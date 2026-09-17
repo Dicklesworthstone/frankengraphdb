@@ -351,6 +351,11 @@ pub(super) fn bind_builder(
             GqlParameterValue::UInt64(_) => {
                 unreachable!("property arguments were type-checked at preparation")
             }
+            // List declarations refuse at the typed number parser, matching the
+            // scalar property admission invariant; a List value cannot bind.
+            GqlParameterValue::List(_) => {
+                unreachable!("property arguments were type-checked at preparation")
+            }
         };
         built(at, builder.filter(variable, predicate))?;
     }

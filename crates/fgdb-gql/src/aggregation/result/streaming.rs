@@ -34,6 +34,7 @@ impl<'a> OwnedGroup<'a> {
             match state {
                 Accumulator::Distinct(seen) => *state = Accumulator::Count(seen.len() as u64),
                 Accumulator::Numeric(numeric) => numeric.release_distinct_set(),
+                Accumulator::Collect { seen, .. } => *seen = None,
                 _ => {}
             }
         }
