@@ -21,56 +21,343 @@ pub(crate) enum SourceEvent {
 type IdentifiedEdge = (EId, VId, RelationId, VId);
 type VertexCursor = Reverse<(VId, CommitSeq, usize, usize)>;
 
-/// Rebuildable coordinates into one admitted generation, never an authority
-/// beside its blocks. Histories retain every version; endpoint lists are in
-/// EId order, including both incidences of self loops only once at lookup.
+/// Immutable AVL nodes: updating a generation copies only the search path.
+/// Values stored here must themselves have cheap clones (coordinates or roots).
+#[derive(Clone, Debug)]
+struct IndexMap<K, V>(Option<std::sync::Arc<IndexNode<K, V>>>);
+
+#[derive(Clone, Debug)]
+struct IndexNode<K, V> {
+    key: K,
+    value: V,
+    left: IndexMap<K, V>,
+    right: IndexMap<K, V>,
+    height: u16,
+    len: usize,
+}
+
+impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
+    fn new() -> Self {
+        Self(None)
+    }
+    fn height(&self) -> u16 {
+        self.0.as_ref().map_or(0, |n| n.height)
+    }
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |n| n.len)
+    }
+    fn node(key: K, value: V, left: Self, right: Self, work: &mut u64) -> Self {
+        *work += 1;
+        let height = 1 + left.height().max(right.height());
+        let len = 1 + left.len() + right.len();
+        Self(Some(std::sync::Arc::new(IndexNode {
+            key,
+            value,
+            left,
+            right,
+            height,
+            len,
+        })))
+    }
+    fn balanced(key: K, value: V, mut left: Self, mut right: Self, work: &mut u64) -> Self {
+        if left.height() > right.height() + 1 {
+            let child = left.0.as_ref().expect("left-heavy tree");
+            if child.right.height() > child.left.height() {
+                let pivot = child.right.0.as_ref().expect("inner-heavy child");
+                let lower = Self::node(
+                    child.key.clone(),
+                    child.value.clone(),
+                    child.left.clone(),
+                    pivot.left.clone(),
+                    work,
+                );
+                left = Self::node(
+                    pivot.key.clone(),
+                    pivot.value.clone(),
+                    lower,
+                    pivot.right.clone(),
+                    work,
+                );
+            }
+            let pivot = left.0.as_ref().expect("left rotation pivot");
+            let lower = Self::node(key, value, pivot.right.clone(), right, work);
+            return Self::node(
+                pivot.key.clone(),
+                pivot.value.clone(),
+                pivot.left.clone(),
+                lower,
+                work,
+            );
+        }
+        if right.height() > left.height() + 1 {
+            let child = right.0.as_ref().expect("right-heavy tree");
+            if child.left.height() > child.right.height() {
+                let pivot = child.left.0.as_ref().expect("inner-heavy child");
+                let lower = Self::node(
+                    child.key.clone(),
+                    child.value.clone(),
+                    pivot.right.clone(),
+                    child.right.clone(),
+                    work,
+                );
+                right = Self::node(
+                    pivot.key.clone(),
+                    pivot.value.clone(),
+                    pivot.left.clone(),
+                    lower,
+                    work,
+                );
+            }
+            let pivot = right.0.as_ref().expect("right rotation pivot");
+            let lower = Self::node(key, value, left, pivot.left.clone(), work);
+            return Self::node(
+                pivot.key.clone(),
+                pivot.value.clone(),
+                lower,
+                pivot.right.clone(),
+                work,
+            );
+        }
+        Self::node(key, value, left, right, work)
+    }
+    fn get(&self, key: &K) -> Option<&V> {
+        let mut cursor = self.0.as_deref();
+        while let Some(node) = cursor {
+            match key.cmp(&node.key) {
+                std::cmp::Ordering::Less => cursor = node.left.0.as_deref(),
+                std::cmp::Ordering::Greater => cursor = node.right.0.as_deref(),
+                std::cmp::Ordering::Equal => return Some(&node.value),
+            }
+        }
+        None
+    }
+    fn insert(&self, key: K, value: V, work: &mut u64) -> Self {
+        *work += 1;
+        let Some(node) = self.0.as_ref() else {
+            return Self::node(key, value, Self::new(), Self::new(), work);
+        };
+        match key.cmp(&node.key) {
+            std::cmp::Ordering::Less => Self::balanced(
+                node.key.clone(),
+                node.value.clone(),
+                node.left.insert(key, value, work),
+                node.right.clone(),
+                work,
+            ),
+            std::cmp::Ordering::Greater => Self::balanced(
+                node.key.clone(),
+                node.value.clone(),
+                node.left.clone(),
+                node.right.insert(key, value, work),
+                work,
+            ),
+            std::cmp::Ordering::Equal => {
+                Self::node(key, value, node.left.clone(), node.right.clone(), work)
+            }
+        }
+    }
+    #[cfg(test)]
+    fn remove(&self, key: &K, work: &mut u64) -> Self {
+        *work += 1;
+        let Some(node) = self.0.as_ref() else {
+            return self.clone();
+        };
+        match key.cmp(&node.key) {
+            std::cmp::Ordering::Less => Self::balanced(
+                node.key.clone(),
+                node.value.clone(),
+                node.left.remove(key, work),
+                node.right.clone(),
+                work,
+            ),
+            std::cmp::Ordering::Greater => Self::balanced(
+                node.key.clone(),
+                node.value.clone(),
+                node.left.clone(),
+                node.right.remove(key, work),
+                work,
+            ),
+            std::cmp::Ordering::Equal => {
+                if node.left.0.is_none() {
+                    return node.right.clone();
+                }
+                if node.right.0.is_none() {
+                    return node.left.clone();
+                }
+                let mut successor = node.right.0.as_deref().expect("nonempty right subtree");
+                while let Some(next) = successor.left.0.as_deref() {
+                    *work += 1;
+                    successor = next;
+                }
+                Self::balanced(
+                    successor.key.clone(),
+                    successor.value.clone(),
+                    node.left.clone(),
+                    node.right.remove(&successor.key, work),
+                    work,
+                )
+            }
+        }
+    }
+    fn iter(&self) -> IndexIter<'_, K, V> {
+        let mut iter = IndexIter { stack: Vec::new() };
+        iter.descend(self.0.as_deref());
+        iter
+    }
+    fn at(&self, mut rank: usize) -> Option<(&K, &V)> {
+        let mut cursor = self.0.as_deref();
+        while let Some(node) = cursor {
+            let left = node.left.len();
+            if rank < left {
+                cursor = node.left.0.as_deref();
+            } else if rank == left {
+                return Some((&node.key, &node.value));
+            } else {
+                rank -= left + 1;
+                cursor = node.right.0.as_deref();
+            }
+        }
+        None
+    }
+}
+
+pub(crate) struct IndexIter<'a, K, V> {
+    stack: Vec<&'a IndexNode<K, V>>,
+}
+impl<'a, K, V> IndexIter<'a, K, V> {
+    fn descend(&mut self, mut node: Option<&'a IndexNode<K, V>>) {
+        while let Some(next) = node {
+            self.stack.push(next);
+            node = next.left.0.as_deref();
+        }
+    }
+}
+impl<'a, K, V> Iterator for IndexIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = self.stack.pop()?;
+        self.descend(node.right.0.as_deref());
+        Some((&node.key, &node.value))
+    }
+}
+
+#[cfg(test)]
+mod persistent_index_tests {
+    use super::IndexMap;
+    #[test]
+    fn updates_preserve_pinned_predecessor_and_order() {
+        let mut map = IndexMap::new();
+        let mut work = 0;
+        for key in 0..400 {
+            map = map.insert(key, key * 2, &mut work);
+        }
+        let pinned = map.clone();
+        work = 0;
+        map = map.insert(401, 802, &mut work);
+        map = map.remove(&199, &mut work);
+        assert!(work < 100, "path copying charged {work} nodes");
+        assert_eq!(pinned.get(&199), Some(&398));
+        assert_eq!(pinned.get(&401), None);
+        assert_eq!(map.get(&199), None);
+        assert_eq!(map.get(&401), Some(&802));
+        assert_eq!(
+            map.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            (0..400)
+                .filter(|k| *k != 199)
+                .chain([401])
+                .collect::<Vec<_>>()
+        );
+        for key in (0..400).rev() {
+            map = map.remove(&key, &mut work);
+        }
+        assert_eq!(map.at(0), Some((&401, &802)));
+        assert_eq!(map.len(), 1);
+        assert_eq!(pinned.len(), 400);
+    }
+}
+
+/// Rebuildable, structurally shared coordinates into an admitted generation.
+/// Publishing a suffix copies search paths, never a pinned predecessor's tree.
+type History = IndexMap<(CommitSeq, usize, usize), ()>;
+type Incidence = IndexMap<EId, ()>;
+
 #[derive(Clone, Debug)]
 pub(crate) struct AdjacencyIndex {
-    histories: Vec<Vec<(CommitSeq, usize, usize)>>,
-    outgoing: BTreeMap<VId, Vec<usize>>,
-    incoming: BTreeMap<VId, Vec<usize>>,
+    histories: IndexMap<EId, History>,
+    outgoing: IndexMap<VId, Incidence>,
+    incoming: IndexMap<VId, Incidence>,
+    work: u64,
 }
 
 impl AdjacencyIndex {
     pub(crate) fn build(blocks: &[Vec<AdjacencyEntry>]) -> Self {
-        let mut by_id = BTreeMap::<EId, Vec<(CommitSeq, usize, usize)>>::new();
-        for (block, entries) in blocks.iter().enumerate() {
-            for (row, entry) in entries.iter().enumerate() {
-                by_id
-                    .entry(entry.eid)
-                    .or_default()
-                    .push((entry.created_at, block, row));
-            }
-        }
         let mut index = Self {
-            histories: Vec::with_capacity(by_id.len()),
-            outgoing: BTreeMap::new(),
-            incoming: BTreeMap::new(),
+            histories: IndexMap::new(),
+            outgoing: IndexMap::new(),
+            incoming: IndexMap::new(),
+            work: 0,
         };
-        for mut history in by_id.into_values() {
-            let id = index.histories.len();
-            // Equal creation sequences use the last block/row, exactly like
-            // visit_edges' replacement rule (including retirement images).
-            history.sort_unstable();
-            for &(_, block, row) in &history {
-                let entry = &blocks[block][row];
-                for (lists, endpoint) in [
-                    (&mut index.outgoing, entry.src),
-                    (&mut index.incoming, entry.dst),
-                ] {
-                    let list = lists.entry(endpoint).or_default();
-                    if list.last() != Some(&id) {
-                        list.push(id);
-                    }
-                }
-            }
-            index.histories.push(history);
-        }
+        index.apply_added(blocks, 0);
         index
     }
 
+    /// The retained writer appends sealed objects in publication order.
+    /// Compaction/open replace the writer and use `build` on their replacement
+    /// generation. No predecessor tree is mutated, even with a pinned reader.
+    pub(crate) fn extend(&self, blocks: &[Vec<AdjacencyEntry>], carried: usize) -> Self {
+        let mut next = self.clone();
+        next.apply_added(blocks, carried);
+        next
+    }
+
+    pub(crate) fn maintenance_work(&self) -> u64 {
+        self.work
+    }
+
+    pub(crate) fn equivalent(&self, other: &Self) -> bool {
+        fn same<K: Ord + Clone + PartialEq, I: Ord + Clone + PartialEq>(
+            a: &IndexMap<K, IndexMap<I, ()>>,
+            b: &IndexMap<K, IndexMap<I, ()>>,
+        ) -> bool {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|((ak, av), (bk, bv))| {
+                    ak == bk && av.len() == bv.len() && av.iter().eq(bv.iter())
+                })
+        }
+        same(&self.histories, &other.histories)
+            && same(&self.outgoing, &other.outgoing)
+            && same(&self.incoming, &other.incoming)
+    }
+
+    pub(crate) fn apply_added(&mut self, blocks: &[Vec<AdjacencyEntry>], added_from: usize) -> u64 {
+        self.work = 0;
+        for (block, entries) in blocks.iter().enumerate().skip(added_from) {
+            for (row, entry) in entries.iter().enumerate() {
+                self.work += 1;
+                let history = self
+                    .histories
+                    .get(&entry.eid)
+                    .cloned()
+                    .unwrap_or_else(IndexMap::new);
+                let history = history.insert((entry.created_at, block, row), (), &mut self.work);
+                self.histories = self.histories.insert(entry.eid, history, &mut self.work);
+                for (face, endpoint) in [
+                    (&mut self.outgoing, entry.src),
+                    (&mut self.incoming, entry.dst),
+                ] {
+                    let incidence = face.get(&endpoint).cloned().unwrap_or_else(IndexMap::new);
+                    let incidence = incidence.insert(entry.eid, (), &mut self.work);
+                    *face = face.insert(endpoint, incidence, &mut self.work);
+                }
+            }
+        }
+        self.work
+    }
+
+    /// Visit the surviving versions of every incident identity at `as_of`,
+    /// merging both faces in EId order; self loops appear once.
     fn visit<'a, E, C>(
-        &self,
+        &'a self,
         blocks: &'a [Vec<AdjacencyEntry>],
         endpoint: VId,
         direction: fgdb_gql::algebra::GlaDirection,
@@ -83,29 +370,51 @@ impl AdjacencyIndex {
     {
         use fgdb_gql::algebra::GlaDirection;
         control(SourceEvent::Work)?;
-        let outgoing = self.outgoing.get(&endpoint).map_or(&[][..], Vec::as_slice);
-        let incoming = self.incoming.get(&endpoint).map_or(&[][..], Vec::as_slice);
+        let face = |set: &'a Incidence| set.iter().map(|(key, _)| key).peekable();
+        let outgoing = self.outgoing.get(&endpoint).map(face);
+        let incoming = self.incoming.get(&endpoint).map(face);
         let (mut left, mut right) = match direction {
-            GlaDirection::Forward => (outgoing, &[][..]),
-            GlaDirection::Reverse => (incoming, &[][..]),
+            GlaDirection::Forward => (outgoing, None),
+            GlaDirection::Reverse => (incoming, None),
             GlaDirection::Undirected => (outgoing, incoming),
         };
-        while !left.is_empty() || !right.is_empty() {
-            control(SourceEvent::Work)?;
-            let id = match (left.first(), right.first()) {
-                (Some(a), Some(b)) => *a.min(b),
-                (Some(a), None) | (None, Some(a)) => *a,
+        loop {
+            let id = match (&mut left, &mut right) {
+                (Some(a), Some(b)) => match (a.peek(), b.peek()) {
+                    (Some(x), Some(y)) => Some((*x).min(*y)),
+                    (Some(x), None) => Some(*x),
+                    (None, Some(y)) => Some(*y),
+                    (None, None) => break,
+                },
+                (Some(a), None) => a.peek().copied(),
+                (None, Some(b)) => b.peek().copied(),
                 (None, None) => break,
             };
-            if left.first() == Some(&id) {
-                left = &left[1..];
+            let Some(id) = id else { break };
+            control(SourceEvent::Work)?;
+            if let Some(a) = left.as_mut()
+                && a.peek() == Some(&id)
+            {
+                a.next();
             }
-            if right.first() == Some(&id) {
-                right = &right[1..];
+            if let Some(b) = right.as_mut()
+                && b.peek() == Some(&id)
+            {
+                b.next();
             }
-            let history = &self.histories[id];
-            let end = history.partition_point(|&(created, _, _)| created <= as_of);
-            let Some(&(_, block, row)) = end.checked_sub(1).map(|at| &history[at]) else {
+            let history = self.histories.get(id).expect("incidence has a history");
+            let mut low = 0;
+            let mut high = history.len();
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if history.at(middle).expect("history rank").0.0 <= as_of {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            let Some((&(_, block, row), _)) = low.checked_sub(1).and_then(|at| history.at(at))
+            else {
                 continue;
             };
             let entry = &blocks[block][row];
@@ -129,56 +438,91 @@ impl AdjacencyIndex {
 /// only authority — the caller re-checks the predicate against it.
 #[derive(Clone, Debug)]
 pub(crate) struct PropertyEqualityIndex {
-    candidates: BTreeMap<(PropertyKeyId, Box<[u8]>), Vec<VId>>,
-    histories: BTreeMap<VId, Vec<(CommitSeq, usize, usize)>>,
+    candidates: IndexMap<(PropertyKeyId, std::sync::Arc<[u8]>), IndexMap<VId, ()>>,
+    histories: IndexMap<VId, History>,
+    work: u64,
 }
 
 impl PropertyEqualityIndex {
     pub(crate) fn build(patches: &[VertexPatchRows]) -> Self {
-        let mut candidates: BTreeMap<(PropertyKeyId, Box<[u8]>), Vec<VId>> = BTreeMap::new();
-        let mut histories: BTreeMap<VId, Vec<(CommitSeq, usize, usize)>> = BTreeMap::new();
-        for (patch_at, patch) in patches.iter().enumerate() {
-            for (row_at, row) in patch.iter().enumerate() {
-                histories
-                    .entry(row.vid)
-                    .or_default()
-                    .push((row.created_at, patch_at, row_at));
+        let mut index = Self {
+            candidates: IndexMap::new(),
+            histories: IndexMap::new(),
+            work: 0,
+        };
+        index.apply_added(patches, 0);
+        index
+    }
+
+    pub(crate) fn extend(&self, patches: &[VertexPatchRows], carried: usize) -> Self {
+        let mut next = self.clone();
+        next.apply_added(patches, carried);
+        next
+    }
+
+    pub(crate) fn maintenance_work(&self) -> u64 {
+        self.work
+    }
+
+    pub(crate) fn equivalent(&self, other: &Self) -> bool {
+        self.histories.len() == other.histories.len()
+            && self
+                .histories
+                .iter()
+                .zip(other.histories.iter())
+                .all(|((ak, av), (bk, bv))| {
+                    ak == bk && av.len() == bv.len() && av.iter().eq(bv.iter())
+                })
+            && self.candidates.len() == other.candidates.len()
+            && self
+                .candidates
+                .iter()
+                .zip(other.candidates.iter())
+                .all(|((ak, av), (bk, bv))| {
+                    ak == bk && av.len() == bv.len() && av.iter().eq(bv.iter())
+                })
+    }
+
+    pub(crate) fn apply_added(&mut self, patches: &[VertexPatchRows], added_from: usize) -> u64 {
+        self.work = 0;
+        for (patch, rows) in patches.iter().enumerate().skip(added_from) {
+            for (row_at, row) in rows.iter().enumerate() {
+                self.work += 1;
+                let history = self
+                    .histories
+                    .get(&row.vid)
+                    .cloned()
+                    .unwrap_or_else(IndexMap::new);
+                let history = history.insert((row.created_at, patch, row_at), (), &mut self.work);
+                self.histories = self.histories.insert(row.vid, history, &mut self.work);
                 for (key, value) in &row.props {
+                    self.work += 1;
                     if matches!(value, CanonicalScalar::Null) {
                         continue;
                     }
                     let Ok(encoded) = value.encode() else {
                         continue;
                     };
-                    candidates
-                        .entry((*key, encoded.into_boxed_slice()))
-                        .or_default()
-                        .push(row.vid);
+                    self.work += encoded.len() as u64;
+                    let key = (*key, std::sync::Arc::from(encoded));
+                    let candidates = self
+                        .candidates
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(IndexMap::new);
+                    let candidates = candidates.insert(row.vid, (), &mut self.work);
+                    self.candidates = self.candidates.insert(key, candidates, &mut self.work);
                 }
             }
         }
-        for vids in candidates.values_mut() {
-            vids.sort_unstable();
-            vids.dedup();
-        }
-        for history in histories.values_mut() {
-            history.sort_unstable();
-        }
-        Self {
-            candidates,
-            histories,
-        }
+        self.work
     }
 
-    /// Sorted candidate VIds whose history ever carried this exact canonical
-    /// value under `key`, or an empty slice when none did.
-    pub(crate) fn lookup(&self, key: PropertyKeyId, value: &CanonicalScalar) -> &[VId] {
+    pub(crate) fn lookup(&self, key: PropertyKeyId, value: &CanonicalScalar) -> Candidates<'_> {
         let Ok(encoded) = value.encode() else {
-            return &[];
+            return Candidates(None);
         };
-        self.candidates
-            .get(&(key, encoded.into_boxed_slice()))
-            .map_or(&[][..], Vec::as_slice)
+        Candidates(self.candidates.get(&(key, std::sync::Arc::from(encoded))))
     }
 
     /// Latest statement at the cut, with later patches winning equal creation
@@ -197,17 +541,39 @@ impl PropertyEqualityIndex {
         while low < high {
             control(SourceEvent::Work)?;
             let middle = low + (high - low) / 2;
-            if history[middle].0 <= as_of {
+            if history.at(middle).expect("history rank").0.0 <= as_of {
                 low = middle + 1;
             } else {
                 high = middle;
             }
         }
         Ok(low.checked_sub(1).and_then(|at| {
-            let (_, patch, row) = history[at];
+            let (&(_, patch, row), _) = history.at(at).expect("history rank");
             let row = &patches[patch][row];
             row.visible_at(as_of).then_some(row)
         }))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Candidates<'a>(Option<&'a IndexMap<VId, ()>>);
+impl Candidates<'_> {
+    fn len(self) -> usize {
+        self.0.map_or(0, IndexMap::len)
+    }
+    #[cfg(test)]
+    fn to_vec(self) -> Vec<VId> {
+        self.into_iter().copied().collect()
+    }
+}
+impl<'a> IntoIterator for Candidates<'a> {
+    type Item = &'a VId;
+    type IntoIter = std::iter::Map<IndexIter<'a, VId, ()>, fn((&'a VId, &'a ())) -> &'a VId>;
+    fn into_iter(self) -> Self::IntoIter {
+        let iter = self
+            .0
+            .map_or(IndexIter { stack: Vec::new() }, IndexMap::iter);
+        iter.map(|(vid, _)| vid)
     }
 }
 

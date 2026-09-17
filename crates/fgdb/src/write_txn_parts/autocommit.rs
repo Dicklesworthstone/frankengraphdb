@@ -47,14 +47,14 @@ impl<V: Vfs + Clone> Database<V> {
         mutation: &fgdb_gql::PreparedGraphMutation,
         policy: fgdb_gql::GraphMutationPolicy,
     ) -> Result<
-        (fgdb_gql::GraphMutationStats, Vec<VId>, EmbeddedTxnCompletion),
+        (fgdb_gql::GraphMutationStats, Vec<VId>, Vec<EId>, EmbeddedTxnCompletion),
         fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
     > {
         use fgdb_gql::{GqlQueryError, GraphMutationError};
         let infrastructure = |error| GqlQueryError::Source(GraphMutationError::Source(error));
         let mut transaction = self.begin(txcx)
             .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
-        let (stats, targets) = match transaction.execute_graph_mutation_returning_governed(
+        let (stats, targets, edges) = match transaction.execute_graph_mutation_returning_governed(
             self, query_cx, mutation, policy,
         ) {
             Ok(result) => result,
@@ -64,7 +64,7 @@ impl<V: Vfs + Clone> Database<V> {
             }
         };
         let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
-        Ok((stats, targets, completion))
+        Ok((stats, targets, edges, completion))
     }
 
     /// Create graph structures and complete the private transaction in one call.

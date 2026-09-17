@@ -114,12 +114,13 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
         })
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
-    let result = aggregate.execute_governed(
+    let result = aggregate.execute_governed_with_element_properties(
         admitted.snapshot_records,
         admitted.vertex_ids(),
-        admitted.edge_triples(),
+        admitted.identified_edges(),
         |vid, predicates| admitted.matches(vid, predicates),
         |vid, key| Ok(admitted.property(vid, key)),
+        |eid, key| Ok(admitted.edge_property(eid, key)),
         usage.remaining(policy),
         checkpoint,
     );
@@ -400,12 +401,17 @@ fn execute_shortest_at<C>(
         );
     }
 
-    let edges = super::scan_edges(&snapshot.blocks, as_of, &mut |event| {
-        checkpoint().map_err(GqlQueryError::Interrupted)?;
-        usage.observe::<GqlError, C>(policy, event)
-    })?;
+    let edges = super::scan_edges(
+        &snapshot.blocks,
+        &snapshot.block_props,
+        as_of,
+        &mut |event| {
+            checkpoint().map_err(GqlQueryError::Interrupted)?;
+            usage.observe::<GqlError, C>(policy, event)
+        },
+    )?;
     let mut pairs = BTreeMap::<(VId, VId), u64>::new();
-    for (_, left, actual_relation, right) in edges {
+    for ((_, left, actual_relation, right), _) in edges {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         usage.observe::<GqlError, C>(policy, super::SourceEvent::Work)?;
         if actual_relation != relation {

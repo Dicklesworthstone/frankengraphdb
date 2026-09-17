@@ -135,9 +135,8 @@ mod write_txn;
 pub use fgdb_gql::{BoundPlan, RelationBind};
 /// The replayable certificate [`Database::execute_gql_certified`] returns
 /// beside its rows (fgdb-gate-genesis-lce.1): snapshot seq plus statement and
-/// bind digests, so the same graph state, text, and bind are auditable as
-/// byte-identical.
-pub use gql_cert::{GqlCertificate, GqlPlanCertificate, NativeReadClass};
+    NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead, QueryError, QueryResult,
+    QueryValue, QueryWriteError, ReplayRefusal,
 pub use query::{
     NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead, QueryError,
     QueryResult, QueryValue, QueryWriteError, ReplayRefusal,
@@ -3658,12 +3657,23 @@ impl<V: Vfs + Clone> Database<V> {
                     )
             })
             .collect::<Vec<VertexPatchRows>>();
+        // The retained writer carries every sealed object as an unchanged
+        // prefix. Replacement writers (compaction and recovery) rebuild from
+        // their replacement objects instead; coordinates never cross writers.
+        assert!(root.blocks.starts_with(&self.snapshot.refs));
+        assert!(root.vertex_patches.starts_with(&self.snapshot.patch_refs));
         self.writer = folded;
         self.snapshot = Arc::new(Snapshot {
-            adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&decoded)),
-            property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(
-                &decoded_patches,
-            )),
+            adjacency_index: Arc::new(
+                self.snapshot
+                    .adjacency_index
+                    .extend(&decoded, self.snapshot.refs.len()),
+            ),
+            property_index: Arc::new(
+                self.snapshot
+                    .property_index
+                    .extend(&decoded_patches, self.snapshot.patch_refs.len()),
+            ),
             blocks: decoded,
             block_props: decoded_props,
             refs: root.blocks,
@@ -3680,6 +3690,32 @@ impl<V: Vfs + Clone> Database<V> {
             published_frontier: self.snapshot.frontier,
         };
         Ok(self.snapshot.frontier)
+    }
+
+    /// Work performed by the last generation's derived-index maintenance.
+    /// Counts processed rows/properties and persistent-tree visits/allocations;
+    /// excludes storage publication and source query execution.
+    pub fn index_maintenance_work(&self) -> Result<(u64, u64), ReadError> {
+        self.ensure_readable()?;
+        Ok((
+            self.snapshot.adjacency_index.maintenance_work(),
+            self.snapshot.property_index.maintenance_work(),
+        ))
+    }
+
+    /// Compare both derived indexes against fresh construction from the admitted
+    /// generation. This diagnostic does not publish or alter either index.
+    pub fn verify_snapshot_indexes(&self) -> Result<bool, ReadError> {
+        self.ensure_readable()?;
+        Ok(self
+            .snapshot
+            .adjacency_index
+            .equivalent(&gql_exec::source::AdjacencyIndex::build(
+                &self.snapshot.blocks,
+            ))
+            && self.snapshot.property_index.equivalent(
+                &gql_exec::source::PropertyEqualityIndex::build(&self.snapshot.patches),
+            ))
     }
 
     /// The live destinations of `src` over `relation`, at the published

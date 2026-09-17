@@ -1,0 +1,7 @@
+{"v":1,"event":"invocation"}
+{"v":1,"event":"columns","columns":["<name>",...]}
+{"v":1,"event":"row","cells":[{"type":"null"}|{"type":"bool","value":true|false}|{"type":"int","value":"<decimal>"}|{"type":"text","value":"<escaped>"}|{"type":"list","value":[<cell>,...]}|{"type":"count","value":"<decimal>"}|{"type":"wideint","value":"<decimal>"},...]}
+{"v":1,"event":"result","kind":"rows","count":<n>}
+{"v":1,"event":"result","kind":"created","seq":<n>}
+{"v":1,"event":"result","kind":"written","seq":<n>,"statements":<n>}
+{"v":1,"event":"error","class":"usage|query|open|io","diagnostics":["<message>",...]}

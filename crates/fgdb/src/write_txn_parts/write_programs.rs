@@ -177,8 +177,8 @@ impl WriteTxn {
                 match input {
                     GraphWriteStatement::Mutation(input) => workspace.txn
                         .execute_graph_mutation_returning_governed(database, cx, input, remaining.mutations)
-                        .map(|(stats, targets)| {
-                            receipts.push(GraphWriteStepReceipt::Mutation { targets });
+                        .map(|(stats, targets, edges)| {
+                            receipts.push(GraphWriteStepReceipt::Mutation { targets, edges });
                             GraphWriteStepStats::Mutation(stats)
                         })
                         .map_err(GraphWriteStepError::Mutation),

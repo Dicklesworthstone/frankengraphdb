@@ -1,5 +1,5 @@
 mod query_source {
-    use super::{BoundPlan, Database, OverlayEdgeMap, PendingRow, WriteTxn, WriteTxnError};
+    use super::{BoundPlan, Database, PendingRow, WriteTxn, WriteTxnError};
     use crate::Snapshot;
     use crate::gql_exec::source::{self, SourceEvent};
     use asupersync::fs::Vfs;
@@ -38,27 +38,46 @@ mod query_source {
         }
     }
 
+    struct EdgeView<'a> {
+        props: &'a [(PropertyKeyId, CanonicalScalar)],
+        edits: BTreeMap<PropertyKeyId, Option<&'a CanonicalScalar>>,
+    }
+    impl<'a> EdgeView<'a> {
+        fn new(props: &'a [(PropertyKeyId, CanonicalScalar)]) -> Self {
+            Self { props, edits: BTreeMap::new() }
+        }
+        fn property(&self, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+            if let Some(value) = self.edits.get(&key) { *value } else {
+                self.props.binary_search_by_key(&key, |(key, _)| *key).ok().map(|at| &self.props[at].1)
+            }
+        }
+    }
+
     /// One basis/template pair, with output shape carried by the checked plan.
     /// The borrowed source is the same for scalar and tuple query projections.
     pub(super) struct OverlayQuerySource<'a, Row = VId> {
         pub(super) logical: GlaPlan<Row>,
         vertices: Vec<(VId, VertexView<'a>)>,
-        edges: Vec<IdentifiedEdge>,
+        edges: Vec<(IdentifiedEdge, EdgeView<'a>)>,
         pub(super) snapshot_records: usize,
     }
     impl<Row: GlaOutput> OverlayQuerySource<'_, Row> {
         pub(super) fn vertex_ids(&self) -> impl Iterator<Item = VId> + '_ { self.vertices.iter().map(|(vid, _)| *vid) }
-        pub(super) fn identified_edges(&self) -> impl Iterator<Item = IdentifiedEdge> + '_ { self.edges.iter().copied() }
+        pub(super) fn identified_edges(&self) -> impl Iterator<Item = IdentifiedEdge> + '_ { self.edges.iter().map(|(edge, _)| *edge) }
         pub(super) fn edge_triples(&self) -> impl Iterator<Item = EdgeTriple> + '_ {
-            self.edges.iter().map(|&(_, src, relation, dst)| (src, relation, dst))
+            self.identified_edges().map(|(_, src, relation, dst)| (src, relation, dst))
         }
         pub(super) fn matches(&self, vid: VId, predicates: &[VertexPredicate]) -> bool {
             self.vertices.binary_search_by_key(&vid, |(vid, _)| *vid).ok()
                 .is_some_and(|at| predicates.iter().all(|predicate| self.vertices[at].1.matches(predicate)))
         }
-        fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+        pub(super) fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
             let at = self.vertices.binary_search_by_key(&vid, |(vid, _)| *vid).ok()?;
             self.vertices[at].1.property(key)
+        }
+        pub(super) fn edge_property(&self, eid: EId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+            let at = self.edges.binary_search_by_key(&eid, |(edge, _)| edge.0).ok()?;
+            self.edges[at].1.property(key)
         }
         pub(super) fn execute(self) -> Result<Vec<Row>, WriteTxnError>
         where Row: GlaIdentityOutput {
@@ -118,9 +137,9 @@ mod query_source {
                 let source = self.query_source_over_logical(snapshot, pattern.plan().clone(), pattern.required_vertex_label(), &mut |event| {
                     cx.checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?; usage.observe(policy, event)
                 })?;
-                let result = source.logical.execute_governed_with_identified_properties(source.snapshot_records as u64, source.vertex_ids(), source.identified_edges(),
+                let result = source.logical.execute_governed_with_element_properties(source.snapshot_records as u64, source.vertex_ids(), source.identified_edges(),
                     |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
-                    |vid, key| Ok(source.property(vid, key)), usage.remaining(policy), || cx.checkpoint());
+                    |vid, key| Ok(source.property(vid, key)), |eid, key| Ok(source.edge_property(eid, key)), usage.remaining(policy), || cx.checkpoint());
                 usage.finish(policy, result)
             })
         }
@@ -177,14 +196,14 @@ mod query_source {
                     }
                 }
             }
-            let mut vertices = BTreeMap::new(); let mut edges = OverlayEdgeMap::new();
+            let mut vertices = BTreeMap::new(); let mut edges = BTreeMap::new();
             if reads_edges {
-                source::visit_edges(&snapshot.blocks, self.basis, control, |entry, control| {
+                source::visit_edges_with_properties(snapshot, self.basis, control, |entry, props, control| {
                     for element in [ElementId::Edge(entry.eid), ElementId::Vertex(entry.src), ElementId::Vertex(entry.dst)] {
                         self.note_query_read(&mut observed, element, control)?;
                     }
                     control(SourceEvent::ScratchEntry)?;
-                    edges.insert(entry.eid, (entry.src, entry.relation, entry.dst)); Ok(())
+                    edges.insert(entry.eid, (entry.src, entry.relation, entry.dst, EdgeView::new(props))); Ok(())
                 })?;
             }
             if !edge_scan {
@@ -202,11 +221,17 @@ mod query_source {
                         if !edge_scan { apply_vertex(&mut vertices, effect, None, control)?; }
                         if reads_edges {
                             match effect {
-                                DeltaRow::CreateEdge { eid, src, relation, dst, .. } => {
+                                DeltaRow::CreateEdge { eid, src, relation, dst, props, .. } => {
                                     if !edges.contains_key(eid) { control(SourceEvent::ScratchEntry)?; }
-                                    edges.insert(*eid, (*src, *relation, *dst));
+                                    edges.insert(*eid, (*src, *relation, *dst, EdgeView::new(props)));
                                 }
                                 DeltaRow::DeleteEdge { eid, .. } => { edges.remove(eid); }
+                                DeltaRow::Property { elem: ElementId::Edge(eid), property, after, .. } => {
+                                    if let Some((_, _, _, row)) = edges.get_mut(eid) {
+                                        if !row.edits.contains_key(property) { control(SourceEvent::ScratchEntry)?; }
+                                        row.edits.insert(*property, after.as_ref());
+                                    }
+                                }
                                 DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } => {
                                     for eid in sorted_retired_incident_edges {
                                         control(SourceEvent::Work)?; self.note_query_read(&mut observed, ElementId::Edge(*eid), control)?;
@@ -222,7 +247,7 @@ mod query_source {
             }
             if edge_scan && logical.needs_vertex_values() {
                 let mut candidates = BTreeSet::new();
-                for &(src, relation, dst) in edges.values() {
+                for &(src, relation, dst, _) in edges.values() {
                     control(SourceEvent::Work)?;
                     let requested = logical.operators().iter().any(|op| match op {
                         GlaOperator::ScanEdges { relation: required, .. } | GlaOperator::Expand { relation: required, .. } => *required == relation,
@@ -249,9 +274,9 @@ mod query_source {
                 control(SourceEvent::ScratchEntry)?; vertex_rows.push((vid, row));
             }
             let mut edge_rows = Vec::new();
-            for (eid, (src, relation, dst)) in edges {
+            for (eid, (src, relation, dst, props)) in edges {
                 control(SourceEvent::Work)?; control(SourceEvent::SnapshotRecord)?; control(SourceEvent::ScratchEntry)?;
-                edge_rows.push((eid, src, relation, dst));
+                edge_rows.push(((eid, src, relation, dst), props));
             }
             let snapshot_records = edge_rows.len() + if edge_scan { 0 } else { vertex_rows.len() };
             Ok(OverlayQuerySource { logical, vertices: vertex_rows, edges: edge_rows, snapshot_records })

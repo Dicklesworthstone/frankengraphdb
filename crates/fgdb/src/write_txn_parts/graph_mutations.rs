@@ -2,7 +2,7 @@
 // ordinary WriteTxn::write rollback/preparation boundary. No alternate writer.
 
 impl WriteTxn {
-    /// Stage one simultaneous query-selected vertex mutation. This does NOT
+    /// Stage one simultaneous query-selected element mutation. This does NOT
     /// commit: the caller still explicitly commits or aborts this transaction.
     /// Mutable transaction ownership is required; a pinned read view cannot
     /// call this API. The QueryCx governs matching and proposal cancellation.
@@ -28,14 +28,13 @@ impl WriteTxn {
         fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
     > {
         self.execute_graph_mutation_governed_inner(database, cx, mutation, policy, false)
-            .map(|(stats, _)| stats)
+            .map(|(stats, _, _)| stats)
     }
 
-    /// Stage the same simultaneous mutation and return the distinct vertex IDs
-    /// whose canonical proposal contains at least one property, label or detach-
-    /// delete intent. IDs are sorted by identity and appear once even when one
-    /// vertex has several fields changed or many MATCH occurrences collapse to
-    /// the same assignment.
+    /// Stage the same simultaneous mutation and return distinct vertex and edge
+    /// IDs whose canonical proposal contains at least one intent. Each domain
+    /// is sorted independently and appears once even when several fields change
+    /// or many MATCH occurrences collapse to the same assignment.
     ///
     /// The returned IDs describe the accepted STAGED statement, not durable
     /// state and not necessarily changed storage rows: an equal-to-current SET
@@ -49,7 +48,7 @@ impl WriteTxn {
         mutation: &fgdb_gql::PreparedGraphMutation,
         policy: fgdb_gql::GraphMutationPolicy,
     ) -> Result<
-        (fgdb_gql::GraphMutationStats, Vec<VId>),
+        (fgdb_gql::GraphMutationStats, Vec<VId>, Vec<EId>),
         fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
     > {
         self.execute_graph_mutation_governed_inner(database, cx, mutation, policy, true)
@@ -63,7 +62,7 @@ impl WriteTxn {
         policy: fgdb_gql::GraphMutationPolicy,
         retain_targets: bool,
     ) -> Result<
-        (fgdb_gql::GraphMutationStats, Vec<VId>),
+        (fgdb_gql::GraphMutationStats, Vec<VId>, Vec<EId>),
         fgdb_gql::GqlQueryError<fgdb_gql::GraphMutationError<WriteTxnError>, Box<asupersync::error::Error>>,
     > {
         use fgdb_gql::{GraphMutationError, GraphMutationIntent, GqlQueryError};
@@ -90,19 +89,20 @@ impl WriteTxn {
                 || cx.checkpoint(),
             )?;
             let stats = proposal.stats();
-            let targets = if retain_targets {
+            let (targets, edges) = if retain_targets {
                 let mut targets = std::collections::BTreeSet::new();
+                let mut edges = std::collections::BTreeSet::new();
                 for intent in proposal.intents() {
-                    let vertex = match intent {
+                    match intent {
                         GraphMutationIntent::Property { vertex, .. }
                         | GraphMutationIntent::Label { vertex, .. }
-                        | GraphMutationIntent::DetachDelete { vertex } => *vertex,
-                    };
-                    targets.insert(vertex);
+                        | GraphMutationIntent::DetachDelete { vertex } => { targets.insert(*vertex); }
+                        GraphMutationIntent::EdgeProperty { edge, .. } => { edges.insert(*edge); }
+                    }
                 }
-                targets.into_iter().collect()
+                (targets.into_iter().collect(), edges.into_iter().collect())
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             let mut batch = WriteBatch::new(mutation.relation());
             for intent in proposal.into_intents() {
@@ -112,6 +112,9 @@ impl WriteTxn {
                 match intent {
                     GraphMutationIntent::Property { vertex, key, value } => {
                         batch.set_vertex_property(vertex, key, value);
+                    }
+                    GraphMutationIntent::EdgeProperty { edge, key, value } => {
+                        batch.set_edge_property(edge, key, value);
                     }
                     GraphMutationIntent::Label { vertex, label, present } => {
                         batch.set_vertex_label(vertex, label, present);
@@ -125,7 +128,7 @@ impl WriteTxn {
             // Never report a new interruption after the workspace has changed.
             cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
             if !batch.is_empty() { self.write(database, batch).map_err(source)?; }
-            Ok((stats, targets))
+            Ok((stats, targets, edges))
         })
     }
 }

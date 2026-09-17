@@ -349,7 +349,7 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
     fn identified_edges(&self) -> impl Iterator<Item = (EId, VId, RelationId, VId)> + '_ {
         self.borrowed
             .iter()
-            .flat_map(|tables| tables.edges.iter().copied())
+            .flat_map(|tables| tables.edges.iter().map(|(edge, _)| *edge))
             .chain(self.edges.iter().map(|record| {
                 (
                     record.entry.eid,
@@ -382,6 +382,16 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             return tables.property(vid, key);
         }
         let row = self.vertices.get(&vid)?;
+        row.props
+            .binary_search_by_key(&key, |(key, _)| *key)
+            .ok()
+            .map(|at| &row.props[at].1)
+    }
+    fn edge_property(&self, eid: EId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+        if let Some(tables) = &self.borrowed {
+            return tables.edge_property(eid, key);
+        }
+        let row = self.edges.iter().find(|record| record.entry.eid == eid)?;
         row.props
             .binary_search_by_key(&key, |(key, _)| *key)
             .ok()
@@ -440,12 +450,13 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
             usage.observe::<ReadError, C>(policy, event)
         })?;
-        let result = self.logical.execute_governed_with_identified_properties(
+        let result = self.logical.execute_governed_with_element_properties(
             self.snapshot_records,
             self.vertex_ids(),
             self.identified_edges(),
             |vid, predicates| self.matches(vid, predicates),
             |vid, key| Ok(self.property(vid, key)),
+            |eid, key| Ok(self.edge_property(eid, key)),
             usage.remaining(policy),
             checkpoint,
         );
