@@ -19,6 +19,3 @@ fgdb-delta-types = { path = "../fgdb-delta-types" }
 fgdb-gql = { path = "../fgdb-gql" }
 fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }
-
-[dev-dependencies]
-fgdb-reference = { path = "../fgdb-reference" }
