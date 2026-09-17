@@ -158,6 +158,9 @@ fn copy_value<E>(value: &GraphValue, control: &mut impl FnMut(GlaExecutionEvent)
         GraphValue::Scalar(CanonicalScalar::Bytes(value)) => [value.as_slice().len(), 0],
         GraphValue::Scalar(CanonicalScalar::Timestamp(value)) =>
             [value.zone().map_or(0, |zone| zone.identifier().len()), 0],
+        GraphValue::Path(value) => [core::mem::size_of_val(value.steps()), 0],
+        GraphValue::Vertices(value) => [core::mem::size_of_val(value.as_ref()), 0],
+        GraphValue::Edges(value) => [core::mem::size_of_val(value.as_ref()), 0],
         _ => [0, 0],
     };
     control(GlaExecutionEvent::ScratchEntry)?;
@@ -202,12 +205,12 @@ pub(super) fn evaluate<E>(row: &GraphValueRow, projection: &[GraphSetProjection]
                 GraphValue::Scalar(scalar.clone())
             }
             GraphSetValue::Integer(expression) => {
-                let value = expression.evaluate_with_control(row.values(), control).map_err(|error| match error {
+                let value = expression.evaluate_scalar_with_control(row.values(), control).map_err(|error| match error {
                     GraphIntegerEvaluationError::Control(error) => ProjectionFailure::Control(error),
                     GraphIntegerEvaluationError::Value(error) => ProjectionFailure::Arithmetic { column, error },
                 })?;
                 control(GlaExecutionEvent::ScratchEntry).map_err(ProjectionFailure::Control)?;
-                GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
+                GraphValue::Scalar(value)
             }
         };
         values.push(value);

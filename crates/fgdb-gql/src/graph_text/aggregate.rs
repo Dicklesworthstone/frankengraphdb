@@ -329,6 +329,7 @@ impl PreparedGraphAggregateText {
             parser.syntax.columns.push(Column {
                 variable: group.variable,
                 property: group.property,
+                path: None,
                 alias,
             });
         }
@@ -348,6 +349,7 @@ impl PreparedGraphAggregateText {
                     parser.syntax.columns.push(Column {
                         variable: expression.variable,
                         property: expression.property,
+                        path: None,
                         alias: item.alias,
                     });
                     at
@@ -383,6 +385,7 @@ impl PreparedGraphAggregateText {
                 parser.syntax.columns.push(Column {
                     variable: expression.variable,
                     property: expression.property,
+                    path: None,
                     alias,
                 });
                 at
@@ -418,6 +421,7 @@ impl PreparedGraphAggregateText {
             source_aliases.extend((0..computed.sources.len()).map(|index| format!("__aggregate_source_{index}")));
             parser.syntax.columns = computed.sources.iter().zip(&source_aliases).map(|(&(variable, property), alias)| Column {
                 variable, property, alias: Name { text: alias.as_str(), at: variable.at },
+                path: None,
             }).collect();
             Some(projection)
         };
@@ -428,6 +432,7 @@ impl PreparedGraphAggregateText {
             parser.syntax.columns.push(Column {
                 variable,
                 property: None,
+                path: None,
                 alias: Name {
                     text: "__count_source",
                     at: variable.at,

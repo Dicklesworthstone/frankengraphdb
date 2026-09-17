@@ -1,17 +1,15 @@
-//! Checked nullable integer expressions over a frozen, typed value row.
+//! Checked nullable scalar expressions over a frozen, typed value row.
 //!
-//! Preparation consumes bounded, typed postfix IR and emits private linear
-//! bytecode. CASE and COALESCE select branches lazily; already-projected inputs
-//! retain the enclosing GLA source/error contract. Arithmetic is signed i64,
-//! division truncates toward zero, and overflow/zero division refuse. Boolean
-//! conditions are a separate compile-time domain, never integer truthiness.
-//! No float, decimal, string, or vertex-to-integer coercion is performed.
+//! Bounded typed postfix IR compiles to private linear bytecode. CASE and
+//! COALESCE are lazy. Integer arithmetic remains checked, with no coercions.
+//! Text operations use Unicode scalar positions and UCS_BASIC result collation.
 
 mod compile;
 
 use crate::GlaExecutionEvent;
-use crate::algebra::{GraphValue, IntegerComparison};
+use crate::algebra::{GraphValue, IntegerComparison, ScalarPredicate, GRAPH_VALUE_PAYLOAD_UNIT_BYTES};
 use fgdb_types::CanonicalScalar;
+use std::borrow::Cow;
 
 pub const MAX_GRAPH_INTEGER_INSTRUCTIONS: usize = 1_024;
 
@@ -21,16 +19,28 @@ pub enum GraphIntegerUnary { Plus, Negate, Abs }
 pub enum GraphIntegerBinary { Add, Subtract, Multiply, Divide, Remainder, NullIf }
 
 /// Postfix construction IR. Arithmetic operands/results are nullable integers.
-/// Truth, Compare, IsNull, Not, And and Or produce private Boolean conditions.
-/// Case consumes (condition, then_integer, else_integer); only the selected
+/// Scalar conditions and results never implicitly coerce between domains.
+/// Case consumes (condition, then_value, else_value); only the selected
 /// result executes. Nest Case in the else operand for ordered WHEN clauses.
 /// SimpleCase consumes (selector, when, then, ..., default), evaluates its
 /// selector once, and selects the first nonnull equality. Conditions use eager
 /// three-valued Boolean evaluation; unselected CASE arms are not executed.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum GraphIntegerOp {
     Column(usize),
     Literal(Option<i64>),
+    Scalar(ScalarPredicate),
+    ScalarColumn(usize),
+    Upper,
+    Lower,
+    Trim,
+    CharLength,
+    Substring,
+    Concat,
+    StartsWith,
+    EndsWith,
+    Contains,
+    InList { members: usize },
     Unary(GraphIntegerUnary),
     Binary(GraphIntegerBinary),
     Coalesce,
@@ -48,6 +58,18 @@ impl core::fmt::Debug for GraphIntegerOp {
         match self {
             Self::Column(_) => f.write_str("Column([REDACTED])"),
             Self::Literal(_) => f.write_str("Literal([REDACTED])"),
+            Self::Scalar(_) => f.write_str("Scalar([REDACTED])"),
+            Self::ScalarColumn(_) => f.write_str("ScalarColumn([REDACTED])"),
+            Self::Upper => f.write_str("Upper"),
+            Self::Lower => f.write_str("Lower"),
+            Self::Trim => f.write_str("Trim"),
+            Self::CharLength => f.write_str("CharLength"),
+            Self::Substring => f.write_str("Substring"),
+            Self::Concat => f.write_str("Concat"),
+            Self::StartsWith => f.write_str("StartsWith"),
+            Self::EndsWith => f.write_str("EndsWith"),
+            Self::Contains => f.write_str("Contains"),
+            Self::InList { members } => f.debug_struct("InList").field("members", members).finish(),
             Self::Unary(op) => op.fmt(f),
             Self::Binary(op) => op.fmt(f),
             Self::Coalesce => f.write_str("Coalesce"),
@@ -80,7 +102,10 @@ impl core::fmt::Display for GraphIntegerBuildError {
 impl core::error::Error for GraphIntegerBuildError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GraphIntegerErrorKind { MissingColumn, NonInteger, Overflow, DivisionByZero }
+pub enum GraphIntegerErrorKind {
+    MissingColumn, NonInteger, Overflow, DivisionByZero, NonText, NonBoolean,
+    NonScalar, IncompatibleOperands, InvalidSubstring, TextConstruction,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphIntegerError {
     pub instruction: usize,
@@ -112,6 +137,9 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphIntegerEvaluat
 #[derive(Clone, PartialEq, Eq)]
 enum Instruction {
     Column(usize), Literal(Option<i64>), Unary(GraphIntegerUnary),
+    Scalar(ScalarPredicate), ScalarColumn(usize),
+    Upper, Lower, Trim, CharLength, Substring, Concat, StartsWith, EndsWith, Contains,
+    InList { members: usize },
     Binary(GraphIntegerBinary), JumpIfPresent(usize),
     Truth(Option<bool>), Compare(IntegerComparison), IsNull(bool), Not, And, Or,
     JumpUnlessTrue(usize), JumpUnlessEqual(usize), Jump(usize), Drop,
@@ -140,9 +168,14 @@ impl GraphIntegerExpression {
         compile::prepare(ops)
     }
 
+    /// Admit an integer, Boolean, text or null root, including dynamic columns.
+    pub fn prepare_scalar(ops: &[GraphIntegerOp]) -> Result<Self, GraphIntegerBuildError> {
+        compile::prepare_scalar(ops)
+    }
+
     pub fn referenced_columns(&self) -> impl Iterator<Item = usize> + '_ {
         self.code.iter().filter_map(|op| match op {
-            Instruction::Column(column) => Some(*column), _ => None,
+            Instruction::Column(column) | Instruction::ScalarColumn(column) => Some(*column), _ => None,
         })
     }
 

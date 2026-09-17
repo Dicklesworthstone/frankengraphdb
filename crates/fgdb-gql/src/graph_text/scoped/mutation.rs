@@ -240,6 +240,7 @@ impl PreparedGraphMutationText {
             // is rewritten and user names/arguments never become syntax.
             columns.push(BoundColumn {
                 alias: format!("_mutation_{index}"), variable: projection.variable.text.to_owned(), key,
+                path: None,
             });
         }
         let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();

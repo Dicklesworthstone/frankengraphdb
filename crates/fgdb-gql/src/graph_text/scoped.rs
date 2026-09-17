@@ -7,7 +7,7 @@
 //! MATCH ANY SHORTEST WALK selects one occurrence per endpoint pair; MATCH ALL
 //! SHORTEST WALK keeps every tie. Both require one finite quantified atom in
 //! each selected positive pattern. They share all ordinary MATCH consumers and
-//! never imply a global DISTINCT or a captured path value.
+//! never imply a global DISTINCT. An explicit root binding captures the path.
 
 mod mutation;
 
@@ -170,6 +170,17 @@ fn resolve_pattern_with_captures<'a>(
     let mut numeric = Vec::new();
     for filter in filters {
         match filter {
+            Filter::PathCapture(name) => {
+                built(name.at, builder.capture_path(name.text))?;
+            }
+            Filter::PathLength { variable, comparison, value } => {
+                numeric.push(BoundFilter::PathLength {
+                    variable: variable.text.to_owned(), comparison, value,
+                });
+            }
+            Filter::PathNull { variable, function, is_null } => {
+                built(variable.at, builder.filter_path_null(variable.text, function, is_null))?;
+            }
             Filter::Boolean { program, at } => {
                 numeric.push(BoundFilter::Boolean(
                     boolean::BoundBooleanTemplate::resolve(program, at, symbol)?,
@@ -270,6 +281,13 @@ pub(super) fn bind_builder(
 ) -> Result<GraphPatternBuilder, GraphPatternTextError> {
     let mut builder = builder.clone();
     for filter in filters {
+        if let BoundFilter::PathLength { variable, comparison, value } = filter {
+            let GqlParameterValue::Int64(value) = value.value(values) else {
+                unreachable!("path length arguments were type-checked at preparation")
+            };
+            built(at, builder.filter_path_length(variable, *comparison, value))?;
+            continue;
+        }
         let BoundFilter::Property {
             variable,
             key,
@@ -315,6 +333,9 @@ fn predicate_captures<'a>(
     let mut pending: Vec<_> = filters.iter().rev().collect();
     while let Some(filter) = pending.pop() {
         let names = match filter {
+            Filter::PathCapture(_) | Filter::PathLength { .. } | Filter::PathNull { .. } => {
+                return Err(error(0, GraphPatternTextErrorKind::Expected("root path predicate")));
+            }
             Filter::Boolean { program, .. } => {
                 for item in program.iter().rev() {
                     if let boolean::SyntaxItem::Atom(atom) = item { pending.push(atom); }
@@ -358,8 +379,16 @@ impl<'a> Parser<'a> {
     /// unsupported. A mutation attaches its own typed terminal clause.
     pub(super) fn parse_match_prefix(&mut self) -> Result<(), GraphPatternTextError> {
         self.word("MATCH")?;
+        if self.starts_path_binding()? {
+            let path = self.name()?;
+            self.punct(b'=', "=")?;
+            self.syntax.path = Some(path);
+        }
         self.positive_pattern()?;
         self.syntax.root_variables = self.syntax.variables.len();
+        if let Some(path) = self.syntax.path {
+            self.syntax.filters.push(Filter::PathCapture(path));
+        }
         if self.take_word("WHERE")? {
             self.scoped_predicates(true)?;
         }
@@ -374,6 +403,11 @@ impl<'a> Parser<'a> {
         }
         self.syntax.return_at = self.current.at;
         Ok(())
+    }
+
+    fn starts_path_binding(&self) -> Result<bool, GraphPatternTextError> {
+        Ok(matches!(self.current.kind, TokenKind::Word(_))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'=')))
     }
     /// One positive-pattern parser, used at the root and in each scope. WALK
     /// is explicit per MATCH; a bare quantifier never silently adopts repeated-
@@ -547,6 +581,7 @@ impl<'a> Parser<'a> {
     fn scoped_predicates(&mut self, allow_existence: bool) -> Result<(), GraphPatternTextError> {
         let mut has_existence = false;
         let mut has_boolean = false;
+        let path_predicates = self.syntax.path.is_some();
         loop {
             if self.starts_existence()? {
                 if has_boolean {
@@ -572,6 +607,12 @@ impl<'a> Parser<'a> {
                     ScopeKind::Exists
                 })?;
                 has_existence = true;
+            } else if path_predicates {
+                if self.starts_path_predicate()? {
+                    self.path_predicate()?;
+                } else {
+                    self.positive_predicate()?;
+                }
             } else {
                 let extended = self.boolean_predicates()?;
                 if extended && has_existence {
@@ -586,6 +627,45 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        Ok(())
+    }
+
+    fn starts_path_predicate(&self) -> Result<bool, GraphPatternTextError> {
+        let TokenKind::Word(word) = self.current.kind else { return Ok(false); };
+        if self.syntax.path.is_some_and(|path| path.text == word) {
+            return Ok(true);
+        }
+        Ok((word.eq_ignore_ascii_case("path_length") || word.eq_ignore_ascii_case("nodes")
+            || word.eq_ignore_ascii_case("edges"))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
+    }
+
+    fn path_predicate(&mut self) -> Result<(), GraphPatternTextError> {
+        self.capacity(self.predicates, MAX_PATTERN_PREDICATES,
+            crate::algebra::PatternLimitDimension::Predicates)?;
+        let expression = self.name()?;
+        let (variable, function) = if self.take(b'(')? {
+            let function = Self::path_function(expression)?;
+            let variable = self.path_variable()?;
+            self.punct(b')', ")")?;
+            (variable, function)
+        } else {
+            (expression, GraphPathFunction::Value)
+        };
+        let filter = if self.take_word("IS")? {
+            let is_null = !self.take_word("NOT")?;
+            self.word("NULL")?;
+            Filter::PathNull { variable, function, is_null }
+        } else {
+            if function != GraphPathFunction::Length {
+                return Err(error(expression.at, GraphPatternTextErrorKind::Expected("path IS [NOT] NULL")));
+            }
+            let comparison = self.comparison()?;
+            let value = self.number(GqlParameterType::Int64)?;
+            Filter::PathLength { variable, comparison, value }
+        };
+        self.syntax.filters.push(filter);
+        self.predicates += 1;
         Ok(())
     }
 
@@ -671,6 +751,10 @@ impl<'a> Parser<'a> {
         // original offsets, caps and previously completed clauses never reset.
         let parsed = (|| {
             self.word("MATCH")?;
+            if self.starts_path_binding()? {
+                return Err(error(self.current.at,
+                    GraphPatternTextErrorKind::Expected("path binding in root MATCH only")));
+            }
             self.positive_pattern()?;
             let matched_variables = self.syntax.variables.len();
             if self.take_word("WHERE")? {

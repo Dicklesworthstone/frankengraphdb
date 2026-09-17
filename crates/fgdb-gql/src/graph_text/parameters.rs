@@ -75,17 +75,25 @@ pub(crate) struct UnresolvedGraphText<'a> {
 impl UnresolvedGraphText<'_> {
     pub(crate) fn column_schema(&self) -> (Vec<String>, Vec<crate::GraphSetColumnType>) {
         use crate::GraphSetColumnType::{Scalar, Vertex};
+        let column_type = |column: &Column<'_>| match column.path {
+            Some(GraphPathFunction::Value) => crate::GraphSetColumnType::Path,
+            Some(GraphPathFunction::Length) => Scalar,
+            Some(GraphPathFunction::Nodes) => crate::GraphSetColumnType::Vertices,
+            Some(GraphPathFunction::Edges) => crate::GraphSetColumnType::Edges,
+            None if column.property.is_some() => Scalar,
+            None => Vertex,
+        };
         let (mut names, mut types): (Vec<String>, Vec<crate::GraphSetColumnType>) = if let Some(projection) = &self.projection {
             projection.iter().map(|column| {
                 let kind = match &column.value {
-                    ReadValueTemplate::Column(input) if self.syntax.columns[*input].property.is_none() => Vertex,
+                    ReadValueTemplate::Column(input) => column_type(&self.syntax.columns[*input]),
                     _ => Scalar,
                 };
                 (column.name.clone(), kind)
             }).unzip()
         } else {
             self.syntax.columns.iter().map(|column| (
-                column.alias.text.to_owned(), if column.property.is_some() { Scalar } else { Vertex },
+                column.alias.text.to_owned(), column_type(column),
             )).unzip()
         };
         for stage in &self.pipeline {
@@ -143,6 +151,7 @@ impl UnresolvedGraphText<'_> {
                 } else { None };
                 columns.push(BoundColumn {
                     alias: format!("_return_input_{index}"), variable: column.variable.text.to_owned(), key,
+                    path: column.path,
                 });
             }
             let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();

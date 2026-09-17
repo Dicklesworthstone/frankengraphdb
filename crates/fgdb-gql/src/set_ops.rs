@@ -28,7 +28,33 @@ pub enum GraphSetOperation { Union, Intersect, Except }
 pub enum GraphSetQuantifier { All, Distinct }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GraphSetColumnType { Vertex, Scalar }
+pub enum GraphSetColumnType { Vertex, Scalar, Path, Vertices, Edges }
+impl From<&ValueProjection> for GraphSetColumnType {
+    fn from(column: &ValueProjection) -> Self {
+        use crate::algebra::GraphPathFunction;
+        match column {
+            ValueProjection::Vertex { .. } => Self::Vertex,
+            ValueProjection::Property { .. } => Self::Scalar,
+            ValueProjection::Path { function, .. } => match function {
+                GraphPathFunction::Value => Self::Path,
+                GraphPathFunction::Length => Self::Scalar,
+                GraphPathFunction::Nodes => Self::Vertices,
+                GraphPathFunction::Edges => Self::Edges,
+            },
+        }
+    }
+}
+impl GraphSetColumnType {
+    pub(crate) fn accepts(self, value: &crate::algebra::GraphValue) -> bool {
+        use crate::algebra::GraphValue;
+        value.is_null() || matches!((self, value),
+            (Self::Vertex, GraphValue::Vertex(_))
+            | (Self::Scalar, GraphValue::Scalar(_))
+            | (Self::Path, GraphValue::Path(_))
+            | (Self::Vertices, GraphValue::Vertices(_))
+            | (Self::Edges, GraphValue::Edges(_)))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphSetBuildError {
@@ -133,10 +159,7 @@ impl core::fmt::Debug for PreparedGraphSet {
 }
 impl From<PreparedGraphPattern<GraphValueRow>> for PreparedGraphSet {
     fn from(pattern: PreparedGraphPattern<GraphValueRow>) -> Self {
-        let types = pattern.value_columns().iter().map(|column| match column {
-            ValueProjection::Vertex { .. } => GraphSetColumnType::Vertex,
-            ValueProjection::Property { .. } => GraphSetColumnType::Scalar,
-        }).collect();
+        let types = pattern.value_columns().iter().map(GraphSetColumnType::from).collect();
         Self {
             columns: pattern.columns().to_vec(), types, operands: 1, depth: 1,
             node: SetNode::Pattern(pattern), order: Vec::new(), offset: 0, count: None,

@@ -25,7 +25,7 @@ pub use pattern::{
 };
 pub use predicate::{MAX_SCALAR_PREDICATE_BYTES, ScalarPredicate, ScalarPredicateError};
 pub use values::{
-    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphValue, GraphValueRow, ValueProjection,
+    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphPath, GraphPathFunction, GraphValue, GraphValueRow, ValueProjection,
 };
 pub(crate) use values::{RowKey, ValueRef};
 
@@ -284,6 +284,22 @@ pub enum GlaOperator {
     SelectBoolean {
         expression: BoundBooleanExpression,
     },
+    /// Assemble the ordered identified expansion segments of one captured path.
+    CapturePath {
+        capture: u32,
+        start: BindingSlot,
+        segments: Vec<BindingSlot>,
+    },
+    SelectPathLength {
+        capture: u32,
+        comparison: IntegerComparison,
+        value: i64,
+    },
+    SelectPathNull {
+        capture: u32,
+        function: GraphPathFunction,
+        is_null: bool,
+    },
 }
 
 /// Immutable logical definition with a statically determined output row shape.
@@ -540,6 +556,12 @@ impl<Row> GlaPlan<Row> {
         })
     }
 
+    /// Captured values require the real edge-identity input lane.
+    #[must_use]
+    pub fn requires_identified_edges(&self) -> bool {
+        self.operators.iter().any(|op| matches!(op, GlaOperator::CapturePath { .. }))
+    }
+
     /// Property projections require a real source even without a predicate.
     #[must_use]
     pub fn projects_properties(&self) -> bool {
@@ -688,6 +710,11 @@ impl<Row> GlaPlan<Row> {
                                 bytes.extend_from_slice(&slot.0.to_be_bytes());
                                 bytes.extend_from_slice(&key.0.to_be_bytes());
                             }
+                            ValueProjection::Path { capture, function } => {
+                                bytes.push(2);
+                                bytes.extend_from_slice(&capture.to_be_bytes());
+                                bytes.push(*function as u8);
+                            }
                         }
                     }
                 }
@@ -746,6 +773,25 @@ impl<Row> GlaPlan<Row> {
                 GlaOperator::SelectBoolean { expression } => {
                     bytes.push(21);
                     expression.append_transcript(&mut bytes);
+                }
+                GlaOperator::CapturePath { capture, start, segments } => {
+                    bytes.push(26);
+                    bytes.extend_from_slice(&capture.to_be_bytes());
+                    bytes.extend_from_slice(&start.0.to_be_bytes());
+                    bytes.extend_from_slice(&(segments.len() as u64).to_be_bytes());
+                    for slot in segments { bytes.extend_from_slice(&slot.0.to_be_bytes()); }
+                }
+                GlaOperator::SelectPathLength { capture, comparison, value } => {
+                    bytes.push(27);
+                    bytes.extend_from_slice(&capture.to_be_bytes());
+                    bytes.push(comparison.tag());
+                    bytes.extend_from_slice(&value.to_be_bytes());
+                }
+                GlaOperator::SelectPathNull { capture, function, is_null } => {
+                    bytes.push(28);
+                    bytes.extend_from_slice(&capture.to_be_bytes());
+                    bytes.push(*function as u8);
+                    bytes.push(u8::from(*is_null));
                 }
             }
         }

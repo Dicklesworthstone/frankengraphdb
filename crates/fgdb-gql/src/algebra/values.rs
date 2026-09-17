@@ -8,9 +8,39 @@ use super::{BindingSlot, MAX_PATTERN_VERTICES};
 use crate::GlaExecutionEvent;
 use crate::algebra_exec::ProjectedRows;
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
+
+/// An owned traversal, ordered by alternating vertex and edge identities.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GraphPath {
+    start: VId,
+    steps: Box<[(EId, VId)]>,
+}
+
+impl GraphPath {
+    pub(crate) fn new(start: VId, steps: Box<[(EId, VId)]>) -> Self { Self { start, steps } }
+    #[must_use]
+    pub fn start(&self) -> VId { self.start }
+    #[must_use]
+    pub fn steps(&self) -> &[(EId, VId)] { &self.steps }
+    #[must_use]
+    pub fn nodes(&self) -> impl Iterator<Item = VId> + '_ {
+        core::iter::once(self.start).chain(self.steps.iter().map(|(_, vertex)| *vertex))
+    }
+    #[must_use]
+    pub fn edges(&self) -> impl ExactSizeIterator<Item = EId> + '_ {
+        self.steps.iter().map(|(edge, _)| *edge)
+    }
+    #[must_use]
+    pub fn len(&self) -> usize { self.steps.len() }
+    #[must_use]
+    pub fn is_empty(&self) -> bool { self.steps.is_empty() }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GraphPathFunction { Value, Length, Nodes, Edges }
 
 /// Preparation-only column declarations. Names are checked before being owned
 /// by a prepared pattern. The caller already resolved property key identities.
@@ -25,9 +55,18 @@ pub enum GraphColumn<'a> {
         variable: &'a str,
         key: PropertyKeyId,
     },
+    Path {
+        name: &'a str,
+        variable: &'a str,
+        function: GraphPathFunction,
+    },
 }
 
 impl<'a> GraphColumn<'a> {
+    #[must_use]
+    pub const fn path(name: &'a str, variable: &'a str, function: GraphPathFunction) -> Self {
+        Self::Path { name, variable, function }
+    }
     #[must_use]
     pub const fn vertex(name: &'a str, variable: &'a str) -> Self {
         Self::Vertex { name, variable }
@@ -45,13 +84,13 @@ impl<'a> GraphColumn<'a> {
     #[must_use]
     pub const fn name(self) -> &'a str {
         match self {
-            Self::Vertex { name, .. } | Self::Property { name, .. } => name,
+            Self::Vertex { name, .. } | Self::Property { name, .. } | Self::Path { name, .. } => name,
         }
     }
 
     pub(super) const fn variable(self) -> &'a str {
         match self {
-            Self::Vertex { variable, .. } | Self::Property { variable, .. } => variable,
+            Self::Vertex { variable, .. } | Self::Property { variable, .. } | Self::Path { variable, .. } => variable,
         }
     }
 }
@@ -74,6 +113,7 @@ pub enum ValueProjection {
         slot: BindingSlot,
         key: PropertyKeyId,
     },
+    Path { capture: u32, function: GraphPathFunction },
 }
 
 /// Scalar values retain their exact canonical type, collation and time binding.
@@ -84,6 +124,9 @@ pub enum ValueProjection {
 pub enum GraphValue {
     Scalar(CanonicalScalar),
     Vertex(VId),
+    Path(GraphPath),
+    Vertices(Box<[VId]>),
+    Edges(Box<[EId]>),
 }
 
 impl GraphValue {
@@ -91,7 +134,7 @@ impl GraphValue {
     pub fn as_scalar(&self) -> Option<&CanonicalScalar> {
         match self {
             Self::Scalar(value) => Some(value),
-            Self::Vertex(_) => None,
+            _ => None,
         }
     }
 
@@ -99,10 +142,14 @@ impl GraphValue {
     pub fn as_vertex(&self) -> Option<VId> {
         match self {
             Self::Vertex(value) => Some(*value),
-            Self::Scalar(_) => None,
+            _ => None,
         }
     }
 
+    #[must_use]
+    pub fn as_path(&self) -> Option<&GraphPath> {
+        match self { Self::Path(value) => Some(value), _ => None }
+    }
     #[must_use]
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Scalar(CanonicalScalar::Null))
@@ -114,6 +161,9 @@ impl core::fmt::Debug for GraphValue {
         let kind = match self {
             Self::Scalar(_) => "Scalar",
             Self::Vertex(_) => "Vertex",
+            Self::Path(_) => "Path",
+            Self::Vertices(_) => "Vertices",
+            Self::Edges(_) => "Edges",
         };
         f.debug_tuple(kind).field(&"[REDACTED]").finish()
     }
@@ -169,10 +219,19 @@ pub const GRAPH_VALUE_PAYLOAD_UNIT_BYTES: usize = 64;
 pub(crate) enum ValueRef<'a> {
     Scalar(&'a CanonicalScalar),
     Vertex(VId),
+    Path(&'a GraphPath),
+    Vertices(&'a [VId]),
+    Edges(&'a [EId]),
 }
 
 impl ValueRef<'_> {
     fn payload_units(self) -> usize {
+        match self {
+            Self::Path(path) => return path.len().saturating_mul(2).saturating_add(1),
+            Self::Vertices(values) => return values.len(),
+            Self::Edges(values) => return values.len(),
+            _ => {}
+        }
         let bytes = match self {
             Self::Scalar(CanonicalScalar::Bytes(value)) => value.as_slice().len(),
             Self::Scalar(CanonicalScalar::Text(value)) => {
@@ -192,6 +251,9 @@ impl ValueRef<'_> {
         match self {
             Self::Scalar(value) => GraphValue::Scalar(value.clone()),
             Self::Vertex(value) => GraphValue::Vertex(value),
+            Self::Path(value) => GraphValue::Path(value.clone()),
+            Self::Vertices(value) => GraphValue::Vertices(value.into()),
+            Self::Edges(value) => GraphValue::Edges(value.into()),
         }
     }
 }
@@ -221,6 +283,9 @@ impl RowKey for GraphValueRow {
         match &self.values[at] {
             GraphValue::Scalar(value) => ValueRef::Scalar(value),
             GraphValue::Vertex(value) => ValueRef::Vertex(*value),
+            GraphValue::Path(value) => ValueRef::Path(value),
+            GraphValue::Vertices(value) => ValueRef::Vertices(value),
+            GraphValue::Edges(value) => ValueRef::Edges(value),
         }
     }
 }
@@ -259,7 +324,41 @@ pub(super) fn collect_values<'a, E>(
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
+    collect_values_with_paths(columns, bindings, &[], projected, property, control)
+}
+
+pub(super) fn collect_values_with_paths<'a, E>(
+    columns: &[ValueProjection],
+    bindings: &[Option<VId>],
+    paths: &[Option<GraphPath>],
+    projected: &mut ProjectedRows<GraphValueRow>,
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
     let null = CanonicalScalar::Null;
+    let mut computed: [Option<GraphValue>; MAX_PATTERN_VERTICES] = core::array::from_fn(|_| None);
+    for (at, column) in columns.iter().enumerate() {
+        let ValueProjection::Path { capture, function } = column else { continue; };
+        let Some(path) = paths.get(*capture as usize).and_then(Option::as_ref) else { continue; };
+        computed[at] = match function {
+            GraphPathFunction::Value => None,
+            GraphPathFunction::Length => Some(GraphValue::Scalar(CanonicalScalar::Int(path.len() as i64))),
+            GraphPathFunction::Nodes => {
+                for _ in 0..=path.len() {
+                    control(GlaExecutionEvent::Work)?;
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+                Some(GraphValue::Vertices(path.nodes().collect()))
+            }
+            GraphPathFunction::Edges => {
+                for _ in 0..path.len() {
+                    control(GlaExecutionEvent::Work)?;
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+                Some(GraphValue::Edges(path.edges().collect()))
+            }
+        };
+    }
     let mut key = [ValueRef::Scalar(&null); MAX_PATTERN_VERTICES];
     for (at, column) in columns.iter().enumerate() {
         control(GlaExecutionEvent::Work)?;
@@ -276,6 +375,16 @@ pub(super) fn collect_values<'a, E>(
                 };
                 ValueRef::Scalar(value.unwrap_or(&null))
             }
+            ValueProjection::Path { capture, function } => {
+                match (function, computed[at].as_ref()) {
+                    (GraphPathFunction::Value, _) => paths.get(*capture as usize)
+                        .and_then(Option::as_ref).map_or(ValueRef::Scalar(&null), ValueRef::Path),
+                    (_, Some(GraphValue::Scalar(value))) => ValueRef::Scalar(value),
+                    (_, Some(GraphValue::Vertices(value))) => ValueRef::Vertices(value),
+                    (_, Some(GraphValue::Edges(value))) => ValueRef::Edges(value),
+                    _ => ValueRef::Scalar(&null),
+                }
+            }
         };
         for _ in 0..key[at].payload_units() {
             control(GlaExecutionEvent::Work)?;
@@ -290,12 +399,21 @@ pub(super) fn collect_values<'a, E>(
     }
     control(GlaExecutionEvent::ScratchEntry)?;
     let mut values = Vec::new();
-    for value in &key[..columns.len()] {
+    for at in 0..columns.len() {
         control(GlaExecutionEvent::ScratchEntry)?;
-        for _ in 0..value.payload_units() {
+        if computed[at].is_some() { continue; }
+        for _ in 0..key[at].payload_units() {
             control(GlaExecutionEvent::ScratchEntry)?;
         }
-        values.push((*value).into_owned());
+    }
+    let mut copied: [Option<GraphValue>; MAX_PATTERN_VERTICES] = core::array::from_fn(|_| None);
+    for at in 0..columns.len() {
+        if computed[at].is_none() {
+            copied[at] = Some(key[at].into_owned());
+        }
+    }
+    for at in 0..columns.len() {
+        values.push(copied[at].take().or_else(|| computed[at].take()).expect("resolved cell"));
     }
     projected.insert_value(GraphValueRow {
         values: values.into_boxed_slice(),

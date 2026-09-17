@@ -129,10 +129,7 @@ where
                 }
                 for (value, kind) in row.values().iter().zip(&query.types) {
                     meter.event(GlaExecutionEvent::Work)?;
-                    let valid = match kind {
-                        GraphSetColumnType::Vertex => value.is_null() || value.as_vertex().is_some(),
-                        GraphSetColumnType::Scalar => value.as_scalar().is_some(),
-                    };
+                    let valid = kind.accepts(value);
                     if !valid { return Err(GqlQueryError::Source(GraphSetExecutionError::InputSchema { operand: at })); }
                 }
             }
@@ -212,6 +209,15 @@ fn compare_value<E>(a: &GraphValue, b: &GraphValue,
     control(GlaExecutionEvent::Work)?;
     for value in [a, b] {
         if let Some(scalar) = value.as_scalar() { charge_payload(scalar, control)?; }
+        let bytes = match value {
+            GraphValue::Path(value) => core::mem::size_of_val(value.steps()),
+            GraphValue::Vertices(value) => core::mem::size_of_val(value.as_ref()),
+            GraphValue::Edges(value) => core::mem::size_of_val(value.as_ref()),
+            _ => 0,
+        };
+        for _ in 0..bytes.div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+            control(GlaExecutionEvent::Work)?;
+        }
     }
     Ok(a.cmp(b))
 }

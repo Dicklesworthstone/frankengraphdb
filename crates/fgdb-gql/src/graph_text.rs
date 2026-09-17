@@ -15,7 +15,7 @@ pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 use scoped::{BoundScope, ScopeSyntax};
 
 use crate::algebra::{
-    GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
+    GlaDirection, GraphColumn, GraphPathFunction, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
     IntegerComparison, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
     MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError, PreparedGraphPattern,
     VertexPredicate,
@@ -265,6 +265,17 @@ struct Edge<'a> {
     search: crate::algebra::GraphWalkSearch,
 }
 enum Filter<'a> {
+    PathCapture(Name<'a>),
+    PathLength {
+        variable: Name<'a>,
+        comparison: IntegerComparison,
+        value: Number,
+    },
+    PathNull {
+        variable: Name<'a>,
+        function: GraphPathFunction,
+        is_null: bool,
+    },
     Boolean {
         program: Vec<boolean::SyntaxItem<'a>>,
         at: usize,
@@ -305,10 +316,12 @@ enum Filter<'a> {
 struct Column<'a> {
     variable: Name<'a>,
     property: Option<Name<'a>>,
+    path: Option<GraphPathFunction>,
     alias: Name<'a>,
 }
 struct Syntax<'a> {
     variables: Vec<Name<'a>>,
+    path: Option<Name<'a>>,
     root_variables: usize,
     labels: Vec<(Name<'a>, Name<'a>)>,
     edges: Vec<Edge<'a>>,
@@ -356,6 +369,7 @@ impl<'a> Parser<'a> {
             parameter_types: BTreeMap::new(),
             syntax: Syntax {
                 variables: Vec::new(),
+                path: None,
                 root_variables: 0,
                 labels: Vec::new(),
                 edges: Vec::new(),
@@ -475,6 +489,9 @@ impl<'a> Parser<'a> {
         use crate::algebra::PatternLimitDimension;
         self.punct(b'(', "(")?;
         let name = self.name()?;
+        if self.syntax.path.is_some_and(|path| path.text == name.text) {
+            return Err(error(name.at, GraphPatternTextErrorKind::Expected("vertex distinct from path binding")));
+        }
         if !self
             .syntax
             .variables
@@ -602,8 +619,16 @@ impl<'a> Parser<'a> {
         self.parse_scoped_head()
     }
     fn parse(mut self) -> Result<Syntax<'a>, GraphPatternTextError> {
-        use crate::algebra::PatternLimitDimension;
         self.parse_head()?;
+        self.parse_columns()?;
+        self.parse_row_ordering()?;
+        self.parse_pagination()?;
+        self.end()?;
+        Ok(self.syntax)
+    }
+
+    fn parse_columns(&mut self) -> Result<(), GraphPatternTextError> {
+        use crate::algebra::PatternLimitDimension;
         self.syntax.distinct = self.take_word("DISTINCT")?;
         if !self.syntax.distinct {
             self.take_word("ALL")?;
@@ -614,8 +639,15 @@ impl<'a> Parser<'a> {
                 .extend(self.syntax.variables.iter().copied().map(|name| Column {
                     variable: name,
                     property: None,
+                    path: None,
                     alias: name,
                 }));
+            if let Some(name) = self.syntax.path {
+                self.capacity(self.syntax.columns.len(), MAX_PATTERN_VERTICES, PatternLimitDimension::Columns)?;
+                self.syntax.columns.push(Column {
+                    variable: name, property: None, path: Some(GraphPathFunction::Value), alias: name,
+                });
+            }
         } else {
             loop {
                 self.capacity(
@@ -623,16 +655,26 @@ impl<'a> Parser<'a> {
                     MAX_PATTERN_VERTICES,
                     PatternLimitDimension::Columns,
                 )?;
-                let variable = self.variable()?;
-                let property = if self.take(b'.')? {
-                    Some(self.name()?)
+                let expression = self.name()?;
+                let (variable, property, path) = if self.is_punct(b'(') {
+                    let function = Self::path_function(expression)?;
+                    self.advance()?;
+                    let variable = self.path_variable()?;
+                    self.punct(b')', ")")?;
+                    (variable, None, Some(function))
+                } else if self.syntax.path.is_some_and(|path| path.text == expression.text) {
+                    (expression, None, Some(GraphPathFunction::Value))
                 } else {
-                    None
+                    if !self.syntax.variables.iter().any(|name| name.text == expression.text) {
+                        return Err(error(expression.at, GraphPatternTextErrorKind::UnknownVariable));
+                    }
+                    let property = if self.take(b'.')? { Some(self.name()?) } else { None };
+                    (expression, property, None)
                 };
                 let alias = if self.take_word("AS")? {
                     self.name()?
                 } else {
-                    property.unwrap_or(variable)
+                    property.unwrap_or(expression)
                 };
                 if self
                     .syntax
@@ -648,6 +690,7 @@ impl<'a> Parser<'a> {
                 self.syntax.columns.push(Column {
                     variable,
                     property,
+                    path,
                     alias,
                 });
                 if !self.take(b',')? {
@@ -655,10 +698,27 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        self.parse_row_ordering()?;
-        self.parse_pagination()?;
-        self.end()?;
-        Ok(self.syntax)
+        Ok(())
+    }
+
+    fn path_function(name: Name<'a>) -> Result<GraphPathFunction, GraphPatternTextError> {
+        if name.text.eq_ignore_ascii_case("path_length") {
+            Ok(GraphPathFunction::Length)
+        } else if name.text.eq_ignore_ascii_case("nodes") {
+            Ok(GraphPathFunction::Nodes)
+        } else if name.text.eq_ignore_ascii_case("edges") {
+            Ok(GraphPathFunction::Edges)
+        } else {
+            Err(error(name.at, GraphPatternTextErrorKind::Expected("path function")))
+        }
+    }
+
+    fn path_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+        let name = self.name()?;
+        if !self.syntax.path.is_some_and(|path| path.text == name.text) {
+            return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        Ok(name)
     }
     fn parse_pagination(&mut self) -> Result<(), GraphPatternTextError> {
         if self.take_word("SKIP")? {
@@ -682,6 +742,11 @@ impl<'a> Parser<'a> {
 
 #[derive(Clone)]
 enum BoundFilter {
+    PathLength {
+        variable: String,
+        comparison: IntegerComparison,
+        value: Number,
+    },
     Property {
         variable: String,
         key: PropertyKeyId,
@@ -695,9 +760,13 @@ struct BoundColumn {
     alias: String,
     variable: String,
     key: Option<PropertyKeyId>,
+    path: Option<GraphPathFunction>,
 }
 impl BoundColumn {
     fn declaration(&self) -> GraphColumn<'_> {
+        if let Some(function) = self.path {
+            return GraphColumn::path(&self.alias, &self.variable, function);
+        }
         match self.key {
             Some(key) => GraphColumn::property(&self.alias, &self.variable, key),
             None => GraphColumn::vertex(&self.alias, &self.variable),
@@ -764,8 +833,8 @@ impl PreparedGraphText {
     /// An explicit MATCH WALK enables bounded `[:R*min..max]`, `[:R*k]` and
     /// `[:R*..max]` atoms in that MATCH scope. The omitted minimum is one; zero
     /// is explicit. Bounds are integer literals with 0 <= min <= max <= 1024.
-    /// Repeated edges and vertices contribute distinct walk occurrences; this
-    /// does not select TRAIL/SIMPLE or path-valued projection. The explicit
+    /// Repeated edges and vertices contribute distinct walk occurrences.
+    /// A root `MATCH p = ...` captures its ordered path, including real edge IDs.
     /// MATCH ALL SHORTEST WALK prefix selects all tied minimum-hop occurrences
     /// within the interval, separately for each endpoint pair. This native
     /// profile requires exactly one quantified atom in its positive pattern;
@@ -774,7 +843,9 @@ impl PreparedGraphText {
     /// Endpoint predicates do not filter transit vertices. Every OPTIONAL or
     /// existential MATCH opts in independently. The same head grammar feeds
     /// aggregate queries and query-selected writes. Bare/open-ended quantifiers,
-    /// hop parameters, weighted search and captured paths remain unsupported.
+    /// hop parameters and weighted search remain unsupported. Captured paths
+    /// support RETURN p, path_length(p), nodes(p), edges(p), and conjunctive
+    /// length comparisons or IS [NOT] NULL predicates. Scoped captures refuse.
     ///
     /// Syntax is completely validated before calling `resolve`. Each unique
     /// (kind,name) is resolved once across ALL scopes. Unknown/wrong-kind names
@@ -836,6 +907,7 @@ impl PreparedGraphText {
                 alias: column.alias.text.to_owned(),
                 variable: column.variable.text.to_owned(),
                 key,
+                path: column.path,
             });
         }
         // Compile the actual scope topology for structural validation. Do not

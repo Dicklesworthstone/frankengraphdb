@@ -1,8 +1,8 @@
 //! Simultaneous assignment reduction. Borrowed scalars point into the frozen
-//! selection/literals; computed integers stay inline until intent ownership.
+//! selection/literals; computed scalars move into intent ownership without copies.
 
 use super::*;
-use crate::algebra::{GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphValue};
+use crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES;
 use crate::algebra_exec::charge_payload;
 use crate::{
     GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
@@ -18,11 +18,10 @@ enum Field {
     Label(LabelId),
     Delete,
 }
-#[derive(Clone, Copy)]
 enum Value<'a> {
     Property(Option<&'a CanonicalScalar>),
-    /// None is stored canonical NULL, never a property-removal intention.
-    Integer(Option<i64>),
+    /// Canonical NULL is stored, never a property-removal intention.
+    Computed(CanonicalScalar),
     Label(bool),
     Delete,
 }
@@ -75,25 +74,31 @@ impl<F> Meter<F> {
 }
 
 fn equal<E>(
-    left: Value<'_>,
-    right: Value<'_>,
+    left: &Value<'_>,
+    right: &Value<'_>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<bool, E> {
     control(GlaExecutionEvent::Work)?;
     match (left, right) {
         (Value::Property(left), Value::Property(right)) => {
-            for scalar in [left, right].into_iter().flatten() {
+            for scalar in [*left, *right].into_iter().flatten() {
                 charge_payload(scalar, control)?;
             }
             Ok(left == right)
         }
-        (Value::Integer(left), Value::Integer(right)) => Ok(left == right),
-        (Value::Integer(integer), Value::Property(scalar))
-        | (Value::Property(scalar), Value::Integer(integer)) => Ok(match (integer, scalar) {
-            (None, Some(CanonicalScalar::Null)) => true,
-            (Some(left), Some(CanonicalScalar::Int(right))) => left == *right,
-            _ => false,
-        }),
+        (Value::Computed(left), Value::Computed(right)) => {
+            charge_payload(left, control)?;
+            charge_payload(right, control)?;
+            Ok(left == right)
+        }
+        (Value::Computed(computed), Value::Property(scalar))
+        | (Value::Property(scalar), Value::Computed(computed)) => {
+            charge_payload(computed, control)?;
+            if let Some(scalar) = scalar {
+                charge_payload(scalar, control)?;
+            }
+            Ok(Some(computed) == *scalar)
+        }
         (Value::Label(left), Value::Label(right)) => Ok(left == right),
         (Value::Delete, Value::Delete) => Ok(true),
         _ => Ok(false),
@@ -193,10 +198,7 @@ pub(super) fn execute<E, C>(
         }
         for (column, (value, expression)) in row.values().iter().zip(columns).enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
-            let valid = match expression {
-                GraphSetColumnType::Vertex => value.is_null() || value.as_vertex().is_some(),
-                GraphSetColumnType::Scalar => matches!(value, GraphValue::Scalar(_)),
-            };
+            let valid = expression.accepts(value);
             if !valid {
                 return Err(GqlQueryError::Source(GraphMutationError::InputSchema {
                     row: row_at,
@@ -222,7 +224,7 @@ pub(super) fn execute<E, C>(
                         GraphMutationValue::Literal(value) => Value::Property(Some(value.value())),
                         GraphMutationValue::Expression(expression) => {
                             let value = expression
-                                .evaluate_with_control(row.values(), &mut |event| {
+                                .evaluate_scalar_with_control(row.values(), &mut |event| {
                                     meter.event(event)
                                 })
                                 .map_err(|failure| match failure {
@@ -235,7 +237,7 @@ pub(super) fn execute<E, C>(
                                         })
                                     }
                                 })?;
-                            Value::Integer(value)
+                            Value::Computed(value)
                         }
                     };
                     (Field::Property(*key), value)
@@ -249,7 +251,7 @@ pub(super) fn execute<E, C>(
                 GraphMutationAction::DetachDelete { .. } => (Field::Delete, Value::Delete),
             };
             if let Some(previous) = proposals.get(&(vertex, field)) {
-                if !equal(previous.value, value, &mut |event| meter.event(event))? {
+                if !equal(&previous.value, &value, &mut |event| meter.event(event))? {
                     return Err(GqlQueryError::Source(
                         GraphMutationError::ConflictingAssignment {
                             first_row: previous.row,
@@ -300,12 +302,12 @@ pub(super) fn execute<E, C>(
                     value: value.cloned(),
                 }
             }
-            (Field::Property(key), Value::Integer(value)) => {
+            (Field::Property(key), Value::Computed(value)) => {
                 meter.event(GlaExecutionEvent::ScratchEntry)?;
                 GraphMutationIntent::Property {
                     vertex,
                     key,
-                    value: Some(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
+                    value: Some(value),
                 }
             }
             (Field::Label(label), Value::Label(present)) => GraphMutationIntent::Label {
@@ -560,13 +562,13 @@ mod tests {
         for value in [None, Some(i64::MIN), Some(0), Some(i64::MAX)] {
             let scalar = value.map_or(CanonicalScalar::Null, CanonicalScalar::Int);
             for (left, right) in [
-                (Value::Integer(value), Value::Property(Some(&scalar))),
-                (Value::Property(Some(&scalar)), Value::Integer(value)),
+                (Value::Computed(scalar.clone()), Value::Property(Some(&scalar))),
+                (Value::Property(Some(&scalar)), Value::Computed(scalar.clone())),
             ] {
-                assert!(equal(left, right, &mut |_| Ok::<_, ()>(())).unwrap());
+                assert!(equal(&left, &right, &mut |_| Ok::<_, ()>(())).unwrap());
             }
             assert!(
-                !equal(Value::Integer(value), Value::Property(None), &mut |_| Ok::<
+                !equal(&Value::Computed(scalar), &Value::Property(None), &mut |_| Ok::<
                     _,
                     (),
                 >(
@@ -577,8 +579,8 @@ mod tests {
         }
         assert!(
             !equal(
-                Value::Integer(Some(1)),
-                Value::Property(Some(&CanonicalScalar::Bool(true))),
+                &Value::Computed(CanonicalScalar::Int(1)),
+                &Value::Property(Some(&CanonicalScalar::Bool(true))),
                 &mut |_| Ok::<_, ()>(())
             )
             .unwrap()

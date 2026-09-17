@@ -7,7 +7,6 @@ mod conditional;
 use super::*;
 use crate::{GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerExpression,
     GraphIntegerOp, GraphIntegerUnary, MAX_GRAPH_INTEGER_INSTRUCTIONS};
-use fgdb_types::CanonicalScalarKind;
 
 const MAX_INTEGER_NESTING: usize = 64;
 // The precedence/CASE compiler is shared by graph assignments and relational
@@ -33,34 +32,20 @@ fn emit(program: &mut Vec<ParsedOp>, op: ParsedOp, at: usize) -> Result<(), Grap
     program.push(op);
     Ok(())
 }
-fn integer_scalar(value: &CanonicalScalar, at: usize) -> Result<Option<i64>, GraphMutationTextError> {
-    match value {
-        CanonicalScalar::Int(value) => Ok(Some(*value)),
-        CanonicalScalar::Null => Ok(None),
-        _ => Err(failure(at, GraphMutationTextErrorKind::IntegerOperand)),
-    }
-}
-fn integer_value(value: &GqlParameterValue, at: usize) -> Result<Option<i64>, GraphMutationTextError> {
-    match value {
-        GqlParameterValue::Int64(value) => Ok(Some(*value)),
-        GqlParameterValue::Scalar(value) => integer_scalar(value.value(), at),
-        GqlParameterValue::UInt64(_) => Err(failure(at, GraphMutationTextErrorKind::IntegerOperand)),
-    }
-}
 
 pub(super) fn bind_integer(program: &[MutationIntegerTemplateOp], values: &[GqlParameterValue], at: usize)
     -> Result<GraphIntegerExpression, GraphMutationTextError> {
     let mut ops = Vec::with_capacity(program.len());
     for op in program {
         ops.push(match op {
-            MutationIntegerTemplateOp::Bound(op) => *op,
+            MutationIntegerTemplateOp::Bound(op) => op.clone(),
             MutationIntegerTemplateOp::Parameter { index, at } => {
                 let value = values.get(*index).ok_or_else(|| failure(*at, GraphMutationTextErrorKind::IntegerOperand))?;
-                GraphIntegerOp::Literal(integer_value(value, *at)?)
+                GraphIntegerOp::Scalar(scalar(value.clone(), *at)?.predicate(IntegerComparison::Equal))
             }
         });
     }
-    GraphIntegerExpression::prepare(&ops)
+    GraphIntegerExpression::prepare_scalar(&ops)
         .map_err(|error| failure(at, GraphMutationTextErrorKind::IntegerExpression(error)))
 }
 
@@ -79,7 +64,7 @@ impl<'a> Parser<'a> {
         -> Result<Operand, GraphMutationTextError> {
         let at = self.current.at;
         let mut parsed = Vec::new();
-        self.integer_sum(columns, 0, &mut parsed)?;
+        self.scalar_comparison(columns, 0, &mut parsed)?;
         if parsed.len() == 1 {
             let ParsedOp::Atom(value, _) = parsed.pop().expect("one parsed operand") else {
                 unreachable!("operators and CASE also contain their operands")
@@ -100,21 +85,16 @@ impl<'a> Parser<'a> {
                         && schema[column].1 != crate::GraphSetColumnType::Scalar {
                         return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
                     }
-                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Column(column))
+                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::ScalarColumn(column))
                 }
-                ParsedOp::Atom(Operand::Literal(value), at) =>
-                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Literal(integer_scalar(value.value(), at)?)),
+                ParsedOp::Atom(Operand::Literal(value), _) =>
+                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Scalar(value.predicate(IntegerComparison::Equal))),
                 ParsedOp::Atom(Operand::Number(Number::Literal(value)), at) =>
-                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Literal(integer_value(&value, at)?)),
+                    MutationIntegerTemplateOp::Bound(GraphIntegerOp::Scalar(scalar(value, at)?.predicate(IntegerComparison::Equal))),
                 ParsedOp::Atom(Operand::Number(Number::Parameter(index)), at) => {
-                    let kind = self.syntax.parameters[index].parameter_type;
-                    let integer = match kind {
-                        GqlParameterType::Int64 => true,
-                        GqlParameterType::Scalar(kind) => kind == CanonicalScalarKind::of(&CanonicalScalar::Int(0))
-                            || kind == CanonicalScalarKind::of(&CanonicalScalar::Null),
-                        GqlParameterType::UInt64 => false,
-                    };
-                    if !integer { return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand)); }
+                    if self.syntax.parameters[index].parameter_type == GqlParameterType::UInt64 {
+                        return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
+                    }
                     MutationIntegerTemplateOp::Parameter { index, at }
                 }
                 ParsedOp::Atom(Operand::Integer { .. }, _) => unreachable!("atoms never recurse into expression preparation"),
@@ -123,12 +103,75 @@ impl<'a> Parser<'a> {
         // Null placeholders prove stack/types/control-flow only. Preparation
         // neither evaluates branches nor guesses a parameter's runtime value.
         let shape: Vec<_> = program.iter().map(|op| match op {
-            MutationIntegerTemplateOp::Bound(op) => *op,
+            MutationIntegerTemplateOp::Bound(op) => op.clone(),
             MutationIntegerTemplateOp::Parameter { .. } => GraphIntegerOp::Literal(None),
         }).collect();
-        GraphIntegerExpression::prepare(&shape)
+        GraphIntegerExpression::prepare_scalar(&shape)
             .map_err(|error| failure(at, GraphMutationTextErrorKind::IntegerExpression(error)))?;
         Ok(Operand::Integer { program, at })
+    }
+
+    fn scalar_comparison(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
+        -> Result<(), GraphMutationTextError> {
+        self.scalar_concat(columns, depth, program)?;
+        loop {
+            let at = self.current.at;
+            let op = if self.take_word("STARTS")? {
+                self.word("WITH")?; Some(GraphIntegerOp::StartsWith)
+            } else if self.take_word("ENDS")? {
+                self.word("WITH")?; Some(GraphIntegerOp::EndsWith)
+            } else if self.take_word("CONTAINS")? { Some(GraphIntegerOp::Contains) }
+            else { None };
+            if let Some(op) = op {
+                self.scalar_concat(columns, depth, program)?;
+                emit(program, ParsedOp::Bound(op), at)?;
+                continue;
+            }
+            if self.is_word("IN") || (self.is_word("NOT") && matches!(self.lexer.clone().next()?.kind,
+                TokenKind::Word(word) if word.eq_ignore_ascii_case("IN"))) {
+                let negate = self.take_word("NOT")?;
+                self.word("IN")?;
+                self.punct(b'[', "[")?;
+                let mut members = 0;
+                if !self.take(b']')? {
+                    loop {
+                        self.scalar_concat(columns, depth + 1, program)?;
+                        members += 1;
+                        if self.take(b']')? { break; }
+                        self.punct(b',', ", or ]")?;
+                    }
+                }
+                emit(program, ParsedOp::Bound(GraphIntegerOp::InList { members }), at)?;
+                if negate { emit(program, ParsedOp::Bound(GraphIntegerOp::Not), at)?; }
+                continue;
+            }
+            if self.take_word("IS")? {
+                let negate = self.take_word("NOT")?;
+                self.word("NULL")?;
+                emit(program, ParsedOp::Bound(GraphIntegerOp::IsNull(!negate)), at)?;
+                continue;
+            }
+            if matches!(self.current.kind, TokenKind::Punct(b'=' | b'!' | b'<' | b'>')) {
+                let comparison = self.comparison()?;
+                self.scalar_concat(columns, depth, program)?;
+                emit(program, ParsedOp::Bound(GraphIntegerOp::Compare(comparison)), at)?;
+                continue;
+            }
+            break;
+        }
+        Ok(())
+    }
+
+    fn scalar_concat(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
+        -> Result<(), GraphMutationTextError> {
+        self.integer_sum(columns, depth, program)?;
+        while self.take(b'|')? {
+            let at = self.current.at;
+            self.punct(b'|', "||")?;
+            self.integer_sum(columns, depth, program)?;
+            emit(program, ParsedOp::Bound(GraphIntegerOp::Concat), at)?;
+        }
+        Ok(())
     }
 
     fn integer_sum(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
@@ -179,11 +222,13 @@ impl<'a> Parser<'a> {
             return emit(program, ParsedOp::Unary(op), at);
         }
         if self.take(b'(')? {
-            self.integer_sum(columns, depth + 1, program)?;
+            self.scalar_comparison(columns, depth + 1, program)?;
             self.punct(b')', ")")?;
             return Ok(());
         }
-        let function = if (self.is_word("ABS") || self.is_word("COALESCE") || self.is_word("NULLIF"))
+        let function = if (self.is_word("ABS") || self.is_word("COALESCE") || self.is_word("NULLIF")
+            || self.is_word("UPPER") || self.is_word("LOWER") || self.is_word("TRIM")
+            || self.is_word("CHAR_LENGTH") || self.is_word("SUBSTRING"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')) {
             let TokenKind::Word(name) = self.current.kind else { unreachable!("checked function word") };
             Some(name)
@@ -191,20 +236,38 @@ impl<'a> Parser<'a> {
         if let Some(function) = function {
             self.advance()?;
             self.punct(b'(', "(")?;
-            self.integer_sum(columns, depth + 1, program)?;
+            self.scalar_concat(columns, depth + 1, program)?;
+            let text_op = if function.eq_ignore_ascii_case("UPPER") { Some(GraphIntegerOp::Upper) }
+                else if function.eq_ignore_ascii_case("LOWER") { Some(GraphIntegerOp::Lower) }
+                else if function.eq_ignore_ascii_case("TRIM") { Some(GraphIntegerOp::Trim) }
+                else if function.eq_ignore_ascii_case("CHAR_LENGTH") { Some(GraphIntegerOp::CharLength) }
+                else { None };
+            if let Some(op) = text_op {
+                self.punct(b')', ")")?;
+                return emit(program, ParsedOp::Bound(op), at);
+            }
+            if function.eq_ignore_ascii_case("SUBSTRING") {
+                let sql = self.take_word("FROM")?;
+                if !sql { self.punct(b',', ", or FROM")?; }
+                self.scalar_concat(columns, depth + 1, program)?;
+                if sql { self.word("FOR")?; } else { self.punct(b',', ",")?; }
+                self.scalar_concat(columns, depth + 1, program)?;
+                self.punct(b')', ")")?;
+                return emit(program, ParsedOp::Bound(GraphIntegerOp::Substring), at);
+            }
             if function.eq_ignore_ascii_case("ABS") {
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Unary(GraphIntegerUnary::Abs), at);
             }
             self.punct(b',', ",")?;
-            self.integer_sum(columns, depth + 1, program)?;
+            self.scalar_concat(columns, depth + 1, program)?;
             if function.eq_ignore_ascii_case("NULLIF") {
                 self.punct(b')', ")")?;
                 return emit(program, ParsedOp::Binary(GraphIntegerBinary::NullIf), at);
             }
             emit(program, ParsedOp::Coalesce, at)?;
             while self.take(b',')? {
-                self.integer_sum(columns, depth + 1, program)?;
+                self.scalar_concat(columns, depth + 1, program)?;
                 emit(program, ParsedOp::Coalesce, at)?;
             }
             self.punct(b')', ")")?;

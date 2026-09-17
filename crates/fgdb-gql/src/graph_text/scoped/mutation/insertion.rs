@@ -200,10 +200,10 @@ fn bind_fields(fields: &[(PropertyKeyId, ReadValueTemplate)], values: Option<&[G
                     Some(values) => integer::bind_integer(program, values, *at)?,
                     None => {
                         let shape: Vec<_> = program.iter().map(|op| match op {
-                            MutationIntegerTemplateOp::Bound(op) => *op,
+                            MutationIntegerTemplateOp::Bound(op) => op.clone(),
                             MutationIntegerTemplateOp::Parameter { .. } => GraphIntegerOp::Literal(None),
                         }).collect();
-                        GraphIntegerExpression::prepare(&shape).map_err(|kind| GraphMutationTextError {
+                        GraphIntegerExpression::prepare_scalar(&shape).map_err(|kind| GraphMutationTextError {
                             offset: *at, kind: GraphMutationTextErrorKind::IntegerExpression(kind),
                         })?
                     }
@@ -298,7 +298,7 @@ impl PreparedGraphInsertText {
                     Some(key)
                 } else { None };
                 columns.push(BoundColumn { alias: format!("_insert_input_{index}"),
-                    variable: projection.variable.text.to_owned(), key });
+                    variable: projection.variable.text.to_owned(), key, path: None });
             }
             let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
             let projected: Vec<_> = columns.iter().map(BoundColumn::declaration).collect();

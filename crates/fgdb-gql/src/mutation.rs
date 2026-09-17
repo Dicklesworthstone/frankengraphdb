@@ -9,7 +9,7 @@
 mod collect;
 mod relational;
 
-use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
+use crate::algebra::{GraphValueRow, PreparedGraphPattern};
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GqlScalarParameter, GraphIntegerError, GraphIntegerExpression, GraphSetColumnType,
@@ -273,10 +273,7 @@ impl PreparedGraphMutation {
         }
         let columns: Vec<_> = match &input_relation {
             Some(input) => input.column_types().to_vec(),
-            None => selection.value_columns().iter().map(|column| match column {
-                ValueProjection::Vertex { .. } => GraphSetColumnType::Vertex,
-                ValueProjection::Property { .. } => GraphSetColumnType::Scalar,
-            }).collect(),
+            None => selection.value_columns().iter().map(GraphSetColumnType::from).collect(),
         };
         let deleting = matches!(actions[0], GraphMutationAction::DetachDelete { .. });
         for (at, action) in actions.iter().enumerate() {

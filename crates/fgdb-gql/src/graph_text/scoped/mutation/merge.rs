@@ -242,6 +242,7 @@ fn resolve_merge_template<'a>(
         alias: "_merge_target".to_owned(),
         variable: variable.text.to_owned(),
         key: None,
+        path: None,
     }];
     let projected = columns.iter().map(BoundColumn::declaration).collect::<Vec<_>>();
     built(at, builder.prepare_values(&projected, 0, None))?;

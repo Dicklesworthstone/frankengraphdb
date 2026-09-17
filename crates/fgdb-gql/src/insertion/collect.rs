@@ -57,21 +57,21 @@ fn fields<E, A, C>(properties: &Properties, row: &[GraphValue], row_at: usize, d
     let mut result = Vec::new();
     for (property, (key, expression)) in properties.keys.iter().zip(&properties.projection).enumerate() {
         control(GlaExecutionEvent::Work)?;
-        // Use the same integer/CASE VM as mutation, RETURN and aggregation.
-        // Plain scalar values retain their canonical kind; there is no coercion.
-        let computed;
+        // Use the same scalar/CASE VM as mutation, RETURN and aggregation.
+        // Computed values already own their charged payload; move, never copy.
         let value = match expression.value() {
             GraphSetValue::Column(column) => row[*column].as_scalar()
                 .expect("the complete input schema was validated"),
             GraphSetValue::Literal(value) => value.value(),
             GraphSetValue::Integer(expression) => {
-                let integer = expression.evaluate_with_control(row, control).map_err(|error| match error {
+                let value = expression.evaluate_scalar_with_control(row, control).map_err(|error| match error {
                     GraphIntegerEvaluationError::Control(error) => error,
                     GraphIntegerEvaluationError::Value(error) => GqlQueryError::Source(
                         GraphInsertError::Arithmetic { row: row_at, declaration, property, error }),
                 })?;
-                computed = integer.map_or(CanonicalScalar::Null, CanonicalScalar::Int);
-                &computed
+                control(GlaExecutionEvent::ScratchEntry)?;
+                result.push((*key, value));
+                continue;
             }
         };
         // Reserve the field and its variable payload before its only clone.
@@ -179,10 +179,7 @@ pub(super) fn execute<E, A, C>(
         }
         for (column, (value, expression)) in row.iter().zip(columns).enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
-            let valid = match expression {
-                ValueProjection::Vertex { .. } => value.is_null() || value.as_vertex().is_some(),
-                ValueProjection::Property { .. } => matches!(value, GraphValue::Scalar(_)),
-            };
+            let valid = crate::GraphSetColumnType::from(expression).accepts(value);
             if !valid {
                 return Err(GqlQueryError::Source(GraphInsertError::InputSchema { row: row_at, column }));
             }
