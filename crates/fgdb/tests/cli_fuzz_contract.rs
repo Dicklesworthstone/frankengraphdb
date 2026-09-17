@@ -734,7 +734,10 @@ fn generated_case(
             if variant != 1 {
                 args.extend([
                     "--param".into(),
-                    format!("p=int:{}", if variant == 4 { 2 + rng.below(100) } else { 1 }),
+                    format!(
+                        "p=int:{}",
+                        if variant == 4 { 2 + rng.below(100) } else { 1 }
+                    ),
                 ]);
             }
             (args, Some(variant < 2))
@@ -751,8 +754,12 @@ fn generated_case(
                 2 => "{\"kind\":\"vertex\",\"key\":",
                 3 => "{\"kind\":\"vertex\",\"key\":\"w\",\"labels\":[\"Unknown\"]}\n",
                 4 => "{\"kind\":\"vertex\",\"key\":\"v\",\"labels\":[]}\n",
-                5 => "{\"kind\":\"edge\",\"key\":\"e\",\"source\":\"v\",\"destination\":\"missing\",\"relation\":\"R\"}\n",
-                _ => "{\"kind\":\"edge\",\"key\":\"e\",\"source\":\"v\",\"destination\":\"v\",\"relation\":\"R\"}\n",
+                5 => {
+                    "{\"kind\":\"edge\",\"key\":\"e\",\"source\":\"v\",\"destination\":\"missing\",\"relation\":\"R\"}\n"
+                }
+                _ => {
+                    "{\"kind\":\"edge\",\"key\":\"e\",\"source\":\"v\",\"destination\":\"v\",\"relation\":\"R\"}\n"
+                }
             };
             std::fs::write(&input, vertex + suffix).unwrap();
             if variant == 6 {
@@ -760,16 +767,24 @@ fn generated_case(
             }
             args = ws.args("load", None);
             args.extend([
-                "--input".into(), input.to_string_lossy().into_owned(),
-                "--label".into(), "Person=1".into(),
-                "--relation".into(), "R=1".into(),
-                "--property".into(), "p=1".into(),
-                "--rows-per-chunk".into(), if variant == 7 { "0" } else { "1" }.into(),
+                "--input".into(),
+                input.to_string_lossy().into_owned(),
+                "--label".into(),
+                "Person=1".into(),
+                "--relation".into(),
+                "R=1".into(),
+                "--property".into(),
+                "p=1".into(),
+                "--rows-per-chunk".into(),
+                if variant == 7 { "0" } else { "1" }.into(),
             ]);
             // No checkpoint flag and an absent checkpoint file are BOTH
             // valid fresh loads. Garbage checkpoints must fail closed.
             if variant != 0 {
-                args.extend(["--checkpoint".into(), checkpoint.to_string_lossy().into_owned()]);
+                args.extend([
+                    "--checkpoint".into(),
+                    checkpoint.to_string_lossy().into_owned(),
+                ]);
             }
             (args, Some(variant < 2))
         }
@@ -993,13 +1008,23 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
         0
     );
     for (name, text, parameter) in [
-        ("certificate", "MATCH (n) WHERE n.p=$p RETURN n.p AS value", true),
-        ("alternate-certificate", "MATCH (n) RETURN count(n) AS total", false),
+        (
+            "certificate",
+            "MATCH (n) WHERE n.p=$p RETURN n.p AS value",
+            true,
+        ),
+        (
+            "alternate-certificate",
+            "MATCH (n) RETURN count(n) AS total",
+            false,
+        ),
     ] {
         let mut args = ws.args("query", Some(text));
         args.extend([
-            "--property".into(), "p=1".into(),
-            "--certify-to".into(), ws.root.join(name).to_string_lossy().into_owned(),
+            "--property".into(),
+            "p=1".into(),
+            "--certify-to".into(),
+            ws.root.join(name).to_string_lossy().into_owned(),
         ]);
         if parameter {
             args.extend(["--param".into(), "p=int:1".into()]);
@@ -1007,11 +1032,19 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
         assert_eq!(invoke(&args, true, &schema, &ws.secrets).code, 0);
     }
     let certificate = std::fs::read(ws.root.join("certificate")).unwrap();
-    std::fs::write(ws.root.join("truncated-certificate"), &certificate[..certificate.len() / 2]).unwrap();
+    std::fs::write(
+        ws.root.join("truncated-certificate"),
+        &certificate[..certificate.len() / 2],
+    )
+    .unwrap();
     std::fs::write(ws.root.join("garbage-certificate"), b"not a certificate").unwrap();
     let mut changed = fgdb::NativeResultCertificate::decode(&certificate).unwrap();
     changed.statement = "MATCH (n) WHERE n.p=$p RETURN n.p AS other".into();
-    std::fs::write(ws.root.join("changed-statement-certificate"), changed.canonical_bytes()).unwrap();
+    std::fs::write(
+        ws.root.join("changed-statement-certificate"),
+        changed.canonical_bytes(),
+    )
+    .unwrap();
     let mut counts: [[FamilyCounts; 2]; FAMILIES.len()] = std::array::from_fn(|_| {
         std::array::from_fn(|_| FamilyCounts {
             success: 0,
@@ -1070,7 +1103,15 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
             );
         }
     }
-    for command in ["create", "write", "query", "replay", "load", "help", "robot-schema"] {
+    for command in [
+        "create",
+        "write",
+        "query",
+        "replay",
+        "load",
+        "help",
+        "robot-schema",
+    ] {
         let modes = commands.get(command).expect("subcommand never exercised");
         assert!(modes.iter().all(|count| *count > 0), "{command}: {modes:?}");
     }
