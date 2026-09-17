@@ -4,8 +4,12 @@
 //! a substitute that violates the contract FAILS, never passes) and the
 //! frozen NDJSON contract is asserted with a dependency-free parser.
 //! Knobs: `CLI_FUZZ_SEEDS` (default 3, >=3 asserted), `CLI_FUZZ_ITERS`
-//! (default 86 per seed/family). The floor is 1,500 process invocations;
-//! the campaign asserts a 180-second wall bound. Fixtures are retained in /tmp.
+//! (default 86 per seed/family). Nine families execute at least 2,322 cases;
+//! the campaign asserts a 600-second wall bound. Measured envelopes:
+//! 60.4s idle @1,548 invocations (IcyPeak-095150), 252.1s under concurrent
+//! batch load @1,548 (WildLantern-113651), 353.0s under load @2,322
+//! (bg_1, local run at ad425d95); 600s is 1.7x the worst observation.
+//! Fixtures stay in /tmp.
 
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -1088,7 +1092,7 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
             }
         }
     }
-    assert!(total >= 1500, "executed {total}");
+    assert!(total >= 2322, "executed {total}");
     for (family, modes) in FAMILIES.into_iter().zip(counts) {
         for (mode, count) in modes.into_iter().enumerate() {
             eprintln!(
@@ -1122,7 +1126,7 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
         ws.root.display()
     );
     assert!(
-        started.elapsed() < Duration::from_secs(180),
+        started.elapsed() < Duration::from_secs(600),
         "campaign wall budget"
     );
 }

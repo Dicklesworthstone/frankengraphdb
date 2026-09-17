@@ -487,20 +487,41 @@ fn owner_basis_relation_and_exact_query_budgets_guard_the_public_creation_entryp
         let mut prior = WriteBatch::new(R);
         prior.create_vertex(VId(777), vec![], vec![]);
         txn.write(&mut db, prior).unwrap();
+        // Direct write() remains single-coordinate until write_atomic() has
+        // explicitly admitted multiple groups. INSERT is not so restricted.
+        let mut mismatched = WriteBatch::new(S);
+        mismatched.add_edge(EId(15), VId(1), VId(2), vec![]);
+        assert!(matches!(
+            txn.write(&mut db, mismatched),
+            Err(WriteTxnError::RelationMismatch {
+                expected: R,
+                found: S
+            })
+        ));
         let other_relation =
             PreparedGraphInsertText::prepare("MATCH (n) CREATE (copy)", S, symbols)
                 .unwrap()
                 .bind_parameters(&GqlParameters::new())
                 .unwrap();
-        assert!(matches!(
-            txn.execute_graph_insert_governed(&mut db, &cx, &other_relation, policy(), |request| {
-                calls.set(calls.get() + 1);
-                allocator(request)
-            }),
-            Err(GqlQueryError::Source(GraphInsertError::Source(
-                WriteTxnError::RelationMismatch { .. }
-            )))
-        ));
+        let basis = db.frontier().unwrap();
+        txn.execute_graph_insert_governed(&mut db, &cx, &other_relation, policy(), allocator)
+            .unwrap();
+        assert_eq!(db.frontier().unwrap(), basis);
+        assert!(db.vertex(VId(777)).unwrap().is_none());
+        assert_eq!(
+            txn.commit(&mut db, &commit).await.unwrap(),
+            CommitSeq(basis.0 + 1)
+        );
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert_eq!(db.vertices().unwrap().len(), 10);
+        assert!(db.vertex(VId(777)).unwrap().is_some());
+        for row in 0..5 {
+            let copy = db.vertex(VId(1_000 + row * 4)).unwrap().unwrap();
+            assert!(copy.labels.is_empty());
+            assert!(copy.props.is_empty());
+        }
+        let mut txn = db.begin(&txcx).unwrap();
         let mut advance = WriteBatch::new(R);
         advance.create_vertex(VId(888), vec![], vec![]);
         db.write(&commit, advance).await.unwrap();
