@@ -249,6 +249,149 @@ fn equality_bound_answers_equal_scan_answers_across_history() {
     }
 }
 
+/// A root equality may prune its own scan, never the shared domain of a later
+/// join. Range conjunctions express the same integer predicate without using
+/// the equality index; explicit expected identities prevent common-mode loss.
+#[test]
+fn equality_and_scan_agree_for_staged_and_retained_join_domains() {
+    let ((), report) = run_async_under_lab(0xb01_0050, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let vfs = MemVfs::new().unwrap();
+        let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
+        let mut batch = WriteBatch::new(R);
+        for (id, p) in [(1, BOUND), (2, BOUND), (3, 9)] {
+            batch.create_vertex(
+                VId(id),
+                vec![],
+                vec![
+                    (P, CanonicalScalar::Int(p)),
+                    (Q, CanonicalScalar::Int(id as i64)),
+                ],
+            );
+        }
+        let old = db.write(&commit, batch).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let symbols = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+            _ => None,
+        };
+        let pairs = [
+            (
+                "MATCH (n) WHERE n.p=42 RETURN n",
+                "MATCH (n) WHERE n.p>=42 AND n.p<=42 RETURN n",
+            ),
+            (
+                "MATCH (a) WHERE a.q=1 OPTIONAL MATCH (b) WHERE b.p=a.p RETURN b",
+                "MATCH (a) WHERE a.q>=1 AND a.q<=1 OPTIONAL MATCH (b) WHERE b.p=a.p RETURN b",
+            ),
+        ]
+        .map(|(indexed, scan)| {
+            [indexed, scan].map(|text| {
+                PreparedGraphText::prepare(text, symbols)
+                    .unwrap()
+                    .bind_parameters(&GqlParameters::new())
+                    .unwrap()
+            })
+        });
+        let wide = GqlQueryPolicy::new(100_000, 100_000, 5_000_000, 5_000_000);
+        let before = [vec![VId(1), VId(2)], vec![VId(1), VId(2)]];
+        let after = [vec![VId(2)], vec![VId(1), VId(3), VId(4)]];
+        macro_rules! check {
+            ($results:expr, $expected:expr) => {{
+                let [indexed, scan] = $results;
+                let indexed = indexed.unwrap().value;
+                let scan = scan.unwrap().value;
+                assert_eq!(indexed, scan);
+                assert_eq!(
+                    indexed
+                        .iter()
+                        .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+                        .collect::<Vec<_>>(),
+                    $expected
+                );
+            }};
+        }
+        for (pair, expected) in pairs.iter().zip(&before) {
+            check!(
+                pair.each_ref()
+                    .map(|query| db.execute_graph_pattern_governed(&cx, query, wide)),
+                *expected
+            );
+        }
+        let mut txn = db.begin(&contexts.txn()).unwrap();
+        let mut staged = WriteBatch::new(R);
+        staged.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(9)));
+        staged.create_vertex(VId(4), vec![], vec![(P, CanonicalScalar::Int(9))]);
+        txn.write(&mut db, staged).unwrap();
+        for ((pair, expected), retained) in pairs.iter().zip(&after).zip(&before) {
+            check!(
+                pair.each_ref()
+                    .map(|query| txn.execute_graph_pattern_governed(&db, &cx, query, wide)),
+                *expected
+            );
+            check!(
+                pair.each_ref()
+                    .map(|query| db.execute_graph_pattern_governed(&cx, query, wide)),
+                *retained
+            );
+        }
+        txn.commit(&mut db, &commit).await.unwrap();
+        for ((pair, expected), retained) in pairs.iter().zip(&after).zip(&before) {
+            check!(
+                pair.each_ref()
+                    .map(|query| db.execute_graph_pattern_governed(&cx, query, wide)),
+                *expected
+            );
+            check!(
+                pair.each_ref()
+                    .map(|query| pinned.execute_graph_pattern_governed(&cx, query, wide)),
+                *retained
+            );
+        }
+        db.compact(&commit).await.unwrap();
+        for ((pair, expected), retained) in pairs.iter().zip(&after).zip(&before) {
+            check!(
+                pair.each_ref()
+                    .map(|query| db.execute_graph_pattern_governed(&cx, query, wide)),
+                *expected
+            );
+            check!(
+                pair.each_ref()
+                    .map(|query| db.execute_graph_pattern_governed_at(&cx, query, old, wide)),
+                *retained
+            );
+        }
+        drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        for ((pair, expected), retained) in pairs.iter().zip(&after).zip(&before) {
+            check!(
+                pair.each_ref()
+                    .map(|query| db.execute_graph_pattern_governed(&cx, query, wide)),
+                *expected
+            );
+            check!(
+                pair.each_ref()
+                    .map(|query| db.execute_graph_pattern_governed_at(&cx, query, old, wide)),
+                *retained
+            );
+            check!(
+                pair.each_ref()
+                    .map(|query| pinned.execute_graph_pattern_governed(&cx, query, wide)),
+                *retained
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
 /// An equality lookup charges identical Work/SnapshotRecord counts on a
 /// 1k-vertex and a 50k-vertex graph with the same matching set.
 #[test]

@@ -212,28 +212,43 @@ impl PropertyEqualityIndex {
 }
 
 /// Whether equality-bound vertex scans are served from the index (fgdb-bupm).
-const PROPERTY_INDEX_SERVING: bool = false;
+const PROPERTY_INDEX_SERVING: bool = true;
 
-/// Serve an equality-bound vertex-only plan from the equality index. Returns
-/// `None` unless the plan is a vertex scan whose prefix constrains slot 0 (or
-/// slot 1 with an identical value bound through the join) with an equality
-/// predicate; every other shape keeps the scan path verbatim.
+/// Serve an equality-bound single-domain vertex plan from the equality index.
+/// The admitted rows also supply every nested scan and property lookup, so a
+/// root predicate cannot prune that shared table when later operators introduce
+/// other bindings. Such plans retain the complete scan source.
 fn bound_vertices<'a, E, Row>(
     snapshot: &'a Snapshot,
     logical: &fgdb_gql::algebra::GlaPlan<Row>,
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<Option<Vec<&'a VertexRow>>, E> {
+) -> Result<Option<(Vec<&'a VertexRow>, u64)>, E> {
     use fgdb_gql::algebra::{GlaOperator, IntegerComparison, VertexPredicate};
     if !matches!(logical.operators().first(), Some(GlaOperator::ScanVertices)) {
         return Ok(None);
     }
     let prefix = &logical.operators()[1..];
+    if !prefix.iter().all(|op| match op {
+        GlaOperator::Select { slot, .. } => slot.ordinal() == 0,
+        GlaOperator::Project { .. }
+        | GlaOperator::Distinct
+        | GlaOperator::OrderByVertexId
+        | GlaOperator::ProjectBindings { .. }
+        | GlaOperator::OrderByBindings
+        | GlaOperator::ProjectValues { .. }
+        | GlaOperator::OrderByValues
+        | GlaOperator::OrderByValueColumns { .. }
+        | GlaOperator::Limit { .. } => true,
+        _ => false,
+    }) {
+        return Ok(None);
+    }
     let mut equality: Option<(PropertyKeyId, CanonicalScalar)> = None;
     let mut bound_predicates: &[VertexPredicate] = &[];
     for op in prefix {
         match op {
-            GlaOperator::Select { slot, predicates } if slot.ordinal() < 2 => {
+            GlaOperator::Select { slot, predicates } if slot.ordinal() == 0 => {
                 let mut found = None;
                 for predicate in predicates {
                     let (key, value) = match predicate {
@@ -273,8 +288,12 @@ fn bound_vertices<'a, E, Row>(
         return Ok(None);
     };
     let mut rows = Vec::new();
-    for vid in snapshot.property_index.lookup(key, &value) {
+    let candidates = snapshot.property_index.lookup(key, &value);
+    for vid in candidates {
         control(SourceEvent::Work)?;
+        // History candidates consume admission even when their visible row
+        // has changed value or retired. Charge before resolving that history.
+        control(SourceEvent::SnapshotRecord)?;
         // Resolve only this candidate's history, not every snapshot patch.
         // The visible row remains the authority for the complete predicate.
         if let Some(row) =
@@ -286,13 +305,12 @@ fn bound_vertices<'a, E, Row>(
                 .iter()
                 .all(|predicate| predicate.matches(&row.labels, &row.props))
             {
-                control(SourceEvent::SnapshotRecord)?;
                 control(SourceEvent::ScratchEntry)?;
                 rows.push(row);
             }
         }
     }
-    Ok(Some(rows))
+    Ok(Some((rows, candidates.len() as u64)))
 }
 
 #[cfg(test)]
@@ -773,18 +791,19 @@ pub(super) fn admit<'a, E, Row>(
     use fgdb_gql::algebra::GlaOperator;
     if !logical.scans_edges() {
         // Equality-bound vertex scans serve from the per-generation index;
-        // every other node shape keeps the O(|V|) scan verbatim. Serving is
-        // OFF (fgdb-bupm P0): the index path returned wrong rows for staged,
-        // retained and joined reads (outer_predicate_queries, scalar_parameters,
-        // scalar_text). A faster path that drifts a result is not served.
+        // every other node shape keeps the O(|V|) scan verbatim.
         let served = if PROPERTY_INDEX_SERVING {
             bound_vertices(snapshot, logical, as_of, control)?
         } else {
             None
         };
-        let vertices = match served {
-            Some(vertices) => vertices,
-            None => scan_vertices(&snapshot.patches, as_of, control)?,
+        let (vertices, vertex_records) = match served {
+            Some(admitted) => admitted,
+            None => {
+                let vertices = scan_vertices(&snapshot.patches, as_of, control)?;
+                let count = vertices.len() as u64;
+                (vertices, count)
+            }
         };
         // A node-root semijoin needs both base tables. Keep isolated outer
         // vertices, admit topology once, and charge every base record to the
@@ -795,7 +814,7 @@ pub(super) fn admit<'a, E, Row>(
             Vec::new()
         };
         return Ok(BorrowedTables {
-            snapshot_records: vertices.len() as u64 + edges.len() as u64,
+            snapshot_records: vertex_records + edges.len() as u64,
             vertices,
             edges,
         });

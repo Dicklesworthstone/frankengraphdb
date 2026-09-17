@@ -141,20 +141,28 @@ fn scalar_text_preserves_types_and_nulls_on_all_five_read_entrypoints() {
         let basis = seed(&mut db, &commit).await;
         let view = db.read_session().unwrap();
         let txn = db.begin(&txn_cx).unwrap();
-        for (predicate, expected) in [
-            ("n.status = 'ready'", vec![VId(0), VId(1)]),
-            ("n.status <> 'ready'", vec![VId(2), HIGH]),
-            ("n.status = 'O''Reilly 🦀'", vec![HIGH]),
-            ("n.active = TRUE", vec![VId(0), VId(2), HIGH]),
-            ("n.active <> false", vec![VId(0), VId(2), HIGH]),
-            ("n.active = 1", vec![VId(3)]),
-            ("n.note IS NULL", vec![VId(0), VId(1), HIGH]),
-            ("n.note IS NOT NULL", vec![VId(2), VId(3)]),
-            ("n.note = NULL", vec![]),
-            ("n.note <> NULL", vec![]),
+        // Candidate counts derive from this fixture's own vertex properties,
+        // never from an engine counter: how many of the seven vertices carry
+        // that exact key value in the seed batch below (V0..V4 and HIGH;
+        // rows [V0,V1], [V2,HIGH], [HIGH], [V0,V2,HIGH], [V0,V2,HIGH],
+        // [V3], and none for the note/NULL shapes). Non-equality and
+        // null-comparison shapes never consult the index: 7 full-domain
+        // records. The ruling (fgdb-bupm 2026-09-17): an equality lookup
+        // charges only the candidates it resolves.
+        for (predicate, expected, indexed_records) in [
+            ("n.status = 'ready'", vec![VId(0), VId(1)], 2),
+            ("n.status <> 'ready'", vec![VId(2), HIGH], 7),
+            ("n.status = 'O''Reilly 🦀'", vec![HIGH], 1),
+            ("n.active = TRUE", vec![VId(0), VId(2), HIGH], 3),
+            ("n.active <> false", vec![VId(0), VId(2), HIGH], 7),
+            ("n.active = 1", vec![VId(3)], 1),
+            ("n.note IS NULL", vec![VId(0), VId(1), HIGH], 7),
+            ("n.note IS NOT NULL", vec![VId(2), VId(3)], 7),
+            ("n.note = NULL", vec![], 7),
+            ("n.note <> NULL", vec![], 7),
         ] {
             let pattern = query(&format!("MATCH (n:Person) WHERE {predicate} RETURN n"));
-            for result in [
+            for (entrypoint, result) in [
                 db.execute_graph_pattern_governed(&cx, &pattern, policy())
                     .unwrap(),
                 db.execute_graph_pattern_governed_at(&cx, &pattern, basis, policy())
@@ -165,9 +173,14 @@ fn scalar_text_preserves_types_and_nulls_on_all_five_read_entrypoints() {
                     .unwrap(),
                 txn.execute_graph_pattern_governed(&db, &cx, &pattern, policy())
                     .unwrap(),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 assert_eq!(ids(&result.value), expected, "{predicate}");
-                assert_eq!(result.rows.snapshot_records, 7);
+                // Transaction overlays have their own complete canonical source.
+                let records = if entrypoint == 4 { 7 } else { indexed_records };
+                assert_eq!(result.rows.snapshot_records, records, "{predicate}");
             }
         }
         txn.abort();
@@ -415,7 +428,7 @@ fn scalar_queries_keep_exact_policy_boundaries_and_real_runtime_cancellation() {
                     .unwrap();
                 assert_eq!(ids(&full.value), vec![VId(0), VId(1)]);
                 let exact = GqlQueryPolicy::new(
-                    7,
+                    2,
                     2,
                     full.evaluator.work_units,
                     full.evaluator.scratch_entries,
@@ -425,9 +438,36 @@ fn scalar_queries_keep_exact_policy_boundaries_and_real_runtime_cancellation() {
                         .unwrap(),
                     full
                 );
+                // The scan-served equivalent keeps the full-domain boundary:
+                // seven source vertices, refusal exactly one below the cap.
+                let range = query("MATCH (n:Person) WHERE n.status >= 'r' RETURN n");
+                let range_records = 7;
+                assert_eq!(
+                    db.execute_graph_pattern_governed(&cx, &range, policy())
+                        .unwrap()
+                        .rows
+                        .snapshot_records,
+                    range_records
+                );
+                assert!(matches!(
+                    db.execute_graph_pattern_governed(
+                        &cx,
+                        &range,
+                        GqlQueryPolicy::new(6, 2, u64::MAX, u64::MAX)
+                    ),
+                    Err(GqlQueryError::Rows(_))
+                ));
+                assert!(matches!(
+                    db.execute_graph_pattern_governed(
+                        &cx,
+                        &range,
+                        GqlQueryPolicy::new(7, 2, u64::MAX, u64::MAX)
+                    ),
+                    Ok(_)
+                ));
                 for cap in [
-                    GqlQueryPolicy::new(6, 2, u64::MAX, u64::MAX),
-                    GqlQueryPolicy::new(7, 1, u64::MAX, u64::MAX),
+                    GqlQueryPolicy::new(1, 2, u64::MAX, u64::MAX),
+                    GqlQueryPolicy::new(2, 1, u64::MAX, u64::MAX),
                 ] {
                     assert!(matches!(
                         db.execute_graph_pattern_governed(&cx, &pattern, cap),
@@ -435,8 +475,8 @@ fn scalar_queries_keep_exact_policy_boundaries_and_real_runtime_cancellation() {
                     ));
                 }
                 for cap in [
-                    GqlQueryPolicy::new(7, 2, full.evaluator.work_units - 1, u64::MAX),
-                    GqlQueryPolicy::new(7, 2, u64::MAX, full.evaluator.scratch_entries - 1),
+                    GqlQueryPolicy::new(2, 2, full.evaluator.work_units - 1, u64::MAX),
+                    GqlQueryPolicy::new(2, 2, u64::MAX, full.evaluator.scratch_entries - 1),
                 ] {
                     assert!(matches!(
                         db.execute_graph_pattern_governed(&cx, &pattern, cap),
