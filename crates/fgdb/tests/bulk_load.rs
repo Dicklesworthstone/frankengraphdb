@@ -430,14 +430,14 @@ fn three_seed_ten_thousand_edge_bulk_matches_native_create_and_gql() {
             for relation in [R, S] {
                 let bulk_answer = query_answers(&bulk, &contexts.query(), relation);
                 let native_answer = query_answers(&native, &contexts.query(), relation);
+                // Matches the fixture projection exactly: RETURN ALL a.k AS
+                // ak, b.k AS bk yields one [source_k, destination_k] row.
                 let mut expected_answer: Vec<Vec<i64>> = rows
                     .iter()
                     .filter_map(|row| match row {
                         BulkRow::Edge(row) if row.relation == relation => Some(vec![
                             row.source[1..].parse().unwrap(),
-                            int_property(&row.props, K),
                             row.destination[1..].parse().unwrap(),
-                            int_property(&row.props, P),
                         ]),
                         _ => None,
                     })
