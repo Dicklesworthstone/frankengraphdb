@@ -12,10 +12,10 @@ pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::ProjectedRows;
 
 use crate::algebra::{
-    GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphWalkSearch, VertexPredicate,
+    GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphPath, GraphWalkSearch, VertexPredicate,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +153,7 @@ fn charge(
 
 type Adjacency = BTreeMap<VId, Vec<VId>>;
 type Index = BTreeMap<(RelationId, GlaDirection), Adjacency>;
+type IdentifiedIndex = BTreeMap<(RelationId, GlaDirection), BTreeMap<VId, Vec<(EId, VId)>>>;
 
 // Both search kernels borrow the SAME admitted index and feed the same binding
 // continuation. Search is a prepared logical choice, never an adaptive fallback
@@ -317,6 +318,9 @@ struct Execution<F, C, P, Row> {
     // One admitted identity stream, shared by all independent scan frames.
     // Never materialize a Cartesian intermediate or reopen a source per row.
     vertex_domain: Vec<VId>,
+    identified_index: Option<IdentifiedIndex>,
+    segments: [Option<GraphPath>; crate::algebra::MAX_PATTERN_BINDINGS],
+    paths: [Option<GraphPath>; crate::algebra::MAX_PATTERN_IDENTITIES],
 }
 
 impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
@@ -330,7 +334,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[Option<VId>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
+        P: FnMut(&GlaOperator, &[Option<VId>], &[Option<GraphPath>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
     {
         let Some(operator) = operators.get(ordinal) else {
             return Ok(());
@@ -399,7 +403,7 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 // The value-aware action owns the SAME property resolver as
                 // projection/aggregation. Its Boolean is only a continuation
                 // decision; no projected row is produced by this selection.
-                if (self.project)(operator, bindings, &mut self.projected, &mut self.control)? {
+                if (self.project)(operator, bindings, &self.paths, &mut self.projected, &mut self.control)? {
                     self.visit(operators, ordinal + 1, bindings, index)?;
                 }
             }
@@ -422,6 +426,10 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 else {
                     return Ok(());
                 };
+                if self.identified_index.is_some() {
+                    return self.visit_identified_expansion(operators, ordinal, bindings, index,
+                        source, *relation, *direction, crate::GraphWalkBounds::new(1, 1).expect("one hop"), GraphWalkSearch::All);
+                }
                 if let Some(neighbors) = index
                     .get(&(*relation, *direction))
                     .and_then(|adjacency| adjacency.get(&source))
@@ -461,6 +469,10 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 else {
                     return Ok(());
                 };
+                if self.identified_index.is_some() {
+                    return self.visit_identified_expansion(operators, ordinal, bindings, index,
+                        source, *relation, *direction, *bounds, *search);
+                }
                 let mut cursor = WalkExpansion::new(
                     *search,
                     source,
@@ -551,10 +563,49 @@ impl<F, C, P, Row: GlaOutput> Execution<F, C, P, Row> {
                 let _ = bindings.pop();
                 result?;
             }
+            GlaOperator::CapturePath { capture, start, segments } => {
+                let at = *capture as usize;
+                let previous = self.paths[at].take();
+                if let Some(start) = bindings[start.ordinal() as usize] {
+                    let mut steps = Vec::new();
+                    let mut complete = true;
+                    let mut endpoint = start;
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    for slot in segments {
+                        (self.control)(GlaExecutionEvent::Work)?;
+                        let Some(segment) = &self.segments[slot.ordinal() as usize] else {
+                            complete = false;
+                            break;
+                        };
+                        if segment.start() != endpoint { complete = false; break; }
+                        for step in segment.steps() {
+                            (self.control)(GlaExecutionEvent::Work)?;
+                            (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                            (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                            steps.push(*step);
+                            endpoint = step.1;
+                        }
+                    }
+                    if complete { self.paths[at] = Some(GraphPath::new(start, steps.into_boxed_slice())); }
+                }
+                let result = self.visit(operators, ordinal + 1, bindings, index);
+                self.paths[at] = previous;
+                result?;
+            }
+            GlaOperator::SelectPathLength { capture, comparison, value } => {
+                if self.paths[*capture as usize].as_ref().is_some_and(|path| comparison.accepts(path.len() as i64, *value)) {
+                    self.visit(operators, ordinal + 1, bindings, index)?;
+                }
+            }
+            GlaOperator::SelectPathNull { capture, is_null, .. } => {
+                if self.paths[*capture as usize].is_none() == *is_null {
+                    self.visit(operators, ordinal + 1, bindings, index)?;
+                }
+            }
             GlaOperator::Project { .. }
             | GlaOperator::ProjectBindings { .. }
             | GlaOperator::ProjectValues { .. } => {
-                let _ = (self.project)(operator, bindings, &mut self.projected, &mut self.control)?;
+                let _ = (self.project)(operator, bindings, &self.paths, &mut self.projected, &mut self.control)?;
             }
             GlaOperator::Empty
             | GlaOperator::ScanEdges { .. }
@@ -610,7 +661,7 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
             edges,
             test_vertex,
             control,
-            |operator, bindings, projected, control| {
+            |operator, bindings, _paths, projected, control| {
                 Row::collect(operator, bindings, projected, control)?;
                 Ok(false)
             },
@@ -636,14 +687,14 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             edges,
             test_vertex,
             control,
-            |operator, bindings, projected, control| {
+            |operator, bindings, paths, projected, control| {
                 if matches!(
                     operator,
                     GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
                 ) {
                     return compare_properties(operator, bindings, &mut property, control);
                 }
-                Row::collect_properties(operator, bindings, projected, &mut property, control)?;
+                Row::collect_properties_with_paths(operator, bindings, paths, projected, &mut property, control)?;
                 Ok(false)
             },
         )
@@ -663,14 +714,33 @@ impl<Row: GlaOutput> GlaPlan<Row> {
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[Option<VId>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
+        P: FnMut(&GlaOperator, &[Option<VId>], &[Option<GraphPath>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
     {
+        if self.requires_identified_edges() { return Ok(Vec::new()); }
         let operators = self.operators();
         let index = if self.reads_edges() {
             build_index(operators, edges, &mut control)?
         } else {
             Index::new()
         };
+        self.execute_projected_index(vertices, index, None, test_vertex, control, project)
+    }
+
+    fn execute_projected_index<E, F, C, P>(
+        &self,
+        vertices: impl IntoIterator<Item = VId>,
+        index: Index,
+        identified_index: Option<IdentifiedIndex>,
+        test_vertex: F,
+        mut control: C,
+        project: P,
+    ) -> Result<Vec<Row>, E>
+    where
+        F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        P: FnMut(&GlaOperator, &[Option<VId>], &[Option<GraphPath>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
+    {
+        let operators = self.operators();
         let repeated_vertex_scan = operators
             .iter()
             .skip(1)
@@ -695,6 +765,9 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             probe_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
             optional_matches: [false; crate::algebra::MAX_PATTERN_IDENTITIES],
             vertex_domain,
+            identified_index,
+            segments: core::array::from_fn(|_| None),
+            paths: core::array::from_fn(|_| None),
         };
         let mut bindings = Vec::new();
         match operators.first() {

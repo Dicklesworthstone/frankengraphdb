@@ -733,9 +733,7 @@ impl PreparedGraphAggregate {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
     {
-        if self.input.plan().operators().iter().any(|operator| matches!(operator,
-            GlaOperator::CapturePath { .. } | GlaOperator::SelectPathLength { .. }
-            | GlaOperator::SelectPathNull { .. })) {
+        if self.input.plan().requires_identified_edges() {
             return Err(GqlQueryError::IdentifiedEdgesRequired);
         }
         if self.relational_input.is_some() {

@@ -18,6 +18,10 @@ const MAX_BOOLEAN_NESTING: usize = 64;
 
 pub(super) enum SyntaxItem<'a> {
     Atom(Filter<'a>),
+    Expression {
+        columns: Vec<(Name<'a>, Name<'a>)>,
+        program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
+    },
     Truth(Option<bool>),
     And,
     Or,
@@ -166,6 +170,12 @@ impl<'a> Parser<'a> {
             ));
         }
         let at = self.current.at;
+        if self.starts_scalar_predicate()? {
+            self.admit_compound_leaf()?;
+            let (columns, program) = self.boolean_scalar_expression()?;
+            parsed.extended = true;
+            return parsed.push(SyntaxItem::Expression { columns, program }, at);
+        }
         if self.is_word("NOT") && !self.boolean_word_is_variable()? {
             self.advance()?;
             parsed.extended = true;
@@ -207,6 +217,34 @@ impl<'a> Parser<'a> {
             .expect("one positive predicate was just parsed");
         parsed.extended |= matches!(filter, Filter::VertexNull { .. });
         parsed.push(SyntaxItem::Atom(filter), at)
+    }
+
+    fn starts_scalar_predicate(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let mut depth = 0_usize;
+        let mut arithmetic = false;
+        loop {
+            match token.kind {
+                TokenKind::End | TokenKind::Punct(b'{' | b'}') => break,
+                TokenKind::Punct(b'(') => depth += 1,
+                TokenKind::Punct(b')') if depth == 0 => break,
+                TokenKind::Punct(b')') => depth -= 1,
+                TokenKind::Punct(b'|') => return Ok(true),
+                TokenKind::Punct(b'+' | b'*' | b'/' | b'%') => arithmetic = true,
+                TokenKind::Word(word) => {
+                    if ["UPPER", "LOWER", "TRIM", "SUBSTRING", "CHAR_LENGTH", "STARTS", "ENDS", "CONTAINS"]
+                        .iter().any(|keyword| word.eq_ignore_ascii_case(keyword)) {
+                        return Ok(true);
+                    }
+                    if depth == 0 && ["AND", "OR", "RETURN", "SET", "REMOVE", "WITH", "MATCH", "OPTIONAL"]
+                        .iter().any(|keyword| word.eq_ignore_ascii_case(keyword)) { break; }
+                }
+                _ => {}
+            }
+            token = lexer.next()?;
+        }
+        Ok(arithmetic)
     }
 
     /// Look ahead with the existing bounded lexer. Never consume a partial
@@ -359,6 +397,10 @@ enum Atom {
 #[derive(Clone)]
 enum Item {
     Atom(Atom),
+    Expression {
+        columns: Vec<(String, PropertyKeyId)>,
+        program: Vec<crate::mutation_text::MutationIntegerTemplateOp>,
+    },
     Truth(Option<bool>),
     And,
     Or,
@@ -388,6 +430,12 @@ impl BoundBooleanTemplate {
         let mut resolved = Vec::new();
         for instruction in program {
             resolved.push(match instruction {
+                SyntaxItem::Expression { columns, program } => Item::Expression {
+                    columns: columns.into_iter().map(|(variable, key)|
+                        property(key).map(|key| (variable.text.to_owned(), key)))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    program,
+                },
                 SyntaxItem::Truth(value) => Item::Truth(value),
                 SyntaxItem::And => Item::And,
                 SyntaxItem::Or => Item::Or,
@@ -484,9 +532,21 @@ impl BoundBooleanTemplate {
                 _ => Ok(None),
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let expressions = self.program.iter().map(|item| match item {
+            Item::Expression { program, .. } => Parser::bind_boolean_scalar(program, values, self.at).map(Some),
+            _ => Ok(None),
+        }).collect::<Result<Vec<_>, GraphPatternTextError>>()?;
+        let expression_columns = self.program.iter().map(|item| match item {
+            Item::Expression { columns, .. } => columns.iter().map(|(variable, key)| Operand::Property { variable, key: *key }).collect(),
+            _ => Vec::new(),
+        }).collect::<Vec<Vec<Operand<'_>>>>();
         let mut program = Vec::new();
-        for (item, literal) in self.program.iter().zip(&literals) {
+        for (index, (item, literal)) in self.program.iter().zip(&literals).enumerate() {
             program.push(match item {
+                Item::Expression { .. } => Op::Expression {
+                    expression: expressions[index].as_ref().expect("bound scalar expression"),
+                    columns: &expression_columns[index],
+                },
                 Item::Truth(value) => Op::Truth(*value),
                 Item::And => Op::And,
                 Item::Or => Op::Or,

@@ -25,7 +25,7 @@ pub enum GraphMutationValue {
     Column(usize),
     /// A checked canonical operand; clones share its bounded encoded storage.
     Literal(GqlScalarParameter),
-    /// Checked nullable i64 bytecode over the same frozen selection row.
+    /// Checked canonical scalar bytecode over the same frozen selection row.
     /// All column references are validated before storage execution begins.
     Expression(GraphIntegerExpression),
 }

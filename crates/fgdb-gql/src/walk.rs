@@ -7,7 +7,8 @@
 //! performed here; the caller owns the immutable, admitted graph generation.
 
 use crate::GlaExecutionEvent;
-use fgdb_types::VId;
+use crate::algebra::{GraphPath, GraphWalkSearch};
+use fgdb_types::{EId, VId};
 use std::collections::BTreeMap;
 
 /// Definition limit, not a guarantee of inexpensive enumeration. Runtime work
@@ -156,6 +157,196 @@ impl core::fmt::Debug for GraphWalkCursor<'_> {
         f.debug_struct("GraphWalkCursor")
             .field("bounds", &self.bounds)
             .field("frontier_depth", &self.stack.len())
+            .field("graph", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Identity-preserving traversal over one admitted graph generation. Layers are
+/// ordered by hop count, then by alternating edge/vertex identities, regardless
+/// of adjacency input order. The occurrence key retains duplicate input rows.
+/// Unlike the endpoint cursors, every returned path contains real edge IDs.
+pub(crate) struct GraphPathCursor<'a> {
+    adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+    bounds: GraphWalkBounds,
+    search: GraphWalkSearch,
+    depth: u32,
+    frontier: BTreeMap<(GraphPath, usize), ()>,
+    pending: BTreeMap<(GraphPath, usize), ()>,
+    settled: BTreeMap<VId, u32>,
+    done: bool,
+}
+
+impl<'a> GraphPathCursor<'a> {
+    pub(crate) fn new<E>(
+        source: VId,
+        bounds: GraphWalkBounds,
+        search: GraphWalkSearch,
+        adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        control(GlaExecutionEvent::Work)?;
+        control(GlaExecutionEvent::ScratchEntry)?;
+        Ok(Self {
+            adjacency,
+            bounds,
+            search,
+            depth: 0,
+            frontier: BTreeMap::from([((GraphPath::new(source, Box::new([])), 0), ())]),
+            pending: BTreeMap::new(),
+            settled: BTreeMap::new(),
+            done: false,
+        })
+    }
+
+    /// Every delivery is governed, including buffered results. Refusal drops all
+    /// retained paths and settlement markers and permanently fuses the cursor.
+    pub(crate) fn next_with_control<E>(
+        &mut self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<GraphPath>, E> {
+        let result = self.next_controlled(control);
+        if result.is_err() {
+            self.done = true;
+            self.frontier.clear();
+            self.pending.clear();
+            self.settled.clear();
+        }
+        result
+    }
+
+    fn next_controlled<E>(
+        &mut self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<GraphPath>, E> {
+        loop {
+            if !self.pending.is_empty() {
+                control(GlaExecutionEvent::Work)?;
+                return Ok(self.pending.pop_first().map(|((path, _), ())| path));
+            }
+            if self.done {
+                return Ok(None);
+            }
+            self.fill_layer(control)?;
+        }
+    }
+
+    fn fill_layer<E>(
+        &mut self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        control(GlaExecutionEvent::Work)?;
+        if self.frontier.is_empty() || self.depth > self.bounds.maximum() {
+            self.done = true;
+            self.settled.clear();
+            return Ok(());
+        }
+
+        let shortest = self.search != GraphWalkSearch::All;
+        let unique = self.search == GraphWalkSearch::AnyShortest;
+        let mut next = BTreeMap::new();
+        let mut canonical = BTreeMap::<VId, GraphPath>::new();
+        for ((path, occurrence), ()) in core::mem::take(&mut self.frontier) {
+            control(GlaExecutionEvent::Work)?;
+            let endpoint = path.steps().last().map_or(path.start(), |step| step.1);
+            // Settlement starts at the lower bound, not at the first visit.
+            // Recording the depth keeps every equal-depth witness eligible.
+            if shortest && self.settled.get(&endpoint).is_some_and(|&at| at < self.depth) {
+                continue;
+            }
+            let emit = self.depth >= self.bounds.minimum();
+            if shortest && emit && !self.settled.contains_key(&endpoint) {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                self.settled.insert(endpoint, self.depth);
+            }
+
+            if self.depth < self.bounds.maximum()
+                && let Some(neighbors) = self.adjacency.and_then(|map| map.get(&endpoint))
+            {
+                for &step in neighbors {
+                    control(GlaExecutionEvent::Work)?;
+                    if unique {
+                        // Compare before copying: parallel edges and tied
+                        // routes cannot multiply the next layer's prefixes.
+                        let previous = canonical.get(&step.1);
+                        if let Some(previous) = previous {
+                            let candidate = path.steps().iter().copied().chain(core::iter::once(step));
+                            let mut better = false;
+                            for (left, &right) in candidate.zip(previous.steps()) {
+                                control(GlaExecutionEvent::Work)?;
+                                match left.cmp(&right) {
+                                    core::cmp::Ordering::Less => {
+                                        better = true;
+                                        break;
+                                    }
+                                    core::cmp::Ordering::Greater => break,
+                                    core::cmp::Ordering::Equal => {}
+                                }
+                            }
+                            if !better {
+                                continue;
+                            }
+                        } else {
+                            control(GlaExecutionEvent::ScratchEntry)?;
+                        }
+                        let child = Self::extend_path(&path, step, control)?;
+                        canonical.insert(step.1, child);
+                    } else {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        let child = Self::extend_path(&path, step, control)?;
+                        let occurrence = next.len();
+                        next.insert((child, occurrence), ());
+                    }
+                }
+            }
+            if emit {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                self.pending.insert((path, occurrence), ());
+            }
+        }
+        // Endpoint coalescing chooses identities, not endpoint ordering. Move
+        // those winners into the same canonical path order used by ALL modes.
+        for (_, path) in canonical {
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+            next.insert((path, 0), ());
+        }
+        self.frontier = next;
+        self.depth += 1;
+        self.done = self.frontier.is_empty();
+        if self.done {
+            self.settled.clear();
+        }
+        Ok(())
+    }
+
+    fn extend_path<E>(
+        path: &GraphPath,
+        step: (EId, VId),
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<GraphPath, E> {
+        // Admit every copied identity pair and the new step before allocating
+        // the exact-sized buffer. Moving paths between maps never copies it.
+        let length = path.steps().len() + 1;
+        for _ in 0..length {
+            control(GlaExecutionEvent::Work)?;
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        let mut steps = Vec::with_capacity(length);
+        steps.extend_from_slice(path.steps());
+        steps.push(step);
+        Ok(GraphPath::new(path.start(), steps.into_boxed_slice()))
+    }
+}
+
+impl core::fmt::Debug for GraphPathCursor<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphPathCursor")
+            .field("bounds", &self.bounds)
+            .field("search", &self.search)
+            .field("depth", &self.depth)
+            .field("frontier", &self.frontier.len())
+            .field("pending", &self.pending.len())
             .field("graph", &"[REDACTED]")
             .finish()
     }
