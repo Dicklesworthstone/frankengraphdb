@@ -113,6 +113,12 @@
 
 #![forbid(unsafe_code)]
 
+mod bulk_load;
+pub use bulk_load::{
+    BulkEdge, BulkLoadCheckpoint, BulkLoadError, BulkLoadErrorKind, BulkLoadPolicy, BulkRow,
+    BulkVertex,
+};
+
 mod fcw;
 pub use fcw::FirstCommitterWinsValidator;
 
