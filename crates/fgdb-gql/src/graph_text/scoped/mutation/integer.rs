@@ -223,18 +223,14 @@ impl<'a> Parser<'a> {
                     ))
                 }
                 ParsedOp::Atom(Operand::Number(Number::Parameter(index)), at) => {
-                    // Integer operand slots accept only integer-valued
-                    // parameters. The declared type is known at prepare time,
-                    // so a non-integer canonical scalar (Text, Boolean, ...)
-                    // refuses here rather than failing at bind or execution.
+                    // This compiler also serves text and Boolean expressions.
+                    // Binding substitutes the declared scalar and validates its
+                    // operator context with GraphIntegerExpression::prepare_scalar.
                     let parameter_type = self.syntax.parameters[index].parameter_type;
-                    let integer_typed = matches!(parameter_type, GqlParameterType::Int64)
-                        || matches!(
-                            parameter_type,
-                            GqlParameterType::Scalar(kind)
-                                if kind == CanonicalScalarKind::of(&CanonicalScalar::Int(0)),
-                        );
-                    if !integer_typed {
+                    if !matches!(
+                        parameter_type,
+                        GqlParameterType::Int64 | GqlParameterType::Scalar(_)
+                    ) {
                         return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
                     }
                     MutationIntegerTemplateOp::Parameter { index, at }
@@ -244,17 +240,53 @@ impl<'a> Parser<'a> {
                 }
             });
         }
-        // Null placeholders prove stack/types/control-flow only. Preparation
-        // neither evaluates branches nor guesses a parameter's runtime value.
+        // Validate declared scalar kinds before catalog access. These values
+        // are type witnesses only; preparation never executes the program.
+        let mut noninteger_parameter = None;
         let shape: Vec<_> = program
             .iter()
             .map(|op| match op {
-                MutationIntegerTemplateOp::Bound(op) => op.clone(),
-                MutationIntegerTemplateOp::Parameter { .. } => GraphIntegerOp::Literal(None),
+                MutationIntegerTemplateOp::Bound(op) => Ok(op.clone()),
+                MutationIntegerTemplateOp::Parameter { index, at } => {
+                    let kind = self.syntax.parameters[*index].parameter_type;
+                    let witness = match kind {
+                        GqlParameterType::Int64
+                        | GqlParameterType::Scalar(CanonicalScalarKind::Int) => {
+                            GraphIntegerOp::Literal(Some(0))
+                        }
+                        GqlParameterType::Scalar(CanonicalScalarKind::Null) => {
+                            GraphIntegerOp::Literal(None)
+                        }
+                        GqlParameterType::Scalar(CanonicalScalarKind::Bool) => {
+                            noninteger_parameter.get_or_insert(*at);
+                            GraphIntegerOp::Truth(Some(false))
+                        }
+                        GqlParameterType::Scalar(CanonicalScalarKind::Text) => {
+                            noninteger_parameter.get_or_insert(*at);
+                            GraphIntegerOp::Scalar(
+                                crate::GqlScalarParameter::new(
+                                    CanonicalScalar::ucs_basic_text("")
+                                        .expect("empty text is canonical"),
+                                )
+                                .expect("empty text is an admitted scalar")
+                                .predicate(IntegerComparison::Equal),
+                            )
+                        }
+                        _ => return Err(failure(*at, GraphMutationTextErrorKind::IntegerOperand)),
+                    };
+                    Ok(witness)
+                }
             })
-            .collect();
-        GraphIntegerExpression::prepare_scalar(&shape)
-            .map_err(|error| failure(at, GraphMutationTextErrorKind::IntegerExpression(error)))?;
+            .collect::<Result<_, _>>()?;
+        GraphIntegerExpression::prepare_scalar(&shape).map_err(|error| {
+            if matches!(error, GraphIntegerBuildError::OperandType { .. })
+                && let Some(parameter_at) = noninteger_parameter
+            {
+                failure(parameter_at, GraphMutationTextErrorKind::IntegerOperand)
+            } else {
+                failure(at, GraphMutationTextErrorKind::IntegerExpression(error))
+            }
+        })?;
         Ok(Operand::Integer { program, at })
     }
 
