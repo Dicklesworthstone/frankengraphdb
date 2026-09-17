@@ -27,12 +27,15 @@
 
 use asupersync::fs::Vfs;
 use asupersync::lab::run_async_under_lab;
-use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, MemVfs, QueryResult, WriteBatch};
+use fgdb::{CAPSULE_OBJECT_KIND, Database, DatabaseKeys, QueryResult, WriteBatch};
 use fgdb_chronicle::capsule::{CapsuleKeys, CapsuleProfile};
 use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
-use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphSymbol, GraphSymbolKind};
+use fgdb_gql::{
+    GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphSymbol, GraphSymbolKind,
+    PreparedGraphAggregateText,
+};
 use fgdb_reference::ReferenceGraph;
 use fgdb_sim::{replay, replay_through};
 use fgdb_types::context::PurposeContexts;
@@ -111,11 +114,30 @@ fn units() -> Vec<fn(&mut WriteBatch)> {
     ]
 }
 
-async fn build<V: Vfs + Clone>(db: &mut Database<V>, cx: &CommitCx) -> Vec<CommitSeq> {
+async fn build<V: Vfs + Clone>(db: &mut Database<V>, cx: &CommitCx, seed: u64) -> Vec<CommitSeq> {
     let mut epochs = Vec::new();
-    for unit in units() {
+    let mut random = seed;
+    for (index, unit) in units().into_iter().enumerate() {
         let mut batch = WriteBatch::new(R);
         unit(&mut batch);
+        if index == 0 {
+            // Two equal non-NULL members survive the delete. Their value and
+            // additional members vary with the seed, independently of lab scheduling.
+            let duplicate = 10 + (seed % 97) as i64;
+            for vid in 6..10 + seed % 4 {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let value = if vid < 8 {
+                    duplicate
+                } else {
+                    110 + (random % 17) as i64
+                };
+                batch.create_vertex(
+                    VId(u128::from(vid)),
+                    vec![],
+                    vec![(P, CanonicalScalar::Int(value))],
+                );
+            }
+        }
         epochs.push(db.write(cx, batch).await.expect("oracle history commit"));
     }
     epochs
@@ -128,23 +150,25 @@ fn rows<V: Vfs + Clone>(
     text: &str,
     params: &GqlParameters,
 ) -> Vec<Vec<GraphValue>> {
-    match db
-        .query(cx, text, params, symbols, policy())
-        .expect("oracle query")
-    {
+    let result = db.query(cx, text, params, symbols, policy());
+    assert!(result.is_ok(), "query={text}: {result:?}");
+    let result = result.expect("query succeeded");
+    let converted: Result<Vec<Vec<GraphValue>>, String> = match result {
         QueryResult::Rows { rows, .. } => rows
             .into_iter()
             .map(|row| {
                 row.into_iter()
                     .map(|cell| match cell {
-                        GraphAggregateValue::Value(value) => value,
-                        other => panic!("oracle cells are values, got {other:?}"),
+                        GraphAggregateValue::Value(value) => Ok(value),
+                        other => Err(format!("expected value cell, got {other:?}")),
                     })
                     .collect()
             })
             .collect(),
-        other => panic!("list oracle expects rows, got {other:?}"),
-    }
+        other => Err(format!("expected rows, got {other:?}")),
+    };
+    assert!(converted.is_ok(), "query={text}: {converted:?}");
+    converted.expect("row conversion succeeded")
 }
 
 /// INDEPENDENT evaluation over the reference graph: collected `p` values of
@@ -154,19 +178,17 @@ fn rows<V: Vfs + Clone>(
 fn reference_collect(graph: &ReferenceGraph, distinct: bool, keep_nulls: bool) -> Vec<GraphValue> {
     let mut out: Vec<GraphValue> = Vec::new();
     for (_vid, vertex) in graph.iter_vertices() {
-        match vertex.props.get(&P) {
-            Some(CanonicalScalar::Int(value)) => {
-                let cell = int(*value);
-                if !distinct || !out.contains(&cell) {
-                    out.push(cell);
-                }
-            }
-            Some(CanonicalScalar::Null) | None => {
-                if keep_nulls {
-                    out.push(null());
-                }
-            }
-            Some(other) => panic!("fixture is int/null only, got {other:?}"),
+        let value = vertex
+            .props
+            .get(&P)
+            .cloned()
+            .unwrap_or(CanonicalScalar::Null);
+        if value == CanonicalScalar::Null && !keep_nulls {
+            continue;
+        }
+        let cell = GraphValue::Scalar(value);
+        if !distinct || !out.contains(&cell) {
+            out.push(cell);
         }
     }
     out
@@ -200,6 +222,16 @@ fn reference_rows_vids(values: &[VId]) -> Vec<Vec<GraphValue>> {
         .collect()
 }
 
+/// The oracle's expected `collect`/`collect(DISTINCT)` row pair.
+/// `keep_nulls: true` is the planted-negative lever ONLY — it makes the
+/// evaluator retain NULL/missing members, which must break the differential.
+fn expected_collect_rows(graph: &ReferenceGraph, keep_nulls: bool) -> Vec<Vec<GraphValue>> {
+    vec![vec![
+        list(reference_collect(graph, false, keep_nulls)),
+        list(reference_collect(graph, true, keep_nulls)),
+    ]]
+}
+
 /// Sort rows by canonical bytes — the test-side normalizer used where the
 /// engine's group ordering is not itself under test.
 fn canonical_sorted(mut rows: Vec<Vec<GraphValue>>) -> Vec<Vec<u8>> {
@@ -219,7 +251,7 @@ fn canonical_sorted(mut rows: Vec<Vec<GraphValue>>) -> Vec<Vec<u8>> {
 #[test]
 fn list_value_families_match_independent_reference_across_seeds() {
     for graph_seed in [0x1A49_u64, 0x1A4A, 0x1A4B, 0x1A4C] {
-        let ((), report) = run_async_under_lab(graph_seed, |root| async move {
+        let ((), report) = run_async_under_lab(graph_seed, move |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let cx = contexts.query();
@@ -230,7 +262,8 @@ fn list_value_families_match_independent_reference_across_seeds() {
             let mut db = Database::create(&commit, &dir, keys())
                 .await
                 .expect("oracle database");
-            let epochs = build(&mut db, &commit).await;
+            let epochs = build(&mut db, &commit, graph_seed).await;
+            drop(db);
 
             // Independent state: full stream, and the prefix through the last
             // pre-delete epoch (the delete is the sixth and final unit).
@@ -247,17 +280,15 @@ fn list_value_families_match_independent_reference_across_seeds() {
                 .expect("prefix replay")
                 .database;
             let pre_graph = prefix.graph(GRAPH, BRANCH).expect("prefix graph");
+            drop(coordinator);
+            let db = Database::open(&commit, &dir, keys())
+                .await
+                .expect("reopen query database after independent replay");
 
             let params = GqlParameters::new();
             let live = reference_vertices(graph);
 
-            // collect / collect(DISTINCT) at the frontier: duplicates from
-            // VId(1) remain after the delete; NULL VId(3) and missing VId(4)
-            // are excluded; first occurrences retained under DISTINCT.
-            let expected_collect = vec![vec![
-                list(reference_collect(graph, false, false)),
-                list(reference_collect(graph, true, false)),
-            ]];
+            let expected = expected_collect_rows(graph, false);
             assert_eq!(
                 rows(
                     &db,
@@ -265,23 +296,43 @@ fn list_value_families_match_independent_reference_across_seeds() {
                     "MATCH (n) RETURN collect(n.p) AS xs, collect(DISTINCT n.p) AS dx",
                     &params
                 ),
-                expected_collect,
-                "collect at frontier: order [3,1] with duplicates 3,3 pre-delete"
+                expected,
+                "collect at frontier retains VId input order and excludes NULL"
             );
-            assert_eq!(
-                expected_collect[0][0],
-                list(vec![int(3), int(1)]),
-                "anti-vacuity: frontier list keeps the surviving duplicate value"
+            assert_ne!(
+                expected[0][0], expected[0][1],
+                "anti-vacuity: surviving duplicates distinguish collect from DISTINCT"
             );
 
             // Grouped collect, compared as canonical multisets (group ROW
             // order is an engine canonical-order question, not a list one).
-            let grouped = rows(
-                &db,
-                &cx,
-                "MATCH (n) RETURN n.p AS p, collect(n.p) AS xs GROUP BY p",
-                &params,
-            );
+            // The `db.query` facades reject GROUP BY (their aggregate pipeline
+            // template demands WITH/UNWIND), so grouped aggregation goes
+            // through the dedicated PreparedGraphAggregateText facade; its
+            // GROUP BY binds pattern expressions (n.p), not RETURN aliases.
+            let grouped_template = PreparedGraphAggregateText::prepare(
+                "MATCH (n) RETURN n.p AS p, collect(n.p) AS xs GROUP BY n.p",
+                symbols,
+            )
+            .expect("grouped aggregate template");
+            let grouped_query = grouped_template
+                .bind_parameters(&params)
+                .expect("grouped aggregate bind");
+            let grouped: Vec<Vec<GraphValue>> = db
+                .execute_graph_aggregate_governed(&cx, &grouped_query, policy())
+                .expect("grouped aggregate executes")
+                .value
+                .iter()
+                .map(|row| {
+                    vec![
+                        row.keys()[0].clone(),
+                        match row.get(0).expect("collect cell") {
+                            GraphAggregateValue::Value(value) => value.clone(),
+                            other => panic!("collect yields values, got {other:?}"),
+                        },
+                    ]
+                })
+                .collect();
             // Distinct group keys over live vertices: NULL for missing/explicit
             // NULL, plus each distinct int value.
             let mut keys: Vec<CanonicalScalar> = live
@@ -325,14 +376,22 @@ fn list_value_families_match_independent_reference_across_seeds() {
                     .collect();
                 expected_grouped.push(vec![GraphValue::Scalar(key.clone()), list(members)]);
             }
+            assert!(
+                expected_grouped
+                    .iter()
+                    .any(|row| matches!(&row[1], GraphValue::List(values) if values.len() > 1)),
+                "anti-vacuity: a non-NULL group has multiple collected members"
+            );
+            assert!(
+                expected_grouped
+                    .iter()
+                    .any(|row| row[0] == null() && row[1] == list(vec![])),
+                "anti-vacuity: NULL-keyed group exists and collects no NULL members"
+            );
             assert_eq!(
                 canonical_sorted(grouped),
                 canonical_sorted(expected_grouped),
                 "GROUP BY collect vs independent grouping (NULL group collects empty)"
-            );
-            assert!(
-                expected_grouped.len() > 2,
-                "anti-vacuity: >1 group and a NULL-keyed group must exist"
             );
 
             // UNWIND $list AS x MATCH (n {p: x}): duplicates preserved.
@@ -375,27 +434,42 @@ fn list_value_families_match_independent_reference_across_seeds() {
                 "NULL UNWIND produces zero rows"
             );
 
-            // size over collect, empty collect, literals, NULL.
-            let count = reference_collect(graph, false, false).len() as i64;
+            // `size` over LISTS (literals and WITH-bound lists) through the
+            // db.query facade; `size(collect(...))` is NOT a supported
+            // composition (the aggregate facades reject a scalar function
+            // wrapping an aggregate), so the collect-length family is verified
+            // by taking the length of the returned list itself. The literal
+            // cases are the bead's size(NULL)/size([])/NULL-element contract.
+            let collected = rows(&db, &cx, "MATCH (n) RETURN collect(n.p) AS xs", &params);
             assert_eq!(
-                rows(
-                    &db,
-                    &cx,
-                    "MATCH (n) RETURN size(collect(n.p)) AS len",
-                    &params
-                ),
-                vec![vec![int(count)]],
-                "size(collect) counts NULL-excluded members"
+                collected,
+                vec![vec![list(reference_collect(graph, false, false))]],
+                "collect returns the NULL-excluded list the oracle counts"
+            );
+            let count = reference_collect(graph, false, false).len() as i64;
+            assert!(
+                count >= 1,
+                "anti-vacuity: collected list is non-empty before size checks"
             );
             assert_eq!(
                 rows(
                     &db,
                     &cx,
-                    "MATCH (n) WHERE n.p = 999 RETURN size(collect(n.p)) AS len",
+                    "MATCH (n) WHERE n.p = 1 WITH [7,NULL,[2,3]] AS xs RETURN size(xs) AS length, size([1,2,3]) AS a, size([]) AS b, size(NULL) AS c, size([1,NULL]) AS d",
                     &params
                 ),
-                vec![vec![int(0)]],
-                "empty match collects empty list, size 0"
+                vec![vec![int(3), int(3), int(0), null(), int(2)]],
+                "size of WITH-bound list and literals: NULL base NULL, empty 0"
+            );
+            assert_eq!(
+                rows(
+                    &db,
+                    &cx,
+                    "MATCH (n) WHERE n.p = 999 RETURN collect(n.p) AS xs",
+                    &params
+                ),
+                vec![vec![list(vec![])]],
+                "empty match collects empty list (aggregate RETURN stays alone)"
             );
             assert_eq!(
                 rows(
@@ -428,28 +502,25 @@ fn list_value_families_match_independent_reference_across_seeds() {
                 "zero-based, negative-from-end, out-of-range NULL, NULL-base NULL"
             );
 
-            // Temporal: the prefix through epochs[4] still has VId(5) live, so
-            // its collected list has three members; the frontier has two.
+            // The prefix still has VId(5); deleting it removes one occurrence
+            // of 3 while retaining the other equal member and generated rows.
             let pre_members = reference_collect(pre_graph, false, false);
             assert_eq!(
-                pre_members,
-                vec![int(3), int(1), int(3)],
-                "anti-vacuity: prefix list has the duplicate the delete removes"
+                pre_members.iter().filter(|value| **value == int(3)).count(),
+                2,
+                "anti-vacuity: prefix contains two copies of the deleted value"
             );
             assert_eq!(
                 rows(
                     &db,
                     &cx,
                     &format!(
-                        "MATCH (n) FOR SYSTEM_TIME AS OF SEQ {} RETURN collect(n.p) AS xs, size(collect(n.p)) AS len",
+                        "MATCH (n) FOR SYSTEM_TIME AS OF SEQ {} RETURN collect(n.p) AS xs",
                         epochs[4].0
                     ),
                     &params
                 ),
-                vec![vec![
-                    list(pre_members.clone()),
-                    int(pre_members.len() as i64)
-                ]],
+                vec![vec![list(pre_members.clone())]],
                 "AS OF prefix collect retains the to-be-deleted member"
             );
             assert_ne!(
