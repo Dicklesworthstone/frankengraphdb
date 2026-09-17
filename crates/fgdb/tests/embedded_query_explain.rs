@@ -143,7 +143,7 @@ fn explain_refuses_writes_and_covers_every_read_class() {
         for (name, class, statements) in READS {
             for (statement_index, text) in statements.into_iter().enumerate() {
                 let (rows, cert) = explain(&db, text, &params, true)
-                    .unwrap_or_else(|e| panic!("{name} must EXPLAIN: {e}"));
+                    .expect("read statement must EXPLAIN");
                 let prepared = fgdb::PreparedNativeRead::prepare(text, &params, symbols).unwrap();
                 assert_eq!(prepared.facade_class(), class, "{text}");
                 assert!(cert.unwrap().verifies(&prepared), "{text}");
@@ -176,7 +176,7 @@ fn explain_refuses_writes_and_covers_every_read_class() {
                         rows: result_rows,
                     } = result
                     else {
-                        panic!("EXPLAIN returned a write outcome");
+                        unreachable!("EXPLAIN is a read-only prefix; got {result:?}");
                     };
                     assert_eq!(columns, ["operator", "detail"]);
                     let expected: Vec<Vec<GraphAggregateValue>> = rows
