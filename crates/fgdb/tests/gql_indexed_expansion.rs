@@ -327,3 +327,31 @@ fn bound_fixed_edge_keeps_topology_for_later_walk() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn pinned_snapshot_traversal_survives_successor_publication() {
+    let ((), report) = run_async_under_lab(0xa26_0060, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut first = WriteBatch::new(R);
+        for id in 1..=3 {
+            first.create_vertex(VId(id), vec![], vec![(N, CanonicalScalar::Int(id as i64))]);
+        }
+        first.add_edge(EId(1), VId(1), VId(2), vec![]);
+        let at = db.write(&commit, first).await.unwrap();
+        let pinned = db.read_session().unwrap();
+        let names = RelationBind::new()
+            .with_relation("R", R)
+            .with_property("n", N);
+        let text = "MATCH (a)-[:R]->(b) WHERE a.n = 1 RETURN b";
+        assert_eq!(pinned.execute_gql(text, &names).unwrap(), vec![VId(2)]);
+        let mut successor = WriteBatch::new(R);
+        successor.add_edge(EId(2), VId(1), VId(3), vec![]);
+        db.write(&commit, successor).await.unwrap();
+        assert_eq!(db.execute_gql(text, &names).unwrap(), vec![VId(2), VId(3)]);
+        assert_eq!(pinned.execute_gql(text, &names).unwrap(), vec![VId(2)]);
+        assert_eq!(db.execute_gql_at(text, &names, at).unwrap(), vec![VId(2)]);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
