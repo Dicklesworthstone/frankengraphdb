@@ -84,22 +84,20 @@ impl<V: Vfs + Clone> Database<V> {
         let mut symbols = BTreeMap::new();
         let mut resolve = |kind, name: &str| *symbols.entry((kind, name.to_owned()))
             .or_insert_with(|| resolver(kind, name));
+        // Numeric arguments keep native inference; explicit scalar declarations
+        // reach every prepare_with_parameter_types facade uniformly.
+        let declarations: Vec<(&str, GqlParameterType)> = params.parameter_types()
+            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_))).collect();
         let mut diagnostics = Vec::new();
-        match PreparedTemporalGraphAggregateText::prepare(text, &mut resolve) {
+        match PreparedTemporalGraphAggregateText::prepare_with_parameter_types(
+            text, &declarations, &mut resolve)
+        {
             Ok(prepared) => {
                 let query = prepared.bind_parameters(params).map_err(QueryError::TemporalText)?;
                 let columns = prepared.columns().to_vec();
-                let aggregate = query.aggregate();
-                let slots = columns.iter().map(|name| {
-                    aggregate.key_columns().iter().position(|key| key == name)
-                        .map(GraphAggregateTextSlot::GroupKey)
-                        .or_else(|| aggregate.aggregate_columns().iter().position(|key| key == name)
-                            .map(GraphAggregateTextSlot::Aggregate))
-                }).collect::<Option<Vec<_>>>().ok_or_else(|| QueryError::Unsupported {
-                    diagnostics: vec!["temporal aggregate output schema mismatch".into()] })?;
                 let result = self.execute_temporal_graph_aggregate_text_governed(cx, &query, budget)
                     .map_err(QueryError::Aggregate)?;
-                return Ok(aggregates(columns, &slots, result.value));
+                return Ok(aggregates(columns, prepared.output_slots(), result.value));
             }
             Err(error) => diagnostics.push(error.to_string()),
         }

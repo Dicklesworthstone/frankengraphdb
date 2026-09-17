@@ -119,6 +119,13 @@ impl GqlParameters {
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
+    /// Iterate every argument as `(name, exact parameter type)` without cloning
+    /// payloads. Lets a host entrypoint derive explicit scalar declarations for
+    /// facades whose numeric inference alone cannot admit nonnumeric scalars.
+    pub fn parameter_types(&self) -> impl Iterator<Item = (&str, GqlParameterType)> {
+        self.values.iter().map(|(name, value)| (name.as_str(), value.parameter_type()))
+    }
+
 
     /// Explicit plaintext export. Unlike Debug, these bytes contain values.
     /// This is a self-delimiting application transcript, not a durable format.

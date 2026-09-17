@@ -121,6 +121,8 @@ mod gql_exec;
 mod memvfs;
 mod prepared_write;
 mod write_txn;
+mod query;
+pub use query::{QueryError, QueryResult, QueryValue, QueryWriteError};
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
 /// catalog), and the plan is re-exported so tests can state that the executor
