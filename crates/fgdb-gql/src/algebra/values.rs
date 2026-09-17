@@ -262,16 +262,35 @@ impl GraphValue {
     }
 
     /// Count nested cells and variable payload without cloning their storage.
+    /// Traversal is iterative; an arbitrary-depth public input cannot exhaust
+    /// the stack. The frame vector is the only scratch and stays O(nesting).
     #[must_use]
     pub fn payload_units(&self) -> usize {
+        enum Frame<'a> {
+            Root(&'a GraphValue),
+            Rest(&'a [GraphValue], usize),
+        }
         let mut total = 0usize;
-        let mut pending = vec![self];
-        while let Some(value) = pending.pop() {
-            total = total.saturating_add(1);
-            if let Self::List(values) = value {
-                pending.extend(values.iter());
-            } else {
-                total = total.saturating_add(value.leaf_payload_units());
+        let mut pending = vec![Frame::Root(self)];
+        while let Some(frame) = pending.pop() {
+            match frame {
+                Frame::Root(value) => {
+                    total = total.saturating_add(1);
+                    if let Self::List(values) = value {
+                        if let Some((first, rest)) = values.split_first() {
+                            pending.push(Frame::Rest(values, 1));
+                            pending.push(Frame::Root(first));
+                        }
+                    } else {
+                        total = total.saturating_add(value.leaf_payload_units());
+                    }
+                }
+                Frame::Rest(values, at) => {
+                    if at < values.len() {
+                        pending.push(Frame::Rest(values, at + 1));
+                        pending.push(Frame::Root(&values[at]));
+                    }
+                }
             }
         }
         total
