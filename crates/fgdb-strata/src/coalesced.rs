@@ -45,20 +45,53 @@ pub struct CoalescedBlock<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoalescedError {
     NotAContainer,
-    UnsupportedFormat { major: u16, minor: u16 },
-    Truncated { at: usize },
-    TrailingBytes { extra: usize },
-    LengthMismatch { declared: u64, found: usize },
-    TooLarge { bytes: usize, limit: usize },
-    InvalidMemberCount { count: usize },
+    UnsupportedFormat {
+        major: u16,
+        minor: u16,
+    },
+    Truncated {
+        at: usize,
+    },
+    TrailingBytes {
+        extra: usize,
+    },
+    LengthMismatch {
+        declared: u64,
+        found: usize,
+    },
+    TooLarge {
+        bytes: usize,
+        limit: usize,
+    },
+    InvalidMemberCount {
+        count: usize,
+    },
     LengthOverflow,
-    EmptyBlock { at: usize },
-    EmptyPatch { at: usize },
-    MissingPatch { at: usize },
-    UnexpectedPatch { at: usize },
-    PartitionMismatch { at: usize, expected: u64, found: u64 },
-    Block { at: usize, error: BlockError },
-    Patch { at: usize, error: EdgePropertyPatchError },
+    EmptyBlock {
+        at: usize,
+    },
+    EmptyPatch {
+        at: usize,
+    },
+    MissingPatch {
+        at: usize,
+    },
+    UnexpectedPatch {
+        at: usize,
+    },
+    PartitionMismatch {
+        at: usize,
+        expected: u64,
+        found: u64,
+    },
+    Block {
+        at: usize,
+        error: BlockError,
+    },
+    Patch {
+        at: usize,
+        error: EdgePropertyPatchError,
+    },
 }
 
 impl core::fmt::Display for CoalescedError {
@@ -66,7 +99,10 @@ impl core::fmt::Display for CoalescedError {
         match self {
             Self::NotAContainer => write!(f, "not a strata seal container"),
             Self::UnsupportedFormat { major, minor } => {
-                write!(f, "seal container format {major}.{minor} is not implemented")
+                write!(
+                    f,
+                    "seal container format {major}.{minor} is not implemented"
+                )
             }
             Self::Truncated { at } => write!(f, "seal container ends at framing offset {at}"),
             Self::TrailingBytes { extra } => write!(f, "{extra} bytes after the last seal member"),
@@ -80,8 +116,15 @@ impl core::fmt::Display for CoalescedError {
             Self::EmptyPatch { at } => write!(f, "seal member {at} has an empty present patch"),
             Self::MissingPatch { at } => write!(f, "seal member {at} is missing its hosted patch"),
             Self::UnexpectedPatch { at } => write!(f, "seal member {at} references no patch"),
-            Self::PartitionMismatch { at, expected, found } => {
-                write!(f, "seal member {at} belongs to partition {found}, not {expected}")
+            Self::PartitionMismatch {
+                at,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "seal member {at} belongs to partition {found}, not {expected}"
+                )
             }
             Self::Block { at, error } => write!(f, "seal member {at}: {error}"),
             Self::Patch { at, error } => write!(f, "seal member {at} patch: {error}"),
@@ -135,7 +178,11 @@ fn validate_member(
     let (found, declared) = header_partition_and_digest(member.block_bytes);
     match *partition {
         Some(expected) if expected != found => {
-            return Err(CoalescedError::PartitionMismatch { at, expected, found });
+            return Err(CoalescedError::PartitionMismatch {
+                at,
+                expected,
+                found,
+            });
         }
         None => *partition = Some(found),
         _ => {}
@@ -163,7 +210,10 @@ fn validate_member(
                 .collect();
             let recomputed = block_logical_digest(&entries, &rows_by_entry).map_err(block_error)?;
             if recomputed != declared {
-                return Err(block_error(BlockError::LogicalDigestMismatch { declared, recomputed }));
+                return Err(block_error(BlockError::LogicalDigestMismatch {
+                    declared,
+                    recomputed,
+                }));
             }
         }
     }
@@ -179,12 +229,16 @@ pub fn encode_coalesced(
     blocks: &[CoalescedBlock<'_>],
 ) -> Result<Vec<u8>, CoalescedError> {
     if blocks.is_empty() || blocks.len() > MAX_COALESCED_MEMBERS {
-        return Err(CoalescedError::InvalidMemberCount { count: blocks.len() });
+        return Err(CoalescedError::InvalidMemberCount {
+            count: blocks.len(),
+        });
     }
     let count = u32::try_from(blocks.len()).map_err(|_| CoalescedError::LengthOverflow)?;
     let mut total = COALESCED_HEADER_LEN;
     for (at, &member) in blocks.iter().enumerate() {
-        total = total.checked_add(member_size(at, member)?).ok_or(CoalescedError::LengthOverflow)?;
+        total = total
+            .checked_add(member_size(at, member)?)
+            .ok_or(CoalescedError::LengthOverflow)?;
         bounded_size(total, MAX_COALESCED_BYTES)?;
     }
     let mut partition = None;
@@ -198,7 +252,8 @@ pub fn encode_coalesced(
     out.extend_from_slice(&count.to_le_bytes());
     out.extend_from_slice(&(total as u64).to_le_bytes());
     for member in blocks {
-        let block_len = u32::try_from(member.block_bytes.len()).map_err(|_| CoalescedError::LengthOverflow)?;
+        let block_len =
+            u32::try_from(member.block_bytes.len()).map_err(|_| CoalescedError::LengthOverflow)?;
         let patch = member.property_patch.unwrap_or_default();
         let patch_len = u32::try_from(patch.len()).map_err(|_| CoalescedError::LengthOverflow)?;
         out.extend_from_slice(&block_len.to_le_bytes());
@@ -210,8 +265,12 @@ pub fn encode_coalesced(
 }
 
 fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8], CoalescedError> {
-    let end = offset.checked_add(len).ok_or(CoalescedError::LengthOverflow)?;
-    let slice = bytes.get(*offset..end).ok_or(CoalescedError::Truncated { at: *offset })?;
+    let end = offset
+        .checked_add(len)
+        .ok_or(CoalescedError::LengthOverflow)?;
+    let slice = bytes
+        .get(*offset..end)
+        .ok_or(CoalescedError::Truncated { at: *offset })?;
     *offset = end;
     Ok(slice)
 }
@@ -239,9 +298,13 @@ pub fn decode_coalesced<'a>(
     let count = u32::from_le_bytes(header[8..12].try_into().expect("fixed header")) as usize;
     let declared = u64::from_le_bytes(header[12..20].try_into().expect("fixed header"));
     if declared != bytes.len() as u64 {
-        return Err(CoalescedError::LengthMismatch { declared, found: bytes.len() });
+        return Err(CoalescedError::LengthMismatch {
+            declared,
+            found: bytes.len(),
+        });
     }
-    if count == 0 || count > MAX_COALESCED_MEMBERS
+    if count == 0
+        || count > MAX_COALESCED_MEMBERS
         || count > (bytes.len() - COALESCED_HEADER_LEN) / (COALESCED_ENTRY_FRAME_LEN + 1)
     {
         return Err(CoalescedError::InvalidMemberCount { count });
@@ -263,7 +326,9 @@ pub fn decode_coalesced<'a>(
         members.push(member);
     }
     if offset != bytes.len() {
-        return Err(CoalescedError::TrailingBytes { extra: bytes.len() - offset });
+        return Err(CoalescedError::TrailingBytes {
+            extra: bytes.len() - offset,
+        });
     }
     let mut partition = None;
     for (at, &member) in members.iter().enumerate() {
