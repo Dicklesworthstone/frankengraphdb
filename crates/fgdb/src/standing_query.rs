@@ -463,12 +463,66 @@ fn affected_vertex(query: &PreparedGraphAggregate, row: &DeltaRow) -> Option<VId
     }
 }
 impl<V: Vfs + Clone> Database<V> {
+    /// Register a session-local maintained result against the current committed
+    /// snapshot. Initialization and later explicit rebuilds share one admitted
+    /// source path; ordinary commit maintenance never scans that source again.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
+        let query = self.prepare_standing_query(cx, definition, policy)?;
+        let index = self.standing_queries.len();
+        self.standing_queries.push(query);
+        Ok(StandingQueryHandle {
+            owner: Arc::clone(&self.handle_owner),
+            index,
+        })
+    }
+
+    /// Rebuild an existing standing query from the authoritative current
+    /// snapshot, retaining the same handle and immutable prepared definition.
+    /// A maintenance refusal does not roll back the already durable write;
+    /// this method repairs the derived view after the cause is corrected or
+    /// a larger policy is supplied. It is also valid for a healthy view.
+    ///
+    /// Preparation is private: any read, cancellation, budget or arithmetic
+    /// refusal preserves the prior result, policy, failure and frontier. On
+    /// success all are replaced together, then later commits resume ordinary
+    /// incremental maintenance. This deliberately rebuilds the full admitted
+    /// snapshot rather than skipping deltas or trusting a partial old state.
+    /// No handle transfer across reopened databases, durable registration,
+    /// delivery replay or automatic retry is implied.
+    pub fn rebuild_standing_query(
+        &mut self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+        policy: GqlQueryPolicy,
+    ) -> Result<CommitSeq, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        if !Arc::ptr_eq(&self.handle_owner, &handle.owner) {
+            return Err(StandingQueryError::ForeignHandle);
+        }
+        self.ensure_readable().map_err(StandingQueryError::Read)?;
+        let definition = self.standing_queries
+            .get(handle.index)
+            .ok_or(StandingQueryError::UnknownHandle)?
+            .definition.clone();
+        let replacement = self.prepare_standing_query(cx, definition, policy)?;
+        let frontier = replacement.frontier;
+        // No await, source mutation or fallible callback can interleave the
+        // completed preparation and this one replacement under &mut self.
+        self.standing_queries[handle.index] = replacement;
+        Ok(frontier)
+    }
+
+    fn prepare_standing_query(
+        &self,
+        cx: &QueryCx,
+        definition: PreparedGraphAggregate,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQuery, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         if !eligible(&definition) {
@@ -484,7 +538,7 @@ impl<V: Vfs + Clone> Database<V> {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            // Registration alone may scan the snapshot. Admit and charge every
+            // Registration/rebuild may scan the snapshot. Admit and charge every
             // physical row/payload before merge_all_vertices can allocate it.
             let mut records = 0u64;
             for patch in &self.snapshot.patches {
@@ -538,12 +592,10 @@ impl<V: Vfs + Clone> Database<V> {
                 .integrate(updates, &mut meter)
                 .map_err(StandingQueryError::Maintenance)?;
             query.stats = meter.stats;
-            let index = self.standing_queries.len();
-            self.standing_queries.push(query);
-            Ok(StandingQueryHandle {
-                owner: Arc::clone(&self.handle_owner),
-                index,
-            })
+            // The built query is still private, including its aggregate and
+            // result sink. Refuse cancellation before the public owner swaps.
+            (meter.checkpoint)().map_err(StandingQueryError::Maintenance)?;
+            Ok(query)
         })
     }
 

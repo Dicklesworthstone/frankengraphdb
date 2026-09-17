@@ -123,14 +123,14 @@ fn grouped_commits_move_keys_retract_groups_and_keep_null_and_average_semantics(
             ] { verify(&db, &query_cx, handle, plan, grouped, id); }
             let mut batch = WriteBatch::new(R);
             match step {
-                0 => batch.set_vertex_property(VId(1), TEAM, Some(text("green"))),
-                1 => batch.set_vertex_label(VId(3), PERSON, false),
-                2 => batch.set_vertex_property(VId(2), SCORE, Some(CanonicalScalar::Int(7))),
-                3 => batch.set_vertex_property(VId(4), SELECTED, Some(CanonicalScalar::Int(1))),
-                4 => batch.set_vertex_property(VId(6), TEAM, Some(CanonicalScalar::Null)),
-                5 => batch.delete_vertex(VId(2)),
-                6 => batch.set_vertex_label(VId(3), PERSON, true),
-                7 => batch.set_vertex_property(VId(6), TEAM, None),
+                0 => { batch.set_vertex_property(VId(1), TEAM, Some(text("green"))); }
+                1 => { batch.set_vertex_label(VId(3), PERSON, false); }
+                2 => { batch.set_vertex_property(VId(2), SCORE, Some(CanonicalScalar::Int(7))); }
+                3 => { batch.set_vertex_property(VId(4), SELECTED, Some(CanonicalScalar::Int(1))); }
+                4 => { batch.set_vertex_property(VId(6), TEAM, Some(CanonicalScalar::Null)); }
+                5 => { batch.delete_vertex(VId(2)); }
+                6 => { batch.set_vertex_label(VId(3), PERSON, true); }
+                7 => { batch.set_vertex_property(VId(6), TEAM, None); }
                 8 => { for id in [1, 3, 4, 5, 6] { batch.delete_vertex(VId(id)); } }
                 _ => unreachable!(),
             }
@@ -244,9 +244,9 @@ fn irrelevant_ticks_do_not_revisit_vertices_or_leak_staged_values() {
         for step in 0..3 {
             let mut batch = WriteBatch::new(R);
             match step {
-                0 => batch.set_vertex_property(VId(1), UNUSED, Some(text("private-payload-8723"))),
-                1 => batch.add_edge(EId(1), VId(1), VId(2), vec![]),
-                2 => batch.delete_edge(EId(1)),
+                0 => { batch.set_vertex_property(VId(1), UNUSED, Some(text("private-payload-8723"))); }
+                1 => { batch.add_edge(EId(1), VId(1), VId(2), vec![]); }
+                2 => { batch.delete_edge(EId(1)); }
                 _ => unreachable!(),
             }
             let at = db.write(&commit, batch).await.unwrap();
