@@ -214,6 +214,22 @@ fn literal_list_membership_preserves_three_valued_equality() {
     ] {
         assert_eq!(scalar(expression, &text("Ab")), expected, "{expression}");
     }
+    // A bare literal left operand takes the same scalar path in WHERE, so
+    // NULL membership must also refuse to become TRUE there.
+    let query = prepare("MATCH (n) WHERE NULL IN ['Ab'] RETURN n");
+    assert!(
+        execute(&query, &text("Ab"), policy())
+            .unwrap()
+            .value
+            .is_empty()
+    );
+    let query = prepare("MATCH (n) WHERE 'Ab' IN [NULL, 'other'] RETURN n");
+    assert!(
+        execute(&query, &text("Ab"), policy())
+            .unwrap()
+            .value
+            .is_empty()
+    );
     let query =
         prepare("MATCH (n) WHERE UPPER(n.text) IN ['AB','OTHER'] RETURN LOWER(n.text) AS value");
     assert_eq!(

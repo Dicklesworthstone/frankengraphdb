@@ -44,7 +44,7 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 
 fn query(statement: &str) -> PreparedGraphSet {
     PreparedGraphSetText::prepare(statement, symbols)
-        .unwrap()
+        .unwrap_or_else(|error| panic!("{statement}: {error:?}"))
         .bind_parameters(&GqlParameters::new())
         .unwrap()
 }
@@ -293,6 +293,8 @@ fn null_on_either_side_stays_unknown_in_return_and_is_not_true_in_where() {
                 || e.contains("ENDS WITH") || e.contains("CONTAINS") || e.contains("IN ["));
             let filtered = if boolean_valued {
                 query(&format!("MATCH (n) WHERE ({expression}) RETURN n"))
+            } else if expression == "CHAR_LENGTH(NULL)" {
+                query(&format!("MATCH (n) WHERE ({expression}) = 1 RETURN n"))
             } else {
                 query(&format!("MATCH (n) WHERE ({expression}) = 'x' RETURN n"))
             };

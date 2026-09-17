@@ -182,6 +182,22 @@ impl<'a> Parser<'a> {
             self.boolean_unary(depth + 1, parsed)?;
             return parsed.push(SyntaxItem::Not, at);
         }
+        // A bare literal left operand with an IN/NOT IN list takes the shared
+        // scalar path, so three-valued membership keeps its unknown result
+        // instead of collapsing into a Boolean Truth leaf. Property-left lists
+        // retain their pinned OR-of-equality lowering below.
+        if (self.is_word("TRUE")
+            || self.is_word("FALSE")
+            || self.is_word("NULL")
+            || matches!(self.current.kind, TokenKind::Quoted(_)))
+            && !self.boolean_word_is_variable()?
+            && self.literal_starts_in_list()?
+        {
+            self.admit_compound_leaf()?;
+            let (columns, program) = self.boolean_scalar_expression()?;
+            parsed.extended = true;
+            return parsed.push(SyntaxItem::Expression { columns, program }, at);
+        }
         if self.take(b'(')? {
             parsed.extended = true;
             self.boolean_or(depth + 1, parsed)?;
@@ -217,6 +233,15 @@ impl<'a> Parser<'a> {
             .expect("one positive predicate was just parsed");
         parsed.extended |= matches!(filter, Filter::VertexNull { .. });
         parsed.push(SyntaxItem::Atom(filter), at)
+    }
+
+    fn literal_starts_in_list(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut token = lexer.next()?;
+        if matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT")) {
+            token = lexer.next()?;
+        }
+        Ok(matches!(token.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("IN")))
     }
 
     fn starts_scalar_predicate(&self) -> Result<bool, GraphPatternTextError> {
@@ -256,17 +281,6 @@ impl<'a> Parser<'a> {
                         .any(|keyword| word.eq_ignore_ascii_case(keyword))
                     {
                         break;
-                    }
-                    // A bare literal left operand with an IN/NOT IN list takes
-                    // the shared scalar path so three-valued membership keeps
-                    // its unknown result instead of a Boolean Truth leaf.
-                    if depth == 0
-                        && (word.eq_ignore_ascii_case("IN")
-                            || (word.eq_ignore_ascii_case("NOT")
-                                && matches!(lexer.next()?.kind, TokenKind::Word(next)
-                                    if next.eq_ignore_ascii_case("IN"))))
-                    {
-                        return Ok(true);
                     }
                 }
                 _ => {}
