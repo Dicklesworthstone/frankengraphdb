@@ -35,11 +35,13 @@ fn declarations() -> (Vec<GraphInsertVertex>, Vec<GraphInsertEdge>) {
             GraphInsertEdge {
                 source: GraphInsertEndpoint::CreatedVertex(0),
                 destination: GraphInsertEndpoint::CreatedVertex(1),
+                relation: R,
                 properties: vec![],
             },
             GraphInsertEdge {
                 source: GraphInsertEndpoint::CreatedVertex(1),
                 destination: GraphInsertEndpoint::CreatedVertex(1),
+                relation: RelationId(2),
                 properties: vec![],
             },
         ],
@@ -103,12 +105,14 @@ fn unit_creates_exactly_one_structure_without_observing_any_graph_source() {
             },
             GraphInsertIntent::Edge {
                 edge: EId(200),
+                relation: R,
                 source: VId(100),
                 destination: VId(101),
                 properties: vec![]
             },
             GraphInsertIntent::Edge {
                 edge: EId(201),
+                relation: RelationId(2),
                 source: VId(101),
                 destination: VId(101),
                 properties: vec![]

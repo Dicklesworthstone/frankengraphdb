@@ -76,7 +76,7 @@ impl PreparedGraphEdgeMergeText {
 
     pub fn prepare_with_parameter_types(
         statement: &str,
-        relation: RelationId,
+        _relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphEdgeMergeTextError> {
@@ -124,12 +124,6 @@ impl PreparedGraphEdgeMergeText {
         else {
             unreachable!("symbol domain checked by shared resolver")
         };
-        if found != relation {
-            return Err(GraphEdgeMergeTextError {
-                offset: parsed.relation.at,
-                kind: GraphEdgeMergeTextErrorKind::RelationMismatch,
-            });
-        }
 
         let columns = projections
             .into_iter()
@@ -162,11 +156,12 @@ impl PreparedGraphEdgeMergeText {
             offset: Number::Literal(GqlParameterValue::UInt64(0)),
             count: None,
             distinct: false,
+            visible_columns: None,
             return_at: at,
         };
         Ok(Self {
             selection,
-            relation,
+            relation: found,
             source,
             destination,
         })

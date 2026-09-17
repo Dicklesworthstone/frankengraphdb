@@ -53,11 +53,13 @@ fn plan(selection: PreparedGraphPattern<GraphValueRow>) -> PreparedGraphInsert {
             GraphInsertEdge {
                 source: GraphInsertEndpoint::Column(0),
                 destination: GraphInsertEndpoint::CreatedVertex(0),
+                relation: R,
                 properties: vec![],
             },
             GraphInsertEdge {
                 source: GraphInsertEndpoint::CreatedVertex(0),
                 destination: GraphInsertEndpoint::Column(1),
+                relation: R,
                 properties: vec![(P, GraphMutationValue::Column(2))],
             },
         ],
@@ -165,6 +167,7 @@ fn repeated_matches_create_distinct_row_local_structures_with_frozen_properties(
             };
             expected.push(GraphInsertIntent::Edge {
                 edge: id,
+                relation: R,
                 source: from,
                 destination: to,
                 properties,
@@ -196,6 +199,7 @@ fn declarations_validate_endpoints_and_all_expression_columns_before_execution()
                 vec![GraphInsertEdge {
                     source: GraphInsertEndpoint::Column(0),
                     destination: endpoint,
+                    relation: R,
                     properties: vec![],
                 }]
             )

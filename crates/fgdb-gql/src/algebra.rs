@@ -319,6 +319,7 @@ pub enum GlaOperator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlaPlan<Row = VId> {
     operators: Vec<GlaOperator>,
+    pub(crate) visible_columns: Option<usize>,
     output: PhantomData<fn() -> Row>,
 }
 
@@ -540,6 +541,7 @@ impl<Row> GlaPlan<Row> {
         }
         Self {
             operators,
+            visible_columns: None,
             output: PhantomData,
         }
     }
@@ -573,8 +575,14 @@ impl<Row> GlaPlan<Row> {
     #[must_use]
     pub fn requires_identified_edges(&self) -> bool {
         self.operators.iter().any(|op| {
-            matches!(op, GlaOperator::CapturePath { .. }
-                | GlaOperator::VarLengthExpand { search: GraphWalkSearch::Trail, .. })
+            matches!(
+                op,
+                GlaOperator::CapturePath { .. }
+                    | GlaOperator::VarLengthExpand {
+                        search: GraphWalkSearch::Trail,
+                        ..
+                    }
+            )
         })
     }
 
@@ -844,6 +852,10 @@ impl<Row> GlaPlan<Row> {
                     bytes.push(u8::from(*is_null));
                 }
             }
+        }
+        if let Some(width) = self.visible_columns {
+            bytes.extend_from_slice(b"visible-prefix\0");
+            bytes.extend_from_slice(&(width as u64).to_be_bytes());
         }
         bytes
     }

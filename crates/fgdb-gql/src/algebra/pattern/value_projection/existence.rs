@@ -429,20 +429,24 @@ impl GraphPatternBuilder {
                 return Err(PatternBuildError::DuplicateProjection);
             }
             variables.push(match column {
-                GraphColumn::Path { variable, function, .. } => {
+                GraphColumn::Path {
+                    variable, function, ..
+                } => {
                     let capture = self.path_capture(variable)?;
-                    if (*function == GraphPathFunction::Edge) != self.path_captures[capture].edge_identity {
+                    if (*function == GraphPathFunction::Edge)
+                        != self.path_captures[capture].edge_identity
+                    {
                         return Err(PatternBuildError::InvalidPathCapture);
                     }
                     capture
-                },
+                }
                 GraphColumn::EdgeProperty { variable, .. } => {
                     let capture = self.path_capture(variable)?;
                     if !self.path_captures[capture].edge_identity {
                         return Err(PatternBuildError::InvalidPathCapture);
                     }
                     capture
-                },
+                }
                 GraphColumn::Vertex { variable, .. } | GraphColumn::Property { variable, .. } => {
                     self.variable(variable)?
                 }

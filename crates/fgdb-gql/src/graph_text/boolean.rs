@@ -323,7 +323,9 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
             operand_end = match token.kind {
-                TokenKind::Digits(_) | TokenKind::Parameter(_) | TokenKind::Quoted(_)
+                TokenKind::Digits(_)
+                | TokenKind::Parameter(_)
+                | TokenKind::Quoted(_)
                 | TokenKind::Punct(b')' | b']') => true,
                 TokenKind::Word(word) => {
                     after_dot
@@ -764,15 +766,27 @@ impl BoundBooleanTemplate {
                 }),
             });
         }
-        let edge_variables = edges.iter().filter_map(|edge| edge.variable)
-            .filter(|name| resolved.iter().any(|item| match item {
-                Item::Atom(Atom::Property { variable, .. } | Atom::Scalar { variable, .. }
-                    | Atom::Null { variable, .. }) => variable == name.text,
-                Item::Atom(Atom::Properties { left, right, .. }) => left == name.text || right == name.text,
-                Item::Expression { columns, .. } => columns.iter().any(|(variable, _)| variable == name.text),
-                _ => false,
-            }))
-            .map(|name| name.text.to_owned()).collect();
+        let edge_variables = edges
+            .iter()
+            .filter_map(|edge| edge.variable)
+            .filter(|name| {
+                resolved.iter().any(|item| match item {
+                    Item::Atom(
+                        Atom::Property { variable, .. }
+                        | Atom::Scalar { variable, .. }
+                        | Atom::Null { variable, .. },
+                    ) => variable == name.text,
+                    Item::Atom(Atom::Properties { left, right, .. }) => {
+                        left == name.text || right == name.text
+                    }
+                    Item::Expression { columns, .. } => {
+                        columns.iter().any(|(variable, _)| variable == name.text)
+                    }
+                    _ => false,
+                })
+            })
+            .map(|name| name.text.to_owned())
+            .collect();
         Ok(Self {
             program: resolved,
             at,
@@ -1257,12 +1271,19 @@ mod compound_tests {
     #[test]
     fn scalar_dispatch_preserves_keyword_identifiers_and_signed_literal_lowering() {
         for name in [
-            "upper", "lower", "trim", "substring", "char_length", "starts", "ends",
-            "contains", "abs", "coalesce", "nullif",
+            "upper",
+            "lower",
+            "trim",
+            "substring",
+            "char_length",
+            "starts",
+            "ends",
+            "contains",
+            "abs",
+            "coalesce",
+            "nullif",
         ] {
-            let text = format!(
-                "MATCH ({name}),(other) WHERE {name}=other RETURN {name},other"
-            );
+            let text = format!("MATCH ({name}),(other) WHERE {name}=other RETURN {name},other");
             let pattern = PreparedGraphText::prepare(&text, |_, _| None)
                 .unwrap()
                 .bind_parameters(&GqlParameters::new())
@@ -1278,14 +1299,15 @@ mod compound_tests {
             .unwrap()
             .bind_parameters(&GqlParameters::new())
             .unwrap();
-            assert_eq!(property.canonical_bytes(), prepare("n.p=1").canonical_bytes());
+            assert_eq!(
+                property.canonical_bytes(),
+                prepare("n.p=1").canonical_bytes()
+            );
         }
-        let syntax = Parser::new(
-            "MATCH (n) WHERE n.p=-9223372036854775808 RETURN n"
-        )
-        .unwrap()
-        .parse()
-        .unwrap();
+        let syntax = Parser::new("MATCH (n) WHERE n.p=-9223372036854775808 RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
         assert!(matches!(
             syntax.filters.as_slice(),
             [Filter::Property {

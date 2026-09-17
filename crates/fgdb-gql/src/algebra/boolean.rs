@@ -144,7 +144,10 @@ enum Instruction<S> {
 }
 
 impl<S> Operand<S> {
-    fn try_map<T, E>(&self, map: &mut impl FnMut(&S, bool) -> Result<T, E>) -> Result<Operand<T>, E> {
+    fn try_map<T, E>(
+        &self,
+        map: &mut impl FnMut(&S, bool) -> Result<T, E>,
+    ) -> Result<Operand<T>, E> {
         Ok(match self {
             Self::Vertex(slot) => Operand::Vertex(map(slot, false)?),
             Self::Property { variable, key } => Operand::Property {
@@ -160,7 +163,10 @@ impl<S> Operand<S> {
     }
 }
 impl<S> Instruction<S> {
-    fn try_map<T, E>(&self, map: &mut impl FnMut(&S, bool) -> Result<T, E>) -> Result<Instruction<T>, E> {
+    fn try_map<T, E>(
+        &self,
+        map: &mut impl FnMut(&S, bool) -> Result<T, E>,
+    ) -> Result<Instruction<T>, E> {
         Ok(match self {
             Self::Compare {
                 left,
@@ -404,13 +410,14 @@ impl GraphBooleanExpression {
         }
         self.program.iter().any(|instruction| match instruction {
             Instruction::Compare { left, right, .. } => operand(left) || operand(right),
-            Instruction::IsNull { operand: checked, .. } => operand(checked),
+            Instruction::IsNull {
+                operand: checked, ..
+            } => operand(checked),
             Instruction::Expression { columns, .. } => columns.iter().any(operand),
             Instruction::Truth(_) | Instruction::And | Instruction::Or | Instruction::Not => false,
         })
     }
 }
-
 
 /// Compiler-owned slot program. There is no public unchecked constructor.
 #[derive(Clone, PartialEq, Eq)]
@@ -435,7 +442,9 @@ impl BoundBooleanExpression {
         }
         self.program.iter().any(|instruction| match instruction {
             Instruction::Compare { left, right, .. } => operand(left) || operand(right),
-            Instruction::IsNull { operand: checked, .. } => operand(checked),
+            Instruction::IsNull {
+                operand: checked, ..
+            } => operand(checked),
             Instruction::Expression { columns, .. } => columns.iter().any(operand),
             Instruction::Truth(_) | Instruction::And | Instruction::Or | Instruction::Not => false,
         })
@@ -514,7 +523,10 @@ fn resolve<'source: 'borrow, 'borrow, E>(
             },
         ),
         Operand::EdgeProperty { variable, key } => Value::Scalar(
-            match paths.get(variable.ordinal() as usize).and_then(Option::as_ref) {
+            match paths
+                .get(variable.ordinal() as usize)
+                .and_then(Option::as_ref)
+            {
                 Some(path) => {
                     let [(edge, _)] = path.steps() else {
                         unreachable!("edge property captures contain exactly one relationship")
@@ -557,13 +569,23 @@ impl BoundBooleanExpression {
         self.remap_elements(&mut map, |capture| capture)
     }
 
-    pub(crate) fn remap_elements(&self, mut map: impl FnMut(BindingSlot) -> BindingSlot, mut capture: impl FnMut(u32) -> u32) -> Self {
+    pub(crate) fn remap_elements(
+        &self,
+        mut map: impl FnMut(BindingSlot) -> BindingSlot,
+        mut capture: impl FnMut(u32) -> u32,
+    ) -> Self {
         let program = self
             .program
             .iter()
             .map(|instruction| {
                 let result: Result<_, core::convert::Infallible> =
-                    instruction.try_map(&mut |slot, edge| Ok(if edge { BindingSlot(capture(slot.ordinal())) } else { map(*slot) }));
+                    instruction.try_map(&mut |slot, edge| {
+                        Ok(if edge {
+                            BindingSlot(capture(slot.ordinal()))
+                        } else {
+                            map(*slot)
+                        })
+                    });
                 match result {
                     Ok(value) => value,
                     Err(never) => match never {},
@@ -593,8 +615,13 @@ impl BoundBooleanExpression {
         property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
-        self.evaluate_elements(bindings, &[], property,
-            &mut |_, _| panic!("edge properties require an explicit edge property source"), control)
+        self.evaluate_elements(
+            bindings,
+            &[],
+            property,
+            &mut |_, _| panic!("edge properties require an explicit edge property source"),
+            control,
+        )
     }
 
     pub(crate) fn evaluate_elements<'a, E>(
@@ -625,7 +652,8 @@ impl BoundBooleanExpression {
                     compare(&left, &right, *comparison)
                 }
                 Instruction::IsNull { operand, is_null } => Truth::from(Some(
-                    resolve(operand, bindings, paths, property, edge_property, control)?.is_null() == *is_null,
+                    resolve(operand, bindings, paths, property, edge_property, control)?.is_null()
+                        == *is_null,
                 )),
                 Instruction::Expression {
                     expression,
@@ -636,7 +664,14 @@ impl BoundBooleanExpression {
                     }
                     let mut values = Vec::with_capacity(columns.len());
                     for column in columns {
-                        let value = match resolve(column, bindings, paths, property, edge_property, control)? {
+                        let value = match resolve(
+                            column,
+                            bindings,
+                            paths,
+                            property,
+                            edge_property,
+                            control,
+                        )? {
                             Value::Vertex(Some(vertex)) => GraphValue::Vertex(vertex),
                             Value::Scalar(Some(value)) => {
                                 crate::algebra_exec::charge_payload(value, control)?;

@@ -367,7 +367,9 @@ impl<'a> Parser<'a> {
         &mut self,
         mut inputs: Option<&mut Vec<Projection<'a>>>,
         schema: &[(Name<'a>, GraphSetColumnType)],
-        resolve: &mut Option<&mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>>,
+        resolve: &mut Option<
+            &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+        >,
         depth: usize,
     ) -> Result<ReadValueTemplate, GraphSetTextError> {
         let at = self.current.at;
@@ -404,11 +406,14 @@ impl<'a> Parser<'a> {
         {
             self.advance()?;
             self.punct(b'(', "(")?;
-            let inner = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            let inner =
+                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b')', ")")?;
             ReadValueTemplate::Size(Box::new(inner))
         } else if let Some(resolve) = resolve.as_deref_mut() {
-            let operand = self.resolved_expression(resolve).map_err(expression_error)?;
+            let operand = self
+                .resolved_expression(resolve)
+                .map_err(expression_error)?;
             self.read_value_template(operand, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
             let bare = matches!(self.current.kind, TokenKind::Word(word) if self.syntax.variables.iter().any(|name| name.text == word))
@@ -430,7 +435,8 @@ impl<'a> Parser<'a> {
             self.read_value_template(operand, at)?
         };
         while self.take(b'[')? {
-            let index = self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
+            let index =
+                self.read_recursive_value(inputs.as_deref_mut(), schema, resolve, depth + 1)?;
             self.punct(b']', "]")?;
             value = ReadValueTemplate::Index {
                 list: Box::new(value),

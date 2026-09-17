@@ -17,11 +17,14 @@ const MAX_INTEGER_NESTING: usize = 64;
 enum ExpressionColumns<'columns, 'text> {
     Graph(&'columns mut Vec<Projection<'text>>),
     Row(&'columns [(Name<'text>, crate::GraphSetColumnType)]),
-    Resolved(&'columns mut dyn FnMut(&mut Parser<'text>) -> Result<Option<usize>, GraphPatternTextError>),
+    Resolved(
+        &'columns mut dyn FnMut(&mut Parser<'text>) -> Result<Option<usize>, GraphPatternTextError>,
+    ),
 }
 enum ExpressionBoundary {
     Whole,
     Predicate,
+    Operand,
 }
 enum ParsedOp {
     Atom(Operand, usize),
@@ -160,7 +163,14 @@ impl<'a> Parser<'a> {
         columns: &mut ExpressionColumns<'_, 'a>,
         predicates: bool,
     ) -> Result<Operand, GraphMutationTextError> {
-        self.checked_expression_with_boundary(columns, ExpressionBoundary::Whole)
+        self.checked_expression_with_boundary(
+            columns,
+            if predicates {
+                ExpressionBoundary::Whole
+            } else {
+                ExpressionBoundary::Operand
+            },
+        )
     }
 
     fn checked_expression_with_boundary(
@@ -176,6 +186,8 @@ impl<'a> Parser<'a> {
             // them here would regroup A AND scalar(B) OR C as A AND (B OR C).
             // Parentheses still parse their complete internal Boolean expression.
             ExpressionBoundary::Predicate => self.scalar_negation(columns, 0, &mut parsed)?,
+            // HAVING owns comparisons and Boolean operators around each operand.
+            ExpressionBoundary::Operand => self.scalar_concat(columns, 0, &mut parsed)?,
         }
         if parsed.len() == 1 {
             let ParsedOp::Atom(value, _) = parsed.pop().expect("one parsed operand") else {
@@ -620,13 +632,11 @@ mod predicate_boundary_tests {
             vec![(p, CanonicalScalar::Null), (q, CanonicalScalar::Int(1))],
             vec![(q, CanonicalScalar::Int(1))],
         ];
-        let pattern = PreparedGraphText::prepare(
-            &format!("MATCH (n) WHERE {predicate} RETURN n"),
-            symbols,
-        )
-        .unwrap()
-        .bind_parameters(&GqlParameters::new())
-        .unwrap();
+        let pattern =
+            PreparedGraphText::prepare(&format!("MATCH (n) WHERE {predicate} RETURN n"), symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
         pattern
             .plan()
             .execute_governed_with_properties(
@@ -634,7 +644,11 @@ mod predicate_boundary_tests {
                 (1..=5).map(VId),
                 [],
                 |vid, predicate| {
-                    Ok::<_, ()>(predicate.iter().all(|p| p.matches(&[], &values[vid.0 as usize - 1])))
+                    Ok::<_, ()>(
+                        predicate
+                            .iter()
+                            .all(|p| p.matches(&[], &values[vid.0 as usize - 1])),
+                    )
                 },
                 |vid, key| {
                     Ok(values[vid.0 as usize - 1]
@@ -675,12 +689,10 @@ mod predicate_boundary_tests {
     #[test]
     fn graph_boolean_program_keeps_separate_scalar_leaves_and_operator_order() {
         use crate::graph_text::boolean::SyntaxItem;
-        let syntax = Parser::new(
-            "MATCH (n) WHERE n.p+1=1 AND n.q+1=1 OR n.p=2 RETURN n",
-        )
-        .unwrap()
-        .parse()
-        .unwrap();
+        let syntax = Parser::new("MATCH (n) WHERE n.p+1=1 AND n.q+1=1 OR n.p=2 RETURN n")
+            .unwrap()
+            .parse()
+            .unwrap();
         let [Filter::Boolean { program, .. }] = syntax.filters.as_slice() else {
             panic!("one graph Boolean program");
         };

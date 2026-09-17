@@ -64,6 +64,7 @@ impl core::error::Error for GraphMutationProgramTemplateError {
 /// borrows already-prepared schemas and never copies/reparses source text.
 fn program_parameters<'a>(
     inputs: impl ExactSizeIterator<Item = (RelationId, &'a [GqlParameterSpec])>,
+    require_same_relation: bool,
 ) -> Result<Vec<GqlParameterSpec>, GraphMutationProgramTemplateError> {
     use GraphMutationProgramTemplateError as Error;
     let count = inputs.len();
@@ -84,7 +85,7 @@ fn program_parameters<'a>(
     let mut index = BTreeMap::<String, usize>::new();
     for (statement, (coordinate, schema)) in inputs.enumerate() {
         if let Some(expected) = relation {
-            if coordinate != expected {
+            if require_same_relation && coordinate != expected {
                 return Err(Error::Definition(
                     GraphMutationProgramBuildError::MixedRelation { statement },
                 ));
@@ -169,6 +170,7 @@ impl PreparedGraphMutationProgramTemplate {
             statements
                 .iter()
                 .map(|input| (input.relation, input.parameter_schema())),
+            true,
         )?;
         Ok(Self {
             statements: statements.into_boxed_slice(),

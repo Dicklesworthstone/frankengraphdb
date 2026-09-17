@@ -36,7 +36,7 @@ const TEXT: &str = "MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (a)-[e:R]
 #[test]
 fn native_selection_and_branches_share_one_frozen_parameter_contract() {
     let calls = Cell::new(0);
-    let template = PreparedGraphEdgeUpsertText::prepare(TEXT, R, |kind, name| {
+    let template = PreparedGraphEdgeUpsertText::prepare(TEXT, RelationId(9), |kind, name| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
     })
@@ -46,6 +46,7 @@ fn native_selection_and_branches_share_one_frozen_parameter_contract() {
     assert_eq!(template.parameter_schema().len(), 4);
     let args = arguments();
     let bound = template.bind_parameters(&args).unwrap();
+    assert_eq!(bound.merge().relation(), R);
     assert_eq!(
         bound.on_create()[0].value.value(),
         &CanonicalScalar::Int(200)

@@ -140,12 +140,14 @@ fn native_creation_freezes_case_properties_and_reuses_one_catalog_and_argument_c
         });
         expected.push(GraphInsertIntent::Edge {
             edge: EId(1_000 + row as u128 * 16),
+            relation: R,
             source,
             destination: vertex,
             properties: vec![(Q, CanonicalScalar::Int(1))],
         });
         expected.push(GraphInsertIntent::Edge {
             edge: EId(1_001 + row as u128 * 16),
+            relation: R,
             source: vertex,
             destination,
             properties: vec![],
@@ -274,16 +276,28 @@ fn malformed_and_overlarge_statements_refuse_before_any_catalog_observation() {
 }
 
 #[test]
-fn relation_coordinates_and_catalog_key_aliases_fail_closed() {
-    let mismatch =
-        PreparedGraphInsertText::prepare("MATCH (n) CREATE (n)-[:S]->(n)", R, symbols).unwrap_err();
-    assert!(matches!(
-        mismatch.kind,
-        GraphInsertTextErrorKind::RelationCoordinate {
-            expected: R,
-            found: RelationId(2)
-        }
-    ));
+fn creation_relations_are_independent_of_defaults_and_catalog_key_aliases_fail_closed() {
+    let query = prepare("MATCH (n) CREATE (n)-[:S]->(n),(n)-[:R]->(n)");
+    let batch = run(&query, &[VId(1)], &[], &Props::new()).unwrap();
+    assert_eq!(
+        batch.intents(),
+        &[
+            GraphInsertIntent::Edge {
+                edge: EId(1_000),
+                relation: RelationId(2),
+                source: VId(1),
+                destination: VId(1),
+                properties: vec![],
+            },
+            GraphInsertIntent::Edge {
+                edge: EId(1_001),
+                relation: R,
+                source: VId(1),
+                destination: VId(1),
+                properties: vec![],
+            },
+        ]
+    );
     let alias =
         PreparedGraphInsertText::prepare("MATCH (n) CREATE (x {p:1,q:2})", R, |kind, name| {
             if kind == GraphSymbolKind::Property {
@@ -302,6 +316,23 @@ fn relation_coordinates_and_catalog_key_aliases_fail_closed() {
         query.relation(),
         R,
         "MATCH relations never choose the write coordinate"
+    );
+    let batch = run(
+        &query,
+        &[VId(1), VId(2)],
+        &[(VId(1), RelationId(2), VId(2))],
+        &Props::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        batch.intents(),
+        &[GraphInsertIntent::Edge {
+            edge: EId(1_000),
+            relation: R,
+            source: VId(1),
+            destination: VId(2),
+            properties: vec![],
+        }]
     );
 }
 
@@ -461,6 +492,7 @@ fn inline_chains_incoming_arrows_cycles_and_anonymous_nodes_bind_exact_endpoints
     ] {
         expected.push(GraphInsertIntent::Edge {
             edge: EId(1_000 + index),
+            relation: R,
             source: VId(source),
             destination: VId(destination),
             properties,

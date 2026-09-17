@@ -329,9 +329,9 @@ impl GraphWriteProgramStats {
     }
 }
 
-/// Source-ordered mixed graph writes at one relation coordinate. Later MATCH
+/// Source-ordered mixed graph writes across relation coordinates. Later MATCH
 /// and MERGE steps observe successful earlier creations, updates and deletes in
-/// the canonical transaction overlay. This is not cross-relation sequencing.
+/// the canonical transaction overlay.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphWriteProgram {
     statements: Box<[GraphWriteStatement]>,
@@ -368,12 +368,6 @@ impl PreparedGraphWriteProgram {
                 observed: statements.len(),
             });
         }
-        let relation = statements[0].relation();
-        for (statement, input) in statements.iter().enumerate() {
-            if input.relation() != relation {
-                return Err(GraphMutationProgramBuildError::MixedRelation { statement });
-            }
-        }
         Ok(Self {
             statements: statements.into_boxed_slice(),
         })
@@ -387,11 +381,6 @@ impl PreparedGraphWriteProgram {
     // each record's program a second time.
     pub(crate) fn into_statements(self) -> Box<[GraphWriteStatement]> {
         self.statements
-    }
-
-    #[must_use]
-    pub fn relation(&self) -> RelationId {
-        self.statements[0].relation()
     }
 
     /// The transcript binds ordered statement kinds and definitions. It is not

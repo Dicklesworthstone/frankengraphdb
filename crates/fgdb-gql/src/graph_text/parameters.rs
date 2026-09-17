@@ -252,6 +252,7 @@ impl UnresolvedGraphText<'_> {
                 offset: Number::Literal(GqlParameterValue::UInt64(0)),
                 count: None,
                 distinct: false,
+                visible_columns: None,
                 return_at: syntax.return_at,
             }
         };

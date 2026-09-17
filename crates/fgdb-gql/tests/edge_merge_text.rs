@@ -94,13 +94,15 @@ fn malformed_or_semantically_unimplemented_relationship_forms_refuse_before_cata
 }
 
 #[test]
-fn relation_coordinate_mismatch_and_argument_errors_remain_typed() {
+fn resolved_relation_overrides_default_and_argument_errors_remain_typed() {
     let text = "MATCH (a),(b) WHERE a.p=$x AND b.p=$y MERGE (a)-[:R]->(b)";
-    let mismatch = PreparedGraphEdgeMergeText::prepare(text, RelationId(9), symbols).unwrap_err();
-    assert_eq!(mismatch.kind, GraphEdgeMergeTextErrorKind::RelationMismatch);
-    assert_eq!(mismatch.offset, text.rfind("R").unwrap());
-
-    let template = PreparedGraphEdgeMergeText::prepare(text, R, symbols).unwrap();
+    let template = PreparedGraphEdgeMergeText::prepare(text, RelationId(9), symbols).unwrap();
+    let args = GqlParameters::new()
+        .with_int64("x", 1)
+        .unwrap()
+        .with_int64("y", 2)
+        .unwrap();
+    assert_eq!(template.bind_parameters(&args).unwrap().relation(), R);
     let missing = template.bind_parameters(&GqlParameters::new()).unwrap_err();
     assert!(matches!(
         missing.kind,

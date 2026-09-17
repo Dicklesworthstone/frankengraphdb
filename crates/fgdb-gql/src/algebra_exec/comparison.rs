@@ -11,13 +11,16 @@ use fgdb_types::{CanonicalScalar, VId};
 /// three-valued engine once bound; each read names its disjoint identity
 /// domain and an unreadable source always propagates.
 pub(crate) fn compare_element_properties<'a, E>(
-        operator: &GlaOperator,
-        bindings: &[Option<VId>],
-        paths: &[Option<crate::algebra::GraphPath>],
-        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        edge_property: &mut impl FnMut(fgdb_types::EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
-        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<bool, E> {
+    operator: &GlaOperator,
+    bindings: &[Option<VId>],
+    paths: &[Option<crate::algebra::GraphPath>],
+    property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    edge_property: &mut impl FnMut(
+        fgdb_types::EId,
+        PropertyKeyId,
+    ) -> Result<Option<&'a CanonicalScalar>, E>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<bool, E> {
     if let GlaOperator::SelectBoolean { expression } = operator {
         return expression.evaluate_elements(bindings, paths, property, edge_property, control);
     }
@@ -35,10 +38,13 @@ pub(crate) fn compare_element_properties<'a, E>(
         bindings.get(slot.ordinal() as usize).copied().flatten()
     };
     let edge = |slot: &BindingSlot| -> Option<fgdb_types::EId> {
-        paths.get(slot.ordinal() as usize).and_then(Option::as_ref).and_then(|path| match path.steps() {
-            [(edge, _)] => Some(*edge),
-            _ => None,
-        })
+        paths
+            .get(slot.ordinal() as usize)
+            .and_then(Option::as_ref)
+            .and_then(|path| match path.steps() {
+                [(edge, _)] => Some(*edge),
+                _ => None,
+            })
     };
     let left = match (vertex(left), edge(left)) {
         (_, Some(captured)) => edge_property(captured, *left_key)?,

@@ -359,7 +359,7 @@ fn wrong_kind_or_inconsistent_creation_statistics_cannot_be_accepted() {
 }
 
 #[test]
-fn definitions_are_bounded_and_mixed_coordinates_refuse_before_execution() {
+fn definitions_are_bounded_and_preserve_distinct_statement_coordinates() {
     assert!(matches!(
         PreparedGraphWriteProgram::prepare(vec![]),
         Err(GraphMutationProgramBuildError::Empty)
@@ -372,8 +372,13 @@ fn definitions_are_bounded_and_mixed_coordinates_refuse_before_execution() {
         .unwrap()
         .bind_parameters(&GqlParameters::new())
         .unwrap();
-    assert!(matches!(
-        PreparedGraphWriteProgram::prepare(vec![mutation(), foreign.into()]),
-        Err(GraphMutationProgramBuildError::MixedRelation { statement: 1 })
-    ));
+    let program = PreparedGraphWriteProgram::prepare(vec![mutation(), foreign.into()]).unwrap();
+    assert_eq!(
+        program
+            .statements()
+            .iter()
+            .map(GraphWriteStatement::relation)
+            .collect::<Vec<_>>(),
+        vec![R, RelationId(2)]
+    );
 }

@@ -35,7 +35,10 @@ impl GraphPatternBuilder {
         bounds: crate::GraphWalkBounds,
     ) -> Result<&mut Self, PatternBuildError> {
         self.walk(source, relation, direction, destination, bounds)?;
-        self.edges.last_mut().expect("one validated atom was added").search = GraphWalkSearch::Trail;
+        self.edges
+            .last_mut()
+            .expect("one validated atom was added")
+            .search = GraphWalkSearch::Trail;
         Ok(self)
     }
 
@@ -105,7 +108,10 @@ impl GraphPatternBuilder {
         if self.property_comparisons.is_empty()
             && self.path_captures.is_empty()
             && self.path_predicates.is_empty()
-            && !self.edges.iter().any(|edge| edge.search == GraphWalkSearch::Trail)
+            && !self
+                .edges
+                .iter()
+                .any(|edge| edge.search == GraphWalkSearch::Trail)
         {
             Ok(())
         } else {

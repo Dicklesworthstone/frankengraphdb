@@ -1,14 +1,18 @@
 //! INSERT and CREATE normalize to the same bounded insertion program.
 //! These comparisons concern the admitted query surface, not full ISO conformance.
 
-use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::insertion::GraphInsertBuildError;
+use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::insertion::{
+    GraphInsertBatch, GraphInsertBuildError, GraphInsertError, GraphInsertIntent, GraphInsertPolicy,
+    GraphInsertRequest,
+};
 use fgdb_gql::{
-    GqlParameterType, GqlParameters, GraphInsertTextError, GraphInsertTextErrorKind,
+    GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphInsertTextError,
+    GraphInsertTextErrorKind,
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, GraphWriteProgramTemplateError,
     GraphWriteScriptErrorKind, PreparedGraphInsertText, PreparedGraphWriteScript,
 };
-use fgdb_types::{CanonicalScalar, CanonicalScalarKind};
+use fgdb_types::{CanonicalScalar, CanonicalScalarKind, EId, VId};
 
 const R: RelationId = RelationId(1);
 const SPELLINGS: [&str; 6] = ["CREATE", "create", "CrEaTe", "INSERT", "insert", "iNsErT"];
@@ -256,15 +260,47 @@ fn bound_node_redeclarations_and_malformed_syntax_have_identical_typed_refusals(
         ));
 
         let text = format!("{spelling} (a)-[:S]->(b)");
-        let error = PreparedGraphInsertText::prepare(&text, R, symbols).unwrap_err();
-        assert_eq!(error.offset, text.find(":S").unwrap() + 1);
-        assert!(matches!(
-            error.kind,
-            GraphInsertTextErrorKind::RelationCoordinate {
-                expected: R,
-                found: RelationId(2)
-            }
-        ));
+        let prepared = PreparedGraphInsertText::prepare(&text, R, symbols).unwrap();
+        let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+        let result: Result<GraphInsertBatch, GqlQueryError<GraphInsertError<(), ()>, ()>> =
+            bound.execute_governed(
+                GraphInsertPolicy::new(GqlQueryPolicy::new(0, 1, 100_000, 100_000), 2, 1),
+                |_, _| panic!("standalone insertion must not scan a graph source"),
+                |request| {
+                    Ok(match request {
+                        GraphInsertRequest::Vertex { row, vertex } => {
+                            ElementId::Vertex(VId(100 + row as u128 * 16 + vertex as u128))
+                        }
+                        GraphInsertRequest::Edge { row, edge } => {
+                            ElementId::Edge(EId(200 + row as u128 * 16 + edge as u128))
+                        }
+                    })
+                },
+                || Ok(()),
+            );
+        assert_eq!(
+            result.unwrap().intents(),
+            &[
+                GraphInsertIntent::Vertex {
+                    vertex: VId(100),
+                    labels: vec![],
+                    properties: vec![],
+                },
+                GraphInsertIntent::Vertex {
+                    vertex: VId(101),
+                    labels: vec![],
+                    properties: vec![],
+                },
+                GraphInsertIntent::Edge {
+                    edge: EId(200),
+                    relation: RelationId(2),
+                    source: VId(100),
+                    destination: VId(101),
+                    properties: vec![],
+                },
+            ],
+            "{text}"
+        );
     }
 }
 

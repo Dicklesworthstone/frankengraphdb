@@ -62,6 +62,7 @@ enum Endpoint {
     Created(usize),
 }
 struct EdgeDraft {
+    relation: RelationId,
     source: Endpoint,
     destination: Endpoint,
     properties: Fields,
@@ -348,6 +349,7 @@ pub(super) fn execute<E, A, C>(
                 &mut |event| meter.event(event),
             )?;
             edges.push(EdgeDraft {
+                relation: edge.relation,
                 source,
                 destination,
                 properties,
@@ -410,6 +412,7 @@ pub(super) fn execute<E, A, C>(
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             intents.push(GraphInsertIntent::Edge {
                 edge: id,
+                relation: draft.relation,
                 source,
                 destination,
                 properties: draft.properties,

@@ -329,6 +329,7 @@ struct Syntax<'a> {
     filters: Vec<Filter<'a>>,
     scopes: Vec<ScopeSyntax<'a>>,
     columns: Vec<Column<'a>>,
+    visible_columns: Option<usize>,
     ordering: Vec<GraphValueOrder>,
     parameters: Vec<GqlParameterSpec>,
     parameter_offsets: Vec<usize>,
@@ -381,6 +382,7 @@ impl<'a> Parser<'a> {
                 filters: Vec::new(),
                 scopes: Vec::new(),
                 columns: Vec::new(),
+                visible_columns: None,
                 ordering: Vec::new(),
                 parameters: Vec::new(),
                 parameter_offsets: Vec::new(),
@@ -1063,6 +1065,7 @@ pub struct PreparedGraphText {
     filters: Vec<BoundFilter>,
     scopes: Vec<BoundScope>,
     columns: Vec<BoundColumn>,
+    visible_columns: Option<usize>,
     ordering: Vec<GraphValueOrder>,
     parameters: Vec<GqlParameterSpec>,
     parameter_offsets: Vec<usize>,
@@ -1112,18 +1115,20 @@ impl PreparedGraphText {
     /// independent NULLS FIRST/LAST (default LAST). Whole rows break ties.
     /// Ordering precedes SKIP/LIMIT; hidden sort expressions are refused.
     ///
-    /// An explicit MATCH WALK enables bounded `[:R*min..max]`, `[:R*k]` and
-    /// `[:R*..max]` atoms in that MATCH scope. The omitted minimum is one; zero
-    /// is explicit. Bounds are integer literals with 0 <= min <= max <= 1024.
-    /// Repeated edges and vertices contribute distinct walk occurrences.
+    /// Plain MATCH and explicit MATCH WALK accept bounded `[:R*min..max]`,
+    /// `[:R*k]` and `[:R*..max]` atoms. The omitted minimum is one; zero is
+    /// explicit. Bounds are integer literals with 0 <= min <= max <= 1024.
+    /// Both use WALK semantics: repeated edges and vertices contribute distinct
+    /// occurrences, including duplicate endpoint rows. MATCH TRAIL forbids edge
+    /// reuse instead; explicit path selectors retain their own semantics.
     /// A root `MATCH p = ...` captures its ordered path, including real edge IDs.
     /// MATCH ALL SHORTEST WALK prefix selects all tied minimum-hop occurrences
     /// within the interval, separately for each endpoint pair. This native
     /// profile requires exactly one quantified atom in its positive pattern;
     /// compound shortest-path patterns refuse rather than selecting each atom
     /// independently and pretending to minimize total path length.
-    /// Endpoint predicates do not filter transit vertices. Every OPTIONAL or
-    /// existential MATCH opts in independently. The same head grammar feeds
+    /// Endpoint predicates do not filter transit vertices. OPTIONAL and
+    /// existential MATCH use the same finite bounds. The same head grammar feeds
     /// aggregate queries and query-selected writes. Bare/open-ended quantifiers,
     /// hop parameters and weighted search remain unsupported. Captured paths
     /// support RETURN p, path_length(p), nodes(p), edges(p), and conjunctive
@@ -1176,7 +1181,8 @@ impl PreparedGraphText {
             scopes.push(scope.resolve(&mut symbol)?);
         }
         let mut columns = Vec::new();
-        for column in syntax.columns {
+        let mut hidden_alias = 0usize;
+        for (index, column) in syntax.columns.iter().enumerate() {
             let key = if let Some(name) = column.property {
                 let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)? else {
                     unreachable!("symbol domain checked above")
@@ -1186,7 +1192,21 @@ impl PreparedGraphText {
                 None
             };
             columns.push(BoundColumn {
-                alias: column.alias.text.to_owned(),
+                alias: if syntax.visible_columns.is_some_and(|width| index >= width) {
+                    loop {
+                        let alias = format!("__fgdb_sort_{hidden_alias}");
+                        hidden_alias += 1;
+                        if !syntax
+                            .columns
+                            .iter()
+                            .any(|column| column.alias.text == alias)
+                        {
+                            break alias;
+                        }
+                    }
+                } else {
+                    column.alias.text.to_owned()
+                },
                 variable: column.variable.text.to_owned(),
                 key,
                 path: if key.is_some()
@@ -1215,6 +1235,7 @@ impl PreparedGraphText {
             filters,
             scopes,
             columns,
+            visible_columns: syntax.visible_columns,
             ordering: syntax.ordering,
             parameters: syntax.parameters,
             parameter_offsets: syntax.parameter_offsets,
@@ -1339,6 +1360,10 @@ impl PreparedGraphText {
             }
         }
         bytes.push(u8::from(self.distinct));
+        if let Some(width) = self.visible_columns {
+            bytes.extend_from_slice(b"visible-prefix\0");
+            bytes.extend_from_slice(&(width as u64).to_be_bytes());
+        }
         bytes
     }
 
@@ -1432,13 +1457,17 @@ impl PreparedGraphText {
         } else {
             pattern.with_duplicates()
         };
-        if self.ordering.is_empty() {
-            Ok(pattern)
-        } else {
+        let pattern = if self.ordering.is_empty() {
             pattern
-                .with_order_by(&self.ordering)
-                .map_err(|kind| error(self.return_at, GraphPatternTextErrorKind::OrderBuild(kind)))
-        }
+        } else {
+            pattern.with_order_by(&self.ordering).map_err(|kind| {
+                error(self.return_at, GraphPatternTextErrorKind::OrderBuild(kind))
+            })?
+        };
+        Ok(match self.visible_columns {
+            Some(width) => pattern.with_visible_columns(width),
+            None => pattern,
+        })
     }
 }
 

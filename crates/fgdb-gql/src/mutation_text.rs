@@ -235,7 +235,6 @@ pub struct GraphEdgeMergeTextError {
 pub enum GraphEdgeMergeTextErrorKind {
     Query(GraphPatternTextErrorKind),
     Build(GraphEdgeMergeBuildError),
-    RelationMismatch,
 }
 impl From<GraphPatternTextError> for GraphEdgeMergeTextError {
     fn from(error: GraphPatternTextError) -> Self {

@@ -411,22 +411,14 @@ impl PreparedGraphInsertText {
         }
         let mut edges = Vec::new();
         for edge in parsed.edges {
-            let GraphSymbol::Relation(found) = symbol(GraphSymbolKind::Relation, edge.relation)?
+            let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, edge.relation)?
             else {
                 unreachable!("shared catalog resolver checked the domain")
             };
-            if found != relation {
-                return Err(GraphInsertTextError {
-                    offset: edge.relation.at,
-                    kind: GraphInsertTextErrorKind::RelationCoordinate {
-                        expected: relation,
-                        found,
-                    },
-                });
-            }
             edges.push(InsertEdgeTemplate {
                 source: edge.source,
                 destination: edge.destination,
+                relation,
                 properties: resolve_properties(edge.properties, &mut symbol)?,
             });
         }
@@ -467,6 +459,7 @@ impl PreparedGraphInsertText {
                 offset: Number::Literal(GqlParameterValue::UInt64(0)),
                 count: None,
                 distinct: false,
+                visible_columns: None,
                 return_at: at,
             };
             (InsertTextInput::Match(selection), Some(shape))
@@ -571,6 +564,7 @@ impl PreparedGraphInsertText {
             edges.push(GraphInsertEdge {
                 source: edge.source,
                 destination: edge.destination,
+                relation: edge.relation,
                 properties: bind_fields(&edge.properties, values)?,
             });
         }

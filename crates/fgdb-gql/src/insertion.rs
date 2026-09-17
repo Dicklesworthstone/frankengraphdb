@@ -44,6 +44,7 @@ impl core::fmt::Debug for GraphInsertVertex {
 pub struct GraphInsertEdge {
     pub source: GraphInsertEndpoint,
     pub destination: GraphInsertEndpoint,
+    pub relation: RelationId,
     pub properties: Vec<(PropertyKeyId, GraphMutationValue)>,
 }
 impl core::fmt::Debug for GraphInsertEdge {
@@ -206,6 +207,7 @@ pub enum GraphInsertIntent {
     },
     Edge {
         edge: EId,
+        relation: RelationId,
         source: VId,
         destination: VId,
         properties: Vec<(PropertyKeyId, CanonicalScalar)>,
@@ -257,6 +259,7 @@ struct Vertex {
 }
 #[derive(Clone, PartialEq, Eq)]
 struct Edge {
+    relation: RelationId,
     source: GraphInsertEndpoint,
     destination: GraphInsertEndpoint,
     properties: Properties,
@@ -284,7 +287,7 @@ impl PreparedGraphInsert {
     /// Freeze a creation template. Properties read only the original selection;
     /// created vertices may be edge endpoints but are not RHS temporaries.
     /// Duplicate label/property declarations refuse instead of choosing a value.
-    /// All created edges use the explicit WriteBatch relation coordinate.
+    /// Each edge carries its relation; the supplied coordinate places vertices.
     pub fn prepare(
         selection: PreparedGraphPattern<GraphValueRow>,
         relation: RelationId,
@@ -368,6 +371,7 @@ impl PreparedGraphInsert {
         let mut bound_edges = Vec::new();
         for (edge, declaration) in edges.into_iter().enumerate() {
             bound_edges.push(Edge {
+                relation: declaration.relation,
                 source: declaration.source,
                 destination: declaration.destination,
                 properties: Properties::prepare(
@@ -430,8 +434,8 @@ impl PreparedGraphInsert {
     }
 
     /// Application definition, not a durable effect encoding or allocation log.
-    /// Existing MATCH definitions retain their bytes. Unit-input definitions
-    /// have a distinct domain and cannot collide with a graph-selected template.
+    /// Edge relations are included alongside their endpoints and properties.
+    /// Unit-input definitions have a distinct domain from graph-selected templates.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = if self.selection.is_some() {
@@ -457,6 +461,7 @@ impl PreparedGraphInsert {
         }
         bytes.extend_from_slice(&(self.edges.len() as u64).to_be_bytes());
         for edge in &self.edges {
+            bytes.extend_from_slice(&edge.relation.0.to_be_bytes());
             for endpoint in [edge.source, edge.destination] {
                 let (tag, index) = match endpoint {
                     GraphInsertEndpoint::Column(index) => (0, index),

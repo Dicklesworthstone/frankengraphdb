@@ -100,9 +100,12 @@ impl<'a> Parser<'a> {
         columns.push(Projection {
             variable,
             property,
-            path: self.syntax.edges.iter().any(|edge| {
-                edge.variable.is_some_and(|name| name.text == variable.text)
-            }).then_some(GraphPathFunction::Edge),
+            path: self
+                .syntax
+                .edges
+                .iter()
+                .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text))
+                .then_some(GraphPathFunction::Edge),
         });
         Ok(at)
     }
@@ -210,8 +213,17 @@ impl<'a> Parser<'a> {
                 let kind = if deleting {
                     ActionKind::Delete
                 } else if self.take(b':')? {
-                    if !self.syntax.variables.iter().any(|name| name.text == variable.text) {
-                        return Err(error(variable.at, GraphPatternTextErrorKind::Expected("vertex label target")).into());
+                    if !self
+                        .syntax
+                        .variables
+                        .iter()
+                        .any(|name| name.text == variable.text)
+                    {
+                        return Err(error(
+                            variable.at,
+                            GraphPatternTextErrorKind::Expected("vertex label target"),
+                        )
+                        .into());
                     }
                     ActionKind::Label {
                         label: self.name()?,
@@ -408,6 +420,7 @@ impl PreparedGraphMutationText {
             offset: Number::Literal(GqlParameterValue::UInt64(0)),
             count: None,
             distinct: false,
+            visible_columns: None,
             return_at: at,
         };
         Ok(Self {

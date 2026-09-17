@@ -24,7 +24,7 @@ impl Parser<'_> {
             } else {
                 None
             };
-            let column = if let Some((variable, function)) = function {
+            let resolved = if let Some((variable, function)) = function {
                 self.syntax.columns.iter().position(|column| {
                     column.variable.text == variable.text && column.path == Some(function)
                 })
@@ -46,13 +46,48 @@ impl Parser<'_> {
                                 && matches!(column.path, None | Some(GraphPathFunction::Value))
                         })
                     })
-            }
-            .ok_or_else(|| {
-                error(
+            };
+            let column = if let Some(column) = resolved {
+                column
+            } else if property.is_some() && self.syntax.distinct {
+                // DISTINCT deduplicates whole evaluation rows; a hidden sort
+                // cell would change which occurrences survive. Refuse typed
+                // instead of silently picking survivors.
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Expected(
+                        "projected ORDER BY expression or alias under DISTINCT",
+                    ),
+                ));
+            } else if let Some(property) = property {
+                // Hidden sort key: evaluate the property for ranking without
+                // projecting it publicly. The property symbol is resolved once
+                // in from_syntax like every returned column; only the position
+                // of this appended evaluation cell is referenced afterwards.
+                self.capacity(
+                    self.syntax.columns.len(),
+                    MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Columns,
+                )?;
+                let width = self.syntax.columns.len();
+                self.syntax.columns.push(Column {
+                    alias: property,
+                    variable: name,
+                    property: Some(property),
+                    path: None,
+                });
+                // Multiple hidden keys must all sit in the hidden tail; the
+                // visible prefix is the width BEFORE the first appended cell.
+                if self.syntax.visible_columns.is_none() {
+                    self.syntax.visible_columns = Some(width);
+                }
+                width
+            } else {
+                return Err(error(
                     name.at,
                     GraphPatternTextErrorKind::Expected("projected ORDER BY expression or alias"),
-                )
-            })?;
+                ));
+            };
             if self
                 .syntax
                 .ordering

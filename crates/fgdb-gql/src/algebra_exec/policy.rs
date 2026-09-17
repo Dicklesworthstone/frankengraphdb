@@ -248,7 +248,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
             self.execute_with_element_properties_control(
-                vertices, edges,
+                vertices,
+                edges,
                 |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
                 |vid, key| property(vid, key).map_err(GqlQueryError::Source),
                 |eid, key| edge_property(eid, key).map_err(GqlQueryError::Source),

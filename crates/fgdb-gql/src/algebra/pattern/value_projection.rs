@@ -87,6 +87,14 @@ impl GraphPatternBuilder {
 }
 
 impl PreparedGraphPattern<GraphValueRow> {
+    pub(crate) fn with_visible_columns(mut self, width: usize) -> Self {
+        assert!(width > 0 && width <= self.columns.len());
+        assert!(self.preserves_duplicates());
+        self.logical.visible_columns = Some(width);
+        self.columns.truncate(width);
+        self
+    }
+
     /// Rank by projected column positions before applying the existing page.
     /// Nulls default to last in both directions. Canonical complete-row order
     /// breaks remaining ties; DISTINCT still compares the entire output row.
@@ -108,7 +116,9 @@ impl PreparedGraphPattern<GraphValueRow> {
             .operators()
             .iter()
             .find_map(|operator| match operator {
-                GlaOperator::ProjectValues { columns } => Some(columns.as_slice()),
+                GlaOperator::ProjectValues { columns } => {
+                    Some(&columns[..self.logical.visible_columns.unwrap_or(columns.len())])
+                }
                 _ => None,
             })
             .expect("the private value-pattern constructor owns its projection")

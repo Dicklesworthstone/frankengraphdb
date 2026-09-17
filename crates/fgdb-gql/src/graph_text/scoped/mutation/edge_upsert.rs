@@ -3,7 +3,7 @@
 use super::*;
 use crate::edge_upsert_text::{EdgeUpsertActionTemplate, EdgeUpsertValueTemplate};
 use crate::{
-    GraphEdgeMergeTextError, GraphEdgeMergeTextErrorKind, GraphEdgeUpsertAction,
+    GraphEdgeMergeTextError, GraphEdgeUpsertAction,
     GraphEdgeUpsertBranch, GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind,
     PreparedGraphEdgeMergeText, PreparedGraphEdgeUpsert, PreparedGraphEdgeUpsertText,
 };
@@ -186,7 +186,7 @@ impl PreparedGraphEdgeUpsertText {
 
     pub fn prepare_with_parameter_types(
         statement: &str,
-        relation: RelationId,
+        _relation: RelationId,
         declarations: &[(&str, GqlParameterType)],
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphEdgeUpsertTextError> {
@@ -234,14 +234,6 @@ impl PreparedGraphEdgeUpsertText {
         else {
             unreachable!("symbol domain checked")
         };
-        if found != relation {
-            return Err(GraphEdgeUpsertTextError {
-                offset: parsed.relation.at,
-                kind: GraphEdgeUpsertTextErrorKind::Merge(
-                    GraphEdgeMergeTextErrorKind::RelationMismatch,
-                ),
-            });
-        }
         let mut resolve_actions = |parsed: Vec<(Name<'_>, EdgeUpsertValueTemplate)>| -> Result<
             Vec<EdgeUpsertActionTemplate>,
             GraphPatternTextError,
@@ -290,11 +282,12 @@ impl PreparedGraphEdgeUpsertText {
             offset: Number::Literal(GqlParameterValue::UInt64(0)),
             count: None,
             distinct: false,
+            visible_columns: None,
             return_at: at,
         };
         let merge = PreparedGraphEdgeMergeText {
             selection,
-            relation,
+            relation: found,
             source,
             destination,
         };

@@ -199,6 +199,7 @@ impl PreparedGraphWriteProgramTemplate {
             statements
                 .iter()
                 .map(|input| (input.relation(), input.parameter_schema())),
+            false,
         )?;
         Ok(Self {
             statements: statements.into_boxed_slice(),
@@ -386,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn parameter_types_relations_and_program_sizes_are_checked_once() {
+    fn parameter_types_and_program_sizes_are_checked_across_relations() {
         let boolean = CanonicalScalarKind::of(&CanonicalScalar::Bool(true));
         let a = PreparedGraphInsertText::prepare_with_parameter_types(
             "CREATE (x {p:$x})",
@@ -410,17 +411,21 @@ mod tests {
         ));
         let foreign =
             PreparedGraphInsertText::prepare("CREATE (x)", RelationId(2), symbols).unwrap();
-        assert!(matches!(
-            PreparedGraphWriteProgramTemplate::prepare(vec![
-                insert("CREATE (x)").into(),
-                foreign.into()
-            ]),
-            Err(GraphWriteProgramTemplateError::Program(
-                GraphMutationProgramTemplateError::Definition(
-                    GraphMutationProgramBuildError::MixedRelation { statement: 1 }
-                )
-            ))
-        ));
+        let program = PreparedGraphWriteProgramTemplate::prepare(vec![
+            insert("CREATE (x)").into(),
+            foreign.into(),
+        ])
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert_eq!(
+            program
+                .statements()
+                .iter()
+                .map(GraphWriteStatement::relation)
+                .collect::<Vec<_>>(),
+            vec![R, RelationId(2)]
+        );
         assert!(PreparedGraphWriteProgramTemplate::prepare(vec![]).is_err());
         assert!(
             PreparedGraphWriteProgramTemplate::prepare(vec![

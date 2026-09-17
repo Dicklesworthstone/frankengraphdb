@@ -14,10 +14,6 @@ pub enum GraphInsertTextErrorKind {
     Query(GraphPatternTextErrorKind),
     Expression(GraphMutationTextErrorKind),
     Build(GraphInsertBuildError),
-    RelationCoordinate {
-        expected: RelationId,
-        found: RelationId,
-    },
 }
 #[derive(Debug)]
 pub struct GraphInsertTextError {
@@ -64,6 +60,7 @@ pub(crate) struct InsertVertexTemplate {
 pub(crate) struct InsertEdgeTemplate {
     pub source: GraphInsertEndpoint,
     pub destination: GraphInsertEndpoint,
+    pub relation: RelationId,
     pub properties: Vec<(PropertyKeyId, ReadValueTemplate)>,
 }
 
@@ -85,10 +82,11 @@ pub(crate) enum InsertTextInput {
 /// or create anonymous nodes. A name's first occurrence declares its labels and
 /// properties; later references must be bare. Matched nodes cannot be redeclared.
 ///
-/// Every edge names the explicit target relation coordinate. Property values
-/// read matched bindings or typed constants/parameters, not freshly created
-/// property state. There is no MERGE, undirected/quantified creation, arbitrary
-/// mixed-relation insertion, or write-returning in this bounded profile.
+/// Each edge binds its own explicit relation name. The supplied coordinate
+/// places vertex-only effects; it does not constrain edge relation types.
+/// Property values read matched bindings or typed constants/parameters, not
+/// freshly created property state. MERGE and undirected/quantified creation
+/// are not part of this insertion facade.
 #[derive(Clone)]
 pub struct PreparedGraphInsertText {
     pub(crate) input: InsertTextInput,

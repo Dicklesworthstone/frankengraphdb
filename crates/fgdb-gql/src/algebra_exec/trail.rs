@@ -6,7 +6,10 @@ use std::collections::BTreeMap;
 
 pub(super) enum IdentifiedExpansion<'a> {
     Path(crate::walk::GraphPathCursor<'a>),
-    Trail { cursor: GraphTrailCursor<'a>, capture: bool },
+    Trail {
+        cursor: GraphTrailCursor<'a>,
+        capture: bool,
+    },
 }
 
 impl<'a> IdentifiedExpansion<'a> {
@@ -35,11 +38,18 @@ impl<'a> IdentifiedExpansion<'a> {
     ) -> Result<Option<(VId, Option<GraphPath>)>, E> {
         let path = match self {
             Self::Path(cursor) => cursor.next_with_control(control)?,
-            Self::Trail { cursor, capture: true } => cursor.next_with_control(control)?,
-            Self::Trail { cursor, capture: false } => {
+            Self::Trail {
+                cursor,
+                capture: true,
+            } => cursor.next_with_control(control)?,
+            Self::Trail {
+                cursor,
+                capture: false,
+            } => {
                 // Edge membership remains in the live frontier; endpoint-only
                 // output need not clone any of that path into a GraphPath.
-                return cursor.next_endpoint_with_control(control)
+                return cursor
+                    .next_endpoint_with_control(control)
                     .map(|value| value.map(|endpoint| (endpoint, None)));
             }
         };

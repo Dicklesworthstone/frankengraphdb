@@ -109,15 +109,20 @@ impl<'a> GraphColumn<'a> {
 
     #[must_use]
     pub const fn edge_property(name: &'a str, variable: &'a str, key: PropertyKeyId) -> Self {
-        Self::EdgeProperty { name, variable, key }
+        Self::EdgeProperty {
+            name,
+            variable,
+            key,
+        }
     }
 
     #[must_use]
     pub const fn name(self) -> &'a str {
         match self {
-            Self::Vertex { name, .. } | Self::Property { name, .. } | Self::EdgeProperty { name, .. } | Self::Path { name, .. } => {
-                name
-            }
+            Self::Vertex { name, .. }
+            | Self::Property { name, .. }
+            | Self::EdgeProperty { name, .. }
+            | Self::Path { name, .. } => name,
         }
     }
 
@@ -431,6 +436,14 @@ pub struct GraphValueRow {
 }
 
 impl GraphValueRow {
+    pub(crate) fn into_prefix(self, width: usize) -> Self {
+        let mut values = self.values.into_vec();
+        values.truncate(width);
+        Self {
+            values: values.into_boxed_slice(),
+        }
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, fgdb_types::ScalarEncodeError> {
         let mut bytes = b"fgdb:graph-row:v1\0".to_vec();
         bytes.extend_from_slice(&(self.values.len() as u64).to_be_bytes());
@@ -619,8 +632,15 @@ pub(super) fn collect_values_with_paths<'a, E>(
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
-    collect_values_with_element_properties(columns, bindings, paths, projected, property,
-        &mut |_, _| panic!("edge properties require an explicit edge property source"), control)
+    collect_values_with_element_properties(
+        columns,
+        bindings,
+        paths,
+        projected,
+        property,
+        &mut |_, _| panic!("edge properties require an explicit edge property source"),
+        control,
+    )
 }
 
 pub(super) fn collect_values_with_element_properties<'a, E>(
