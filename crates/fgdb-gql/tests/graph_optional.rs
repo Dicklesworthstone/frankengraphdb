@@ -492,6 +492,58 @@ fn maximum_optional_chain_keeps_all_65_columns_without_sentinel_or_slot_aliasing
     ));
 }
 
+/// The u77c fix (5f3b80ad) moved the heavy visitor branches into
+/// `#[inline(never)]` helpers so a 65-clause OPTIONAL chain no longer
+/// overflows the default 2 MiB test stack. This guard holds that property
+/// at a deliberately tighter bound: if per-frame cost regrows, this thread
+/// overflows while the default-stack tests still pass, so the regression is
+/// caught before the main stack is exhausted. Sized from the measured HEAD
+/// peak (~316 KiB) with 3x headroom; see the bead's measurement notes.
+#[test]
+fn maximum_optional_chain_fits_tight_small_stack_guard() {
+    // 1 MiB = one half of the default test-thread stack; the measured
+    // HEAD peak for the 65-column chain is ~316 KiB, so ~708 KiB of
+    // headroom must remain before this bound fires.
+    const GUARD_STACK: usize = 1024 * 1024;
+    let result = std::thread::Builder::new()
+        .stack_size(GUARD_STACK)
+        .spawn(move || {
+            let names: Vec<_> = (0..=MAX_PATTERN_EDGES).map(|at| format!("n{at}")).collect();
+            let root = builder(&[names[0].as_str()], &[]);
+            let inners: Vec<_> = names
+                .windows(2)
+                .map(|pair| {
+                    builder(
+                        &[pair[0].as_str(), pair[1].as_str()],
+                        &[(pair[0].as_str(), R, GlaDirection::Forward, pair[1].as_str())],
+                    )
+                })
+                .collect();
+            let clauses: Vec<_> = inners.iter().map(GraphMatchClause::optional).collect();
+            let columns: Vec<_> = names
+                .iter()
+                .map(|name| GraphColumn::vertex(name, name))
+                .collect();
+            let pattern = root
+                .prepare_values_with_clauses(&clauses, &columns, 0, None)
+                .unwrap();
+            let edges: Vec<_> = (0..64).map(|at| (VId(at), R, VId(at + 1))).collect();
+            let present = execute(&pattern, &[VId(0)], &edges);
+            assert_eq!(present.len(), 1);
+            assert_eq!(present[0].len(), 65);
+            assert!(present[0].iter().all(Option::is_some));
+            let mut absent = vec![None; 65];
+            absent[0] = Some(VId(0));
+            assert_eq!(execute(&pattern, &[VId(0)], &[]), vec![absent]);
+        })
+        .unwrap()
+        .join();
+    // A panic in the child would surface as an Any payload; a stack
+    // overflow aborts the whole process instead, so any Err here means
+    // the guard bound was exceeded.
+    assert!(result.is_ok(), "65-column chain exceeded the guard stack");
+}
+
 #[test]
 fn optional_null_rows_share_every_budget_and_interruption_checkpoint() {
     let root = builder(&["p"], &[]);
