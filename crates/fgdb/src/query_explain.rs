@@ -326,7 +326,7 @@ pub fn explain_rows(prepared: &PreparedNativeRead) -> Vec<ExplainRow> {
             prepared.parameter_schema().len()
         ),
     }];
-    if let Self::Pattern(pattern) = prepared {
+    if let PreparedNativeRead::Pattern(pattern) = prepared {
         for operator in pattern.template_operators() {
             rows.push(ExplainRow {
                 operator: operator.to_owned(),

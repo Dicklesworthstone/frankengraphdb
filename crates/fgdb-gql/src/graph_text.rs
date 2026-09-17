@@ -1039,7 +1039,7 @@ impl PreparedGraphText {
     /// template, filters, scopes, projections, ordering, paging shape and
     /// parameter identity. Statement text and parameter values never enter.
     #[must_use]
-    pub(crate) fn template_bytes(&self) -> Vec<u8> {
+    pub fn template_bytes(&self) -> Vec<u8> {
         use crate::graph_text::boolean::append_number;
         fn append_name(bytes: &mut Vec<u8>, value: &str) {
             bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
@@ -1143,7 +1143,7 @@ impl PreparedGraphText {
 
     /// Logical template operators in declaration order, before lowering.
     #[must_use]
-    pub(crate) fn template_operators(&self) -> Vec<&'static str> {
+    pub fn template_operators(&self) -> Vec<&'static str> {
         let mut operators = self.builder.template_operators();
         operators.extend(std::iter::repeat_n(
             "MatchScope",
@@ -1523,7 +1523,6 @@ mod tests {
             "",
             "MATCH",
             "MATCH () RETURN *",
-            "MATCH (a)-[e:R]->(b) RETURN a",
             "MATCH (a)<-[:R]->(b) RETURN a",
             "MATCH (a)-[:R]->(b) RETURN DISTINCT ALL a",
             "MATCH (a)-[:R]->(b) RETURN missing",
@@ -1553,6 +1552,30 @@ mod tests {
             );
             assert_eq!(calls, 0, "failed syntax called the catalog: {text}");
         }
+    }
+    #[test]
+    fn named_relationship_captures_prepare_and_reach_name_resolution() {
+        let mut calls = 0;
+        let prepared = PreparedGraphText::prepare("MATCH (a)-[e:R]->(b) RETURN a", |kind, name| {
+            calls += 1;
+            symbols(kind, name)
+        })
+        .expect("named relationship captures are legal since fgdb-kp80 (482e77f0)");
+        let pattern = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+        assert_eq!(pattern.columns(), &["a"]);
+        let actual = pattern.plan().execute_governed_with_properties(
+            3,
+            [],
+            [(VId(1), RelationId(1), VId(2)),
+             (VId(1), RelationId(1), VId(3)),
+             (VId(2), RelationId(2), VId(3))],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            policy(),
+            || Ok::<_, ()>(()),
+        ).unwrap();
+        assert_eq!(vertex_rows(&actual.value), vec![vec![VId(1)], vec![VId(1)]]);
+        assert!(calls > 0, "legal input must reach name resolution");
     }
 
     #[test]
