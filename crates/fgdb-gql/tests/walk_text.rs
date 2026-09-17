@@ -127,8 +127,8 @@ fn quantified_text_has_the_same_plan_as_typed_walks_and_rebinds_without_resolvin
 #[test]
 fn unsafe_ambiguous_or_unbounded_quantifiers_refuse_before_any_catalog_call() {
     for text in [
-        "MATCH (a)-[:R*1..2]->(b) RETURN a",
-        "MATCH TRAIL (a)-[:R*1..2]->(b) RETURN a",
+        "MATCH (a)-[:R*]->(b) RETURN a",
+        "MATCH TRAIL (a)-[:R*]->(b) RETURN a",
         "MATCH WALK (a)-[:R*]->(b) RETURN a",
         "MATCH WALK (a)-[:R*..]->(b) RETURN a",
         "MATCH WALK (a)-[:R*1..]->(b) RETURN a",
@@ -143,7 +143,7 @@ fn unsafe_ambiguous_or_unbounded_quantifiers_refuse_before_any_catalog_call() {
         "MATCH WALK (a)-[:R*0..$hops]->(b) RETURN a",
         "MATCH WALK (a)-[:R*1025]->(b) RETURN a LIMIT 0",
         "MATCH WALK (a)-[:R*4294967296]->(b) RETURN a",
-        "MATCH WALK (a) OPTIONAL MATCH (a)-[:R*0..2]->(b) RETURN a",
+        "MATCH WALK (a) OPTIONAL MATCH (a)-[:R*0..]->(b) RETURN a",
     ] {
         let calls = Cell::new(0);
         assert!(
@@ -171,6 +171,63 @@ fn unsafe_ambiguous_or_unbounded_quantifiers_refuse_before_any_catalog_call() {
         wrong.kind,
         GraphPatternTextErrorKind::WrongSymbolKind { .. }
     ));
+}
+
+#[test]
+fn plain_match_bounded_walks_preserve_occurrences_and_zero_hops() {
+    // One self-loop contributes once at each depth; two parallel loops
+    // contribute 2^depth. Plain MATCH must not silently switch to TRAIL.
+    for selector in ["MATCH", "MATCH WALK"] {
+        for (bounds, expected) in [("0", 1), ("2", 4), ("0..2", 7), ("..2", 6)] {
+            let text = format!("{selector} (a)-[:R*{bounds}]->(b) RETURN a,b");
+            let rows = prepare(&text)
+                .plan()
+                .execute_governed_with_properties(
+                    1,
+                    [VId(1)],
+                    [(VId(1), RelationId(1), VId(1)); 2],
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap();
+            let actual: Vec<_> = rows
+                .value
+                .iter()
+                .map(|row| {
+                    (
+                        row.values()[0].as_vertex().unwrap(),
+                        row.values()[1].as_vertex().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(actual, vec![(VId(1), VId(1)); expected], "{text}");
+        }
+    }
+    let rows = prepare("MATCH (a) OPTIONAL MATCH (a)-[:R*0..2]->(b) RETURN a,b")
+        .plan()
+        .execute_governed_with_properties(
+            1,
+            [VId(7)],
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let actual: Vec<_> = rows
+        .value
+        .iter()
+        .map(|row| {
+            (
+                row.values()[0].as_vertex().unwrap(),
+                row.values()[1].as_vertex().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(actual, vec![(VId(7), VId(7))]);
 }
 
 #[test]

@@ -210,19 +210,28 @@ fn resolve_pattern_with_captures<'a>(
     }
     let mut numeric = Vec::new();
     for filter in filters {
-        let edge_property = |name: Name<'_>| edges.iter().any(|edge| {
-            edge.variable.is_some_and(|variable| variable.text == name.text)
-        });
+        let edge_property = |name: Name<'_>| {
+            edges.iter().any(|edge| {
+                edge.variable
+                    .is_some_and(|variable| variable.text == name.text)
+            })
+        };
         let uses_edge = match &filter {
-            Filter::Property { variable, .. } | Filter::Scalar { variable, .. }
+            Filter::Property { variable, .. }
+            | Filter::Scalar { variable, .. }
             | Filter::Null { variable, .. } => edge_property(*variable),
             Filter::Properties { left, right, .. } => edge_property(*left) || edge_property(*right),
             _ => false,
         };
         if uses_edge {
-            numeric.push(BoundFilter::Boolean(boolean::BoundBooleanTemplate::resolve(
-                vec![boolean::SyntaxItem::Atom(filter)], 0, edges, symbol,
-            )?));
+            numeric.push(BoundFilter::Boolean(
+                boolean::BoundBooleanTemplate::resolve(
+                    vec![boolean::SyntaxItem::Atom(filter)],
+                    0,
+                    edges,
+                    symbol,
+                )?,
+            ));
             continue;
         }
         match filter {
@@ -459,7 +468,10 @@ fn predicate_captures<'a>(
             },
         };
         for name in names.into_iter().flatten() {
-            if edges.iter().any(|edge| edge.variable.is_some_and(|variable| variable.text == name.text)) {
+            if edges.iter().any(|edge| {
+                edge.variable
+                    .is_some_and(|variable| variable.text == name.text)
+            }) {
                 continue;
             }
             if variables.iter().any(|variable| variable.text == name.text) {
@@ -554,15 +566,12 @@ impl<'a> Parser<'a> {
             GraphWalkSearch::Acyclic | GraphWalkSearch::Simple | GraphWalkSearch::Trail
         );
         let selected = shortest || restricted;
-        let walk_mode = if shortest {
+        if shortest {
             self.word("SHORTEST")?;
             self.word("WALK")?;
-            true
-        } else if restricted {
-            true
-        } else {
-            self.take_word("WALK")?
-        };
+        } else if !restricted {
+            self.take_word("WALK")?;
+        }
         let expected_atom = if search == GraphWalkSearch::Trail {
             "one finite quantified TRAIL atom"
         } else if restricted {
@@ -598,7 +607,7 @@ impl<'a> Parser<'a> {
                 self.punct(b':', ":")?;
                 let relation = self.name()?;
                 let bound_at = self.current.at;
-                let walk = self.pattern_walk_bounds(walk_mode)?;
+                let walk = self.pattern_walk_bounds()?;
                 if selected && walk.is_none() {
                     return Err(error(
                         bound_at,
@@ -677,19 +686,10 @@ impl<'a> Parser<'a> {
     /// No source-text rewriting, guessed bound or implicit truncation occurs.
     fn pattern_walk_bounds(
         &mut self,
-        enabled: bool,
     ) -> Result<Option<crate::GraphWalkBounds>, GraphPatternTextError> {
         let at = self.current.at;
         if !self.take(b'*')? {
             return Ok(None);
-        }
-        if !enabled {
-            return Err(error(
-                at,
-                GraphPatternTextErrorKind::Expected(
-                    "explicit MATCH WALK, TRAIL, ACYCLIC or SIMPLE for quantified atoms",
-                ),
-            ));
         }
         let (minimum, maximum) = if self.take(b'.')? {
             self.punct(b'.', "..")?;
@@ -1065,11 +1065,17 @@ mod capture_tests {
         .unwrap();
         let body = &syntax.scopes[0].body;
         assert_eq!(
-            body.variables.iter().map(|name| name.text).collect::<Vec<_>>(),
+            body.variables
+                .iter()
+                .map(|name| name.text)
+                .collect::<Vec<_>>(),
             vec!["n", "b", "a"]
         );
         assert_eq!(
-            body.captures.iter().map(|name| name.text).collect::<Vec<_>>(),
+            body.captures
+                .iter()
+                .map(|name| name.text)
+                .collect::<Vec<_>>(),
             vec!["b", "a"]
         );
     }
@@ -1085,7 +1091,10 @@ mod capture_tests {
             let arguments = GqlParameters::new().with_int64("offset", 1).unwrap();
             assert_eq!(
                 run(&text, &arguments, &values),
-                vec![vec![Some(VId(1)), Some(VId(2))], vec![Some(VId(1)), Some(VId(3))]]
+                vec![
+                    vec![Some(VId(1)), Some(VId(2))],
+                    vec![Some(VId(1)), Some(VId(3))]
+                ]
             );
             let arguments = GqlParameters::new().with_int64("offset", 10).unwrap();
             let expected = if clause == "MATCH" {
@@ -1128,7 +1137,10 @@ mod capture_tests {
                 &GqlParameters::new(),
                 &values,
             ),
-            vec![vec![Some(VId(1)), Some(VId(2))], vec![Some(VId(1)), Some(VId(3))]]
+            vec![
+                vec![Some(VId(1)), Some(VId(2))],
+                vec![Some(VId(1)), Some(VId(3))]
+            ]
         );
     }
 
@@ -1173,12 +1185,20 @@ mod capture_tests {
         assert_eq!(captures[0].text, last.text);
         let overflow = Filter::Boolean {
             program: vec![boolean::SyntaxItem::Expression {
-                columns: vec![(Name { text: "overflow", at: 29 }, key)],
+                columns: vec![(
+                    Name {
+                        text: "overflow",
+                        at: 29,
+                    },
+                    key,
+                )],
                 program: Vec::new(),
             }],
             at: 0,
         };
-        let failure = predicate_captures(&mut variables, &[overflow], &[]).err().unwrap();
+        let failure = predicate_captures(&mut variables, &[overflow], &[])
+            .err()
+            .unwrap();
         assert_eq!(failure.offset, 29);
         assert!(matches!(
             failure.kind,
