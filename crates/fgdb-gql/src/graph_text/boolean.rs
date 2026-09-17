@@ -224,6 +224,9 @@ impl<'a> Parser<'a> {
         let mut token = self.current;
         let mut depth = 0_usize;
         let mut arithmetic = false;
+        let mut operand_end = false;
+        let mut after_dot = false;
+        let property_compound = self.starts_compound_property_predicate()?;
         loop {
             match token.kind {
                 TokenKind::End | TokenKind::Punct(b'{' | b'}') => break,
@@ -232,23 +235,45 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b')') => depth -= 1,
                 TokenKind::Punct(b'|') => return Ok(true),
                 TokenKind::Punct(b'+' | b'*' | b'/' | b'%') => arithmetic = true,
+                TokenKind::Punct(b'-') => {
+                    // A signed numeric RHS keeps the original typed comparison
+                    // (including i64::MIN). Binary subtraction and nonliteral
+                    // unary negation require the existing scalar compiler.
+                    if operand_end
+                        || token.at == self.current.at
+                        || !matches!(lexer.clone().next()?.kind, TokenKind::Digits(_))
+                    {
+                        arithmetic = true;
+                    }
+                }
                 TokenKind::Word(word) => {
-                    if [
-                        "UPPER",
-                        "LOWER",
-                        "TRIM",
-                        "SUBSTRING",
-                        "CHAR_LENGTH",
-                        "STARTS",
-                        "ENDS",
-                        "CONTAINS",
-                    ]
-                    .iter()
-                    .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    if !after_dot
+                        && [
+                            "ABS",
+                            "COALESCE",
+                            "NULLIF",
+                            "UPPER",
+                            "LOWER",
+                            "TRIM",
+                            "SUBSTRING",
+                            "CHAR_LENGTH",
+                        ]
+                        .iter()
+                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                        && matches!(lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+                    {
+                        return Ok(true);
+                    }
+                    if !after_dot
+                        && operand_end
+                        && ["STARTS", "ENDS", "CONTAINS"]
+                            .iter()
+                            .any(|keyword| word.eq_ignore_ascii_case(keyword))
                     {
                         return Ok(true);
                     }
                     if depth == 0
+                        && !after_dot
                         && [
                             "AND", "OR", "RETURN", "SET", "REMOVE", "WITH", "MATCH", "OPTIONAL",
                         ]
@@ -257,20 +282,33 @@ impl<'a> Parser<'a> {
                     {
                         break;
                     }
-                    // A bare literal left operand with an IN/NOT IN list takes
-                    // the shared scalar path so three-valued membership keeps
-                    // its unknown result instead of a Boolean Truth leaf.
+                    // Ordinary property membership retains comparison lowering
+                    // and its per-member admission. Continue scanning so an
+                    // actual computed list operand still selects scalar IR.
+                    // Other left operands (including literals) need scalar IN.
+                    // NOT is scanned normally, never by consuming an extra token.
                     if depth == 0
-                        && (word.eq_ignore_ascii_case("IN")
-                            || (word.eq_ignore_ascii_case("NOT")
-                                && matches!(lexer.next()?.kind, TokenKind::Word(next)
-                                    if next.eq_ignore_ascii_case("IN"))))
+                        && !after_dot
+                        && !property_compound
+                        && word.eq_ignore_ascii_case("IN")
                     {
                         return Ok(true);
                     }
                 }
                 _ => {}
             }
+            operand_end = match token.kind {
+                TokenKind::Digits(_) | TokenKind::Parameter(_) | TokenKind::Quoted(_)
+                | TokenKind::Punct(b')' | b']') => true,
+                TokenKind::Word(word) => {
+                    after_dot
+                        || !["NOT", "IN", "BETWEEN", "IS", "AND", "OR"]
+                            .iter()
+                            .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                }
+                _ => false,
+            };
+            after_dot = matches!(token.kind, TokenKind::Punct(b'.'));
             token = lexer.next()?;
         }
         Ok(arithmetic)
@@ -914,5 +952,89 @@ mod compound_tests {
             );
             assert!(result.is_err(), "{predicate}");
         }
+    }
+
+    #[test]
+    fn scalar_dispatch_recognizes_subtraction_and_numeric_functions() {
+        let values = [
+            Some(CanonicalScalar::Int(-3)),
+            Some(CanonicalScalar::Int(0)),
+            Some(CanonicalScalar::Int(3)),
+            Some(CanonicalScalar::Null),
+            None,
+        ];
+        for (predicate, expected) in [
+            ("n.p - 1 = 2", vec![VId(3)]),
+            ("-n.p = 3", vec![VId(1)]),
+            ("n.p = -n.p", vec![VId(2)]),
+            ("ABS(n.p) = 3", vec![VId(1), VId(3)]),
+            ("COALESCE(n.p,7) = 7", vec![VId(4), VId(5)]),
+            ("NULLIF(n.p,3) IS NULL", vec![VId(3), VId(4), VId(5)]),
+        ] {
+            assert_eq!(rows(predicate, &values), expected, "{predicate}");
+        }
+    }
+
+    #[test]
+    fn scalar_dispatch_preserves_keyword_identifiers_and_signed_literal_lowering() {
+        for name in [
+            "upper", "lower", "trim", "substring", "char_length", "starts", "ends",
+            "contains", "abs", "coalesce", "nullif",
+        ] {
+            let text = format!(
+                "MATCH ({name}),(other) WHERE {name}=other RETURN {name},other"
+            );
+            let pattern = PreparedGraphText::prepare(&text, |_, _| None)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            assert_eq!(pattern.columns(), &[name, "other"]);
+            let property = PreparedGraphText::prepare(
+                &format!("MATCH (n) WHERE n.{name}=1 RETURN n"),
+                |kind, _| {
+                    (kind == GraphSymbolKind::Property)
+                        .then_some(GraphSymbol::Property(PropertyKeyId(1)))
+                },
+            )
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+            assert_eq!(property.canonical_bytes(), prepare("n.p=1").canonical_bytes());
+        }
+        let syntax = Parser::new(
+            "MATCH (n) WHERE n.p=-9223372036854775808 RETURN n"
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        assert!(matches!(
+            syntax.filters.as_slice(),
+            [Filter::Property {
+                comparison: IntegerComparison::Equal,
+                value: Number::Literal(GqlParameterValue::Int64(i64::MIN)),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn scalar_dispatch_keeps_computed_members_and_literal_unknown_membership() {
+        let values = [
+            Some(CanonicalScalar::Int(1)),
+            Some(CanonicalScalar::Int(2)),
+            Some(CanonicalScalar::Int(3)),
+            None,
+        ];
+        assert_eq!(rows("n.p IN [n.q+1,3]", &values), vec![VId(3)]);
+        assert_eq!(
+            rows("n.p NOT IN [n.q-1]", &values),
+            vec![VId(1), VId(2), VId(3)]
+        );
+        assert!(rows("TRUE IN [NULL]", &values).is_empty());
+        assert!(rows("TRUE NOT IN [NULL]", &values).is_empty());
+        assert_eq!(
+            rows("NULL NOT IN []", &values),
+            vec![VId(1), VId(2), VId(3), VId(4)]
+        );
     }
 }
