@@ -122,6 +122,127 @@ impl AdjacencyIndex {
     }
 }
 
+/// Rebuildable equality candidates over one admitted generation, never an
+/// authority beside its patches (FG-INV-18). Keys are (property key, canonical
+/// scalar transcript) seen in ANY version of a vertex's history; candidates
+/// are a sorted, deduped superset. The visible winner row at `as_of` is the
+/// only authority — the caller re-checks the predicate against it.
+#[derive(Clone, Debug)]
+pub(crate) struct PropertyEqualityIndex {
+    candidates: BTreeMap<(PropertyKeyId, Box<[u8]>), Vec<VId>>,
+}
+
+impl PropertyEqualityIndex {
+    pub(crate) fn build(patches: &[VertexPatchRows]) -> Self {
+        let mut candidates: BTreeMap<(PropertyKeyId, Box<[u8]>), Vec<VId>> = BTreeMap::new();
+        for patch in patches {
+            for row in patch.iter() {
+                for (key, value) in &row.props {
+                    if matches!(value, CanonicalScalar::Null) {
+                        continue;
+                    }
+                    let Ok(encoded) = value.encode() else {
+                        continue;
+                    };
+                    candidates
+                        .entry((*key, encoded.into_boxed_slice()))
+                        .or_default()
+                        .push(row.vid);
+                }
+            }
+        }
+        for vids in candidates.values_mut() {
+            vids.sort_unstable();
+            vids.dedup();
+        }
+        Self { candidates }
+    }
+
+    /// Sorted candidate VIds whose history ever carried this exact canonical
+    /// value under `key`, or an empty slice when none did.
+    pub(crate) fn lookup(&self, key: PropertyKeyId, value: &CanonicalScalar) -> &[VId] {
+        let Ok(encoded) = value.encode() else {
+            return &[];
+        };
+        self.candidates
+            .get(&(key, encoded.into_boxed_slice()))
+            .map_or(&[][..], Vec::as_slice)
+    }
+}
+
+/// Serve an equality-bound vertex-only plan from the equality index. Returns
+/// `None` unless the plan is a vertex scan whose prefix constrains slot 0 (or
+/// slot 1 with an identical value bound through the join) with an equality
+/// predicate; every other shape keeps the scan path verbatim.
+fn bound_vertices<'a, E, Row>(
+    snapshot: &'a Snapshot,
+    logical: &fgdb_gql::algebra::GlaPlan<Row>,
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<Vec<&'a VertexRow>>, E> {
+    use fgdb_gql::algebra::{GlaOperator, IntegerComparison, VertexPredicate};
+    if !matches!(logical.operators().first(), Some(GlaOperator::ScanVertices)) {
+        return Ok(None);
+    }
+    let prefix = &logical.operators()[1..];
+    let mut equality: Option<(PropertyKeyId, CanonicalScalar)> = None;
+    let mut bound_predicates: &[VertexPredicate] = &[];
+    for op in prefix {
+        match op {
+            GlaOperator::Select { slot, predicates } if slot.ordinal() < 2 => {
+                let mut found = None;
+                for predicate in predicates {
+                    let (key, value) = match predicate {
+                        VertexPredicate::IntegerProperty {
+                            key,
+                            comparison: IntegerComparison::Equal,
+                            value,
+                        } => (*key, CanonicalScalar::Int(*value)),
+                        VertexPredicate::ScalarProperty { key, predicate }
+                            if predicate.comparison() == IntegerComparison::Equal =>
+                        {
+                            // Equality on a non-integer canonical scalar; a
+                            // stored Null is never an equality candidate.
+                            match predicate.value() {
+                                CanonicalScalar::Null => continue,
+                                scalar => (*key, scalar.clone()),
+                            }
+                        }
+                        _ => continue,
+                    };
+                    found = Some((key, value));
+                    break;
+                }
+                if let Some((key, value)) = found {
+                    equality = Some((key, value));
+                    bound_predicates = predicates;
+                    break;
+                }
+            }
+            // Only a leading run of selections is index-served; anything
+            // structural after the scan keeps the scan path.
+            GlaOperator::Project { .. } | GlaOperator::Distinct | GlaOperator::OrderByVertexId => {}
+            _ => return Ok(None),
+        }
+    }
+    let Some((key, value)) = equality else {
+        return Ok(None);
+    };
+    let mut rows = Vec::new();
+    for vid in snapshot.property_index.lookup(key, &value) {
+        control(SourceEvent::Work)?;
+        if bound_predicates
+            .iter()
+            .all(|predicate| predicate.matches(&row.labels, &row.props))
+        {
+            control(SourceEvent::SnapshotRecord)?;
+            control(SourceEvent::ScratchEntry)?;
+            rows.push(row);
+        }
+    }
+    Ok(Some(rows))
+}
+
 #[cfg(test)]
 mod indexed_tests {
     use super::*;
@@ -527,7 +648,12 @@ pub(super) fn admit<'a, E, Row>(
 ) -> Result<BorrowedTables<'a>, E> {
     use fgdb_gql::algebra::GlaOperator;
     if !logical.scans_edges() {
-        let vertices = scan_vertices(&snapshot.patches, as_of, control)?;
+        // Equality-bound vertex scans serve from the per-generation index;
+        // every other node shape keeps the O(|V|) scan verbatim.
+        let vertices = match bound_vertices(snapshot, logical, as_of, control)? {
+            Some(vertices) => vertices,
+            None => scan_vertices(&snapshot.patches, as_of, control)?,
+        };
         // A node-root semijoin needs both base tables. Keep isolated outer
         // vertices, admit topology once, and charge every base record to the
         // same allowance. Probe execution never rereads either source table.
