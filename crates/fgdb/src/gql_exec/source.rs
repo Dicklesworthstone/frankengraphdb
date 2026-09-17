@@ -130,13 +130,19 @@ impl AdjacencyIndex {
 #[derive(Clone, Debug)]
 pub(crate) struct PropertyEqualityIndex {
     candidates: BTreeMap<(PropertyKeyId, Box<[u8]>), Vec<VId>>,
+    histories: BTreeMap<VId, Vec<(CommitSeq, usize, usize)>>,
 }
 
 impl PropertyEqualityIndex {
     pub(crate) fn build(patches: &[VertexPatchRows]) -> Self {
         let mut candidates: BTreeMap<(PropertyKeyId, Box<[u8]>), Vec<VId>> = BTreeMap::new();
-        for patch in patches {
-            for row in patch.iter() {
+        let mut histories: BTreeMap<VId, Vec<(CommitSeq, usize, usize)>> = BTreeMap::new();
+        for (patch_at, patch) in patches.iter().enumerate() {
+            for (row_at, row) in patch.iter().enumerate() {
+                histories
+                    .entry(row.vid)
+                    .or_default()
+                    .push((row.created_at, patch_at, row_at));
                 for (key, value) in &row.props {
                     if matches!(value, CanonicalScalar::Null) {
                         continue;
@@ -155,7 +161,13 @@ impl PropertyEqualityIndex {
             vids.sort_unstable();
             vids.dedup();
         }
-        Self { candidates }
+        for history in histories.values_mut() {
+            history.sort_unstable();
+        }
+        Self {
+            candidates,
+            histories,
+        }
     }
 
     /// Sorted candidate VIds whose history ever carried this exact canonical
@@ -167,6 +179,35 @@ impl PropertyEqualityIndex {
         self.candidates
             .get(&(key, encoded.into_boxed_slice()))
             .map_or(&[][..], Vec::as_slice)
+    }
+
+    /// Latest statement at the cut, with later patches winning equal creation
+    /// sequences exactly as in visit_vertices. Retirements remain authoritative.
+    fn visible_row<'a, E>(
+        &self,
+        patches: &'a [VertexPatchRows],
+        vid: VId,
+        as_of: CommitSeq,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<Option<&'a VertexRow>, E> {
+        let Some(history) = self.histories.get(&vid) else {
+            return Ok(None);
+        };
+        let (mut low, mut high) = (0, history.len());
+        while low < high {
+            control(SourceEvent::Work)?;
+            let middle = low + (high - low) / 2;
+            if history[middle].0 <= as_of {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        Ok(low.checked_sub(1).and_then(|at| {
+            let (_, patch, row) = history[at];
+            let row = &patches[patch][row];
+            row.visible_at(as_of).then_some(row)
+        }))
     }
 }
 
@@ -231,11 +272,13 @@ fn bound_vertices<'a, E, Row>(
     let mut rows = Vec::new();
     for vid in snapshot.property_index.lookup(key, &value) {
         control(SourceEvent::Work)?;
-        // The visible winner at as_of is the authority; the index only names
-        // candidates. Resolution uses find_vertex' replacement rule, exactly
-        // like visit_vertices' winner selection, then re-checks the full
-        // predicate. Lookup order keeps ascending VId.
-        if let Some(row) = find_vertex(&snapshot.patches, *vid, as_of, control)? {
+        // Resolve only this candidate's history, not every snapshot patch.
+        // The visible row remains the authority for the complete predicate.
+        if let Some(row) =
+            snapshot
+                .property_index
+                .visible_row(&snapshot.patches, *vid, as_of, control)?
+        {
             if bound_predicates
                 .iter()
                 .all(|predicate| predicate.matches(&row.labels, &row.props))
@@ -385,7 +428,9 @@ mod indexed_tests {
         };
         let patches = vec![
             // v1: value 7 at creation, changed to 8; v2 created with 7 later.
-            patch(&[VertexRow { ..row(1, 1, None, 7) }]),
+            patch(&[VertexRow {
+                ..row(1, 1, None, 7)
+            }]),
             patch(&[
                 VertexRow {
                     retired_at: Some(CommitSeq(2)),
@@ -422,14 +467,13 @@ mod indexed_tests {
             // At every cut the re-checked winner set equals the scan answer.
             let mut winners = Vec::new();
             for vid in index.lookup(PropertyKeyId(1), &CanonicalScalar::Int(7)) {
-                if let Some(row) = find_vertex(&patches, *vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
+                if let Some(row) = index
+                    .visible_row(&patches, *vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
                     .unwrap()
                 {
-                    if row
-                        .props
-                        .iter()
-                        .any(|(key, value)| *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7))
-                    {
+                    if row.props.iter().any(|(key, value)| {
+                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7)
+                    }) {
                         winners.push(row.vid);
                     }
                 }

@@ -11,7 +11,12 @@
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, RelationBind, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::{GqlParameters, GqlQueryPolicy, PreparedGqlTemplate};
+use fgdb_gql::{
+    GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy, GqlScalarParameter,
+    GraphSymbol, GraphSymbolKind, PreparedGqlTemplate, PreparedGraphText,
+};
+use fgdb_types::CanonicalScalarKind;
+use fgdb_types::CanonicalText;
 use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
 
 const R: RelationId = RelationId(1);
@@ -22,6 +27,8 @@ const BOUND: i64 = 42;
 const ID_TEXT: &str = "MATCH (n) WHERE n.p = $v RETURN n";
 const LABELED_TEXT: &str = "MATCH (n:Tag) WHERE n.p = $v RETURN n";
 const TEXT_TEXT: &str = "MATCH (n) WHERE n.q = $w RETURN n";
+const RANGE_TEXT: &str = "MATCH (n) WHERE n.p > $v RETURN n";
+const UNBOUND_TEXT: &str = "MATCH (n) RETURN n";
 
 fn keys() -> DatabaseKeys {
     DatabaseKeys::new(
@@ -59,48 +66,52 @@ async fn generated(
                 batch.create_vertex(
                     VId(id),
                     vec![L],
-                    vec![(P, CanonicalScalar::Int((id % 3) as i64))],
+                    vec![(P, CanonicalScalar::Int(if id % 2 == 0 { BOUND } else { 1 }))],
                 );
             }
             batch.create_vertex(
                 VId(90),
                 vec![],
-                vec![(Q, CanonicalScalar::Text("hit".into()))],
+                vec![(
+                    Q,
+                    CanonicalScalar::Text(CanonicalText::new_ucs_basic("hit").unwrap()),
+                )],
             );
         } else {
-            match rng.next() % 4 {
-                // property update: value moves, making history candidates stale
-                0 => {
-                    let id = rng.next() % 24;
-                    batch.set_vertex_property(
-                        VId(id),
-                        P,
-                        Some(CanonicalScalar::Int((rng.next() % 3) as i64)),
-                    );
-                }
-                // label flip
-                1 => {
-                    let id = rng.next() % 24;
-                    batch.set_vertex_label(VId(id), L, rng.next() % 2 == 0);
-                }
-                // vertex delete
-                2 if commit >= 2 => {
-                    let id = rng.next() % 24;
-                    batch.delete_vertex(VId(id));
-                }
-                // text property flip between the two canonical values
-                _ => {
-                    batch.set_vertex_property(
-                        VId(90),
-                        Q,
-                        Some(CanonicalScalar::Text(if rng.next() % 2 == 0 {
-                            "hit".into()
-                        } else {
-                            "miss".into()
-                        })),
-                    );
-                }
-            }
+            // Every seed exercises all transitions, including a newly matching
+            // value that a first-insert-only index cannot discover.
+            batch.set_vertex_property(
+                VId(1),
+                P,
+                Some(CanonicalScalar::Int(if commit % 2 == 1 {
+                    BOUND
+                } else {
+                    1
+                })),
+            );
+            batch.set_vertex_property(
+                VId(0),
+                P,
+                if commit == 5 {
+                    None
+                } else {
+                    Some(CanonicalScalar::Int(if rng.next() % 2 == 0 {
+                        BOUND
+                    } else {
+                        2
+                    }))
+                },
+            );
+            batch.set_vertex_label(VId(2), L, commit % 2 == 0);
+            batch.delete_vertex(VId(u128::from(10 + commit * 2)));
+            batch.set_vertex_property(
+                VId(90),
+                Q,
+                Some(CanonicalScalar::Text(
+                    CanonicalText::new_ucs_basic(if commit % 2 == 0 { "hit" } else { "miss" })
+                        .unwrap(),
+                )),
+            );
         }
         seqs.push(db.write(cx, batch).await.unwrap());
     }
@@ -129,6 +140,10 @@ fn oracle(db: &Database<MemVfs>, at: CommitSeq, kind: Kind) -> Vec<VId> {
                 *key == Q
                     && matches!(value, CanonicalScalar::Text(actual) if actual.as_str() == "hit")
             }),
+            Kind::Range => row.props.iter().any(|(key, value)| {
+                *key == P && matches!(value, CanonicalScalar::Int(actual) if *actual > BOUND)
+            }),
+            Kind::Unbound => true,
         })
         .map(|row| row.vid)
         .collect()
@@ -139,6 +154,8 @@ enum Kind {
     Int,
     Labeled,
     Text,
+    Unbound,
+    Range,
 }
 
 /// Indexed answers == scan answers at every cut, including values that were
@@ -147,36 +164,44 @@ enum Kind {
 #[test]
 fn equality_bound_answers_equal_scan_answers_across_history() {
     for (lab_seed, graph_seed) in [
-        (0xbpm_0001_u64, 11_u64),
-        (0xbpm_0002, 23),
-        (0xbpm_0003, 0xdead_f00d),
+        (0xb01_0001_u64, 11_u64),
+        (0xb01_0002, 23),
+        (0xb01_0003, 0xdead_f00d),
     ] {
         let ((), report) = run_async_under_lab(lab_seed, move |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let seqs = generated(graph_seed, &mut db, &commit).await;
-            let names = RelationBind::new()
-                .with_relation("R", R)
-                .with_label("Tag", L)
-                .with_property("p", P)
-                .with_property("q", Q);
-            let int_template = PreparedGqlTemplate::prepare(ID_TEXT, &names).unwrap();
-            let labeled_template = PreparedGqlTemplate::prepare(LABELED_TEXT, &names).unwrap();
-            let text_template = PreparedGqlTemplate::prepare(TEXT_TEXT, &names).unwrap();
+            let symbols = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+                (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(Q)),
+                (GraphSymbolKind::Label, "Tag") => Some(GraphSymbol::Label(L)),
+                _ => None,
+            };
+            let int_template = PreparedGraphText::prepare(ID_TEXT, symbols).unwrap();
+            let labeled_template = PreparedGraphText::prepare(LABELED_TEXT, symbols).unwrap();
+            let text_template = PreparedGraphText::prepare_with_parameter_types(
+                TEXT_TEXT,
+                &[("w", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
+                symbols,
+            )
+            .unwrap();
+            let range_template = PreparedGraphText::prepare(RANGE_TEXT, symbols).unwrap();
+            let unbound_template = PreparedGraphText::prepare(UNBOUND_TEXT, symbols).unwrap();
             let int_args = GqlParameters::new().with_int64("v", BOUND).unwrap();
-            let text_args = GqlParameters::new().with_string("w", "hit").unwrap();
+            let text_args = GqlParameters::new().with_text("w", "hit").unwrap();
             let mut saw_nonempty = [false; 3];
             for at in &seqs {
-                for (kind, template, args) in [
-                    (Kind::Int, &int_template, &int_args),
-                    (Kind::Labeled, &labeled_template, &int_args),
-                    (Kind::Text, &text_template, &text_args),
+                for (kind, slot, template, args) in [
+                    (Kind::Int, 0usize, &int_template, &int_args),
+                    (Kind::Labeled, 1, &labeled_template, &int_args),
+                    (Kind::Text, 2, &text_template, &text_args),
                 ] {
                     let query = template.bind_parameters(args).unwrap();
                     let expected = oracle(&db, *at, kind);
                     let rows = db
-                        .execute_prepared_query_governed_at(
+                        .execute_graph_pattern_governed_at(
                             &contexts.query(),
                             &query,
                             *at,
@@ -186,19 +211,33 @@ fn equality_bound_answers_equal_scan_answers_across_history() {
                     let got: Vec<VId> = rows
                         .value
                         .iter()
-                        .map(|row| row.as_vertex().unwrap())
+                        .map(|row| row.get(0).unwrap().as_vertex().unwrap())
                         .collect();
-                    assert_eq!(
-                        got,
-                        expected,
-                        "at={at:?} kind={kind:?}",
-                        kind = match kind {
-                            Kind::Int => "int",
-                            Kind::Labeled => "labeled",
-                            Kind::Text => "text",
-                        }
-                    );
-                    saw_nonempty[kind as usize] |= !rows.value.is_empty();
+                    assert_eq!(got, expected, "at={at:?} direction={}", slot);
+                    saw_nonempty[slot] |= !got.is_empty();
+                }
+                // Scan-path shapes: a range predicate and an unbound vertex
+                // scan must bypass the index yet answer identically to the
+                // storage oracle.
+                for (kind, template, args) in [
+                    (Kind::Range, &range_template, &int_args),
+                    (Kind::Unbound, &unbound_template, &GqlParameters::new()),
+                ] {
+                    let query = template.bind_parameters(args).unwrap();
+                    let rows = db
+                        .execute_graph_pattern_governed_at(
+                            &contexts.query(),
+                            &query,
+                            *at,
+                            GqlQueryPolicy::new(1_000_000, 1_000_000, 10_000_000, 10_000_000),
+                        )
+                        .unwrap();
+                    let got: Vec<VId> = rows
+                        .value
+                        .iter()
+                        .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+                        .collect();
+                    assert_eq!(got, oracle(&db, *at, kind), "scan at={at:?}");
                 }
             }
             assert!(
@@ -215,25 +254,28 @@ fn equality_bound_answers_equal_scan_answers_across_history() {
 #[test]
 fn equality_lookup_charges_stay_constant_as_vertex_count_grows() {
     let mut charged = Vec::new();
-    for (lab_seed, total) in [(0xbpm_0042_u64, 1_000_usize), (0xbpm_0043, 50_000)] {
+    for (lab_seed, total) in [(0xb01_0042_u64, 1_000_usize), (0xb01_0043, 50_000)] {
         let (result, report) = run_async_under_lab(lab_seed, move |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let query_cx = contexts.query();
-            let names = RelationBind::new().with_property("p", P);
-            let template = PreparedGqlTemplate::prepare(ID_TEXT, &names).unwrap();
+            let symbols = |kind: GraphSymbolKind, name: &str| match (kind, name) {
+                (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+                _ => None,
+            };
+            let template = PreparedGraphText::prepare(ID_TEXT, symbols).unwrap();
             let args = GqlParameters::new().with_int64("v", BOUND).unwrap();
             let query = template.bind_parameters(&args).unwrap();
             let wide = GqlQueryPolicy::new(1_000_000, 1_000_000, 10_000_000, 10_000_000);
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let at = graph_of(&mut db, &commit, total).await;
             let run = db
-                .execute_prepared_query_governed_at(&query_cx, &query, at, wide)
+                .execute_graph_pattern_governed_at(&query_cx, &query, at, wide)
                 .unwrap();
             (
                 run.rows.snapshot_records,
                 run.evaluator.work_units,
-                run.value,
+                run.value.len(),
             )
         });
         assert!(report.lab_test_passed(), "total {total}: {report:?}");
@@ -246,7 +288,7 @@ fn equality_lookup_charges_stay_constant_as_vertex_count_grows() {
     assert!(charged[0].1.0 > 0, "equality lookup must admit matches");
 }
 
-/// Chunked commits: `total` vertices, every 100th carries BOUND under P,
+/// Chunked commits: exactly the first ten vertices carry BOUND under P;
 /// everything else carries a different value. Returns the final commit.
 async fn graph_of(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx, total: usize) -> CommitSeq {
     let mut seq = CommitSeq(0);
@@ -255,10 +297,10 @@ async fn graph_of(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx, total: u
         let mut batch = WriteBatch::new(R);
         let end = (at + 1_000).min(total);
         for index in at..end {
-            let value = if index % 100 == 0 {
+            let value = if index < 10 {
                 CanonicalScalar::Int(BOUND)
             } else {
-                CanonicalScalar::Int(1 + (index % 97) as i64)
+                CanonicalScalar::Int(-1 - (index % 97) as i64)
             };
             batch.create_vertex(VId(index as u128), vec![], vec![(P, value)]);
         }
