@@ -52,6 +52,7 @@ fn execute(text: &str, policy: fgdb_gql::GqlQueryPolicy) -> Result<
     let prepared = fgdb_gql::PreparedGraphSetText::prepare(text, |_, _| None).unwrap()
         .bind_parameters(&fgdb_gql::GqlParameters::new()).unwrap();
     prepared.execute_governed(policy, |pattern, budget| {
+        pattern.plan().execute_governed_with_properties(
             1, [fgdb_types::VId(1)], [], |_, _| Ok::<_, ()>(true),
             |_, _| Ok(None), budget, || Ok::<_, ()>(()),
         )
@@ -64,6 +65,7 @@ fn list_growth_and_unwind_fanout_cannot_hide_behind_limit_zero() {
     let wide = (0..256).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
     let ample = GqlQueryPolicy::new(100, 1000, 1_000_000, 1_000_000);
     let small_list = "MATCH (n) RETURN [] AS xs LIMIT 0";
+    let large_list = format!("MATCH (n) RETURN [{wide}] AS xs LIMIT 0");
     let baseline = execute(small_list, ample).unwrap().evaluator.scratch_entries;
     let tight = GqlQueryPolicy::new(100, 1000, 1_000_000, baseline + 32);
     assert!(execute(small_list, tight).unwrap().value.is_empty());
