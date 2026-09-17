@@ -213,6 +213,8 @@ impl PurposeContexts {
             query: QueryCx {
                 inner: root.restrict::<LocalDatabaseCaps>(),
                 tracker: Arc::clone(&tracker),
+                #[cfg(feature = "simulation-checkpoints")]
+                checkpoint_probe: None,
             },
             txn: TxnCx {
                 inner: root.restrict::<LocalDatabaseCaps>(),
@@ -305,6 +307,36 @@ pub trait StorageReadCx: storage_read_seal::Sealed {
     fn with_restriction_async<Fut: Future>(&self, future: Fut) -> RestrictedFuture<Fut>;
 }
 
+/// Simulation-only observation and exact-ordinal interruption of query checkpoints.
+///
+/// Ordinals are one-based and count only checkpoints whose real runtime check
+/// succeeds. `None` observes without interrupting; `Some(0)` never interrupts.
+/// An injected error affects only the matching checkpoint: it does not request
+/// whole-task cancellation, cancel a region, or make later checkpoints fail.
+#[cfg(feature = "simulation-checkpoints")]
+#[derive(Debug)]
+pub struct SimulationCheckpointProbe {
+    calls: AtomicUsize,
+    stop: Option<usize>,
+}
+
+#[cfg(feature = "simulation-checkpoints")]
+impl SimulationCheckpointProbe {
+    #[must_use]
+    pub const fn new(stop: Option<usize>) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            stop,
+        }
+    }
+
+    /// Number of observed checkpoints, including an injected interruption.
+    #[must_use]
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
 /// Query-only effects.
 ///
 /// ```compile_fail
@@ -320,6 +352,8 @@ pub trait StorageReadCx: storage_read_seal::Sealed {
 pub struct QueryCx {
     inner: Cx<LocalDatabaseCaps>,
     tracker: Arc<ObligationTracker>,
+    #[cfg(feature = "simulation-checkpoints")]
+    checkpoint_probe: Option<Arc<SimulationCheckpointProbe>>,
 }
 
 impl QueryCx {
@@ -329,7 +363,30 @@ impl QueryCx {
     }
 
     pub fn checkpoint(&self) -> Result<(), Box<asupersync::error::Error>> {
-        self.inner.checkpoint().map_err(Box::new)
+        self.inner.checkpoint().map_err(Box::new)?;
+        #[cfg(feature = "simulation-checkpoints")]
+        if let Some(probe) = &self.checkpoint_probe {
+            let ordinal = probe.calls.fetch_add(1, Ordering::Relaxed) + 1;
+            if probe.stop == Some(ordinal) {
+                return Err(Box::new(asupersync::error::Error::cancelled(
+                    &asupersync::types::CancelReason::user("simulation checkpoint interruption"),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Clones this context with a simulation-only checkpoint probe attached.
+    ///
+    /// The original context is unchanged. Clones of the returned context share
+    /// the probe counter. Runtime cancellation takes precedence over probing;
+    /// an injected interruption does not request whole-task cancellation.
+    #[cfg(feature = "simulation-checkpoints")]
+    #[must_use]
+    pub fn with_checkpoint_probe(&self, probe: Arc<SimulationCheckpointProbe>) -> Self {
+        let mut context = self.clone();
+        context.checkpoint_probe = Some(probe);
+        context
     }
 
     /// Runs synchronous delegated code with the local role mask installed as

@@ -37,3 +37,4 @@ fgdb-types = { path = "../fgdb-types" }
 
 [dev-dependencies]
 fgdb-gql = { path = "../fgdb-gql" }
+fgdb-types = { path = "../fgdb-types", features = ["simulation-checkpoints"] }
