@@ -141,9 +141,13 @@ fn indexed_bound_answers_equal_scan_answers_across_history_and_directions() {
                     (&undirected_template, None),
                 ] {
                     let query = template.bind_parameters(&args).unwrap();
+                    // Project{b} + Distinct + OrderByVertexId mirror: sorted
+                    // distinct single-column rows.
                     let expected: Vec<VId> = oracle(&db, *at, VId(0), forward)
                         .into_iter()
-                        .map(|(_, dst)| dst)
+                        .map(|(_, other)| other)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
                         .collect();
                     let rows = db.execute_prepared_query_governed_at(
                         &contexts.query(),
@@ -155,28 +159,34 @@ fn indexed_bound_answers_equal_scan_answers_across_history_and_directions() {
                     saw_nonempty |= !rows.value.is_empty();
                 }
             }
-            // Deleted edges must actually filter: at the final cut the
-            // storage merge has fewer incident triples than the number of
-            // bound-incident edges ever created (every created edge of the
-            // final generation was born before the last commit).
+            // Deleted edges must actually filter: every commit after the
+            // first deletes edges, so bound-incident triples ever created
+            // must exceed what remains visible at the final cut.
+            let final_at = *seqs.last().unwrap();
             let mut ever_incident = 0_u64;
             let mut visible_incident = 0_u64;
             let mut seen_eids = std::collections::BTreeSet::new();
-            for record in db.edges_at(*seqs.last().unwrap()).unwrap() {
+            for record in db.edges_at(final_at).unwrap() {
                 let entry = &record.entry;
-                if entry.relation != R || (entry.src != VId(0) && entry.dst != VId(0)) {
-                    continue;
+                if entry.relation == R && (entry.src == VId(0) || entry.dst == VId(0)) {
+                    seen_eids.insert(entry.eid);
                 }
-                seen_eids.insert(entry.eid);
             }
             for eid in seen_eids {
-                let record = db.edge_at(eid, CommitSeq(u64::MAX)).unwrap();
-                if record.is_some() {
+                ever_incident += 1;
+                if db.edge_at(eid, final_at).unwrap().is_some() {
                     visible_incident += 1;
                 }
-                ever_incident += 1;
             }
             saw_deleted_filtered = ever_incident > visible_incident;
+            assert!(
+                saw_deleted_filtered,
+                "seed {graph_seed}: no deleted edge was ever filtered"
+            );
+            assert!(
+                saw_nonempty,
+                "seed {graph_seed}: differential produced no rows"
+            );
         });
         assert!(report.lab_test_passed(), "seed {graph_seed}: {report:?}");
     }
@@ -213,7 +223,7 @@ fn bound_degree_charges_stay_constant_as_unrelated_edges_grow() {
         assert_eq!(one.rows.snapshot_records, two.rows.snapshot_records);
         assert_eq!(one.evaluator.work_units, two.evaluator.work_units);
         assert_eq!(one.value, two.value);
-        assert_eq!(one.rows.snapshot_records, 20, "degree d charges d records");
+        assert_eq!(one.rows.snapshot_records, 10, "forward bound lookup charges out-degree");
         assert!(one.evaluator.work_units > 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
