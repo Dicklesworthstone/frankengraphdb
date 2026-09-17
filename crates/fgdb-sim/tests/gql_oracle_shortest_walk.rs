@@ -64,7 +64,7 @@ fn policy() -> GqlQueryPolicy {
 async fn generate(db: &mut Database<MemVfs>, cx: &CommitCx, seed: u64) -> (CommitSeq, CommitSeq) {
     let mut batch = WriteBatch::new(R);
     for id in 1..=9 {
-        batch.create_vertex(VId(id), vec![], vec![]);
+        batch.create_vertex(VId(u128::from(id)), vec![], vec![]);
     }
     let mut eid: u128 = 1;
     let mut edge = |batch: &mut WriteBatch, src: u128, dst: u128| {
@@ -191,12 +191,12 @@ fn expected_rows(
 ) -> Vec<(VId, VId)> {
     let mut rows = Vec::new();
     for id in SOURCES {
-        for (dst, count) in settled(graph, VId(id), m, n, direction, false) {
+        for (dst, count) in settled(graph, VId(u128::from(id)), m, n, direction, false) {
             if any {
-                rows.push((VId(id), dst));
+                rows.push((VId(u128::from(id)), dst));
             } else {
                 for _ in 0..count {
-                    rows.push((VId(id), dst));
+                    rows.push((VId(u128::from(id)), dst));
                 }
             }
         }
@@ -327,9 +327,9 @@ fn check_families(
     let bounded: Vec<(VId, VId)> = {
         let mut rows = Vec::new();
         for id in SOURCES {
-            for (dst, count) in settled(live, VId(id), 1, 2, 0, true) {
+            for (dst, count) in settled(live, VId(u128::from(id)), 1, 2, 0, true) {
                 for _ in 0..count {
-                    rows.push((VId(id), dst));
+                    rows.push((VId(u128::from(id)), dst));
                 }
             }
         }
