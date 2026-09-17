@@ -3,9 +3,7 @@
 //! from a database sample, parameter spelling, value, or text substitution.
 
 use super::*;
-use crate::set_text::{
-    BoundSetTextInput, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
-};
+use crate::set_text::{BoundSetTextInput, ReadProjectionTemplate, ReadStageTemplate};
 
 impl PreparedGraphText {
     /// Prepare with explicit types for selected argument names (without `$`).
@@ -93,13 +91,20 @@ impl UnresolvedGraphText<'_> {
             None if column.property.is_some() => Scalar,
             None => Vertex,
         };
-        let input_types: Vec<_> = self.leading_types.iter().copied().chain(self.syntax.columns.iter().map(column_type)).collect();
+        let input_types: Vec<_> = self
+            .leading_types
+            .iter()
+            .copied()
+            .chain(self.syntax.columns.iter().map(column_type))
+            .collect();
         let (mut names, mut types): (Vec<String>, Vec<crate::GraphSetColumnType>) =
             if let Some(projection) = &self.projection {
                 projection
                     .iter()
                     .map(|column| {
-                        let kind = column.value.column_type(&input_types, &self.syntax.parameters);
+                        let kind = column
+                            .value
+                            .column_type(&input_types, &self.syntax.parameters);
                         (column.name.clone(), kind)
                     })
                     .unzip()
@@ -130,7 +135,10 @@ impl UnresolvedGraphText<'_> {
         (names, types)
     }
     pub(crate) fn depth(&self) -> usize {
-        1 + self.leading.len() + usize::from(!self.leading.is_empty() && !self.singleton) + usize::from(self.projection.is_some())
+        1 + self.leading.len()
+            + usize::from(!self.leading.is_empty() && !self.singleton)
+            + usize::from(self.projection.is_some())
+            + usize::from(!self.correlations.is_empty())
             + self
                 .pipeline
                 .iter()
@@ -157,7 +165,18 @@ impl UnresolvedGraphText<'_> {
         let parameter_offsets = self.syntax.parameter_offsets.clone();
         let return_at = self.syntax.return_at;
         if self.singleton {
-            return Ok(BoundSetTextInput { selection: None, parameters, parameter_offsets, return_at, projection: self.projection, quantifier, pipeline: self.pipeline, singleton: true, leading: self.leading, correlations: self.correlations });
+            return Ok(BoundSetTextInput {
+                selection: None,
+                parameters,
+                parameter_offsets,
+                return_at,
+                projection: self.projection,
+                quantifier,
+                pipeline: self.pipeline,
+                singleton: true,
+                leading: self.leading,
+                correlations: self.correlations,
+            });
         }
         let selection = if self.projection.is_none() {
             PreparedGraphText::from_syntax(self.statement, self.syntax, resolve)?

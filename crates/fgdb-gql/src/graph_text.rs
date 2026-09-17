@@ -523,6 +523,36 @@ impl<'a> Parser<'a> {
             self.syntax.labels.push((name, label));
             self.predicates += 1;
         }
+        if self.take(b'{')? && !self.take(b'}')? {
+            loop {
+                self.capacity(
+                    self.predicates,
+                    MAX_PATTERN_PREDICATES,
+                    PatternLimitDimension::Predicates,
+                )?;
+                let key = self.name()?;
+                self.punct(b':', ":")?;
+                let row = match self.current.kind {
+                    TokenKind::Word(binding) => self
+                        .read_row_bindings
+                        .iter()
+                        .position(|candidate| candidate.text == binding),
+                    _ => None,
+                };
+                if let Some(row) = row {
+                    self.advance()?;
+                    self.read_correlations.push((name, key, row));
+                } else {
+                    let filter = self.property_operand(name, key, IntegerComparison::Equal)?;
+                    self.syntax.filters.push(filter);
+                }
+                self.predicates += 1;
+                if !self.take(b',')? {
+                    break;
+                }
+            }
+            self.punct(b'}', "}")?;
+        }
         self.punct(b')', ")")?;
         Ok(name)
     }
@@ -591,9 +621,7 @@ impl<'a> Parser<'a> {
             GqlParameterType::List => {
                 return Err(error(
                     at,
-                    GraphPatternTextErrorKind::Expected(
-                        "list parameters are not scalar operands",
-                    ),
+                    GraphPatternTextErrorKind::Expected("list parameters are not scalar operands"),
                 ));
             }
         };
@@ -673,10 +701,16 @@ impl<'a> Parser<'a> {
             }
             for edge in &self.syntax.edges {
                 if let Some(name) = edge.variable {
-                    self.capacity(self.syntax.columns.len(), MAX_PATTERN_VERTICES, PatternLimitDimension::Columns)?;
+                    self.capacity(
+                        self.syntax.columns.len(),
+                        MAX_PATTERN_VERTICES,
+                        PatternLimitDimension::Columns,
+                    )?;
                     self.syntax.columns.push(Column {
-                        variable: name, property: None,
-                        path: Some(GraphPathFunction::Edge), alias: name,
+                        variable: name,
+                        property: None,
+                        path: Some(GraphPathFunction::Edge),
+                        alias: name,
                     });
                 }
             }
@@ -700,7 +734,10 @@ impl<'a> Parser<'a> {
                     .is_some_and(|path| path.text == expression.text)
                 {
                     (expression, None, Some(GraphPathFunction::Value))
-                } else if self.syntax.edges.iter().any(|edge| edge.variable.is_some_and(|name| name.text == expression.text)) {
+                } else if self.syntax.edges.iter().any(|edge| {
+                    edge.variable
+                        .is_some_and(|name| name.text == expression.text)
+                }) {
                     (expression, None, Some(GraphPathFunction::Edge))
                 } else {
                     if !self

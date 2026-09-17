@@ -518,7 +518,11 @@ impl<'a> Parser<'a> {
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
                 self.punct(b'[', "[")?;
-                let variable = if self.is_punct(b':') { None } else { Some(self.name()?) };
+                let variable = if self.is_punct(b':') {
+                    None
+                } else {
+                    Some(self.name()?)
+                };
                 self.punct(b':', ":")?;
                 let relation = self.name()?;
                 let bound_at = self.current.at;
@@ -843,6 +847,9 @@ impl<'a> Parser<'a> {
             PatternLimitDimension::Identities,
         )?;
         let outer = self.take_pattern();
+        // Leading row aliases are lowered at the root join. They must not
+        // escape an OPTIONAL/EXISTS predicate into a post-join filter.
+        let row_bindings = core::mem::take(&mut self.read_row_bindings);
         // Only positive fields change scope. The lexer, global parameters,
         // original offsets, caps and previously completed clauses never reset.
         let parsed = (|| {
@@ -881,6 +888,7 @@ impl<'a> Parser<'a> {
             body.captures = predicate_captures(&mut body.variables, &body.filters)?;
             Ok::<_, GraphPatternTextError>(body)
         })();
+        self.read_row_bindings = row_bindings;
         let body = match parsed {
             Ok(body) => body,
             Err(error) => {

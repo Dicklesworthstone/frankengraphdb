@@ -220,7 +220,7 @@ where
     let mut rows = match &query.node {
         SetNode::Values => {
             meter.event(GlaExecutionEvent::ScratchEntry)?;
-            vec![GraphValueRow::from_owned_values(Vec::new())]
+            vec![GraphValueRow::unit()]
         }
         SetNode::Unwind { input, value } => {
             let input = run(input, source, meter, operand)?;
@@ -228,12 +228,9 @@ where
             for (row_at, row) in input.into_iter().enumerate() {
                 meter.event(GlaExecutionEvent::Work)?;
                 let column = row.len();
-                let list = projection::evaluate_value(
-                    value,
-                    &row,
-                    column,
-                    &mut |event| meter.event(event),
-                )
+                let list = projection::evaluate_value(value, &row, column, &mut |event| {
+                    meter.event(event)
+                })
                 .map_err(|error| match error {
                     projection::ProjectionFailure::Control(error) => error,
                     projection::ProjectionFailure::Arithmetic { column, error } => {
@@ -263,7 +260,9 @@ where
                     meter.event(GlaExecutionEvent::ScratchEntry)?;
                     let mut cells = Vec::new();
                     for cell in row.values() {
-                        cells.push(projection::copy_value(cell, &mut |event| meter.event(event))?);
+                        cells.push(projection::copy_value(cell, &mut |event| {
+                            meter.event(event)
+                        })?);
                     }
                     // The evaluated element already owns its metered payload;
                     // only the newly retained output cell needs reservation.
@@ -284,7 +283,9 @@ where
                     meter.event(GlaExecutionEvent::ScratchEntry)?;
                     let mut cells = Vec::new();
                     for cell in left_row.values().iter().chain(right_row.values()) {
-                        cells.push(projection::copy_value(cell, &mut |event| meter.event(event))?);
+                        cells.push(projection::copy_value(cell, &mut |event| {
+                            meter.event(event)
+                        })?);
                     }
                     output.push(GraphValueRow::from_owned_values(cells));
                 }

@@ -277,7 +277,7 @@ impl GraphValue {
                 Frame::Root(value) => {
                     total = total.saturating_add(1);
                     if let Self::List(values) = value {
-                        if let Some((first, rest)) = values.split_first() {
+                        if let Some(first) = values.first() {
                             pending.push(Frame::Rest(values, 1));
                             pending.push(Frame::Root(first));
                         }
@@ -432,6 +432,13 @@ impl GraphValueRow {
         debug_assert!(!values.is_empty() && values.len() <= MAX_PATTERN_VERTICES);
         Self {
             values: values.into_boxed_slice(),
+        }
+    }
+
+    /// Zero-column identity tuple used by the relational singleton source.
+    pub(crate) fn unit() -> Self {
+        Self {
+            values: Box::new([]),
         }
     }
 
