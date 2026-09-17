@@ -563,8 +563,9 @@ impl BoundBooleanTemplate {
     }
 }
 
-/// Local comparison tag mirroring the algebra transcript convention.
-fn comparison_tag(comparison: IntegerComparison) -> u8 {
+/// Comparison tag mirroring the algebra transcript convention, shared by
+/// sibling aggregate and having transcripts within this module tree.
+pub(super) fn comparison_tag(comparison: IntegerComparison) -> u8 {
     match comparison {
         IntegerComparison::Equal => 0,
         IntegerComparison::NotEqual => 1,
