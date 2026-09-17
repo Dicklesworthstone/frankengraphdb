@@ -8,6 +8,8 @@
 //! Key allocation/comparison costs and standard collection allocation failure
 //! have the same explicit boundary as the parent Z-set value API.
 
+pub mod presence;
+
 use super::{ZSet, ZSetError, ZSetEvent, admit, event};
 use crate::{LimbLimit, ZWeight};
 use std::collections::{BTreeMap, btree_map::Entry};

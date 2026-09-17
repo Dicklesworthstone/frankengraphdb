@@ -8,6 +8,7 @@
 //! key-size, comparison and callback costs. No durable encoding is introduced.
 
 pub mod aggregate;
+pub mod committed;
 pub mod incremental;
 
 use crate::{LimbLimit, ZWeight, ZWeightError};
