@@ -94,7 +94,7 @@ async fn generate(db: &mut Database<MemVfs>, cx: &CommitCx, seed: u64) -> (Commi
 
     let mut first = WriteBatch::new(R);
     first.delete_edge(varied);
-    let basis2 = db.write(cx, first).await.unwrap();
+    db.write(cx, first).await.unwrap();
     let mut second = WriteBatch::new(R);
     second.delete_edge(tie_a);
     let basis3 = db.write(cx, second).await.unwrap();
