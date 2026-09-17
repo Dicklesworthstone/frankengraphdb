@@ -1,14 +1,17 @@
-//! Zoned values must survive native/GQL writes and both disk recovery paths.
-//! Phase diagnostics precede assertions so a write refusal cannot hide recovery.
+//! Without an engine resolver, zoned writes must refuse before publication.
+//! Phase diagnostics preserve baseline observations across both recovery paths.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, QueryResult, WriteBatch};
+use fgdb::{
+    Database, DatabaseKeys, QueryResult, QueryWriteError, WriteBatch, WriteError, WriteTxnError,
+};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphSymbol, GraphSymbolKind,
-    GraphWriteProgramPolicy,
+    GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphMutationProgramError, GraphSymbol,
+    GraphSymbolKind, GraphWriteProgramError, GraphWriteProgramPolicy,
+    GraphWriteScriptExecutionError,
 };
 use fgdb_types::{
     CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId, ObjectId,
@@ -76,7 +79,11 @@ fn expected_rows(value: Option<&CanonicalScalar>) -> QueryResult {
         columns: vec!["p".into()],
         rows: value
             .into_iter()
-            .map(|value| vec![GraphAggregateValue::Value(GraphValue::Scalar(value.clone()))])
+            .map(|value| {
+                vec![GraphAggregateValue::Value(GraphValue::Scalar(
+                    value.clone(),
+                ))]
+            })
             .collect(),
     }
 }
@@ -113,7 +120,10 @@ fn inspect(
         |seq| *seq == expected_frontier,
         failures,
     );
-    for (name, seq, value) in [("current", None, current), ("historical", Some(before), prior)] {
+    for (name, seq, value) in [
+        ("current", None, current),
+        ("historical", Some(before), prior),
+    ] {
         let native = match seq {
             Some(seq) => db.vertex_at(target, seq),
             None => db.vertex(target),
@@ -124,7 +134,9 @@ fn inspect(
             |row| match (row, value) {
                 (None, None) => true,
                 (Some(row), Some(value)) => {
-                    row.vid == target && row.labels == [TIMESTAMP] && row.props == [(P, value.clone())]
+                    row.vid == target
+                        && row.labels == [TIMESTAMP]
+                        && row.props == [(P, value.clone())]
                 }
                 _ => false,
             },
@@ -137,12 +149,16 @@ fn inspect(
         record(
             &format!("{phase}/{name}/native-baseline"),
             &baseline,
-            |row| row.as_ref().is_some_and(|row| {
-                row.labels == [BASELINE] && row.props == [(P, CanonicalScalar::Int(99))]
-            }),
+            |row| {
+                row.as_ref().is_some_and(|row| {
+                    row.labels == [BASELINE] && row.props == [(P, CanonicalScalar::Int(99))]
+                })
+            },
             failures,
         );
-        let temporal = seq.map_or_else(String::new, |seq| format!(" FOR SYSTEM_TIME AS OF SEQ {}", seq.0));
+        let temporal = seq.map_or_else(String::new, |seq| {
+            format!(" FOR SYSTEM_TIME AS OF SEQ {}", seq.0)
+        });
         for (label, expected) in [
             ("Timestamp", expected_rows(value)),
             ("Baseline", expected_rows(Some(&CanonicalScalar::Int(99)))),
@@ -178,34 +194,53 @@ fn reproduce(path: WritePath, seed: u64) {
         for rebuilding in [false, true] {
             let mode = if rebuilding { "rebuilding" } else { "fast" };
             let phase = format!("{path:?}/{mode}");
-            let dir = std::env::temp_dir().join(format!(
-                "fgdb-zoned-{}-{seed}-{mode}", std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("fgdb-zoned-{}-{seed}-{mode}", std::process::id()));
             eprintln!("{phase}/database: {}", dir.display());
             let mut db = Database::create(&commit, &dir, keys()).await.unwrap();
             let mut batch = WriteBatch::new(R);
-            batch.create_vertex(BASELINE_ID, vec![BASELINE], vec![(P, CanonicalScalar::Int(99))]);
+            batch.create_vertex(
+                BASELINE_ID,
+                vec![BASELINE],
+                vec![(P, CanonicalScalar::Int(99))],
+            );
             let prior = matches!(path, WritePath::Set).then_some(CanonicalScalar::Int(7));
             if let Some(value) = &prior {
                 batch.create_vertex(TARGET_ID, vec![TIMESTAMP], vec![(P, value.clone())]);
             }
             let before = db.write(&commit, batch).await.unwrap();
             let mut target = TARGET_ID;
-            inspect(&db, &query, &format!("{phase}/before"), target, before, before,
-                prior.as_ref(), prior.as_ref(), &mut failures);
+            inspect(
+                &db,
+                &query,
+                &format!("{phase}/before"),
+                target,
+                before,
+                before,
+                prior.as_ref(),
+                prior.as_ref(),
+                &mut failures,
+            );
             let expected = zoned();
-            let accepted = match path {
+            let refused = match path {
                 WritePath::Native => {
                     let mut batch = WriteBatch::new(R);
                     batch.create_vertex(target, vec![TIMESTAMP], vec![(P, expected.clone())]);
                     let result = db.write(&commit, batch).await;
                     eprintln!("{phase}/write: {result:?}");
-                    result.is_ok()
+                    matches!(result, Err(WriteError::FirstCommitterWins { law, detail }) if law == "FG-LAW-FCW-01" && detail == "malformed logical delta template: Scalar")
                 }
                 WritePath::Insert | WritePath::Set => {
                     let mut reserved = if matches!(path, WritePath::Insert) {
-                        let id = db.allocate_identity(&query, GraphInsertRequest::Vertex { row: 0, vertex: 0 }).unwrap();
-                        let ElementId::Vertex(vid) = id else { panic!("vertex allocation returned {id:?}") };
+                        let id = db
+                            .allocate_identity(
+                                &query,
+                                GraphInsertRequest::Vertex { row: 0, vertex: 0 },
+                            )
+                            .unwrap();
+                        let ElementId::Vertex(vid) = id else {
+                            panic!("vertex allocation returned {id:?}")
+                        };
                         target = vid;
                         Some(id)
                     } else {
@@ -216,21 +251,48 @@ fn reproduce(path: WritePath, seed: u64) {
                     } else {
                         "MATCH (n:Timestamp) SET n.p = $stamp"
                     };
-                    let params = GqlParameters::new().with_scalar("stamp", expected.clone()).unwrap();
-                    let result = db.query_write(
-                        &txn, &query, &commit, text, &params, symbols, R,
-                        GraphWriteProgramPolicy::new(policy(), 100, 100, 100),
-                        |_| reserved.take().ok_or("unexpected identity request"),
-                    ).await;
+                    let params = GqlParameters::new()
+                        .with_scalar("stamp", expected.clone())
+                        .unwrap();
+                    let result = db
+                        .query_write(
+                            &txn,
+                            &query,
+                            &commit,
+                            text,
+                            &params,
+                            symbols,
+                            R,
+                            GraphWriteProgramPolicy::new(policy(), 100, 100, 100),
+                            |_| reserved.take().ok_or("unexpected identity request"),
+                        )
+                        .await;
                     eprintln!("{phase}/write: {result:?}");
-                    result.is_ok()
+                    matches!(result,
+                        Err(QueryWriteError::Execute(GraphWriteScriptExecutionError::Program(
+                            GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(
+                                WriteTxnError::Write(WriteError::FirstCommitterWins { law, detail })
+                            ))
+                        ))) if law == "FG-LAW-FCW-01" && detail == "malformed logical delta template: Scalar")
                 }
             };
-            eprintln!("{phase}/write-accepted: {accepted}; before: {before:?}; after: {:?}", db.frontier());
-            let expected_frontier = if accepted { CommitSeq(before.0 + 1) } else { before };
-            let current = if accepted { Some(&expected) } else { prior.as_ref() };
-            inspect(&db, &query, &format!("{phase}/live"), target, before, expected_frontier,
-                prior.as_ref(), current, &mut failures);
+            eprintln!(
+                "{phase}/typed-refusal: {refused}; before: {before:?}; after: {:?}",
+                db.frontier()
+            );
+            let expected_frontier = before;
+            let current = prior.as_ref();
+            inspect(
+                &db,
+                &query,
+                &format!("{phase}/live"),
+                target,
+                before,
+                expected_frontier,
+                prior.as_ref(),
+                current,
+                &mut failures,
+            );
             drop(db);
             let reopened = if rebuilding {
                 Database::open_rebuilding(&commit, &dir, keys()).await
@@ -240,35 +302,53 @@ fn reproduce(path: WritePath, seed: u64) {
             match reopened {
                 Ok(db) => {
                     eprintln!("{phase}/open: Ok");
-                    inspect(&db, &query, &format!("{phase}/reopened"), target, before, expected_frontier,
-                        prior.as_ref(), current, &mut failures);
+                    inspect(
+                        &db,
+                        &query,
+                        &format!("{phase}/reopened"),
+                        target,
+                        before,
+                        expected_frontier,
+                        prior.as_ref(),
+                        current,
+                        &mut failures,
+                    );
                 }
                 Err(error) => {
                     eprintln!("{phase}/open: Err({error:?})");
                     failures.push(format!("{phase}/open: {error:?}"));
                 }
             }
-            if !accepted {
-                failures.push(format!("{phase}: zoned write must commit and roundtrip, not be refused"));
+            if !refused {
+                failures.push(format!(
+                    "{phase}: expected current FCW malformed-scalar refusal"
+                ));
             }
         }
         failures
     });
-    assert!(report.lab_test_passed(), "{report:?}; outcomes: {failures:?}");
-    assert!(failures.is_empty(), "zoned timestamp phase failures:\n{}", failures.join("\n"));
+    assert!(
+        report.lab_test_passed(),
+        "{report:?}; outcomes: {failures:?}"
+    );
+    assert!(
+        failures.is_empty(),
+        "zoned timestamp phase failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
-fn native_zoned_timestamp_roundtrips() {
+fn native_zoned_timestamp_refusal_preserves_baseline() {
     reproduce(WritePath::Native, 0x209e_0001);
 }
 
 #[test]
-fn gql_insert_zoned_timestamp_parameter_roundtrips() {
+fn gql_insert_zoned_timestamp_refusal_preserves_baseline() {
     reproduce(WritePath::Insert, 0x209e_0002);
 }
 
 #[test]
-fn gql_set_zoned_timestamp_parameter_roundtrips() {
+fn gql_set_zoned_timestamp_refusal_preserves_baseline() {
     reproduce(WritePath::Set, 0x209e_0003);
 }
