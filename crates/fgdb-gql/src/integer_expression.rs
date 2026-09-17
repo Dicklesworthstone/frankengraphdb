@@ -66,6 +66,83 @@ pub enum GraphIntegerOp {
     Case,
     SimpleCase { alternatives: usize },
 }
+
+impl GraphIntegerOp {
+    /// Append one postfix template instruction, without compiling expressions
+    /// or replacing parameter holes with arbitrary values. Tags common to the
+    /// executable bytecode retain that encoding; lazy template forms are distinct.
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        match self {
+            Self::Column(column) => {
+                bytes.push(0);
+                bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            }
+            Self::Literal(value) => {
+                bytes.extend_from_slice(&[1, u8::from(value.is_some())]);
+                if let Some(value) = value {
+                    bytes.extend_from_slice(&value.to_be_bytes());
+                }
+            }
+            Self::Unary(op) => bytes.extend_from_slice(&[2, match op {
+                GraphIntegerUnary::Plus => 0,
+                GraphIntegerUnary::Negate => 1,
+                GraphIntegerUnary::Abs => 2,
+            }]),
+            Self::Binary(op) => bytes.extend_from_slice(&[3, match op {
+                GraphIntegerBinary::Add => 0,
+                GraphIntegerBinary::Subtract => 1,
+                GraphIntegerBinary::Multiply => 2,
+                GraphIntegerBinary::Divide => 3,
+                GraphIntegerBinary::Remainder => 4,
+                GraphIntegerBinary::NullIf => 5,
+            }]),
+            Self::Truth(value) => bytes.extend_from_slice(&[5, match value {
+                None => 0, Some(false) => 1, Some(true) => 2,
+            }]),
+            Self::Compare(comparison) => bytes.extend_from_slice(&[6, match comparison {
+                IntegerComparison::Equal => 0,
+                IntegerComparison::NotEqual => 1,
+                IntegerComparison::Less => 2,
+                IntegerComparison::LessOrEqual => 3,
+                IntegerComparison::Greater => 4,
+                IntegerComparison::GreaterOrEqual => 5,
+            }]),
+            Self::IsNull(is_null) => bytes.extend_from_slice(&[7, u8::from(*is_null)]),
+            Self::Not => bytes.push(8),
+            Self::And => bytes.push(9),
+            Self::Or => bytes.push(10),
+            Self::Scalar(value) => {
+                bytes.push(15);
+                let value = value.canonical_value_bytes();
+                bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(value);
+            }
+            Self::ScalarColumn(column) => {
+                bytes.push(16);
+                bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            }
+            Self::Upper => bytes.push(17),
+            Self::Lower => bytes.push(18),
+            Self::Trim => bytes.push(19),
+            Self::CharLength => bytes.push(20),
+            Self::Substring => bytes.push(21),
+            Self::Concat => bytes.push(22),
+            Self::StartsWith => bytes.push(23),
+            Self::EndsWith => bytes.push(24),
+            Self::Contains => bytes.push(25),
+            Self::InList { members } => {
+                bytes.push(26);
+                bytes.extend_from_slice(&(*members as u64).to_be_bytes());
+            }
+            Self::Coalesce => bytes.push(27),
+            Self::Case => bytes.push(28),
+            Self::SimpleCase { alternatives } => {
+                bytes.push(29);
+                bytes.extend_from_slice(&(*alternatives as u64).to_be_bytes());
+            }
+        }
+    }
+}
 impl core::fmt::Debug for GraphIntegerOp {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -792,6 +869,30 @@ mod tests {
                 GraphIntegerEvaluationError::Value(error) => error,
                 GraphIntegerEvaluationError::Control(()) => unreachable!("infallible test control"),
             })
+    }
+
+    #[test]
+    fn template_transcripts_preserve_expression_meaning() {
+        fn transcript(ops: &[GraphIntegerOp]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for op in ops {
+                op.append_template_transcript(&mut bytes);
+            }
+            bytes
+        }
+        let addition = [Literal(Some(8)), Literal(Some(2)), Binary(GraphIntegerBinary::Add)];
+        let subtraction = [Literal(Some(8)), Literal(Some(2)), Binary(GraphIntegerBinary::Subtract)];
+        assert_eq!(evaluate(&addition, &[]), Ok(Some(10)));
+        assert_eq!(evaluate(&subtraction, &[]), Ok(Some(6)));
+        assert_eq!(transcript(&addition), transcript(&addition.clone()));
+        assert_ne!(transcript(&addition), transcript(&subtraction));
+        assert_ne!(transcript(&[Literal(None)]), transcript(&[Literal(Some(0))]));
+        assert_ne!(transcript(&[Column(0)]), transcript(&[Column(1)]));
+        assert_ne!(transcript(&[GraphIntegerOp::Case]), transcript(&[Coalesce]));
+        assert_ne!(
+            transcript(&[GraphIntegerOp::InList { members: 1 }]),
+            transcript(&[GraphIntegerOp::InList { members: 2 }]),
+        );
     }
 
     #[test]
