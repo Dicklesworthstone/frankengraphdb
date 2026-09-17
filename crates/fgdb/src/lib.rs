@@ -135,8 +135,9 @@ mod write_txn;
 pub use fgdb_gql::{BoundPlan, RelationBind};
 /// The replayable certificate [`Database::execute_gql_certified`] returns
 /// beside its rows (fgdb-gate-genesis-lce.1): snapshot seq plus statement and
-    NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead, QueryError, QueryResult,
-    QueryValue, QueryWriteError, ReplayRefusal,
+/// bind digests, so the same graph state, text, and bind are auditable as
+/// byte-identical.
+pub use gql_cert::{GqlCertificate, GqlPlanCertificate, NativeReadClass};
 pub use query::{
     NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead, QueryError,
     QueryResult, QueryValue, QueryWriteError, ReplayRefusal,
