@@ -191,6 +191,7 @@ impl WriteTxn {
                     return Err(GqlQueryError::Evaluator(error));
                 }
                 Err(GqlQueryError::Interrupted(error)) => return Err(GqlQueryError::Interrupted(error)),
+                Err(GqlQueryError::IdentifiedEdgesRequired) => return Err(GqlQueryError::IdentifiedEdgesRequired),
             };
             debug_assert_eq!(insert_stats.created_vertices, 1);
             debug_assert_eq!(insert_stats.created_edges, 0);

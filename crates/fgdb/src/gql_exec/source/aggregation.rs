@@ -356,7 +356,7 @@ fn execute_shortest_at<C>(
         usage.observe::<GqlError, C>(policy, event)
     })?;
     let mut pairs = BTreeMap::<(VId, VId), u64>::new();
-    for (left, actual_relation, right) in edges {
+    for (_, left, actual_relation, right) in edges {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         usage.observe::<GqlError, C>(policy, super::SourceEvent::Work)?;
         if actual_relation != relation { continue; }

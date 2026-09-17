@@ -48,6 +48,7 @@ impl WriteTxn {
             Err(GqlQueryError::Rows(error)) => return Err(GqlQueryError::Rows(error)),
             Err(GqlQueryError::Evaluator(error)) => return Err(GqlQueryError::Evaluator(error)),
             Err(GqlQueryError::Interrupted(error)) => return Err(GqlQueryError::Interrupted(error)),
+            Err(GqlQueryError::IdentifiedEdgesRequired) => return Err(GqlQueryError::IdentifiedEdgesRequired),
         };
 
         let (branch, actions) = match outcome {

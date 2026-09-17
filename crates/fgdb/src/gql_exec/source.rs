@@ -17,7 +17,8 @@ pub(crate) enum SourceEvent {
     ScratchEntry,
     SnapshotRecord,
 }
-type EdgeTriple = (VId, RelationId, VId);
+/// Admitted topology keeps edge identity so captured paths name real edges.
+type IdentifiedEdge = (EId, VId, RelationId, VId);
 type VertexCursor = Reverse<(VId, CommitSeq, usize, usize)>;
 
 /// Rebuildable coordinates into one admitted generation, never an authority
@@ -279,12 +280,12 @@ fn scan_edges<E>(
     blocks: &[Vec<AdjacencyEntry>],
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<Vec<EdgeTriple>, E> {
+) -> Result<Vec<IdentifiedEdge>, E> {
     let mut rows = Vec::new();
     visit_edges(blocks, as_of, control, |entry, control| {
         control(SourceEvent::SnapshotRecord)?;
         control(SourceEvent::ScratchEntry)?;
-        rows.push((entry.src, entry.relation, entry.dst));
+        rows.push((entry.eid, entry.src, entry.relation, entry.dst));
         Ok(())
     })?;
     Ok(rows)
@@ -379,7 +380,7 @@ pub(crate) fn find_vertex<'a, E>(
 
 pub(super) struct BorrowedTables<'a> {
     pub(super) vertices: Vec<&'a VertexRow>,
-    pub(super) edges: Vec<EdgeTriple>,
+    pub(super) edges: Vec<IdentifiedEdge>,
     pub(super) snapshot_records: u64,
 }
 
@@ -391,7 +392,7 @@ fn bound_edges<E, Row>(
     logical: &fgdb_gql::algebra::GlaPlan<Row>,
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<Option<Vec<EdgeTriple>>, E> {
+) -> Result<Option<Vec<IdentifiedEdge>>, E> {
     use fgdb_gql::algebra::{GlaDirection, GlaOperator};
     let Some(GlaOperator::ScanEdges {
         relation,
@@ -511,7 +512,7 @@ fn bound_edges<E, Row>(
     Ok(Some(
         selected
             .into_values()
-            .map(|entry| (entry.src, entry.relation, entry.dst))
+            .map(|entry| (entry.eid, entry.src, entry.relation, entry.dst))
             .collect(),
     ))
 }
@@ -549,7 +550,7 @@ pub(super) fn admit<'a, E, Row>(
     // Projection-only properties need admitted vertex rows even with no WHERE.
     if logical.needs_vertex_values() {
         let mut candidates = std::collections::BTreeSet::new();
-        for &(src, relation, dst) in &edges {
+        for &(_, src, relation, dst) in &edges {
             control(SourceEvent::Work)?;
             let requested = logical.operators().iter().any(|operator| match operator {
                 GlaOperator::ScanEdges {
@@ -712,7 +713,7 @@ mod tests {
                 fgdb_strata::root::merge_all_edges_with_props(&blocks, &props, CommitSeq(at))
                     .unwrap()
                     .into_iter()
-                    .map(|(entry, _)| (entry.src, entry.relation, entry.dst))
+                    .map(|(entry, _)| (entry.eid, entry.src, entry.relation, entry.dst))
                     .collect::<Vec<_>>();
             let actual = scan_edges(&blocks, CommitSeq(at), &mut |_| Ok::<_, ()>(())).unwrap();
             assert_eq!(actual, expected);

@@ -177,7 +177,7 @@ mod query_source {
                     }
                 }
             }
-            let mut edges = BTreeMap::<EId, (VId, RelationId, VId)>::new();
+            let mut vertices = BTreeMap::new(); let mut edges = OverlayEdgeMap::new();
             if reads_edges {
                 source::visit_edges(&snapshot.blocks, self.basis, control, |entry, control| {
                     for element in [ElementId::Edge(entry.eid), ElementId::Vertex(entry.src), ElementId::Vertex(entry.dst)] {
@@ -222,7 +222,7 @@ mod query_source {
             }
             if edge_scan && logical.needs_vertex_values() {
                 let mut candidates = BTreeSet::new();
-                for &(_, src, relation, dst) in edges.values() {
+                for &(src, relation, dst) in edges.values() {
                     control(SourceEvent::Work)?;
                     let requested = logical.operators().iter().any(|op| match op {
                         GlaOperator::ScanEdges { relation: required, .. } | GlaOperator::Expand { relation: required, .. } => *required == relation,
