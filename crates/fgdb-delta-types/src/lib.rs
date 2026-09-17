@@ -1,8 +1,11 @@
 //! The G0/W2 logical delta **schema** (Appendix B, ~plan line 2807).
 //!
-//! Scope discipline: this crate is the *type* layer only. The differential
-//! machinery — deriving templates from `NetEffectNormalForm`, applying
-//! batches, indexes, frontier streams — is bead `fgdb-w2-delta-batches`.
+//! Scope discipline: this crate owns the type/value layer, including exact
+//! finite-support Z-set arithmetic. Committed circuit scheduling, durable
+//! arrangements, view publication and subscriptions remain the Ripple/composition
+//! owners'. The differential machinery — deriving templates from
+//! `NetEffectNormalForm`, applying batches, indexes, frontier streams — is bead
+//! `fgdb-w2-delta-batches`.
 //! What lives here is the normative shape:
 //!
 //! - the nine exact typed delta-row families (create / delete / property /
@@ -28,6 +31,7 @@
 mod canonical;
 mod fold;
 mod index;
+pub mod zset;
 mod zweight;
 
 use fgdb_types::{BranchId, CanonicalScalar, CommitCx, EId, GraphId, MarkerRef, ObjectId, VId};
@@ -36,6 +40,7 @@ pub use canonical::{CanonicalError, DELTA_FORMAT_V1, canonicalize};
 pub use fgdb_bigint::{ArithmeticOperation as ZWeightOperation, LimbLimit};
 pub use fold::fold_target_disjoint;
 pub use index::{INDEX_FORMAT_V1, IndexError, LocalDeltaBatchIndex};
+pub use zset::{ZSet, ZSetError, ZSetEvent};
 pub use zweight::{ZWeight, ZWeightError};
 
 /// Catalog-interned label ordinal (durable pinning: `fgdb-w4-schema-catalog`).
@@ -501,7 +506,7 @@ impl LogicalDeltaBatch {
         self.frontier
     }
 
-    /// The batch's position in history (from its committed marker).
+    /// The batch's position in history(from its committed marker).
     pub fn commit_seq(&self) -> fgdb_types::CommitSeq {
         self.commit_seq
     }
