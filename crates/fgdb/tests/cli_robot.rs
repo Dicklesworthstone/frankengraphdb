@@ -1008,6 +1008,195 @@ fn embedded_scalar_properties_have_exact_lossless_process_output() {
 }
 
 #[test]
+fn embedded_zoned_timestamp_survives_cli_history_reopen_and_rebuild() {
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb::{Database, DatabaseKeys, WriteBatch};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::context::PurposeContexts;
+    use fgdb_types::ids::DatabaseSecurityNamespaceId;
+    use fgdb_types::{CanonicalScalar, CanonicalTimestamp, ObjectId, TzdbResolver, VId};
+
+    const INSTANT: i128 = 1_735_689_600_123_456_789;
+    const TZDB: ObjectId = ObjectId([0x40; 32]);
+    const ZONE: &str = "America/New_York";
+    const VID: VId = VId(u128::MAX);
+
+    struct FixtureResolver;
+    impl TzdbResolver for FixtureResolver {
+        fn contains_tzdb(&self, oid: &ObjectId) -> bool {
+            *oid == TZDB
+        }
+
+        fn canonical_utc_offset_seconds(
+            &self,
+            oid: &ObjectId,
+            zone: &str,
+            instant: i128,
+        ) -> Option<i32> {
+            (*oid == TZDB && zone == ZONE && instant == INSTANT).then_some(-18_000)
+        }
+    }
+
+    // CLI --param currently constructs only int, uint, text, bool and null.
+    // Seed the zoned scalar through the native API rather than inventing CLI
+    // syntax or passing text that merely resembles a timestamp.
+    let expected = CanonicalScalar::Timestamp(
+        CanonicalTimestamp::zoned(INSTANT, -18_000, ZONE, TZDB, &FixtureResolver)
+            .expect("exact fixture tzdb binding"),
+    );
+    let db = TestDb::new("zoned-persistence");
+    let before = db.create();
+    let seeded = before + 1;
+    let advanced = before + 2;
+    let keys = DatabaseKeys::new(
+        [0x5a; 32],
+        DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+    );
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let commit = PurposeContexts::narrow_runtime_root(&root).commit();
+    let mut steps: Vec<(String, bool, String)> = Vec::new();
+    runtime.block_on(async {
+        match Database::open(&commit, &db.db, keys.clone()).await {
+            Ok(mut database) => {
+                let mut batch = WriteBatch::new(RelationId(1));
+                batch.create_vertex(
+                    VID,
+                    vec![LabelId(1)],
+                    vec![(PropertyKeyId(2), expected.clone())],
+                );
+                let result = database.write(&commit, batch).await;
+                steps.push((
+                    "native zoned seed".into(),
+                    matches!(&result, Ok(seq) if seq.0 == seeded),
+                    format!("{result:?}"),
+                ));
+                let frontier = database.frontier();
+                steps.push((
+                    "frontier immediately after seed".into(),
+                    matches!(&frontier, Ok(seq) if seq.0 == seeded),
+                    format!("{frontier:?}"),
+                ));
+                let vertex = database.vertex(VID);
+                steps.push((
+                    "native read immediately after seed".into(),
+                    matches!(&vertex, Ok(Some(row)) if row.props == vec![(PropertyKeyId(2), expected.clone())]),
+                    format!("{vertex:?}"),
+                ));
+
+                // Advance independently so AS OF the zoned commit is genuinely
+                // historical. Attempt this even when seed reports a refusal.
+                let mut later = WriteBatch::new(RelationId(1));
+                later.create_vertex(VId(u128::MAX - 1), vec![LabelId(2)], vec![]);
+                let result = database.write(&commit, later).await;
+                steps.push((
+                    "advance after zoned seed".into(),
+                    matches!(&result, Ok(seq) if seq.0 == advanced),
+                    format!("{result:?}"),
+                ));
+                // Dropping releases the embedded writer before any CLI opens.
+                drop(database);
+            }
+            Err(error) => steps.push(("native seed open".into(), false, format!("{error:?}"))),
+        }
+    });
+
+    let expected_cell = format!(
+        r#"{{"type":"timestamp","value":{{"instant_utc_nanos":"{INSTANT}","utc_offset_seconds":-18000,"zone":{{"identifier":"{ZONE}","tzdb_oid":"{}"}}}}}}"#,
+        "40".repeat(32),
+    );
+    let timestamp_rows = format!(r#"{{"v":1,"event":"row","cells":[{expected_cell}]}}"#);
+    let queries = [
+        ("frontier", "MATCH (p:Person) RETURN p.born AS value".to_owned(), true),
+        (
+            "AS OF zoned seed",
+            format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {seeded} RETURN p.born AS value"),
+            true,
+        ),
+        (
+            "AS OF before seed",
+            format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {before} RETURN p.born AS value"),
+            false,
+        ),
+    ];
+    for phase in ["after close", "after reopen", "after open_rebuilding"] {
+        if phase != "after close" {
+            runtime.block_on(async {
+                let opened = if phase == "after open_rebuilding" {
+                    Database::open_rebuilding(&commit, &db.db, keys.clone()).await
+                } else {
+                    Database::open(&commit, &db.db, keys.clone()).await
+                };
+                match opened {
+                    Ok(database) => {
+                        let frontier = database.frontier();
+                        steps.push((
+                            format!("embedded {phase} frontier"),
+                            matches!(&frontier, Ok(seq) if seq.0 == advanced),
+                            format!("{frontier:?}"),
+                        ));
+                        let vertex = database.vertex(VID);
+                        steps.push((
+                            format!("embedded {phase} zoned read"),
+                            matches!(&vertex, Ok(Some(row)) if row.props == vec![(PropertyKeyId(2), expected.clone())]),
+                            format!("{vertex:?}"),
+                        ));
+                        drop(database);
+                    }
+                    Err(error) => steps.push((
+                        format!("embedded {phase} open"),
+                        false,
+                        format!("{error:?}"),
+                    )),
+                }
+            });
+        }
+        // Do not call success()/assert_rows() here: a seed refusal or poisoned
+        // open must not hide the remaining actual subprocess observations.
+        for (name, query, has_row) in &queries {
+            let output = db.command("query", &[query]);
+            let rows = if *has_row { format!("{timestamp_rows}\n") } else { String::new() };
+            let count = usize::from(*has_row);
+            let expected_stdout = format!(
+                "{{\"v\":1,\"event\":\"invocation\"}}\n\
+                 {{\"v\":1,\"event\":\"columns\",\"columns\":[\"value\"]}}\n\
+                 {rows}{{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{advanced},\"count\":{count}}}\n"
+            );
+            steps.push((
+                format!("CLI {phase}: {name}"),
+                output.code == 0 && output.stderr.is_empty() && output.stdout == expected_stdout,
+                format!("exit={}\nstdout={}\nstderr={}", output.code, output.stdout, output.stderr),
+            ));
+        }
+    }
+
+    // This is an unsupported-type probe, not a proposed parameter encoding.
+    // Record the current typed usage refusal independently of persisted reads.
+    let unsupported = format!(
+        "born=timestamp:{INSTANT},-18000,{ZONE},{}",
+        "40".repeat(32),
+    );
+    let output = db.command(
+        "write",
+        &["--param", &unsupported, "INSERT (p:Person {born:$born})"],
+    );
+    steps.push((
+        "CLI zoned --param unavailable (typed usage refusal)".into(),
+        output.code == 2
+            && output.terminal().get("event").string() == "error"
+            && output.terminal().get("class").string() == "usage",
+        format!("exit={}\nstdout={}\nstderr={}", output.code, output.stdout, output.stderr),
+    ));
+
+    let report = steps.iter().map(|(name, passed, details)| {
+        format!("{name}: {}\n{details}", if *passed { "PASS" } else { "FAIL" })
+    }).collect::<Vec<_>>().join("\n");
+    eprintln!("{report}");
+    assert!(steps.iter().all(|(_, passed, _)| *passed), "zoned persistence phase outcomes:\n{report}");
+}
+
+#[test]
 fn exact_average_is_reduced_in_robot_and_human_output() {
     let db = TestDb::new("average");
     db.create();
