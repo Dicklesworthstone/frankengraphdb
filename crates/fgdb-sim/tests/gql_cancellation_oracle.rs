@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! Exact-checkpoint interruption over native storage adapters.
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
