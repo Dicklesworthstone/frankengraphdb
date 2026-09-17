@@ -121,7 +121,7 @@ fn execute(db: &Database, cx: &QueryCx, text: &str, params: &GqlParameters) -> V
             .value
     } else {
         let bound = PreparedGraphSetText::prepare(text, resolve)
-            .unwrap_or_else(|e| panic!("{text}: {e:?}"))
+            .expect("set text prepares")
             .bind_parameters(params)
             .expect("parameters bind");
         db.execute_graph_set_governed(cx, &bound, policy)
