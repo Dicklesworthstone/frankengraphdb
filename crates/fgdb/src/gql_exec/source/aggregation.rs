@@ -20,8 +20,9 @@ type AggregateResult<E> = Result<
 >;
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Summarize one live snapshot without materializing the child match bag.
-    /// Source admission, grouping, arithmetic and final output share one policy.
+    /// Summarize one live snapshot. Ordinary inputs keep streaming/factorized
+    /// execution; captured paths retain real edge IDs in bounded input rows.
+    /// Admission, path copies, grouping and final output share one policy.
     pub fn execute_graph_aggregate_governed(
         &self,
         cx: &QueryCx,
@@ -114,10 +115,10 @@ fn execute_at<R: GqlSnapshotReader + ?Sized, C>(
             usage.observe::<GraphAggregateError<ReadError>, C>(policy, event)
         })
         .map_err(|error| error.map_source(|error| error.map_source(GqlError::Read)))?;
-    let result = aggregate.execute_governed(
+    let result = aggregate.execute_governed_with_identified_properties(
         admitted.snapshot_records,
         admitted.vertex_ids(),
-        admitted.edge_triples(),
+        admitted.identified_edges(),
         |vid, predicates| admitted.matches(vid, predicates),
         |vid, key| Ok(admitted.property(vid, key)),
         usage.remaining(policy),

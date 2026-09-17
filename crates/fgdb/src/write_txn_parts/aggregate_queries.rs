@@ -5,6 +5,8 @@ impl WriteTxn {
     /// Summarize complete matches over the pinned basis plus canonical staged
     /// effects. Observed rows and insertion witnesses survive later arithmetic,
     /// output-budget or cancellation failures; wrong owners never admit data.
+    /// Captured paths preserve canonical overlay EIds through grouping, even
+    /// when the final result contains only a count or numeric summary.
     pub fn execute_graph_aggregate_governed<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
@@ -31,10 +33,10 @@ impl WriteTxn {
                     usage.observe(policy, event)
                 },
             )?;
-            let result = aggregate.execute_governed(
+            let result = aggregate.execute_governed_with_identified_properties(
                 source.snapshot_records as u64,
                 source.vertex_ids(),
-                source.edge_triples(),
+                source.identified_edges(),
                 |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
                 |vid, key| Ok(source.property(vid, key)),
                 usage.remaining(policy),
