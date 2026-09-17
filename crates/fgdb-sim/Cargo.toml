@@ -34,3 +34,6 @@ fgdb-reference = { path = "../fgdb-reference" }
 # names for running it.
 fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }
+
+[dev-dependencies]
+fgdb-gql = { path = "../fgdb-gql" }
