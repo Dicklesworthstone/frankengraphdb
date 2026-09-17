@@ -20,6 +20,228 @@ pub(crate) enum SourceEvent {
 type EdgeTriple = (VId, RelationId, VId);
 type VertexCursor = Reverse<(VId, CommitSeq, usize, usize)>;
 
+/// Rebuildable coordinates into one admitted generation, never an authority
+/// beside its blocks. Histories retain every version; endpoint lists are in
+/// EId order, including both incidences of self loops only once at lookup.
+#[derive(Clone, Debug)]
+pub(crate) struct AdjacencyIndex {
+    histories: Vec<Vec<(CommitSeq, usize, usize)>>,
+    outgoing: BTreeMap<VId, Vec<usize>>,
+    incoming: BTreeMap<VId, Vec<usize>>,
+}
+
+impl AdjacencyIndex {
+    pub(crate) fn build(blocks: &[Vec<AdjacencyEntry>]) -> Self {
+        let mut by_id = BTreeMap::<EId, Vec<(CommitSeq, usize, usize)>>::new();
+        for (block, entries) in blocks.iter().enumerate() {
+            for (row, entry) in entries.iter().enumerate() {
+                by_id
+                    .entry(entry.eid)
+                    .or_default()
+                    .push((entry.created_at, block, row));
+            }
+        }
+        let mut index = Self {
+            histories: Vec::with_capacity(by_id.len()),
+            outgoing: BTreeMap::new(),
+            incoming: BTreeMap::new(),
+        };
+        for mut history in by_id.into_values() {
+            let id = index.histories.len();
+            // Equal creation sequences use the last block/row, exactly like
+            // visit_edges' replacement rule (including retirement images).
+            history.sort_unstable();
+            for &(_, block, row) in &history {
+                let entry = &blocks[block][row];
+                for (lists, endpoint) in [
+                    (&mut index.outgoing, entry.src),
+                    (&mut index.incoming, entry.dst),
+                ] {
+                    let list = lists.entry(endpoint).or_default();
+                    if list.last() != Some(&id) {
+                        list.push(id);
+                    }
+                }
+            }
+            index.histories.push(history);
+        }
+        index
+    }
+
+    fn visit<'a, E, C>(
+        &self,
+        blocks: &'a [Vec<AdjacencyEntry>],
+        endpoint: VId,
+        direction: fgdb_gql::algebra::GlaDirection,
+        as_of: CommitSeq,
+        control: &mut C,
+        mut visit: impl FnMut(&'a AdjacencyEntry, &mut C) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        C: FnMut(SourceEvent) -> Result<(), E>,
+    {
+        use fgdb_gql::algebra::GlaDirection;
+        control(SourceEvent::Work)?;
+        let outgoing = self.outgoing.get(&endpoint).map_or(&[][..], Vec::as_slice);
+        let incoming = self.incoming.get(&endpoint).map_or(&[][..], Vec::as_slice);
+        let (mut left, mut right) = match direction {
+            GlaDirection::Forward => (outgoing, &[][..]),
+            GlaDirection::Reverse => (incoming, &[][..]),
+            GlaDirection::Undirected => (outgoing, incoming),
+        };
+        while !left.is_empty() || !right.is_empty() {
+            control(SourceEvent::Work)?;
+            let id = match (left.first(), right.first()) {
+                (Some(a), Some(b)) => *a.min(b),
+                (Some(a), None) | (None, Some(a)) => *a,
+                (None, None) => break,
+            };
+            if left.first() == Some(&id) {
+                left = &left[1..];
+            }
+            if right.first() == Some(&id) {
+                right = &right[1..];
+            }
+            let history = &self.histories[id];
+            let end = history.partition_point(|&(created, _, _)| created <= as_of);
+            let Some(&(_, block, row)) = end.checked_sub(1).map(|at| &history[at]) else {
+                continue;
+            };
+            let entry = &blocks[block][row];
+            let incident = match direction {
+                GlaDirection::Forward => entry.src == endpoint,
+                GlaDirection::Reverse => entry.dst == endpoint,
+                GlaDirection::Undirected => entry.src == endpoint || entry.dst == endpoint,
+            };
+            if incident && entry.visible_at(as_of) {
+                visit(entry, control)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod indexed_tests {
+    use super::*;
+    use fgdb_gql::algebra::GlaDirection;
+
+    #[test]
+    fn indexed_history_matches_scan_before_and_after_retirement() {
+        for seed in [3_u128, 17, 91] {
+            let mut blocks = Vec::new();
+            for seq in 1..=6 {
+                let mut block = Vec::new();
+                for id in 1..=30 {
+                    block.push(AdjacencyEntry {
+                        src: VId((id * seed) % 7),
+                        dst: VId((id * seed + id / 3) % 7),
+                        relation: RelationId(1),
+                        eid: EId(id),
+                        created_at: CommitSeq(seq),
+                        retired_at: (id % 4 == 0 && seq >= 4).then_some(CommitSeq(4)),
+                    });
+                }
+                blocks.push(block);
+            }
+            let index = AdjacencyIndex::build(&blocks);
+            let mut nonempty = false;
+            let mut deleted = false;
+            for at in 0..=7 {
+                for endpoint in (0..7).map(VId) {
+                    for direction in [
+                        GlaDirection::Forward,
+                        GlaDirection::Reverse,
+                        GlaDirection::Undirected,
+                    ] {
+                        let mut expected = Vec::new();
+                        visit_edges(
+                            &blocks,
+                            CommitSeq(at),
+                            &mut |_| Ok::<_, ()>(()),
+                            |entry, _| {
+                                let incident = match direction {
+                                    GlaDirection::Forward => entry.src == endpoint,
+                                    GlaDirection::Reverse => entry.dst == endpoint,
+                                    GlaDirection::Undirected => {
+                                        entry.src == endpoint || entry.dst == endpoint
+                                    }
+                                };
+                                if incident {
+                                    expected.push(entry);
+                                }
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                        let mut actual = Vec::new();
+                        index
+                            .visit(
+                                &blocks,
+                                endpoint,
+                                direction,
+                                CommitSeq(at),
+                                &mut |_| Ok::<_, ()>(()),
+                                |entry, _| {
+                                    actual.push(entry);
+                                    Ok(())
+                                },
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            actual, expected,
+                            "seed={seed} at={at} endpoint={endpoint:?} direction={direction:?}"
+                        );
+                        nonempty |= !actual.is_empty();
+                        if at >= 4 {
+                            assert!(actual.iter().all(|entry| entry.eid.0 % 4 != 0));
+                            deleted = true;
+                        }
+                    }
+                }
+            }
+            assert!(nonempty && deleted);
+        }
+    }
+
+    #[test]
+    fn indexed_lookup_refuses_at_every_source_event() {
+        let blocks = vec![vec![AdjacencyEntry {
+            src: VId(1),
+            dst: VId(2),
+            relation: RelationId(1),
+            eid: EId(1),
+            created_at: CommitSeq(1),
+            retired_at: None,
+        }]];
+        let index = AdjacencyIndex::build(&blocks);
+        let run = |stop| {
+            let mut seen = 0;
+            let result = index.visit(
+                &blocks,
+                VId(1),
+                GlaDirection::Forward,
+                CommitSeq(1),
+                &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                },
+                |_, control| {
+                    control(SourceEvent::SnapshotRecord)?;
+                    control(SourceEvent::ScratchEntry)
+                },
+            );
+            (result, seen)
+        };
+        let (result, total) = run(usize::MAX);
+        assert_eq!(result, Ok(()));
+        assert!(total >= 4);
+        for stop in 1..=total {
+            assert_eq!(run(stop), (Err(stop), stop));
+        }
+    }
+}
+
 pub(crate) fn visit_edges<'a, E, C>(
     blocks: &'a [Vec<AdjacencyEntry>],
     as_of: CommitSeq,
@@ -161,6 +383,139 @@ pub(super) struct BorrowedTables<'a> {
     pub(super) snapshot_records: u64,
 }
 
+/// Admit a conservative edge closure for a predicate-bound root. The algebra
+/// still evaluates every predicate/join and owns multiplicity and ordering.
+/// Unbound scans retain the original source and its accounting verbatim.
+fn bound_edges<E, Row>(
+    snapshot: &Snapshot,
+    logical: &fgdb_gql::algebra::GlaPlan<Row>,
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<Vec<EdgeTriple>>, E> {
+    use fgdb_gql::algebra::{GlaDirection, GlaOperator};
+    let Some(GlaOperator::ScanEdges {
+        relation,
+        direction,
+    }) = logical.operators().first()
+    else {
+        return Ok(None);
+    };
+    let prefix = &logical.operators()[1..];
+    let predicate = prefix
+        .iter()
+        .take_while(|op| {
+            !matches!(
+                op,
+                GlaOperator::Expand { .. }
+                    | GlaOperator::VarLengthExpand { .. }
+                    | GlaOperator::Probe { .. }
+                    | GlaOperator::Optional { .. }
+                    | GlaOperator::ScanVertices
+            )
+        })
+        .find_map(|op| match op {
+            GlaOperator::Select { slot, predicates } if slot.ordinal() < 2 => {
+                Some((slot.ordinal(), predicates))
+            }
+            _ => None,
+        });
+    let Some((slot, predicates)) = predicate else {
+        return Ok(None);
+    };
+    let lookup_direction = if slot == 0 {
+        *direction
+    } else {
+        match direction {
+            GlaDirection::Forward => GlaDirection::Reverse,
+            GlaDirection::Reverse => GlaDirection::Forward,
+            GlaDirection::Undirected => GlaDirection::Undirected,
+        }
+    };
+    let mut selected = BTreeMap::<EId, &AdjacencyEntry>::new();
+    let mut frontier = std::collections::BTreeSet::new();
+    visit_vertices(&snapshot.patches, as_of, control, |row, control| {
+        control(SourceEvent::Work)?;
+        for predicate in predicates {
+            for _ in 0..predicate.comparison_work_units() {
+                control(SourceEvent::Work)?;
+            }
+        }
+        if predicates
+            .iter()
+            .all(|p| p.matches(&row.labels, &row.props))
+        {
+            snapshot.adjacency_index.visit(
+                &snapshot.blocks,
+                row.vid,
+                lookup_direction,
+                as_of,
+                control,
+                |entry, control| {
+                    if entry.relation == *relation && !selected.contains_key(&entry.eid) {
+                        control(SourceEvent::SnapshotRecord)?;
+                        control(SourceEvent::ScratchEntry)?;
+                        selected.insert(entry.eid, entry);
+                        for endpoint in [entry.src, entry.dst] {
+                            if !frontier.contains(&endpoint) {
+                                control(SourceEvent::ScratchEntry)?;
+                                frontier.insert(endpoint);
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(())
+    })?;
+    // Fixed-hop plans consume at most one new adjacency per Expand. Using
+    // both endpoints and both directions is a superset even for correlations
+    // and cycle closures; no source-level join can discard a valid witness.
+    let hops = prefix
+        .iter()
+        .filter(|op| matches!(op, GlaOperator::Expand { .. }))
+        .count();
+    let mut visited = std::collections::BTreeSet::new();
+    for _ in 0..hops {
+        let current = std::mem::take(&mut frontier);
+        for endpoint in current {
+            control(SourceEvent::Work)?;
+            if visited.contains(&endpoint) {
+                continue;
+            }
+            control(SourceEvent::ScratchEntry)?;
+            visited.insert(endpoint);
+            snapshot.adjacency_index.visit(
+                &snapshot.blocks,
+                endpoint,
+                GlaDirection::Undirected,
+                as_of,
+                control,
+                |entry, control| {
+                    if !selected.contains_key(&entry.eid) {
+                        control(SourceEvent::SnapshotRecord)?;
+                        control(SourceEvent::ScratchEntry)?;
+                        selected.insert(entry.eid, entry);
+                        for endpoint in [entry.src, entry.dst] {
+                            if !frontier.contains(&endpoint) {
+                                control(SourceEvent::ScratchEntry)?;
+                                frontier.insert(endpoint);
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+    }
+    Ok(Some(
+        selected
+            .into_values()
+            .map(|entry| (entry.src, entry.relation, entry.dst))
+            .collect(),
+    ))
+}
+
 /// Source selection is shared by scalar and tuple plans. Output columns do
 /// not change what snapshot generation or topology is admitted.
 pub(super) fn admit<'a, E, Row>(
@@ -186,7 +541,10 @@ pub(super) fn admit<'a, E, Row>(
             edges,
         });
     }
-    let edges = scan_edges(&snapshot.blocks, as_of, control)?;
+    let edges = match bound_edges(snapshot, logical, as_of, control)? {
+        Some(edges) => edges,
+        None => scan_edges(&snapshot.blocks, as_of, control)?,
+    };
     let mut vertices = Vec::new();
     // Projection-only properties need admitted vertex rows even with no WHERE.
     if logical.needs_vertex_values() {

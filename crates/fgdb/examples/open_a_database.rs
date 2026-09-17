@@ -34,8 +34,9 @@
 //! are not pinned here.
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
-use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
+use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::RelationId;
+use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind};
 use fgdb_types::context::PurposeContexts;
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{EId, VId};
@@ -65,6 +66,13 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     let runtime = RuntimeBuilder::new().build()?;
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let cx = &PurposeContexts::narrow_runtime_root(&root).commit();
+    let query_cx = &PurposeContexts::narrow_runtime_root(&root).query();
+    let params = GqlParameters::new();
+    let budget = GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000);
+    let resolver = |kind, name: &str| match (kind, name) {
+        (GraphSymbolKind::Relation, "KNOWS") => Some(GraphSymbol::Relation(KNOWS)),
+        _ => None,
+    };
 
     runtime.block_on(async move {
         // ---- create, write, read -------------------------------------------
@@ -78,10 +86,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let seq = db.write(cx, batch).await?;
 
         let before = db.neighbours(VId(1), KNOWS)?;
-        let gql_before = db.execute_gql(
-            "MATCH (a)-[:KNOWS]->(b) RETURN b",
-            &RelationBind::new().with_relation("KNOWS", KNOWS),
-        )?;
+        let gql_before = db.query(query_cx,
+            "MATCH (a)-[:KNOWS]->(b) RETURN b", &params, resolver, budget)?;
         let root_before = db.partition_root()?;
         println!("  committed at seq {seq:?}");
         println!("  neighbours(1) before drop: {before:?}");
@@ -91,10 +97,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         // exist yet; see IMPLEMENTATION_STATUS.md) --------------------------------
         db.compact(cx).await?;
         let after_compact = db.neighbours(VId(1), KNOWS)?;
-        let gql_after_compact = db.execute_gql(
-            "MATCH (a)-[:KNOWS]->(b) RETURN b",
-            &RelationBind::new().with_relation("KNOWS", KNOWS),
-        )?;
+        let gql_after_compact = db.query(query_cx,
+            "MATCH (a)-[:KNOWS]->(b) RETURN b", &params, resolver, budget)?;
         println!("  neighbours(1) after compact: {after_compact:?}");
         println!("  GQL MATCH after compact: {gql_after_compact:?}");
         assert_eq!(before, after_compact, "compact must not change adjacency");
@@ -107,10 +111,8 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         // ---- reopen with nothing but the path and the keys ------------------
         let db = Database::open(cx, &path, keys).await?;
         let after = db.neighbours(VId(1), KNOWS)?;
-        let gql_after = db.execute_gql(
-            "MATCH (a)-[:KNOWS]->(b) RETURN b",
-            &RelationBind::new().with_relation("KNOWS", KNOWS),
-        )?;
+        let gql_after = db.query(query_cx,
+            "MATCH (a)-[:KNOWS]->(b) RETURN b", &params, resolver, budget)?;
         println!("  neighbours(1) after reopen: {after:?}");
         println!("  GQL MATCH (1)-[:KNOWS]->(b) RETURN b after reopen: {gql_after:?}");
 

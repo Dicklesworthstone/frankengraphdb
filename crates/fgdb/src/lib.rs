@@ -1393,6 +1393,7 @@ pub struct EdgeRecord {
 #[derive(Clone, Debug)]
 struct Snapshot {
     blocks: Vec<Vec<AdjacencyEntry>>,
+    adjacency_index: Arc<gql_exec::source::AdjacencyIndex>,
     /// The root's block references, aligned with `blocks`. Retained so the
     /// next commit can tell which decoded blocks the new root carries forward
     /// unchanged (fgdb-gieu) — content addressing makes the identity the
@@ -3554,6 +3555,7 @@ impl<V: Vfs + Clone> Database<V> {
             .collect();
         self.writer = folded;
         self.snapshot = Arc::new(Snapshot {
+            adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&decoded)),
             blocks: decoded,
             block_props: decoded_props,
             refs: root.blocks,
@@ -4653,6 +4655,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
     ));
     Ok((
         Snapshot {
+            adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&blocks)),
             blocks,
             refs: root.blocks,
             block_props,
@@ -4961,6 +4964,7 @@ async fn publish_and_snapshot<V: Vfs>(
 
     Ok((
         Snapshot {
+            adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&decoded)),
             blocks: decoded,
             refs: reopened_root.blocks,
             block_props: decoded_props,

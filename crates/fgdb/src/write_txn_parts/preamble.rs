@@ -10,6 +10,16 @@ use fgdb_types::{
     ObligationAcquireError, ObligationId, PurposeObligation, TxnCx, VId,
 };
 
+/// Per-open-handle reservations, never persisted independently of Chronicle.
+/// The durable floor is refreshed from committed delta rows before allocation.
+/// Aborted work does not rewind reservations within this writer lifetime.
+#[derive(Default)]
+pub(crate) struct IdentityAllocation {
+    frontier: CommitSeq,
+    vertex: u128,
+    edge: u128,
+}
+
 /// Failure to prepare an atomic write or stage/finish a bounded transaction.
 #[derive(Debug)]
 pub enum WriteTxnError {
@@ -36,6 +46,8 @@ pub enum WriteTxnError {
     AtomicOrdinalOverflow,
     /// A new delta family needs an explicit compound-write independence law.
     UnsupportedAtomicMutation,
+    /// The requested 128-bit identity domain has no remaining successor.
+    IdentityExhausted,
     /// Cancellation during prepublication completion/validation. No write from
     /// this attempt reached the commit coordinator; the transaction is terminal.
     Interrupted(Box<asupersync::error::Error>),
@@ -65,6 +77,7 @@ impl core::fmt::Display for WriteTxnError {
                 "atomic relation groups {first:?} and {second:?} are not independent at {element:?}"
             ),
             Self::AtomicOrdinalOverflow => formatter.write_str("atomic write intent ordinal overflow"),
+            Self::IdentityExhausted => formatter.write_str("element identity domain exhausted"),
             Self::UnsupportedAtomicMutation => formatter.write_str(
                 "atomic write contains a mutation without a defined independence law"
             ),
@@ -90,6 +103,7 @@ impl core::error::Error for WriteTxnError {
             | Self::SnapshotAdvanced { .. }
             | Self::AtomicRelationConflict { .. }
             | Self::AtomicOrdinalOverflow
+            | Self::IdentityExhausted
             | Self::UnsupportedAtomicMutation => None,
         }
     }

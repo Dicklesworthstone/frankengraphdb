@@ -2,6 +2,36 @@
 // staging paths. This file owns orchestration, not another writer or matcher.
 
 impl WriteTxn {
+    /// Execute CREATE/INSERT/MERGE with database-owned identity reservations.
+    pub fn execute_graph_write_program_engine_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+    ) -> Result<fgdb_gql::GraphWriteProgramStats,
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, WriteTxnError, Box<asupersync::error::Error>>> {
+        let preflight = |error| fgdb_gql::GraphWriteProgramError::Program(fgdb_gql::GraphMutationProgramError::Preflight(error));
+        self.ensure_database(database).map_err(preflight)?;
+        let mut allocate = database.engine_allocator(cx).map_err(preflight)?;
+        self.execute_graph_write_program_governed(database, cx, program, policy, |request| allocate(request.request))
+    }
+
+    /// Return the same ordered receipts with no caller-supplied allocator.
+    pub fn execute_graph_write_program_returning_engine_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+    ) -> Result<fgdb_gql::GraphWriteProgramReceipt,
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, WriteTxnError, Box<asupersync::error::Error>>> {
+        let preflight = |error| fgdb_gql::GraphWriteProgramError::Program(fgdb_gql::GraphMutationProgramError::Preflight(error));
+        self.ensure_database(database).map_err(preflight)?;
+        let mut allocate = database.engine_allocator(cx).map_err(preflight)?;
+        self.execute_graph_write_program_returning_governed(database, cx, program, policy, |request| allocate(request.request))
+    }
+
     /// Stage CREATE, SET/REMOVE, DELETE, DETACH DELETE, vertex MERGE and directed
     /// relationship MERGE, including ON MATCH/ON CREATE actions on either
     /// element kind, as one atomic operation inside this transaction. Each step

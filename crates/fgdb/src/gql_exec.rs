@@ -14,7 +14,7 @@ use fgdb_gql::algebra::{
     GlaIdentityOutput, GlaOutput, GlaPlan, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{BoundPlan, GlaExecution, GlaExecutionError, GlaExecutionLimits, RelationBind};
-use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use source::SourceEvent;
 use std::collections::BTreeMap;
 
@@ -343,10 +343,15 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             .chain(self.vertices.keys().copied())
     }
     fn edge_triples(&self) -> impl Iterator<Item = (VId, RelationId, VId)> + '_ {
+        self.identified_edges().map(|(_, src, relation, dst)| (src, relation, dst))
+    }
+    fn identified_edges(&self) -> impl Iterator<Item = (EId, VId, RelationId, VId)> + '_ {
         self.borrowed
             .iter()
             .flat_map(|tables| tables.edges.iter().copied())
-            .chain(self.edges.iter().map(edge_triple))
+            .chain(self.edges.iter().map(|record| {
+                (record.entry.eid, record.entry.src, record.entry.relation, record.entry.dst)
+            }))
     }
     fn matches(&self, vid: VId, predicates: &[VertexPredicate]) -> Result<bool, ReadError> {
         if let Some(tables) = &self.borrowed {
@@ -429,10 +434,10 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
             usage.observe::<ReadError, C>(policy, event)
         })?;
-        let result = self.logical.execute_governed_with_properties(
+        let result = self.logical.execute_governed_with_identified_properties(
             self.snapshot_records,
             self.vertex_ids(),
-            self.edge_triples(),
+            self.identified_edges(),
             |vid, predicates| self.matches(vid, predicates),
             |vid, key| Ok(self.property(vid, key)),
             usage.remaining(policy),
@@ -440,9 +445,6 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
         );
         usage.finish(policy, result)
     }
-}
-fn edge_triple(record: &EdgeRecord) -> (VId, RelationId, VId) {
-    (record.entry.src, record.entry.relation, record.entry.dst)
 }
 pub(crate) fn execute<V: Vfs + Clone>(
     plan: &BoundPlan,

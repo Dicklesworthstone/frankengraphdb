@@ -2,6 +2,40 @@
 // computed payloads are frozen before allocation; commit remains explicit.
 
 impl WriteTxn {
+    /// INSERT/CREATE with identities reserved by the owning database.
+    pub fn execute_graph_insert_engine_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        insertion: &fgdb_gql::insertion::PreparedGraphInsert,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+    ) -> Result<
+        fgdb_gql::insertion::GraphInsertStats,
+        fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>, Box<asupersync::error::Error>>,
+    > {
+        let source = |error| fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(error));
+        self.ensure_database(database).map_err(source)?;
+        let allocate = database.engine_allocator(cx).map_err(source)?;
+        self.execute_graph_insert_governed(database, cx, insertion, policy, allocate)
+    }
+
+    /// INSERT/CREATE with an engine-issued identity receipt; publication remains explicit.
+    pub fn execute_graph_insert_returning_engine_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        insertion: &fgdb_gql::insertion::PreparedGraphInsert,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+    ) -> Result<
+        (fgdb_gql::insertion::GraphInsertStats, Vec<VId>, Vec<EId>),
+        fgdb_gql::GqlQueryError<fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>, Box<asupersync::error::Error>>,
+    > {
+        let source = |error| fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(error));
+        self.ensure_database(database).map_err(source)?;
+        let allocate = database.engine_allocator(cx).map_err(source)?;
+        self.execute_graph_insert_returning_governed(database, cx, insertion, policy, allocate)
+    }
+
     /// Create graph structures once per selected occurrence in this workspace.
     /// Matched endpoints and property reads use the canonical staged overlay.
     /// Newly created vertices are available as endpoints within their own row.

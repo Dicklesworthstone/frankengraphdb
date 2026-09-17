@@ -209,3 +209,65 @@ impl<V: Vfs + Clone> Database<V> {
         Ok((receipt, completion))
     }
 }
+
+impl<V: Vfs + Clone> Database<V> {
+    /// Reserve an identity above every committed creation of its kind.
+    /// Reservations are shared by staged transactions on this opened handle.
+    /// Reopen reconstructs the floor from Chronicle, including deleted IDs;
+    /// never-committed reservations are not durable leases.
+    pub fn allocate_identity(
+        &mut self,
+        cx: &fgdb_types::QueryCx,
+        request: fgdb_gql::insertion::GraphInsertRequest,
+    ) -> Result<ElementId, WriteTxnError> {
+        self.engine_allocator(cx)?(request)
+    }
+
+    fn engine_allocator<'a>(
+        &mut self,
+        cx: &'a fgdb_types::QueryCx,
+    ) -> Result<impl FnMut(fgdb_gql::insertion::GraphInsertRequest) -> Result<ElementId, WriteTxnError> + 'a, WriteTxnError> {
+        cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+        let index = self.delta_index()?;
+        let mut state = self.identity_allocation.lock().map_err(|_| WriteTxnError::IdentityExhausted)?;
+        for batch in index.since(state.frontier).map_err(crate::read_error_from_index)? {
+            for coordinate in batch.coordinate_entries() {
+                for row in &coordinate.rows {
+                    match row {
+                        fgdb_delta_types::DeltaRow::CreateVertex { vid, .. } => state.vertex = state.vertex.max(vid.0),
+                        fgdb_delta_types::DeltaRow::CreateEdge { eid, .. } => state.edge = state.edge.max(eid.0),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        state.frontier = index.frontier();
+        drop(state);
+        let allocation = self.identity_allocation.clone();
+        Ok(move |request| {
+            cx.checkpoint().map_err(WriteTxnError::Interrupted)?;
+            let mut state = allocation.lock().map_err(|_| WriteTxnError::IdentityExhausted)?;
+            let vertex = matches!(request, fgdb_gql::insertion::GraphInsertRequest::Vertex { .. });
+            let high = if vertex { &mut state.vertex } else { &mut state.edge };
+            *high = high.checked_add(1).ok_or(WriteTxnError::IdentityExhausted)?;
+            Ok(if vertex { ElementId::Vertex(VId(*high)) } else { ElementId::Edge(EId(*high)) })
+        })
+    }
+}
+
+impl WriteTxn {
+    /// Reserve from this transaction's owning database without a caller allocator.
+    pub fn allocate_identity<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        request: fgdb_gql::insertion::GraphInsertRequest,
+    ) -> Result<ElementId, WriteTxnError> {
+        self.ensure_database(database)?;
+        let live = database.frontier()?;
+        if live != self.basis {
+            return Err(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live });
+        }
+        database.allocate_identity(cx, request)
+    }
+}
