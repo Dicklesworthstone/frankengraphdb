@@ -182,7 +182,13 @@ fn settled(
 
 /// One ANY-style row per settled pair, or one ALL-style row per walk
 /// occurrence at the settled level.
-fn expected_rows(graph: &ReferenceGraph, m: u64, n: u64, direction: u8, any: bool) -> Vec<(VId, VId)> {
+fn expected_rows(
+    graph: &ReferenceGraph,
+    m: u64,
+    n: u64,
+    direction: u8,
+    any: bool,
+) -> Vec<(VId, VId)> {
     let mut rows = Vec::new();
     for id in SOURCES {
         for (dst, count) in settled(graph, VId(id), m, n, direction, false) {
@@ -249,7 +255,10 @@ fn compare_at(
     );
     actual.sort();
     expected.sort();
-    assert_eq!(actual, expected, "seed={seed:#x}; as-of {basis:?}; query={text}");
+    assert_eq!(
+        actual, expected,
+        "seed={seed:#x}; as-of {basis:?}; query={text}"
+    );
 }
 
 fn check_families(
@@ -326,8 +335,17 @@ fn check_families(
         }
         rows
     };
-    assert!(bounded.contains(&(VId(1), VId(1))), "cycle closes in 2 hops");
-    compare(db, cx, seed, "MATCH WALK (a)-[:R*1..2]->(b) RETURN a,b", bounded);
+    assert!(
+        bounded.contains(&(VId(1), VId(1))),
+        "cycle closes in 2 hops"
+    );
+    compare(
+        db,
+        cx,
+        seed,
+        "MATCH WALK (a)-[:R*1..2]->(b) RETURN a,b",
+        bounded,
+    );
     // A lower bound above the only route's length excludes the pair: with
     // *3..3 the one-hop route into 5 no longer settles it.
     let tightened = expected_rows(live, 3, 3, 0, true);

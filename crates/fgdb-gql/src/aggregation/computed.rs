@@ -7,6 +7,8 @@
 
 use super::*;
 use crate::{GraphSetProjection, GraphSetQuantifier, PreparedGraphSet};
+use fgdb_types::EId;
+use std::cell::RefCell;
 
 impl PreparedGraphAggregate {
     /// Compute named input columns before grouping and aggregate argument
@@ -45,6 +47,69 @@ impl PreparedGraphAggregate {
         self.computed_input.as_deref()
     }
 
+    /// Summarize paths using the real edge identities of one admitted source.
+    /// This is the identified counterpart of execute_governed, not another
+    /// matcher or aggregate implementation. Uncaptured inputs retain their
+    /// ordinary streaming/factorized path, counters and source error types.
+    ///
+    /// Captured inputs own bounded rows through the existing GLA executor;
+    /// projections and row pipelines run before the same borrowed accumulators.
+    /// Distinct paths remain distinct even when their endpoints or lengths agree.
+    /// All source, path-copy, projection and grouping work shares one allowance.
+    /// Only final groups consume the public result-row quota. An output LIMIT 0
+    /// never suppresses source, path or scalar failures.
+    ///
+    /// The caller must supply one immutable, authorized graph generation. EIds
+    /// must be the real source identities, not ordinals assigned to edge triples.
+    /// This is bounded materialization, not spill-backed path aggregation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_identified_properties<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        if !self.input.plan().requires_identified_edges() {
+            return self.execute_governed(
+                snapshot_records, vertices, edges.into_iter().map(|(_, s, r, d)| (s, r, d)),
+                test_vertex, property, policy, checkpoint,
+            );
+        }
+        if self.relational_input.is_some() {
+            // Both the source and row-stage owner reach the same stateful
+            // checkpoint. No RefCell borrow spans either executor invocation.
+            let checkpoint = RefCell::new(&mut checkpoint);
+            let mut admitted = Some((vertices, edges));
+            return self.execute_relational_with_source(
+                policy,
+                |pattern, remaining| {
+                    let (vertices, edges) = admitted.take()
+                        .expect("single-source aggregate preparation admits exactly one leaf");
+                    pattern.plan().execute_governed_with_identified_properties(
+                        snapshot_records, vertices, edges, &mut test_vertex, &mut property,
+                        remaining, || (*checkpoint.borrow_mut())(),
+                    )
+                },
+                || (*checkpoint.borrow_mut())(),
+            );
+        }
+        let source_policy = GqlQueryPolicy {
+            rows: crate::GqlExecutionBudget::snapshot_records(
+                policy.rows.max_snapshot_records().unwrap_or(u64::MAX),
+            ),
+            evaluator: policy.evaluator,
+        };
+        let source = self.input.plan().execute_governed_with_identified_properties(
+            snapshot_records, vertices, edges, test_vertex, property,
+            source_policy, &mut checkpoint,
+        ).map_err(|error| error.map_source(GraphAggregateError::Source))?;
+        self.finish_materialized_governed(source, policy, checkpoint)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn execute_projected_governed<'a, E, C>(
         &self,
@@ -55,9 +120,7 @@ impl PreparedGraphAggregate {
         property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
-    {
-        let projection = self.computed_input.as_ref().expect("projected dispatch");
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
         // MATCH rows are private aggregate input, not public result rows. They
         // still pay every ordinary GLA instruction and allocation. Source
         // admission is counted once, not once again for the computed relation.
@@ -67,19 +130,22 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let source = self
-            .input
-            .plan()
-            .execute_governed_with_properties(
-                snapshot_records,
-                vertices,
-                edges,
-                test_vertex,
-                property,
-                source_policy,
-                &mut checkpoint,
-            )
-            .map_err(|error| error.map_source(GraphAggregateError::Source))?;
+        let source = self.input.plan().execute_governed_with_properties(
+            snapshot_records, vertices, edges, test_vertex, property,
+            source_policy, &mut checkpoint,
+        ).map_err(|error| error.map_source(GraphAggregateError::Source))?;
+        self.finish_materialized_governed(source, policy, checkpoint)
+    }
+
+    /// Source rows are already admitted. Keep them alive until the shared
+    /// summary/result engine has copied its final owned cells. No second input
+    /// clone or freshly initialized evaluator budget is introduced here.
+    fn finish_materialized_governed<E, C>(
+        &self,
+        source: GqlQueryExecution<GraphValueRow>,
+        policy: GqlQueryPolicy,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
         let mut evaluator = source.evaluator;
         let mut rows = GqlExecutionStats {
             snapshot_records: source.rows.snapshot_records,
@@ -107,27 +173,26 @@ impl PreparedGraphAggregate {
             rows.result_rows = result_rows;
             Ok(())
         };
-        let mut computed = Vec::new();
-        for (row, input) in source.value.into_iter().enumerate() {
-            control(GlaExecutionEvent::ScratchEntry)?;
-            // Reuse the read-projection evaluator, including payload charging,
-            // frozen column references and lazy arithmetic-only COALESCE. All
-            // source reads above remain eager and source errors stay errors.
-            let value = GraphSetProjection::evaluate_row_with_control(
-                &input,
-                projection,
-                &mut control,
-                |column, error| {
-                    GqlQueryError::Source(GraphAggregateError::InputExpression {
-                        row,
-                        column,
-                        error,
-                    })
-                },
-            )?;
-            computed.push(value);
-        }
-        let value = self.summarize_projected_rows(&computed, &mut control)?;
+        let input = if let Some(projection) = &self.computed_input {
+            let mut computed = Vec::new();
+            for (row, input) in source.value.into_iter().enumerate() {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                // Reuse the read-projection evaluator, including payload charging,
+                // frozen column references and lazy scalar branches. Source reads
+                // above remain eager and source errors remain typed errors.
+                let value = GraphSetProjection::evaluate_row_with_control(
+                    &input, projection, &mut control,
+                    |column, error| GqlQueryError::Source(GraphAggregateError::InputExpression {
+                        row, column, error,
+                    }),
+                )?;
+                computed.push(value);
+            }
+            computed
+        } else {
+            source.value
+        };
+        let value = self.summarize_projected_rows(&input, &mut control)?;
         control(GlaExecutionEvent::Work)?;
         Ok(GqlQueryExecution {
             value,
