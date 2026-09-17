@@ -2216,11 +2216,9 @@ fn a_lied_commit_rolls_back_strata_and_chronicle_together() {
                 .expect("durable baseline commit");
         }
 
-        // SESSION 2 — every sync lies. Since the BlockStore moved onto the
-        // Vfs seam (fgdb-tvg8.1) the root-slot evidence reread catches the
-        // unobservable generation during the write itself: the writer no
-        // longer stays blind, it returns CommittedNeedsRecovery naming the
-        // exact stage. Not one byte of the commit is durable either way.
+        // SESSION 2 — every sync lies. The batch's durable-backing check
+        // detects Strata's first lying inode sync before a root can be
+        // published. Chronicle remains authoritative after process loss.
         let vfs = FaultVfs::unix(FaultPlan {
             fsync_lie: Trigger::Always,
             ..FaultPlan::faultless()
@@ -2235,7 +2233,7 @@ fn a_lied_commit_rolls_back_strata_and_chronicle_together() {
             let error = db
                 .write(cx, batch)
                 .await
-                .expect_err("the root-slot evidence reread must expose the lies");
+                .expect_err("the durable inode evidence must expose the lies");
             let WriteError::CommittedNeedsRecovery { recovery, .. } = &error else {
                 panic!(
                     "a fully lying plane must fence as recovery-required, \
@@ -2246,7 +2244,7 @@ fn a_lied_commit_rolls_back_strata_and_chronicle_together() {
             assert_eq!(recovery.published_frontier.0, 1);
             assert_eq!(
                 recovery.failed_stage,
-                DerivedPublicationStage::PublishRootSlot
+                DerivedPublicationStage::PublishEdgeBlocks
             );
         }
         // THE WITNESS THIS SEAM EXISTS FOR: the plan bit BOTH planes. The
