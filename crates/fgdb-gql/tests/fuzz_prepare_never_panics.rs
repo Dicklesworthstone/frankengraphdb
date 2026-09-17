@@ -10,10 +10,13 @@ use fgdb_gql::{
 };
 use std::time::{Duration, Instant};
 
-// knob: ITERATIONS is the corpus size per seed (x3 seeds); 7_000 x3 = 21k
-// inputs total, tuned to stay under ~60s debug on one core. Lower it for a
-// quick local smoke; raise with care for deeper campaigns.
-const ITERATIONS: usize = 7_000;
+// knob: ITERATIONS is per-campaign statements; each campaign loops
+// SEEDS.len() seeds x ITERATIONS statements (currently 5 x 5_000 = 25_000),
+// and the generated + mutated campaigns together execute 50_000 statements,
+// every one through all 15 facades. Tuned to stay well under ~60s debug on
+// one core; lower it for a quick local smoke.
+const ITERATIONS: usize = 5_000;
+const SEEDS: usize = 5;
 
 mod fuzz_gen {
     pub struct Rng {
@@ -281,24 +284,35 @@ fn prepare_all(stmt: &str) {
 
 #[test]
 fn generated_statements_prepare_without_panic_across_all_facades() {
-    for seed in [0x5EED_0001, 0x5EED_0002, 0x5EED_0003] {
-        let mut corpus = fuzz_gen::Corpus::new(seed);
-        for _ in 0..ITERATIONS / 3 {
+    let mut executed = 0usize;
+    for seed in 0..SEEDS {
+        let mut corpus = fuzz_gen::Corpus::new(0x5EED_0001 + seed as u64);
+        for _ in 0..ITERATIONS {
             prepare_all(&corpus.unmutated_statement());
+            executed += 1;
         }
     }
+    assert!(
+        executed >= 20_000,
+        "generated campaign executed {executed} statements, below the 20k acceptance floor"
+    );
 }
 
 #[test]
 fn mutated_statements_prepare_without_panic_across_all_facades() {
-    for seed in [0x5EED_1001, 0x5EED_1002, 0x5EED_1003] {
-        let mut corpus = fuzz_gen::Corpus::new(seed);
-        for _ in 0..ITERATIONS / 3 {
+    let mut executed = 0usize;
+    for seed in 0..SEEDS {
+        let mut corpus = fuzz_gen::Corpus::new(0x5EED_1001 + seed as u64);
+        for _ in 0..ITERATIONS {
             prepare_all(&corpus.statement());
+            executed += 1;
         }
     }
+    assert!(
+        executed >= 20_000,
+        "mutated campaign executed {executed} statements, below the 20k acceptance floor"
+    );
 }
-
 #[test]
 fn deeply_nested_statements_refuse_with_typed_error_not_stack_overflow() {
     for stmt in [
