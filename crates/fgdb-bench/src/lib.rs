@@ -1076,6 +1076,31 @@ async fn load_gql_fixture(
     Ok((db, model))
 }
 
+/// Opt-in fixture reuse for profiling and optimization reruns
+/// (`FGDB_BENCH_REUSE_DB=<dir>`): reopen an existing durable fixture instead
+/// of paying the ~40-minute create/bulk-load per run. Default off, so the
+/// published baselines keep their create-from-scratch durability contract.
+/// The per-probe generator comparisons still fire on every probe: a stale,
+/// corrupt, or wrongly sized database fails the run and never publishes.
+/// Verification and timing semantics are identical either way.
+async fn open_or_load_gql_fixture(
+    query_cx: &QueryCx,
+    cx: &CommitCx,
+    name: &str,
+    vertices: usize,
+) -> Result<(Database, Model), String> {
+    if let Ok(dir) = std::env::var("FGDB_BENCH_REUSE_DB") {
+        if !dir.is_empty() {
+            let db = Database::open(cx, Path::new(&dir), keys())
+                .await
+                .map_err(|error| format!("reopen {name} from {dir}: {error}"))?;
+            let model = Model::preferential_attachment(vertices, 6, LOAD_SEED ^ 0x67_51);
+            return Ok((db, model));
+        }
+    }
+    load_gql_fixture(query_cx, cx, &scratch(name), vertices).await
+}
+
 fn gql_attributes(k: usize) -> [i64; 4] {
     let k = k as i64;
     [k, (k * 7919) % 100_003, k % 8, 20 + (k * 31) % 45]
@@ -1162,7 +1187,7 @@ pub async fn run_gql_shape(
         }
         _ => return Err(format!("unknown GQL shape {name:?}")),
     };
-    let (db, model) = load_gql_fixture(query_cx, cx, &scratch(name), vertices).await?;
+    let (db, model) = open_or_load_gql_fixture(query_cx, cx, name, vertices).await?;
     let scalar = |value| QueryValue::Value(GraphValue::Scalar(CanonicalScalar::Int(value)));
     // These expectations only consume the generator, not database results.
     let mut groups = BTreeMap::<i64, (u64, i128)>::new();
