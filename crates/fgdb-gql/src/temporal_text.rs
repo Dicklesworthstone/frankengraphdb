@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphTemporalTextErrorKind {
     Query(GraphPatternTextErrorKind),
+    Pipeline(crate::GraphPipelineAggregateTextErrorKind),
     MissingSystemTimeClause,
     DuplicateSystemTimeClause,
     InvalidSystemTimePosition,
@@ -50,6 +51,15 @@ impl From<GraphPatternTextError> for GraphTemporalTextError {
         Self {
             offset: error.offset,
             kind: GraphTemporalTextErrorKind::Query(error.kind),
+        }
+    }
+}
+
+impl From<crate::GraphPipelineAggregateTextError> for GraphTemporalTextError {
+    fn from(error: crate::GraphPipelineAggregateTextError) -> Self {
+        Self {
+            offset: error.offset,
+            kind: GraphTemporalTextErrorKind::Pipeline(error.kind),
         }
     }
 }

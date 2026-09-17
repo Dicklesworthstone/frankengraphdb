@@ -1,15 +1,15 @@
 //! Parse-once `FOR SYSTEM_TIME AS OF SEQ` wrapper for aggregate GQL text.
 //!
 //! The temporal selector is removed with equal-length ASCII whitespace and the
-//! remaining bytes are compiled by `PreparedGraphAggregateText`. This preserves
-//! the original UTF-8 offsets while reusing grouping, HAVING, CASE/arithmetic,
+//! remaining bytes are compiled by the direct or WITH-pipeline aggregate
+//! compiler. This preserves original UTF-8 offsets, row-stage boundaries,
 //! catalog resolution and parameter binding. Execution remains host-owned.
 
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters, GraphAggregateTextSlot,
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, GraphTemporalTextError,
     GraphTemporalTextErrorKind, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
-    PreparedGraphAggregate, PreparedGraphAggregateText,
+    PreparedGraphAggregate, PreparedGraphAggregateText, PreparedGraphPipelineAggregateText,
 };
 use fgdb_types::CommitSeq;
 use std::collections::BTreeSet;
@@ -236,9 +236,9 @@ fn locate(statement: &str) -> Result<(usize, usize, SequenceSelector), GraphTemp
             GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::TooManyTokens),
         ));
     }
-    let first_tail = tokens
-        .iter()
-        .position(|token| token.word("WHERE") || token.word("OPTIONAL") || token.word("RETURN"));
+    let first_tail = tokens.iter().position(|token| {
+        token.word("WHERE") || token.word("OPTIONAL") || token.word("WITH") || token.word("RETURN")
+    });
     let mut found = Vec::new();
     let mut loose_for = None;
     for at in 0..tokens.len() {
@@ -293,10 +293,9 @@ fn locate(statement: &str) -> Result<(usize, usize, SequenceSelector), GraphTemp
             GraphTemporalTextErrorKind::InvalidSystemTimePosition,
         ));
     }
-    if !tokens
-        .get(at + 6)
-        .is_some_and(|next| next.word("WHERE") || next.word("OPTIONAL") || next.word("RETURN"))
-    {
+    if !tokens.get(at + 6).is_some_and(|next| {
+        next.word("WHERE") || next.word("OPTIONAL") || next.word("WITH") || next.word("RETURN")
+    }) {
         return Err(fail(
             end,
             GraphTemporalTextErrorKind::InvalidSystemTimePosition,
@@ -306,9 +305,48 @@ fn locate(statement: &str) -> Result<(usize, usize, SequenceSelector), GraphTemp
 }
 
 #[derive(Clone)]
+enum AggregateTemplate {
+    Direct(PreparedGraphAggregateText),
+    Pipeline(PreparedGraphPipelineAggregateText),
+}
+
+impl AggregateTemplate {
+    fn columns(&self) -> &[String] {
+        match self {
+            Self::Direct(inner) => inner.columns(),
+            Self::Pipeline(inner) => inner.columns(),
+        }
+    }
+
+    fn output_slots(&self) -> &[GraphAggregateTextSlot] {
+        match self {
+            Self::Direct(inner) => inner.output_slots(),
+            Self::Pipeline(inner) => inner.output_slots(),
+        }
+    }
+
+    fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        match self {
+            Self::Direct(inner) => inner.parameter_schema(),
+            Self::Pipeline(inner) => inner.parameter_schema(),
+        }
+    }
+
+    fn bind_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<PreparedGraphAggregate, GraphTemporalTextError> {
+        match self {
+            Self::Direct(inner) => Ok(inner.bind_parameters(arguments)?),
+            Self::Pipeline(inner) => Ok(inner.bind_parameters(arguments)?),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct PreparedTemporalGraphAggregateText {
     statement: String,
-    inner: PreparedGraphAggregateText,
+    inner: AggregateTemplate,
     selector: SequenceSelector,
     parameters: Vec<GqlParameterSpec>,
 }
@@ -379,11 +417,25 @@ impl PreparedTemporalGraphAggregateText {
             .copied()
             .filter(|(name, _)| inner_names.contains(*name))
             .collect::<Vec<_>>();
-        let inner = PreparedGraphAggregateText::prepare_with_parameter_types(
-            &blanked,
-            &inner_declarations,
-            resolve,
-        )?;
+        let pipeline = tokens(&blanked)
+            .iter()
+            .take_while(|token| !token.word("RETURN"))
+            .any(|token| token.word("WITH"));
+        let inner = if pipeline {
+            AggregateTemplate::Pipeline(
+                PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
+                    &blanked,
+                    &inner_declarations,
+                    resolve,
+                )?,
+            )
+        } else {
+            AggregateTemplate::Direct(PreparedGraphAggregateText::prepare_with_parameter_types(
+                &blanked,
+                &inner_declarations,
+                resolve,
+            )?)
+        };
         let mut parameters = inner.parameter_schema().to_vec();
         if let Some(name) = temporal_name {
             if let Some(spec) = parameters.iter_mut().find(|spec| spec.name == name) {
