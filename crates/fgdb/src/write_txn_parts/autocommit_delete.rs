@@ -33,8 +33,9 @@ impl<V: Vfs + Clone> Database<V> {
         Ok((stats, completion))
     }
 
-    /// Autocommit plain DELETE plus the exact distinct target identities. The
-    /// target receipt is withheld until transaction completion succeeds.
+    /// Autocommit DELETE plus its exact distinct vertex target identities.
+    /// Edge targets are counted in stats; this receipt remains vertex-only.
+    /// The target receipt is withheld until transaction completion succeeds.
     pub async fn execute_graph_delete_returning_autocommit_governed(
         &mut self,
         txcx: &TxnCx,

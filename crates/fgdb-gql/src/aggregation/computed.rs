@@ -224,6 +224,7 @@ impl PreparedGraphAggregate {
                     GraphValue::Path(path) => ValueRef::Path(path),
                     GraphValue::Vertices(vertices) => ValueRef::Vertices(vertices),
                     GraphValue::Edges(edges) => ValueRef::Edges(edges),
+                    GraphValue::Edge(edge) => ValueRef::Edge(*edge),
                 };
                 for _ in 0..values[at].payload_units() {
                     control(GlaExecutionEvent::Work)?;

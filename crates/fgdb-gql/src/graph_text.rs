@@ -257,6 +257,7 @@ impl Number {
 }
 
 struct Edge<'a> {
+    variable: Option<Name<'a>>,
     source: Name<'a>,
     relation: Name<'a>,
     direction: GlaDirection,
@@ -658,6 +659,15 @@ impl<'a> Parser<'a> {
                     alias: name,
                 });
             }
+            for edge in &self.syntax.edges {
+                if let Some(name) = edge.variable {
+                    self.capacity(self.syntax.columns.len(), MAX_PATTERN_VERTICES, PatternLimitDimension::Columns)?;
+                    self.syntax.columns.push(Column {
+                        variable: name, property: None,
+                        path: Some(GraphPathFunction::Edge), alias: name,
+                    });
+                }
+            }
         } else {
             loop {
                 self.capacity(
@@ -678,6 +688,8 @@ impl<'a> Parser<'a> {
                     .is_some_and(|path| path.text == expression.text)
                 {
                     (expression, None, Some(GraphPathFunction::Value))
+                } else if self.syntax.edges.iter().any(|edge| edge.variable.is_some_and(|name| name.text == expression.text)) {
+                    (expression, None, Some(GraphPathFunction::Edge))
                 } else {
                     if !self
                         .syntax

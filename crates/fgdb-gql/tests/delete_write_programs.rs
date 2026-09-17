@@ -32,6 +32,7 @@ fn stats() -> GraphDeleteStats {
             scratch_entries: 2,
         },
         target_vertices: 1,
+        target_edges: 0,
     }
 }
 fn run(policy: GraphWriteProgramPolicy) -> Result<fgdb_gql::GraphWriteProgramStats, Error> {

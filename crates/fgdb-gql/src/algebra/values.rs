@@ -55,6 +55,8 @@ pub enum GraphPathFunction {
     Length,
     Nodes,
     Edges,
+    /// Identity of a captured, fixed-length relationship atom.
+    Edge,
 }
 
 /// Preparation-only column declarations. Names are checked before being owned
@@ -153,6 +155,7 @@ pub enum GraphValue {
     Path(GraphPath),
     Vertices(Box<[VId]>),
     Edges(Box<[EId]>),
+    Edge(EId),
 }
 
 impl GraphValue {
@@ -168,6 +171,14 @@ impl GraphValue {
     pub fn as_vertex(&self) -> Option<VId> {
         match self {
             Self::Vertex(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_edge(&self) -> Option<EId> {
+        match self {
+            Self::Edge(value) => Some(*value),
             _ => None,
         }
     }
@@ -193,6 +204,7 @@ impl core::fmt::Debug for GraphValue {
             Self::Path(_) => "Path",
             Self::Vertices(_) => "Vertices",
             Self::Edges(_) => "Edges",
+            Self::Edge(_) => "Edge",
         };
         f.debug_tuple(kind).field(&"[REDACTED]").finish()
     }
@@ -253,6 +265,7 @@ pub(crate) enum ValueRef<'a> {
     Path(&'a GraphPath),
     Vertices(&'a [VId]),
     Edges(&'a [EId]),
+    Edge(EId),
 }
 
 impl ValueRef<'_> {
@@ -285,6 +298,7 @@ impl ValueRef<'_> {
             Self::Path(value) => GraphValue::Path(value.clone()),
             Self::Vertices(value) => GraphValue::Vertices(value.into()),
             Self::Edges(value) => GraphValue::Edges(value.into()),
+            Self::Edge(value) => GraphValue::Edge(value),
         }
     }
 }
@@ -317,6 +331,7 @@ impl RowKey for GraphValueRow {
             GraphValue::Path(value) => ValueRef::Path(value),
             GraphValue::Vertices(value) => ValueRef::Vertices(value),
             GraphValue::Edges(value) => ValueRef::Edges(value),
+            GraphValue::Edge(value) => ValueRef::Edge(*value),
         }
     }
 }
@@ -377,6 +392,7 @@ pub(super) fn collect_values_with_paths<'a, E>(
         };
         computed[at] = match function {
             GraphPathFunction::Value => None,
+            GraphPathFunction::Edge => path.steps().first().map(|(edge, _)| GraphValue::Edge(*edge)),
             GraphPathFunction::Length => {
                 Some(GraphValue::Scalar(CanonicalScalar::Int(path.len() as i64)))
             }
@@ -421,6 +437,7 @@ pub(super) fn collect_values_with_paths<'a, E>(
                     (_, Some(GraphValue::Scalar(value))) => ValueRef::Scalar(value),
                     (_, Some(GraphValue::Vertices(value))) => ValueRef::Vertices(value),
                     (_, Some(GraphValue::Edges(value))) => ValueRef::Edges(value),
+                    (_, Some(GraphValue::Edge(value))) => ValueRef::Edge(*value),
                     _ => ValueRef::Scalar(&null),
                 }
             }

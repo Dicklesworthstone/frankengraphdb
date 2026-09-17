@@ -242,9 +242,9 @@ impl WriteTxn {
                         })
                         .map_err(GraphWriteStepError::EdgeUpsert),
                     GraphWriteStatement::Delete(input) => workspace.txn
-                        .execute_graph_delete_returning_governed(database, cx, input, remaining.deletion_policy())
-                        .map(|(stats, targets)| {
-                            receipts.push(GraphWriteStepReceipt::Delete { targets });
+                        .execute_graph_delete_elements_returning_governed(database, cx, input, remaining.deletion_policy())
+                        .map(|(stats, targets, edges)| {
+                            receipts.push(GraphWriteStepReceipt::Delete { targets, edges });
                             GraphWriteStepStats::Delete(stats)
                         })
                         .map_err(GraphWriteStepError::Delete),

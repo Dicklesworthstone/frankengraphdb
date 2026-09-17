@@ -30,8 +30,15 @@ impl<'a> Parser<'a> {
                     },
                 ));
             }
-            let variable = self.variable()?;
+            let variable = self.name()?;
+            let edge = self.syntax.edges.iter().any(|edge| edge.variable.is_some_and(|name| name.text == variable.text));
+            if !edge && !self.syntax.variables.iter().any(|name| name.text == variable.text) {
+                return Err(error(variable.at, GraphPatternTextErrorKind::UnknownVariable).into());
+            }
             let target = self.mutation_projection(&mut columns, variable, None)?;
+            if edge {
+                columns[target].path = Some(GraphPathFunction::Edge);
+            }
             if targets.contains(&target) {
                 return Err(build_error(
                     variable.at,
@@ -52,9 +59,9 @@ impl<'a> Parser<'a> {
 }
 
 impl PreparedGraphDeleteText {
-    /// Prepare `MATCH [WALK] ... [WHERE ...] [OPTIONAL MATCH ...] DELETE a[,b]`
-    /// through the existing graph-text parser. DELETE is non-detaching; the
-    /// write-capable host later proves every target has no incident relationship.
+    /// Prepare native MATCH followed by DELETE of bound vertices or fixed-length
+    /// relationships. Vertex targets must have no remaining incident edges;
+    /// relationship targets retire only the identified matching occurrences.
     pub fn prepare(
         statement: &str,
         relation: RelationId,
@@ -64,7 +71,7 @@ impl PreparedGraphDeleteText {
     }
 
     /// One parameter schema spans MATCH/WHERE/OPTIONAL clauses. DELETE itself
-    /// accepts bound vertex variables only. Syntax and target shape are fully
+    /// accepts bound vertex and fixed-length relationship variables. Syntax and target shape are fully
     /// validated before any catalog callback.
     pub fn prepare_with_parameter_types(
         statement: &str,
@@ -117,7 +124,7 @@ impl PreparedGraphDeleteText {
                 alias: format!("_delete_{index}"),
                 variable: projection.variable.text.to_owned(),
                 key: None,
-                path: None,
+                path: projection.path,
             })
             .collect::<Vec<_>>();
         let clauses = scopes.iter().map(BoundScope::clause).collect::<Vec<_>>();

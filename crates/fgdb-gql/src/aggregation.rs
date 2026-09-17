@@ -879,6 +879,7 @@ enum ValueRef<'a> {
     Path(&'a GraphPath),
     Vertices(&'a [VId]),
     Edges(&'a [EId]),
+    Edge(EId),
 }
 impl ValueRef<'_> {
     fn is_null(self) -> bool {
@@ -914,6 +915,7 @@ impl ValueRef<'_> {
             Self::Path(value) => GraphValue::Path(value.clone()),
             Self::Vertices(value) => GraphValue::Vertices(value.into()),
             Self::Edges(value) => GraphValue::Edges(value.into()),
+            Self::Edge(value) => GraphValue::Edge(value),
         })
     }
 }

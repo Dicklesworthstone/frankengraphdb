@@ -31,9 +31,10 @@ pub enum GraphWriteStepReceipt {
     EdgeUpsert {
         outcome: GraphEdgeMergeOutcome,
     },
-    /// Distinct non-detaching DELETE targets, sorted by vertex identity.
+    /// Distinct non-detaching DELETE targets, sorted within each identity domain.
     Delete {
         targets: Vec<VId>,
+        edges: Vec<EId>,
     },
 }
 
@@ -41,7 +42,7 @@ impl GraphWriteStepReceipt {
     #[must_use]
     pub fn mutation_targets(&self) -> Option<&[VId]> {
         match self {
-            Self::Mutation { targets } | Self::Delete { targets } => Some(targets),
+            Self::Mutation { targets } | Self::Delete { targets, .. } => Some(targets),
             Self::Insert { .. }
             | Self::VertexMerge { .. }
             | Self::VertexUpsert { .. }
@@ -55,7 +56,15 @@ impl GraphWriteStepReceipt {
     #[must_use]
     pub fn deleted_vertices(&self) -> Option<&[VId]> {
         match self {
-            Self::Delete { targets } => Some(targets),
+            Self::Delete { targets, .. } => Some(targets),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn deleted_edges(&self) -> Option<&[EId]> {
+        match self {
+            Self::Delete { edges, .. } => Some(edges),
             _ => None,
         }
     }
@@ -160,9 +169,10 @@ impl core::fmt::Debug for GraphWriteStepReceipt {
                 .debug_struct("EdgeUpsert")
                 .field("outcome", outcome)
                 .finish(),
-            Self::Delete { targets } => f
+            Self::Delete { targets, edges } => f
                 .debug_struct("Delete")
                 .field("targets", &targets.len())
+                .field("edges", &edges.len())
                 .field("identities", &"[REDACTED]")
                 .finish(),
         }
@@ -335,6 +345,7 @@ mod tests {
         for targets in [vec![], vec![VId(u128::MAX)]] {
             let step = GraphWriteStepReceipt::Delete {
                 targets: targets.clone(),
+                edges: Vec::new(),
             };
             assert_eq!(step.deleted_vertices(), Some(targets.as_slice()));
             assert_eq!(step.mutation_targets(), Some(targets.as_slice()));

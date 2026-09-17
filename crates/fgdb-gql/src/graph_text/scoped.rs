@@ -131,7 +131,7 @@ fn resolve_pattern_with_captures<'a>(
             builder.filter(variable.text, VertexPredicate::HasLabel(label_id)),
         )?;
     }
-    for edge in edges {
+    for (edge_at, edge) in edges.iter().enumerate() {
         let GraphSymbol::Relation(relation) = symbol(GraphSymbolKind::Relation, edge.relation)?
         else {
             unreachable!("symbol domain is checked by the shared resolver")
@@ -181,6 +181,9 @@ fn resolve_pattern_with_captures<'a>(
             ),
         };
         built(edge.relation.at, result)?;
+        if let Some(variable) = edge.variable {
+            built(variable.at, builder.capture_edge(variable.text, edge_at))?;
+        }
     }
     let mut numeric = Vec::new();
     for filter in filters {
@@ -510,6 +513,7 @@ impl<'a> Parser<'a> {
                 let incoming = self.take(b'<')?;
                 self.punct(b'-', "-")?;
                 self.punct(b'[', "[")?;
+                let variable = if self.is_punct(b':') { None } else { Some(self.name()?) };
                 self.punct(b':', ":")?;
                 let relation = self.name()?;
                 let bound_at = self.current.at;
@@ -535,6 +539,7 @@ impl<'a> Parser<'a> {
                 }
                 let right = self.node()?;
                 self.syntax.edges.push(Edge {
+                    variable,
                     source: left,
                     relation,
                     destination: right,

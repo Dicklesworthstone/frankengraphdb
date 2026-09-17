@@ -515,10 +515,10 @@ fn direct_write(
                 .unwrap()
                 .bind_parameters(args)
                 .unwrap();
-            let (_, targets) = txn
-                .execute_graph_delete_returning_governed(db, cx, &bound, policy.deletion_policy())
+            let (_, targets, edges) = txn
+                .execute_graph_delete_elements_returning_governed(db, cx, &bound, policy.deletion_policy())
                 .unwrap();
-            GraphWriteStepReceipt::Delete { targets }
+            GraphWriteStepReceipt::Delete { targets, edges }
         }
         WriteFacade::VertexMerge => {
             let bound = PreparedGraphVertexMergeText::prepare(text, R, symbols)

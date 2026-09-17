@@ -3,10 +3,10 @@
 // has no live incident relationship in the canonical transaction overlay.
 
 impl WriteTxn {
-    /// Stage a non-detaching query-selected vertex deletion. Every selected
-    /// target must have zero live incident relationships after all earlier
-    /// staged effects in this transaction. Otherwise the complete statement
-    /// refuses and no delete batch is appended.
+    /// Stage a non-detaching query-selected element deletion. Vertex targets
+    /// must have no incident relationships remaining after explicitly selected
+    /// edge targets are removed. Relationship deletion keeps both endpoints.
+    /// A refusal appends no delete batch.
     ///
     /// The incident-edge scan is also a conflict witness: a concurrent edge
     /// insertion after this check invalidates completion instead of allowing a
@@ -26,7 +26,8 @@ impl WriteTxn {
             .map(|(stats, _)| stats)
     }
 
-    /// The same plain DELETE with the exact distinct staged target identities.
+    /// The same DELETE with its distinct staged vertex targets only; edge
+    /// targets are included in statistics, not this vertex-identity receipt.
     /// This is a transaction-local receipt, not a durability acknowledgement.
     /// Returned source/work/scratch totals include the incident-edge validation
     /// and delete proposals, under the SAME allowance as MATCH. Storage overlay
@@ -39,6 +40,22 @@ impl WriteTxn {
         policy: fgdb_gql::GraphDeletePolicy,
     ) -> Result<
         (fgdb_gql::GraphDeleteStats, Vec<VId>),
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>,
+    > {
+        self.execute_graph_delete_elements_returning_governed(database, cx, deletion, policy)
+            .map(|(stats, vertices, _)| (stats, vertices))
+    }
+
+    /// Return disjoint, sorted vertex and relationship target identities.
+    /// Receipts describe staging, never successful durability.
+    pub fn execute_graph_delete_elements_returning_governed<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &fgdb_types::QueryCx,
+        deletion: &fgdb_gql::PreparedGraphDelete,
+        policy: fgdb_gql::GraphDeletePolicy,
+    ) -> Result<
+        (fgdb_gql::GraphDeleteStats, Vec<VId>, Vec<EId>),
         fgdb_gql::GqlQueryError<fgdb_gql::GraphDeleteError<WriteTxnError>, Box<asupersync::error::Error>>,
     > {
         use fgdb_gql::{GlaExecutionEvent, GlaLimitDimension, GlaLimitExceeded,
@@ -66,15 +83,15 @@ impl WriteTxn {
                 || cx.checkpoint(),
             )?;
             let mut stats = proposal.stats();
-            let targets = proposal.into_targets();
-            if targets.is_empty() {
-                return Ok((stats, targets));
+            let (targets, edge_targets) = proposal.into_target_parts();
+            if targets.is_empty() && edge_targets.is_empty() {
+                return Ok((stats, targets, edge_targets));
             }
 
             // Read the exact staged overlay once. Edge deletions already staged
             // by the transaction disappear here; staged edge creations appear.
             // edges() retains both point and scan dependencies for completion.
-            let edges = self.edges(database).map_err(source)?;
+            let edges = if targets.is_empty() { Vec::new() } else { self.edges(database).map_err(source)? };
             let records = u64::try_from(edges.len()).ok()
                 .and_then(|count| stats.selection.snapshot_records.checked_add(count))
                 .ok_or(GqlQueryError::Source(GraphDeleteError::InvalidSourceStatistics))?;
@@ -105,14 +122,19 @@ impl WriteTxn {
             // rescanning every edge for every target; do not allocate an index.
             for edge in &edges {
                 event(GlaExecutionEvent::Work)?;
-                if targets.binary_search(&edge.entry.src).is_ok()
-                    || targets.binary_search(&edge.entry.dst).is_ok()
+                if (targets.binary_search(&edge.entry.src).is_ok()
+                    || targets.binary_search(&edge.entry.dst).is_ok())
+                    && edge_targets.binary_search(&edge.entry.eid).is_err()
                 {
                     return Err(GqlQueryError::Source(GraphDeleteError::IncidentRelationships));
                 }
             }
 
             let mut batch = WriteBatch::new(deletion.relation());
+            for target in &edge_targets {
+                event(GlaExecutionEvent::ScratchEntry)?;
+                batch.delete_edge(*target);
+            }
             for target in &targets {
                 event(GlaExecutionEvent::ScratchEntry)?;
                 // Storage still uses its ordinary vertex-delete representation.
@@ -122,7 +144,7 @@ impl WriteTxn {
             }
             event(GlaExecutionEvent::Work)?;
             self.write(database, batch).map_err(source)?;
-            Ok((stats, targets))
+            Ok((stats, targets, edge_targets))
         })
     }
 }

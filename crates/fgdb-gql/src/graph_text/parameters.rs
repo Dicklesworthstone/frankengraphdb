@@ -85,6 +85,7 @@ impl UnresolvedGraphText<'_> {
             Some(GraphPathFunction::Length) => Scalar,
             Some(GraphPathFunction::Nodes) => crate::GraphSetColumnType::Vertices,
             Some(GraphPathFunction::Edges) => crate::GraphSetColumnType::Edges,
+            Some(GraphPathFunction::Edge) => crate::GraphSetColumnType::Edge,
             None if column.property.is_some() => Scalar,
             None => Vertex,
         };

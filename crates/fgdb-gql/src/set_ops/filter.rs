@@ -126,11 +126,13 @@ impl RowPredicate {
                         GraphSetColumnType::Path
                             | GraphSetColumnType::Vertices
                             | GraphSetColumnType::Edges
+                            | GraphSetColumnType::Edge
                     ) || matches!(
                         right,
                         GraphSetColumnType::Path
                             | GraphSetColumnType::Vertices
                             | GraphSetColumnType::Edges
+                            | GraphSetColumnType::Edge
                     ) {
                         return Err(Error::InvalidValueComparison { instruction });
                     }
@@ -290,7 +292,7 @@ fn resolve<'a, E>(
         GraphSetOperand::Column(column) => match &row.values()[*column] {
             GraphValue::Vertex(value) => Cell::Vertex(*value),
             GraphValue::Scalar(value) => Cell::Scalar(value),
-            GraphValue::Path(_) | GraphValue::Vertices(_) | GraphValue::Edges(_) => {
+            GraphValue::Path(_) | GraphValue::Vertices(_) | GraphValue::Edges(_) | GraphValue::Edge(_) => {
                 Cell::Incompatible
             }
         },

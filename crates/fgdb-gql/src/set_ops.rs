@@ -43,6 +43,7 @@ pub enum GraphSetColumnType {
     Path,
     Vertices,
     Edges,
+    Edge,
 }
 impl From<&ValueProjection> for GraphSetColumnType {
     fn from(column: &ValueProjection) -> Self {
@@ -55,6 +56,7 @@ impl From<&ValueProjection> for GraphSetColumnType {
                 GraphPathFunction::Length => Self::Scalar,
                 GraphPathFunction::Nodes => Self::Vertices,
                 GraphPathFunction::Edges => Self::Edges,
+                GraphPathFunction::Edge => Self::Edge,
             },
         }
     }
@@ -70,6 +72,7 @@ impl GraphSetColumnType {
                     | (Self::Path, GraphValue::Path(_))
                     | (Self::Vertices, GraphValue::Vertices(_))
                     | (Self::Edges, GraphValue::Edges(_))
+                    | (Self::Edge, GraphValue::Edge(_))
             )
     }
 }

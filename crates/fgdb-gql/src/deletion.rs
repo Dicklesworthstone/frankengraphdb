@@ -1,18 +1,16 @@
-//! Query-selected non-detaching vertex deletion.
+//! Query-selected non-detaching vertex and relationship deletion.
 //!
-//! This kernel freezes one prepared MATCH relation and reduces target columns to
-//! distinct vertex identities. It deliberately does not decide whether a target
-//! has incident relationships: only the write-capable host can answer that
-//! against the canonical transaction overlay. The host must refuse such a
-//! target before staging any delete. No storage effect or cascade lives here.
+//! Distinct typed identities are frozen from the admitted MATCH result. The
+//! write-capable host proves vertex targets have no remaining incident edges;
+//! relationship targets retire only their actual EIds, never their endpoints.
 
-use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
+use crate::algebra::{GraphPathFunction, GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
     GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
 };
 use fgdb_delta_types::RelationId;
-use fgdb_types::VId;
+use fgdb_types::{EId, VId};
 use std::collections::BTreeSet;
 
 pub const MAX_GRAPH_DELETE_TARGETS: usize = 256;
@@ -83,14 +81,18 @@ pub struct GraphDeleteStats {
     pub selection: GqlExecutionStats,
     pub evaluator: GlaExecutionStats,
     pub target_vertices: u64,
+    pub target_edges: u64,
 }
 
 #[derive(Debug)]
 pub struct GraphDeleteProposal {
     targets: Vec<VId>,
+    edge_targets: Vec<EId>,
     stats: GraphDeleteStats,
 }
 impl GraphDeleteProposal {
+    /// Distinct vertex targets only; relationship identities are disjoint and
+    /// available through edge_targets().
     #[must_use]
     pub fn targets(&self) -> &[VId] {
         &self.targets
@@ -99,9 +101,19 @@ impl GraphDeleteProposal {
     pub const fn stats(&self) -> GraphDeleteStats {
         self.stats
     }
+    /// Consume the vertex portion only. Use into_target_parts() when applying
+    /// mutations so relationship targets are retained as well.
     #[must_use]
     pub fn into_targets(self) -> Vec<VId> {
         self.targets
+    }
+    #[must_use]
+    pub fn edge_targets(&self) -> &[EId] {
+        &self.edge_targets
+    }
+    #[must_use]
+    pub fn into_target_parts(self) -> (Vec<VId>, Vec<EId>) {
+        (self.targets, self.edge_targets)
     }
 }
 
@@ -137,7 +149,7 @@ impl PreparedGraphDelete {
         let columns = selection.value_columns();
         let mut seen = BTreeSet::new();
         for (at, &column) in targets.iter().enumerate() {
-            if !matches!(columns.get(column), Some(ValueProjection::Vertex { .. })) {
+            if !matches!(columns.get(column), Some(ValueProjection::Vertex { .. } | ValueProjection::Path { function: GraphPathFunction::Edge, .. })) {
                 return Err(GraphDeleteBuildError::TargetColumn { target: at, column });
             }
             if !seen.insert(column) {
@@ -253,6 +265,7 @@ impl PreparedGraphDelete {
         event(GlaExecutionEvent::Work)?;
         let columns = self.selection.value_columns();
         let mut targets = BTreeSet::new();
+        let mut edge_targets = BTreeSet::new();
         for (row_at, row) in selected.value.iter().enumerate() {
             event(GlaExecutionEvent::Work)?;
             if row.len() != columns.len() {
@@ -267,16 +280,20 @@ impl PreparedGraphDelete {
                 if value.is_null() {
                     continue;
                 }
-                let Some(vertex) = value.as_vertex() else {
+                let edge_column = matches!(columns[column], ValueProjection::Path { function: GraphPathFunction::Edge, .. });
+                let vertex = if edge_column { None } else { value.as_vertex() };
+                let edge = if edge_column { value.as_edge() } else { None };
+                if vertex.is_none() && edge.is_none() {
                     return Err(GqlQueryError::Source(GraphDeleteError::InputSchema {
                         row: row_at,
                         column,
                     }));
-                };
-                if targets.contains(&vertex) {
+                }
+                if vertex.is_some_and(|vertex| targets.contains(&vertex))
+                    || edge.is_some_and(|edge| edge_targets.contains(&edge)) {
                     continue;
                 }
-                let observed = targets.len() as u128 + 1;
+                let observed = targets.len() as u128 + edge_targets.len() as u128 + 1;
                 if observed > u128::from(policy.max_targets) {
                     return Err(GqlQueryError::Source(GraphDeleteError::TargetLimit {
                         limit: policy.max_targets,
@@ -284,17 +301,24 @@ impl PreparedGraphDelete {
                     }));
                 }
                 event(GlaExecutionEvent::ScratchEntry)?;
-                targets.insert(vertex);
+                if let Some(vertex) = vertex {
+                    targets.insert(vertex);
+                }
+                if let Some(edge) = edge {
+                    edge_targets.insert(edge);
+                }
             }
         }
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         let targets = targets.into_iter().collect::<Vec<_>>();
+        let edge_targets = edge_targets.into_iter().collect::<Vec<_>>();
         let stats = GraphDeleteStats {
             selection: selected.rows,
             evaluator,
             target_vertices: targets.len() as u64,
+            target_edges: edge_targets.len() as u64,
         };
-        Ok(GraphDeleteProposal { targets, stats })
+        Ok(GraphDeleteProposal { targets, edge_targets, stats })
     }
 
     #[must_use]

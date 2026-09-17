@@ -132,7 +132,9 @@ struct Identity {
 struct PathCapture {
     name: String,
     start: usize,
+    first_edge: usize,
     edge_count: usize,
+    edge_identity: bool,
 }
 
 #[derive(Clone)]
@@ -389,7 +391,37 @@ impl GraphPatternBuilder {
         self.path_captures.push(PathCapture {
             name: name.to_owned(),
             start,
+            first_edge: 0,
             edge_count: self.edges.len(),
+            edge_identity: false,
+        });
+        Ok(self)
+    }
+
+    /// Capture one declared, fixed-length relationship using the same admitted
+    /// traversal segment as path values. No endpoint-to-edge reconstruction.
+    pub fn capture_edge(&mut self, name: &str, edge: usize) -> Result<&mut Self, PatternBuildError> {
+        let definition = self.edges.get(edge).ok_or(PatternBuildError::InvalidPathCapture)?;
+        if definition.walk.is_some() {
+            return Err(PatternBuildError::InvalidPathCapture);
+        }
+        let start = definition.source;
+        let bytes = name.as_bytes();
+        if bytes.is_empty() || bytes.len() > MAX_PATTERN_NAME_BYTES
+            || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+            || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            return Err(PatternBuildError::InvalidVariableName);
+        }
+        if self.variables.iter().any(|variable| variable.name == name)
+            || self.path_captures.iter().any(|capture| capture.name == name)
+        {
+            return Err(PatternBuildError::DuplicateVariable);
+        }
+        check_next(self.path_captures.len(), MAX_PATTERN_IDENTITIES, PatternLimitDimension::PathCaptures)?;
+        self.path_captures.push(PathCapture {
+            name: name.to_owned(), start, first_edge: edge, edge_count: 1,
+            edge_identity: true,
         });
         Ok(self)
     }
@@ -750,6 +782,7 @@ impl GraphPatternBuilder {
         } else {
             vec![None; self.edges.len()]
         };
+        let mut edge_starts = if self.path_captures.is_empty() { Vec::new() } else { vec![None; self.edges.len()] };
         let mut operators = Vec::new();
         let mut next_slot;
         if root.is_some() || self.edges.is_empty() {
@@ -788,6 +821,7 @@ impl GraphPatternBuilder {
             consumed[0] = true;
             if !path_segments.is_empty() {
                 path_segments[0] = Some(BindingSlot(1));
+                edge_starts[0] = Some(BindingSlot(0));
             }
             next_slot = 2;
         }
@@ -811,6 +845,7 @@ impl GraphPatternBuilder {
                 operators.push(edge.expansion(source, direction));
                 if !path_segments.is_empty() {
                     path_segments[at] = Some(appended);
+                    edge_starts[at] = Some(source);
                 }
                 let previous = slots[target];
                 if let Some(representative) = previous {
@@ -859,8 +894,12 @@ impl GraphPatternBuilder {
         for (capture, definition) in self.path_captures.iter().enumerate() {
             operators.push(GlaOperator::CapturePath {
                 capture: capture as u32,
-                start: slots[definition.start],
-                segments: path_segments[..definition.edge_count]
+                start: if definition.edge_identity {
+                    edge_starts[definition.first_edge].expect("every captured edge has a source")
+                } else {
+                    slots[definition.start]
+                },
+                segments: path_segments[definition.first_edge..definition.first_edge + definition.edge_count]
                     .iter()
                     .map(|slot| slot.expect("every captured edge has been bound"))
                     .collect(),
