@@ -438,10 +438,14 @@ fn scalar_queries_keep_exact_policy_boundaries_and_real_runtime_cancellation() {
                         .unwrap(),
                     full
                 );
-                // The scan-served equivalent keeps the full-domain boundary:
-                // seven source vertices, refusal exactly one below the cap.
+                // fgdb-j8mu: the range predicate is served from the maintained
+                // property index; the source layer charges one SnapshotRecord
+                // per resolved candidate (fgdb-bupm ruling), so the full
+                // seven-row domain is no longer read. The fixture's own seed
+                // batch fixes the candidate domain at two 'ready' rows
+                // (V0, V1) — never engine counters.
                 let range = query("MATCH (n:Person) WHERE n.status >= 'r' RETURN n");
-                let range_records = 7;
+                let range_records = 2;
                 assert_eq!(
                     db.execute_graph_pattern_governed(&cx, &range, policy())
                         .unwrap()
@@ -449,11 +453,13 @@ fn scalar_queries_keep_exact_policy_boundaries_and_real_runtime_cancellation() {
                         .snapshot_records,
                     range_records
                 );
+                // Exact candidate-boundary refusals: one below the candidate
+                // count refuses, exactly the candidate count succeeds.
                 assert!(matches!(
                     db.execute_graph_pattern_governed(
                         &cx,
                         &range,
-                        GqlQueryPolicy::new(6, 2, u64::MAX, u64::MAX)
+                        GqlQueryPolicy::new(1, 2, u64::MAX, u64::MAX)
                     ),
                     Err(GqlQueryError::Rows(_))
                 ));
@@ -461,7 +467,7 @@ fn scalar_queries_keep_exact_policy_boundaries_and_real_runtime_cancellation() {
                     db.execute_graph_pattern_governed(
                         &cx,
                         &range,
-                        GqlQueryPolicy::new(7, 2, u64::MAX, u64::MAX)
+                        GqlQueryPolicy::new(2, 2, u64::MAX, u64::MAX)
                     ),
                     Ok(_)
                 ));

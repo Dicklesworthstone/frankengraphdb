@@ -562,8 +562,17 @@ fn source_oracle(db: &Database<MemVfs>, at: CommitSeq) -> Vec<(Vec<VId>, u64)> {
     // Cost derivation (fgdb-dewk adjudication): the source layer charges one
     // SnapshotRecord per distinct admitted element the shape must read, from
     // storage facts only — never from engine counters.
-    // q0 vertex scan: every visible vertex row is admitted once.
-    let vertex_charge = vertices.len() as u64;
+    // q0 (fgdb-j8mu): the n>=3 range predicate is served from the maintained
+    // property index, which charges one SnapshotRecord per RESOLVED
+    // CANDIDATE (fgdb-bupm ruling): the union over the serving generation's
+    // stored history of vertices that ever held a qualifying value, whether
+    // or not that row is visible at the queried as_of. Derived from this
+    // fixture's own writes: the seed batch stores n=3 (VId 3) and n=9
+    // (HIGH); the seq-3 update stores n=8 on VId 2; later retires and
+    // deletes never erase stored history. Every as_of at or below a
+    // generation's frontier is served from that generation's union, so the
+    // charge is constant per generation rather than per as_of.
+    let vertex_charge = if db.frontier().unwrap().0 >= 3 { 3 } else { 2 };
     // q1 bound-edge scan (fgdb-dewk adjudication): the bound slot is b
     // (slot 1), so the expansion walks each qualifying vertex's incoming
     // adjacency and charges one SnapshotRecord per newly selected visible

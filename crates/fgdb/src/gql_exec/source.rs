@@ -204,6 +204,20 @@ impl<K: Ord + Clone, V: Clone> IndexMap<K, V> {
         iter.descend(self.0.as_deref());
         iter
     }
+    /// Seek once, then traverse only the requested ordered suffix.
+    fn iter_from(&self, lower: &K, inclusive: bool) -> IndexIter<'_, K, V> {
+        let mut iter = IndexIter { stack: Vec::new() };
+        let mut cursor = self.0.as_deref();
+        while let Some(node) = cursor {
+            if node.key > *lower || (inclusive && node.key == *lower) {
+                iter.stack.push(node);
+                cursor = node.left.0.as_deref();
+            } else {
+                cursor = node.right.0.as_deref();
+            }
+        }
+        iter
+    }
     fn at(&self, mut rank: usize) -> Option<(&K, &V)> {
         let mut cursor = self.0.as_deref();
         while let Some(node) = cursor {
@@ -273,6 +287,29 @@ mod persistent_index_tests {
         assert_eq!(map.at(0), Some((&401, &802)));
         assert_eq!(map.len(), 1);
         assert_eq!(pinned.len(), 400);
+    }
+
+    #[test]
+    fn ordered_seek_respects_present_absent_and_exclusive_bounds() {
+        let mut map = IndexMap::new();
+        let mut work = 0;
+        for key in [8, 2, 14, 0, 6, 10, 18, 4, 12, 16] {
+            map = map.insert(key, (), &mut work);
+        }
+        for lower in -1..=20 {
+            for inclusive in [false, true] {
+                let expected: Vec<_> = (0..=18)
+                    .step_by(2)
+                    .filter(|key| *key > lower || (inclusive && *key == lower))
+                    .collect();
+                assert_eq!(
+                    map.iter_from(&lower, inclusive)
+                        .map(|(key, ())| *key)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
     }
 }
 
@@ -525,6 +562,37 @@ impl PropertyEqualityIndex {
         Candidates(self.candidates.get(&(key, std::sync::Arc::from(encoded))))
     }
 
+    /// Ordered scalar bytes have the same order as CanonicalScalar::cmp.
+    /// Bounds stay within one type tag: predicate.rs::accepts_scalar_pair
+    /// rejects heterogeneous pairs, rather than comparing their type ranks.
+    fn range_candidates<E>(
+        &self,
+        range: &PropertyRange,
+        control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+    ) -> Result<std::collections::BTreeSet<VId>, E> {
+        let mut ids = std::collections::BTreeSet::new();
+        if range.empty {
+            return Ok(ids);
+        }
+        let lower = (range.key, std::sync::Arc::from(range.lower.as_slice()));
+        for ((key, encoded), candidates) in self.candidates.iter_from(&lower, range.lower_inclusive)
+        {
+            if *key != range.key
+                || encoded.as_ref() > range.upper.as_slice()
+                || (!range.upper_inclusive && encoded.as_ref() == range.upper.as_slice())
+            {
+                break;
+            }
+            for (vid, ()) in candidates.iter() {
+                if !ids.contains(vid) {
+                    control(SourceEvent::ScratchEntry)?;
+                    ids.insert(*vid);
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     /// Latest statement at the cut, with later patches winning equal creation
     /// sequences exactly as in visit_vertices. Retirements remain authoritative.
     fn visible_row<'a, E>(
@@ -577,10 +645,67 @@ impl<'a> IntoIterator for Candidates<'a> {
     }
 }
 
-/// Whether equality-bound vertex scans are served from the index (fgdb-bupm).
+/// Intersection of constraints on one property and one canonical scalar kind.
+struct PropertyRange {
+    key: PropertyKeyId,
+    lower: Vec<u8>,
+    upper: Vec<u8>,
+    lower_inclusive: bool,
+    upper_inclusive: bool,
+    tag: u8,
+    empty: bool,
+}
+
+impl PropertyRange {
+    fn new(key: PropertyKeyId, encoded: &[u8]) -> Self {
+        let tag = encoded[0];
+        Self {
+            key,
+            lower: vec![tag],
+            upper: vec![tag + 1],
+            lower_inclusive: true,
+            upper_inclusive: false,
+            tag,
+            empty: false,
+        }
+    }
+
+    fn constrain(&mut self, encoded: Vec<u8>, comparison: fgdb_gql::algebra::IntegerComparison) {
+        use fgdb_gql::algebra::IntegerComparison as C;
+        if encoded[0] != self.tag {
+            self.empty = true;
+            return;
+        }
+        let inclusive = matches!(comparison, C::Equal | C::LessOrEqual | C::GreaterOrEqual);
+        if matches!(comparison, C::Equal | C::Greater | C::GreaterOrEqual) {
+            match encoded.cmp(&self.lower) {
+                std::cmp::Ordering::Greater => {
+                    self.lower = encoded.clone();
+                    self.lower_inclusive = inclusive;
+                }
+                std::cmp::Ordering::Equal => self.lower_inclusive &= inclusive,
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        if matches!(comparison, C::Equal | C::Less | C::LessOrEqual) {
+            match encoded.cmp(&self.upper) {
+                std::cmp::Ordering::Less => {
+                    self.upper = encoded;
+                    self.upper_inclusive = inclusive;
+                }
+                std::cmp::Ordering::Equal => self.upper_inclusive &= inclusive,
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+        self.empty |= self.lower > self.upper
+            || (self.lower == self.upper && !(self.lower_inclusive && self.upper_inclusive));
+    }
+}
+
+/// Whether property-bound single-domain scans use the maintained index.
 const PROPERTY_INDEX_SERVING: bool = true;
 
-/// Serve an equality-bound single-domain vertex plan from the equality index.
+/// Serve equality or range predicates over a single vertex domain.
 /// The admitted rows also supply every nested scan and property lookup, so a
 /// root predicate cannot prune that shared table when later operators introduce
 /// other bindings. Such plans retain the complete scan source.
@@ -644,14 +769,14 @@ fn bound_vertices<'a, E, Row>(
                     break;
                 }
             }
-            // Only a leading run of selections is index-served; anything
-            // structural after the scan keeps the scan path.
+            // Preserve equality preference. Other allowed output operators
+            // need no equality extraction; the range fallback handles them.
             GlaOperator::Project { .. } | GlaOperator::Distinct | GlaOperator::OrderByVertexId => {}
-            _ => return Ok(None),
+            _ => break,
         }
     }
     let Some((key, value)) = equality else {
-        return Ok(None);
+        return range_vertices(snapshot, prefix, as_of, control);
     };
     let mut rows = Vec::new();
     let candidates = snapshot.property_index.lookup(key, &value);
@@ -671,6 +796,78 @@ fn bound_vertices<'a, E, Row>(
                 .iter()
                 .all(|predicate| predicate.matches(&row.labels, &row.props))
             {
+                control(SourceEvent::ScratchEntry)?;
+                rows.push(row);
+            }
+        }
+    }
+    Ok(Some((rows, candidates.len() as u64)))
+}
+
+fn range_vertices<'a, E>(
+    snapshot: &'a Snapshot,
+    operators: &[fgdb_gql::algebra::GlaOperator],
+    as_of: CommitSeq,
+    control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
+) -> Result<Option<(Vec<&'a VertexRow>, u64)>, E> {
+    use fgdb_gql::algebra::{GlaOperator, IntegerComparison, VertexPredicate};
+    let predicates = || {
+        operators
+            .iter()
+            .filter_map(|operator| match operator {
+                GlaOperator::Select { predicates, .. } => Some(predicates.as_slice()),
+                _ => None,
+            })
+            .flatten()
+    };
+    let mut range: Option<PropertyRange> = None;
+    for predicate in predicates() {
+        let (key, comparison, encoded) = match predicate {
+            VertexPredicate::IntegerProperty {
+                key,
+                comparison,
+                value,
+            } => (
+                *key,
+                *comparison,
+                CanonicalScalar::Int(*value)
+                    .encode()
+                    .expect("integer encoding"),
+            ),
+            VertexPredicate::ScalarProperty { key, predicate } => {
+                if matches!(predicate.value(), CanonicalScalar::Null) {
+                    continue;
+                }
+                (
+                    *key,
+                    predicate.comparison(),
+                    predicate.canonical_value_bytes().to_vec(),
+                )
+            }
+            _ => continue,
+        };
+        if comparison == IntegerComparison::NotEqual {
+            continue;
+        }
+        let selected = range.get_or_insert_with(|| PropertyRange::new(key, &encoded));
+        if selected.key == key {
+            selected.constrain(encoded, comparison);
+        }
+    }
+    let Some(range) = range else {
+        return Ok(None);
+    };
+    let candidates = snapshot.property_index.range_candidates(&range, control)?;
+    let mut rows = Vec::new();
+    for vid in &candidates {
+        control(SourceEvent::Work)?;
+        control(SourceEvent::SnapshotRecord)?;
+        if let Some(row) =
+            snapshot
+                .property_index
+                .visible_row(&snapshot.patches, *vid, as_of, control)?
+        {
+            if predicates().all(|predicate| predicate.matches(&row.labels, &row.props)) {
                 control(SourceEvent::ScratchEntry)?;
                 rows.push(row);
             }
