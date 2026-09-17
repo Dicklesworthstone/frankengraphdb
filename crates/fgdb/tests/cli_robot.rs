@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint"]}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"]}"##,
     "\n"
 );
 
@@ -291,6 +291,22 @@ fn exact_fields(value: &Json, fields: &[&str]) {
     );
 }
 
+fn check_identity(value: &Json) {
+    assert_eq!(
+        value.string().parse::<u128>().unwrap().to_string(),
+        value.string()
+    );
+}
+
+fn check_hex(value: &Json) {
+    let text = value.string();
+    assert_eq!(text.len() % 2, 0);
+    assert!(
+        text.bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    );
+}
+
 fn check_cell(cell: &Json, schema: &Json) {
     let kind = cell.get("type").string();
     assert!(
@@ -328,6 +344,67 @@ fn check_cell(cell: &Json, schema: &Json) {
             value.string().parse::<i128>().unwrap().to_string(),
             value.string()
         ),
+        "average" => {
+            let (numerator, denominator) = value.string().split_once('/').unwrap();
+            let numerator_value = numerator.parse::<i128>().unwrap();
+            let denominator_value = denominator.parse::<u64>().unwrap();
+            assert_eq!(numerator_value.to_string(), numerator);
+            assert_eq!(denominator_value.to_string(), denominator);
+            assert_ne!(denominator_value, 0);
+            let mut left = numerator_value.unsigned_abs();
+            let mut right = u128::from(denominator_value);
+            while right != 0 {
+                (left, right) = (right, left % right);
+            }
+            assert_eq!(left, 1, "average must be reduced");
+        }
+        "decimal" => {
+            let text = value.string().strip_prefix('-').unwrap_or(value.string());
+            let (integer, fraction) = text.split_once('.').unwrap_or((text, ""));
+            assert!(!integer.is_empty());
+            assert!(integer.bytes().all(|byte| byte.is_ascii_digit()));
+            assert!(fraction.bytes().all(|byte| byte.is_ascii_digit()));
+        }
+        "float" => {
+            let text = value.string();
+            if !matches!(text, "NaN" | "Infinity" | "-Infinity") {
+                let number = text.parse::<f64>().unwrap();
+                assert!(number.is_finite());
+                assert_eq!(number.to_string(), text, "shortest-roundtrip float");
+            }
+        }
+        "bytes" => check_hex(value),
+        "timestamp" => {
+            exact_fields(value, &["instant_utc_nanos", "utc_offset_seconds", "zone"]);
+            let instant = value.get("instant_utc_nanos").string();
+            assert_eq!(instant.parse::<i128>().unwrap().to_string(), instant);
+            match value.get("utc_offset_seconds") {
+                Json::Number(offset) => {
+                    assert_eq!(offset.parse::<i32>().unwrap().to_string(), *offset);
+                }
+                _ => fail("timestamp offset must be a JSON integer"),
+            }
+            let zone = value.get("zone");
+            if zone != &Json::Null {
+                exact_fields(zone, &["identifier", "tzdb_oid"]);
+                zone.get("identifier").string();
+                check_hex(zone.get("tzdb_oid"));
+            }
+        }
+        "vertex" | "edge" => check_identity(value),
+        "vertices" | "edges" => {
+            for identity in value.array() {
+                check_identity(identity);
+            }
+        }
+        "path" => {
+            exact_fields(value, &["nodes", "edges"]);
+            for field in ["nodes", "edges"] {
+                for identity in value.get(field).array() {
+                    check_identity(identity);
+                }
+            }
+        }
         _ => fail(&format!("unknown cell type {kind}")),
     }
 }
@@ -430,11 +507,11 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                 let class = event.get("class").string();
                 assert_ne!(class, "success");
                 assert_eq!(code as u64, schema.get("exit_codes").get(class).unsigned());
-                assert_eq!(
-                    event.get("diagnostics").array(),
-                    &[],
-                    "details belong only on stderr"
-                );
+                let diagnostics = event.get("diagnostics").array();
+                assert!(!diagnostics.is_empty(), "error diagnostics are required");
+                for diagnostic in diagnostics {
+                    assert!(!diagnostic.string().trim().is_empty());
+                }
             }
             _ => fail(&format!("unhandled schema event {name}")),
         }
@@ -488,6 +565,11 @@ impl Outcome {
         assert_eq!(self.terminal().get("event").string(), "error");
         assert_eq!(self.terminal().get("class").string(), class);
         assert!(!self.stderr.is_empty(), "failure details must reach stderr");
+        for key_byte in ["5a", "5b", "77", "78", "3c", "3d"] {
+            let key = key_byte.repeat(32);
+            assert!(!self.stdout.to_ascii_lowercase().contains(&key));
+            assert!(!self.stderr.to_ascii_lowercase().contains(&key));
+        }
     }
 }
 
@@ -805,7 +887,244 @@ fn merge_branches_and_typed_parameters_round_trip_without_interpolation() {
 }
 
 #[test]
-fn typed_failures_keep_stdout_machine_readable_and_diagnostics_private() {
+fn embedded_scalar_properties_have_exact_lossless_process_output() {
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb::{Database, DatabaseKeys, WriteBatch};
+    use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::context::PurposeContexts;
+    use fgdb_types::ids::DatabaseSecurityNamespaceId;
+    use fgdb_types::{
+        CanonicalDecimal, CanonicalF64, CanonicalScalar, CanonicalTimestamp, EId, VId,
+    };
+
+    // These scalar variants have no GQL literals or CLI parameter constructors.
+    // Persist them through the embedded API, then read through fresh CLI processes.
+    let db = TestDb::new("embedded-scalars");
+    db.create();
+    let cases = [
+        (
+            CanonicalScalar::Decimal(
+                CanonicalDecimal::from_coefficient(-1_250_000_000_000_000_001).unwrap(),
+            ),
+            r#"{"type":"decimal","value":"-1.250000000000000001"}"#,
+            Some("-1.250000000000000001"),
+        ),
+        (
+            CanonicalScalar::Float(CanonicalF64::new(1.2345678901234567)),
+            r#"{"type":"float","value":"1.2345678901234567"}"#,
+            Some("1.2345678901234567"),
+        ),
+        (
+            CanonicalScalar::Float(CanonicalF64::new(f64::NAN)),
+            r#"{"type":"float","value":"NaN"}"#,
+            Some("NaN"),
+        ),
+        (
+            CanonicalScalar::Float(CanonicalF64::new(f64::INFINITY)),
+            r#"{"type":"float","value":"Infinity"}"#,
+            Some("Infinity"),
+        ),
+        (
+            CanonicalScalar::Float(CanonicalF64::new(f64::NEG_INFINITY)),
+            r#"{"type":"float","value":"-Infinity"}"#,
+            Some("-Infinity"),
+        ),
+        (
+            CanonicalScalar::Timestamp(
+                CanonicalTimestamp::offset_only(-123456789012345678901234567890, -1847).unwrap(),
+            ),
+            r#"{"type":"timestamp","value":{"instant_utc_nanos":"-123456789012345678901234567890","utc_offset_seconds":-1847,"zone":null}}"#,
+            None,
+        ),
+        (
+            CanonicalScalar::bytes(vec![0, 1, 0xab, 0xff]).unwrap(),
+            r#"{"type":"bytes","value":"0001abff"}"#,
+            None,
+        ),
+    ];
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let commit = PurposeContexts::narrow_runtime_root(&root).commit();
+    let seq = runtime.block_on(async {
+        let keys = DatabaseKeys::new(
+            [0x5a; 32],
+            DatabaseSecurityNamespaceId([0x77; 32]),
+            [0x3c; 32],
+        );
+        let mut database = Database::open(&commit, &db.db, keys).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        for (index, (value, _, _)) in cases.iter().enumerate() {
+            batch.create_vertex(
+                VId(u128::MAX - index as u128),
+                vec![LabelId(1)],
+                vec![
+                    (PropertyKeyId(2), value.clone()),
+                    (PropertyKeyId(3), CanonicalScalar::Int(index as i64)),
+                ],
+            );
+        }
+        batch.add_edge(EId(u128::MAX), VId(u128::MAX), VId(u128::MAX - 1), vec![]);
+        database.write(&commit, batch).await.unwrap().0
+    });
+    for (index, (_, expected, human_value)) in cases.iter().enumerate() {
+        let query = format!("MATCH (p:Person) WHERE p.team={index} RETURN p.born AS value");
+        let output = db.command("query", &[&query]);
+        output.success();
+        assert_eq!(
+            output.stdout,
+            format!(
+                "{{\"v\":1,\"event\":\"invocation\"}}\n\
+             {{\"v\":1,\"event\":\"columns\",\"columns\":[\"value\"]}}\n\
+             {{\"v\":1,\"event\":\"row\",\"cells\":[{expected}]}}\n\
+             {{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{seq},\"count\":1}}\n"
+            )
+        );
+        if let Some(expected) = human_value {
+            let human = run(
+                false,
+                &["query", "--db", &db.db, "--key-file", &db.key, &query],
+            );
+            human.success();
+            assert_eq!(human.stdout.lines().nth(2).unwrap().trim(), *expected);
+        }
+    }
+    let source = u128::MAX;
+    let target = u128::MAX - 1;
+    assert_rows(
+        &db.command("query", &["MATCH (a)-[e:KNOWS]->(b) RETURN a,e,b"]),
+        &format!(
+            r#"[[{{"type":"vertex","value":"{source}"}},{{"type":"edge","value":"{source}"}},{{"type":"vertex","value":"{target}"}}]]"#
+        ),
+    );
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH p = (a)-[:KNOWS]->(b) RETURN p,nodes(p) AS nodes,edges(p) AS edges"],
+        ),
+        &format!(
+            r#"[[{{"type":"path","value":{{"nodes":["{source}","{target}"],"edges":["{source}"]}}}},{{"type":"vertices","value":["{source}","{target}"]}},{{"type":"edges","value":["{source}"]}}]]"#
+        ),
+    );
+}
+
+#[test]
+fn exact_average_is_reduced_in_robot_and_human_output() {
+    let db = TestDb::new("average");
+    db.create();
+    let seq = db.write(&[
+        "INSERT (:Person {born:1}),(:Person {born:2}),(:Person {born:3}),(:Person {born:4})",
+    ]);
+    let query = "MATCH (p:Person) RETURN AVG(p.born) AS mean";
+    let output = db.command("query", &[query]);
+    output.success();
+    assert_eq!(
+        output.stdout,
+        format!(
+            "{{\"v\":1,\"event\":\"invocation\"}}\n\
+         {{\"v\":1,\"event\":\"columns\",\"columns\":[\"mean\"]}}\n\
+         {{\"v\":1,\"event\":\"row\",\"cells\":[{{\"type\":\"average\",\"value\":\"5/2\"}}]}}\n\
+         {{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{seq},\"count\":1}}\n"
+        )
+    );
+    let human = run(
+        false,
+        &["query", "--db", &db.db, "--key-file", &db.key, query],
+    );
+    human.success();
+    assert_eq!(human.stdout.lines().nth(2).unwrap().trim(), "5/2");
+}
+
+#[test]
+fn path_output_retains_ordered_node_and_edge_identities() {
+    let db = TestDb::new("path");
+    db.create();
+    let seq =
+        db.write(&["INSERT (a:Person {name:'Ada'}),(b:Person {name:'Grace'}),(a)-[:KNOWS]->(b)"]);
+    let identities = db.command(
+        "query",
+        &["MATCH (a)-[e:KNOWS]->(b) WHERE a.name='Ada' AND b.name='Grace' RETURN a,e,b"],
+    );
+    identities.success();
+    assert_eq!(identities.terminal().get("count").unsigned(), 1);
+    let cells = identities.events[2].get("cells").array();
+    assert_eq!(cells[0].get("type").string(), "vertex");
+    assert_eq!(cells[1].get("type").string(), "edge");
+    assert_eq!(cells[2].get("type").string(), "vertex");
+    let source = cells[0].get("value").string();
+    let edge = cells[1].get("value").string();
+    let target = cells[2].get("value").string();
+    assert_ne!(source, target);
+    let query = "MATCH p = ANY SHORTEST WALK (a)-[:KNOWS*1..4]->(b) WHERE a.name='Ada' AND b.name='Grace' RETURN p";
+    let output = db.command("query", &[query]);
+    output.success();
+    assert_eq!(
+        output.stdout,
+        format!(
+            "{{\"v\":1,\"event\":\"invocation\"}}\n\
+         {{\"v\":1,\"event\":\"columns\",\"columns\":[\"p\"]}}\n\
+         {{\"v\":1,\"event\":\"row\",\"cells\":[{{\"type\":\"path\",\"value\":{{\"nodes\":[\"{source}\",\"{target}\"],\"edges\":[\"{edge}\"]}}}}]}}\n\
+         {{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{seq},\"count\":1}}\n"
+        )
+    );
+    let human = run(
+        false,
+        &["query", "--db", &db.db, "--key-file", &db.key, query],
+    );
+    human.success();
+    assert_eq!(
+        human.stdout.lines().nth(2).unwrap().trim(),
+        format!("path({{\"nodes\":[\"{source}\",\"{target}\"],\"edges\":[\"{edge}\"]}})")
+    );
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH p = ANY SHORTEST WALK (a)-[:KNOWS*1..4]->(b) WHERE a.name='Ada' AND b.name='Grace' RETURN nodes(p) AS nodes,edges(p) AS edges"],
+        ),
+        &format!(
+            r#"[[{{"type":"vertices","value":["{source}","{target}"]}},{{"type":"edges","value":["{edge}"]}}]]"#
+        ),
+    );
+}
+
+#[test]
+fn wrong_dek_after_committed_write_is_an_open_failure() {
+    let db = TestDb::new("populated-wrong-dek");
+    let created = db.create();
+    let written = db.write(&["INSERT (:Person {name:'Ada'})"]);
+    assert_eq!(written, created + 1);
+    let query = "MATCH (p:Person) RETURN p.name AS name";
+    assert_rows(
+        &db.command("query", &[query]),
+        r#"[[{"type":"text","value":"Ada"}]]"#,
+    );
+    let wrong = scratch("populated-wrong-key");
+    std::fs::write(
+        &wrong,
+        format!(
+            "{}\n{}\n{}\n",
+            "5a".repeat(32),
+            "77".repeat(32),
+            "3d".repeat(32)
+        ),
+    )
+    .unwrap();
+    robot(&[
+        "query",
+        "--db",
+        &db.db,
+        "--key-file",
+        wrong.to_str().unwrap(),
+        query,
+    ])
+    .failure(4, "open");
+    assert_rows(
+        &db.command("query", &[query]),
+        r#"[[{"type":"text","value":"Ada"}]]"#,
+    );
+}
+
+#[test]
+fn typed_failures_keep_stdout_machine_readable_and_key_material_private() {
     let db = TestDb::new("failures");
     db.create();
     db.command("query", &["MATCH (p RETURN p"])

@@ -5,7 +5,7 @@
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, QueryResult, QueryValue};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::algebra::{GraphPath, GraphValue};
 use fgdb_gql::{
     GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy, GqlScalarParameter,
     GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy, PreparedGraphWriteScript,
@@ -21,7 +21,7 @@ use std::{
 };
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint"]}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"]}"##,
     "\n"
 );
 const HELP: &str = "fgdb - embedded graph database
@@ -37,7 +37,7 @@ Supply the same bindings on reopen; no implicit catalog or hashed names.
 --write-relation u32 selects the native mutation coordinate (default 1).
 Key file: three nonempty lines of 64 hex characters: object-id key,
 security namespace, encryption key. # starts a comment. Keys never printed.
-Robot stdout: versioned NDJSON; diagnostics only on stderr.
+Robot stdout: versioned NDJSON; errors include message strings in diagnostics.
 Exit codes: 0 success, 2 usage/schema, 3 query refusal, 4 open/key, 5 I/O/corruption.
 ";
 
@@ -94,12 +94,14 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("fgdb: {}", error.message);
             if robot {
-                // Diagnostic contents stay off stdout and never include keys.
+                // Robot error events carry the message too; diagnostics never
+                // include key material because messages never format keys.
                 let _ = emit(
                     &mut out,
                     &format!(
-                        r#"{{"v":1,"event":"error","class":"{}","diagnostics":[]}}"#,
-                        error.class
+                        r#"{{"v":1,"event":"error","class":"{}","diagnostics":[{}]}}"#,
+                        error.class,
+                        quoted(&error.message)
                     ),
                 );
                 let _ = out.flush();
@@ -282,6 +284,16 @@ async fn read_keys(
 fn open_failure(error: fgdb::OpenError) -> Failure {
     use fgdb::OpenError as E;
     match error {
+        // Capsule recovery authenticates symbols with the supplied DEK before
+        // decoding. A wrong key leaves too few authenticated symbols. The
+        // public error cannot distinguish that from total symbol loss, so
+        // this ambiguous open-time failure belongs to the open/key class.
+        E::Rebuild(fgdb::RebuildError::Commit(fgdb_chronicle::CommitError::Capsule(
+            fgdb_chronicle::capsule::CapsuleError::Recovery(
+                fgdb_chronicle::SymbolizeError::InsufficientSymbols
+                | fgdb_chronicle::SymbolizeError::AuthenticationFailed,
+            ),
+        ))) => Failure::open(error),
         // Key failures: the path is fine, the identity in hand is not. A
         // foreign slot (namespace/opener disagreement) and a slot the
         // K_oid-authenticated stream disowns (wrong K_oid, SlotDisagreesWith
@@ -389,12 +401,47 @@ fn quoted(value: &str) -> String {
 }
 fn value_cell(value: &GraphValue) -> Result<String, Failure> {
     Ok(match value {
-        GraphValue::Scalar(CanonicalScalar::Null) => r#"{"type":"null"}"#.into(),
+        GraphValue::Scalar(CanonicalScalar::Null) => r#"{"type":"null"}"#.to_owned(),
         GraphValue::Scalar(CanonicalScalar::Bool(v)) => format!(r#"{{"type":"bool","value":{v}}}"#),
         GraphValue::Scalar(CanonicalScalar::Int(v)) => format!(r#"{{"type":"int","value":"{v}"}}"#),
         GraphValue::Scalar(CanonicalScalar::Text(v)) => {
             format!(r#"{{"type":"text","value":{}}}"#, quoted(v.as_str()))
         }
+        GraphValue::Scalar(CanonicalScalar::Decimal(v)) => {
+            format!(r#"{{"type":"decimal","value":"{v}"}}"#)
+        }
+        GraphValue::Scalar(CanonicalScalar::Float(v)) => {
+            format!(
+                r#"{{"type":"float","value":{}}}"#,
+                quoted(&float_text(v.get()))
+            )
+        }
+        GraphValue::Scalar(CanonicalScalar::Timestamp(v)) => {
+            format!(r#"{{"type":"timestamp","value":{}}}"#, timestamp_cell(v))
+        }
+        GraphValue::Scalar(CanonicalScalar::Bytes(v)) => {
+            format!(
+                r#"{{"type":"bytes","value":{}}}"#,
+                quoted(&hex(v.as_slice()))
+            )
+        }
+        GraphValue::Vertex(v) => format!(r#"{{"type":"vertex","value":"{}"}}"#, v.0),
+        GraphValue::Edge(v) => format!(r#"{{"type":"edge","value":"{}"}}"#, v.0),
+        GraphValue::Path(v) => format!(r#"{{"type":"path","value":{}}}"#, path_cell(v)),
+        GraphValue::Vertices(v) => format!(
+            r#"{{"type":"vertices","value":[{}]}}"#,
+            v.iter()
+                .map(|id| quoted(&id.0.to_string()))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        GraphValue::Edges(v) => format!(
+            r#"{{"type":"edges","value":[{}]}}"#,
+            v.iter()
+                .map(|id| quoted(&id.0.to_string()))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         GraphValue::List(values) => format!(
             r#"{{"type":"list","value":[{}]}}"#,
             values
@@ -403,15 +450,70 @@ fn value_cell(value: &GraphValue) -> Result<String, Failure> {
                 .collect::<Result<Vec<_>, _>>()?
                 .join(",")
         ),
-        _ => return Err(Failure::query("result domain is not in robot schema v1")),
     })
+}
+fn path_cell(value: &GraphPath) -> String {
+    let mut nodes = vec![quoted(&value.start().0.to_string())];
+    let mut edges = Vec::new();
+    for (edge, vertex) in value.steps() {
+        edges.push(quoted(&edge.0.to_string()));
+        nodes.push(quoted(&vertex.0.to_string()));
+    }
+    format!(
+        r#"{{"nodes":[{}],"edges":[{}]}}"#,
+        nodes.join(","),
+        edges.join(",")
+    )
+}
+/// Shortest round-trip float text; non-finite values are quoted tokens
+/// because JSON has no numeric spelling for them.
+fn float_text(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".to_owned()
+    } else if value.is_infinite() {
+        if value > 0.0 { "Infinity" } else { "-Infinity" }.to_owned()
+    } else {
+        value.to_string()
+    }
+}
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+/// Preserve every timestamp component, including second-resolution offsets
+/// and the exact timezone database identity. JSON integers use decimal text
+/// where their range exceeds the interoperable numeric domain.
+fn timestamp_cell(value: &fgdb_types::CanonicalTimestamp) -> String {
+    let zone = value.zone().map_or_else(
+        || "null".to_owned(),
+        |zone| {
+            format!(
+                r#"{{"identifier":{},"tzdb_oid":"{}"}}"#,
+                quoted(zone.identifier()),
+                hex(&zone.tzdb_oid().0)
+            )
+        },
+    );
+    format!(
+        r#"{{"instant_utc_nanos":"{}","utc_offset_seconds":{},"zone":{zone}}}"#,
+        value.instant_utc_nanos(),
+        value.utc_offset_seconds()
+    )
 }
 fn cell(value: &QueryValue) -> Result<String, Failure> {
     match value {
         QueryValue::Value(v) => value_cell(v),
         QueryValue::Count(v) => Ok(format!(r#"{{"type":"count","value":"{v}"}}"#)),
         QueryValue::Integer(v) => Ok(format!(r#"{{"type":"wideint","value":"{v}"}}"#)),
-        QueryValue::Average(_) => Err(Failure::query("exact averages are not in robot schema v1")),
+        QueryValue::Average(v) => Ok(format!(
+            r#"{{"type":"average","value":"{}/{}"}}"#,
+            v.numerator(),
+            v.denominator()
+        )),
     }
 }
 fn human_value(value: &GraphValue) -> Result<String, Failure> {
@@ -430,7 +532,27 @@ fn human_value(value: &GraphValue) -> Result<String, Failure> {
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         ),
-        _ => return Err(Failure::query("result domain is not supported by CLI v1")),
+        GraphValue::Scalar(CanonicalScalar::Decimal(v)) => v.to_string(),
+        GraphValue::Scalar(CanonicalScalar::Float(v)) => float_text(v.get()),
+        GraphValue::Scalar(CanonicalScalar::Timestamp(v)) => timestamp_cell(v),
+        GraphValue::Scalar(CanonicalScalar::Bytes(v)) => format!("0x{}", hex(v.as_slice())),
+        GraphValue::Vertex(v) => format!("vertex {}", v.0),
+        GraphValue::Edge(v) => format!("edge {}", v.0),
+        GraphValue::Path(v) => format!("path({})", path_cell(v)),
+        GraphValue::Vertices(v) => format!(
+            "vertices({})",
+            v.iter()
+                .map(|id| id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        GraphValue::Edges(v) => format!(
+            "edges({})",
+            v.iter()
+                .map(|id| id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
     })
 }
 fn render(result: QueryResult, seq: u64, robot: bool, out: &mut impl Write) -> Result<(), Failure> {
@@ -450,7 +572,7 @@ fn render(result: QueryResult, seq: u64, robot: bool, out: &mut impl Write) -> R
                             QueryValue::Value(v) => human_value(v),
                             QueryValue::Count(v) => Ok(v.to_string()),
                             QueryValue::Integer(v) => Ok(v.to_string()),
-                            _ => Err(Failure::query("unsupported result domain")),
+                            QueryValue::Average(v) => Ok(v.to_string()),
                         }
                     }
                 })
