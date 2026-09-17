@@ -152,6 +152,12 @@ fn grouping_argument_reuse_and_count_only_do_not_create_accidental_distinct_chil
         ]
     );
     let count = prepare("MATCH (n) RETURN COUNT(*)");
+    // GQL admits DISTINCT on every aggregate; for MIN/MAX it is
+    // result-invariant, so it binds the plain extreme function
+    // (fgdb-oracle-optional-aggregate-cet0).
+    let extreme = prepare("MATCH (n) RETURN MIN(DISTINCT n.n) AS low");
+    let plain = prepare("MATCH (n) RETURN MIN(n.n) AS low");
+    assert_eq!(extreme.canonical_bytes(), plain.canonical_bytes());
     assert_eq!(count.input_pattern().columns().len(), 1);
     let empty = count
         .execute_governed(
@@ -303,7 +309,6 @@ fn malformed_ungrouped_and_unsupported_aggregates_never_resolve_names() {
         "MATCH (a) RETURN COUNT(DISTINCT *)",
         "MATCH (a) RETURN SUM(*)",
         "MATCH (a) RETURN AVG(*)",
-        "MATCH (a) RETURN MIN(DISTINCT a.n)",
         "MATCH (a) RETURN COUNT(SUM(a.n))",
         "MATCH (a) RETURN COUNT(a,b)",
         "MATCH (a) RETURN a.n AS key,COUNT(*) GROUP BY a",
