@@ -21,7 +21,7 @@ use std::{
 };
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"]}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema"]}"##,
     "\n"
 );
 const HELP: &str = "fgdb - embedded graph database
@@ -29,6 +29,7 @@ Usage: fgdb [--robot] <command>
   create --db <dir> --key-file <file>
   write --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
   query --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
+  replay --db <dir> --key-file <file> [bindings] [--param name=value]... --certificate <file>
   robot schema
   help
 Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
@@ -36,6 +37,7 @@ timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>.
 --tzdb-file <file> supplies a pinned transition-table artifact on every invocation.
 Bindings: repeat --label name=u32, --relation name=u32, --property name=u32.
 Supply the same bindings on reopen; no implicit catalog or hashed names.
+query --certify-to <file> saves a portable result certificate after emitting rows.
 --write-relation u32 selects the native mutation coordinate (default 1).
 Key file: three nonempty lines of 64 hex characters: object-id key,
 security namespace, encryption key. # starts a comment. Keys never printed.
@@ -124,6 +126,8 @@ struct Options {
     relations: BTreeMap<String, u32>,
     properties: BTreeMap<String, u32>,
     coordinate: RelationId,
+    certify_to: Option<PathBuf>,
+    certificate: Option<PathBuf>,
 }
 impl Options {
     fn resolve(&self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -143,7 +147,8 @@ impl Options {
         }
     }
 }
-fn parse(args: &[String], create: bool) -> Result<Options, Failure> {
+fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
+    let create = command == "create";
     let mut db = None;
     let mut key = None;
     let mut text = None;
@@ -154,6 +159,8 @@ fn parse(args: &[String], create: bool) -> Result<Options, Failure> {
     let mut relations = BTreeMap::new();
     let mut properties = BTreeMap::new();
     let mut coordinate = RelationId(1);
+    let mut certify_to = None;
+    let mut certificate = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg.starts_with("--") {
@@ -164,6 +171,12 @@ fn parse(args: &[String], create: bool) -> Result<Options, Failure> {
                 "--db" if db.is_none() => db = Some(PathBuf::from(value)),
                 "--key-file" if key.is_none() => key = Some(PathBuf::from(value)),
                 "--tzdb-file" if tzdb_file.is_none() => tzdb_file = Some(PathBuf::from(value)),
+                "--certify-to" if command == "query" && certify_to.is_none() => {
+                    certify_to = Some(PathBuf::from(value));
+                }
+                "--certificate" if command == "replay" && certificate.is_none() => {
+                    certificate = Some(PathBuf::from(value));
+                }
                 "--param" if !create => {
                     let (name, raw) = value
                         .split_once('=')
@@ -193,24 +206,26 @@ fn parse(args: &[String], create: bool) -> Result<Options, Failure> {
                     map.insert(name.to_owned(), id);
                 }
                 "--write-relation" => {
-                    coordinate = RelationId(
-                        value
-                            .parse()
-                            .map_err(|_| Failure::usage("write relation must be u32"))?,
-                    )
+                    let id: u32 = value
+                        .parse()
+                        .map_err(|_| Failure::usage("write relation must be u32"))?;
+                    coordinate = RelationId(u64::from(id));
                 }
                 _ => return Err(Failure::usage("unknown, duplicate, or inapplicable flag")),
             }
-        } else if create || text.replace(arg.clone()).is_some() {
+        } else if create || command == "replay" || text.replace(arg.clone()).is_some() {
             return Err(Failure::usage(
                 "expected exactly one GQL argument for query/write, none for create",
             ));
         }
     }
+    if command == "replay" && certificate.is_none() {
+        return Err(Failure::usage("--certificate required"));
+    }
     Ok(Options {
         db: db.ok_or_else(|| Failure::usage("--db required"))?,
         key: key.ok_or_else(|| Failure::usage("--key-file required"))?,
-        text: if create {
+        text: if create || command == "replay" {
             String::new()
         } else {
             text.ok_or_else(|| Failure::usage("GQL argument required"))?
@@ -222,6 +237,8 @@ fn parse(args: &[String], create: bool) -> Result<Options, Failure> {
         relations,
         properties,
         coordinate,
+        certify_to,
+        certificate,
     })
 }
 fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
@@ -393,8 +410,8 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             }
             Ok(())
         }
-        Some(command @ ("create" | "query" | "write")) => {
-            let mut options = parse(&args[1..], command == "create")?;
+        Some(command @ ("create" | "query" | "write" | "replay")) => {
+            let mut options = parse(&args[1..], command)?;
             let runtime = RuntimeBuilder::new().build().map_err(Failure::io)?;
             let root = runtime.request_cx_with_budget(Budget::INFINITE);
             let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -423,9 +440,23 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     let seq = match completion { EmbeddedTxnCompletion::WriteCommitted { commit_seq } => commit_seq.0, EmbeddedTxnCompletion::ReadClosed { snapshot_seq, .. } => snapshot_seq.0 };
                     return if robot { emit(out, &format!(r#"{{"v":1,"event":"result","kind":"written","seq":{seq},"statements":{}}}"#, receipt.stats().completed_statements)) } else { writeln!(out, "completed at seq {seq}").map_err(Failure::io) };
                 }
+                if let Some(path) = &options.certificate {
+                    contexts.query().checkpoint().map_err(Failure::io)?;
+                    let bytes = asupersync::fs::read(path).await.map_err(Failure::io)?;
+                    let certificate = fgdb::NativeResultCertificate::decode(&bytes).map_err(Failure::query)?;
+                    let result = db.replay(&contexts.query(), &certificate, &options.params, |kind, name| options.resolve(kind, name), policy()).map_err(Failure::query)?;
+                    return render(result, certificate.plan.snapshot_seq.0, "replayed", robot, out);
+                }
+                if let Some(path) = &options.certify_to {
+                    let (result, certificate) = db.execute_certified(&contexts.query(), &options.text, &options.params, |kind, name| options.resolve(kind, name), policy()).map_err(execution_failure)?;
+                    render(result, certificate.plan.snapshot_seq.0, "rows", robot, out)?;
+                    out.flush().map_err(Failure::io)?;
+                    contexts.query().checkpoint().map_err(Failure::io)?;
+                    return asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io);
+                }
                 let result = db.query(&contexts.query(), &options.text, &options.params, |kind, name| options.resolve(kind, name), policy()).map_err(execution_failure)?;
                 let seq = db.frontier().map_err(Failure::io)?.0;
-                render(result, seq, robot, out)
+                render(result, seq, "rows", robot, out)
             })
         }
         _ => Err(Failure::usage(
@@ -609,7 +640,13 @@ fn human_value(value: &GraphValue) -> Result<String, Failure> {
         ),
     })
 }
-fn render(result: QueryResult, seq: u64, robot: bool, out: &mut impl Write) -> Result<(), Failure> {
+fn render(
+    result: QueryResult,
+    seq: u64,
+    kind: &str,
+    robot: bool,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
     let QueryResult::Rows { columns, rows } = result else {
         return Err(Failure::query("read returned a write receipt"));
     };
@@ -654,7 +691,7 @@ fn render(result: QueryResult, seq: u64, robot: bool, out: &mut impl Write) -> R
         emit(
             out,
             &format!(
-                r#"{{"v":1,"event":"result","kind":"rows","seq":{seq},"count":{}}}"#,
+                r#"{{"v":1,"event":"result","kind":"{kind}","seq":{seq},"count":{}}}"#,
                 rows.len()
             ),
         )

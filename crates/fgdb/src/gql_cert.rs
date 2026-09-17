@@ -30,6 +30,22 @@ pub enum NativeReadClass {
     TemporalAggregate = 6,
 }
 
+impl TryFrom<u8> for NativeReadClass {
+    type Error = ();
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        match tag {
+            0 => Ok(Self::Pattern),
+            1 => Ok(Self::Aggregate),
+            2 => Ok(Self::PipelineAggregate),
+            3 => Ok(Self::Set),
+            4 => Ok(Self::TemporalPattern),
+            5 => Ok(Self::TemporalSet),
+            6 => Ok(Self::TemporalAggregate),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Resolved, unbound native plan evidence. Implementations must retain literal
 /// constants and parameter identities, but must not encode argument values.
 pub trait NativeCertificatePlan {
@@ -586,11 +602,12 @@ pub struct NativeResultCertificate {
 }
 
 impl NativeResultCertificate {
-    /// Versioned envelope: plan digest, snapshot seq, bound parameter values
-    /// digest and canonical result digest. In-memory only in this slice.
+    /// Portable v1 envelope: plan identity and snapshot, parameter and result
+    /// digests, history/database identities, facade class, and statement text.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.to_vec();
+        bytes.push(NATIVE_RESULT_CERTIFICATE_VERSION_V1);
         bytes.extend_from_slice(&self.plan.digest.0);
         bytes.extend_from_slice(&self.plan.snapshot_seq.0.to_be_bytes());
         bytes.extend_from_slice(&self.values_digest.0);
@@ -601,6 +618,117 @@ impl NativeResultCertificate {
         bytes.extend_from_slice(&(self.statement.len() as u64).to_be_bytes());
         bytes.extend_from_slice(self.statement.as_bytes());
         bytes
+    }
+}
+
+const NATIVE_RESULT_CERTIFICATE_VERSION_V1: u8 = 1;
+
+/// Decode error for the versioned portable certificate envelope. Every
+/// refusal is explicit: version, length, magic, or trailing bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CertificateDecodeError {
+    /// Fewer bytes than the fixed header requires.
+    Truncated,
+    /// Leading domain magic differs.
+    Magic,
+    /// Unknown envelope version byte.
+    Version(u8),
+    /// Statement length prefix exceeds the remaining bytes or is not UTF-8.
+    Statement,
+    /// Bytes remain after the complete envelope.
+    Trailing(usize),
+    /// Facade class tag is outside the admitted set.
+    FacadeClass(u8),
+}
+impl core::fmt::Display for CertificateDecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Truncated => write!(f, "certificate truncated"),
+            Self::Magic => write!(f, "certificate magic mismatch"),
+            Self::Version(v) => write!(f, "certificate version {v} unsupported"),
+            Self::Statement => write!(f, "certificate statement length invalid"),
+            Self::Trailing(n) => write!(f, "{n} trailing certificate bytes"),
+            Self::FacadeClass(tag) => write!(f, "certificate facade class {tag} unknown"),
+        }
+    }
+}
+impl core::error::Error for CertificateDecodeError {}
+
+impl NativeResultCertificate {
+    /// Strict decode of the v1 envelope: exact magic, version, fixed fields,
+    /// statement length prefix, and zero trailing bytes.
+    ///
+    /// # Errors
+    /// Typed [`CertificateDecodeError`] on any structural mismatch.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CertificateDecodeError> {
+        let magic = NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len();
+        let fixed = magic + 1 + 5 * 32 + 8 + 1 + 8;
+        if bytes.len() < fixed {
+            return Err(CertificateDecodeError::Truncated);
+        }
+        if &bytes[..magic] != NATIVE_RESULT_CERTIFICATE_DOMAIN_V1 {
+            return Err(CertificateDecodeError::Magic);
+        }
+        let mut at = magic;
+        let version = bytes[at];
+        at += 1;
+        if version != NATIVE_RESULT_CERTIFICATE_VERSION_V1 {
+            return Err(CertificateDecodeError::Version(version));
+        }
+        let read_digest = |at: usize| -> [u8; 32] {
+            let mut digest = [0_u8; 32];
+            digest.copy_from_slice(&bytes[at..at + 32]);
+            digest
+        };
+        let plan_digest = Digest(read_digest(at));
+        at += 32;
+        let snapshot_seq = CommitSeq(u64::from_be_bytes(
+            bytes[at..at + 8].try_into().expect("checked length"),
+        ));
+        at += 8;
+        let values_digest = Digest(read_digest(at));
+        at += 32;
+        let result_digest = Digest(read_digest(at));
+        at += 32;
+        let snapshot_identity = Digest(read_digest(at));
+        at += 32;
+        let database_identity = Digest(read_digest(at));
+        at += 32;
+        let facade_tag = bytes[at];
+        at += 1;
+        let facade_class = match NativeReadClass::try_from(facade_tag) {
+            Ok(class) => class,
+            Err(_) => return Err(CertificateDecodeError::FacadeClass(facade_tag)),
+        };
+        let statement_len = usize::try_from(u64::from_be_bytes(
+            bytes[at..at + 8].try_into().expect("checked length"),
+        ))
+        .map_err(|_| CertificateDecodeError::Statement)?;
+        at += 8;
+        let Some(rest) = bytes.get(at..) else {
+            return Err(CertificateDecodeError::Truncated);
+        };
+        if rest.len() < statement_len {
+            return Err(CertificateDecodeError::Truncated);
+        }
+        let statement = core::str::from_utf8(&rest[..statement_len])
+            .map_err(|_| CertificateDecodeError::Statement)?;
+        at += statement_len;
+        if bytes.len() != at {
+            return Err(CertificateDecodeError::Trailing(bytes.len() - at));
+        }
+        Ok(Self {
+            plan: NativePlanCertificate {
+                digest: plan_digest,
+                snapshot_seq,
+            },
+            values_digest,
+            result_digest,
+            statement: statement.to_owned(),
+            facade_class,
+            snapshot_identity,
+            database_identity,
+        })
     }
 }
 
@@ -662,6 +790,7 @@ pub(crate) fn native_result_digest(
 
 #[cfg(test)]
 mod tests {
+    use super::NativeResultCertificate;
     use super::{
         GqlCertificate, GqlPlanCertificate, certify, certify_v1_legacy, digest_bind,
         digest_statement, direction_tag, projection_tag,
@@ -861,6 +990,70 @@ mod tests {
         assert_eq!(projection_tag(ReturnProjection::Destination), 0);
         assert_eq!(projection_tag(ReturnProjection::Source), 1);
         assert_eq!(projection_tag(ReturnProjection::Hop2Destination), 2);
+    }
+
+    fn sample_result_certificate() -> NativeResultCertificate {
+        NativeResultCertificate {
+            plan: NativePlanCertificate {
+                digest: fgdb_crypto::Digest([9; 32]),
+                snapshot_seq: CommitSeq(41),
+            },
+            values_digest: fgdb_crypto::Digest([8; 32]),
+            result_digest: fgdb_crypto::Digest([7; 32]),
+            statement: "MATCH (a)-[:KNOWS]->(b) RETURN b".to_owned(),
+            facade_class: NativeReadClass::TemporalPattern,
+            snapshot_identity: fgdb_crypto::Digest([6; 32]),
+            database_identity: fgdb_crypto::Digest([5; 32]),
+        }
+    }
+
+    #[test]
+    fn result_certificate_round_trip_is_exact_bytes() {
+        let certificate = sample_result_certificate();
+        let bytes = certificate.canonical_bytes();
+        let decoded = NativeResultCertificate::decode(&bytes).unwrap();
+        assert_eq!(decoded, certificate);
+        assert_eq!(decoded.canonical_bytes(), bytes, "encode(decode(b)) == b");
+    }
+
+    #[test]
+    fn result_certificate_decode_refuses_structural_damage_typed() {
+        let bytes = sample_result_certificate().canonical_bytes();
+        use super::CertificateDecodeError as E;
+        // Unknown version refuses before any field is trusted. The version
+        // byte immediately follows the 33-byte magic.
+        let mut version = bytes.clone();
+        version[super::NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len()] = 2;
+        assert!(matches!(
+            NativeResultCertificate::decode(&version),
+            Err(E::Version(2))
+        ));
+        // Truncation at every prefix length refuses; no panic, no partial read.
+        for cut in 0..bytes.len() {
+            assert_eq!(
+                NativeResultCertificate::decode(&bytes[..cut]),
+                Err(E::Truncated),
+                "cut={cut}"
+            );
+        }
+        // Trailing bytes refuse: the envelope is exact.
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            NativeResultCertificate::decode(&trailing),
+            Err(E::Trailing(1))
+        );
+        // Wrong magic and unknown facade tags refuse typed.
+        let mut magic = bytes.clone();
+        magic[0] ^= 0xff;
+        assert_eq!(NativeResultCertificate::decode(&magic), Err(E::Magic));
+        let mut facade = bytes.clone();
+        let facade_at = super::NATIVE_RESULT_CERTIFICATE_DOMAIN_V1.len() + 1 + 5 * 32 + 8;
+        facade[facade_at] = 9;
+        assert_eq!(
+            NativeResultCertificate::decode(&facade),
+            Err(E::FacadeClass(9))
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"]}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema"]}"##,
     "\n"
 );
 
@@ -471,7 +471,7 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                     schema.get("exit_codes").get("success").unsigned()
                 );
                 match event.get("kind").string() {
-                    "rows" => {
+                    "rows" | "replayed" => {
                         exact_fields(event, &["v", "event", "kind", "seq", "count"]);
                         assert!(columns.is_some());
                         assert_eq!(event.get("count").unsigned(), rows);
@@ -580,7 +580,7 @@ fn run(robot: bool, args: &[&str]) -> Outcome {
     }
     if let Some((subcommand, rest)) = args.split_first() {
         command.arg(subcommand);
-        if matches!(*subcommand, "create" | "write" | "query") {
+        if matches!(*subcommand, "create" | "write" | "query" | "replay") {
             command.args([
                 "--label",
                 "Person=1",
@@ -829,6 +829,114 @@ fn lifecycle_across_processes_has_exact_query_and_history_ndjson() {
         r#"[[{"type":"text","value":"Ada"},{"type":"int","value":"1816"}]]"#,
     );
     assert_eq!(reopened.sequence("rows"), deleted);
+}
+
+#[test]
+fn certified_query_replays_original_rows_after_later_write_across_processes() {
+    let db = TestDb::new("portable-certificate");
+    db.create();
+    let certified_seq =
+        db.write(&["INSERT (:Person {name:'Ada',born:1815}), (:Person {name:'Grace',born:1906})"]);
+    let certificate = PathBuf::from(&db.key).with_file_name("result.certificate");
+    let certificate_path = certificate.to_str().unwrap();
+    let query = "MATCH (p:Person) WHERE p.name=$name RETURN p.name AS name,p.born AS born";
+    let certified = db.command(
+        "query",
+        &[
+            "--param",
+            "name=text:Ada",
+            "--certify-to",
+            certificate_path,
+            query,
+        ],
+    );
+    assert_eq!(certified.sequence("rows"), certified_seq);
+    assert_rows(
+        &certified,
+        r#"[[{"type":"text","value":"Ada"},{"type":"int","value":"1815"}]]"#,
+    );
+    let later_seq = db.write(&["MATCH (p:Person) WHERE p.name='Ada' SET p.born=1816"]);
+    assert_eq!(later_seq, certified_seq + 1);
+    let current = db.command("query", &["--param", "name=text:Ada", query]);
+    assert_eq!(current.sequence("rows"), later_seq);
+    assert_rows(
+        &current,
+        r#"[[{"type":"text","value":"Ada"},{"type":"int","value":"1816"}]]"#,
+    );
+
+    let replayed = db.command(
+        "replay",
+        &[
+            "--param",
+            "name=text:Ada",
+            "--certificate",
+            certificate_path,
+        ],
+    );
+    assert_eq!(replayed.sequence("replayed"), certified_seq);
+    assert_eq!(
+        &replayed.events[..replayed.events.len() - 1],
+        &certified.events[..certified.events.len() - 1],
+        "replay must preserve the certified columns and rows, not current data"
+    );
+    assert_eq!(
+        replayed.terminal().get("count"),
+        certified.terminal().get("count")
+    );
+
+    db.command(
+        "replay",
+        &[
+            "--param",
+            "name=text:Grace",
+            "--certificate",
+            certificate_path,
+        ],
+    )
+    .failure(3, "query");
+
+    let mut tampered = std::fs::read(&certificate).unwrap();
+    *tampered.last_mut().expect("certificate payload") ^= 1;
+    let tampered_path = certificate.with_file_name("tampered.certificate");
+    std::fs::write(&tampered_path, tampered).unwrap();
+    db.command(
+        "replay",
+        &[
+            "--param",
+            "name=text:Ada",
+            "--certificate",
+            tampered_path.to_str().unwrap(),
+        ],
+    )
+    .failure(3, "query");
+}
+
+#[test]
+fn write_relation_accepts_u32_max_and_refuses_overflow_without_committing() {
+    let db = TestDb::new("write-relation-boundary");
+    let created = db.create();
+    db.command(
+        "write",
+        &[
+            "--write-relation",
+            "4294967296",
+            "INSERT (:Person {name:'Overflow'})",
+        ],
+    )
+    .failure(2, "usage");
+    let unchanged = db.command("query", &["MATCH (p:Person) RETURN p.name AS name"]);
+    assert_eq!(unchanged.sequence("rows"), created);
+    assert_rows(&unchanged, "[]");
+
+    let written = db.write(&[
+        "--write-relation",
+        "4294967295",
+        "INSERT (:Person {name:'Maximum'})",
+    ]);
+    assert_eq!(written, created + 1);
+    let reopened = db.command("query", &["MATCH (p:Person) RETURN p.name AS name"]);
+    assert_eq!(reopened.sequence("rows"), written);
+    assert_rows(&reopened, r#"[[{"type":"text","value":"Maximum"}]]"#);
 }
 
 #[test]
