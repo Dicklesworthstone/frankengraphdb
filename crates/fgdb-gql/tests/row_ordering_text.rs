@@ -266,18 +266,32 @@ fn aliases_star_and_bad_order_references_are_resolved_before_catalog_access() {
             [VId(0), VId(1)],
             [],
             |_, _| Ok::<_, ()>(true),
-            |vid, key| Ok(Some(if key == SCORE {
-                &scores[vid.0 as usize]
-            } else {
-                &payloads[vid.0 as usize]
-            })),
+            |vid, key| {
+                Ok(Some(if key == SCORE {
+                    &scores[vid.0 as usize]
+                } else {
+                    &payloads[vid.0 as usize]
+                }))
+            },
             |_| Ok(()),
         )
         .unwrap();
-    let visible: Vec<Vec<CanonicalScalar>> = rows.iter().map(|row| {
-        row.values().iter().map(|value| value.as_scalar().unwrap().clone()).collect()
-    }).collect();
-    assert_eq!(visible, vec![vec![CanonicalScalar::Int(20)], vec![CanonicalScalar::Int(10)]]);
+    let visible: Vec<Vec<CanonicalScalar>> = rows
+        .iter()
+        .map(|row| {
+            row.values()
+                .iter()
+                .map(|value| value.as_scalar().unwrap().clone())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        visible,
+        vec![
+            vec![CanonicalScalar::Int(20)],
+            vec![CanonicalScalar::Int(10)]
+        ]
+    );
     let alias = text("MATCH (a)-[:R]->(b) RETURN a AS b,b AS other ORDER BY b DESC");
     assert_eq!(ordering(&alias), &[GraphValueOrder::descending(0)]);
     let star = text("MATCH (a)-[:R]->(b) RETURN * ORDER BY b DESC");
