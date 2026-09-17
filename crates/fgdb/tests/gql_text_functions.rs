@@ -149,7 +149,16 @@ fn null_on_either_side_stays_unknown_in_return_and_is_not_true_in_where() {
             let projection = query(&format!("MATCH (n) RETURN n,{expression} AS value ORDER BY n"));
             assert_eq!(cells(&db.execute_graph_set_governed(&cx, &projection, policy()).unwrap().value),
                 vec![vec![CanonicalScalar::Null]; 6], "{expression}");
-            let filtered = query(&format!("MATCH (n) WHERE ({expression}) = ({expression}) RETURN n"));
+            // Boolean-valued expressions enter WHERE directly (UNKNOWN never
+            // survives); scalar-valued ones compare against one literal. Both
+            // stay UNKNOWN for a NULL operand, so every row is filtered out.
+            let boolean_valued = matches!(expression, e if e.contains("STARTS WITH")
+                || e.contains("ENDS WITH") || e.contains("CONTAINS") || e.contains("IN ["));
+            let filtered = if boolean_valued {
+                query(&format!("MATCH (n) WHERE ({expression}) RETURN n"))
+            } else {
+                query(&format!("MATCH (n) WHERE ({expression}) = 'x' RETURN n"))
+            };
             assert_eq!(ids(&db.execute_graph_set_governed(&cx, &filtered, policy()).unwrap().value), vec![], "{expression}");
         }
         // A matching member dominates UNKNOWN; a nonmatch with NULL remains

@@ -10,7 +10,8 @@ use super::{
     BindingSlot, IntegerComparison, MAX_PATTERN_NAME_BYTES, MAX_PATTERN_PREDICATES,
     PatternBuildError, ScalarPredicate, ScalarPredicateError,
 };
-use crate::GlaExecutionEvent;
+use super::GraphValue;
+use crate::{GlaExecutionEvent, GraphIntegerEvaluationError};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, VId};
 use std::sync::Arc;
@@ -41,6 +42,13 @@ pub enum GraphBooleanOp<'a> {
         is_null: bool,
     },
     Truth(Option<bool>),
+    /// A whole typed scalar program evaluated by the shared expression
+    /// engine. Ordered inputs feed its value columns; the result must be a
+    /// canonical Boolean or null to select rows.
+    Expression {
+        expression: &'a crate::GraphIntegerExpression,
+        columns: &'a [GraphBooleanOperand<'a>],
+    },
     And,
     Or,
     Not,
@@ -65,6 +73,7 @@ pub enum GraphBooleanError {
     InvalidStack { instruction: usize },
     InvalidVariableName,
     InvalidVertexComparison,
+    InvalidExpressionColumn,
     Scalar(ScalarPredicateError),
 }
 impl core::fmt::Display for GraphBooleanError {
@@ -86,6 +95,7 @@ impl core::fmt::Display for GraphBooleanError {
             Self::InvalidVertexComparison => {
                 f.write_str("vertex operands require vertex equality or inequality")
             }
+            Self::InvalidExpressionColumn => f.write_str("Boolean expression references an unknown value column"),
             Self::Scalar(error) => core::fmt::Display::fmt(error, f),
         }
     }
@@ -117,6 +127,10 @@ enum Instruction<S> {
         is_null: bool,
     },
     Truth(Option<bool>),
+    Expression {
+        expression: crate::GraphIntegerExpression,
+        columns: Vec<Operand<S>>,
+    },
     And,
     Or,
     Not,
@@ -150,6 +164,16 @@ impl<S> Instruction<S> {
                 operand: operand.try_map(map)?,
                 is_null: *is_null,
             },
+            Self::Expression { expression, columns } => {
+                let mut mapped = Vec::with_capacity(columns.len());
+                for column in columns {
+                    mapped.push(column.try_map(map)?);
+                }
+                Instruction::Expression {
+                    expression: expression.clone(),
+                    columns: mapped,
+                }
+            }
             Self::Truth(value) => Instruction::Truth(*value),
             Self::And => Instruction::And,
             Self::Or => Instruction::Or,
@@ -249,7 +273,8 @@ impl GraphBooleanExpression {
                 GraphBooleanOp::Not if depth >= 1 => {}
                 GraphBooleanOp::Compare { .. }
                 | GraphBooleanOp::IsNull { .. }
-                | GraphBooleanOp::Truth(_) => {
+                | GraphBooleanOp::Truth(_)
+                | GraphBooleanOp::Expression { .. } => {
                     depth += 1;
                     predicates += 1;
                     if predicates > MAX_PATTERN_PREDICATES {
@@ -297,6 +322,19 @@ impl GraphBooleanExpression {
                     operand: own(operand)?,
                     is_null,
                 },
+                GraphBooleanOp::Expression { expression, columns } => {
+                    if expression.referenced_columns().any(|column| column >= columns.len()) {
+                        return Err(GraphBooleanError::InvalidExpressionColumn);
+                    }
+                    let mut mapped = Vec::with_capacity(columns.len());
+                    for column in columns {
+                        mapped.push(own(*column)?);
+                    }
+                    Instruction::Expression {
+                        expression: expression.clone(),
+                        columns: mapped,
+                    }
+                }
                 GraphBooleanOp::Truth(value) => Instruction::Truth(value),
                 GraphBooleanOp::And => Instruction::And,
                 GraphBooleanOp::Or => Instruction::Or,
@@ -491,6 +529,28 @@ impl BoundBooleanExpression {
                 Instruction::IsNull { operand, is_null } => Truth::from(Some(
                     resolve(operand, bindings, property, control)?.is_null() == *is_null,
                 )),
+                Instruction::Expression { expression, columns } => {
+                    for _ in columns {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
+                    let mut values = Vec::with_capacity(columns.len());
+                    for column in columns {
+                        let value = match resolve(column, bindings, property, control)? {
+                            Value::Vertex(Some(vertex)) => GraphValue::Vertex(vertex),
+                            Value::Scalar(Some(value)) => {
+                                crate::algebra_exec::charge_payload(value, control)?;
+                                GraphValue::Scalar(value.clone())
+                            }
+                            Value::Vertex(None) | Value::Scalar(None) => GraphValue::Scalar(CanonicalScalar::Null),
+                        };
+                        values.push(value);
+                    }
+                    match expression.evaluate_scalar_with_control(&values, control) {
+                        Ok(CanonicalScalar::Bool(value)) => Truth::from(Some(value)),
+                        Ok(_) | Err(GraphIntegerEvaluationError::Value(_)) => Truth::Unknown,
+                        Err(GraphIntegerEvaluationError::Control(error)) => return Err(error),
+                    }
+                }
                 Instruction::Truth(value) => Truth::from(*value),
                 Instruction::Not => {
                     stack[depth - 1] = stack[depth - 1].not();
@@ -544,6 +604,16 @@ impl BoundBooleanExpression {
                 Instruction::And => bytes.push(3),
                 Instruction::Or => bytes.push(4),
                 Instruction::Not => bytes.push(5),
+                Instruction::Expression { expression, columns } => {
+                    bytes.push(6);
+                    let encoded = expression.canonical_bytes();
+                    bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(&encoded);
+                    bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
+                    for column in columns {
+                        append_operand(column, bytes);
+                    }
+                }
             }
         }
     }

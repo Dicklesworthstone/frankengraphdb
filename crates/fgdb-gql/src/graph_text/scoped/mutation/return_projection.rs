@@ -110,7 +110,7 @@ impl<'a> Parser<'a> {
             self.syntax.columns = outputs.into_iter().map(|(alias, operand)| {
                 let Operand::Column(index) = operand else { unreachable!("plain projection checked above") };
                 let source = inputs[index];
-                Column { variable: source.variable, property: source.property, alias }
+                Column { variable: source.variable, property: source.property, path: source.path, alias }
             }).collect();
             return Ok(UnresolvedGraphText { statement, syntax: self.syntax, projection: None, pipeline });
         }
@@ -119,7 +119,7 @@ impl<'a> Parser<'a> {
             let _ = self.mutation_projection(&mut inputs, variable, None)?;
         }
         self.syntax.columns = inputs.into_iter().map(|source| Column {
-            variable: source.variable, property: source.property, alias: source.variable,
+            variable: source.variable, property: source.property, path: source.path, alias: source.variable,
         }).collect();
         let mut projection = Vec::new();
         for (alias, operand) in outputs {
