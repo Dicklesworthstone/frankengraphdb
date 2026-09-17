@@ -146,7 +146,7 @@ fn mutation_receipt_is_distinct_sorted_targets_not_match_occurrences_or_fields()
         .bind_parameters(&GqlParameters::new())
         .unwrap();
         let mut txn = db.begin(&txcx).unwrap();
-        let (stats, targets) = txn
+        let (stats, targets, edges) = txn
             .execute_graph_mutation_returning_governed(
                 &mut db,
                 &query,
@@ -161,6 +161,7 @@ fn mutation_receipt_is_distinct_sorted_targets_not_match_occurrences_or_fields()
             "duplicate matches collapse per target/field"
         );
         assert_eq!(targets, vec![VId(1), VId(2)]);
+        assert!(edges.is_empty());
         assert_eq!(db.vertex(VId(1)).unwrap().unwrap().labels, vec![SOURCE]);
         assert_eq!(
             txn.vertex(&db, VId(1)).unwrap().unwrap().labels,
@@ -310,7 +311,8 @@ fn mixed_program_receipt_escapes_only_after_the_whole_program_is_accepted() {
         ));
         assert!(matches!(
             &receipt.steps()[1],
-            GraphWriteStepReceipt::Mutation { targets } if targets == &[VId(900)]
+            GraphWriteStepReceipt::Mutation { targets, edges }
+                if targets == &[VId(900)] && edges.is_empty()
         ));
         assert!(!format!("{receipt:?}").contains("900"));
         assert!(db.vertex(VId(900)).unwrap().is_none());

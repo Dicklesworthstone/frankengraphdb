@@ -74,7 +74,7 @@ fn mutation_autocommit_commits_targets_while_zero_match_closes_read_only() {
         let seeded = seed(&mut db, &commit).await;
 
         let update = mutation("MATCH (n) WHERE n.p >= 10 SET n.p=n.p+1");
-        let (stats, targets, completion) = db
+        let (stats, targets, edges, completion) = db
             .execute_graph_mutation_returning_autocommit_governed(
                 &txcx,
                 &query,
@@ -85,6 +85,7 @@ fn mutation_autocommit_commits_targets_while_zero_match_closes_read_only() {
             .await
             .unwrap();
         assert_eq!(targets, vec![VId(1)]);
+        assert!(edges.is_empty());
         assert_eq!((stats.target_vertices, stats.effects), (1, 1));
         let committed = match completion {
             EmbeddedTxnCompletion::WriteCommitted { commit_seq } => commit_seq,
@@ -246,6 +247,7 @@ fn mixed_autocommit_withholds_receipt_until_dependent_program_is_durable() {
         assert_eq!(receipt.steps().len(), 2);
         assert_eq!(receipt.steps()[0].created_vertices(), Some(&[VId(200)][..]));
         assert_eq!(receipt.steps()[1].mutation_targets(), Some(&[VId(200)][..]));
+        assert_eq!(receipt.steps()[1].mutation_edges(), Some(&[][..]));
         assert_eq!(
             db.vertex(VId(200)).unwrap().unwrap().props,
             vec![(P, CanonicalScalar::Int(6))]

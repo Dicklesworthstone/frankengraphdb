@@ -412,16 +412,15 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
                     },
                     policy(),
                 );
-                let QueryError::Refused { facade, source } = result.unwrap_err() else {
-                    panic!("unsupported/unknown text must retain typed parser diagnostics")
+                let QueryError::Unsupported { diagnostics } = result.unwrap_err() else {
+                    panic!("unsupported/unknown text must retain structural diagnostics")
                 };
-                let diagnostic = source.to_string();
-                assert!(!diagnostic.is_empty());
+                assert!(!diagnostics.is_empty());
                 assert!(
                     calls.values().all(|count| *count == 1),
                     "misses must be cached too"
                 );
-                runs.push((facade, diagnostic, calls));
+                runs.push((diagnostics, calls));
             }
             assert_eq!(runs[0], runs[1]);
         }
@@ -490,10 +489,11 @@ fn direct_write(
                 .unwrap()
                 .bind_parameters(args)
                 .unwrap();
-            let (_, targets) = txn
+            let (_, targets, edges) = txn
                 .execute_graph_mutation_returning_governed(db, cx, &bound, policy.mutations)
                 .unwrap();
-            GraphWriteStepReceipt::Mutation { targets }
+            assert!(edges.is_empty());
+            GraphWriteStepReceipt::Mutation { targets, edges }
         }
         WriteFacade::Insert => {
             let bound = PreparedGraphInsertText::prepare(text, R, symbols)
