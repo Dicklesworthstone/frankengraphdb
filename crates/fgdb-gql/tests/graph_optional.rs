@@ -888,3 +888,80 @@ fn seeded_optional_chains_preserve_bags_and_governed_events() {
         println!("OPTIONAL_TRANSCRIPT {depth} {expected:?} {governed:?} {checkpoints} {events:?}");
     }
 }
+
+#[test]
+fn small_optional_chains_have_absolute_rule_derived_budgets() {
+    let root = builder(&["p"], &[]);
+    let first = builder(&["p", "b"], &[("p", R, GlaDirection::Forward, "b")]);
+    let second = builder(&["b", "c"], &[("b", S, GlaDirection::Forward, "c")]);
+    let pattern = root
+        .prepare_values_with_clauses(
+            &[
+                GraphMatchClause::optional(&first),
+                GraphMatchClause::optional(&second),
+            ],
+            &[
+                GraphColumn::vertex("p", "p"),
+                GraphColumn::vertex("b", "b"),
+                GraphColumn::vertex("c", "c"),
+            ],
+            0,
+            None,
+        )
+        .unwrap()
+        .with_duplicates();
+
+    // W denotes a Work event, S a ScratchEntry event, R a ResultRow event.
+    // work_units counts EVERY event, including S and R; scratch_entries counts S.
+    // Common cost: root enumeration 1W; projection dispatch 1W, three
+    // fixed-width cells 3W, retained row + cells 4S, release 1R = (10, 4).
+    // No predicates, payloads, index intersections, pagination or sort comparisons.
+    // Each admitted edge: read 1W + neighbor 1S + singleton adjacency visit 1W
+    // = (3, 1). Each matched clause: Optional, BindVertex, correlation identity,
+    // Expand, OptionalEnd = 5W, plus copied correlation 1S = (6, 1).
+    // Missing adjacency on a non-null anchor: Optional/Bind/identity/Expand 4W,
+    // correlation copy 1S, then TWO null slots (private correlation + output)
+    // 2S = (7, 3). Null anchor: Optional/Bind 2W (Bind refuses before copying),
+    // then two null slots 2S = (4, 2). No OptionalEnd on either missing path.
+    let cases = [
+        // Common (10,4) + two edges (6,2) + two matched clauses (12,2).
+        (
+            "all-match",
+            vec![(VId(0), R, VId(1)), (VId(1), S, VId(2))],
+            vec![Some(VId(0)), Some(VId(1)), Some(VId(2))],
+            28,
+            8,
+        ),
+        // Common (10,4) + first miss (7,3) + null-anchor miss (4,2).
+        // Four null slots in total, not just the two publicly projected cells.
+        ("all-miss", vec![], vec![Some(VId(0)), None, None], 21, 9),
+        // Common (10,4) + one edge (3,1) + match (6,1) + first miss (7,3).
+        (
+            "mixed",
+            vec![(VId(0), R, VId(1))],
+            vec![Some(VId(0)), Some(VId(1)), None],
+            26,
+            9,
+        ),
+    ];
+    for (name, edges, expected_row, work, scratch) in cases {
+        let result = pattern
+            .plan()
+            .execute_governed_with_properties(
+                1 + edges.len() as u64,
+                [VId(0)],
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(plain(&result.value), vec![expected_row], "{name}");
+        assert_eq!(result.evaluator.work_units, work, "{name}: absolute work");
+        assert_eq!(
+            result.evaluator.scratch_entries, scratch,
+            "{name}: absolute scratch"
+        );
+    }
+}
