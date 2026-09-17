@@ -126,45 +126,50 @@ async fn apply(db: &mut Database<MemVfs>, cx: &CommitCx, groups: &[Vec<usize>]) 
 /// keys) plus one unordered scan whose plan canonicalization is documented in
 /// the module docs.
 fn battery() -> Vec<(&'static str, String, GqlParameters)> {
-    let mut params = GqlParameters::new();
-    for (name, value) in [("min", 2), ("src", 1)] {
-        params = params.with_int64(name, value).expect("scalar parameter");
-    }
+    let params = |text: &str| {
+        let mut bound = GqlParameters::new();
+        for (name, value) in [("min", 2), ("src", 1)] {
+            if text.contains(&format!("${name}")) {
+                bound = bound.with_int64(name, value).expect("scalar parameter");
+            }
+        }
+        bound
+    };
     vec![
         (
             "two-hop-ties",
             "MATCH (a)-[:R]->(b)-[:R]->(c) WHERE a.p >= $min RETURN ALL a.p AS ap, c.p AS cp ORDER BY ap, cp".to_owned(),
-            params.clone(),
+            params("MATCH (a)-[:R]->(b)-[:R]->(c) WHERE a.p >= $min RETURN ALL a.p AS ap, c.p AS cp ORDER BY ap, cp"),
         ),
         (
             "aggregate",
             "MATCH (n) WHERE n.p >= $min RETURN COUNT(*) AS c, SUM(n.p) AS s, AVG(n.p) AS mean".to_owned(),
-            params.clone(),
+            params("MATCH (n) WHERE n.p >= $min RETURN COUNT(*) AS c, SUM(n.p) AS s, AVG(n.p) AS mean"),
         ),
         (
             "grouped",
             "MATCH (n) RETURN ABS(n.p) AS bucket, COUNT(*) AS c GROUP BY ABS(n.p) ORDER BY bucket".to_owned(),
-            params.clone(),
+            params("MATCH (n) RETURN ABS(n.p) AS bucket, COUNT(*) AS c GROUP BY ABS(n.p) ORDER BY bucket"),
         ),
         (
             "pipeline",
             "MATCH (n) WHERE n.p >= $min WITH n.p AS x ORDER BY x DESC LIMIT 4 RETURN COUNT(*) AS c, SUM(x) AS s".to_owned(),
-            params.clone(),
+            params("MATCH (n) WHERE n.p >= $min WITH n.p AS x ORDER BY x DESC LIMIT 4 RETURN COUNT(*) AS c, SUM(x) AS s"),
         ),
         (
             "union",
             "MATCH (a) WHERE a.p >= $min RETURN a.p AS p UNION DISTINCT MATCH (b) WHERE b.p <= 9 RETURN b.p AS p ORDER BY p".to_owned(),
-            params.clone(),
+            params("MATCH (a) WHERE a.p >= $min RETURN a.p AS p UNION DISTINCT MATCH (b) WHERE b.p <= 9 RETURN b.p AS p ORDER BY p"),
         ),
         (
             "any-shortest",
             "MATCH p = ANY SHORTEST WALK (a)-[:R*1..3]->(b) WHERE a.p = $src RETURN path_length(p) AS hops, b.p AS bp ORDER BY hops, bp".to_owned(),
-            params.clone(),
+            params("MATCH p = ANY SHORTEST WALK (a)-[:R*1..3]->(b) WHERE a.p = $src RETURN path_length(p) AS hops, b.p AS bp ORDER BY hops, bp"),
         ),
         (
             "unordered-scan",
             "MATCH (n) RETURN n.p AS p".to_owned(),
-            params.clone(),
+            params("MATCH (n) RETURN n.p AS p"),
         ),
     ]
 }
@@ -301,33 +306,39 @@ fn seeded_histories_are_byte_identical_across_repeats_databases_batchings_and_se
             );
 
             // D3: alternate batchings of the same units.
-            let mut big = Database::create_with_vfs(
-                &commit,
-                MemVfs::new().expect("big filesystem"),
-                MemVfs::new().expect("big dir").database_dir(),
-                keys(),
-            )
-            .await
-            .expect("create big-batch database");
+            let big_vfs = MemVfs::new().expect("big filesystem");
+            let big_dir = big_vfs.database_dir();
+            let mut big = Database::create_with_vfs(&commit, big_vfs, big_dir, keys())
+                .await
+                .expect("create big-batch database");
             let all: Vec<usize> = (0..UNITS).collect();
             let big_epochs = apply(&mut big, &commit, &[all.clone()]).await;
             assert_eq!(big_epochs.len(), 1, "batchings must differ in commit count");
 
-            let mut shuffled = Database::create_with_vfs(
-                &commit,
-                MemVfs::new().expect("shuffled filesystem"),
-                MemVfs::new().expect("shuffled dir").database_dir(),
-                keys(),
-            )
-            .await
-            .expect("create shuffled database");
-            let mut order = all;
+            let shuffled_vfs = MemVfs::new().expect("shuffled filesystem");
+            let shuffled_dir = shuffled_vfs.database_dir();
+            let mut shuffled =
+                Database::create_with_vfs(&commit, shuffled_vfs, shuffled_dir, keys())
+                    .await
+                    .expect("create shuffled database");
+            // Shuffle only within causal layers: vertices (0..4), edges
+            // (4..8) whose endpoints exist after the vertex layer, updates
+            // (8..12) that touch existing elements. A batch never references
+            // an element its own earlier units have not created.
+            let mut order = Vec::with_capacity(all.len());
             let mut random = seed ^ 0x9E37_79B9_7F4A_7C15;
-            for index in (1..order.len()).rev() {
-                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let pick = ((random >> 33) % (index as u64 + 1)) as usize;
-                order.swap(index, pick);
-            }
+            let mut layer = |range: std::ops::Range<usize>, random: &mut u64| {
+                let mut pending: Vec<usize> = range.collect();
+                for index in (1..pending.len()).rev() {
+                    *random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let pick = ((*random >> 33) % (index as u64 + 1)) as usize;
+                    pending.swap(index, pick);
+                }
+                order.append(&mut pending);
+            };
+            layer(0..4, &mut random);
+            layer(4..8, &mut random);
+            layer(8..UNITS, &mut random);
             let shuffled_epochs = apply(&mut shuffled, &commit, &[order]).await;
             assert_eq!(shuffled_epochs.len(), 1);
 
