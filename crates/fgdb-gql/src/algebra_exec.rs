@@ -359,8 +359,9 @@ fn sort_identified_neighbors<E>(values: &mut [(EId, VId)], control: &mut impl Fn
         }
         Ok(())
     }
-    for root in (0..values.len() / 2).rev() { sift(values, root, values.len(), control)?; }
-    for end in (1..values.len()).rev() {
+    let end = values.len();
+    for root in (0..end / 2).rev() { sift(values, root, end, control)?; }
+    for end in (1..end).rev() {
         control(GlaExecutionEvent::Work)?;
         values.swap(0, end);
         sift(values, 0, end, control)?;
@@ -899,6 +900,19 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 relation,
                 direction,
             }) => {
+                if let Some(adjacency) = identified_index.as_ref().and_then(|index| index.get(&(*relation, *direction))) {
+                    for (source, neighbors) in adjacency {
+                        for &(edge, destination) in neighbors {
+                            (execution.control)(GlaExecutionEvent::Work)?;
+                            for _ in 0..3 { (execution.control)(GlaExecutionEvent::ScratchEntry)?; }
+                            execution.segments[1] = Some(GraphPath::new(*source, vec![(edge, destination)].into_boxed_slice()));
+                            bindings.clear();
+                            bindings.extend([Some(*source), Some(destination)]);
+                            execution.visit(operators, 1, &mut bindings, &index)?;
+                            execution.segments[1] = None;
+                        }
+                    }
+                }
                 if let Some(adjacency) = index.get(&(*relation, *direction)) {
                     for (source, destinations) in adjacency {
                         let destinations = join::bound_neighbors(

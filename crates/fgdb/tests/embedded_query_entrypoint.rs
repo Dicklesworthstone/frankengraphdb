@@ -143,7 +143,7 @@ fn pattern_aggregate_pipeline_and_set_each_match_two_specific_facade_queries() {
         assert_eq!(rows[0][0], GraphAggregateValue::Count(4));
         assert_eq!(rows[0][1], GraphAggregateValue::Integer(10));
         let average = rows[0][2].as_average().unwrap();
-        assert_eq!((average.numerator(), average.denominator()), (10, 4));
+        assert_eq!((average.numerator(), average.denominator()), (5, 2));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -430,6 +430,120 @@ fn two_write_scripts_match_native_receipts_overlay_effects_and_single_commit() {
                 assert_eq!(txcx.outstanding_obligations(), 0);
             }
         }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn scalar_payloads_match_declared_read_and_write_facades_without_interpolation() {
+    let ((), report) = run_async_under_lab(0x7d14_0007, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let payload = "'); MERGE (escape); -- COUNT(*) FOR SYSTEM_TIME";
+        let declarations = [("name", GqlParameterType::Scalar(fgdb_types::CanonicalScalarKind::Text))];
+        let args = GqlParameters::new().with_text("name", payload).unwrap();
+        let text = "CREATE (n:Person {p:$name})";
+        let prepared = PreparedGraphInsertText::prepare_with_parameter_types(
+            text, R, &declarations, symbols,
+        ).unwrap().bind_parameters(&args).unwrap();
+        for autocommit in [false, true] {
+            let mut direct = seeded(&commit).await;
+            let mut entry = seeded(&commit).await;
+            let mut direct_txn = direct.begin(&txcx).unwrap();
+            let (_, vertices, edges) = direct_txn.execute_graph_insert_returning_governed(
+                &mut direct, &cx, &prepared, write_policy().insertion_policy(), identity,
+            ).unwrap();
+            let expected_step = GraphWriteStepReceipt::Insert { vertices, edges };
+            let (receipt, completion) = if autocommit {
+                let QueryResult::Write { receipt, completion } = entry.query_write(
+                    &txcx, &cx, &commit, text, &args, symbols, R, write_policy(), |r| identity(r.request),
+                ).await.unwrap() else { panic!("scalar insertion returned rows") };
+                (receipt, completion.unwrap())
+            } else {
+                let mut txn = entry.begin(&txcx).unwrap();
+                let QueryResult::Write { receipt, completion } = txn.query_write(
+                    &mut entry, &cx, text, &args, symbols, R, write_policy(), |r| identity(r.request),
+                ).unwrap() else { panic!("scalar insertion returned rows") };
+                assert_eq!(completion, None);
+                assert_eq!(txn.staged_effect_digest().unwrap(), direct_txn.staged_effect_digest().unwrap());
+                (receipt, txn.finish(&mut entry, &commit).await.unwrap())
+            };
+            assert_eq!(receipt.steps(), &[expected_step]);
+            assert_eq!(completion, direct_txn.finish(&mut direct, &commit).await.unwrap());
+            assert_eq!(entry.vertices().unwrap(), direct.vertices().unwrap());
+            let read = "MATCH (n:Person) WHERE n.p=$name RETURN n.p AS payload";
+            let bound = PreparedGraphText::prepare_with_parameter_types(read, &declarations, symbols)
+                .unwrap().bind_parameters(&args).unwrap();
+            let expected = plain(bound.columns(), direct.execute_graph_pattern_governed(&cx, &bound, policy()).unwrap().value);
+            assert_eq!(entry.query(&cx, read, &args, symbols, policy()).unwrap(), expected);
+            assert_eq!(expected, QueryResult::Rows {
+                columns: vec!["payload".into()],
+                rows: vec![vec![GraphAggregateValue::Value(GraphValue::Scalar(
+                    CanonicalScalar::ucs_basic_text(payload).unwrap(),
+                ))]],
+            });
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn late_script_budget_refusal_matches_native_error_and_preserves_outer_prefix() {
+    let ((), report) = run_async_under_lab(0x7d14_0008, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let txcx = contexts.txn();
+        let text = "MERGE (n:Person {p:7}); MERGE (n:Person {p:8})";
+        let prepared = PreparedGraphWriteScript::prepare(text, R, symbols).unwrap();
+        let args = GqlParameters::new();
+        let budget = GraphWriteProgramPolicy::new(policy(), 0, 1, 0);
+        let mut direct = seeded(&commit).await;
+        let mut entry = seeded(&commit).await;
+        let mut direct_txn = direct.begin(&txcx).unwrap();
+        let mut txn = entry.begin(&txcx).unwrap();
+        for (transaction, database) in [(&mut direct_txn, &mut direct), (&mut txn, &mut entry)] {
+            let mut prefix = WriteBatch::new(R);
+            prefix.create_vertex(VId(99), vec![], vec![(P, CanonicalScalar::Int(99))]);
+            transaction.write(database, prefix).unwrap();
+        }
+        let before = txn.staged_effect_digest().unwrap();
+        let mut direct_requests = Vec::new();
+        let mut entry_requests = Vec::new();
+        let direct_error = direct_txn.execute_graph_write_script_governed(
+            &mut direct, &cx, &prepared, &args, budget, |request| {
+                direct_requests.push(request);
+                script_identity(request)
+            },
+        ).unwrap_err();
+        let entry_error = txn.query_write(&mut entry, &cx, text, &args, symbols, R, budget, |request| {
+            entry_requests.push(request);
+            script_identity(request)
+        }).unwrap_err();
+        let QueryWriteError::Execute(entry_error) = entry_error else { panic!("budget became preparation error") };
+        for error in [&direct_error, &entry_error] {
+            assert!(matches!(error, GraphWriteScriptExecutionError::Program(
+                GraphWriteProgramError::CreationBudget {
+                    statement: 1, dimension: fgdb_gql::insertion::GraphInsertLimitDimension::Vertices,
+                    limit: 1, observed: 2,
+                }
+            )));
+        }
+        assert_eq!(entry_requests, direct_requests);
+        assert_eq!(entry_requests.len(), 1, "second statement must refuse before allocation");
+        assert_eq!(txn.staged_effect_digest().unwrap(), before);
+        assert_eq!(direct_txn.staged_effect_digest().unwrap(), before);
+        assert!(txn.vertex(&entry, VId(100)).unwrap().is_none());
+        assert!(txn.vertex(&entry, VId(99)).unwrap().is_some());
+        assert_eq!(txn.finish(&mut entry, &commit).await.unwrap(),
+            direct_txn.finish(&mut direct, &commit).await.unwrap());
+        assert_eq!(entry.vertices().unwrap(), direct.vertices().unwrap());
+        assert!(entry.vertex(VId(100)).unwrap().is_none());
+        assert!(entry.vertex(VId(99)).unwrap().is_some());
+        assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

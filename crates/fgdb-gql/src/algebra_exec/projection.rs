@@ -278,7 +278,7 @@ impl crate::algebra::GlaPlan<crate::algebra::GraphValueRow> {
             edges,
             test_vertex,
             control,
-            |operator, bindings, _projected, control| {
+            |operator, bindings, _paths, _projected, control| {
                 if matches!(
                     operator,
                     crate::algebra::GlaOperator::CompareProperties { .. }

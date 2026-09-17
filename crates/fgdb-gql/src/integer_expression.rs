@@ -499,6 +499,8 @@ fn scalar_text(value: &CanonicalScalar) -> Result<Option<&str>, GraphIntegerErro
 fn scalar_payload_bytes(value: &CanonicalScalar) -> usize {
     match value {
         CanonicalScalar::Text(value) => value.len().saturating_add(value.canonical_sort_key().map_or(0, <[u8]>::len)),
+        CanonicalScalar::Bytes(value) => value.as_slice().len(),
+        CanonicalScalar::Timestamp(value) => value.zone().map_or(0, |zone| zone.identifier().len()),
         _ => 0,
     }
 }

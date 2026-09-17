@@ -1,6 +1,6 @@
 //! Schema-bound graph components lowered to the shared GLA evaluator.
 //! Projection may return vertex IDs, correlated bindings or canonical values.
-//! Bounded WALK atoms retain endpoint bindings and edge-occurrence multiplicity.
+//! Captured chains preserve ordered routes; uncaptured WALKs retain endpoints.
 
 mod property_comparison;
 mod value_projection;
@@ -28,6 +28,7 @@ pub enum PatternLimitDimension {
     Identities,
     Columns,
     Bindings,
+    PathCaptures,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,7 +69,7 @@ impl core::fmt::Display for PatternBuildError {
             Self::DuplicateProjection => f.write_str("binding projection repeats a column"),
             Self::InvalidColumnName => f.write_str("invalid graph-pattern column name"),
             Self::RequiresValueProjection => f.write_str(
-                "binding property comparisons require prepare_values or its scoped variants",
+                "binding property comparisons and path captures require prepare_values or its scoped variants",
             ),
             Self::InvalidPathCapture => f.write_str("path capture requires an ordered connected root chain or a single WALK atom"),
             Self::LimitExceeded {
@@ -288,7 +289,7 @@ impl GraphPatternBuilder {
             return Err(PatternBuildError::DuplicateVariable);
         }
         check_next(
-            self.variables.len() + self.path_captures.len(),
+            self.variables.len(),
             MAX_PATTERN_VERTICES,
             PatternLimitDimension::Vertices,
         )?;
@@ -317,8 +318,7 @@ impl GraphPatternBuilder {
     /// Later edges do not extend an existing capture. Captures are value-only
     /// root bindings; scoped children cannot declare them.
     pub fn capture_path(&mut self, name: &str) -> Result<&mut Self, PatternBuildError> {
-        // Reuse vertex-name and shared visible-name validation without leaving
-        // a vertex declaration behind if chain validation fails.
+        // Validate the same identifier namespace as vertex().
         let bytes = name.as_bytes();
         if bytes.is_empty()
             || bytes.len() > MAX_PATTERN_NAME_BYTES
@@ -333,9 +333,9 @@ impl GraphPatternBuilder {
             return Err(PatternBuildError::DuplicateVariable);
         }
         check_next(
-            self.variables.len() + self.path_captures.len(),
-            MAX_PATTERN_VERTICES,
-            PatternLimitDimension::Vertices,
+            self.path_captures.len(),
+            MAX_PATTERN_IDENTITIES,
+            PatternLimitDimension::PathCaptures,
         )?;
         if self.variables.is_empty() {
             return Err(PatternBuildError::EmptyPattern);
@@ -357,7 +357,7 @@ impl GraphPatternBuilder {
             } else {
                 return Err(PatternBuildError::InvalidPathCapture);
             };
-            if visited[endpoint] {
+            if visited[endpoint] && self.edges.len() > 1 {
                 return Err(PatternBuildError::InvalidPathCapture);
             }
             visited[endpoint] = true;
@@ -481,7 +481,7 @@ impl GraphPatternBuilder {
     ///
     /// The existing breadth-first cursor executes the atom under the same
     /// work/scratch controls, slot mapping and snapshot admission as WALK.
-    /// Output is endpoint-only; no path values or weighted search are implied.
+    /// Capturing this atom additionally exposes its selected traversal as a path.
     pub fn shortest_walk(
         &mut self,
         source: &str,
@@ -503,7 +503,7 @@ impl GraphPatternBuilder {
     /// this does not enumerate every tied route before deduplicating output.
     /// Each incoming binding occurrence executes independently. Endpoint
     /// predicates, scopes and outer multiplicities retain their ordinary laws.
-    /// Like shortest_walk, this is per-atom and returns no captured path.
+    /// Like shortest_walk, this is a per-atom selector; capture_path retains its route.
     pub fn any_shortest_walk(
         &mut self,
         source: &str,
