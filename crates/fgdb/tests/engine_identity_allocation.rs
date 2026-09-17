@@ -147,7 +147,7 @@ fn same_basis_staged_engine_inserts_are_disjoint_and_loser_cannot_publish() {
         // Both insertions depend on the same observed vertex population.
         assert_eq!(first.vertices(&db).unwrap().into_iter().map(|row| row.vid).collect::<Vec<_>>(), vec![VId(7)]);
         assert_eq!(second.vertices(&db).unwrap().into_iter().map(|row| row.vid).collect::<Vec<_>>(), vec![VId(7)]);
-        let create = insertion("INSERT (a:Person {p:1})-[:R]->(b:Person {p:2})");
+        let create = insertion("CREATE (a:Person {p:1})-[:R]->(b:Person {p:2})");
         let (_, first_vertices, first_edges) = first.execute_graph_insert_returning_engine_governed(
             &mut db, &query, &create, insert_policy(),
         ).unwrap();
@@ -294,7 +294,7 @@ fn engine_insert_create_and_merge_programs_need_no_caller_allocator() {
         let mut db = deleted_maxima(&commit, &path).await;
         let mut txn = db.begin(&txcx).unwrap();
         let stats = txn.execute_graph_insert_engine_governed(
-            &mut db, &query, &insertion("INSERT (n:Person {p:30})"), insert_policy(),
+            &mut db, &query, &insertion("CREATE (n:Person {p:30})"), insert_policy(),
         ).unwrap();
         assert_eq!(stats.created_vertices, 1);
         txn.commit(&mut db, &commit).await.unwrap();
