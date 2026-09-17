@@ -654,22 +654,33 @@ impl<'a> Parser<'a> {
             }
             (None, GraphAggregateFunction::CountRows)
         } else {
-            let function = if distinct {
-                match function {
-                    GraphAggregateFunction::Count => GraphAggregateFunction::CountDistinct,
-                    GraphAggregateFunction::SumInt => GraphAggregateFunction::SumIntDistinct,
-                    GraphAggregateFunction::AverageInt => GraphAggregateFunction::AverageIntDistinct,
-                    _ => {
-                        return Err(error(
-                            name.at,
-                            GraphPatternTextErrorKind::Expected(
-                                "DISTINCT argument for COUNT, SUM or AVG",
-                            ),
-                        ));
-                    }
+            // GQL admits DISTINCT on every aggregate. For MIN/MAX it cannot
+            // change the result — the minimum (maximum) of a bag equals the
+            // minimum (maximum) of its distinct values — so it binds to the
+            // plain extreme function rather than a separate variant.
+            let function = match (function, distinct) {
+                (GraphAggregateFunction::Count, true) => GraphAggregateFunction::CountDistinct,
+                (GraphAggregateFunction::SumInt, true) => GraphAggregateFunction::SumIntDistinct,
+                (GraphAggregateFunction::AverageInt, true) => {
+                    GraphAggregateFunction::AverageIntDistinct
                 }
-            } else {
-                function
+                (function, true)
+                    if matches!(
+                        function,
+                        GraphAggregateFunction::Min | GraphAggregateFunction::Max
+                    ) =>
+                {
+                    function
+                }
+                (_, true) => {
+                    return Err(error(
+                        name.at,
+                        GraphPatternTextErrorKind::Expected(
+                            "DISTINCT argument for COUNT, SUM, AVG, MIN or MAX",
+                        ),
+                    ));
+                }
+                (function, false) => function,
             };
             (Some(self.aggregate_expression(computed)?), function)
         };
