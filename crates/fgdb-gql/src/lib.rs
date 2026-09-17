@@ -34,6 +34,7 @@ mod shortest_walk;
 mod temporal_aggregate_text;
 mod temporal_set_text;
 mod temporal_text;
+mod trail;
 mod vertex_merge;
 mod vertex_upsert;
 mod vertex_upsert_text;
@@ -152,6 +153,7 @@ pub use set_ops::{
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;
+pub use trail::GraphTrailCursor;
 pub use temporal_aggregate_text::{
     BoundTemporalGraphAggregateQuery, PreparedTemporalGraphAggregateText,
 };
