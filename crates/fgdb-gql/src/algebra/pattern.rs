@@ -278,6 +278,178 @@ impl GraphPatternBuilder {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Encode the resolved definition without compiling a scope or supplying
+    /// parameter values. Declaration ordinals retain topology and correlations.
+    pub(crate) fn canonical_template_bytes(&self) -> Vec<u8> {
+        fn ordinal(bytes: &mut Vec<u8>, value: usize) {
+            bytes.extend_from_slice(&(value as u64).to_be_bytes());
+        }
+        fn name(bytes: &mut Vec<u8>, value: &str) {
+            ordinal(bytes, value.len());
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        let mut bytes = b"fgdb:gql:pattern-template:v1\0".to_vec();
+        ordinal(&mut bytes, self.variables.len());
+        for variable in &self.variables {
+            name(&mut bytes, &variable.name);
+            bytes.push(u8::from(variable.outer));
+            ordinal(&mut bytes, variable.predicates.len());
+            for predicate in &variable.predicates {
+                match predicate {
+                    VertexPredicate::HasLabel(label) => {
+                        bytes.push(0);
+                        bytes.extend_from_slice(&label.0.to_be_bytes());
+                    }
+                    VertexPredicate::IntegerProperty {
+                        key,
+                        comparison,
+                        value,
+                    } => {
+                        bytes.push(1);
+                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                        bytes.push(comparison.tag());
+                        bytes.extend_from_slice(&value.to_be_bytes());
+                    }
+                    VertexPredicate::ScalarProperty { key, predicate } => {
+                        bytes.push(2);
+                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                        predicate.append_transcript(&mut bytes);
+                    }
+                    VertexPredicate::PropertyNull { key, is_null } => {
+                        bytes.push(3);
+                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                        bytes.push(u8::from(*is_null));
+                    }
+                }
+            }
+        }
+        ordinal(&mut bytes, self.edges.len());
+        for edge in &self.edges {
+            ordinal(&mut bytes, edge.source);
+            ordinal(&mut bytes, edge.destination);
+            bytes.extend_from_slice(&edge.relation.0.to_be_bytes());
+            bytes.push(super::direction_tag(edge.direction));
+            bytes.push(u8::from(edge.walk.is_some()));
+            if let Some(bounds) = edge.walk {
+                bytes.extend_from_slice(&bounds.minimum().to_be_bytes());
+                bytes.extend_from_slice(&bounds.maximum().to_be_bytes());
+            }
+            bytes.push(match edge.search {
+                GraphWalkSearch::All => 0,
+                GraphWalkSearch::AllShortest => 1,
+                GraphWalkSearch::AnyShortest => 2,
+                GraphWalkSearch::Acyclic => 3,
+                GraphWalkSearch::Simple => 4,
+            });
+        }
+        ordinal(&mut bytes, self.identities.len());
+        for identity in &self.identities {
+            ordinal(&mut bytes, identity.left);
+            ordinal(&mut bytes, identity.right);
+            bytes.push(u8::from(identity.equal));
+        }
+        ordinal(&mut bytes, self.property_comparisons.len());
+        for comparison in &self.property_comparisons {
+            match comparison {
+                PropertyComparison::Properties {
+                    left,
+                    left_key,
+                    right,
+                    right_key,
+                    comparison,
+                } => {
+                    bytes.push(0);
+                    ordinal(&mut bytes, *left);
+                    bytes.extend_from_slice(&left_key.0.to_be_bytes());
+                    ordinal(&mut bytes, *right);
+                    bytes.extend_from_slice(&right_key.0.to_be_bytes());
+                    bytes.push(comparison.tag());
+                }
+                PropertyComparison::Boolean(expression) => {
+                    bytes.push(1);
+                    let expression = expression.template_bytes();
+                    ordinal(&mut bytes, expression.len());
+                    bytes.extend_from_slice(&expression);
+                }
+            }
+        }
+        ordinal(&mut bytes, self.path_captures.len());
+        for capture in &self.path_captures {
+            name(&mut bytes, &capture.name);
+            ordinal(&mut bytes, capture.start);
+            ordinal(&mut bytes, capture.first_edge);
+            ordinal(&mut bytes, capture.edge_count);
+            bytes.push(u8::from(capture.edge_identity));
+        }
+        ordinal(&mut bytes, self.path_predicates.len());
+        for predicate in &self.path_predicates {
+            match predicate {
+                PathPredicate::Length {
+                    capture,
+                    comparison,
+                    value,
+                } => {
+                    bytes.push(0);
+                    bytes.extend_from_slice(&capture.to_be_bytes());
+                    bytes.push(comparison.tag());
+                    bytes.extend_from_slice(&value.to_be_bytes());
+                }
+                PathPredicate::Null {
+                    capture,
+                    function,
+                    is_null,
+                } => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&capture.to_be_bytes());
+                    bytes.push(*function as u8);
+                    bytes.push(u8::from(*is_null));
+                }
+            }
+        }
+        bytes
+    }
+
+    /// Logical template operators in declaration order, before scope lowering.
+    pub(crate) fn template_operators(&self) -> Vec<&'static str> {
+        let mut operators = Vec::new();
+        for variable in &self.variables {
+            operators.push(if variable.outer {
+                "BindOuterVertex"
+            } else {
+                "ScanVertices"
+            });
+            if !variable.predicates.is_empty() {
+                operators.push("Select");
+            }
+        }
+        for edge in &self.edges {
+            operators.push(if edge.walk.is_some() {
+                "VarLengthExpand"
+            } else {
+                "Expand"
+            });
+        }
+        for _ in &self.identities {
+            operators.push("VertexIdentity");
+        }
+        for comparison in &self.property_comparisons {
+            operators.push(match comparison {
+                PropertyComparison::Properties { .. } => "CompareProperties",
+                PropertyComparison::Boolean(_) => "SelectBoolean",
+            });
+        }
+        for _ in &self.path_captures {
+            operators.push("CapturePath");
+        }
+        for predicate in &self.path_predicates {
+            operators.push(match predicate {
+                PathPredicate::Length { .. } => "SelectPathLength",
+                PathPredicate::Null { .. } => "SelectPathNull",
+            });
+        }
+        operators
+    }
     fn variable(&self, name: &str) -> Result<usize, PatternBuildError> {
         self.variables
             .iter()
@@ -400,27 +572,47 @@ impl GraphPatternBuilder {
 
     /// Capture one declared, fixed-length relationship using the same admitted
     /// traversal segment as path values. No endpoint-to-edge reconstruction.
-    pub fn capture_edge(&mut self, name: &str, edge: usize) -> Result<&mut Self, PatternBuildError> {
-        let definition = self.edges.get(edge).ok_or(PatternBuildError::InvalidPathCapture)?;
+    pub fn capture_edge(
+        &mut self,
+        name: &str,
+        edge: usize,
+    ) -> Result<&mut Self, PatternBuildError> {
+        let definition = self
+            .edges
+            .get(edge)
+            .ok_or(PatternBuildError::InvalidPathCapture)?;
         if definition.walk.is_some() {
             return Err(PatternBuildError::InvalidPathCapture);
         }
         let start = definition.source;
         let bytes = name.as_bytes();
-        if bytes.is_empty() || bytes.len() > MAX_PATTERN_NAME_BYTES
+        if bytes.is_empty()
+            || bytes.len() > MAX_PATTERN_NAME_BYTES
             || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-            || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            || !bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
         {
             return Err(PatternBuildError::InvalidVariableName);
         }
         if self.variables.iter().any(|variable| variable.name == name)
-            || self.path_captures.iter().any(|capture| capture.name == name)
+            || self
+                .path_captures
+                .iter()
+                .any(|capture| capture.name == name)
         {
             return Err(PatternBuildError::DuplicateVariable);
         }
-        check_next(self.path_captures.len(), MAX_PATTERN_IDENTITIES, PatternLimitDimension::PathCaptures)?;
+        check_next(
+            self.path_captures.len(),
+            MAX_PATTERN_IDENTITIES,
+            PatternLimitDimension::PathCaptures,
+        )?;
         self.path_captures.push(PathCapture {
-            name: name.to_owned(), start, first_edge: edge, edge_count: 1,
+            name: name.to_owned(),
+            start,
+            first_edge: edge,
+            edge_count: 1,
             edge_identity: true,
         });
         Ok(self)
@@ -782,7 +974,11 @@ impl GraphPatternBuilder {
         } else {
             vec![None; self.edges.len()]
         };
-        let mut edge_starts = if self.path_captures.is_empty() { Vec::new() } else { vec![None; self.edges.len()] };
+        let mut edge_starts = if self.path_captures.is_empty() {
+            Vec::new()
+        } else {
+            vec![None; self.edges.len()]
+        };
         let mut operators = Vec::new();
         let mut next_slot;
         if root.is_some() || self.edges.is_empty() {
@@ -899,7 +1095,8 @@ impl GraphPatternBuilder {
                 } else {
                     slots[definition.start]
                 },
-                segments: path_segments[definition.first_edge..definition.first_edge + definition.edge_count]
+                segments: path_segments
+                    [definition.first_edge..definition.first_edge + definition.edge_count]
                     .iter()
                     .map(|slot| slot.expect("every captured edge has been bound"))
                     .collect(),
@@ -943,6 +1140,50 @@ mod tests {
             builder.vertex(name).unwrap();
         }
         builder
+    }
+
+    #[test]
+    fn template_preserves_resolved_symbols_topology_and_literals() {
+        let mut original = builder(&["a", "b"]);
+        original
+            .edge("a", RelationId(1), GlaDirection::Forward, "b")
+            .unwrap();
+        let baseline = original.canonical_template_bytes();
+        assert_eq!(baseline, original.clone().canonical_template_bytes());
+        let mut changed = original.clone();
+        changed.edges[0].relation = RelationId(2);
+        assert_ne!(baseline, changed.canonical_template_bytes());
+        changed = original.clone();
+        changed.edges[0].destination = 0;
+        assert_ne!(baseline, changed.canonical_template_bytes());
+        changed = original.clone();
+        changed.variables[0].outer = true;
+        assert_ne!(baseline, changed.canonical_template_bytes());
+        assert!(changed.template_operators().contains(&"BindOuterVertex"));
+        original.path_captures.push(PathCapture {
+            name: "route".into(),
+            start: 0,
+            first_edge: 0,
+            edge_count: 1,
+            edge_identity: false,
+        });
+        original.path_predicates.push(PathPredicate::Length {
+            capture: 0,
+            comparison: IntegerComparison::Equal,
+            value: 2,
+        });
+        changed = original.clone();
+        changed.path_predicates[0] = PathPredicate::Length {
+            capture: 0,
+            comparison: IntegerComparison::Equal,
+            value: 3,
+        };
+        assert_ne!(
+            original.canonical_template_bytes(),
+            changed.canonical_template_bytes()
+        );
+        assert!(original.template_operators().contains(&"CapturePath"));
+        assert!(original.template_operators().contains(&"SelectPathLength"));
     }
 
     #[test]
