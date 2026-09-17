@@ -61,20 +61,22 @@
 //! honest thing: bytes on disk, addressed by identity, verified on read.
 
 use crate::edge_props::{
-    BlockProps, EdgePropertyPatchVersion, read_property_patch, validate_block_patch_consistency,
+    BlockProps, EdgePropertyPatchVersion, read_property_patch_inner,
+    validate_block_patch_consistency,
 };
-use crate::vertex::{VertexPatchRows, VertexPatchVersion, decode_patch, vertex_patch_id};
+use crate::vertex::{VertexPatchRows, VertexPatchVersion, decode_patch_inner, vertex_patch_id};
 use crate::{BlockError, DeltaBlockVersion, PartitionRootVersion, block_id, decode_block};
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use fgdb_crypto::zeroize::SharedSecret;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CommitSeq, StorageReadCx};
+use fgdb_types::{CanonicalScalarResolver, CommitSeq, StorageReadCx};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Directory holding a database's Strata blocks.
 pub const BLOCK_DIR: &str = "strata-blocks";
@@ -444,6 +446,7 @@ pub struct BlockStore<V: Vfs = UnixVfs> {
     publication_lock_path: PathBuf,
     k_oid: SharedSecret<32>,
     namespace: DatabaseSecurityNamespaceId,
+    scalar_resolver: Option<Arc<dyn CanonicalScalarResolver + Send + Sync>>,
 }
 
 impl<V: Vfs> core::fmt::Debug for BlockStore<V> {
@@ -526,6 +529,26 @@ impl BlockStore<UnixVfs> {
 }
 
 impl<V: Vfs> BlockStore<V> {
+    /// Attach the explicit pinned artifacts used when decoding property scalars.
+    /// The store never falls back to the host's locale or timezone database.
+    pub fn with_scalar_resolver(
+        mut self,
+        resolver: Arc<dyn CanonicalScalarResolver + Send + Sync>,
+    ) -> Self {
+        self.scalar_resolver = Some(resolver);
+        self
+    }
+
+    /// Borrow the optional artifact capability retained by this store.
+    pub fn scalar_resolver(&self) -> Option<&(dyn CanonicalScalarResolver + Send + Sync)> {
+        self.scalar_resolver.as_deref()
+    }
+
+    fn decode_resolver(&self) -> Option<&dyn CanonicalScalarResolver> {
+        self.scalar_resolver()
+            .map(|resolver| resolver as &dyn CanonicalScalarResolver)
+    }
+
     /// Borrow the retained identity authority for ownership-law tests.
     ///
     /// This never returns an owned key and is not a general data API.
@@ -644,6 +667,7 @@ impl<V: Vfs> BlockStore<V> {
             publication_lock_path,
             k_oid,
             namespace,
+            scalar_resolver: None,
         })
     }
 
@@ -1055,7 +1079,7 @@ impl<V: Vfs> BlockStore<V> {
         id: VertexPatchVersion,
     ) -> Result<VertexPatchRows, StoreError> {
         let bytes = self.get_patch_bytes(cx, id).await?;
-        decode_patch(&bytes).map_err(StoreError::MalformedPatch)
+        decode_patch_inner(&bytes, self.decode_resolver()).map_err(StoreError::MalformedPatch)
     }
 
     async fn resolve_root_block(
@@ -1109,11 +1133,12 @@ impl<V: Vfs> BlockStore<V> {
                     at,
                     error: Box::new(error),
                 })?;
-            let rows = read_property_patch(
+            let rows = read_property_patch_inner(
                 self.k_oid.expose(),
                 self.namespace,
                 &patch_bytes,
                 EdgePropertyPatchVersion(patch_id),
+                self.decode_resolver(),
             )
             .map_err(StoreError::MalformedEdgePropertyPatch)?;
             validate_block_patch_consistency(&locators, rows.len())
@@ -1218,8 +1243,15 @@ impl<V: Vfs> BlockStore<V> {
                 at,
                 error: Box::new(error),
             })?;
-        crate::root::resolve_patch_ref(self.k_oid.expose(), self.namespace, at, reference, &bytes)
-            .map_err(StoreError::MalformedRoot)
+        crate::root::resolve_patch_ref(
+            self.k_oid.expose(),
+            self.namespace,
+            at,
+            reference,
+            &bytes,
+            self.decode_resolver(),
+        )
+        .map_err(StoreError::MalformedRoot)
     }
 
     /// Prove every vertex patch named by an already-structural root while
@@ -1344,7 +1376,8 @@ impl<V: Vfs> BlockStore<V> {
         }
         let stored = self.put_patch(cx, bytes).await?;
         debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
-        let rows = decode_patch(bytes).map_err(StoreError::MalformedPatch)?;
+        let rows = decode_patch_inner(bytes, self.decode_resolver())
+            .map_err(StoreError::MalformedPatch)?;
         receipts
             .vertex_validator
             .observe_patch(receipts.patch_spans.len(), &rows)
@@ -1428,11 +1461,12 @@ impl<V: Vfs> BlockStore<V> {
                     &owned
                 }
             };
-            let rows = read_property_patch(
+            let rows = read_property_patch_inner(
                 self.k_oid.expose(),
                 self.namespace,
                 proof_bytes,
                 EdgePropertyPatchVersion(patch_id),
+                self.decode_resolver(),
             )
             .map_err(StoreError::MalformedEdgePropertyPatch)?;
             validate_block_patch_consistency(&locators, rows.len())

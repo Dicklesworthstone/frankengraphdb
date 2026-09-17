@@ -1543,3 +1543,95 @@ fn human_table_aligns_columns_and_robot_has_no_human_decoration() {
         r#"[[{"type":"text","value":"Ada"},{"type":"int","value":"1815"}],[{"type":"text","value":"Barbara"},{"type":"int","value":"1939"}]]"#,
     );
 }
+
+#[test]
+fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
+    use asupersync::{Budget, runtime::RuntimeBuilder};
+    use fgdb::{Database, DatabaseKeys};
+    use fgdb_types::context::PurposeContexts;
+    use fgdb_types::ids::DatabaseSecurityNamespaceId;
+
+    const INSTANT: i128 = 1_735_689_600_123_456_789;
+    const ZONE: &str = "Etc/UTC";
+    let db = TestDb::new("zoned-pinned");
+    let artifact_bytes: Vec<u8> = {
+        let table = fgdb::PinnedTzdb::new(vec![fgdb::TzdbZone {
+            identifier: ZONE.into(),
+            initial_offset_seconds: 0,
+            transitions: vec![],
+        }])
+        .unwrap();
+        table.canonical_bytes().to_vec()
+    };
+    let artifact_path = std::path::Path::new(&db.db)
+        .parent()
+        .unwrap()
+        .join("tzdb-artifact");
+    std::fs::write(&artifact_path, &artifact_bytes).unwrap();
+    let object_id = fgdb::PinnedTzdb::decode(&artifact_bytes)
+        .unwrap()
+        .object_id();
+    let oid_hex = object_id
+        .0
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    db.create();
+    let param = format!("born=timestamp:{INSTANT},0,{ZONE},{oid_hex}");
+    let written = db.write(&[
+        "--tzdb-file",
+        artifact_path.to_str().unwrap(),
+        "--param",
+        &param,
+        "INSERT (:Person {born:$born})",
+    ]);
+    let advanced = db.write(&[
+        "--tzdb-file",
+        artifact_path.to_str().unwrap(),
+        "INSERT (:Person {name:'x'})",
+    ]);
+
+    let expected_cell = format!(
+        r#"{{"type":"timestamp","value":{{"instant_utc_nanos":"{INSTANT}","utc_offset_seconds":0,"zone":{{"identifier":"{ZONE}","tzdb_oid":"{oid_hex}"}}}}}}"#,
+    );
+    let queries = [
+        (
+            "MATCH (p:Person) RETURN p.born AS value".to_owned(),
+            format!(r#"[[{{"type":"null"}}],[{expected_cell}]]"#),
+        ),
+        (
+            format!("MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ {written} RETURN p.born AS value"),
+            format!("[[{expected_cell}]]"),
+        ),
+    ];
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let commit = PurposeContexts::narrow_runtime_root(&root).commit();
+    let keys = DatabaseKeys::new(
+        [0x5a; 32],
+        DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+    )
+    .with_scalar_resolver(std::sync::Arc::new(
+        fgdb::PinnedTzdb::decode(&artifact_bytes).unwrap(),
+    ));
+    for phase in ["after close", "after reopen", "after open_rebuilding"] {
+        if phase != "after close" {
+            let opened = if phase == "after open_rebuilding" {
+                runtime.block_on(Database::open_rebuilding(&commit, &db.db, keys.clone()))
+            } else {
+                runtime.block_on(Database::open(&commit, &db.db, keys.clone()))
+            };
+            assert!(opened.is_ok(), "embedded {phase}: {:?}", opened.err());
+        }
+        for (query, expected) in &queries {
+            let output = db.command(
+                "query",
+                &["--tzdb-file", artifact_path.to_str().unwrap(), query],
+            );
+            assert_rows(&output, expected);
+            assert_eq!(output.sequence("rows"), advanced, "CLI {phase}: {query}");
+        }
+    }
+}

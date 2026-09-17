@@ -31,7 +31,9 @@ Usage: fgdb [--robot] <command>
   query --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
   robot schema
   help
-Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null.
+Parameters: int:42, uint:42, text:Ada, bool:true, bool:false, null,
+timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>.
+--tzdb-file <file> supplies a pinned transition-table artifact on every invocation.
 Bindings: repeat --label name=u32, --relation name=u32, --property name=u32.
 Supply the same bindings on reopen; no implicit catalog or hashed names.
 --write-relation u32 selects the native mutation coordinate (default 1).
@@ -116,6 +118,8 @@ struct Options {
     key: PathBuf,
     text: String,
     params: GqlParameters,
+    raw_params: Vec<(String, String)>,
+    tzdb_file: Option<PathBuf>,
     labels: BTreeMap<String, u32>,
     relations: BTreeMap<String, u32>,
     properties: BTreeMap<String, u32>,
@@ -143,7 +147,9 @@ fn parse(args: &[String], create: bool) -> Result<Options, Failure> {
     let mut db = None;
     let mut key = None;
     let mut text = None;
-    let mut params = GqlParameters::new();
+    let params = GqlParameters::new();
+    let mut raw_params = Vec::new();
+    let mut tzdb_file = None;
     let mut labels = BTreeMap::new();
     let mut relations = BTreeMap::new();
     let mut properties = BTreeMap::new();
@@ -157,12 +163,12 @@ fn parse(args: &[String], create: bool) -> Result<Options, Failure> {
             match arg.as_str() {
                 "--db" if db.is_none() => db = Some(PathBuf::from(value)),
                 "--key-file" if key.is_none() => key = Some(PathBuf::from(value)),
+                "--tzdb-file" if tzdb_file.is_none() => tzdb_file = Some(PathBuf::from(value)),
                 "--param" if !create => {
                     let (name, raw) = value
                         .split_once('=')
                         .ok_or_else(|| Failure::usage("expected --param name=value"))?;
-                    let parsed = parameter(raw)?;
-                    params.insert(name, parsed).map_err(Failure::query)?;
+                    raw_params.push((name.to_owned(), raw.to_owned()));
                 }
                 "--label" | "--relation" | "--property" => {
                     let (name, raw) = value
@@ -210,13 +216,15 @@ fn parse(args: &[String], create: bool) -> Result<Options, Failure> {
             text.ok_or_else(|| Failure::usage("GQL argument required"))?
         },
         params,
+        raw_params,
+        tzdb_file,
         labels,
         relations,
         properties,
         coordinate,
     })
 }
-fn parameter(raw: &str) -> Result<GqlParameterValue, Failure> {
+fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
     if let Some(value) = raw.strip_prefix("int:") {
         return value
             .parse()
@@ -231,6 +239,41 @@ fn parameter(raw: &str) -> Result<GqlParameterValue, Failure> {
     }
     let scalar = if let Some(value) = raw.strip_prefix("text:") {
         CanonicalScalar::ucs_basic_text(value).map_err(Failure::query)?
+    } else if let Some(value) = raw.strip_prefix("timestamp:") {
+        let fields: Vec<_> = value.split(',').collect();
+        if fields.len() != 4 {
+            return Err(Failure::usage(
+                "timestamp requires nanos,offset,zone,tzdb-oid",
+            ));
+        }
+        let instant = fields[0]
+            .parse()
+            .map_err(|_| Failure::usage("invalid timestamp nanos"))?;
+        let offset = fields[1]
+            .parse()
+            .map_err(|_| Failure::usage("invalid timestamp offset"))?;
+        let oid = fields[3];
+        if oid.len() != 64 || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Failure::usage(
+                "tzdb OID requires 64 hexadecimal characters",
+            ));
+        }
+        let mut bytes = [0u8; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte =
+                u8::from_str_radix(&oid[index * 2..index * 2 + 2], 16).map_err(Failure::usage)?;
+        }
+        let resolver = resolver.ok_or_else(|| Failure::usage("timestamp requires --tzdb-file"))?;
+        CanonicalScalar::Timestamp(
+            fgdb_types::CanonicalTimestamp::zoned(
+                instant,
+                offset,
+                fields[2],
+                fgdb_types::ObjectId(bytes),
+                resolver,
+            )
+            .map_err(Failure::query)?,
+        )
     } else {
         match raw {
             "bool:true" => CanonicalScalar::Bool(true),
@@ -351,12 +394,22 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             Ok(())
         }
         Some(command @ ("create" | "query" | "write")) => {
-            let options = parse(&args[1..], command == "create")?;
+            let mut options = parse(&args[1..], command == "create")?;
             let runtime = RuntimeBuilder::new().build().map_err(Failure::io)?;
             let root = runtime.request_cx_with_budget(Budget::INFINITE);
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             runtime.block_on(async {
-                let keys = read_keys(&contexts.query(), &options.key).await?;
+                let mut keys = read_keys(&contexts.query(), &options.key).await?;
+                let artifact = if let Some(path) = &options.tzdb_file {
+                    contexts.query().checkpoint().map_err(Failure::io)?;
+                    let bytes = asupersync::fs::read(path).await.map_err(Failure::io)?;
+                    let artifact = std::sync::Arc::new(fgdb::PinnedTzdb::decode(&bytes).map_err(Failure::open)?);
+                    keys = keys.with_scalar_resolver(artifact.clone());
+                    Some(artifact)
+                } else { None };
+                for (name, raw) in &options.raw_params {
+                    options.params.insert(name, parameter(raw, artifact.as_deref())?).map_err(Failure::query)?;
+                }
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;

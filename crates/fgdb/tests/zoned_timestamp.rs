@@ -1,24 +1,24 @@
-//! Without an engine resolver, zoned writes must refuse before publication.
-//! Phase diagnostics preserve baseline observations across both recovery paths.
+//! Pinned zoned values survive native/GQL writes and both recovery paths.
+//! Missing artifacts refuse before publication, including erased batch inputs.
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, QueryResult, QueryWriteError, WriteBatch, WriteError,
-    WriteMismatchPolicy, WriteTxnError,
+    Database, DatabaseKeys, PinnedTzdb, QueryResult, TzdbTransition, TzdbZone, WriteBatch,
+    WriteError, WriteMismatchPolicy,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphMutationProgramError, GraphSymbol,
-    GraphSymbolKind, GraphWriteProgramError, GraphWriteProgramPolicy,
-    GraphWriteScriptExecutionError,
+    GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphSymbol, GraphSymbolKind,
+    GraphWriteProgramPolicy,
 };
 use fgdb_types::{
-    CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId, EId, ObjectId,
-    PurposeContexts, QueryCx, TzdbResolver, VId,
+    CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId, EId,
+    PurposeContexts, QueryCx, VId,
 };
 use std::fmt::Debug;
+use std::sync::Arc;
 
 const R: RelationId = RelationId(1);
 const TIMESTAMP: LabelId = LabelId(1);
@@ -26,31 +26,41 @@ const BASELINE: LabelId = LabelId(2);
 const P: PropertyKeyId = PropertyKeyId(7);
 const BASELINE_ID: VId = VId(1);
 const TARGET_ID: VId = VId(2);
-const TZDB_OID: ObjectId = ObjectId([0x9d; 32]);
 const ZONE: &str = "America/New_York";
 const INSTANT: i128 = 1_720_008_000_123_456_789;
 const OFFSET: i32 = -14_400;
 
-struct FixtureTzdb;
-
-impl TzdbResolver for FixtureTzdb {
-    fn contains_tzdb(&self, oid: &ObjectId) -> bool {
-        *oid == TZDB_OID
-    }
-
-    fn canonical_utc_offset_seconds(
-        &self,
-        oid: &ObjectId,
-        zone: &str,
-        instant: i128,
-    ) -> Option<i32> {
-        (*oid == TZDB_OID && zone == ZONE && instant == INSTANT).then_some(OFFSET)
-    }
+fn artifact() -> Arc<PinnedTzdb> {
+    Arc::new(
+        PinnedTzdb::new(vec![TzdbZone {
+            identifier: ZONE.into(),
+            initial_offset_seconds: -18_000,
+            transitions: vec![
+                TzdbTransition {
+                    instant_utc_seconds: 1_710_054_000,
+                    offset_seconds: OFFSET,
+                },
+                TzdbTransition {
+                    instant_utc_seconds: 1_730_613_600,
+                    offset_seconds: -18_000,
+                },
+            ],
+        }])
+        .unwrap(),
+    )
 }
 
 fn zoned() -> CanonicalScalar {
+    let artifact = artifact();
     CanonicalScalar::Timestamp(
-        CanonicalTimestamp::zoned(INSTANT, OFFSET, ZONE, TZDB_OID, &FixtureTzdb).unwrap(),
+        CanonicalTimestamp::zoned(
+            INSTANT,
+            OFFSET,
+            ZONE,
+            artifact.object_id(),
+            artifact.as_ref(),
+        )
+        .unwrap(),
     )
 }
 
@@ -189,16 +199,17 @@ fn reproduce(path: WritePath, seed: u64) {
         let commit = contexts.commit();
         let query = contexts.query();
         let txn = contexts.txn();
+        let artifact = artifact();
+        let pinned_keys = keys().with_scalar_resolver(artifact.clone());
         let mut failures = Vec::new();
-        // Separate durable fixtures: fast open cannot repair or rewrite the
-        // files whose independent rebuilding outcome we need to observe.
         for rebuilding in [false, true] {
             let mode = if rebuilding { "rebuilding" } else { "fast" };
             let phase = format!("{path:?}/{mode}");
             let dir = std::env::temp_dir()
                 .join(format!("fgdb-zoned-{}-{seed}-{mode}", std::process::id()));
-            eprintln!("{phase}/database: {}", dir.display());
-            let mut db = Database::create(&commit, &dir, keys()).await.unwrap();
+            let mut db = Database::create(&commit, &dir, pinned_keys.clone())
+                .await
+                .unwrap();
             let mut batch = WriteBatch::new(R);
             batch.create_vertex(
                 BASELINE_ID,
@@ -211,25 +222,14 @@ fn reproduce(path: WritePath, seed: u64) {
             }
             let before = db.write(&commit, batch).await.unwrap();
             let mut target = TARGET_ID;
-            inspect(
-                &db,
-                &query,
-                &format!("{phase}/before"),
-                target,
-                before,
-                before,
-                prior.as_ref(),
-                prior.as_ref(),
-                &mut failures,
-            );
             let expected = zoned();
-            let refused = match path {
+            match path {
                 WritePath::Native => {
                     let mut batch = WriteBatch::new(R);
                     batch.create_vertex(target, vec![TIMESTAMP], vec![(P, expected.clone())]);
-                    let result = db.prepare_write(batch);
-                    eprintln!("{phase}/prepare: {result:?}");
-                    matches!(result, Err(WriteError::ZonedTimestampRequiresResolver { tzdb_oid }) if tzdb_oid == TZDB_OID)
+                    db.write(&commit, batch)
+                        .await
+                        .expect("native pinned write commits");
                 }
                 WritePath::Insert | WritePath::Set => {
                     let mut reserved = if matches!(path, WritePath::Insert) {
@@ -255,87 +255,85 @@ fn reproduce(path: WritePath, seed: u64) {
                     let params = GqlParameters::new()
                         .with_scalar("stamp", expected.clone())
                         .unwrap();
-                    let result = db
-                        .query_write(
-                            &txn,
-                            &query,
-                            &commit,
-                            text,
-                            &params,
-                            symbols,
-                            R,
-                            GraphWriteProgramPolicy::new(policy(), 100, 100, 100),
-                            |_| reserved.take().ok_or("unexpected identity request"),
-                        )
-                        .await;
-                    eprintln!("{phase}/write: {result:?}");
-                    matches!(result,
-                        Err(QueryWriteError::Execute(GraphWriteScriptExecutionError::Program(
-                            GraphWriteProgramError::Insert { statement: 0, source:
-                                fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(
-                                    WriteTxnError::Write(WriteError::ZonedTimestampRequiresResolver { tzdb_oid })
-                                ))
-                            }
-                        ))) if tzdb_oid == TZDB_OID)
-                        || matches!(result,
-                        Err(QueryWriteError::Execute(GraphWriteScriptExecutionError::Program(
-                            GraphWriteProgramError::Program(GraphMutationProgramError::Statement {
-                                statement: 0, source:
-                                fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphMutationError::Source(
-                                    WriteTxnError::Write(WriteError::ZonedTimestampRequiresResolver { tzdb_oid })
-                                ))
-                            })
-                        ))) if tzdb_oid == TZDB_OID)
+                    db.query_write(
+                        &txn,
+                        &query,
+                        &commit,
+                        text,
+                        &params,
+                        symbols,
+                        R,
+                        GraphWriteProgramPolicy::new(policy(), 100, 100, 100),
+                        |_| reserved.take().ok_or("unexpected identity request"),
+                    )
+                    .await
+                    .expect("GQL pinned write commits");
                 }
-            };
-            eprintln!(
-                "{phase}/typed-refusal: {refused}; before: {before:?}; after: {:?}",
-                db.frontier()
-            );
-            let expected_frontier = before;
-            let current = prior.as_ref();
+            }
+            let at = db.frontier().unwrap();
+            assert!(at > before);
             inspect(
                 &db,
                 &query,
                 &format!("{phase}/live"),
                 target,
                 before,
-                expected_frontier,
+                at,
                 prior.as_ref(),
-                current,
+                Some(&expected),
+                &mut failures,
+            );
+            // Advance with a real update: AS OF must recover the zoned value
+            // from history rather than reading the current frontier again.
+            let current = CanonicalScalar::Int(42);
+            let mut later = WriteBatch::new(R);
+            later.set_vertex_property(target, P, Some(current.clone()));
+            let after = db.write(&commit, later).await.unwrap();
+            assert!(after > at);
+            inspect(
+                &db,
+                &query,
+                &format!("{phase}/later"),
+                target,
+                at,
+                after,
+                Some(&expected),
+                Some(&current),
                 &mut failures,
             );
             drop(db);
-            let reopened = if rebuilding {
-                Database::open_rebuilding(&commit, &dir, keys()).await
+            // Load independent artifact bytes, not the live writer's resolver.
+            let reopened_keys = keys().with_scalar_resolver(Arc::new(
+                PinnedTzdb::decode(artifact.canonical_bytes()).unwrap(),
+            ));
+            let db = if rebuilding {
+                Database::open_rebuilding(&commit, &dir, reopened_keys).await
             } else {
-                Database::open(&commit, &dir, keys()).await
-            };
-            match reopened {
-                Ok(db) => {
-                    eprintln!("{phase}/open: Ok");
-                    inspect(
-                        &db,
-                        &query,
-                        &format!("{phase}/reopened"),
-                        target,
-                        before,
-                        expected_frontier,
-                        prior.as_ref(),
-                        current,
-                        &mut failures,
-                    );
-                }
-                Err(error) => {
-                    eprintln!("{phase}/open: Err({error:?})");
-                    failures.push(format!("{phase}/open: {error:?}"));
-                }
+                Database::open(&commit, &dir, reopened_keys).await
             }
-            if !refused {
-                failures.push(format!(
-                    "{phase}: expected exact ZonedTimestampRequiresResolver with fixture tzdb OID"
-                ));
-            }
+            .expect("pinned timestamp history reopens");
+            inspect(
+                &db,
+                &query,
+                &format!("{phase}/reopened"),
+                target,
+                at,
+                after,
+                Some(&expected),
+                Some(&current),
+                &mut failures,
+            );
+            inspect(
+                &db,
+                &query,
+                &format!("{phase}/baseline-history"),
+                target,
+                before,
+                after,
+                prior.as_ref(),
+                Some(&current),
+                &mut failures,
+            );
         }
         failures
     });
@@ -351,17 +349,17 @@ fn reproduce(path: WritePath, seed: u64) {
 }
 
 #[test]
-fn native_zoned_timestamp_refusal_preserves_baseline() {
+fn native_pinned_timestamp_persists_through_recovery() {
     reproduce(WritePath::Native, 0x209e_0001);
 }
 
 #[test]
-fn gql_insert_zoned_timestamp_refusal_preserves_baseline() {
+fn gql_insert_pinned_timestamp_persists_through_recovery() {
     reproduce(WritePath::Insert, 0x209e_0002);
 }
 
 #[test]
-fn gql_set_zoned_timestamp_refusal_preserves_baseline() {
+fn gql_set_pinned_timestamp_persists_through_recovery() {
     reproduce(WritePath::Set, 0x209e_0003);
 }
 
@@ -478,7 +476,7 @@ fn native_preparation_refuses_every_zoned_scalar_before_noops_and_netfold() {
                 build(&mut batch);
                 let result = db.prepare_write(batch);
                 eprintln!("{phase}: {result:?}");
-                if !matches!(result, Err(WriteError::ZonedTimestampRequiresResolver { tzdb_oid }) if tzdb_oid == TZDB_OID)
+                if !matches!(result, Err(WriteError::ZonedTimestampRequiresResolver { tzdb_oid }) if tzdb_oid == artifact().object_id())
                 {
                     failures.push(format!("{phase}: expected exact typed resolver refusal"));
                 }
@@ -565,4 +563,98 @@ fn native_preparation_refuses_every_zoned_scalar_before_noops_and_netfold() {
         "zoned preparation failures:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn native_preparation_rejects_unknown_oid_with_other_valid_resolver() {
+    let (_, report) = run_async_under_lab(0x209e_0005, move |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let available = artifact();
+        let other = PinnedTzdb::new(vec![TzdbZone {
+            identifier: ZONE.into(),
+            initial_offset_seconds: OFFSET,
+            transitions: vec![],
+        }])
+        .unwrap();
+        assert_ne!(available.object_id(), other.object_id());
+        let unsupported = CanonicalScalar::Timestamp(
+            CanonicalTimestamp::zoned(INSTANT, OFFSET, ZONE, other.object_id(), &other).unwrap(),
+        );
+        let pinned_keys = keys().with_scalar_resolver(available);
+        for rebuilding in [false, true] {
+            let dir = std::env::temp_dir().join(format!(
+                "fgdb-zoned-unknown-{}-{rebuilding}",
+                std::process::id(),
+            ));
+            let mut db = Database::create(&commit, &dir, pinned_keys.clone())
+                .await
+                .unwrap();
+            let mut baseline = WriteBatch::new(R);
+            baseline.create_vertex(
+                BASELINE_ID,
+                vec![BASELINE],
+                vec![(P, CanonicalScalar::Int(99))],
+            );
+            baseline.create_vertex(
+                TARGET_ID,
+                vec![TIMESTAMP],
+                vec![(P, CanonicalScalar::Int(7))],
+            );
+            let before = db.write(&commit, baseline).await.unwrap();
+            let mut batch = WriteBatch::new(R);
+            batch.set_vertex_property(TARGET_ID, P, Some(unsupported.clone()));
+            assert!(
+                matches!(
+                    db.prepare_write(batch),
+                    Err(WriteError::ZonedTimestampRequiresResolver { tzdb_oid })
+                        if tzdb_oid == other.object_id()
+                ),
+                "unknown artifact must fail preparation"
+            );
+            let mut batch = WriteBatch::new(R);
+            batch.set_vertex_property(TARGET_ID, P, Some(unsupported.clone()));
+            assert!(
+                matches!(
+                    db.write(&commit, batch).await,
+                    Err(WriteError::ZonedTimestampRequiresResolver { tzdb_oid })
+                        if tzdb_oid == other.object_id()
+                ),
+                "unknown artifact must not publish"
+            );
+            let mut failures = Vec::new();
+            inspect(
+                &db,
+                &query,
+                "unknown/live",
+                TARGET_ID,
+                before,
+                before,
+                Some(&CanonicalScalar::Int(7)),
+                Some(&CanonicalScalar::Int(7)),
+                &mut failures,
+            );
+            drop(db);
+            let db = if rebuilding {
+                Database::open_rebuilding(&commit, &dir, pinned_keys.clone()).await
+            } else {
+                Database::open(&commit, &dir, pinned_keys.clone()).await
+            }
+            .expect("rejected artifact cannot poison recovery");
+            inspect(
+                &db,
+                &query,
+                "unknown/reopened",
+                TARGET_ID,
+                before,
+                before,
+                Some(&CanonicalScalar::Int(7)),
+                Some(&CanonicalScalar::Int(7)),
+                &mut failures,
+            );
+            assert!(failures.is_empty(), "{failures:?}");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

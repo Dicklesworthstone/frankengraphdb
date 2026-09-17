@@ -24,7 +24,7 @@
 
 use crate::BlockError;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{BranchId, CommitSeq, EId, GraphId, VId};
+use fgdb_types::{BranchId, CanonicalScalarResolver, CommitSeq, EId, GraphId, VId};
 
 /// `FGSR` — FrankenGraph Strata Root.
 pub const ROOT_MAGIC: [u8; 4] = *b"FGSR";
@@ -1231,12 +1231,14 @@ pub(crate) fn resolve_patch_ref(
     at: usize,
     reference: &PatchRef,
     bytes: &[u8],
+    resolver: Option<&dyn CanonicalScalarResolver>,
 ) -> Result<crate::vertex::VertexPatchRows, RootError> {
-    let rows = crate::vertex::read_patch(
+    let rows = crate::vertex::read_patch_inner(
         k_oid,
         namespace,
         bytes,
         crate::vertex::VertexPatchVersion(reference.patch_id),
+        resolver,
     )
     .map_err(|error| RootError::Patch { at, error })?;
 

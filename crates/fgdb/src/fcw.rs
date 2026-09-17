@@ -14,15 +14,36 @@ const FCW_LAW: &str = "FG-LAW-FCW-01";
 /// Default starts with no intervening commits. A caller committing an older
 /// prepared write must use `from_history`, not a resettable validator left over
 /// from some unrelated write. The constructor refuses incomplete retained cuts.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct FirstCommitterWinsValidator {
     last_writer: BTreeMap<ElementId, CommitSeq>,
     adjacency_insertions: BTreeMap<VId, CommitSeq>,
     dependencies: BTreeSet<ElementId>,
     adjacency_dependencies: BTreeSet<VId>,
+    scalar_resolver: Option<std::sync::Arc<dyn fgdb_types::CanonicalScalarResolver + Send + Sync>>,
+}
+
+impl core::fmt::Debug for FirstCommitterWinsValidator {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FirstCommitterWinsValidator")
+            .field("last_writer", &self.last_writer)
+            .field("adjacency_insertions", &self.adjacency_insertions)
+            .field("dependencies", &self.dependencies)
+            .field("adjacency_dependencies", &self.adjacency_dependencies)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FirstCommitterWinsValidator {
+    #[must_use]
+    pub fn with_scalar_resolver(
+        mut self,
+        resolver: Option<std::sync::Arc<dyn fgdb_types::CanonicalScalarResolver + Send + Sync>>,
+    ) -> Self {
+        self.scalar_resolver = resolver;
+        self
+    }
+
     /// Reconstruct conflict state from the complete committed suffix after
     /// `basis`. Writes at or before that snapshot are deliberately excluded.
     /// A future basis or a retired prefix propagates the exact index error.
@@ -71,13 +92,17 @@ impl FirstCommitterWinsValidator {
 
 impl CommitValidator for FirstCommitterWinsValidator {
     fn validate(&mut self, draft: &CommitDraft<'_>) -> Result<(), ValidationRejection> {
-        let template =
-            LogicalDeltaTemplate::decode_canonical(draft.capsule_plaintext).map_err(|error| {
-                ValidationRejection {
-                    law: FCW_LAW,
-                    detail: format!("malformed logical delta template: {error:?}"),
-                }
-            })?;
+        let decoded = match self.scalar_resolver.as_deref() {
+            Some(resolver) => LogicalDeltaTemplate::decode_canonical_with_resolver(
+                draft.capsule_plaintext,
+                resolver,
+            ),
+            None => LogicalDeltaTemplate::decode_canonical(draft.capsule_plaintext),
+        };
+        let template = decoded.map_err(|error| ValidationRejection {
+            law: FCW_LAW,
+            detail: format!("malformed logical delta template: {error:?}"),
+        })?;
 
         let mut touched = BTreeSet::new();
         let mut required_vertices = BTreeSet::new();

@@ -130,6 +130,7 @@ impl<V: Vfs + Clone> Database<V> {
         let validator =
             FirstCommitterWinsValidator::from_history(prepared.basis, &self.snapshot.delta_index)
                 .map_err(WriteError::PreparedHistory)?
+                .with_scalar_resolver(self.keys.scalar_resolver.clone())
                 .with_dependencies(
                     prepared.dependencies.elements,
                     prepared.dependencies.adjacency,

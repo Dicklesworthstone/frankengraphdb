@@ -30,7 +30,9 @@
 
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
-use fgdb_types::{CanonicalScalar, CommitSeq, ScalarDecodeError, ScalarEncodeError, VId};
+use fgdb_types::{
+    CanonicalScalar, CanonicalScalarResolver, CommitSeq, ScalarDecodeError, ScalarEncodeError, VId,
+};
 
 /// `FGSV` — FrankenGraph Strata Vertex patch.
 pub const VERTEX_PATCH_MAGIC: [u8; 4] = *b"FGSV";
@@ -496,6 +498,21 @@ impl<'bytes> Cursor<'bytes> {
 /// Decode a patch, independently re-checking every canonical law the encoder
 /// enforces.
 pub fn decode_patch(bytes: &[u8]) -> Result<VertexPatchRows, VertexPatchError> {
+    decode_patch_inner(bytes, None)
+}
+
+/// Decode a patch using explicit pinned artifacts for artifact-bound scalars.
+pub fn decode_patch_with_resolver(
+    bytes: &[u8],
+    resolver: &dyn CanonicalScalarResolver,
+) -> Result<VertexPatchRows, VertexPatchError> {
+    decode_patch_inner(bytes, Some(resolver))
+}
+
+pub(crate) fn decode_patch_inner(
+    bytes: &[u8],
+    resolver: Option<&dyn CanonicalScalarResolver>,
+) -> Result<VertexPatchRows, VertexPatchError> {
     let mut cursor = Cursor { bytes, at: 0 };
     if cursor.take::<4>()? != VERTEX_PATCH_MAGIC {
         return Err(VertexPatchError::NotAVertexPatch);
@@ -528,8 +545,11 @@ pub fn decode_patch(bytes: &[u8]) -> Result<VertexPatchRows, VertexPatchError> {
             let encoded = cursor.take_slice(len)?;
             // This is the closed graph-value decoder; no JWT or signature state exists here.
             // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
-            let value = CanonicalScalar::decode(encoded)
-                .map_err(|error| VertexPatchError::ScalarDecode { at, error })?;
+            let value = match resolver {
+                Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
+                None => CanonicalScalar::decode(encoded),
+            }
+            .map_err(|error| VertexPatchError::ScalarDecode { at, error })?;
             props.push((key, value));
         }
         let row = VertexRow {
@@ -645,6 +665,27 @@ pub fn read_patch(
     bytes: &[u8],
     expected: VertexPatchVersion,
 ) -> Result<VertexPatchRows, VertexPatchError> {
+    read_patch_inner(k_oid, namespace, bytes, expected, None)
+}
+
+/// Verify a patch's identity and decode its scalars against explicit pinned artifacts.
+pub fn read_patch_with_resolver(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: VertexPatchVersion,
+    resolver: &dyn CanonicalScalarResolver,
+) -> Result<VertexPatchRows, VertexPatchError> {
+    read_patch_inner(k_oid, namespace, bytes, expected, Some(resolver))
+}
+
+pub(crate) fn read_patch_inner(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: VertexPatchVersion,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+) -> Result<VertexPatchRows, VertexPatchError> {
     let actual = vertex_patch_id(k_oid, namespace, bytes);
     if actual != expected.0 {
         return Err(VertexPatchError::IdentityMismatch {
@@ -652,5 +693,5 @@ pub fn read_patch(
             actual,
         });
     }
-    decode_patch(bytes)
+    decode_patch_inner(bytes, resolver)
 }

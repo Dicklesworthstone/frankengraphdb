@@ -121,6 +121,8 @@ pub use bulk_load::{
 
 mod fcw;
 pub use fcw::FirstCommitterWinsValidator;
+mod pinned_tzdb;
+pub use pinned_tzdb::{PinnedTzdb, TzdbArtifactError, TzdbTransition, TzdbZone};
 
 mod gql_cert;
 mod gql_exec;
@@ -139,8 +141,8 @@ pub use fgdb_gql::{BoundPlan, RelationBind};
 /// byte-identical.
 pub use gql_cert::{GqlCertificate, GqlPlanCertificate, NativeReadClass};
 pub use query::{
-    NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead, QueryError,
-    QueryResult, QueryValue, QueryWriteError, ReplayRefusal,
+    NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead, QueryError, QueryResult,
+    QueryValue, QueryWriteError, ReplayRefusal,
 };
 pub use write_txn::{WriteTxn, WriteTxnError};
 
@@ -243,6 +245,7 @@ pub struct DatabaseKeys {
     pub namespace: DatabaseSecurityNamespaceId,
     /// The data-encryption key for capsules.
     dek: SharedSecret<32>,
+    scalar_resolver: Option<Arc<dyn fgdb_types::CanonicalScalarResolver + Send + Sync>>,
 }
 
 impl core::fmt::Debug for DatabaseKeys {
@@ -258,6 +261,28 @@ impl DatabaseKeys {
             k_oid: SharedSecret::new(k_oid),
             namespace,
             dek: SharedSecret::new(dek),
+            scalar_resolver: None,
+        }
+    }
+
+    /// Pins immutable artifact data for admission and every recovery decoder.
+    /// Reopening must supply the same artifacts; unknown OIDs fail closed.
+    #[must_use]
+    pub fn with_scalar_resolver(
+        mut self,
+        resolver: Arc<dyn fgdb_types::CanonicalScalarResolver + Send + Sync>,
+    ) -> Self {
+        self.scalar_resolver = Some(resolver);
+        self
+    }
+
+    fn decode_template(
+        &self,
+        bytes: &[u8],
+    ) -> Result<LogicalDeltaTemplate, fgdb_delta_types::CanonicalError> {
+        match self.scalar_resolver.as_deref() {
+            Some(resolver) => LogicalDeltaTemplate::decode_canonical_with_resolver(bytes, resolver),
+            None => LogicalDeltaTemplate::decode_canonical(bytes),
         }
     }
 
@@ -2233,10 +2258,17 @@ impl<V: Vfs + Clone> Database<V> {
         // (see `write_with_faults` / `commit_prepared`); installing it here
         // guarantees the interval between open and first write is already
         // governed.
-        coordinator.set_validator(Box::new(FirstCommitterWinsValidator::default()));
+        coordinator.set_validator(Box::new(
+            FirstCommitterWinsValidator::default()
+                .with_scalar_resolver(keys.scalar_resolver.clone()),
+        ));
         let store =
             BlockStore::open_with_vfs(cx, vfs.clone(), path, keys.k_oid.clone(), keys.namespace)
                 .await?;
+        let store = match &keys.scalar_resolver {
+            Some(resolver) => store.with_scalar_resolver(resolver.clone()),
+            None => store,
+        };
         let mut crypto_verification_events = Vec::new();
         // CHECKPOINT-SELECTED PATH (fgdb-ge6a): a lawful slot names a
         // resolvable manifest. Before accepting it, bind verifies the selected
@@ -2393,7 +2425,7 @@ impl<V: Vfs + Clone> Database<V> {
         // would open a window starting at `published_at`, and the next
         // insert would see a gap (plan:397, FG-INV-18).
         let delta_index =
-            rebuild_delta_index(cx, &coordinator, &mut crypto_verification_events).await?;
+            rebuild_delta_index(cx, &coordinator, &keys, &mut crypto_verification_events).await?;
         snapshot.delta_index = delta_index;
         let published_frontier = snapshot.frontier;
         Ok(Self {
@@ -2700,8 +2732,10 @@ impl<V: Vfs + Clone> Database<V> {
         // An immediate write was prepared under this same exclusive borrow at
         // the current frontier. Prepared writes instead reconstruct their own
         // committed suffix in prepared_write before choosing the validator.
-        self.coordinator
-            .set_validator(Box::new(FirstCommitterWinsValidator::default()));
+        self.coordinator.set_validator(Box::new(
+            FirstCommitterWinsValidator::default()
+                .with_scalar_resolver(self.keys.scalar_resolver.clone()),
+        ));
         self.commit_template(
             cx,
             template,
@@ -2724,15 +2758,21 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(WriteError::EmptyBatch);
         }
         // Validate before normalization/ensure can erase an unsupported input.
-        // Encoding preserves zones, but the writer and recovery decoder have
-        // no pinned artifact resolver. Never publish bytes replay cannot read.
+        // Validate against exactly the artifacts retained by recovery.
         let admit = |value: &CanonicalScalar| -> Result<(), WriteError> {
             if let CanonicalScalar::Timestamp(timestamp) = value
                 && let Some(zone) = timestamp.zone()
             {
-                return Err(WriteError::ZonedTimestampRequiresResolver {
-                    tzdb_oid: zone.tzdb_oid(),
-                });
+                let Some(resolver) = self.keys.scalar_resolver.as_deref() else {
+                    return Err(WriteError::ZonedTimestampRequiresResolver {
+                        tzdb_oid: zone.tzdb_oid(),
+                    });
+                };
+                timestamp.validate_tzdb_binding(resolver).map_err(|_| {
+                    WriteError::ZonedTimestampRequiresResolver {
+                        tzdb_oid: zone.tzdb_oid(),
+                    }
+                })?;
             }
             Ok(())
         };
@@ -3559,13 +3599,21 @@ impl<V: Vfs + Clone> Database<V> {
                     let patch = sealed.property_patch.as_ref().expect(
                         "a sealed block declaring a hosted patch was sealed beside that patch",
                     );
-                    let rows = fgdb_strata::edge_props::decode_property_patch(&patch.bytes)
-                        .map_err(|error| WriteError::CommittedNeedsRecovery {
-                            recovery,
-                            source: Box::new(RebuildError::Store(
-                                StoreError::MalformedEdgePropertyPatch(error),
-                            )),
-                        })?;
+                    let rows = match self.keys.scalar_resolver.as_deref() {
+                        Some(resolver) => {
+                            fgdb_strata::edge_props::decode_property_patch_with_resolver(
+                                &patch.bytes,
+                                resolver,
+                            )
+                        }
+                        None => fgdb_strata::edge_props::decode_property_patch(&patch.bytes),
+                    }
+                    .map_err(|error| WriteError::CommittedNeedsRecovery {
+                        recovery,
+                        source: Box::new(RebuildError::Store(
+                            StoreError::MalformedEdgePropertyPatch(error),
+                        )),
+                    })?;
                     Some(BlockProps { locators, rows })
                 }
                 None => None,
@@ -3630,11 +3678,15 @@ impl<V: Vfs + Clone> Database<V> {
                 .expect("every reference in a publish's root names a patch that publish returned");
             fresh_patches.insert(
                 reference.patch_id,
-                fgdb_strata::vertex::decode_patch(&sealed.bytes).map_err(|error| {
-                    WriteError::CommittedNeedsRecovery {
-                        recovery,
-                        source: Box::new(RebuildError::Store(StoreError::MalformedPatch(error))),
+                match self.keys.scalar_resolver.as_deref() {
+                    Some(resolver) => {
+                        fgdb_strata::vertex::decode_patch_with_resolver(&sealed.bytes, resolver)
                     }
+                    None => fgdb_strata::vertex::decode_patch(&sealed.bytes),
+                }
+                .map_err(|error| WriteError::CommittedNeedsRecovery {
+                    recovery,
+                    source: Box::new(RebuildError::Store(StoreError::MalformedPatch(error))),
                 })?,
             );
         }
@@ -4866,6 +4918,7 @@ async fn rebuild<V: Vfs>(
 async fn rebuild_delta_index<V: Vfs>(
     cx: &CommitCx,
     coordinator: &CommitCoordinator<V>,
+    keys: &DatabaseKeys,
     crypto_verification_events: &mut Vec<CryptoVerificationEvent>,
 ) -> Result<LocalDeltaBatchIndex, RebuildError> {
     let mut index = LocalDeltaBatchIndex::new();
@@ -4896,12 +4949,12 @@ async fn rebuild_delta_index<V: Vfs>(
                 recomputed,
             });
         }
-        let template = LogicalDeltaTemplate::decode_canonical(&bytes).map_err(|error| {
-            RebuildError::Decode {
+        let template = keys
+            .decode_template(&bytes)
+            .map_err(|error| RebuildError::Decode {
                 commit_seq: commit_seq.0,
                 error,
-            }
-        })?;
+            })?;
         let batch = LogicalDeltaBatch::order(
             &template,
             logical_delta_template_digest.0,
@@ -5010,12 +5063,12 @@ async fn fold_stream<V: Vfs>(
                 recomputed,
             });
         }
-        let template = LogicalDeltaTemplate::decode_canonical(&bytes).map_err(|error| {
-            RebuildError::Decode {
+        let template = keys
+            .decode_template(&bytes)
+            .map_err(|error| RebuildError::Decode {
                 commit_seq: commit_seq.0,
                 error,
-            }
-        })?;
+            })?;
 
         for coordinate in template.coordinate_entries() {
             if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {

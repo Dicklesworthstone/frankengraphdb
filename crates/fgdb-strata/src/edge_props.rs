@@ -23,8 +23,8 @@
 //! an unreferenced row or serve two entries with one row.
 
 use fgdb_delta_types::PropertyKeyId;
-use fgdb_types::CanonicalScalar;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
+use fgdb_types::{CanonicalScalar, CanonicalScalarResolver};
 
 /// `FGSP` — FrankenGraph Strata Property patch.
 pub const PROPERTY_PATCH_MAGIC: [u8; 4] = *b"FGSP";
@@ -250,6 +250,21 @@ pub fn encode_property_patch(rows: &[EdgePropertyRow]) -> Result<Vec<u8>, EdgePr
 
 /// Decode a patch, independently re-checking every canonical law.
 pub fn decode_property_patch(bytes: &[u8]) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
+    decode_property_patch_inner(bytes, None)
+}
+
+/// Decode a patch using explicit pinned artifacts for artifact-bound scalars.
+pub fn decode_property_patch_with_resolver(
+    bytes: &[u8],
+    resolver: &dyn CanonicalScalarResolver,
+) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
+    decode_property_patch_inner(bytes, Some(resolver))
+}
+
+fn decode_property_patch_inner(
+    bytes: &[u8],
+    resolver: Option<&dyn CanonicalScalarResolver>,
+) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
     let mut at = 0usize;
     let take = |at: &mut usize, n: usize| -> Result<usize, EdgePropertyPatchError> {
         let end = at
@@ -291,8 +306,12 @@ pub fn decode_property_patch(bytes: &[u8]) -> Result<Vec<EdgePropertyRow>, EdgeP
             let start = take(&mut at, len)?;
             // This is the closed graph-value decoder; no JWT or signature state exists here.
             // ubs:ignore -- exact false match is `CanonicalScalar::decode`, not a JWT decoder.
-            let value = CanonicalScalar::decode(&bytes[start..start + len])
-                .map_err(|error| EdgePropertyPatchError::ScalarDecode { at: row_at, error })?;
+            let encoded = &bytes[start..start + len];
+            let value = match resolver {
+                Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver),
+                None => CanonicalScalar::decode(encoded),
+            }
+            .map_err(|error| EdgePropertyPatchError::ScalarDecode { at: row_at, error })?;
             row.push((key, value));
         }
         validate_row(row_at, &row)?;
@@ -330,6 +349,27 @@ pub fn read_property_patch(
     bytes: &[u8],
     expected: EdgePropertyPatchVersion,
 ) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
+    read_property_patch_inner(k_oid, namespace, bytes, expected, None)
+}
+
+/// Verify a patch's identity and decode its scalars against explicit pinned artifacts.
+pub fn read_property_patch_with_resolver(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: EdgePropertyPatchVersion,
+    resolver: &dyn CanonicalScalarResolver,
+) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
+    read_property_patch_inner(k_oid, namespace, bytes, expected, Some(resolver))
+}
+
+pub(crate) fn read_property_patch_inner(
+    k_oid: &[u8; 32],
+    namespace: DatabaseSecurityNamespaceId,
+    bytes: &[u8],
+    expected: EdgePropertyPatchVersion,
+    resolver: Option<&dyn CanonicalScalarResolver>,
+) -> Result<Vec<EdgePropertyRow>, EdgePropertyPatchError> {
     let actual = property_patch_id(k_oid, namespace, bytes);
     if actual != expected.0 {
         return Err(EdgePropertyPatchError::IdentityMismatch {
@@ -337,7 +377,7 @@ pub fn read_property_patch(
             actual,
         });
     }
-    decode_property_patch(bytes)
+    decode_property_patch_inner(bytes, resolver)
 }
 
 /// The locator column's own canonical law: non-zero locators are exactly
