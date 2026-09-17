@@ -17,6 +17,10 @@ enum ExpressionColumns<'columns, 'text> {
     Graph(&'columns mut Vec<Projection<'text>>),
     Row(&'columns [(Name<'text>, crate::GraphSetColumnType)]),
 }
+enum ExpressionBoundary {
+    Whole,
+    Predicate,
+}
 enum ParsedOp {
     Atom(Operand, usize),
     Unary(GraphIntegerUnary),
@@ -88,7 +92,10 @@ impl<'a> Parser<'a> {
         let at = self.current.at;
         let mut columns = Vec::new();
         let operand = self
-            .mutation_expression(&mut columns)
+            .checked_expression_with_boundary(
+                &mut ExpressionColumns::Graph(&mut columns),
+                ExpressionBoundary::Predicate,
+            )
             .map_err(|source| error(source.offset, GraphPatternTextErrorKind::BooleanExpression))?;
         let program = match operand {
             Operand::Integer { program, .. } => program,
@@ -135,9 +142,23 @@ impl<'a> Parser<'a> {
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
     ) -> Result<Operand, GraphMutationTextError> {
+        self.checked_expression_with_boundary(columns, ExpressionBoundary::Whole)
+    }
+
+    fn checked_expression_with_boundary(
+        &mut self,
+        columns: &mut ExpressionColumns<'_, 'a>,
+        boundary: ExpressionBoundary,
+    ) -> Result<Operand, GraphMutationTextError> {
         let at = self.current.at;
         let mut parsed = Vec::new();
-        self.scalar_boolean(columns, 0, &mut parsed)?;
+        match boundary {
+            ExpressionBoundary::Whole => self.scalar_boolean(columns, 0, &mut parsed)?,
+            // The graph Boolean parser owns AND/OR between its leaves. Consuming
+            // them here would regroup A AND scalar(B) OR C as A AND (B OR C).
+            // Parentheses still parse their complete internal Boolean expression.
+            ExpressionBoundary::Predicate => self.scalar_negation(columns, 0, &mut parsed)?,
+        }
         if parsed.len() == 1 {
             let ParsedOp::Atom(value, _) = parsed.pop().expect("one parsed operand") else {
                 unreachable!("operators and CASE also contain their operands")
@@ -301,7 +322,7 @@ impl<'a> Parser<'a> {
                         if self.take(b']')? {
                             break;
                         }
-                        self.punct(b',', ", or ]")?;
+                        self.punct(b',', ",")?;
                     }
                 }
                 emit(
@@ -539,5 +560,130 @@ impl<'a> Parser<'a> {
         // Only literals/parameters remain. In particular, no root variable or
         // property lookup can reach the graph operand branch of this helper.
         self.mutation_operand(&mut Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod predicate_boundary_tests {
+    use super::*;
+    use crate::GqlQueryPolicy;
+    use fgdb_types::VId;
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            _ => None,
+        }
+    }
+
+    fn rows(predicate: &str) -> Vec<VId> {
+        let p = PropertyKeyId(1);
+        let q = PropertyKeyId(2);
+        let values = [
+            vec![(p, CanonicalScalar::Int(0)), (q, CanonicalScalar::Int(1))],
+            vec![(p, CanonicalScalar::Int(1)), (q, CanonicalScalar::Int(0))],
+            vec![(p, CanonicalScalar::Int(2)), (q, CanonicalScalar::Int(2))],
+            vec![(p, CanonicalScalar::Null), (q, CanonicalScalar::Int(1))],
+            vec![(q, CanonicalScalar::Int(1))],
+        ];
+        let pattern = PreparedGraphText::prepare(
+            &format!("MATCH (n) WHERE {predicate} RETURN n"),
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        pattern
+            .plan()
+            .execute_governed_with_properties(
+                5,
+                (1..=5).map(VId),
+                [],
+                |vid, predicate| {
+                    Ok::<_, ()>(predicate.matches(&[], &values[vid.0 as usize - 1]))
+                },
+                |vid, key| {
+                    Ok(values[vid.0 as usize - 1]
+                        .iter()
+                        .find(|(property, _)| *property == key)
+                        .map(|(_, value)| value))
+                },
+                GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+            .iter()
+            .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn scalar_where_leaves_do_not_swallow_outer_conjunctions_or_disjunctions() {
+        for (predicate, expected) in [
+            ("n.p=1 AND n.q+1=1 OR n.p=0", vec![VId(1), VId(2)]),
+            ("n.p=1 AND (n.q+1=1 OR n.p=0)", vec![VId(2)]),
+            ("NOT n.p=1 AND n.q+1=1 OR n.p=0", vec![VId(1)]),
+            ("n.p=1 AND NOT n.q+1=1 OR n.p=0", vec![VId(1)]),
+            (
+                "n.q+1=1 AND n.p BETWEEN 0 AND 1 OR n.p=2",
+                vec![VId(2), VId(3)],
+            ),
+            (
+                "n.p=1 AND n.q+1=1 OR n.p IS NULL",
+                vec![VId(2), VId(4), VId(5)],
+            ),
+        ] {
+            assert_eq!(rows(predicate), expected, "{predicate}");
+        }
+    }
+
+    #[test]
+    fn graph_boolean_program_keeps_separate_scalar_leaves_and_operator_order() {
+        use crate::graph_text::boolean::SyntaxItem;
+        let syntax = Parser::new(
+            "MATCH (n) WHERE n.p+1=1 AND n.q+1=1 OR n.p=2 RETURN n",
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        let [Filter::Boolean { program, .. }] = syntax.filters.as_slice() else {
+            panic!("one graph Boolean program");
+        };
+        assert!(matches!(
+            program.as_slice(),
+            [
+                SyntaxItem::Expression { .. },
+                SyntaxItem::Expression { .. },
+                SyntaxItem::And,
+                SyntaxItem::Atom(Filter::Property { .. }),
+                SyntaxItem::Or,
+            ]
+        ));
+    }
+
+    #[test]
+    fn assignment_and_row_expressions_still_parse_the_whole_boolean_expression() {
+        let text = "1=1 AND 2=2 OR 3=4";
+        let mut predicate = Parser::new(text).unwrap();
+        predicate.boolean_scalar_expression().unwrap();
+        assert!(predicate.is_word("AND"));
+        for row_scope in [false, true] {
+            let mut parser = Parser::new(text).unwrap();
+            let operand = if row_scope {
+                parser.row_expression(&[]).unwrap()
+            } else {
+                parser.mutation_expression(&mut Vec::new()).unwrap()
+            };
+            assert!(matches!(parser.current.kind, TokenKind::End));
+            let Operand::Integer { program, .. } = operand else {
+                panic!("whole Boolean expression bytecode");
+            };
+            assert!(matches!(
+                program.last(),
+                Some(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Or))
+            ));
+        }
     }
 }
