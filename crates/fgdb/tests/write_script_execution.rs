@@ -12,6 +12,7 @@ use fgdb_gql::{
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
     PurposeContexts, VId};
 use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const R: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(1);
@@ -60,11 +61,13 @@ fn parameterized_script_commits_once_rebinds_without_allocation_and_survives_reo
              MERGE (a)-[e:R]->(b) ON CREATE SET e.q=$fresh ON MATCH SET e.q=$seen;"
         );
         let before = db.frontier().unwrap();
-        let allocated = Cell::new(0);
+        // The autocommit future is awaited under the lab runtime, so a counter the
+        // allocator closure holds across that await must be Sync.
+        let allocated = AtomicUsize::new(0);
         let (receipt, completion) = db.execute_graph_write_script_autocommit_governed(
             &txcx, &query, &commit, &definition, &arguments(200, 100), policy(1, 2, 1),
             |request| {
-                allocated.set(allocated.get() + 1);
+                allocated.fetch_add(1, Ordering::Relaxed);
                 Ok::<_, ()>(match (request.statement, request.request) {
                     (0, GraphInsertRequest::Vertex { row: 0, vertex: 0 }) => ElementId::Vertex(VId(1)),
                     (1, GraphInsertRequest::Vertex { row: 0, vertex: 0 }) => ElementId::Vertex(VId(2)),
@@ -75,7 +78,7 @@ fn parameterized_script_commits_once_rebinds_without_allocation_and_survives_reo
         ).await.unwrap();
         assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { commit_seq }
             if commit_seq.0 == before.0 + 1));
-        assert_eq!(allocated.get(), 3);
+        assert_eq!(allocated.load(Ordering::Relaxed), 3);
         assert_eq!(receipt.stats().completed_statements, 3);
         assert_eq!((receipt.stats().created_vertices, receipt.stats().created_edges), (2, 1));
         assert_eq!(receipt.steps()[2].merged_edge(), Some(GraphEdgeMergeOutcome::Created(EId(10))));
@@ -245,12 +248,12 @@ fn allocator_failure_withholds_all_receipts_and_all_staged_creations() {
         let txcx = contexts.txn();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let before = db.frontier().unwrap();
-        let calls = Cell::new(0);
+        let calls = AtomicUsize::new(0);
         let result = db.execute_graph_write_script_autocommit_governed(
             &txcx, &query, &commit,
             &script("MERGE (n:Person {p:1}); MERGE (n:Person {p:2});"),
             &GqlParameters::new(), policy(0, 2, 0), |request| {
-                calls.set(calls.get() + 1);
+                calls.fetch_add(1, Ordering::Relaxed);
                 if request.statement == 0 { Ok(ElementId::Vertex(VId(10))) }
                 else { Err("identity source refused") }
             },
@@ -258,7 +261,7 @@ fn allocator_failure_withholds_all_receipts_and_all_staged_creations() {
         assert!(matches!(result, Err(GraphWriteScriptExecutionError::Program(
             GraphWriteProgramError::VertexMerge { statement: 1, .. },
         ))));
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertices().unwrap().is_empty());
         assert_eq!(txcx.outstanding_obligations(), 0);

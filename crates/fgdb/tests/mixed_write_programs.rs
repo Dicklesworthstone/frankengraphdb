@@ -129,7 +129,7 @@ fn dependent_creations_updates_and_deletion_publish_one_exact_graph() {
         }
         assert_eq!(db.vertices().unwrap(), expected);
         assert_eq!(db.edges().unwrap(), expected_edges);
-        assert_eq!(db.delta_since(basis).unwrap().len(), 1);
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
         db.compact(&commit).await.unwrap(); drop(db);
         let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
         assert_eq!(db.vertices().unwrap(), expected);

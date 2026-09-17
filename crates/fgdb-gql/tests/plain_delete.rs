@@ -138,16 +138,17 @@ fn exact_work_scratch_and_every_checkpoint_are_enforced() {
     }
 
     let run = |stop: usize| {
-        let mut calls = 0;
+        // One counter observed by both checkpoints: the selection's and the delete's.
+        let calls = std::cell::Cell::new(0);
         let result = delete.execute_governed(
             policy(10),
             |pattern, allowance| pattern.plan().execute_governed_with_properties(
                 3, vertices, edges, |_, _| Ok::<_, usize>(true), |_, _| Ok(None), allowance,
-                || { calls += 1; if calls == stop { Err(stop) } else { Ok(()) } },
+                || { calls.set(calls.get() + 1); if calls.get() == stop { Err(stop) } else { Ok(()) } },
             ),
-            || { calls += 1; if calls == stop { Err(stop) } else { Ok(()) } },
+            || { calls.set(calls.get() + 1); if calls.get() == stop { Err(stop) } else { Ok(()) } },
         );
-        (result, calls)
+        (result, calls.get())
     };
     let (complete, total) = run(0);
     assert_eq!(complete.unwrap().targets(), &[VId(2), VId(3)]);

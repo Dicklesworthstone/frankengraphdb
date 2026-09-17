@@ -32,7 +32,7 @@ impl PreparedGraphMutation {
         self.input_relation.as_ref()
     }
 
-    fn select_governed<E, C>(
+    pub(super) fn select_governed<E, C>(
         &self,
         policy: GqlQueryPolicy,
         source: impl FnOnce(&PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy)

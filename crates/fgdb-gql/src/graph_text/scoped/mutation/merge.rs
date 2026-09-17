@@ -22,6 +22,17 @@ enum ParsedUpsertAction<'a> {
     Label { label: Name<'a> },
 }
 
+/// Pins the action resolver's argument to one inferred source lifetime. A bare
+/// closure parameter here has no type at its definition (E0282), and spelling it
+/// with `'_` would make the closure higher-ranked over a lifetime the symbol
+/// cache cannot outlive.
+fn upsert_action_resolver<'s, F>(resolver: F) -> F
+where
+    F: FnMut(Vec<ParsedUpsertAction<'s>>) -> Result<Vec<VertexUpsertActionTemplate>, GraphPatternTextError>,
+{
+    resolver
+}
+
 fn insert_error(at: usize, source: GraphInsertBuildError) -> GraphVertexMergeTextError {
     GraphVertexMergeTextError { offset: at, kind: GraphVertexMergeTextErrorKind::InsertBuild(source) }
 }
@@ -373,7 +384,7 @@ impl PreparedGraphVertexUpsertText {
             cache.insert(key, value);
             Ok(value)
         };
-        let mut resolve_actions = |parsed| -> Result<Vec<VertexUpsertActionTemplate>, GraphPatternTextError> {
+        let mut resolve_actions = upsert_action_resolver(|parsed| {
             parsed.into_iter().map(|action| Ok(match action {
                 ParsedUpsertAction::Property { key, value } => {
                     let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
@@ -388,7 +399,7 @@ impl PreparedGraphVertexUpsertText {
                     VertexUpsertActionTemplate::Label { label, present: true }
                 }
             })).collect()
-        };
+        });
         let on_match = resolve_actions(parsed_match)?;
         let on_create = resolve_actions(parsed_create)?;
         drop(resolve_actions);
