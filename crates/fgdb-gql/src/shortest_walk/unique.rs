@@ -3,8 +3,9 @@
 //! Dominance is depth-local before the lower bound: two WALK prefixes ending
 //! at the same vertex and depth have identical possible continuations. Only
 //! after the lower bound may a first visit settle that vertex across depths.
-//! This is valid for endpoint-only ANY shortest WALK, not ALL, captured paths,
-//! edge/vertex-simple modes, costs, or predicates on the path interior.
+//! Discarding tied occurrences is valid only for endpoint-only ANY shortest
+//! WALK. ALL shares reachability but must still enumerate every tie. Neither
+//! mode here implements captured paths, repetition restrictions, or path costs.
 
 use super::*;
 
