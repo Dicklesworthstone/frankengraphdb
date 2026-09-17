@@ -97,8 +97,8 @@ async fn generate(db: &mut Database<MemVfs>, cx: &CommitCx, seed: u64) -> (Commi
     let basis2 = db.write(cx, first).await.unwrap();
     let mut second = WriteBatch::new(R);
     second.delete_edge(tie_a);
-    db.write(cx, second).await.unwrap();
-    (basis1, basis2)
+    let basis3 = db.write(cx, second).await.unwrap();
+    (basis1, basis3)
 }
 
 /// Per-step adjacency multiplicity in the requested direction: 0 forward,
@@ -383,7 +383,7 @@ fn run_seed(seed: u64) {
         let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
             .await
             .unwrap();
-        let (basis1, basis2) = generate(&mut db, &commit, seed).await;
+        let (basis1, live_basis) = generate(&mut db, &commit, seed).await;
         drop(db);
         let coordinator =
             CommitCoordinator::open_with_vfs(&commit, vfs.clone(), &path, oracle_keys())
@@ -398,7 +398,7 @@ fn run_seed(seed: u64) {
         let db = Database::open_with_vfs(&commit, vfs, &path, keys())
             .await
             .unwrap();
-        assert_eq!(db.frontier().unwrap(), basis2);
+        assert_eq!(db.frontier().unwrap(), live_basis);
         check_families(
             &db,
             &query,
