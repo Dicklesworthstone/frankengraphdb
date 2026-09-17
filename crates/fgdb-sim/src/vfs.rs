@@ -846,6 +846,7 @@ impl Drop for PendingLatency {
 pub struct FaultVfs<V: Vfs = UnixVfs> {
     backing: Arc<V>,
     lab: Arc<Lab>,
+    inodes: Arc<Mutex<BTreeMap<PathBuf, Arc<Inode<V::File>>>>>,
 }
 
 impl<V: Vfs> std::fmt::Debug for FaultVfs<V> {
@@ -859,6 +860,7 @@ impl<V: Vfs> Clone for FaultVfs<V> {
         Self {
             backing: Arc::clone(&self.backing),
             lab: Arc::clone(&self.lab),
+            inodes: Arc::clone(&self.inodes),
         }
     }
 }
@@ -897,6 +899,7 @@ impl<V: Vfs> FaultVfs<V> {
             // Retain the ambient Cx for fault-point traces. Latency is
             // refused above, so this is not used as a timer (fgdb-yevb).
             lab: Arc::new(Lab::new(plan, Cx::current())),
+            inodes: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -917,6 +920,7 @@ impl<V: Vfs> FaultVfs<V> {
         Self {
             backing: Arc::new(backing),
             lab: Arc::new(Lab::new(plan, Some(clock))),
+            inodes: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -978,6 +982,10 @@ impl<V: Vfs> FaultVfs<V> {
         let decided = {
             let mut lab = self.lab.lock();
             lab.generation += 1;
+            self.inodes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clear();
             let pending = std::mem::take(&mut lab.namespace);
             pending
                 .into_iter()
@@ -1068,12 +1076,42 @@ fn lost_handle() -> io::Error {
 // ---------------------------------------------------------------------------
 
 struct FileState {
-    /// The file as its writer sees it: durable bytes plus everything written
-    /// through this handle since.
+    /// Shared page cache: lifetime belongs to the inode, not an open handle.
     image: Vec<u8>,
-    /// Sector indexes written but not yet honestly flushed.
     dirty: BTreeSet<u64>,
-    cursor: u64,
+    length_dirty: bool,
+    revision: u64,
+}
+
+struct Inode<F> {
+    state: Mutex<FileState>,
+    file: Mutex<Option<F>>,
+    available: asupersync::sync::Notify,
+}
+
+struct InodeLease<'a, F> {
+    inode: &'a Inode<F>,
+    file: Option<F>,
+}
+
+impl<F> Inode<F> {
+    async fn acquire(&self) -> InodeLease<'_, F> {
+        let mut file = None;
+        self.available
+            .wait_until(|| {
+                file = self.file.lock().unwrap_or_else(|p| p.into_inner()).take();
+                file.is_some()
+            })
+            .await;
+        InodeLease { inode: self, file }
+    }
+}
+
+impl<F> Drop for InodeLease<'_, F> {
+    fn drop(&mut self) {
+        *self.inode.file.lock().unwrap_or_else(|p| p.into_inner()) = self.file.take();
+        self.inode.available.notify_waiters();
+    }
 }
 
 /// An open file on a [`FaultVfs`].
@@ -1089,7 +1127,8 @@ pub struct FaultFile<V: Vfs> {
     path: PathBuf,
     generation: u64,
     is_dir: bool,
-    state: Mutex<FileState>,
+    inode: Arc<Inode<V::File>>,
+    cursor: u64,
 }
 
 impl<V: Vfs> std::fmt::Debug for FaultFile<V> {
@@ -1103,7 +1142,8 @@ impl<V: Vfs> std::fmt::Debug for FaultFile<V> {
 
 impl<V: Vfs> FaultFile<V> {
     fn lock(&self) -> std::sync::MutexGuard<'_, FileState> {
-        self.state
+        self.inode
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -1273,8 +1313,9 @@ impl<V: Vfs> FaultFile<V> {
             let lab = self.lab.lock();
             lab.plan.sector_bytes()
         };
-        let mut pending = self.pending(sector_bytes);
-        if pending.is_empty() {
+        let mut lease = self.inode.acquire().await;
+        self.alive()?;
+        if self.lock().dirty.is_empty() && !self.lock().length_dirty {
             // Nothing is dirty, so no fault class is eligible: an honest
             // no-op must not consume a trigger count, or `Nth` would drift
             // with a workload's harmless syncs.
@@ -1285,6 +1326,12 @@ impl<V: Vfs> FaultFile<V> {
         // Before the fault-or-write logic: the sync is slow first, and only
         // then honest, lying, torn, or refused — a real device's ordering.
         self.maybe_delay().await?;
+        self.alive()?;
+        let mut pending = self.pending(sector_bytes);
+        let (revision, length) = {
+            let state = self.lock();
+            (state.revision, state.image.len() as u64)
+        };
 
         // --- the fsync lie ---------------------------------------------------
         let unflushed: u64 = pending.iter().map(|(_, _, b)| b.len() as u64).sum();
@@ -1365,7 +1412,8 @@ impl<V: Vfs> FaultFile<V> {
             .iter()
             .map(|(_, start, bytes)| (*start, bytes.clone()))
             .collect();
-        write_through(self.backing.as_ref(), &self.path, &writes).await?;
+        let file = lease.file.as_mut().ok_or_else(lost_handle)?;
+        write_inode(file, &writes, length).await?;
 
         // --- the bit flip ----------------------------------------------------
         // After the write landed, so the damage is to what is now on disk.
@@ -1393,12 +1441,7 @@ impl<V: Vfs> FaultFile<V> {
             }
         }
         if let Some((offset, damaged, _)) = flip {
-            write_through(
-                self.backing.as_ref(),
-                &self.path,
-                &[(offset, vec![damaged])],
-            )
-            .await?;
+            write_inode(file, &[(offset, vec![damaged])], length).await?;
         }
 
         {
@@ -1409,36 +1452,63 @@ impl<V: Vfs> FaultFile<V> {
         // to the tear. A torn sector must NOT stay dirty — its writer was told
         // the sync succeeded, and a later flush that quietly repaired it would
         // make the tear unobservable.
-        self.lock().dirty.clear();
+        self.alive()?;
+        let mut state = self.lock();
+        if state.revision == revision {
+            state.dirty.clear();
+            state.length_dirty = false;
+        }
         Ok(())
     }
 }
 
-/// Seeks and writes each `(offset, bytes)` into `path`, then syncs.
-async fn write_through<V: Vfs>(
-    backing: &V,
-    path: &Path,
+/// Writes the retained descriptor, so a renamed/unlinked inode stays bound.
+async fn write_inode<F: VfsFile>(
+    file: &mut F,
     writes: &[(u64, Vec<u8>)],
+    length: u64,
 ) -> io::Result<()> {
-    if writes.is_empty() {
-        return Ok(());
-    }
-    let mut file = backing
-        .open(path, &OpenOptions::new().write(true).create(true))
-        .await?;
     for (offset, bytes) in writes {
-        poll_fn(|cx| Pin::new(&mut file).poll_seek(cx, SeekFrom::Start(*offset))).await?;
-        let mut written = 0usize;
+        poll_fn(|cx| Pin::new(&mut *file).poll_seek(cx, SeekFrom::Start(*offset))).await?;
+        let mut written = 0;
         while written < bytes.len() {
-            let n = poll_fn(|cx| Pin::new(&mut file).poll_write(cx, &bytes[written..])).await?;
+            let n = poll_fn(|cx| Pin::new(&mut *file).poll_write(cx, &bytes[written..])).await?;
             if n == 0 {
                 return Err(io::ErrorKind::WriteZero.into());
             }
             written += n;
         }
     }
-    poll_fn(|cx| Pin::new(&mut file).poll_flush(cx)).await?;
+    file.set_len(length).await?;
+    poll_fn(|cx| Pin::new(&mut *file).poll_flush(cx)).await?;
     file.sync_all().await
+}
+
+/// Probe the opaque options on a separate known-nonempty inode. Its bytes
+/// are never the durable backing or the shared cache, so even truncating an
+/// empty durable file is distinguishable from a harmless reopen.
+async fn truncates(opts: &OpenOptions) -> io::Result<bool> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!("fgdb-open-probe-{}", std::process::id()));
+    std::fs::create_dir_all(&root)?;
+    let path = loop {
+        let path = root.join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                file.set_len(1)?;
+                break path;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let opened = opts.clone().create_new(false).open(&path).await?;
+    Ok(opened.metadata().await?.len() == 0)
 }
 
 impl<V: Vfs> AsyncRead for FaultFile<V> {
@@ -1450,16 +1520,17 @@ impl<V: Vfs> AsyncRead for FaultFile<V> {
         if let Err(error) = self.alive() {
             return Poll::Ready(Err(error));
         }
-        let mut state = self.lock();
-        let start = usize::try_from(state.cursor).unwrap_or(usize::MAX);
+        let this = self.get_mut();
+        let state = this.lock();
+        let start = usize::try_from(this.cursor).unwrap_or(usize::MAX);
         if start >= state.image.len() {
             return Poll::Ready(Ok(()));
         }
         let available = state.image.len() - start;
         let take = available.min(buf.remaining());
-        let bytes = state.image[start..start + take].to_vec();
-        buf.put_slice(&bytes);
-        state.cursor += take as u64;
+        buf.put_slice(&state.image[start..start + take]);
+        drop(state);
+        this.cursor += take as u64;
         Poll::Ready(Ok(()))
     }
 }
@@ -1501,20 +1572,25 @@ impl<V: Vfs> AsyncWrite for FaultFile<V> {
             return Poll::Ready(Err(io::Error::from_raw_os_error(ENOSPC)));
         }
         let sector_bytes = self.lab.lock().plan.sector_bytes();
-        let mut state = self.lock();
-        let start = usize::try_from(state.cursor).unwrap_or(usize::MAX);
-        let end = start.saturating_add(buf.len());
+        let this = self.get_mut();
+        let mut state = this.lock();
+        let start = usize::try_from(this.cursor).map_err(|_| io::ErrorKind::InvalidInput)?;
+        let end = start
+            .checked_add(buf.len())
+            .ok_or(io::ErrorKind::InvalidInput)?;
         if state.image.len() < end {
             state.image.resize(end, 0);
         }
         state.image[start..end].copy_from_slice(buf);
         // Whole sectors go dirty because whole sectors are what a disk writes.
-        let first = state.cursor / sector_bytes;
+        let first = this.cursor / sector_bytes;
         let last = (end as u64).saturating_sub(1) / sector_bytes;
         for sector in first..=last {
             state.dirty.insert(sector);
         }
-        state.cursor = end as u64;
+        state.revision += 1;
+        drop(state);
+        this.cursor = end as u64;
         Poll::Ready(Ok(buf.len()))
     }
 
@@ -1538,12 +1614,12 @@ impl<V: Vfs> AsyncSeek for FaultFile<V> {
         if let Err(error) = self.alive() {
             return Poll::Ready(Err(error));
         }
-        let mut state = self.lock();
-        let length = state.image.len() as i64;
+        let this = self.get_mut();
+        let length = this.lock().image.len() as i64;
         let target = match pos {
             SeekFrom::Start(offset) => i64::try_from(offset).unwrap_or(i64::MAX),
             SeekFrom::End(delta) => length.saturating_add(delta),
-            SeekFrom::Current(delta) => i64::try_from(state.cursor)
+            SeekFrom::Current(delta) => i64::try_from(this.cursor)
                 .unwrap_or(i64::MAX)
                 .saturating_add(delta),
         };
@@ -1553,8 +1629,8 @@ impl<V: Vfs> AsyncSeek for FaultFile<V> {
                 "seek before the start of the file",
             )));
         }
-        state.cursor = target as u64;
-        Poll::Ready(Ok(state.cursor))
+        this.cursor = target as u64;
+        Poll::Ready(Ok(this.cursor))
     }
 }
 
@@ -1574,22 +1650,14 @@ impl<V: Vfs> VfsFile for FaultFile<V> {
 
     async fn set_len(&self, size: u64) -> io::Result<()> {
         self.alive()?;
-        {
-            let mut state = self.lock();
-            let length = usize::try_from(size).unwrap_or(usize::MAX);
-            state.image.resize(length, 0);
-            if state.cursor > size {
-                state.cursor = size;
-            }
-        }
-        // A truncation changes the file's length, which the in-memory image
-        // cannot represent on the backing store; apply it directly so a
-        // subsequent open sees the shortened file.
-        self.backing
-            .open(&self.path, &OpenOptions::new().write(true))
-            .await?
-            .set_len(size)
-            .await
+        let sector_bytes = self.lab.lock().plan.sector_bytes();
+        let mut state = self.lock();
+        let length = usize::try_from(size).map_err(|_| io::ErrorKind::InvalidInput)?;
+        state.image.resize(length, 0);
+        state.dirty.retain(|sector| sector * sector_bytes < size);
+        state.length_dirty = true;
+        state.revision += 1;
+        Ok(())
     }
 
     async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
@@ -1606,25 +1674,19 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
     type File = FaultFile<V>;
 
     async fn open(&self, path: &Path, opts: &OpenOptions) -> io::Result<Self::File> {
-        // Existence is sampled before the delegated open: `OpenOptions` has
-        // no getters, so "did this open create the file" is observable only
-        // as before-absent/after-present. A directory opens only to be
-        // synced (`sync_directory` is how a dirent barrier is expressed over
-        // a `Vfs`); its handle carries an empty image, nothing can go dirty
-        // through it, and its sync is the dirent settle/lie surface. Reading
-        // a directory as bytes would be EISDIR, which is why it cannot share
-        // the file arm below.
         let before = self.backing.metadata(path).await;
         let existed = before.is_ok();
-        let is_directory = before
-            .map(|metadata| metadata.file_type().is_dir())
-            .unwrap_or(false);
-        // Delegate the open itself so create/create_new/truncate/mode all keep
-        // their real semantics, including their real errors.
-        drop(self.backing.open(path, opts).await?);
-        if !existed && self.backing.metadata(path).await.is_ok() {
-            // The open brought the file into existence: its dirent owes the
-            // parent directory a sync before the name is durable.
+        let is_directory = before.as_ref().is_ok_and(|m| m.is_dir());
+        let truncate = if is_directory {
+            false
+        } else {
+            truncates(opts).await?
+        };
+        let opened = self
+            .backing
+            .open(path, &opts.clone().truncate(false))
+            .await?;
+        if !existed {
             self.record_namespace(
                 path.parent().map(Path::to_path_buf).into_iter().collect(),
                 NamespaceKind::Created {
@@ -1633,27 +1695,60 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
                 },
             );
         }
-        let image = if is_directory {
-            Vec::new()
+        let key = self.backing.canonicalize(path).await?;
+        let existing = self
+            .inodes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+            .cloned();
+        let inode = if let Some(inode) = existing {
+            inode
         } else {
-            match self.backing.read(path).await {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-                Err(error) => return Err(error),
-            }
+            let image = if is_directory {
+                Vec::new()
+            } else {
+                self.backing.read(path).await?
+            };
+            let file = if is_directory {
+                opened
+            } else {
+                self.backing
+                    .open(path, &OpenOptions::new().read(true).write(true))
+                    .await?
+            };
+            let candidate = Arc::new(Inode {
+                state: Mutex::new(FileState {
+                    image,
+                    dirty: BTreeSet::new(),
+                    length_dirty: false,
+                    revision: 0,
+                }),
+                file: Mutex::new(Some(file)),
+                available: asupersync::sync::Notify::new(),
+            });
+            self.inodes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entry(key)
+                .or_insert(candidate)
+                .clone()
         };
-        let generation = self.lab.lock().generation;
+        if truncate {
+            let mut state = inode.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.image.clear();
+            state.dirty.clear();
+            state.length_dirty = true;
+            state.revision += 1;
+        }
         Ok(FaultFile {
             backing: Arc::clone(&self.backing),
             lab: Arc::clone(&self.lab),
             path: path.to_path_buf(),
-            generation,
+            generation: self.lab.lock().generation,
             is_dir: is_directory,
-            state: Mutex::new(FileState {
-                image,
-                dirty: BTreeSet::new(),
-                cursor: 0,
-            }),
+            inode,
+            cursor: 0,
         })
     }
 
@@ -1755,6 +1850,10 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             Err(error) => return Err(error),
         };
         self.backing.remove_file(path).await?;
+        self.inodes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(path);
         if let Some(durable) = durable {
             self.record_namespace(
                 path.parent().map(Path::to_path_buf).into_iter().collect(),
@@ -1778,6 +1877,13 @@ impl<V: Vfs> Vfs for FaultVfs<V> {
             Err(error) => return Err(error),
         };
         self.backing.rename(from, to).await?;
+        {
+            let mut inodes = self.inodes.lock().unwrap_or_else(|p| p.into_inner());
+            inodes.remove(to);
+            if let Some(inode) = inodes.remove(from) {
+                inodes.insert(to.to_path_buf(), inode);
+            }
+        }
         let mut owing: Vec<PathBuf> = from
             .parent()
             .into_iter()
