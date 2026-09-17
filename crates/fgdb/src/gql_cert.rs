@@ -17,6 +17,96 @@ const GQL_PLAN_CERTIFICATE_DOMAIN_V1: &[u8] = b"fgdb:gql-bound-plan-certificate:
 const GQL_PLAN_CERTIFICATE_DOMAIN_V2: &[u8] = b"fgdb:gql-bound-plan-certificate:v2";
 const GQL_RESULT_DIGEST_DOMAIN_V1: &[u8] = b"fgdb:gql-ordered-result-digest:v1";
 
+/// Native read grammar domains. Tags are part of the v1 certificate transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NativeReadClass {
+    Pattern = 0,
+    Aggregate = 1,
+    PipelineAggregate = 2,
+    Set = 3,
+    TemporalPattern = 4,
+    TemporalSet = 5,
+    TemporalAggregate = 6,
+}
+
+/// Resolved, unbound native plan evidence. Implementations must retain literal
+/// constants and parameter identities, but must not encode argument values.
+pub trait NativeCertificatePlan {
+    fn facade_class(&self) -> NativeReadClass;
+    fn canonical_bytes(&self) -> Vec<u8>;
+    fn parameter_schema(&self) -> &[fgdb_gql::GqlParameterSpec];
+}
+
+/// Identity evidence only: neither result correctness nor replay execution.
+/// The digest identifies the template independently of argument values and
+/// snapshot selection; `verifies_at` separately checks the selected frontier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativePlanCertificate {
+    pub digest: Digest,
+    pub snapshot_seq: CommitSeq,
+}
+
+impl NativePlanCertificate {
+    #[must_use]
+    pub fn new(prepared: &impl NativeCertificatePlan, snapshot_seq: CommitSeq) -> Self {
+        Self {
+            digest: native_plan_digest(prepared),
+            snapshot_seq,
+        }
+    }
+
+    #[must_use]
+    pub fn verifies(&self, prepared: &impl NativeCertificatePlan) -> bool {
+        digest_eq(self.digest, native_plan_digest(prepared))
+    }
+
+    #[must_use]
+    pub fn verifies_at(
+        &self,
+        prepared: &impl NativeCertificatePlan,
+        snapshot_seq: CommitSeq,
+    ) -> bool {
+        self.snapshot_seq == snapshot_seq && self.verifies(prepared)
+    }
+
+    /// Fixed, versioned certificate envelope, including the snapshot binding.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = b"fgdb:native-plan-certificate:v1\0".to_vec();
+        bytes.extend_from_slice(&self.digest.0);
+        bytes.extend_from_slice(&self.snapshot_seq.0.to_be_bytes());
+        bytes
+    }
+}
+
+fn native_plan_digest(prepared: &impl NativeCertificatePlan) -> Digest {
+    let mut hasher = Hasher::new();
+    hasher.update(b"fgdb:native-read-template:v1\0");
+    hasher.update(&[prepared.facade_class() as u8]);
+    let bytes = prepared.canonical_bytes();
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(&bytes);
+    let schema = prepared.parameter_schema();
+    hasher.update(&(schema.len() as u64).to_be_bytes());
+    for spec in schema {
+        update_string(&mut hasher, &spec.name);
+        match spec.parameter_type {
+            fgdb_gql::GqlParameterType::Int64 => {
+                hasher.update(&[0]);
+            }
+            fgdb_gql::GqlParameterType::UInt64 => {
+                hasher.update(&[1]);
+            }
+            fgdb_gql::GqlParameterType::Scalar(kind) => {
+                hasher.update(&[2, kind as u8]);
+            }
+        }
+        hasher.update(&[u8::from(spec.requires_positive)]);
+        hasher.update(&(spec.occurrences as u64).to_be_bytes());
+    }
+    hasher.finalize()
+}
 /// Replay evidence for the public statement execution surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GqlCertificate {
@@ -478,6 +568,7 @@ mod tests {
         GqlCertificate, GqlPlanCertificate, certify, certify_v1_legacy, digest_bind,
         digest_statement, direction_tag, projection_tag,
     };
+    use super::{NativeCertificatePlan, NativePlanCertificate, NativeReadClass};
     use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
     use fgdb_gql::{BoundPlan, EdgeDirection, RelationBind, ReturnProjection};
     use fgdb_types::{CommitSeq, VId};
@@ -679,5 +770,52 @@ mod tests {
         assert_eq!(direction_tag(EdgeDirection::Outgoing), 0);
         assert_eq!(direction_tag(EdgeDirection::Incoming), 1);
         assert_eq!(direction_tag(EdgeDirection::Undirected), 2);
+    }
+
+    #[test]
+    fn native_certificate_binds_class_plan_types_and_snapshot() {
+        struct Evidence {
+            class: NativeReadClass,
+            bytes: Vec<u8>,
+            schema: Vec<fgdb_gql::GqlParameterSpec>,
+        }
+        impl NativeCertificatePlan for Evidence {
+            fn facade_class(&self) -> NativeReadClass {
+                self.class
+            }
+            fn canonical_bytes(&self) -> Vec<u8> {
+                self.bytes.clone()
+            }
+            fn parameter_schema(&self) -> &[fgdb_gql::GqlParameterSpec] {
+                &self.schema
+            }
+        }
+        let mut prepared = Evidence {
+            class: NativeReadClass::Pattern,
+            bytes: vec![1, 2, 3],
+            schema: vec![fgdb_gql::GqlParameterSpec {
+                name: "value".to_owned(),
+                parameter_type: fgdb_gql::GqlParameterType::Int64,
+                requires_positive: false,
+                occurrences: 1,
+            }],
+        };
+        let certificate = NativePlanCertificate::new(&prepared, CommitSeq(7));
+        assert!(certificate.verifies(&prepared));
+        assert!(certificate.verifies_at(&prepared, CommitSeq(7)));
+        assert!(!certificate.verifies_at(&prepared, CommitSeq(8)));
+        let pattern_bytes = prepared.canonical_bytes();
+        prepared.class = NativeReadClass::Aggregate;
+        assert_eq!(pattern_bytes, prepared.canonical_bytes());
+        assert!(
+            !certificate.verifies(&prepared),
+            "facade domain must separate identical plan bytes"
+        );
+        prepared.class = NativeReadClass::Pattern;
+        prepared.schema[0].parameter_type = fgdb_gql::GqlParameterType::UInt64;
+        assert!(!certificate.verifies(&prepared));
+        prepared.schema[0].parameter_type = fgdb_gql::GqlParameterType::Int64;
+        prepared.bytes[2] = 4;
+        assert!(!certificate.verifies(&prepared));
     }
 }
