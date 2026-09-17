@@ -39,7 +39,9 @@ impl PreparedNativeRead {
         // declarations reach every prepare_with_parameter_types facade.
         let declarations: Vec<(&str, GqlParameterType)> = params
             .parameter_types()
-            .filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_) | GqlParameterType::List))
+            .filter(|(_, kind)| {
+                matches!(kind, GqlParameterType::Scalar(_) | GqlParameterType::List)
+            })
             .collect();
         let mut diagnostics = Vec::new();
         match PreparedTemporalGraphAggregateText::prepare_with_parameter_types(
@@ -241,13 +243,26 @@ impl NativeCertificatePlan for PreparedNativeRead {
         PreparedNativeRead::facade_class(self)
     }
     fn canonical_bytes(&self) -> Vec<u8> {
-        // v1 template identity: exact resolved statement structure and the
-        // normalized parameter table. Values are never present here because
-        // preparation precedes binding.
-        let mut bytes = b"fgdb:native-template-identity:v1\0".to_vec();
-        let statement = self.statement().as_bytes();
-        bytes.extend_from_slice(&(statement.len() as u64).to_be_bytes());
-        bytes.extend_from_slice(statement);
+        // v1 template identity: the resolved, unbound template bytes per
+        // facade class. Argument values are never present because preparation
+        // precedes binding. Classes whose facade accessor is not landed yet
+        // fall back to the statement bytes with an explicit class tag, so a
+        // Pattern plan never collides with an Aggregate plan of equal text.
+        let mut bytes = b"fgdb:native-template-identity:v2\0".to_vec();
+        match self {
+            Self::Pattern(prepared) => {
+                bytes.push(0);
+                let encoded = prepared.template_bytes();
+                bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(&encoded);
+            }
+            other => {
+                bytes.push(1);
+                let statement = other.statement().as_bytes();
+                bytes.extend_from_slice(&(statement.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(statement);
+            }
+        }
         bytes
     }
     fn parameter_schema(&self) -> &[GqlParameterSpec] {
@@ -278,6 +293,12 @@ impl NativeExplainCertificate {
         self.certificate.digest
     }
 
+    /// Versioned certificate bytes binding the template digest and snapshot.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        self.certificate.canonical_bytes()
+    }
+
     #[must_use]
     pub fn snapshot_seq(&self) -> CommitSeq {
         self.certificate.snapshot_seq
@@ -292,7 +313,9 @@ pub struct ExplainRow {
 }
 
 /// Deterministic human-readable operator rows derived from the resolved
-/// template, never from an executed snapshot read.
+/// template, never from an executed snapshot read. Facade classes whose
+/// template operator accessors are landed emit their real per-operator
+/// listing; the others emit their template size and parameter table only.
 #[must_use]
 pub fn explain_rows(prepared: &PreparedNativeRead) -> Vec<ExplainRow> {
     let class = prepared.facade_class();
@@ -303,11 +326,19 @@ pub fn explain_rows(prepared: &PreparedNativeRead) -> Vec<ExplainRow> {
             prepared.parameter_schema().len()
         ),
     }];
-    let statement = prepared.statement();
-    rows.push(ExplainRow {
-        operator: "Template".to_owned(),
-        detail: format!("{} bound columns", statement.len()),
-    });
+    if let Self::Pattern(pattern) = prepared {
+        for operator in pattern.template_operators() {
+            rows.push(ExplainRow {
+                operator: operator.to_owned(),
+                detail: "resolved template".to_owned(),
+            });
+        }
+    } else {
+        rows.push(ExplainRow {
+            operator: "Template".to_owned(),
+            detail: format!("{} statement bytes", prepared.statement().len()),
+        });
+    }
     for spec in prepared.parameter_schema() {
         rows.push(ExplainRow {
             operator: "Parameter".to_owned(),
