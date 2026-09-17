@@ -282,10 +282,16 @@ async fn read_keys(
 fn open_failure(error: fgdb::OpenError) -> Failure {
     use fgdb::OpenError as E;
     match error {
+        // Key failures: the path is fine, the identity in hand is not. A
+        // foreign slot (namespace/opener disagreement) and a slot the
+        // K_oid-authenticated stream disowns (wrong K_oid, SlotDisagreesWith
+        // Stream) are both key failures, not I/O failures.
         E::NotADirectory { .. }
         | E::NotADatabase { .. }
         | E::AlreadyADatabase { .. }
         | E::ForeignSlot { .. }
+        | E::SlotDisagreesWithStream { .. }
+        | E::SlotUnrecoverable { .. }
         | E::NotEmpty { .. } => Failure::open(error),
         _ => Failure::io(error),
     }
