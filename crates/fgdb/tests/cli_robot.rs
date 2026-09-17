@@ -1,0 +1,926 @@
+//! Black-box CLI contracts: every database operation starts a fresh process.
+//! The dependency-free JSON reader checks the frozen schema, not substrings.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const ROBOT_SCHEMA: &str = concat!(
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns"],"row":["v","event","cells"],"result":["v","event","kind","seq","count","statements"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint"]}"##,
+    "\n"
+);
+
+#[derive(Debug, PartialEq, Eq)]
+enum Json {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<Json>),
+    Object(BTreeMap<String, Json>),
+}
+
+impl Json {
+    fn object(&self) -> &BTreeMap<String, Json> {
+        match self {
+            Self::Object(value) => value,
+            _ => panic!("expected JSON object, got {self:?}"),
+        }
+    }
+
+    fn array(&self) -> &[Json] {
+        match self {
+            Self::Array(value) => value,
+            _ => panic!("expected JSON array, got {self:?}"),
+        }
+    }
+
+    fn string(&self) -> &str {
+        match self {
+            Self::String(value) => value,
+            _ => panic!("expected JSON string, got {self:?}"),
+        }
+    }
+
+    fn unsigned(&self) -> u64 {
+        match self {
+            Self::Number(value) => value.parse().expect("unsigned integer JSON number"),
+            _ => panic!("expected JSON number, got {self:?}"),
+        }
+    }
+
+    fn get(&self, name: &str) -> &Json {
+        self.object()
+            .get(name)
+            .unwrap_or_else(|| panic!("missing {name:?} in {self:?}"))
+    }
+}
+
+struct JsonParser<'a> {
+    input: &'a str,
+    offset: usize,
+}
+
+type ParseResult<T> = Result<T, String>;
+
+impl<'a> JsonParser<'a> {
+    fn parse(input: &'a str) -> ParseResult<Json> {
+        let mut parser = Self { input, offset: 0 };
+        let value = parser.value()?;
+        parser.whitespace();
+        if parser.offset != input.len() {
+            return Err(format!("trailing JSON bytes at {}", parser.offset));
+        }
+        Ok(value)
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.input.as_bytes().get(self.offset).copied()
+    }
+
+    fn consume(&mut self, byte: u8) -> bool {
+        if self.peek() == Some(byte) {
+            self.offset += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(&mut self, byte: u8) -> ParseResult<()> {
+        if self.consume(byte) {
+            Ok(())
+        } else {
+            Err(format!(
+                "expected {:?} at {}",
+                char::from(byte),
+                self.offset
+            ))
+        }
+    }
+
+    fn whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.offset += 1;
+        }
+    }
+
+    fn value(&mut self) -> ParseResult<Json> {
+        self.whitespace();
+        match self.peek() {
+            Some(b'"') => self.string().map(Json::String),
+            Some(b'{') => self.object(),
+            Some(b'[') => self.array(),
+            Some(b't') => self.literal("true", Json::Bool(true)),
+            Some(b'f') => self.literal("false", Json::Bool(false)),
+            Some(b'n') => self.literal("null", Json::Null),
+            Some(b'-' | b'0'..=b'9') => self.number(),
+            _ => Err(format!("expected JSON value at {}", self.offset)),
+        }
+    }
+
+    fn literal(&mut self, text: &str, value: Json) -> ParseResult<Json> {
+        if !self.input[self.offset..].starts_with(text) {
+            return Err(format!("invalid JSON literal at {}", self.offset));
+        }
+        self.offset += text.len();
+        Ok(value)
+    }
+
+    fn object(&mut self) -> ParseResult<Json> {
+        self.expect(b'{')?;
+        self.whitespace();
+        let mut fields = BTreeMap::new();
+        if self.consume(b'}') {
+            return Ok(Json::Object(fields));
+        }
+        loop {
+            self.whitespace();
+            let name = self.string()?;
+            self.whitespace();
+            self.expect(b':')?;
+            let value = self.value()?;
+            if fields.insert(name, value).is_some() {
+                return Err("duplicate JSON object field".into());
+            }
+            self.whitespace();
+            if self.consume(b'}') {
+                return Ok(Json::Object(fields));
+            }
+            self.expect(b',')?;
+        }
+    }
+
+    fn array(&mut self) -> ParseResult<Json> {
+        self.expect(b'[')?;
+        self.whitespace();
+        let mut values = Vec::new();
+        if self.consume(b']') {
+            return Ok(Json::Array(values));
+        }
+        loop {
+            values.push(self.value()?);
+            self.whitespace();
+            if self.consume(b']') {
+                return Ok(Json::Array(values));
+            }
+            self.expect(b',')?;
+        }
+    }
+
+    fn hex_quad(&mut self) -> ParseResult<u32> {
+        let mut value = 0;
+        for _ in 0..4 {
+            let digit = self
+                .peek()
+                .and_then(|byte| char::from(byte).to_digit(16))
+                .ok_or_else(|| format!("invalid Unicode escape at {}", self.offset))?;
+            self.offset += 1;
+            value = value * 16 + digit;
+        }
+        Ok(value)
+    }
+
+    fn string(&mut self) -> ParseResult<String> {
+        self.expect(b'"')?;
+        let mut text = String::new();
+        loop {
+            match self.peek() {
+                None => return Err("unterminated JSON string".into()),
+                Some(b'"') => {
+                    self.offset += 1;
+                    return Ok(text);
+                }
+                Some(b'\\') => {
+                    self.offset += 1;
+                    let escape = self.peek().ok_or("unterminated JSON escape")?;
+                    self.offset += 1;
+                    text.push(match escape {
+                        b'"' => '"',
+                        b'\\' => '\\',
+                        b'/' => '/',
+                        b'b' => '\u{08}',
+                        b'f' => '\u{0c}',
+                        b'n' => '\n',
+                        b'r' => '\r',
+                        b't' => '\t',
+                        b'u' => {
+                            let first = self.hex_quad()?;
+                            let scalar = if (0xd800..=0xdbff).contains(&first) {
+                                self.expect(b'\\')?;
+                                self.expect(b'u')?;
+                                let second = self.hex_quad()?;
+                                if !(0xdc00..=0xdfff).contains(&second) {
+                                    return Err("invalid low surrogate".into());
+                                }
+                                0x10000 + ((first - 0xd800) << 10) + second - 0xdc00
+                            } else {
+                                first
+                            };
+                            char::from_u32(scalar).ok_or("invalid Unicode scalar")?
+                        }
+                        _ => return Err("invalid JSON escape".into()),
+                    });
+                }
+                Some(0..=0x1f) => return Err("unescaped control character".into()),
+                Some(_) => {
+                    let character = self.input[self.offset..].chars().next().unwrap();
+                    self.offset += character.len_utf8();
+                    text.push(character);
+                }
+            }
+        }
+    }
+
+    fn digits(&mut self) -> ParseResult<()> {
+        let start = self.offset;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.offset += 1;
+        }
+        if self.offset == start {
+            Err(format!("expected digit at {}", start))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn number(&mut self) -> ParseResult<Json> {
+        let start = self.offset;
+        self.consume(b'-');
+        if !self.consume(b'0') {
+            self.digits()?;
+        }
+        if self.consume(b'.') {
+            self.digits()?;
+        }
+        if self.consume(b'e') || self.consume(b'E') {
+            if !self.consume(b'+') {
+                self.consume(b'-');
+            }
+            self.digits()?;
+        }
+        Ok(Json::Number(self.input[start..self.offset].to_owned()))
+    }
+}
+
+fn json(input: &str) -> Json {
+    JsonParser::parse(input).unwrap_or_else(|error| panic!("{error}: {input:?}"))
+}
+
+fn exact_fields(value: &Json, fields: &[&str]) {
+    let mut expected = fields.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        value
+            .object()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+fn check_cell(cell: &Json, schema: &Json) {
+    let kind = cell.get("type").string();
+    assert!(
+        schema
+            .get("cell_types")
+            .array()
+            .iter()
+            .any(|value| value.string() == kind)
+    );
+    if kind == "null" {
+        exact_fields(cell, &["type"]);
+        return;
+    }
+    exact_fields(cell, &["type", "value"]);
+    let value = cell.get("value");
+    match kind {
+        "bool" => assert!(matches!(value, Json::Bool(_))),
+        "text" => {
+            value.string();
+        }
+        "list" => {
+            for item in value.array() {
+                check_cell(item, schema);
+            }
+        }
+        "int" => assert_eq!(
+            value.string().parse::<i64>().unwrap().to_string(),
+            value.string()
+        ),
+        "count" => assert_eq!(
+            value.string().parse::<u64>().unwrap().to_string(),
+            value.string()
+        ),
+        "wideint" => assert_eq!(
+            value.string().parse::<i128>().unwrap().to_string(),
+            value.string()
+        ),
+        _ => panic!("unknown cell type {kind}"),
+    }
+}
+
+fn check_events(stdout: &str, code: i32) -> Vec<Json> {
+    assert!(
+        stdout.ends_with('\n'),
+        "NDJSON must end with newline: {stdout:?}"
+    );
+    let schema = json(ROBOT_SCHEMA);
+    let events: Vec<_> = stdout
+        .strip_suffix('\n')
+        .unwrap()
+        .split('\n')
+        .map(json)
+        .collect();
+    assert!(events.len() >= 2, "invocation and terminal required");
+    assert_eq!(events[0].get("event").string(), "invocation");
+    let mut columns = None;
+    let mut rows = 0;
+    let mut terminals = 0;
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event.get("v").unsigned(), 1);
+        let name = event.get("event").string();
+        let allowed = schema.get("events").get(name).array();
+        for field in event.object().keys() {
+            assert!(
+                allowed.iter().any(|value| value.string() == field),
+                "unlisted {name}.{field}"
+            );
+        }
+        match name {
+            "invocation" => {
+                assert_eq!(index, 0, "exactly one initial invocation");
+                exact_fields(event, &["v", "event"]);
+            }
+            "columns" => {
+                assert_eq!(index, 1, "columns immediately follow invocation");
+                exact_fields(event, &["v", "event", "columns"]);
+                let names = event.get("columns").array();
+                for name in names {
+                    name.string();
+                }
+                columns = Some(names.len());
+            }
+            "row" => {
+                exact_fields(event, &["v", "event", "cells"]);
+                let cells = event.get("cells").array();
+                assert_eq!(Some(cells.len()), columns, "row width must match columns");
+                for cell in cells {
+                    check_cell(cell, &schema);
+                }
+                rows += 1;
+            }
+            "schema" => {
+                assert_eq!(index, 1);
+                assert_eq!(event, &schema);
+            }
+            "result" => {
+                terminals += 1;
+                assert_eq!(index, events.len() - 1, "terminal must be last");
+                assert_eq!(
+                    code as u64,
+                    schema.get("exit_codes").get("success").unsigned()
+                );
+                match event.get("kind").string() {
+                    "rows" => {
+                        exact_fields(event, &["v", "event", "kind", "seq", "count"]);
+                        assert!(columns.is_some());
+                        assert_eq!(event.get("count").unsigned(), rows);
+                        event.get("seq").unsigned();
+                    }
+                    "written" => {
+                        exact_fields(event, &["v", "event", "kind", "seq", "statements"]);
+                        assert_eq!(index, 1);
+                        event.get("seq").unsigned();
+                        event.get("statements").unsigned();
+                    }
+                    "created" => {
+                        exact_fields(event, &["v", "event", "kind", "seq"]);
+                        assert_eq!(index, 1);
+                        event.get("seq").unsigned();
+                    }
+                    "help" => {
+                        exact_fields(event, &["v", "event", "kind"]);
+                        assert_eq!(index, 1);
+                    }
+                    "schema" => {
+                        exact_fields(event, &["v", "event", "kind"]);
+                        assert_eq!(index, 2);
+                        assert_eq!(events[1], schema);
+                    }
+                    kind => panic!("unknown result kind {kind}"),
+                }
+            }
+            "error" => {
+                terminals += 1;
+                assert_eq!(index, events.len() - 1, "terminal must be last");
+                exact_fields(event, &["v", "event", "class", "diagnostics"]);
+                let class = event.get("class").string();
+                assert_ne!(class, "success");
+                assert_eq!(code as u64, schema.get("exit_codes").get(class).unsigned());
+                assert_eq!(
+                    event.get("diagnostics").array(),
+                    &[],
+                    "details belong only on stderr"
+                );
+            }
+            _ => panic!("unhandled schema event {name}"),
+        }
+    }
+    assert_eq!(terminals, 1, "exactly one terminal event");
+    events
+}
+
+struct Outcome {
+    code: i32,
+    stdout: String,
+    stderr: String,
+    events: Vec<Json>,
+}
+
+impl Outcome {
+    fn success(&self) -> &Self {
+        assert_eq!(
+            self.code, 0,
+            "stdout: {}\nstderr: {}",
+            self.stdout, self.stderr
+        );
+        assert!(
+            self.stderr.is_empty(),
+            "unexpected diagnostics: {}",
+            self.stderr
+        );
+        self
+    }
+
+    fn terminal(&self) -> &Json {
+        self.events.last().expect("terminal event")
+    }
+
+    fn sequence(&self, kind: &str) -> u64 {
+        self.success();
+        assert_eq!(self.terminal().get("kind").string(), kind);
+        self.terminal().get("seq").unsigned()
+    }
+
+    fn failure(&self, code: i32, class: &str) {
+        assert_eq!(
+            self.code, code,
+            "stdout: {}\nstderr: {}",
+            self.stdout, self.stderr
+        );
+        assert_eq!(self.events.len(), 2, "invocation and one error only");
+        assert_eq!(self.terminal().get("event").string(), "error");
+        assert_eq!(self.terminal().get("class").string(), class);
+        assert!(!self.stderr.is_empty(), "failure details must reach stderr");
+    }
+}
+
+fn run(robot: bool, args: &[&str]) -> Outcome {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fgdb"));
+    if robot {
+        command.arg("--robot");
+    }
+    if let Some((subcommand, rest)) = args.split_first() {
+        command.arg(subcommand);
+        if matches!(*subcommand, "create" | "write" | "query") {
+            command.args([
+                "--label",
+                "Person=1",
+                "--relation",
+                "KNOWS=1",
+                "--property",
+                "name=1",
+                "--property",
+                "born=2",
+                "--property",
+                "team=3",
+                "--property",
+                "active=4",
+                "--property",
+                "optional=5",
+            ]);
+        }
+        command.args(rest);
+    }
+    let output = command.output().expect("run built fgdb binary");
+    let code = output.status.code().expect("fgdb exited without signal");
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    let events = if robot {
+        check_events(&stdout, code)
+    } else {
+        Vec::new()
+    };
+    Outcome {
+        code,
+        stdout,
+        stderr,
+        events,
+    }
+}
+
+fn robot(args: &[&str]) -> Outcome {
+    run(true, args)
+}
+
+fn scratch(name: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "fgdb-cli-{name}-{}-{time}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+struct TestDb {
+    db: String,
+    key: String,
+}
+
+impl TestDb {
+    fn new(name: &str) -> Self {
+        let root = scratch(name);
+        std::fs::create_dir(&root).unwrap();
+        let key = root.join("keys");
+        // Exercise blank lines, full-line comments, and trailing comments.
+        std::fs::write(
+            &key,
+            format!(
+                "# test keys\n\n{} # object id\n{}\n{}\n",
+                "5a".repeat(32),
+                "77".repeat(32),
+                "3c".repeat(32)
+            ),
+        )
+        .unwrap();
+        Self {
+            db: root.join("db").to_str().unwrap().to_owned(),
+            key: key.to_str().unwrap().to_owned(),
+        }
+    }
+
+    fn command(&self, command: &str, extra: &[&str]) -> Outcome {
+        let mut args = vec![command, "--db", &self.db, "--key-file", &self.key];
+        args.extend_from_slice(extra);
+        robot(&args)
+    }
+
+    fn create(&self) -> u64 {
+        self.command("create", &[]).sequence("created")
+    }
+
+    fn write(&self, extra: &[&str]) -> u64 {
+        let output = self.command("write", extra);
+        let seq = output.sequence("written");
+        assert_eq!(output.terminal().get("statements").unsigned(), 1);
+        seq
+    }
+}
+
+fn assert_rows(output: &Outcome, expected: &str) {
+    output.success();
+    let rows: Vec<_> = output
+        .events
+        .iter()
+        .filter(|event| event.get("event").string() == "row")
+        .map(|event| event.get("cells"))
+        .collect();
+    let expected = json(expected);
+    assert_eq!(rows, expected.array().iter().collect::<Vec<_>>());
+}
+
+#[test]
+fn json_reader_handles_nested_escaping_and_rejects_malformed_documents() {
+    let document = json(
+        r#" {"escaped":"\"\\\/\b\f\n\r\t\u0000\u00e9\ud83d\ude00","nested":[null,true,false,-12.5e+2,{"raw":"é"}]} "#,
+    );
+    assert_eq!(
+        document.get("escaped").string(),
+        "\"\\/\u{08}\u{0c}\n\r\t\0é\u{1f600}"
+    );
+    assert_eq!(document.get("nested").array()[4].get("raw").string(), "é");
+    for invalid in [
+        "",
+        "hello",
+        "{} junk",
+        "{\"x\":1,}",
+        "[1,]",
+        "{\"x\":1,\"x\":2}",
+        "{\"x\" 1}",
+        "[1}",
+        "01",
+        "1.",
+        "1e",
+        "--1",
+        "truefalse",
+        "\"unterminated",
+        "\"\\x\"",
+        "\"\\ud800\"",
+        "\"\\udc00\"",
+        "\"\\ud800\\u0041\"",
+        "\"raw\nnewline\"",
+    ] {
+        assert!(
+            JsonParser::parse(invalid).is_err(),
+            "accepted malformed JSON {invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn robot_schema_is_frozen_and_help_is_a_complete_robot_invocation() {
+    let plain = run(false, &["robot", "schema"]);
+    plain.success();
+    assert_eq!(plain.stdout, ROBOT_SCHEMA);
+    assert_eq!(json(&plain.stdout), json(ROBOT_SCHEMA));
+    robot(&["robot", "schema"]).success();
+    let help = robot(&["help"]);
+    assert_eq!(help.code, 0);
+    assert!(help.stderr.contains("--key-file"));
+    assert!(help.stderr.contains("64 hex"));
+    assert_eq!(help.terminal().get("kind").string(), "help");
+}
+
+#[test]
+fn lifecycle_across_processes_has_exact_query_and_history_ndjson() {
+    let db = TestDb::new("lifecycle");
+    let created = db.create();
+    let inserted = db.write(&["INSERT (a:Person {name:'Ada',born:1815,team:1}), (b:Person {name:'Grace',born:1906,team:2}), (c:Person {name:'Alan',born:1912,team:2}), (d:Person {name:'Edsger',born:1930,team:2}), (e:Person {name:'Barbara',born:1939,team:2}), (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c), (c)-[:KNOWS]->(d), (a)-[:KNOWS]->(d)"]);
+    assert_eq!(inserted, created + 1, "one INSERT is one commit");
+    let query = db.command("query", &["MATCH (p:Person) WHERE p.born < 1939 RETURN p.name AS name,p.born AS born ORDER BY born DESC"]);
+    query.success();
+    assert_eq!(
+        query.stdout,
+        format!(
+            "{{\"v\":1,\"event\":\"invocation\"}}\n\
+         {{\"v\":1,\"event\":\"columns\",\"columns\":[\"name\",\"born\"]}}\n\
+         {{\"v\":1,\"event\":\"row\",\"cells\":[{{\"type\":\"text\",\"value\":\"Edsger\"}},{{\"type\":\"int\",\"value\":\"1930\"}}]}}\n\
+         {{\"v\":1,\"event\":\"row\",\"cells\":[{{\"type\":\"text\",\"value\":\"Alan\"}},{{\"type\":\"int\",\"value\":\"1912\"}}]}}\n\
+         {{\"v\":1,\"event\":\"row\",\"cells\":[{{\"type\":\"text\",\"value\":\"Grace\"}},{{\"type\":\"int\",\"value\":\"1906\"}}]}}\n\
+         {{\"v\":1,\"event\":\"row\",\"cells\":[{{\"type\":\"text\",\"value\":\"Ada\"}},{{\"type\":\"int\",\"value\":\"1815\"}}]}}\n\
+         {{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{inserted},\"count\":4}}\n"
+        )
+    );
+    assert_rows(
+        &db.command("query", &["MATCH (p:Person) RETURN COUNT(*) AS people"]),
+        r#"[[{"type":"count","value":"5"}]]"#,
+    );
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (a)-[:KNOWS]->(b) RETURN COUNT(*) AS edges"],
+        ),
+        r#"[[{"type":"count","value":"4"}]]"#,
+    );
+
+    let updated = db.write(&[
+        "--param",
+        "year=int:1816",
+        "MATCH (p:Person) WHERE p.name='Ada' SET p.born=$year",
+    ]);
+    assert_eq!(updated, inserted + 1);
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (p:Person) WHERE p.name='Ada' RETURN p.born AS born"],
+        ),
+        r#"[[{"type":"int","value":"1816"}]]"#,
+    );
+    let historic = db.command("query", &["--param", &format!("old=uint:{inserted}"), "MATCH (p:Person) FOR SYSTEM_TIME AS OF SEQ $old WHERE p.name='Ada' RETURN p.born AS born"]);
+    historic.success();
+    assert_eq!(
+        historic.stdout,
+        format!(
+            "{{\"v\":1,\"event\":\"invocation\"}}\n\
+         {{\"v\":1,\"event\":\"columns\",\"columns\":[\"born\"]}}\n\
+         {{\"v\":1,\"event\":\"row\",\"cells\":[{{\"type\":\"int\",\"value\":\"1815\"}}]}}\n\
+         {{\"v\":1,\"event\":\"result\",\"kind\":\"rows\",\"seq\":{updated},\"count\":1}}\n"
+        )
+    );
+
+    let edge_query =
+        "MATCH (a)-[:KNOWS]->(b) WHERE a.name='Ada' AND b.name='Grace' RETURN b.name AS name";
+    assert_rows(
+        &db.command("query", &[edge_query]),
+        r#"[[{"type":"text","value":"Grace"}]]"#,
+    );
+    let deleted =
+        db.write(&["MATCH (a)-[e:KNOWS]->(b) WHERE a.name='Ada' AND b.name='Grace' DELETE e"]);
+    assert_eq!(deleted, updated + 1);
+    let absent = db.command("query", &[edge_query]);
+    assert_rows(&absent, "[]");
+    assert_eq!(absent.sequence("rows"), deleted);
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (a)-[:KNOWS]->(b) RETURN COUNT(*) AS edges"],
+        ),
+        r#"[[{"type":"count","value":"3"}]]"#,
+    );
+    let reopened = db.command(
+        "query",
+        &["MATCH (p:Person) WHERE p.name='Ada' RETURN p.name AS name,p.born AS born"],
+    );
+    assert_rows(
+        &reopened,
+        r#"[[{"type":"text","value":"Ada"},{"type":"int","value":"1816"}]]"#,
+    );
+    assert_eq!(reopened.sequence("rows"), deleted);
+}
+
+#[test]
+fn merge_branches_and_typed_parameters_round_trip_without_interpolation() {
+    let db = TestDb::new("merge-types");
+    db.create();
+    let merge = "MERGE (p:Person {team:$team}) ON MATCH SET p.born=1901 ON CREATE SET p.born=1900";
+    db.write(&["--param", "team=int:7", merge]);
+    assert_rows(
+        &db.command("query", &["MATCH (p:Person) RETURN p.born AS born"]),
+        r#"[[{"type":"int","value":"1900"}]]"#,
+    );
+    db.write(&["--param", "team=int:7", merge]);
+    assert_rows(
+        &db.command("query", &["MATCH (p:Person) RETURN p.born AS born"]),
+        r#"[[{"type":"int","value":"1901"}]]"#,
+    );
+    assert_rows(
+        &db.command("query", &["MATCH (p:Person) RETURN COUNT(*) AS people"]),
+        r#"[[{"type":"count","value":"1"}]]"#,
+    );
+
+    let text = "quoted \" \\ newline\ncarriage\rtab\tbackspace\u{08}formfeed\u{0c}control\u{01} café '); DELETE p; --";
+    db.write(&[
+        "--param",
+        &format!("name=text:{text}"),
+        "--param",
+        "active=bool:true",
+        "--param",
+        "optional=null",
+        "MATCH (p:Person) WHERE p.team=7 SET p.name=$name,p.active=$active,p.optional=$optional",
+    ]);
+    let typed = db.command("query", &["--param", &format!("name=text:{text}"), "--param", "flag=bool:false", "--param", "nil=null", "MATCH (p:Person) WHERE p.name=$name RETURN p.name AS name,p.active AS active,p.optional AS optional,[$flag,$nil,[7,'nested']] AS items"]);
+    typed.success();
+    assert_eq!(typed.terminal().get("count").unsigned(), 1);
+    let cells = typed.events[2].get("cells").array();
+    assert_eq!(cells[0].get("value").string(), text);
+    assert_eq!(cells[1], json(r#"{"type":"bool","value":true}"#));
+    assert_eq!(cells[2], json(r#"{"type":"null"}"#));
+    assert_eq!(
+        cells[3],
+        json(
+            r#"{"type":"list","value":[{"type":"bool","value":false},{"type":"null"},{"type":"list","value":[{"type":"int","value":"7"},{"type":"text","value":"nested"}]}]}"#
+        )
+    );
+
+    db.write(&["MATCH (p:Person) SET p.born=9223372036854775807"]);
+    db.write(&["INSERT (p:Person {team:8,born:9223372036854775807})"]);
+    assert_rows(
+        &db.command(
+            "query",
+            &["MATCH (p:Person) RETURN COUNT(*) AS people,SUM(p.born) AS total"],
+        ),
+        r#"[[{"type":"count","value":"2"},{"type":"wideint","value":"18446744073709551614"}]]"#,
+    );
+}
+
+#[test]
+fn typed_failures_keep_stdout_machine_readable_and_diagnostics_private() {
+    let db = TestDb::new("failures");
+    db.create();
+    db.command("query", &["MATCH (p RETURN p"])
+        .failure(3, "query");
+    db.command("query", &["MATCH (p:Unmapped) RETURN p.name"])
+        .failure(3, "query");
+    let missing = scratch("missing-key");
+    robot(&[
+        "query",
+        "--db",
+        &db.db,
+        "--key-file",
+        missing.to_str().unwrap(),
+        "MATCH (p:Person) RETURN p.name",
+    ])
+    .failure(4, "open");
+    robot(&[
+        "query",
+        "--db",
+        &db.db,
+        "--key-file",
+        std::path::Path::new(&db.key)
+            .parent()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "MATCH (p:Person) RETURN p.name",
+    ])
+    .failure(4, "open");
+    robot(&["query", "--db", &db.db, "MATCH (p:Person) RETURN p.name"]).failure(2, "usage");
+    let wrong = scratch("wrong-key");
+    std::fs::write(
+        &wrong,
+        format!(
+            "{}\n{}\n{}\n",
+            "5a".repeat(32),
+            "77".repeat(32),
+            "3d".repeat(32)
+        ),
+    )
+    .unwrap();
+    robot(&[
+        "query",
+        "--db",
+        &db.db,
+        "--key-file",
+        wrong.to_str().unwrap(),
+        "MATCH (p:Person) RETURN p.name",
+    ])
+    .failure(4, "open");
+    robot(&["frobnicate"]).failure(2, "usage");
+    robot(&[]).failure(2, "usage");
+    db.command(
+        "query",
+        &[
+            "--param",
+            "flag=bool:maybe",
+            "MATCH (p:Person) RETURN p.name",
+        ],
+    )
+    .failure(2, "usage");
+    db.command(
+        "query",
+        &["--param", "old=uint:-1", "MATCH (p:Person) RETURN p.name"],
+    )
+    .failure(2, "usage");
+    let blocked = scratch("db-is-file");
+    std::fs::write(&blocked, "not a directory").unwrap();
+    robot(&[
+        "create",
+        "--db",
+        &blocked.to_string_lossy(),
+        "--key-file",
+        &db.key,
+    ])
+    .failure(4, "open");
+    let below = scratch("blocked-child");
+    std::fs::create_dir(&below).unwrap();
+    std::fs::write(below.join("blocked"), "not a directory").unwrap();
+    robot(&[
+        "create",
+        "--db",
+        below.join("blocked").join("child").to_str().unwrap(),
+        "--key-file",
+        &db.key,
+    ])
+    .failure(5, "io");
+}
+
+#[test]
+fn human_table_aligns_columns_and_robot_has_no_human_decoration() {
+    let db = TestDb::new("human");
+    db.create();
+    db.write(&["INSERT (a:Person {name:'Ada',born:1815}),(b:Person {name:'Barbara',born:1939})"]);
+    let query = "MATCH (p:Person) RETURN p.name AS name,p.born AS born ORDER BY born";
+    let human = run(
+        false,
+        &["query", "--db", &db.db, "--key-file", &db.key, query],
+    );
+    human.success();
+    let lines: Vec<_> = human.stdout.lines().collect();
+    assert_eq!(lines.len(), 5, "header, rule, two rows, count");
+    assert_eq!(
+        lines[0].split('|').map(str::trim).collect::<Vec<_>>(),
+        ["name", "born"]
+    );
+    assert!(lines[1].chars().all(|character| character == '-'));
+    assert_eq!(lines[1].len(), lines[0].len());
+    assert_eq!(
+        lines[2].split('|').map(str::trim).collect::<Vec<_>>(),
+        ["Ada", "1815"]
+    );
+    assert_eq!(
+        lines[3].split('|').map(str::trim).collect::<Vec<_>>(),
+        ["Barbara", "1939"]
+    );
+    assert_eq!(
+        lines[0].find('|'),
+        lines[2].find('|'),
+        "first column is aligned"
+    );
+    assert_eq!(
+        lines[0].find('|'),
+        lines[3].find('|'),
+        "first column is aligned"
+    );
+    assert_eq!(lines[4], "2 row(s)");
+    assert_rows(
+        &db.command("query", &[query]),
+        r#"[[{"type":"text","value":"Ada"},{"type":"int","value":"1815"}],[{"type":"text","value":"Barbara"},{"type":"int","value":"1939"}]]"#,
+    );
+}
