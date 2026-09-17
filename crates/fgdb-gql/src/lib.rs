@@ -88,8 +88,7 @@ pub use temporal_aggregate_text::{
     BoundTemporalGraphAggregateQuery, PreparedTemporalGraphAggregateText,
 };
 pub use temporal_text::{
-    BoundTemporalGraphQuery, GraphTemporalTextError, GraphTemporalTextErrorKind,
-    PreparedTemporalGraphText,
+    BoundTemporalGraphQuery, GraphTemporalTextError, GraphTemporalTextErrorKind, PreparedTemporalGraphText,
 };
 pub use shortest_walk::GraphShortestWalkCursor;
 pub use write_receipt::{GraphWriteProgramReceipt, GraphWriteStepReceipt};
@@ -173,7 +172,7 @@ pub use set_ops::{
     GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp,
     GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
     GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetValue,
-    MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet,
+    MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};

@@ -1,8 +1,8 @@
-//! Single-source relational input for the existing exact GroupAggregate.
+//! Relational input for the existing exact GroupAggregate.
 //!
-//! The real graph leaf remains the storage admission contract. Its completed
-//! row pipeline executes once before the SAME borrowed-row group/result engine.
-//! No synthetic vertices, replacement graph, or second accumulator is involved.
+//! Single-source callers retain their admitted graph contract. Compound callers
+//! supply every actual leaf through the set engine's source adapter. Both paths
+//! feed the SAME borrowed-row group/result engine, never a synthetic graph.
 
 use super::*;
 use crate::PreparedGraphSet;
@@ -19,8 +19,9 @@ impl PreparedGraphAggregate {
     /// HAVING, hidden output columns and deterministic ranking remain available.
     /// Existing snapshot and WriteTxn aggregate entrypoints execute this plan.
     ///
-    /// Binary set inputs refuse until their multiple graph leaves have a shared
-    /// admission owner. This path materializes bounded rows, not spill storage.
+    /// Binary set inputs still refuse at this single-source boundary. Use
+    /// PreparedGraphSetAggregate for a relation with multiple graph operands.
+    /// This path materializes bounded rows, not spill storage.
     pub fn prepare_relation(
         relation: PreparedGraphSet,
         keys: &[usize],
@@ -31,6 +32,23 @@ impl PreparedGraphAggregate {
         relation.check_parent_depth().map_err(GraphAggregateBuildError::RelationalInput)?;
         let source = relation.single_pattern_input()
             .ok_or(GraphAggregateBuildError::RequiresSingleGraphSource)?.clone();
+        Self::prepare_input(source, None, Some(relation), keys, aggregates, offset, count)
+    }
+
+    /// Private construction for the compound owner. The retained primary leaf
+    /// is a REAL input, not a generated schema-carrier pattern. It is metadata
+    /// only on this path: the public compound type never exposes this object's
+    /// single-source admission/execution interface. prepare_input validates
+    /// keys and arguments against the completed relation, not that first leaf.
+    pub(crate) fn prepare_set_relation(
+        relation: PreparedGraphSet,
+        keys: &[usize],
+        aggregates: &[GraphAggregate<'_>],
+        offset: u64,
+        count: Option<u64>,
+    ) -> Result<Self, GraphAggregateBuildError> {
+        relation.check_parent_depth().map_err(GraphAggregateBuildError::RelationalInput)?;
+        let source = relation.first_pattern_input().clone();
         Self::prepare_input(source, None, Some(relation), keys, aggregates, offset, count)
     }
 
@@ -52,6 +70,35 @@ impl PreparedGraphAggregate {
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        // Each borrow exists for one checkpoint, never around source execution.
+        // Single-source preparation still proves that the iterators are taken
+        // once; compound execution cannot enter this iterator-only interface.
+        let checkpoint = RefCell::new(&mut checkpoint);
+        let mut admitted = Some((vertices, edges));
+        self.execute_relational_with_source(
+            policy,
+            |pattern, remaining| {
+                let (vertices, edges) = admitted.take()
+                    .expect("preparation admitted exactly one immutable graph leaf");
+                pattern.plan().execute_governed_with_properties(
+                    snapshot_records, vertices, edges, &mut test_vertex, &mut property,
+                    remaining, || (*checkpoint.borrow_mut())(),
+                )
+            },
+            || (*checkpoint.borrow_mut())(),
+        )
+    }
+
+    /// One owner for source visits, set stages, grouping and result release.
+    /// Called only by the single-source entrypoint above or the compound type.
+    /// The trusted host adapter pins one snapshot/overlay for ALL leaf calls.
+    pub(crate) fn execute_relational_with_source<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        source: impl FnMut(&PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy)
+            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
         let relation = self.relational_input.as_ref().expect("relational input dispatch");
         // Intermediate rows are not public aggregate results. The set engine
         // still charges their traversal, retained cells, payloads and release.
@@ -62,25 +109,8 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let source = {
-            // Source evaluation and relational callbacks are sequential, but
-            // both must reach the SAME stateful cancellation callback. Each
-            // borrow exists only for one callback, never around source execution.
-            let checkpoint = RefCell::new(&mut checkpoint);
-            let mut admitted = Some((vertices, edges));
-            relation.execute_governed(
-                source_policy,
-                |pattern, remaining| {
-                    let (vertices, edges) = admitted.take()
-                        .expect("preparation admitted exactly one immutable graph leaf");
-                    pattern.plan().execute_governed_with_properties(
-                        snapshot_records, vertices, edges, &mut test_vertex, &mut property,
-                        remaining, || (*checkpoint.borrow_mut())(),
-                    )
-                },
-                || (*checkpoint.borrow_mut())(),
-            ).map_err(|error| error.map_source(GraphAggregateError::InputRelation))?
-        };
+        let source = relation.execute_governed(source_policy, source, &mut checkpoint)
+            .map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
         let mut evaluator = source.evaluator;
         let mut rows = GqlExecutionStats {
             snapshot_records: source.rows.snapshot_records,

@@ -6,10 +6,12 @@
 //! left operand. This is the bounded materialized implementation, not a spill
 //! engine, incremental derivative, or full GQL conformance claim.
 
+mod aggregate;
 mod execute;
 mod filter;
 mod merge;
 mod projection;
+pub use aggregate::PreparedGraphSetAggregate;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub use projection::{GraphSetProjection, GraphSetProjectionError, GraphSetValue};
 
