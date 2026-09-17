@@ -5,7 +5,7 @@ mod query_source {
     use asupersync::fs::Vfs;
     use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId, RelationId};
     use fgdb_gql::algebra::{GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, PreparedGraphPattern, VertexPredicate};
-    use fgdb_types::{CanonicalScalar, VId};
+    use fgdb_types::{CanonicalScalar, EId, VId};
     use std::collections::{BTreeMap, BTreeSet};
 
     include!("aggregate_queries.rs");
@@ -118,7 +118,7 @@ mod query_source {
                 let source = self.query_source_over_logical(snapshot, pattern.plan().clone(), pattern.required_vertex_label(), &mut |event| {
                     cx.checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?; usage.observe(policy, event)
                 })?;
-                let result = source.logical.execute_governed_with_properties(source.snapshot_records as u64, source.vertex_ids(), source.edge_triples(),
+                let result = source.logical.execute_governed_with_identified_properties(source.snapshot_records as u64, source.vertex_ids(), source.identified_edges(),
                     |vid, predicates| Ok::<_, WriteTxnError>(source.matches(vid, predicates)),
                     |vid, key| Ok(source.property(vid, key)), usage.remaining(policy), || cx.checkpoint());
                 usage.finish(policy, result)
