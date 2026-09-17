@@ -3479,51 +3479,44 @@ impl<V: Vfs + Clone> Database<V> {
                     error,
                 }),
             })?;
-        // Strata-side incremental publish (fgdb-gieu): the sealed prefix of a
-        // partition is immutable and content-addressed, so of everything the
-        // clone-publish returned, only blocks this session has not already made
-        // durable cost any I/O — `put_verified` skips receipted identities, and
-        // `put_root_verified` admits receipted references without re-reading
-        // them from disk. Measured pre-fix: every commit re-put every sealed
-        // block (read + hash + two fsyncs each) and re-read + re-decoded the
-        // whole partition twice more (admission, reopen) — O(blocks) disk work
-        // per commit with no new information in it.
+        // The immutable prefix remains memoized. New block, hosted-property,
+        // and vertex objects share publication authority and one directory
+        // barrier; no receipt escapes before the entire data batch completes.
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishEdgeBlocks);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
+        let mut publication = self.store.publication_batch(cx, &mut self.receipts, block_store_crash_at.take())
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::from(error)),
+            })?;
         for block in &blocks {
-            let crash_at = if self.receipts.holds(DeltaBlockVersion(block.block_id)) {
-                None
-            } else {
-                block_store_crash_at.take()
-            };
-            self.store
-                .put_verified_with_crash(
-                    cx,
-                    &block.bytes,
-                    block
-                        .property_patch
-                        .as_ref()
-                        .map(|patch| patch.bytes.as_slice()),
-                    &mut self.receipts,
-                    crash_at,
-                )
+            publication.put_verified(
+                cx,
+                &block.bytes,
+                block.property_patch.as_ref().map(|patch| patch.bytes.as_slice()),
+            )
                 .await
                 .map_err(|error| WriteError::CommittedNeedsRecovery {
                     recovery,
                     source: Box::new(RebuildError::from(error)),
                 })?;
         }
-        self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishVertexPatches);
+        recovery.failed_stage = DerivedPublicationStage::PublishVertexPatches;
+        self.state = DatabaseState::NeedsAuthoritativeRecovery(recovery);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         for patch in &patches {
-            self.store
-                .put_patch_verified(cx, &patch.bytes, &mut self.receipts)
+            publication
+                .put_patch_verified(cx, &patch.bytes)
                 .await
                 .map_err(|error| WriteError::CommittedNeedsRecovery {
                     recovery,
                     source: Box::new(RebuildError::from(error)),
                 })?;
         }
+        publication.finish(cx).await.map_err(|error| WriteError::CommittedNeedsRecovery {
+            recovery,
+            source: Box::new(RebuildError::from(error)),
+        })?;
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishPartitionRoot);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         let root_id = self

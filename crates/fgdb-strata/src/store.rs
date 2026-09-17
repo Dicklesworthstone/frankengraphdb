@@ -124,6 +124,14 @@ pub enum BlockStoreCrashPoint {
     /// The staging inode is complete and durable, but it has not yet acquired
     /// the content-addressed canonical name.
     AfterStagingFileSyncBeforePublication,
+    /// A batch staging inode has all offered bytes, before its inode sync.
+    AfterBatchStagingWrite,
+    /// The last batch rename completed, before the shared directory barrier.
+    AfterBatchRenames,
+    /// Every batch inode was synced and checked, before directory durability.
+    AfterBatchFileSyncs,
+    /// The shared directory barrier completed, before any receipts escape.
+    AfterBatchDirectorySync,
 }
 
 /// Make every directory entry currently visible in `directory` durable,
@@ -767,6 +775,23 @@ impl<V: Vfs> BlockStore<V> {
         before_lock: impl FnOnce(),
         after_staging_sync: impl FnOnce(),
     ) -> Result<ObjectId, StoreError> {
+        before_lock();
+        let permit = self.acquire_publication_permit(cx)?;
+        self.put_object_under_permit(kind, cx, bytes, crash_at, after_staging_sync, &permit, false)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn put_object_under_permit(
+        &self,
+        kind: StoredObjectKind,
+        cx: &CommitCx,
+        bytes: &[u8],
+        crash_at: Option<BlockStoreCrashPoint>,
+        after_staging_sync: impl FnOnce(),
+        _permit: &ObjectPublicationPermit,
+        batch: bool,
+    ) -> Result<ObjectId, StoreError> {
         let offered_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         // fgdb-a7sz: each stored family admits against ITS OWN format
         // ceiling. Roots encode up to MAX_ENCODED_ROOT_BYTES (the layout's
@@ -783,9 +808,6 @@ impl<V: Vfs> BlockStore<V> {
 
         let id = kind.identity(self.k_oid.expose(), self.namespace, bytes);
         let path = self.path(id);
-
-        before_lock();
-        let _permit = self.acquire_publication_permit(cx)?;
 
         // The canonical path is inspected only while publication authority is
         // held, so a conforming writer can see either no winner or one complete
@@ -823,6 +845,11 @@ impl<V: Vfs> BlockStore<V> {
                 }
                 if existing != bytes {
                     return Err(StoreError::Collision { object_id: id });
+                }
+                if batch {
+                    cx.with_restriction_async(file.sync_all()).await?;
+                    self.verify_durable_bytes(cx, &path, bytes, limit).await?;
+                    return Ok(id);
                 }
                 sync_file_and_directory(cx, &self.vfs, &file, &self.dir, || {
                     if crash_at
@@ -872,7 +899,13 @@ impl<V: Vfs> BlockStore<V> {
         };
 
         staging.write_all(bytes).await?;
+        if batch && crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
+            return Err(std::io::Error::other("crash: batch staging bytes before inode sync").into());
+        }
         cx.with_restriction_async(staging.sync_all()).await?;
+        if batch {
+            self.verify_durable_bytes(cx, &staging_path, bytes, limit).await?;
+        }
         after_staging_sync();
         if crash_at == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication) {
             return Err(StoreError::Io(std::io::Error::other(
@@ -885,6 +918,12 @@ impl<V: Vfs> BlockStore<V> {
         // permit spans the absence check, staging write, and move.
         drop(staging);
         self.vfs.rename(&staging_path, &path).await?;
+        if batch {
+            if crash_at == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync) {
+                return Err(std::io::Error::other("crash: strata block inode durable before directory entry").into());
+            }
+            return Ok(id);
+        }
 
         let published_opts = OpenOptions::new().read(true).write(true);
         let published = cx
@@ -900,6 +939,50 @@ impl<V: Vfs> BlockStore<V> {
         })
         .await?;
         Ok(id)
+    }
+
+    /// Like Chronicle's root evidence reread, sample the VFS durable backing,
+    /// not another handle into the same volatile inode cache. UnixVfs still
+    /// relies on the filesystem profile's truthful-flush assumption.
+    async fn verify_durable_bytes(
+        &self,
+        cx: &CommitCx,
+        path: &Path,
+        expected: &[u8],
+        limit: u64,
+    ) -> Result<(), StoreError> {
+        cx.with_restriction_async(async {
+            ensure_size_within_limit(self.vfs.metadata(path).await?.len(), limit)?;
+            let durable = Vfs::read(&self.vfs, path).await?;
+            ensure_size_within_limit(u64::try_from(durable.len()).unwrap_or(u64::MAX), limit)?;
+            if durable != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Strata inode sync did not make the offered bytes durable",
+                ).into());
+            }
+            Ok(())
+        }).await
+    }
+
+    /// Hold publication authority across one commit's data objects. A batch
+    /// syncs each unreceipted inode once and the directory once; roots and
+    /// manifests must be published only after `finish` succeeds.
+    pub fn publication_batch<'a>(
+        &'a self,
+        cx: &CommitCx,
+        receipts: &'a mut PublishReceipts,
+        crash_at: Option<BlockStoreCrashPoint>,
+    ) -> Result<BlockPublicationBatch<'a, V>, StoreError> {
+        Ok(BlockPublicationBatch {
+            store: self,
+            receipts,
+            permit: self.acquire_publication_permit(cx)?,
+            objects: std::collections::BTreeSet::new(),
+            pending: Vec::new(),
+            crash_at,
+            failed: false,
+        })
     }
 
     /// Load and decode the block named by `id`.
@@ -1441,6 +1524,18 @@ impl<V: Vfs> BlockStore<V> {
         }
         let stored = self.put_with_crash(cx, bytes, crash_at).await?;
         debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
+        let entries = self.verify_block_payload(cx, bytes, patch_bytes, receipts.spans.len()).await?;
+        receipts.admit_block(id, &entries, crate::header_predecessor(bytes))?;
+        Ok(stored)
+    }
+
+    async fn verify_block_payload(
+        &self,
+        cx: &CommitCx,
+        bytes: &[u8],
+        patch_bytes: Option<&[u8]>,
+        at: usize,
+    ) -> Result<Vec<crate::AdjacencyEntry>, StoreError> {
         let (entries, declared_patch) =
             crate::decode_block_with_properties(bytes).map_err(StoreError::Malformed)?;
         if let Some((patch_id, locators)) = declared_patch {
@@ -1455,7 +1550,7 @@ impl<V: Vfs> BlockStore<V> {
                         .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
                         .await
                         .map_err(|error| StoreError::BlockPatchLoad {
-                            at: receipts.spans.len(),
+                            at,
                             error: Box::new(error),
                         })?;
                     &owned
@@ -1488,21 +1583,7 @@ impl<V: Vfs> BlockStore<V> {
                 ));
             }
         }
-        receipts
-            .validator
-            .observe_block(receipts.spans.len(), &entries)
-            .map_err(StoreError::MalformedRoot)?;
-        if let Some(span) = crate::root::span_of(&entries) {
-            receipts.spans.insert(id, span);
-            receipts.chains.insert(
-                id,
-                (
-                    entries.first().map(|entry| (entry.src, entry.relation)),
-                    crate::header_predecessor(bytes),
-                ),
-            );
-        }
-        Ok(stored)
+        Ok(entries)
     }
 
     /// [`BlockStore::put_root`], with admission memoised under `receipts`
@@ -1793,9 +1874,161 @@ impl PublishReceipts {
         Self::default()
     }
 
+    fn admit_block(
+        &mut self,
+        id: ObjectId,
+        entries: &[crate::AdjacencyEntry],
+        predecessor: Option<DeltaBlockVersion>,
+    ) -> Result<(), StoreError> {
+        self.validator.observe_block(self.spans.len(), entries)
+            .map_err(StoreError::MalformedRoot)?;
+        if let Some(span) = crate::root::span_of(entries) {
+            self.spans.insert(id, span);
+            self.chains.insert(id, (entries.first().map(|entry| (entry.src, entry.relation)), predecessor));
+        }
+        Ok(())
+    }
+
     /// Is this identity already durable-and-admitted under these receipts?
     pub fn holds(&self, id: DeltaBlockVersion) -> bool {
         self.spans.contains_key(&id.0)
+    }
+}
+
+enum PendingAdmission {
+    Block(ObjectId, Vec<crate::AdjacencyEntry>, Option<DeltaBlockVersion>),
+    Patch(ObjectId, VertexPatchRows),
+}
+
+/// Exclusive, non-clone publication session. Dropping it discards all pending
+/// receipts. Complete canonical inodes can remain, but a subsequent publisher
+/// must re-establish their durability before admitting them.
+pub struct BlockPublicationBatch<'a, V: Vfs> {
+    store: &'a BlockStore<V>,
+    receipts: &'a mut PublishReceipts,
+    permit: ObjectPublicationPermit,
+    objects: std::collections::BTreeSet<ObjectId>,
+    pending: Vec<PendingAdmission>,
+    crash_at: Option<BlockStoreCrashPoint>,
+    failed: bool,
+}
+
+impl<V: Vfs> BlockPublicationBatch<'_, V> {
+    async fn put_object(
+        &mut self,
+        cx: &CommitCx,
+        kind: StoredObjectKind,
+        bytes: &[u8],
+    ) -> Result<ObjectId, StoreError> {
+        let id = kind.identity(self.store.k_oid.expose(), self.store.namespace, bytes);
+        if !self.objects.contains(&id) {
+            self.store.put_object_under_permit(
+                kind, cx, bytes, self.crash_at, || {}, &self.permit, true,
+            ).await?;
+            self.objects.insert(id);
+        }
+        Ok(id)
+    }
+
+    /// Stage a block and its hosted patch without exposing a receipt. A failed
+    /// or cancelled operation poisons this batch even if the caller retains it.
+    pub async fn put_verified(
+        &mut self,
+        cx: &CommitCx,
+        bytes: &[u8],
+        patch_bytes: Option<&[u8]>,
+    ) -> Result<DeltaBlockVersion, StoreError> {
+        self.check_live()?;
+        self.failed = true;
+        let id = block_id(self.store.k_oid.expose(), self.store.namespace, bytes);
+        if !self.receipts.spans.contains_key(&id) && !self.objects.contains(&id) {
+            // If the patch was omitted, admit the declared on-disk patch but
+            // still establish its durability under this batch's permit.
+            let (_, declared_patch) = crate::decode_block_with_properties(bytes)
+                .map_err(StoreError::Malformed)?;
+            let owned;
+            let patch_bytes = if let Some(bytes) = patch_bytes {
+                Some(bytes)
+            } else if let Some((patch_id, _)) = declared_patch {
+                owned = self.store.read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES).await?;
+                Some(owned.as_slice())
+            } else {
+                None
+            };
+            let entries = self.store.verify_block_payload(
+                cx, bytes, patch_bytes, self.receipts.spans.len() + self.pending.len(),
+            ).await?;
+            if let Some(patch_bytes) = patch_bytes {
+                self.put_object(cx, StoredObjectKind::EdgePropertyPatch, patch_bytes).await?;
+            }
+            self.put_object(cx, StoredObjectKind::Block, bytes).await?;
+            self.pending.push(PendingAdmission::Block(id, entries, crate::header_predecessor(bytes)));
+        }
+        self.failed = false;
+        Ok(DeltaBlockVersion(id))
+    }
+
+    /// Stage a vertex patch; its history/span admission escapes only at finish.
+    pub async fn put_patch_verified(
+        &mut self,
+        cx: &CommitCx,
+        bytes: &[u8],
+    ) -> Result<VertexPatchVersion, StoreError> {
+        self.check_live()?;
+        self.failed = true;
+        let id = vertex_patch_id(self.store.k_oid.expose(), self.store.namespace, bytes);
+        if !self.receipts.patch_spans.contains_key(&id) && !self.objects.contains(&id) {
+            let rows = decode_patch_inner(bytes, self.store.decode_resolver())
+                .map_err(StoreError::MalformedPatch)?;
+            self.put_object(cx, StoredObjectKind::VertexPatch, bytes).await?;
+            self.pending.push(PendingAdmission::Patch(id, rows));
+        }
+        self.failed = false;
+        Ok(VertexPatchVersion(id))
+    }
+
+    fn check_live(&self) -> Result<(), StoreError> {
+        if self.failed {
+            return Err(std::io::Error::other("publication batch failed or was cancelled").into());
+        }
+        Ok(())
+    }
+
+    /// Complete namespace durability before changing the borrowed receipts.
+    /// No await follows admission: cancellation can never expose a partially
+    /// durable batch. History errors clear the memoization rather than leave
+    /// a partially advanced validator for a caller to reuse.
+    pub async fn finish(self, cx: &CommitCx) -> Result<(), StoreError> {
+        self.check_live()?;
+        if !self.objects.is_empty() {
+            if matches!(self.crash_at, Some(BlockStoreCrashPoint::AfterBatchRenames | BlockStoreCrashPoint::AfterBatchFileSyncs)) {
+                return Err(std::io::Error::other("crash: batch inodes durable before directory barrier").into());
+            }
+            sync_directory(cx, &self.store.vfs, &self.store.dir).await?;
+            if self.crash_at == Some(BlockStoreCrashPoint::AfterBatchDirectorySync) {
+                return Err(std::io::Error::other("crash: batch directory durable before receipts").into());
+            }
+        }
+        for admission in self.pending {
+            let result = match admission {
+                PendingAdmission::Block(id, entries, predecessor) => {
+                    self.receipts.admit_block(id, &entries, predecessor)
+                }
+                PendingAdmission::Patch(id, rows) => {
+                    self.receipts.vertex_validator.observe_patch(self.receipts.patch_spans.len(), &rows)
+                        .map_err(StoreError::MalformedRoot).map(|()| {
+                            if let Some(span) = crate::vertex::span_of_rows(&rows) {
+                                self.receipts.patch_spans.insert(id, span);
+                            }
+                        })
+                }
+            };
+            if let Err(error) = result {
+                *self.receipts = PublishReceipts::new();
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 }
 
