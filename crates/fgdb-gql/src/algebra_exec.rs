@@ -155,7 +155,7 @@ type Adjacency = BTreeMap<VId, Vec<VId>>;
 type Index = BTreeMap<(RelationId, GlaDirection), Adjacency>;
 type IdentifiedIndex = BTreeMap<(RelationId, GlaDirection), BTreeMap<VId, Vec<(EId, VId)>>>;
 
-// Both search kernels borrow the SAME admitted index and feed the same binding
+// Search kernels borrow the SAME admitted index and feed the same binding
 // continuation. Search is a prepared logical choice, never an adaptive fallback
 // or a post-filter over all walks. Ordinary WALK's event sequence is unchanged.
 enum WalkExpansion<'a> {
@@ -181,6 +181,12 @@ impl<'a> WalkExpansion<'a> {
             GraphWalkSearch::AnyShortest => {
                 crate::GraphShortestWalkCursor::new_any(source, bounds, adjacency, control)
                     .map(Self::AllShortest)
+            }
+            GraphWalkSearch::Acyclic => {
+                crate::GraphWalkCursor::new_acyclic(source, bounds, adjacency, control).map(Self::All)
+            }
+            GraphWalkSearch::Simple => {
+                crate::GraphWalkCursor::new_simple(source, bounds, adjacency, control).map(Self::All)
             }
         }
     }
@@ -346,7 +352,7 @@ fn build_identified_index<E>(
 fn sort_identified_neighbors<E>(values: &mut [(EId, VId)], control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<(), E> {
     fn sift<E>(values: &mut [(EId, VId)], mut root: usize, end: usize, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<(), E> {
         while root < end / 2 {
-            let mut child = root * 2 + 1;
+            let mut child = 2 * root + 1;
             if child + 1 < end {
                 control(GlaExecutionEvent::Work)?;
                 if values[child] < values[child + 1] { child += 1; }

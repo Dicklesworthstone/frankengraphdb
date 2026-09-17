@@ -177,7 +177,6 @@ impl<Row> core::fmt::Debug for PreparedGraphPattern<Row> {
             .field("variables", &self.variable_count)
             .field("edges", &self.edge_count)
             .field("columns", &self.columns.len())
-            .field("definition", &"[REDACTED]")
             .finish()
     }
 }
@@ -520,6 +519,40 @@ impl GraphPatternBuilder {
         Ok(self)
     }
 
+    /// Add a finite ACYCLIC atom. Every vertex in this atom's route is unique;
+    /// independent routes and parallel edges retain occurrence multiplicity.
+    /// Membership checks precede frontier growth. Endpoint predicates, scopes
+    /// and capture_path use the ordinary compiler and admitted source.
+    /// The restriction is local to this atom, not to a compound pattern.
+    pub fn acyclic_walk(
+        &mut self,
+        source: &str,
+        relation: RelationId,
+        direction: GlaDirection,
+        destination: &str,
+        bounds: crate::GraphWalkBounds,
+    ) -> Result<&mut Self, PatternBuildError> {
+        self.walk(source, relation, direction, destination, bounds)?;
+        self.edges.last_mut().expect("one validated atom was added").search = GraphWalkSearch::Acyclic;
+        Ok(self)
+    }
+
+    /// Add a finite SIMPLE atom. Only its first and last vertices may coincide;
+    /// a closing return is terminal. This is not edge-unique TRAIL matching or
+    /// shortest-path selection. Captures preserve the actual edge identities.
+    pub fn simple_walk(
+        &mut self,
+        source: &str,
+        relation: RelationId,
+        direction: GlaDirection,
+        destination: &str,
+        bounds: crate::GraphWalkBounds,
+    ) -> Result<&mut Self, PatternBuildError> {
+        self.walk(source, relation, direction, destination, bounds)?;
+        self.edges.last_mut().expect("one validated atom was added").search = GraphWalkSearch::Simple;
+        Ok(self)
+    }
+
     pub fn identity(
         &mut self,
         left: &str,
@@ -797,7 +830,6 @@ impl GraphPatternBuilder {
         Ok((operators, slots))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -53,10 +53,10 @@ pub enum GlaDirection {
     Undirected,
 }
 
-/// Search semantics of one finite WALK atom, not a terminal row quantifier.
-/// ALL modes retain edge-occurrence multiplicity; ANY selects one occurrence
-/// per endpoint pair. DISTINCT remains a separate output operation. This
-/// profile returns endpoints, not captured path values.
+/// Search semantics of one finite path atom, not a terminal row quantifier.
+/// ALL and repetition-restricted modes retain edge-occurrence multiplicity;
+/// ANY selects one occurrence per endpoint pair. DISTINCT remains a separate
+/// output operation. Captured atoms retain the selected real edge identities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphWalkSearch {
     /// Every walk whose length lies in the admitted interval.
@@ -64,13 +64,19 @@ pub enum GraphWalkSearch {
     /// Every tied minimum-length walk in that interval for each endpoint pair.
     /// A lower bound delays settlement; it is not a filter applied after an
     /// unrestricted shortest-path search. Each atom selects independently of
-    /// surrounding joins. No weighted, TRAIL or SIMPLE search is implied.
+    /// surrounding joins. No weighted or repetition-restricted search is implied.
     AllShortest,
     /// One minimum-length occurrence within the interval per endpoint pair.
     /// Equal-depth prefixes coalesce before expansion, not after enumerating
     /// all ties. Surrounding binding occurrences still multiply independently.
-    /// No captured route is selected or exposed by this endpoint-only profile.
     AnyShortest,
+    /// Every path without a repeated vertex, including the starting vertex.
+    /// Membership is path-local; distinct routes to an endpoint remain distinct.
+    Acyclic,
+    /// Every path whose vertices are distinct except that its last vertex may
+    /// equal its first. A closing return is terminal, including a self-loop.
+    /// This is vertex restriction, not edge-unique TRAIL or shortest selection.
+    Simple,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,11 +207,11 @@ pub enum GlaOperator {
         relation: RelationId,
         direction: GlaDirection,
     },
-    /// Append one endpoint for every selected WALK occurrence in the inclusive
-    /// finite interval. Search explicitly selects all walks, all shortest ties
-    /// or one shortest occurrence per endpoint pair. Predicates apply after
-    /// expansion; intermediate vertices are not endpoint-filtered. No captured
-    /// path, weighted search, TRAIL or SIMPLE mode is implied.
+    /// Append an endpoint for each selected path occurrence in the inclusive
+    /// finite interval. Search chooses WALK, shortest WALK, ACYCLIC or SIMPLE.
+    /// Endpoint predicates apply after expansion, not to transit vertices.
+    /// A CapturePath operator may retain the real identified route. Repetition
+    /// restrictions apply to this atom, not to a surrounding compound path.
     VarLengthExpand {
         source: BindingSlot,
         relation: RelationId,
@@ -667,6 +673,8 @@ impl<Row> GlaPlan<Row> {
                         GraphWalkSearch::All => 22,
                         GraphWalkSearch::AllShortest => 23,
                         GraphWalkSearch::AnyShortest => 24,
+                        GraphWalkSearch::Acyclic => 29,
+                        GraphWalkSearch::Simple => 30,
                     });
                     bytes.extend_from_slice(&source.0.to_be_bytes());
                     bytes.extend_from_slice(&relation.0.to_be_bytes());

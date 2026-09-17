@@ -1,8 +1,9 @@
-//! Bounded WALK expansion over an already admitted, sorted adjacency index.
+//! Bounded path expansion over an already admitted, sorted adjacency index.
 //!
-//! Every edge occurrence is significant. Repeated vertices and edges are legal;
-//! this is neither TRAIL/SIMPLE enumeration nor DISTINCT reachability. The cursor
-//! retains only one path frontier and crosses the ordinary GLA control seam
+//! Every edge occurrence is significant. WALK permits repetition; ACYCLIC
+//! forbids repeated vertices; SIMPLE additionally permits a terminal return to
+//! the start. None implies DISTINCT reachability or edge-unique TRAIL matching.
+//! The cursor retains one path frontier and crosses the ordinary GLA control seam
 //! before work and frame growth. No database observation or authorization is
 //! performed here; the caller owns the immutable, admitted graph generation.
 
@@ -70,6 +71,13 @@ struct Frame<'a> {
     emitted: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Repetition {
+    Walk,
+    Acyclic,
+    Simple,
+}
+
 /// Fallible, iterative physical expansion. `next_with_control` yields one
 /// endpoint for each admitted walk, in deterministic depth-first index order.
 /// Distinctness, predicates, correlations, ranking and pagination belong to the
@@ -83,6 +91,7 @@ struct Frame<'a> {
 pub struct GraphWalkCursor<'a> {
     adjacency: Option<&'a BTreeMap<VId, Vec<VId>>>,
     bounds: GraphWalkBounds,
+    repetition: Repetition,
     stack: Vec<Frame<'a>>,
 }
 impl<'a> GraphWalkCursor<'a> {
@@ -90,6 +99,41 @@ impl<'a> GraphWalkCursor<'a> {
         source: VId,
         bounds: GraphWalkBounds,
         adjacency: Option<&'a BTreeMap<VId, Vec<VId>>>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        Self::with_repetition(source, bounds, adjacency, Repetition::Walk, control)
+    }
+
+    /// Enumerate paths with no repeated vertex, including the source. A zero-
+    /// hop path is valid. Membership is path-local, not a global visited set:
+    /// distinct routes to an endpoint and parallel occurrences remain distinct.
+    pub fn new_acyclic<E>(
+        source: VId,
+        bounds: GraphWalkBounds,
+        adjacency: Option<&'a BTreeMap<VId, Vec<VId>>>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        Self::with_repetition(source, bounds, adjacency, Repetition::Acyclic, control)
+    }
+
+    /// Enumerate vertex-simple paths, permitting only the first and last
+    /// vertex to coincide. A closing return, including a self-loop, is terminal:
+    /// it can be emitted within bounds but cannot be extended to another row.
+    /// SIMPLE constrains vertices, not physical edge identities; it is not TRAIL.
+    pub fn new_simple<E>(
+        source: VId,
+        bounds: GraphWalkBounds,
+        adjacency: Option<&'a BTreeMap<VId, Vec<VId>>>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        Self::with_repetition(source, bounds, adjacency, Repetition::Simple, control)
+    }
+
+    fn with_repetition<E>(
+        source: VId,
+        bounds: GraphWalkBounds,
+        adjacency: Option<&'a BTreeMap<VId, Vec<VId>>>,
+        repetition: Repetition,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         control(GlaExecutionEvent::ScratchEntry)?;
@@ -103,6 +147,7 @@ impl<'a> GraphWalkCursor<'a> {
         Ok(Self {
             adjacency,
             bounds,
+            repetition,
             stack: vec![Frame {
                 vertex: source,
                 neighbors,
@@ -112,14 +157,31 @@ impl<'a> GraphWalkCursor<'a> {
         })
     }
 
+    /// Refusal is terminal. No partially explored path may be resumed after a
+    /// work, growth or membership check fails; later pulls return None without
+    /// calling the controller. Drop is iterative even at the maximum hop bound.
     pub fn next_with_control<E>(
+        &mut self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<VId>, E> {
+        let result = self.advance_with_control(control);
+        if result.is_err() {
+            // Release the allocation as well as the live frames. This cursor
+            // stores no independent visited set that could outlive its path.
+            self.stack = Vec::new();
+        }
+        result
+    }
+
+    fn advance_with_control<E>(
         &mut self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<VId>, E> {
         while !self.stack.is_empty() {
             control(GlaExecutionEvent::Work)?;
-            let depth = (self.stack.len() - 1) as u32;
-            let frame = self.stack.last_mut().expect("the frontier is nonempty");
+            let top = self.stack.len() - 1;
+            let depth = top as u32;
+            let frame = &mut self.stack[top];
             if !frame.emitted {
                 frame.emitted = true;
                 if depth >= self.bounds.minimum {
@@ -131,11 +193,30 @@ impl<'a> GraphWalkCursor<'a> {
                 continue;
             }
             let destination = frame.neighbors[frame.next];
-            // A refused frame is not partially admitted. The cursor may be
-            // dropped immediately on cancellation without recursive cleanup.
+            let mut closing = false;
+            let mut repeated = false;
+            if self.repetition != Repetition::Walk {
+                // The existing frontier IS the membership authority. Charge
+                // every comparison before doing it; no unmetered linear scan
+                // or cloned per-prefix set hides behind a single event.
+                for (at, ancestor) in self.stack.iter().enumerate() {
+                    control(GlaExecutionEvent::Work)?;
+                    if ancestor.vertex == destination {
+                        closing = self.repetition == Repetition::Simple && at == 0;
+                        repeated = !closing;
+                        break;
+                    }
+                }
+            }
+            if repeated {
+                self.stack[top].next += 1;
+                continue;
+            }
+            // Admit growth before mutating the parent or allocating a frame.
+            // Rejected cycles never allocate a descendant frontier.
             control(GlaExecutionEvent::ScratchEntry)?;
-            frame.next += 1;
-            let neighbors = if depth + 1 == self.bounds.maximum {
+            self.stack[top].next += 1;
+            let neighbors = if closing || depth + 1 == self.bounds.maximum {
                 &[][..]
             } else {
                 self.adjacency
@@ -156,6 +237,7 @@ impl core::fmt::Debug for GraphWalkCursor<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GraphWalkCursor")
             .field("bounds", &self.bounds)
+            .field("repetition", &self.repetition)
             .field("frontier_depth", &self.stack.len())
             .field("graph", &"[REDACTED]")
             .finish()
@@ -242,7 +324,8 @@ impl<'a> GraphPathCursor<'a> {
             return Ok(());
         }
 
-        let shortest = self.search != GraphWalkSearch::All;
+        let shortest = matches!(self.search, GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest);
+        let restricted = matches!(self.search, GraphWalkSearch::Acyclic | GraphWalkSearch::Simple);
         let unique = self.search == GraphWalkSearch::AnyShortest;
         let mut next = Vec::new();
         let mut pending = Vec::new();
@@ -261,11 +344,30 @@ impl<'a> GraphPathCursor<'a> {
                 self.settled.insert(endpoint, self.depth);
             }
 
-            if self.depth < self.bounds.maximum()
+            // A SIMPLE return to the start is a complete path, never a transit
+            // prefix. In particular, a lower bound cannot license reopening it.
+            let closed = self.search == GraphWalkSearch::Simple
+                && !path.steps().is_empty() && endpoint == path.start();
+            if !closed && self.depth < self.bounds.maximum()
                 && let Some(neighbors) = self.adjacency.and_then(|map| map.get(&endpoint))
             {
                 for &step in neighbors {
                     control(GlaExecutionEvent::Work)?;
+                    if restricted {
+                        // Inspect the actual path, not endpoint settlement.
+                        // Keep all valid parallel edges and distinct prefixes.
+                        control(GlaExecutionEvent::Work)?;
+                        if step.1 == path.start() {
+                            if self.search == GraphWalkSearch::Acyclic { continue; }
+                        } else {
+                            let mut repeated = false;
+                            for &(_, vertex) in path.steps() {
+                                control(GlaExecutionEvent::Work)?;
+                                if vertex == step.1 { repeated = true; break; }
+                            }
+                            if repeated { continue; }
+                        }
+                    }
                     if unique {
                         // Compare before copying: parallel edges and tied
                         // routes cannot multiply the next layer's prefixes.
@@ -547,5 +649,183 @@ mod tests {
             collect(VId(1), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap(),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod repetition_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn run(
+        source: VId,
+        bounds: GraphWalkBounds,
+        adjacency: &BTreeMap<VId, Vec<VId>>,
+        mode: Repetition,
+    ) -> Vec<VId> {
+        let mut cursor = GraphWalkCursor::with_repetition(
+            source, bounds, Some(adjacency), mode, &mut |_| Ok::<_, ()>(()),
+        ).unwrap();
+        let mut rows = Vec::new();
+        while let Some(endpoint) = cursor.next_with_control(&mut |_| Ok::<_, ()>(())).unwrap() {
+            rows.push(endpoint);
+        }
+        rows
+    }
+
+    fn bag(rows: Vec<VId>) -> BTreeMap<VId, usize> {
+        let mut result = BTreeMap::new();
+        for vertex in rows { *result.entry(vertex).or_default() += 1; }
+        result
+    }
+
+    fn valid(path: &[VId], mode: Repetition) -> bool {
+        let checked = if mode == Repetition::Simple && path.len() > 1
+            && path.first() == path.last() {
+            &path[..path.len() - 1]
+        } else { path };
+        mode == Repetition::Walk || checked.iter().collect::<BTreeSet<_>>().len() == checked.len()
+    }
+
+    #[test]
+    fn restricted_paths_match_unpruned_complete_walk_filtering() {
+        // Independent breadth-first occurrence enumeration never prunes a path.
+        // Repetition is checked only on complete sequences, not cursor frames.
+        for mask in 0..512_u32 {
+            let mut adjacency = BTreeMap::<VId, Vec<VId>>::new();
+            for source in 0..3_u128 {
+                for destination in 0..3_u128 {
+                    if mask & (1 << (3 * source + destination)) != 0 {
+                        adjacency.entry(VId(source)).or_default().push(VId(destination));
+                    }
+                }
+            }
+            if let Some(neighbors) = adjacency.values_mut().next() {
+                neighbors.push(neighbors[0]);
+                neighbors.sort();
+            }
+            for source in 0..4_u128 {
+                let mut layers = vec![vec![vec![VId(source)]]];
+                for depth in 1..=4 {
+                    let mut next = Vec::new();
+                    for path in &layers[depth - 1] {
+                        for &endpoint in adjacency.get(path.last().unwrap()).into_iter().flatten() {
+                            let mut extended = path.clone();
+                            extended.push(endpoint);
+                            next.push(extended);
+                        }
+                    }
+                    layers.push(next);
+                }
+                for maximum in 0..=4_u32 {
+                    for minimum in 0..=maximum {
+                        for mode in [Repetition::Acyclic, Repetition::Simple] {
+                            let expected = layers[minimum as usize..=maximum as usize].iter()
+                                .flatten().filter(|path| valid(path, mode))
+                                .map(|path| *path.last().unwrap()).collect();
+                            let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
+                            assert_eq!(bag(run(VId(source), bounds, &adjacency, mode)), bag(expected),
+                                "mask={mask}, source={source}, bounds={bounds:?}, mode={mode:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn simple_closures_are_terminal_and_lower_bounds_do_not_allow_repeated_roots() {
+        let adjacency = BTreeMap::from([
+            (VId(1), vec![VId(1), VId(1), VId(2)]),
+            (VId(2), vec![VId(1), VId(2), VId(3)]),
+            (VId(3), vec![VId(1)]),
+        ]);
+        let bounds = GraphWalkBounds::new(1, 1_024).unwrap();
+        assert_eq!(run(VId(1), bounds, &adjacency, Repetition::Acyclic), vec![VId(2), VId(3)]);
+        assert_eq!(run(VId(1), bounds, &adjacency, Repetition::Simple),
+            vec![VId(1), VId(1), VId(2), VId(1), VId(3), VId(1)]);
+        assert_eq!(run(VId(1), GraphWalkBounds::new(3, 1_024).unwrap(), &adjacency, Repetition::Simple),
+            vec![VId(1)]);
+        assert!(run(VId(1), GraphWalkBounds::new(4, 1_024).unwrap(), &adjacency, Repetition::Simple).is_empty());
+        let isolated = BTreeMap::new();
+        for mode in [Repetition::Acyclic, Repetition::Simple] {
+            assert_eq!(run(VId(u128::MAX), GraphWalkBounds::new(0, 0).unwrap(), &isolated, mode),
+                vec![VId(u128::MAX)]);
+            assert!(run(VId(u128::MAX), GraphWalkBounds::new(1, 2).unwrap(), &isolated, mode).is_empty());
+        }
+    }
+
+    #[test]
+    fn every_refusal_discards_frontier_storage_and_permanently_exhausts_the_cursor() {
+        let adjacency = BTreeMap::from([
+            (VId(1), vec![VId(1), VId(2), VId(2)]),
+            (VId(2), vec![VId(1), VId(3)]),
+            (VId(3), vec![VId(2)]),
+        ]);
+        let bounds = GraphWalkBounds::new(0, 3).unwrap();
+        for mode in [Repetition::Walk, Repetition::Acyclic, Repetition::Simple] {
+            let mut total = 0;
+            let mut control = |_| { total += 1; Ok::<_, usize>(()) };
+            let mut cursor = GraphWalkCursor::with_repetition(VId(1), bounds, Some(&adjacency), mode, &mut control).unwrap();
+            while cursor.next_with_control(&mut control).unwrap().is_some() {}
+            for stop in 1..=total {
+                let mut seen = 0;
+                let mut control = |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                };
+                match GraphWalkCursor::with_repetition(VId(1), bounds, Some(&adjacency), mode, &mut control) {
+                    Err(at) => assert_eq!(at, stop),
+                    Ok(mut cursor) => {
+                        loop {
+                            match cursor.next_with_control(&mut control) {
+                                Ok(Some(_)) => {}
+                                Ok(None) => panic!("missed refusal {stop} in {mode:?}"),
+                                Err(at) => { assert_eq!(at, stop); break; }
+                            }
+                        }
+                        assert!(cursor.stack.is_empty());
+                        assert_eq!(cursor.stack.capacity(), 0);
+                        for _ in 0..2 {
+                            assert_eq!(cursor.next_with_control(&mut |_| -> Result<(), ()> {
+                                panic!("terminal cursor called control")
+                            }), Ok(None));
+                        }
+                    }
+                }
+                assert_eq!(seen, stop);
+            }
+        }
+    }
+
+    #[test]
+    fn maximum_bound_parallel_cycles_do_not_expand_illegal_prefixes() {
+        let adjacency = BTreeMap::from([(VId(7), vec![VId(7); 64])]);
+        let bounds = GraphWalkBounds::new(0, MAX_GRAPH_WALK_HOPS).unwrap();
+        for (mode, expected, allocations) in [(Repetition::Acyclic, 1, 1), (Repetition::Simple, 65, 65)] {
+            let mut work = 0;
+            let mut scratch = 0;
+            let mut control = |event| {
+                work += 1;
+                scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+                assert!(work < 400, "restricted traversal expanded a cyclic descendant");
+                Ok::<_, ()>(())
+            };
+            let mut cursor = GraphWalkCursor::with_repetition(VId(7), bounds, Some(&adjacency), mode, &mut control).unwrap();
+            let mut count = 0;
+            while cursor.next_with_control(&mut control).unwrap().is_some() { count += 1; }
+            assert_eq!(count, expected);
+            assert_eq!(scratch, allocations);
+        }
+    }
+
+    #[test]
+    fn longest_admitted_acyclic_path_is_iterative_and_frontier_local() {
+        let adjacency = (0..MAX_GRAPH_WALK_HOPS).map(|v|
+            (VId(u128::from(v)), vec![VId(u128::from(v + 1))])).collect();
+        let bounds = GraphWalkBounds::new(MAX_GRAPH_WALK_HOPS, MAX_GRAPH_WALK_HOPS).unwrap();
+        for mode in [Repetition::Acyclic, Repetition::Simple] {
+            assert_eq!(run(VId(0), bounds, &adjacency, mode), vec![VId(u128::from(MAX_GRAPH_WALK_HOPS))]);
+        }
     }
 }
