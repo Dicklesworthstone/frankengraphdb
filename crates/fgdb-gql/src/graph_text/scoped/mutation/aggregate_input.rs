@@ -85,7 +85,7 @@ impl<'a> Parser<'a> {
             let variable = self.variable()?;
             Operand::Column(self.mutation_projection(&mut sources, variable, None)?)
         } else {
-            self.mutation_expression(&mut sources)
+            self.aggregate_value_expression(&mut sources)
                 .map_err(scalar_error)?
         };
         computed.sources = sources

@@ -209,6 +209,27 @@ fn prepare_root(
                 .max()
                 .unwrap_or(1),
         };
+        // Scalar syntax must compile to the same integer instructions as typed
+        // IR when the consuming operator requires integers. Do not infer this
+        // from the result kind: CHAR_LENGTH still consumes text.
+        for (position, &child) in children.iter().enumerate() {
+            let integer_operand = matches!(op, Op::Unary(_) | Op::Binary(_))
+                || matches!(op, Op::Substring) && position != 0;
+            if integer_operand {
+                let normalized = match &nodes[child].op {
+                    Op::ScalarColumn(column) => Some(Op::Column(*column)),
+                    Op::Scalar(value) => match value.value() {
+                        CanonicalScalar::Int(value) => Some(Op::Literal(Some(*value))),
+                        CanonicalScalar::Null => Some(Op::Literal(None)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(normalized) = normalized {
+                    nodes[child].op = normalized;
+                }
+            }
+        }
         roots.push(nodes.len());
         nodes.push(Node {
             op: op.clone(),

@@ -121,23 +121,36 @@ impl<'a> Parser<'a> {
         &mut self,
         columns: &mut Vec<Projection<'a>>,
     ) -> Result<Operand, GraphMutationTextError> {
-        self.checked_expression(&mut ExpressionColumns::Graph(columns))
+        self.checked_expression(&mut ExpressionColumns::Graph(columns), true)
+    }
+
+    pub(super) fn aggregate_value_expression(
+        &mut self,
+        columns: &mut Vec<Projection<'a>>,
+    ) -> Result<Operand, GraphMutationTextError> {
+        // HAVING owns predicates around grouping keys and aggregate arguments.
+        self.checked_expression(&mut ExpressionColumns::Graph(columns), false)
     }
 
     pub(super) fn row_expression(
         &mut self,
         columns: &[(Name<'a>, crate::GraphSetColumnType)],
     ) -> Result<Operand, GraphMutationTextError> {
-        self.checked_expression(&mut ExpressionColumns::Row(columns))
+        self.checked_expression(&mut ExpressionColumns::Row(columns), true)
     }
 
     fn checked_expression(
         &mut self,
         columns: &mut ExpressionColumns<'_, 'a>,
+        predicates: bool,
     ) -> Result<Operand, GraphMutationTextError> {
         let at = self.current.at;
         let mut parsed = Vec::new();
-        self.scalar_boolean(columns, 0, &mut parsed)?;
+        if predicates {
+            self.scalar_boolean(columns, 0, &mut parsed)?;
+        } else {
+            self.scalar_concat(columns, 0, &mut parsed)?;
+        }
         if parsed.len() == 1 {
             let ParsedOp::Atom(value, _) = parsed.pop().expect("one parsed operand") else {
                 unreachable!("operators and CASE also contain their operands")
