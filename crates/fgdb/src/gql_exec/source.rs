@@ -211,6 +211,9 @@ impl PropertyEqualityIndex {
     }
 }
 
+/// Whether equality-bound vertex scans are served from the index (fgdb-bupm).
+const PROPERTY_INDEX_SERVING: bool = false;
+
 /// Serve an equality-bound vertex-only plan from the equality index. Returns
 /// `None` unless the plan is a vertex scan whose prefix constrains slot 0 (or
 /// slot 1 with an identical value bound through the join) with an equality
@@ -770,8 +773,16 @@ pub(super) fn admit<'a, E, Row>(
     use fgdb_gql::algebra::GlaOperator;
     if !logical.scans_edges() {
         // Equality-bound vertex scans serve from the per-generation index;
-        // every other node shape keeps the O(|V|) scan verbatim.
-        let vertices = match bound_vertices(snapshot, logical, as_of, control)? {
+        // every other node shape keeps the O(|V|) scan verbatim. Serving is
+        // OFF (fgdb-bupm P0): the index path returned wrong rows for staged,
+        // retained and joined reads (outer_predicate_queries, scalar_parameters,
+        // scalar_text). A faster path that drifts a result is not served.
+        let served = if PROPERTY_INDEX_SERVING {
+            bound_vertices(snapshot, logical, as_of, control)?
+        } else {
+            None
+        };
+        let vertices = match served {
             Some(vertices) => vertices,
             None => scan_vertices(&snapshot.patches, as_of, control)?,
         };
