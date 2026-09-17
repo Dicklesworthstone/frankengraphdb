@@ -512,6 +512,18 @@ impl BoundBooleanExpression {
         }
     }
 
+    /// Versioned, value-independent transcript of the compiled boolean
+    /// template. Resolved binding slots, property keys, comparisons and
+    /// literal constants are encoded; no database values, statement text or
+    /// diagnostic offsets appear. The certificate layer hashes this with its
+    /// own domain prefix, so the encoding here needs no extra framing.
+    #[must_use]
+    pub(crate) fn template_bytes(&self) -> Vec<u8> {
+        let mut bytes = b"fgdb:gql:boolean-template:v1\0".to_vec();
+        self.append_transcript(&mut bytes);
+        bytes
+    }
+
     pub(crate) fn evaluate<'a, E>(
         &self,
         bindings: &[Option<VId>],
@@ -942,5 +954,92 @@ mod tests {
             assert_eq!(at, stop);
             assert_eq!(expression, before);
         }
+    }
+    #[test]
+    fn template_bytes_are_deterministic_and_structure_sensitive() {
+        let int = CanonicalScalar::Int(7);
+        let build = || {
+            bound(&[
+                Op::Compare {
+                    left: Arg::Property {
+                        variable: "a",
+                        key: PropertyKeyId(3),
+                    },
+                    comparison: IntegerComparison::Greater,
+                    right: Arg::Literal(&int),
+                },
+                Op::IsNull {
+                    operand: Arg::Vertex("b"),
+                    is_null: false,
+                },
+                Op::And,
+            ])
+        };
+        // Determinism: two independently bound copies of the same template.
+        let first = build();
+        let second = build();
+        assert_eq!(first.template_bytes(), second.template_bytes());
+
+        // Property identity, comparison, slots and program structure are bound.
+        let different_key = bound(&[
+            Op::Compare {
+                left: Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(4),
+                },
+                comparison: IntegerComparison::Greater,
+                right: Arg::Literal(&int),
+            },
+            Op::IsNull {
+                operand: Arg::Vertex("b"),
+                is_null: false,
+            },
+            Op::And,
+        ]);
+        assert_ne!(first.template_bytes(), different_key.template_bytes());
+
+        let different_comparison = bound(&[
+            Op::Compare {
+                left: Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(3),
+                },
+                comparison: IntegerComparison::Less,
+                right: Arg::Literal(&int),
+            },
+            Op::IsNull {
+                operand: Arg::Vertex("b"),
+                is_null: false,
+            },
+            Op::And,
+        ]);
+        assert_ne!(
+            first.template_bytes(),
+            different_comparison.template_bytes()
+        );
+
+        let different_slot = bound(&[
+            Op::Compare {
+                left: Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(3),
+                },
+                comparison: IntegerComparison::Greater,
+                right: Arg::Literal(&int),
+            },
+            Op::IsNull {
+                operand: Arg::Vertex("a"),
+                is_null: false,
+            },
+            Op::And,
+        ]);
+        assert_ne!(first.template_bytes(), different_slot.template_bytes());
+
+        let different_structure = bound(&[Op::Truth(Some(true)), Op::Not]);
+        assert_ne!(first.template_bytes(), different_structure.template_bytes());
+
+        // Same template, different slot remapping: different bytes.
+        let remapped = first.remap(|slot| BindingSlot(slot.ordinal() + 10));
+        assert_ne!(first.template_bytes(), remapped.template_bytes());
     }
 }
