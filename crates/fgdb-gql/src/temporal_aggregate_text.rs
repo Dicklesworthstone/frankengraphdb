@@ -7,9 +7,9 @@
 
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters,
-    GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, GraphTemporalTextError,
-    GraphTemporalTextErrorKind, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
-    PreparedGraphAggregate, PreparedGraphAggregateText,
+    GraphAggregateTextSlot, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
+    GraphTemporalTextError, GraphTemporalTextErrorKind, MAX_GRAPH_TEXT_BYTES,
+    MAX_GRAPH_TEXT_TOKENS, PreparedGraphAggregate, PreparedGraphAggregateText,
 };
 use fgdb_types::CommitSeq;
 use std::collections::BTreeSet;
@@ -247,6 +247,10 @@ impl PreparedTemporalGraphAggregateText {
     #[must_use] pub fn statement(&self) -> &str { &self.statement }
     #[must_use] pub fn parameter_schema(&self) -> &[GqlParameterSpec] { &self.parameters }
     #[must_use] pub fn columns(&self) -> &[String] { self.inner.columns() }
+    /// RETURN-position slot mapping of the wrapped aggregate, in RETURN order.
+    /// Required by any text entrypoint that must map rows without re-deriving
+    /// slots from aliases, which repeated returned aliases make impossible.
+    #[must_use] pub fn output_slots(&self) -> &[GraphAggregateTextSlot] { self.inner.output_slots() }
 
     pub fn bind_parameters(&self, arguments: &GqlParameters)
         -> Result<BoundTemporalGraphAggregateQuery, GraphTemporalTextError> {
