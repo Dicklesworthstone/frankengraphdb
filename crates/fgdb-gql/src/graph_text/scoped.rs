@@ -4,8 +4,8 @@
 //! Bodies without shared variables are independent, not malformed correlations.
 //! Child WHERE may read visible outer vertices absent from its positive pattern;
 //! those values are captured with null intact, not introduced as node matches.
-//! Shortest WALK, ACYCLIC and SIMPLE require one finite quantified atom per
-//! selected positive pattern. Restrictions preserve occurrence multiplicity;
+//! Shortest WALK, TRAIL, ACYCLIC and SIMPLE require one finite quantified atom
+//! per selected positive pattern. Restrictions preserve occurrence multiplicity;
 //! they never imply a global DISTINCT. An explicit root binding captures the
 //! selected path, including its real ordered edge identities.
 
@@ -160,6 +160,13 @@ fn resolve_pattern_with_captures<'a>(
                 bounds,
             ),
             Some(bounds) if edge.search == GraphWalkSearch::Simple => builder.simple_walk(
+                edge.source.text,
+                relation,
+                edge.direction,
+                edge.destination.text,
+                bounds,
+            ),
+            Some(bounds) if edge.search == GraphWalkSearch::Trail => builder.trail_walk(
                 edge.source.text,
                 relation,
                 edge.direction,
@@ -453,9 +460,9 @@ impl<'a> Parser<'a> {
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'=')))
     }
     /// One positive-pattern parser, used at the root and in each scope. A
-    /// quantifier requires explicit WALK, ACYCLIC or SIMPLE semantics. Restricted
-    /// native patterns contain one finite atom; separate MATCH clauses keep
-    /// separate restrictions. Definition-wide counters never reset per clause.
+    /// quantifier requires explicit WALK, TRAIL, ACYCLIC or SIMPLE semantics.
+    /// Restricted native patterns contain one finite atom; separate MATCH
+    /// clauses keep separate restrictions. Definition-wide counters never reset.
     fn positive_pattern(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         let selector_at = self.current.at;
@@ -467,6 +474,8 @@ impl<'a> Parser<'a> {
             GraphWalkSearch::Acyclic
         } else if self.take_word("SIMPLE")? {
             GraphWalkSearch::Simple
+        } else if self.take_word("TRAIL")? {
+            GraphWalkSearch::Trail
         } else {
             GraphWalkSearch::All
         };
@@ -474,7 +483,10 @@ impl<'a> Parser<'a> {
             search,
             GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest
         );
-        let restricted = matches!(search, GraphWalkSearch::Acyclic | GraphWalkSearch::Simple);
+        let restricted = matches!(
+            search,
+            GraphWalkSearch::Acyclic | GraphWalkSearch::Simple | GraphWalkSearch::Trail
+        );
         let selected = shortest || restricted;
         let walk_mode = if shortest {
             self.word("SHORTEST")?;
@@ -485,7 +497,9 @@ impl<'a> Parser<'a> {
         } else {
             self.take_word("WALK")?
         };
-        let expected_atom = if restricted {
+        let expected_atom = if search == GraphWalkSearch::Trail {
+            "one finite quantified TRAIL atom"
+        } else if restricted {
             "one finite quantified ACYCLIC or SIMPLE atom"
         } else {
             "one bounded atom in shortest WALK"
@@ -601,7 +615,7 @@ impl<'a> Parser<'a> {
             return Err(error(
                 at,
                 GraphPatternTextErrorKind::Expected(
-                    "explicit MATCH WALK, ACYCLIC or SIMPLE for quantified atoms",
+                    "explicit MATCH WALK, TRAIL, ACYCLIC or SIMPLE for quantified atoms",
                 ),
             ));
         }
