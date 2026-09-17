@@ -118,7 +118,7 @@ fn selector_transcripts_are_distinct_and_ordinary_tags_stay_frozen() {
             }
             // The table above enumerates only the walk and shortest selectors;
             // restricted-path transcripts are pinned in restricted_path_text.rs.
-            GraphWalkSearch::Acyclic | GraphWalkSearch::Simple => {
+            GraphWalkSearch::Acyclic | GraphWalkSearch::Simple | GraphWalkSearch::Trail => {
                 unreachable!("selector table lists only walk and shortest searches")
             }
         }
