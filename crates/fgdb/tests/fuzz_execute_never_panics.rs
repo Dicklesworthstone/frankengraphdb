@@ -469,33 +469,32 @@ fn new_surface_families_prepare_refuse_and_execute_under_lab() {
                 for _ in 0..32 {
                     for (slot, family) in fuzz_gen::Family::ALL.into_iter().enumerate() {
                         let (valid, refused) = generator.family_pair(family);
-                        let mutated = if family == fuzz_gen::Family::Explain {
-                            format!(
-                                "EXPLAIN {}",
-                                generator.mutate(valid.strip_prefix("EXPLAIN ").unwrap())
-                            )
-                        } else {
-                            generator.mutate(&valid)
-                        };
+                        let mutated = generator.mutate(&valid);
                         for (statement, expected) in
                             [(valid, Some(true)), (refused, Some(false)), (mutated, None)]
                         {
                             let input_started = Instant::now();
-                            let params = GqlParameters::new()
-                                .with_list(
-                                    "xs",
-                                    vec![
-                                        GraphValue::Scalar(CanonicalScalar::Int(
-                                            variant as i64 + 1,
-                                        )),
-                                        GraphValue::Scalar(CanonicalScalar::Null),
-                                        GraphValue::List(
-                                            vec![GraphValue::Scalar(CanonicalScalar::Int(-2))]
-                                                .into_boxed_slice(),
-                                        ),
-                                    ],
-                                )
-                                .unwrap();
+                            // Explicit list arguments become schema declarations;
+                            // unused declarations are correctly refused by preparation.
+                            let params = if statement.contains("$xs") {
+                                GqlParameters::new()
+                                    .with_list(
+                                        "xs",
+                                        vec![
+                                            GraphValue::Scalar(CanonicalScalar::Int(
+                                                variant as i64 + 1,
+                                            )),
+                                            GraphValue::Scalar(CanonicalScalar::Null),
+                                            GraphValue::List(
+                                                vec![GraphValue::Scalar(CanonicalScalar::Int(-2))]
+                                                    .into_boxed_slice(),
+                                            ),
+                                        ],
+                                    )
+                                    .unwrap()
+                            } else {
+                                GqlParameters::new()
+                            };
                             let admitted = if family.is_write() {
                                 match PreparedGraphWriteScript::prepare(&statement, R, symbols) {
                                     Ok(prepared) => {
@@ -537,17 +536,18 @@ fn new_surface_families_prepare_refuse_and_execute_under_lab() {
                                     }
                                 }
                             } else if family == fuzz_gen::Family::Explain {
-                                // Database::query is the actual prefix-aware EXPLAIN facade;
-                                // unrelated read-parser prefix refusals do not earn coverage.
-                                match db.query(&cx, &statement, &params, symbols, policy()) {
-                                    Ok(QueryResult::Rows { columns, .. }) => {
-                                        assert_eq!(columns, ["operator", "detail"]);
+                                // The public EXPLAIN API takes an unprefixed statement.
+                                // Exercise both certificate modes without executing rows.
+                                let certificate = variant % 2 == 0;
+                                match db.explain(&statement, &params, symbols, certificate) {
+                                    Ok((rows, cert)) => {
+                                        assert_eq!(cert.is_some(), certificate);
+                                        assert!(
+                                            rows.iter().any(|row| row.operator == "NativeRead")
+                                        );
                                         counts[slot].prepared += 1;
                                         counts[slot].executed += 1;
                                         true
-                                    }
-                                    Ok(QueryResult::Write { .. }) => {
-                                        panic!("EXPLAIN executed a write") // ubs:ignore -- intentional test failure, not library code.
                                     }
                                     Err(error) => {
                                         let _ = expect_typed(&error);
@@ -849,13 +849,10 @@ mod fuzz_gen {
                         format!("MATCH {mode} (a)-[:MissingRelation*1..{end}]->(b) RETURN a,b"),
                     )
                 }
-                Family::Explain => {
-                    let prefix = *self.rng.pick(&["EXPLAIN", "EXPLAIN (CERTIFICATE)"]);
-                    (
-                        format!("{prefix} MATCH (n) RETURN n.{property} AS {alias}"),
-                        format!("{prefix} MATCH (n) RETURN n.missing AS {alias}"),
-                    )
-                }
+                Family::Explain => (
+                    format!("MATCH (n) RETURN n.{property} AS {alias}"),
+                    format!("MATCH (n) RETURN n.missing AS {alias}"),
+                ),
             }
         }
         pub fn statement(&mut self) -> String {
