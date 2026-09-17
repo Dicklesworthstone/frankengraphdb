@@ -199,7 +199,7 @@ fn classify(
     if matched {
         parser.parse_match_prefix()?;
     }
-    if parser.is_word("CREATE") {
+    if parser.is_word("CREATE") || parser.is_word("INSERT") {
         return Ok(Kind::Insert);
     }
     if matched && parser.is_word("DELETE") {

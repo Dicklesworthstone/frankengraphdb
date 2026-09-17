@@ -1,4 +1,4 @@
-//! CREATE uses the existing lexer, scoped MATCH compiler and scalar parser.
+//! INSERT and CREATE share the lexer, scoped MATCH compiler and scalar parser.
 //! This module only prepares templates. Storage and identity allocation are
 //! absent from parsing/binding; the ordinary insertion/write paths own both.
 
@@ -190,7 +190,9 @@ impl<'a> Parser<'a> {
 
     fn insertion_clauses(&mut self) -> Result<InsertionSyntax<'a>, GraphInsertTextError> {
         let create_at = self.current.at;
-        self.word("CREATE")?;
+        if !self.take_word("INSERT")? {
+            self.word("CREATE")?;
+        }
         let mut parsed = InsertionSyntax {
             projections: Vec::new(),
             vertices: Vec::new(),
@@ -311,7 +313,8 @@ fn bind_fields(
 }
 
 impl PreparedGraphInsertText {
-    /// Prepare CREATE (a:Label {p:$value})-[:R]->(b), optionally after MATCH.
+    /// Prepare INSERT (a:Label {p:$value})-[:R]->(b), optionally after MATCH.
+    /// The openCypher CREATE spelling lowers to the identical insertion program.
     /// Names are declared on first occurrence and bare repetitions share their
     /// created vertex; anonymous nodes always declare distinct vertices. Chains,
     /// cycles, self-loops and incoming arrows lower to the same typed template.
