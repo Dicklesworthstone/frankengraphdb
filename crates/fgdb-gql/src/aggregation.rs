@@ -171,6 +171,7 @@ pub enum GraphAggregateBuildError {
     TooManyFilters { limit: usize, observed: usize },
     DuplicateOrder { column: GraphAggregateColumn },
     InputProjection(crate::GraphSetProjectionError),
+    OutputProjection(crate::GraphSetProjectionError),
 }
 
 impl core::fmt::Display for GraphAggregateBuildError {
@@ -201,7 +202,7 @@ impl core::fmt::Display for GraphAggregateBuildError {
             Self::DuplicateOrder { column } => {
                 write!(f, "aggregate ORDER BY repeats column {column:?}")
             }
-            Self::InputProjection(error) => error.fmt(f),
+            Self::InputProjection(error) | Self::OutputProjection(error) => error.fmt(f),
         }
     }
 }
@@ -232,6 +233,11 @@ pub enum GraphAggregateError<E> {
         column: usize,
         error: crate::GraphIntegerError,
     },
+    /// A scalar output failed after grouping and HAVING, before pagination.
+    OutputExpression {
+        column: usize,
+        error: crate::GraphIntegerError,
+    },
     ResultCountOverflow,
     /// A physical weighted binding did not match its admitted topology.
     MultiplicityUnavailable,
@@ -256,6 +262,9 @@ impl<E> GraphAggregateError<E> {
             }
             Self::InputExpression { row, column, error } => {
                 GraphAggregateError::InputExpression { row, column, error }
+            }
+            Self::OutputExpression { column, error } => {
+                GraphAggregateError::OutputExpression { column, error }
             }
             Self::ResultCountOverflow => GraphAggregateError::ResultCountOverflow,
             Self::MultiplicityUnavailable => GraphAggregateError::MultiplicityUnavailable,
@@ -287,6 +296,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphAggregateError<E> {
             Self::InputExpression { row, column, error } => {
                 write!(f, "aggregate input row {row} column {column}: {error}")
             }
+            Self::OutputExpression { column, error } => {
+                write!(f, "aggregate output column {column}: {error}")
+            }
             Self::ResultCountOverflow => f.write_str("aggregate result count overflow"),
             Self::MultiplicityUnavailable => {
                 f.write_str("aggregate binding has no admitted topology multiplicity")
@@ -302,7 +314,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphAggregateError
         match self {
             Self::Source(error) => Some(error),
             Self::InputRelation(error) => Some(error),
-            Self::InputExpression { error, .. } => Some(error),
+            Self::InputExpression { error, .. } | Self::OutputExpression { error, .. } => Some(error),
             _ => None,
         }
     }
@@ -422,6 +434,8 @@ pub struct PreparedGraphAggregate {
     key_output: Option<KeyProjection>,
     aggregate_names: Vec<String>,
     output_aggregates: usize,
+    output_projection: Option<Vec<crate::GraphSetProjection>>,
+    output_names: Vec<String>,
     output_distinct: bool,
     offset: u64,
     count: Option<u64>,
@@ -547,6 +561,8 @@ impl PreparedGraphAggregate {
             key_output: None,
             aggregate_names,
             output_aggregates,
+            output_projection: None,
+            output_names: Vec::new(),
             output_distinct: false,
             offset,
             count,
@@ -565,6 +581,9 @@ impl PreparedGraphAggregate {
     }
     #[must_use]
     pub fn key_columns(&self) -> &[String] {
+        if self.output_projection.is_some() {
+            return &[];
+        }
         match &self.key_output {
             Some(projection) => &projection.names,
             None => &self.key_names,
@@ -578,6 +597,9 @@ impl PreparedGraphAggregate {
     }
     #[must_use]
     pub fn aggregate_columns(&self) -> &[String] {
+        if self.output_projection.is_some() {
+            return &self.output_names;
+        }
         &self.aggregate_names[..self.output_aggregates]
     }
 
@@ -719,6 +741,13 @@ impl PreparedGraphAggregate {
         }
         if self.output_distinct {
             bytes.extend_from_slice(b"fgdb:aggregate-output-distinct:v1\0");
+        }
+        if let Some(projection) = &self.output_projection {
+            bytes.extend_from_slice(b"fgdb:aggregate-output-projection:v1\0");
+            bytes.extend_from_slice(&(projection.len() as u64).to_be_bytes());
+            for expression in projection {
+                expression.value().append_canonical_bytes(&mut bytes);
+            }
         }
         self.append_input_projection(&mut bytes);
         if let Some(input) = &self.relational_input {

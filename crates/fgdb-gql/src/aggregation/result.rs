@@ -8,6 +8,7 @@
 mod distinct;
 mod having;
 mod streaming;
+mod projection;
 pub use having::{
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
     MAX_HAVING_INSTRUCTIONS,
@@ -159,9 +160,12 @@ impl<'a> Cell<'a> {
                 numeric::compare_ratios((a, da), (b, db))
             }
             (Self::Value(left), Self::Value(right)) => left.cmp(&right),
-            // Comparisons select the same prepared column from two groups.
-            // A numeric aggregate may instead be null, handled before this call.
-            _ => unreachable!("the prepared aggregate column has one nonnull result domain"),
+            (left, right) if left.numeric().is_some() && right.numeric().is_some() => {
+                numeric::compare_ratios(left.numeric().unwrap(), right.numeric().unwrap())
+            }
+            (Self::Value(left), _) => left.cmp(&ValueRef::Scalar(&CanonicalScalar::Int(0))),
+            (_, Self::Value(right)) => ValueRef::Scalar(&CanonicalScalar::Int(0)).cmp(&right),
+            _ => unreachable!("numeric cells were compared exactly above"),
         }
     }
 }
@@ -217,6 +221,57 @@ impl<'g, 'a: 'g> Group<'g, 'a> {
 }
 
 impl PreparedGraphAggregate {
+    /// Evaluate these expressions after HAVING, before DISTINCT/order/page.
+    /// Columns address all evaluation keys followed by all aggregates. Output
+    /// rows have no keys and one value per named expression.
+    pub fn with_output_projection(
+        mut self,
+        projection: Vec<crate::GraphSetProjection>,
+    ) -> Result<Self, GraphAggregateBuildError> {
+        use crate::{GraphSetColumnType as Kind, GraphSetProjection as Projection, GraphSetProjectionError as Error};
+        let failure = GraphAggregateBuildError::OutputProjection;
+        if projection.is_empty() {
+            return Err(failure(Error::Empty));
+        }
+        if projection.len() > MAX_PATTERN_VERTICES {
+            return Err(failure(Error::TooManyColumns { limit: MAX_PATTERN_VERTICES, observed: projection.len() }));
+        }
+        let source_types = if let Some(relation) = &self.relational_input {
+            relation.column_types().to_vec()
+        } else {
+            let source = crate::PreparedGraphSet::from(self.input.clone());
+            if let Some(input) = &self.computed_input {
+                input.iter().enumerate().map(|(at, value)| {
+                    Projection::admit_output(value.value(), source.column_types(), at)
+                }).collect::<Result<Vec<_>, _>>().map_err(failure)?
+            } else {
+                source.column_types().to_vec()
+            }
+        };
+        let mut types: Vec<_> = self.keys.iter().map(|column| source_types[*column]).collect();
+        types.extend(self.aggregates.iter().map(|aggregate| match aggregate.function {
+            GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => Kind::List,
+            GraphAggregateFunction::Min | GraphAggregateFunction::Max => source_types[aggregate.column.expect("extremum has an input")],
+            _ => Kind::Scalar,
+        }));
+        let mut names = BTreeSet::new();
+        for (column, value) in projection.iter().enumerate() {
+            Projection::validate_output_name(value.name(), column).map_err(failure)?;
+            if !names.insert(value.name()) {
+                return Err(failure(Error::DuplicateName { column }));
+            }
+            Projection::admit_output(value.value(), &types, column).map_err(failure)?;
+        }
+        self.output_names = projection.iter().map(|value| value.name().to_owned()).collect();
+        self.output_projection = Some(projection);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn output_projection(&self) -> Option<&[crate::GraphSetProjection]> {
+        self.output_projection.as_deref()
+    }
+
     /// Replace post-aggregate clauses after validating every referenced output.
     /// All filters are AND-conjoined; ORDER BY is lexicographic. The child,
     /// grouping, output schema and existing pagination remain unchanged.
@@ -447,6 +502,9 @@ impl PreparedGraphAggregate {
             GlaExecutionEvent,
         ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+        if let Some(projection) = &self.output_projection {
+            return self.finish_projected_groups(groups, projection, control);
+        }
         if self.needs_output_distinct() {
             return self.finish_distinct_groups(groups, control);
         }

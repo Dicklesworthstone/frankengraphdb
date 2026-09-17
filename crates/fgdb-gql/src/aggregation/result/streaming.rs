@@ -56,6 +56,7 @@ pub(in crate::aggregation) struct RootGroups<'q, 'a> {
 impl<'q, 'a> RootGroups<'q, 'a> {
     pub(in crate::aggregation) fn new(query: &'q PreparedGraphAggregate) -> Option<Self> {
         if query.keys.len() != 1
+            || query.output_projection.is_some()
             || query.needs_output_distinct()
             || !weighted::root_groups_are_contiguous(query)
         {

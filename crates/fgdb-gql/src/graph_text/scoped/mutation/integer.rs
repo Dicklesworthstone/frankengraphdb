@@ -17,6 +17,7 @@ const MAX_INTEGER_NESTING: usize = 64;
 enum ExpressionColumns<'columns, 'text> {
     Graph(&'columns mut Vec<Projection<'text>>),
     Row(&'columns [(Name<'text>, crate::GraphSetColumnType)]),
+    Resolved(&'columns mut dyn FnMut(&mut Parser<'text>) -> Result<Option<usize>, GraphPatternTextError>),
 }
 enum ParsedOp {
     Atom(Operand, usize),
@@ -138,6 +139,13 @@ impl<'a> Parser<'a> {
         columns: &[(Name<'a>, crate::GraphSetColumnType)],
     ) -> Result<Operand, GraphMutationTextError> {
         self.checked_expression(&mut ExpressionColumns::Row(columns), true)
+    }
+
+    pub(super) fn resolved_expression(
+        &mut self,
+        resolve: &mut dyn FnMut(&mut Parser<'a>) -> Result<Option<usize>, GraphPatternTextError>,
+    ) -> Result<Operand, GraphMutationTextError> {
+        self.checked_expression(&mut ExpressionColumns::Resolved(resolve), false)
     }
 
     fn checked_expression(
@@ -537,6 +545,10 @@ impl<'a> Parser<'a> {
         let operand = match columns {
             ExpressionColumns::Graph(columns) => self.mutation_operand(columns)?,
             ExpressionColumns::Row(schema) => self.row_operand(schema)?,
+            ExpressionColumns::Resolved(resolve) => match resolve(self)? {
+                Some(column) => Operand::Column(column),
+                None => self.row_operand(&[])?,
+            },
         };
         emit(program, ParsedOp::Atom(operand, at), at)
     }

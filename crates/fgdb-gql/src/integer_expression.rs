@@ -245,6 +245,76 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphIntegerEvaluat
     }
 }
 
+/// Borrowed scalar payloads and exact aggregate values share one execution frame.
+pub(crate) enum ExpressionCell<'a> {
+    Scalar(Cow<'a, CanonicalScalar>),
+    Count(u64),
+    Integer(i128),
+    Average(crate::GraphExactAverage),
+}
+
+impl ExpressionCell<'_> {
+    pub(crate) fn is_null(&self) -> bool {
+        matches!(self, Self::Scalar(value) if matches!(value.as_ref(), CanonicalScalar::Null))
+    }
+
+    pub(crate) fn integer(&self) -> Result<Option<i128>, GraphIntegerErrorKind> {
+        match self {
+            Self::Scalar(value) => scalar_integer(value).map(|value| value.map(i128::from)),
+            Self::Count(value) => Ok(Some(i128::from(*value))),
+            Self::Integer(value) => Ok(Some(*value)),
+            Self::Average(_) => Err(GraphIntegerErrorKind::NonInteger),
+        }
+    }
+
+    fn boolean(&self) -> Result<Option<bool>, GraphIntegerErrorKind> {
+        match self {
+            Self::Scalar(value) => scalar_boolean(value),
+            _ => Err(GraphIntegerErrorKind::NonBoolean),
+        }
+    }
+
+    fn text(&self) -> Result<Option<&str>, GraphIntegerErrorKind> {
+        match self {
+            Self::Scalar(value) => scalar_text(value),
+            _ => Err(GraphIntegerErrorKind::NonText),
+        }
+    }
+
+    fn check_scalar(&self) -> Result<(), GraphIntegerErrorKind> {
+        match self {
+            Self::Scalar(value)
+                if !matches!(
+                    value.as_ref(),
+                    CanonicalScalar::Null
+                        | CanonicalScalar::Int(_)
+                        | CanonicalScalar::Bool(_)
+                        | CanonicalScalar::Text(_)
+                ) => Err(GraphIntegerErrorKind::NonScalar),
+            _ => Ok(()),
+        }
+    }
+
+    fn from_integer(
+        value: Option<i128>,
+        exact: bool,
+    ) -> Result<Self, GraphIntegerErrorKind> {
+        match value {
+            None => Ok(CanonicalScalar::Null.into()),
+            Some(value) if exact => Ok(Self::Integer(value)),
+            Some(value) => i64::try_from(value)
+                .map(|value| CanonicalScalar::Int(value).into())
+                .map_err(|_| GraphIntegerErrorKind::Overflow),
+        }
+    }
+}
+
+impl From<CanonicalScalar> for ExpressionCell<'_> {
+    fn from(value: CanonicalScalar) -> Self {
+        Self::Scalar(Cow::Owned(value))
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 enum Instruction {
     Column(usize),
@@ -337,11 +407,37 @@ impl GraphIntegerExpression {
         values: &[GraphValue],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
+        let value = self.evaluate_loaded_with_control(
+            |column| match values.get(column) {
+                Some(GraphValue::Scalar(value)) => Ok(ExpressionCell::Scalar(Cow::Borrowed(value))),
+                Some(_) => Err(GraphIntegerErrorKind::NonScalar),
+                None => Err(GraphIntegerErrorKind::MissingColumn),
+            },
+            control,
+        )?;
+        let ExpressionCell::Scalar(value) = value else {
+            unreachable!("ordinary scalar inputs cannot produce exact aggregate cells")
+        };
+        if let Cow::Borrowed(value) = &value {
+            charge_payload(scalar_payload_bytes(value), true, control)?;
+        }
+        Ok(value.into_owned())
+    }
+
+    /// Execute the same bytecode over scalar-compatible loaded cells. Exact
+    /// operands widen arithmetic to checked i128; scalar-only arithmetic still
+    /// checks i64 bounds. Returned payloads remain borrowed until their caller
+    /// reserves storage for an owned output.
+    pub(crate) fn evaluate_loaded_with_control<'a, E>(
+        &'a self,
+        mut load: impl FnMut(usize) -> Result<ExpressionCell<'a>, GraphIntegerErrorKind>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<ExpressionCell<'a>, GraphIntegerEvaluationError<E>> {
         for _ in 0..self.stack_entries {
             control(GlaExecutionEvent::ScratchEntry)
                 .map_err(GraphIntegerEvaluationError::Control)?;
         }
-        let mut stack: Vec<Cow<'_, CanonicalScalar>> = Vec::with_capacity(self.stack_entries);
+        let mut stack: Vec<ExpressionCell<'a>> = Vec::with_capacity(self.stack_entries);
         let mut at = 0;
         while let Some(op) = self.code.get(at) {
             control(GlaExecutionEvent::Work).map_err(GraphIntegerEvaluationError::Control)?;
@@ -353,28 +449,28 @@ impl GraphIntegerExpression {
             };
             match op {
                 Instruction::Column(column) | Instruction::ScalarColumn(column) => {
-                    let value = match values.get(*column) {
-                        Some(GraphValue::Scalar(value)) => value,
-                        Some(_) => {
-                            return Err(failure(if matches!(op, Instruction::Column(_)) {
-                                GraphIntegerErrorKind::NonInteger
-                            } else {
-                                GraphIntegerErrorKind::NonScalar
-                            }));
-                        }
-                        None => return Err(failure(GraphIntegerErrorKind::MissingColumn)),
-                    };
+                    let value = load(*column).map_err(|kind| {
+                        failure(if matches!(op, Instruction::Column(_))
+                            && kind == GraphIntegerErrorKind::NonScalar
+                        {
+                            GraphIntegerErrorKind::NonInteger
+                        } else {
+                            kind
+                        })
+                    })?;
                     if matches!(op, Instruction::Column(_)) {
-                        scalar_integer(value).map_err(failure)?;
+                        value.integer().map_err(failure)?;
                     }
-                    stack.push(Cow::Borrowed(value));
+                    stack.push(value);
                 }
-                Instruction::Scalar(value) => stack.push(Cow::Borrowed(value.value())),
-                Instruction::Literal(value) => stack.push(Cow::Owned(integer_scalar(*value))),
-                Instruction::Truth(value) => stack.push(Cow::Owned(boolean_scalar(*value))),
+                Instruction::Scalar(value) => {
+                    stack.push(ExpressionCell::Scalar(Cow::Borrowed(value.value())));
+                }
+                Instruction::Literal(value) => stack.push(integer_scalar(*value).into()),
+                Instruction::Truth(value) => stack.push(boolean_scalar(*value).into()),
                 Instruction::Unary(op) => {
                     let value = stack.last_mut().expect("validated unary stack");
-                    let number = scalar_integer(value).map_err(failure)?;
+                    let number = value.integer().map_err(failure)?;
                     let result = match number {
                         None => None,
                         Some(number) => Some(
@@ -386,20 +482,43 @@ impl GraphIntegerExpression {
                             .ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?,
                         ),
                     };
-                    *value = Cow::Owned(integer_scalar(result));
+                    *value = ExpressionCell::from_integer(
+                        result,
+                        !matches!(value, ExpressionCell::Scalar(_)),
+                    )
+                    .map_err(failure)?;
                 }
                 Instruction::Binary(op) => {
                     let right = stack.pop().expect("validated right operand");
                     let left = stack.last_mut().expect("validated left operand");
-                    let a = scalar_integer(left).map_err(failure)?;
-                    let b = scalar_integer(&right).map_err(failure)?;
-                    *left = Cow::Owned(integer_scalar(apply_binary(*op, a, b).map_err(failure)?));
+                    let a = left.integer().map_err(failure)?;
+                    let b = right.integer().map_err(failure)?;
+                    if *op == GraphIntegerBinary::NullIf {
+                        if a.is_some() && a == b {
+                            *left = CanonicalScalar::Null.into();
+                        }
+                    } else {
+                        let exact = !matches!(left, ExpressionCell::Scalar(_))
+                            || !matches!(right, ExpressionCell::Scalar(_));
+                        *left = if exact {
+                            ExpressionCell::from_integer(
+                                apply_exact_binary(*op, a, b).map_err(failure)?,
+                                true,
+                            )
+                            .map_err(failure)?
+                        } else {
+                            let narrow = |value| {
+                                i64::try_from(value).expect("scalar integer operands are i64")
+                            };
+                            integer_scalar(
+                                apply_binary(*op, a.map(narrow), b.map(narrow)).map_err(failure)?,
+                            )
+                            .into()
+                        };
+                    }
                 }
                 Instruction::JumpIfPresent(target) => {
-                    if !matches!(
-                        stack.last().expect("validated coalesce operand").as_ref(),
-                        CanonicalScalar::Null
-                    ) {
+                    if !stack.last().expect("validated coalesce operand").is_null() {
                         at = *target;
                         continue;
                     }
@@ -408,26 +527,23 @@ impl GraphIntegerExpression {
                 Instruction::Compare(comparison) => {
                     let right = stack.pop().expect("validated comparison right operand");
                     let left = stack.last_mut().expect("validated comparison left operand");
-                    let result = compare_scalars(*comparison, left, &right, at, control)?;
-                    *left = Cow::Owned(boolean_scalar(result));
+                    let result = compare_cells(*comparison, left, &right, at, control)?;
+                    *left = boolean_scalar(result).into();
                 }
                 Instruction::IsNull(is_null) => {
                     let value = stack.last_mut().expect("validated null operand");
-                    *value = Cow::Owned(CanonicalScalar::Bool(
-                        matches!(value.as_ref(), CanonicalScalar::Null) == *is_null,
-                    ));
+                    *value = CanonicalScalar::Bool(value.is_null() == *is_null).into();
                 }
                 Instruction::Not => {
                     let value = stack.last_mut().expect("validated Boolean operand");
-                    *value = Cow::Owned(boolean_scalar(
-                        scalar_boolean(value).map_err(failure)?.map(|value| !value),
-                    ));
+                    *value = boolean_scalar(value.boolean().map_err(failure)?.map(|value| !value))
+                        .into();
                 }
                 Instruction::And | Instruction::Or => {
                     let right = stack.pop().expect("validated Boolean right operand");
                     let left = stack.last_mut().expect("validated Boolean left operand");
-                    let a = scalar_boolean(left).map_err(failure)?;
-                    let b = scalar_boolean(&right).map_err(failure)?;
+                    let a = left.boolean().map_err(failure)?;
+                    let b = right.boolean().map_err(failure)?;
                     let result = if matches!(op, Instruction::And) {
                         if a == Some(false) || b == Some(false) {
                             Some(false)
@@ -443,14 +559,14 @@ impl GraphIntegerExpression {
                     } else {
                         Some(false)
                     };
-                    *left = Cow::Owned(boolean_scalar(result));
+                    *left = boolean_scalar(result).into();
                 }
                 Instruction::Upper
                 | Instruction::Lower
                 | Instruction::Trim
                 | Instruction::CharLength => {
                     let value = stack.last_mut().expect("validated text operand");
-                    let result = if let Some(text) = scalar_text(value).map_err(failure)? {
+                    let result = if let Some(text) = value.text().map_err(failure)? {
                         charge_payload(text.len(), false, control)?;
                         match op {
                             Instruction::CharLength => CanonicalScalar::Int(
@@ -477,7 +593,7 @@ impl GraphIntegerExpression {
                     } else {
                         CanonicalScalar::Null
                     };
-                    *value = Cow::Owned(result);
+                    *value = result.into();
                 }
                 Instruction::Concat
                 | Instruction::StartsWith
@@ -485,8 +601,8 @@ impl GraphIntegerExpression {
                 | Instruction::Contains => {
                     let right = stack.pop().expect("validated text right operand");
                     let left = stack.last_mut().expect("validated text left operand");
-                    let a = scalar_text(left).map_err(failure)?;
-                    let b = scalar_text(&right).map_err(failure)?;
+                    let a = left.text().map_err(failure)?;
+                    let b = right.text().map_err(failure)?;
                     let result = if let (Some(a), Some(b)) = (a, b) {
                         charge_payload(a.len(), false, control)?;
                         charge_payload(b.len(), false, control)?;
@@ -509,25 +625,25 @@ impl GraphIntegerExpression {
                     } else {
                         CanonicalScalar::Null
                     };
-                    *left = Cow::Owned(result);
+                    *left = result.into();
                 }
                 Instruction::Substring => {
                     let length = stack.pop().expect("validated substring length");
                     let start = stack.pop().expect("validated substring start");
                     let value = stack.last_mut().expect("validated substring text");
-                    let text = scalar_text(value).map_err(failure)?;
-                    let start = scalar_integer(&start).map_err(failure)?;
-                    let length = scalar_integer(&length).map_err(failure)?;
+                    let text = value.text().map_err(failure)?;
+                    let start = start.integer().map_err(failure)?;
+                    let length = length.integer().map_err(failure)?;
                     if length.is_some_and(|length| length < 0) {
                         return Err(failure(GraphIntegerErrorKind::InvalidSubstring));
                     }
                     let result =
                         if let (Some(text), Some(start), Some(length)) = (text, start, length) {
                             charge_payload(text.len(), false, control)?;
-                            // Intersect the requested [start, start + length) with
-                            // one-based Unicode positions. i128 avoids i64 overflow.
-                            let begin = (i128::from(start) - 1).max(0);
-                            let end = (i128::from(start) - 1 + i128::from(length)).max(0);
+                            // Clamp exact positions outside the finite string domain
+                            // without overflowing at either i128 boundary.
+                            let begin = start.saturating_sub(1).max(0);
+                            let end = start.saturating_add(length.saturating_sub(1)).max(0);
                             let mut first = text.len();
                             let mut last = text.len();
                             for (position, (byte, _)) in text.char_indices().enumerate() {
@@ -544,13 +660,13 @@ impl GraphIntegerExpression {
                         } else {
                             CanonicalScalar::Null
                         };
-                    *value = Cow::Owned(result);
+                    *value = result.into();
                 }
                 Instruction::InList { members } => {
                     let base = stack.len() - *members - 1;
                     let mut result = Some(false);
                     for candidate in &stack[base + 1..] {
-                        let equal = compare_scalars(
+                        let equal = compare_cells(
                             IntegerComparison::Equal,
                             &stack[base],
                             candidate,
@@ -564,11 +680,11 @@ impl GraphIntegerExpression {
                         }
                     }
                     stack.truncate(base);
-                    stack.push(Cow::Owned(boolean_scalar(result)));
+                    stack.push(boolean_scalar(result).into());
                 }
                 Instruction::JumpUnlessTrue(target) => {
                     let condition = stack.pop().expect("validated CASE condition");
-                    if scalar_boolean(&condition).map_err(failure)? != Some(true) {
+                    if condition.boolean().map_err(failure)? != Some(true) {
                         at = *target;
                         continue;
                     }
@@ -576,7 +692,7 @@ impl GraphIntegerExpression {
                 Instruction::JumpUnlessEqual(target) => {
                     let candidate = stack.pop().expect("validated WHEN operand");
                     let selector = stack.last().expect("validated CASE selector");
-                    if compare_scalars(IntegerComparison::Equal, selector, &candidate, at, control)?
+                    if compare_cells(IntegerComparison::Equal, selector, &candidate, at, control)?
                         != Some(true)
                     {
                         at = *target;
@@ -597,22 +713,13 @@ impl GraphIntegerExpression {
         }
         debug_assert_eq!(stack.len(), 1);
         let value = stack.pop().expect("one validated scalar result");
-        if !matches!(
-            value.as_ref(),
-            CanonicalScalar::Null
-                | CanonicalScalar::Int(_)
-                | CanonicalScalar::Bool(_)
-                | CanonicalScalar::Text(_)
-        ) {
-            return Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
+        value.check_scalar().map_err(|kind| {
+            GraphIntegerEvaluationError::Value(GraphIntegerError {
                 instruction: self.code.len(),
-                kind: GraphIntegerErrorKind::NonScalar,
-            }));
-        }
-        if let Cow::Borrowed(value) = &value {
-            charge_payload(scalar_payload_bytes(value), true, control)?;
-        }
-        Ok(value.into_owned())
+                kind,
+            })
+        })?;
+        Ok(value)
     }
 
     /// Value-bearing application transcript. Existing instruction tags remain
@@ -795,6 +902,51 @@ fn make_text<E>(
     })
 }
 
+fn compare_cells<E>(
+    comparison: IntegerComparison,
+    left: &ExpressionCell<'_>,
+    right: &ExpressionCell<'_>,
+    instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<bool>, GraphIntegerEvaluationError<E>> {
+    use core::cmp::Ordering;
+
+    if left.is_null() || right.is_null() {
+        return Ok(None);
+    }
+    if let (ExpressionCell::Scalar(left), ExpressionCell::Scalar(right)) = (left, right) {
+        return compare_scalars(comparison, left, right, instruction, control);
+    }
+    let incompatible = |_| {
+        GraphIntegerEvaluationError::Value(GraphIntegerError {
+            instruction,
+            kind: GraphIntegerErrorKind::IncompatibleOperands,
+        })
+    };
+    let order = match (left, right) {
+        (ExpressionCell::Average(left), ExpressionCell::Average(right)) => left.cmp(right),
+        (ExpressionCell::Average(left), right) => left.compare_integer(
+            right.integer().map_err(incompatible)?.expect("nonnull integer operand"),
+        ),
+        (left, ExpressionCell::Average(right)) => right
+            .compare_integer(
+                left.integer().map_err(incompatible)?.expect("nonnull integer operand"),
+            )
+            .reverse(),
+        (left, right) => left.integer().map_err(incompatible)?.cmp(
+            &right.integer().map_err(incompatible)?,
+        ),
+    };
+    Ok(Some(match comparison {
+        IntegerComparison::Equal => order == Ordering::Equal,
+        IntegerComparison::NotEqual => order != Ordering::Equal,
+        IntegerComparison::Less => order == Ordering::Less,
+        IntegerComparison::LessOrEqual => order != Ordering::Greater,
+        IntegerComparison::Greater => order == Ordering::Greater,
+        IntegerComparison::GreaterOrEqual => order != Ordering::Less,
+    }))
+}
+
 fn compare_scalars<E>(
     comparison: IntegerComparison,
     left: &CanonicalScalar,
@@ -823,6 +975,16 @@ fn apply_binary(
     left: Option<i64>,
     right: Option<i64>,
 ) -> Result<Option<i64>, GraphIntegerErrorKind> {
+    apply_exact_binary(op, left.map(i128::from), right.map(i128::from))?
+        .map(|value| i64::try_from(value).map_err(|_| GraphIntegerErrorKind::Overflow))
+        .transpose()
+}
+
+fn apply_exact_binary(
+    op: GraphIntegerBinary,
+    left: Option<i128>,
+    right: Option<i128>,
+) -> Result<Option<i128>, GraphIntegerErrorKind> {
     if op == GraphIntegerBinary::NullIf {
         return Ok(if left.is_some() && left == right {
             None

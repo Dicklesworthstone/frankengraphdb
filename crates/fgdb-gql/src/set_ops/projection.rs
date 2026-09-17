@@ -51,6 +51,18 @@ pub struct GraphSetProjection {
     value: GraphSetValue,
 }
 impl GraphSetProjection {
+    pub(crate) fn admit_output(
+        value: &GraphSetValue,
+        types: &[GraphSetColumnType],
+        column: usize,
+    ) -> Result<GraphSetColumnType, GraphSetProjectionError> {
+        value_type(value, types, column)
+    }
+
+    pub(crate) fn validate_output_name(name: &str, column: usize) -> Result<(), GraphSetProjectionError> {
+        validate_name(name, column)
+    }
+
     #[must_use]
     pub fn new(name: impl Into<String>, value: GraphSetValue) -> Self {
         Self {
