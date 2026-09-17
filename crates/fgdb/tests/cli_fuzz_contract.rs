@@ -504,7 +504,9 @@ fn invoke(args: &[String], robot: bool, schema: &Json, secrets: &[String]) -> Ou
     let output = command.output().expect("spawn built fgdb binary");
     let elapsed = started.elapsed();
     assert!(
-        elapsed <= Duration::from_secs(10),
+        // Batch38 measured 11.1s under concurrent builds. Allow 30s (2.7x
+        // that observed scheduling delay); retain the total campaign bound.
+        elapsed <= Duration::from_secs(30),
         "single invocation exceeded wall bound: {elapsed:?} for {args:?}"
     );
     let code = output
@@ -536,6 +538,9 @@ fn invoke(args: &[String], robot: bool, schema: &Json, secrets: &[String]) -> Ou
     }
     let events = if robot {
         check_robot_events(&stdout, code, schema)
+    } else if args == ["robot", "schema"] && code == 0 {
+        assert_eq!(json(stdout.trim_end()), *schema);
+        Vec::new()
     } else {
         // Human mode: no NDJSON event lines may appear on stdout.
         for line in stdout.lines() {
@@ -592,9 +597,11 @@ enum Family {
     KeyFile,
     DbPath,
     GqlText,
+    RobotSchema,
 }
 
-const FAMILIES: [Family; 6] = [
+const FAMILIES: [Family; 7] = [
+    Family::RobotSchema,
     Family::Argv,
     Family::Params,
     Family::Bindings,
@@ -695,6 +702,13 @@ fn generated_case(
 ) -> (Vec<String>, Option<bool>) {
     let mut args = ws.args("query", Some("MATCH (n) RETURN n"));
     match family {
+        Family::RobotSchema => {
+            let mut args = vec!["robot".into(), "schema".into()];
+            if index % 2 == 1 {
+                args.push(format!("unexpected{}", rng.next()));
+            }
+            (args, Some(index % 2 == 0))
+        }
         Family::Argv => {
             match index % 8 {
                 0 => return (vec!["help".into()], Some(true)),
@@ -914,20 +928,30 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
         .code,
         0
     );
-    let mut counts: [[FamilyCounts; 2]; 6] = std::array::from_fn(|_| {
+    let mut counts: [[FamilyCounts; 2]; FAMILIES.len()] = std::array::from_fn(|_| {
         std::array::from_fn(|_| FamilyCounts {
             success: 0,
             refused: 0,
         })
     });
     let mut total = 0;
+    let mut commands = BTreeMap::<String, [usize; 2]>::new();
+    let mut slowest = Duration::ZERO;
     for seed in 0..seeds {
         let mut rng = Rng::new(0x6ba1 + seed as u64);
         for (slot, family) in FAMILIES.into_iter().enumerate() {
             for index in 0..iterations {
                 let robot = (index / 12) % 2 == 0;
                 let (args, expected) = generated_case(&ws, &mut rng, family, seed, index);
+                let invocation_started = Instant::now();
                 let outcome = invoke(&args, robot, &schema, &ws.secrets);
+                slowest = slowest.max(invocation_started.elapsed());
+                let command = if args.starts_with(&["robot".into(), "schema".into()]) {
+                    "robot-schema"
+                } else {
+                    args.first().map_or("", String::as_str)
+                };
+                commands.entry(command.to_owned()).or_default()[usize::from(robot)] += 1;
                 total += 1;
                 let count = &mut counts[slot][usize::from(robot)];
                 if outcome.code == 0 {
@@ -962,6 +986,11 @@ fn cli_fuzz_campaign_keeps_robot_contract() {
             );
         }
     }
+    for command in ["create", "write", "query", "help", "robot-schema"] {
+        let modes = commands.get(command).expect("subcommand never exercised");
+        assert!(modes.iter().all(|count| *count > 0), "{command}: {modes:?}");
+    }
+    eprintln!("subcommand coverage={commands:?}; slowest invocation={slowest:?}");
     eprintln!(
         "campaign {total} invocations, {seeds} seeds, elapsed={:?}; fixtures={}",
         started.elapsed(),
