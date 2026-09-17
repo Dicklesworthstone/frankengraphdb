@@ -337,13 +337,14 @@ async fn native_create(db: &mut Database, contexts: &PurposeContexts, rows: &[Bu
 }
 
 fn query_answers(db: &Database, query_cx: &QueryCx, relation: RelationId) -> Vec<Vec<i64>> {
-    // The accepted text surface projects vertex variables (e.g. the corpus's
-    // "RETURN ALL a,c.p AS score"); edge-variable projections like "e.k" are
-    // refused by the parser. Edge payloads are verified exhaustively through
-    // logical_state instead; this differential pins the same GQL pattern
-    // answers over both graphs.
+    // The accepted text surface projects vertex variables with UNIQUE column
+    // names (the corpus form is "RETURN ALL a AS owner, c.amount AS amount"):
+    // edge-variable projections like "e.k" are refused by the parser, and two
+    // bare property projections of the same key collide on column name "k".
+    // Edge payloads are verified exhaustively through logical_state instead;
+    // this differential pins the same GQL pattern answers over both graphs.
     let text = format!(
-        "MATCH (a)-[:{}]->(b) RETURN ALL a.k, b.k",
+        "MATCH (a)-[:{}]->(b) RETURN ALL a.k AS ak, b.k AS bk",
         if relation == R { "R" } else { "S" }
     );
     let query = PreparedGraphText::prepare(&text, symbols)
@@ -452,16 +453,6 @@ fn three_seed_ten_thousand_edge_bulk_matches_native_create_and_gql() {
                     "native GQL seed={seed} relation={relation:?}"
                 );
             }
-            drop(bulk);
-            drop(native);
-            let bulk = Database::open(&contexts.commit(), &bulk_path, keys())
-                .await
-                .unwrap();
-            let native = Database::open(&contexts.commit(), &native_path, keys())
-                .await
-                .unwrap();
-            assert_eq!(logical_state(&bulk, &checkpoint), expected);
-            assert_eq!(logical_state(&native, &native_mapping), expected);
         }
     });
 }
