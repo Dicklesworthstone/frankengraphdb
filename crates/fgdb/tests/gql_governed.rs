@@ -607,6 +607,20 @@ fn check_source_history(
     .into_iter()
     .map(|text| PreparedGqlQuery::prepare(text, &names()).unwrap())
     .collect();
+    // q1 charges selected edges; q2 pins the full edge domain, not the vertex
+    // domain. Keep a q0 twin whose independent OPTIONAL domain prevents index
+    // admission while identity correlation preserves the original results.
+    let scan_twin = fgdb_gql::PreparedGraphText::prepare(
+        "MATCH (a:L) WHERE a.n>=3 OPTIONAL MATCH (other) WHERE other=a RETURN DISTINCT a",
+        |kind, name| match (kind, name) {
+            (fgdb_gql::GraphSymbolKind::Label, "L") => Some(fgdb_gql::GraphSymbol::Label(L)),
+            (fgdb_gql::GraphSymbolKind::Property, "n") => Some(fgdb_gql::GraphSymbol::Property(N)),
+            _ => None,
+        },
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
     let view = db.read_session().unwrap();
     let mut history = Vec::new();
     for seq in 0..=db.frontier().unwrap().0 {
@@ -631,6 +645,39 @@ fn check_source_history(
                     .unwrap(),
                 run
             );
+        }
+        let scan_records = db.vertices_at(at).unwrap().len() as u64;
+        let scan = db
+            .execute_graph_pattern_governed_at(query_cx, &scan_twin, at, generous())
+            .unwrap();
+        assert_eq!(
+            scan.value
+                .iter()
+                .map(|row| row.get(0).unwrap().as_vertex().unwrap())
+                .collect::<Vec<_>>(),
+            expected[0].0
+        );
+        assert_eq!(scan.rows.snapshot_records, scan_records);
+        assert_eq!(
+            db.execute_graph_pattern_governed_at(
+                query_cx,
+                &scan_twin,
+                at,
+                GqlQueryPolicy::new(scan_records, 1_000, u64::MAX, u64::MAX),
+            )
+            .unwrap(),
+            scan,
+        );
+        if scan_records > 0 {
+            assert!(matches!(
+                db.execute_graph_pattern_governed_at(
+                    query_cx, &scan_twin, at,
+                    GqlQueryPolicy::new(scan_records - 1, 1_000, u64::MAX, u64::MAX),
+                ),
+                Err(GqlQueryError::Rows(error))
+                    if error.dimension == GqlBudgetDimension::SnapshotRecords
+                        && error.limit == scan_records - 1 && error.observed == scan_records
+            ));
         }
         history.push(expected);
     }

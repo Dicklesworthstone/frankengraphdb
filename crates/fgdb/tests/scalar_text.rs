@@ -471,6 +471,38 @@ fn scalar_queries_keep_exact_policy_boundaries_and_real_runtime_cancellation() {
                     ),
                     Ok(_)
                 ));
+                // Mail 979, condition 3: preserve the full-domain scan twin.
+                // The independent OPTIONAL domain defeats single-domain index
+                // eligibility; identity correlation and DISTINCT preserve n.
+                let scan_range = query(
+                    "MATCH (n:Person) WHERE n.status >= 'r' \
+                     OPTIONAL MATCH (other) WHERE other=n RETURN DISTINCT n",
+                );
+                let range_records = 7; // All seven vertices from seed().
+                let scan = db
+                    .execute_graph_pattern_governed(&cx, &scan_range, policy())
+                    .unwrap();
+                assert_eq!(ids(&scan.value), vec![VId(0), VId(1)]);
+                assert_eq!(scan.rows.snapshot_records, range_records);
+                assert!(matches!(
+                    db.execute_graph_pattern_governed(
+                        &cx,
+                        &scan_range,
+                        GqlQueryPolicy::new(6, 2, u64::MAX, u64::MAX)
+                    ),
+                    Err(GqlQueryError::Rows(error))
+                        if error.dimension == fgdb_gql::GqlBudgetDimension::SnapshotRecords
+                            && error.limit == 6 && error.observed == 7
+                ));
+                assert_eq!(
+                    db.execute_graph_pattern_governed(
+                        &cx,
+                        &scan_range,
+                        GqlQueryPolicy::new(7, 2, u64::MAX, u64::MAX)
+                    )
+                    .unwrap(),
+                    scan
+                );
                 for cap in [
                     GqlQueryPolicy::new(1, 2, u64::MAX, u64::MAX),
                     GqlQueryPolicy::new(2, 1, u64::MAX, u64::MAX),
