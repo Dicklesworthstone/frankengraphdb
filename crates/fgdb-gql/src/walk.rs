@@ -324,7 +324,8 @@ impl<'a> GraphPathCursor<'a> {
             return Ok(());
         }
 
-        let shortest = self.search != GraphWalkSearch::All;
+        let shortest = matches!(self.search, GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest);
+        let restricted = matches!(self.search, GraphWalkSearch::Acyclic | GraphWalkSearch::Simple);
         let unique = self.search == GraphWalkSearch::AnyShortest;
         let mut next = Vec::new();
         let mut pending = Vec::new();
@@ -343,11 +344,30 @@ impl<'a> GraphPathCursor<'a> {
                 self.settled.insert(endpoint, self.depth);
             }
 
-            if self.depth < self.bounds.maximum()
+            // A SIMPLE return to the start is a complete path, never a transit
+            // prefix. In particular, a lower bound cannot license reopening it.
+            let closed = self.search == GraphWalkSearch::Simple
+                && !path.steps().is_empty() && endpoint == path.start();
+            if !closed && self.depth < self.bounds.maximum()
                 && let Some(neighbors) = self.adjacency.and_then(|map| map.get(&endpoint))
             {
                 for &step in neighbors {
                     control(GlaExecutionEvent::Work)?;
+                    if restricted {
+                        // Inspect the actual path, not endpoint settlement.
+                        // Keep all valid parallel edges and distinct prefixes.
+                        control(GlaExecutionEvent::Work)?;
+                        if step.1 == path.start() {
+                            if self.search == GraphWalkSearch::Acyclic { continue; }
+                        } else {
+                            let mut repeated = false;
+                            for &(_, vertex) in path.steps() {
+                                control(GlaExecutionEvent::Work)?;
+                                if vertex == step.1 { repeated = true; break; }
+                            }
+                            if repeated { continue; }
+                        }
+                    }
                     if unique {
                         // Compare before copying: parallel edges and tied
                         // routes cannot multiply the next layer's prefixes.

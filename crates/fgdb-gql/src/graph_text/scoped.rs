@@ -4,10 +4,10 @@
 //! Bodies without shared variables are independent, not malformed correlations.
 //! Child WHERE may read visible outer vertices absent from its positive pattern;
 //! those values are captured with null intact, not introduced as node matches.
-//! MATCH ANY SHORTEST WALK selects one occurrence per endpoint pair; MATCH ALL
-//! SHORTEST WALK keeps every tie. Both require one finite quantified atom in
-//! each selected positive pattern. They share all ordinary MATCH consumers and
-//! never imply a global DISTINCT. An explicit root binding captures the path.
+//! Shortest WALK, ACYCLIC and SIMPLE require one finite quantified atom per
+//! selected positive pattern. Restrictions preserve occurrence multiplicity;
+//! they never imply a global DISTINCT. An explicit root binding captures the
+//! selected path, including its real ordered edge identities.
 
 mod mutation;
 
@@ -145,6 +145,20 @@ fn resolve_pattern_with_captures<'a>(
                 bounds,
             ),
             Some(bounds) if edge.search == GraphWalkSearch::AnyShortest => builder.any_shortest_walk(
+                edge.source.text,
+                relation,
+                edge.direction,
+                edge.destination.text,
+                bounds,
+            ),
+            Some(bounds) if edge.search == GraphWalkSearch::Acyclic => builder.acyclic_walk(
+                edge.source.text,
+                relation,
+                edge.direction,
+                edge.destination.text,
+                bounds,
+            ),
+            Some(bounds) if edge.search == GraphWalkSearch::Simple => builder.simple_walk(
                 edge.source.text,
                 relation,
                 edge.direction,
@@ -409,9 +423,10 @@ impl<'a> Parser<'a> {
         Ok(matches!(self.current.kind, TokenKind::Word(_))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'=')))
     }
-    /// One positive-pattern parser, used at the root and in each scope. WALK
-    /// is explicit per MATCH; a bare quantifier never silently adopts repeated-
-    /// edge semantics. Counters remain definition-wide while local fields move.
+    /// One positive-pattern parser, used at the root and in each scope. A
+    /// quantifier requires explicit WALK, ACYCLIC or SIMPLE semantics. Restricted
+    /// native patterns contain one finite atom; separate MATCH clauses keep
+    /// separate restrictions. Definition-wide counters never reset per clause.
     fn positive_pattern(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         let selector_at = self.current.at;
@@ -419,28 +434,35 @@ impl<'a> Parser<'a> {
             GraphWalkSearch::AllShortest
         } else if self.take_word("ANY")? {
             GraphWalkSearch::AnyShortest
+        } else if self.take_word("ACYCLIC")? {
+            GraphWalkSearch::Acyclic
+        } else if self.take_word("SIMPLE")? {
+            GraphWalkSearch::Simple
         } else {
             GraphWalkSearch::All
         };
-        let shortest = search != GraphWalkSearch::All;
+        let shortest = matches!(search, GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest);
+        let restricted = matches!(search, GraphWalkSearch::Acyclic | GraphWalkSearch::Simple);
+        let selected = shortest || restricted;
         let walk_mode = if shortest {
             self.word("SHORTEST")?;
             self.word("WALK")?;
             true
+        } else if restricted {
+            true
         } else {
             self.take_word("WALK")?
         };
+        let expected_atom = if restricted { "one finite quantified ACYCLIC or SIMPLE atom" }
+            else { "one bounded atom in shortest WALK" };
         let first_edge = self.syntax.edges.len();
         loop {
             let mut left = self.node()?;
             while self.is_punct(b'-') || self.is_punct(b'<') {
-                // A native selector applies to its complete positive pattern.
-                // Until compound-path minimization exists, accept ONE atom,
-                // never silently substitute independent atom-wise shortest.
-                if shortest && self.syntax.edges.len() != first_edge {
-                    return Err(error(self.current.at, GraphPatternTextErrorKind::Expected(
-                        "one bounded atom in shortest WALK",
-                    )));
+                // No per-atom substitution for a whole-pattern restriction or
+                // shortest-total-length selection across a compound pattern.
+                if selected && self.syntax.edges.len() != first_edge {
+                    return Err(error(self.current.at, GraphPatternTextErrorKind::Expected(expected_atom)));
                 }
                 self.capacity(
                     self.edge_count,
@@ -454,9 +476,9 @@ impl<'a> Parser<'a> {
                 let relation = self.name()?;
                 let bound_at = self.current.at;
                 let walk = self.pattern_walk_bounds(walk_mode)?;
-                if shortest && walk.is_none() {
+                if selected && walk.is_none() {
                     return Err(error(bound_at, GraphPatternTextErrorKind::Expected(
-                        "finite quantified atom in shortest WALK",
+                        if restricted { expected_atom } else { "finite quantified atom in shortest WALK" },
                     )));
                 }
                 self.punct(b']', "]")?;
@@ -486,19 +508,15 @@ impl<'a> Parser<'a> {
                 self.edge_count += 1;
                 left = right;
             }
-            if shortest && self.is_punct(b',') {
-                return Err(error(self.current.at, GraphPatternTextErrorKind::Expected(
-                    "one bounded atom in shortest WALK",
-                )));
+            if selected && self.is_punct(b',') {
+                return Err(error(self.current.at, GraphPatternTextErrorKind::Expected(expected_atom)));
             }
             if !self.take(b',')? {
                 break;
             }
         }
-        if shortest && self.syntax.edges.len() == first_edge {
-            return Err(error(selector_at, GraphPatternTextErrorKind::Expected(
-                "one bounded atom in shortest WALK",
-            )));
+        if selected && self.syntax.edges.len() == first_edge {
+            return Err(error(selector_at, GraphPatternTextErrorKind::Expected(expected_atom)));
         }
         Ok(())
     }
@@ -533,7 +551,7 @@ impl<'a> Parser<'a> {
         if !enabled {
             return Err(error(
                 at,
-                GraphPatternTextErrorKind::Expected("explicit MATCH WALK for quantified atoms"),
+                GraphPatternTextErrorKind::Expected("explicit MATCH WALK, ACYCLIC or SIMPLE for quantified atoms"),
             ));
         }
         let (minimum, maximum) = if self.take(b'.')? {
