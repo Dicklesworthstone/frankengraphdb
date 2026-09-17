@@ -129,6 +129,35 @@ impl CapsuleDescriptor {
             symbol_auth_profile: self.symbol_auth_profile,
         }
     }
+
+    pub(crate) fn validated_encoding(
+        &self,
+        object_id: ObjectId,
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<EncodedObject, CapsuleError> {
+        let encoding = EncodedObject::reconstruct(
+            object_id,
+            self.cipher_descriptor(),
+            Digest(self.ciphertext_id),
+            self.encoding_descriptor(),
+            Digest(self.encoding_id),
+            verification,
+        )
+        .map_err(CapsuleError::DescriptorMismatch)?;
+        let profile = CapsuleProfile::registered(self.fec_profile).ok_or(
+            CapsuleError::UnsupportedFecProfile {
+                fec_profile: self.fec_profile,
+            },
+        )?;
+        if self.repair_symbols != profile.repair_symbols {
+            return Err(CapsuleError::RepairBudgetMismatch {
+                fec_profile: self.fec_profile,
+                declared_repair_symbols: self.repair_symbols,
+                registered_repair_symbols: profile.repair_symbols,
+            });
+        }
+        Ok(encoding)
+    }
 }
 
 /// The coding profile a capsule is written under.
@@ -402,6 +431,54 @@ impl CapsuleKeys {
             verification,
         )
     }
+
+    /// Restore the recorded encoding, not this handle's current sealing policy.
+    /// Recovery proves the plaintext first; both protected identities must then
+    /// match before any replacement symbol can be returned to the writer.
+    pub(crate) fn repair(
+        &self,
+        descriptor: &CapsuleDescriptor,
+        symbols: &[Vec<u8>],
+        object_id: ObjectId,
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<SealedCapsule, CapsuleError> {
+        let plaintext = self.recover(descriptor, symbols, object_id, verification)?;
+        let identified = IdentifiedObject::new(
+            self.k_oid(),
+            self.namespace(),
+            descriptor.object_kind,
+            &[],
+            &plaintext,
+        );
+        let protected = identified
+            .protect(self.dek(), descriptor.cipher_descriptor(), &plaintext)
+            .map_err(CapsuleError::DescriptorMismatch)?;
+        if protected.ciphertext_id().0 != descriptor.ciphertext_id {
+            return Err(CapsuleError::Recovery(
+                SymbolizeError::CiphertextIdentityMismatch,
+            ));
+        }
+        let encoding = protected.encode(descriptor.encoding_descriptor());
+        if encoding.encoding_id().0 != descriptor.encoding_id {
+            return Err(CapsuleError::DescriptorMismatch(
+                IdentityMismatch::EncodingId,
+            ));
+        }
+        let symbols = encode_object(
+            &encoding,
+            protected.protected_bytes(),
+            descriptor.object_kind,
+            0,
+            descriptor.repair_symbols,
+            self.dek(),
+        )
+        .map_err(CapsuleError::Recovery)?;
+        Ok(SealedCapsule {
+            object_id,
+            descriptor: descriptor.clone(),
+            symbols,
+        })
+    }
 }
 
 /// Run the §5.1 pipeline over `plaintext` and erasure-code the result.
@@ -628,37 +705,7 @@ pub fn recover(
     dek: &[u8; 32],
     verification: &mut dyn CryptoVerificationSink,
 ) -> Result<Vec<u8>, CapsuleError> {
-    // Step 1: the descriptor set must be self-consistent. An EncodingId that is
-    // not the digest of its own descriptor means the frame was rewritten, and
-    // no number of valid symbols makes that safe.
-    let encoding = EncodedObject::reconstruct(
-        expected_object_id,
-        descriptor.cipher_descriptor(),
-        Digest(descriptor.ciphertext_id),
-        descriptor.encoding_descriptor(),
-        Digest(descriptor.encoding_id),
-        verification,
-    )
-    .map_err(CapsuleError::DescriptorMismatch)?;
-
-    // Step 2: bind the V1 container's redundant repair count to the registered
-    // policy selected by the now-authenticated `fec_profile`. The count cannot
-    // simply be removed: after damage, surviving symbols do not reveal how
-    // many repair symbols originally existed. Equality to a closed profile
-    // registry preserves that information without letting the frame choose
-    // its own durability classification.
-    let registered_profile = CapsuleProfile::registered(descriptor.fec_profile).ok_or(
-        CapsuleError::UnsupportedFecProfile {
-            fec_profile: descriptor.fec_profile,
-        },
-    )?;
-    if descriptor.repair_symbols != registered_profile.repair_symbols {
-        return Err(CapsuleError::RepairBudgetMismatch {
-            fec_profile: descriptor.fec_profile,
-            declared_repair_symbols: descriptor.repair_symbols,
-            registered_repair_symbols: registered_profile.repair_symbols,
-        });
-    }
+    let encoding = descriptor.validated_encoding(expected_object_id, verification)?;
 
     // Step 3: DROP the symbols that do not authenticate.
     //

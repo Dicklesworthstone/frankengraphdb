@@ -30,8 +30,14 @@
 use crate::capsule::{
     CapsuleError, CapsuleKeys, MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container, encode_container,
 };
+use crate::identity::CryptoVerificationSink;
 use crate::marker::{ChainError, CommitMarker, EffectSource, MarkerChain};
+use crate::scrub::{
+    CapsuleScrubSummary, LostCapsule, LostReason, ScrubCrashPoint, ScrubVerdict, scrub_object,
+};
 use crate::store::{sync_created_entry, sync_directory, sync_file};
+use crate::symbol::SymbolRecord;
+use crate::symbolize::{RecoveryTarget, SymbolizeError};
 use crate::validate::{CommitDraft, CommitValidator, PassThroughValidator, ValidationRejection};
 use asupersync::fs::{OpenOptions, UnixVfs, Vfs, VfsFile};
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -40,6 +46,7 @@ use fgdb_types::StorageReadCx;
 use fgdb_types::context::CommitCx;
 use fgdb_types::ids::ObjectId;
 use fgdb_types::{CommitSeq, MarkerRef};
+use std::collections::BTreeSet;
 use std::fs::TryLockError;
 use std::path::{Path, PathBuf};
 
@@ -570,6 +577,165 @@ impl<V: Vfs> CommitCoordinator<V> {
             Ok(self
                 .keys
                 .recover(&descriptor, &symbols, capsule_oid, verification)?)
+        })
+        .await
+    }
+
+    /// Inspect the committed prefix and atomically restore each recoverable
+    /// capsule's original encoding. The lifetime writer lease excludes another
+    /// coordinator, and borrowing this handle excludes concurrent commits.
+    pub async fn scrub_capsules(
+        &self,
+        cx: &CommitCx,
+        through: CommitSeq,
+        crash_at: Option<ScrubCrashPoint>,
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<CapsuleScrubSummary, CommitError> {
+        if self.poisoned {
+            return Err(CommitError::Poisoned);
+        }
+        let mut seen = BTreeSet::new();
+        let mut summary = CapsuleScrubSummary::default();
+        for entry in self.chain.entries() {
+            if entry.marker.commit_seq > through.0 {
+                break;
+            }
+            let EffectSource::Local {
+                capsule_ref: object_id,
+                ..
+            } = entry.marker.effect_source;
+            if !seen.insert(object_id) {
+                continue;
+            }
+            summary.objects += 1;
+            let path = Self::capsule_path(&self.dir, object_id);
+            let read = cx
+                .with_restriction_async(async {
+                    let file = self.vfs.open_read(&path).await.map_err(CapsuleError::Io)?;
+                    let bytes = read_bounded_capsule_container(file).await?;
+                    decode_container(&bytes)
+                })
+                .await;
+            let (descriptor, symbols) = match read {
+                Ok(value) => value,
+                Err(error) => {
+                    summary.lost.push(LostCapsule {
+                        object_id,
+                        reason: capsule_loss(error)?,
+                    });
+                    continue;
+                }
+            };
+            let encoding = match descriptor.validated_encoding(object_id, verification) {
+                Ok(encoding) => encoding,
+                Err(error) => {
+                    summary.lost.push(LostCapsule {
+                        object_id,
+                        reason: capsule_loss(error)?,
+                    });
+                    continue;
+                }
+            };
+            let report = scrub_object(
+                &encoding,
+                &symbols,
+                RecoveryTarget {
+                    k_oid: self.keys.k_oid(),
+                    namespace: self.keys.namespace(),
+                    object_id,
+                    canonical_header: &[],
+                    protected_len: descriptor.protected_len() as usize,
+                },
+                self.keys.dek(),
+                verification,
+            );
+            if let ScrubVerdict::Lost { reason } = report.verdict {
+                summary.lost.push(LostCapsule { object_id, reason });
+                continue;
+            }
+            // Intact describes only supplied symbols. A truncated tail or an
+            // authenticated duplicate can still leave the canonical inventory
+            // short of its registered source-plus-repair budget.
+            let expected = report.source_symbols + descriptor.repair_symbols as usize;
+            let complete = if matches!(report.verdict, ScrubVerdict::Intact)
+                && symbols.len() == expected
+                && report.symbols_distinct_authentic == expected
+            {
+                symbols.iter().all(|bytes| {
+                    SymbolRecord::verify(bytes, &encoding, self.keys.dek(), verification).is_ok_and(
+                        |record| record.source_block == 0 && (record.esi as usize) < expected,
+                    )
+                })
+            } else {
+                false
+            };
+            if complete {
+                summary.clean.push(object_id);
+                continue;
+            }
+            let repaired = match self
+                .keys
+                .repair(&descriptor, &symbols, object_id, verification)
+            {
+                Ok(repaired) => repaired,
+                Err(error) => {
+                    summary.lost.push(LostCapsule {
+                        object_id,
+                        reason: capsule_loss(error)?,
+                    });
+                    continue;
+                }
+            };
+            let bytes = encode_container(&repaired);
+            self.replace_scrubbed_capsule(cx, &path, &bytes, crash_at)
+                .await?;
+            summary.repaired.push(object_id);
+        }
+        Ok(summary)
+    }
+
+    async fn replace_scrubbed_capsule(
+        &self,
+        cx: &CommitCx,
+        path: &Path,
+        bytes: &[u8],
+        crash_at: Option<ScrubCrashPoint>,
+    ) -> Result<(), CommitError> {
+        cx.with_restriction_async(async {
+            // Never reuse a partial staging inode from an interrupted attempt.
+            // create_new also makes simultaneous scrub attempts collision-safe.
+            let mut attempt = 0u64;
+            let (temporary, mut file) = loop {
+                let temporary = path.with_extension(format!("scrub-{attempt}.tmp"));
+                match self
+                    .vfs
+                    .open(&temporary, &OpenOptions::new().write(true).create_new(true))
+                    .await
+                {
+                    Ok(file) => break (temporary, file),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        attempt = attempt.checked_add(1).ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::AlreadyExists,
+                                "scrub temporary names exhausted",
+                            )
+                        })?;
+                    }
+                    Err(error) => return Err(CommitError::Io(error)),
+                }
+            };
+            scrub_stop(crash_at, ScrubCrashPoint::AfterTempCreate)?;
+            file.write_all(bytes).await?;
+            scrub_stop(crash_at, ScrubCrashPoint::AfterTempWrite)?;
+            file.flush().await?;
+            scrub_stop(crash_at, ScrubCrashPoint::AfterTempFlush)?;
+            sync_file(cx, &file).await?;
+            scrub_stop(crash_at, ScrubCrashPoint::AfterTempFileSync)?;
+            self.vfs.rename(&temporary, path).await?;
+            scrub_stop(crash_at, ScrubCrashPoint::AfterRename)?;
+            sync_directory(cx, &self.vfs, &self.dir.join(CAPSULE_DIR)).await?;
+            scrub_stop(crash_at, ScrubCrashPoint::AfterDirectorySync)?;
+            Ok(())
         })
         .await
     }
@@ -1199,6 +1365,40 @@ impl<V: Vfs> CommitCoordinator<V> {
             Ok(orphans)
         })
         .await
+    }
+}
+
+fn scrub_stop(requested: Option<ScrubCrashPoint>, point: ScrubCrashPoint) -> std::io::Result<()> {
+    if requested == Some(point) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "injected scrub crash",
+        ));
+    }
+    Ok(())
+}
+
+fn capsule_loss(error: CapsuleError) -> Result<LostReason, CommitError> {
+    match error {
+        CapsuleError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(LostReason::InsufficientSymbols)
+        }
+        CapsuleError::Io(error) => Err(CommitError::Io(error)),
+        error @ (CapsuleError::AllocationFailed
+        | CapsuleError::Recovery(SymbolizeError::AllocationFailed)) => {
+            Err(CommitError::Capsule(error))
+        }
+        CapsuleError::DescriptorMismatch(_) => Ok(LostReason::IdentityMismatch),
+        CapsuleError::Recovery(SymbolizeError::InsufficientSymbols) => {
+            Ok(LostReason::InsufficientSymbols)
+        }
+        CapsuleError::Recovery(SymbolizeError::AuthenticationFailed) => {
+            Ok(LostReason::AuthenticationFailed)
+        }
+        CapsuleError::Recovery(
+            SymbolizeError::IdentityMismatch | SymbolizeError::CiphertextIdentityMismatch,
+        ) => Ok(LostReason::IdentityMismatch),
+        _ => Ok(LostReason::Unusable),
     }
 }
 

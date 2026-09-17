@@ -21,7 +21,37 @@ use crate::symbolize::{RecoveryTarget, SymbolizeError, decode_object};
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::proof::ProofOutcome;
 use asupersync::types::ObjectId as RaptorqObjectId;
+use fgdb_types::ids::ObjectId;
 use std::collections::BTreeMap;
+
+/// Results for every distinct capsule referenced by the selected commit prefix.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapsuleScrubSummary {
+    pub objects: usize,
+    pub clean: Vec<ObjectId>,
+    pub repaired: Vec<ObjectId>,
+    pub lost: Vec<LostCapsule>,
+}
+
+/// A committed capsule which cannot be repaired from its local symbols.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LostCapsule {
+    pub object_id: ObjectId,
+    pub reason: LostReason,
+}
+
+/// Interrupt the first repair immediately after this completed I/O step.
+/// Before rename the old capsule remains untouched; after rename the complete
+/// canonical replacement is visible. Temporary files are never authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrubCrashPoint {
+    AfterTempCreate,
+    AfterTempWrite,
+    AfterTempFlush,
+    AfterTempFileSync,
+    AfterRename,
+    AfterDirectorySync,
+}
 
 /// What a scrub found. Ordered from healthy to lost.
 #[derive(Debug, Clone, PartialEq, Eq)]
