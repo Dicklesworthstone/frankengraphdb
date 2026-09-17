@@ -87,7 +87,7 @@ impl<'a> Parser<'a> {
         -> Result<Operand, GraphMutationTextError> {
         let at = self.current.at;
         let mut parsed = Vec::new();
-        self.scalar_comparison(columns, 0, &mut parsed)?;
+        self.scalar_boolean(columns, 0, &mut parsed)?;
         if parsed.len() == 1 {
             let ParsedOp::Atom(value, _) = parsed.pop().expect("one parsed operand") else {
                 unreachable!("operators and CASE also contain their operands")
@@ -132,6 +132,48 @@ impl<'a> Parser<'a> {
         GraphIntegerExpression::prepare_scalar(&shape)
             .map_err(|error| failure(at, GraphMutationTextErrorKind::IntegerExpression(error)))?;
         Ok(Operand::Integer { program, at })
+    }
+
+    fn scalar_boolean(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
+        -> Result<(), GraphMutationTextError> {
+        self.scalar_conjunction(columns, depth, program)?;
+        while self.take_word("OR")? {
+            let at = self.current.at;
+            self.scalar_conjunction(columns, depth, program)?;
+            emit(program, ParsedOp::Bound(GraphIntegerOp::Or), at)?;
+        }
+        Ok(())
+    }
+
+    fn scalar_conjunction(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
+        -> Result<(), GraphMutationTextError> {
+        self.scalar_negation(columns, depth, program)?;
+        while self.is_word("AND") {
+            // Scoped EXISTS is owned by the graph clause parser.
+            let mut lexer = self.lexer.clone();
+            let mut next = lexer.next()?;
+            if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("NOT")) { next = lexer.next()?; }
+            if matches!(next.kind, TokenKind::Word(word) if word.eq_ignore_ascii_case("EXISTS")) { break; }
+            self.advance()?;
+            let at = self.current.at;
+            self.scalar_negation(columns, depth, program)?;
+            emit(program, ParsedOp::Bound(GraphIntegerOp::And), at)?;
+        }
+        Ok(())
+    }
+
+    fn scalar_negation(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
+        -> Result<(), GraphMutationTextError> {
+        if depth > MAX_INTEGER_NESTING {
+            return Err(failure(self.current.at, GraphMutationTextErrorKind::IntegerNesting { limit: MAX_INTEGER_NESTING }));
+        }
+        if self.is_word("NOT") && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.')) {
+            let at = self.current.at;
+            self.advance()?;
+            self.scalar_negation(columns, depth + 1, program)?;
+            return emit(program, ParsedOp::Bound(GraphIntegerOp::Not), at);
+        }
+        self.scalar_comparison(columns, depth, program)
     }
 
     fn scalar_comparison(&mut self, columns: &mut ExpressionColumns<'_, 'a>, depth: usize, program: &mut Vec<ParsedOp>)
@@ -245,7 +287,7 @@ impl<'a> Parser<'a> {
             return emit(program, ParsedOp::Unary(op), at);
         }
         if self.take(b'(')? {
-            self.scalar_comparison(columns, depth + 1, program)?;
+            self.scalar_boolean(columns, depth + 1, program)?;
             self.punct(b')', ")")?;
             return Ok(());
         }

@@ -48,13 +48,13 @@ impl GraphPatternBuilder {
         let projection = columns
             .iter()
             .zip(variables)
-            .map(|(column, variable)| {
-                let slot = slots[variable];
-                match column {
-                    GraphColumn::Vertex { .. } => ValueProjection::Vertex { slot },
-                    GraphColumn::Property { key, .. } => {
-                        ValueProjection::Property { slot, key: *key }
-                    }
+            .map(|(column, variable)| match column {
+                GraphColumn::Vertex { .. } => ValueProjection::Vertex { slot: slots[variable] },
+                GraphColumn::Property { key, .. } => {
+                    ValueProjection::Property { slot: slots[variable], key: *key }
+                }
+                GraphColumn::Path { function, .. } => {
+                    ValueProjection::Path { capture: variable as u32, function: *function }
                 }
             })
             .collect();

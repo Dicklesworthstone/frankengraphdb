@@ -8,7 +8,7 @@ use crate::{
     GqlExecutionBudget, GqlExecutionStats,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, VId};
+use fgdb_types::{CanonicalScalar, EId, VId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GqlQueryPolicy {
@@ -56,6 +56,7 @@ pub enum GqlQueryError<E, C> {
     Rows(GqlBudgetExceeded),
     Evaluator(GlaLimitExceeded),
     Interrupted(C),
+    IdentifiedEdgesRequired,
 }
 
 impl<E, C> GqlQueryError<E, C> {
@@ -65,6 +66,7 @@ impl<E, C> GqlQueryError<E, C> {
             Self::Rows(error) => GqlQueryError::Rows(error),
             Self::Evaluator(error) => GqlQueryError::Evaluator(error),
             Self::Interrupted(error) => GqlQueryError::Interrupted(error),
+            Self::IdentifiedEdgesRequired => GqlQueryError::IdentifiedEdgesRequired,
         }
     }
 }
@@ -75,6 +77,7 @@ impl<E: core::fmt::Display, C: core::fmt::Display> core::fmt::Display for GqlQue
             Self::Rows(error) => core::fmt::Display::fmt(error, f),
             Self::Evaluator(error) => core::fmt::Display::fmt(error, f),
             Self::Interrupted(error) => write!(f, "query interrupted: {error}"),
+            Self::IdentifiedEdgesRequired => f.write_str("captured paths require identified edges"),
         }
     }
 }
@@ -87,6 +90,7 @@ impl<E: core::error::Error + 'static, C: core::error::Error + 'static> core::err
             Self::Rows(error) => Some(error),
             Self::Evaluator(error) => Some(error),
             Self::Interrupted(error) => Some(error),
+            Self::IdentifiedEdgesRequired => None,
         }
     }
 }
@@ -216,9 +220,32 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
+            if self.requires_identified_edges() { return Err(GqlQueryError::IdentifiedEdgesRequired); }
             self.execute_with_properties_control(
                 vertices,
                 edges,
+                |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
+                |vid, key| property(vid, key).map_err(GqlQueryError::Source),
+                |event| meter.observe(event),
+            )
+        })
+    }
+
+    /// Preserve source EIds for captured paths under the ordinary query meter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_identified_properties<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
+        governed(snapshot_records, policy, checkpoint, |meter| {
+            self.execute_with_identified_properties_control(
+                vertices, edges,
                 |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
                 |vid, key| property(vid, key).map_err(GqlQueryError::Source),
                 |event| meter.observe(event),

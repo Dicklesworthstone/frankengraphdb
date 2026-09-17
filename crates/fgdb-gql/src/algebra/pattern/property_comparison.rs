@@ -80,7 +80,10 @@ impl GraphPatternBuilder {
     }
 
     pub(super) fn require_identity_projection(&self) -> Result<(), PatternBuildError> {
-        if self.property_comparisons.is_empty() {
+        if self.property_comparisons.is_empty()
+            && self.path_captures.is_empty()
+            && self.path_predicates.is_empty()
+        {
             Ok(())
         } else {
             Err(PatternBuildError::RequiresValueProjection)

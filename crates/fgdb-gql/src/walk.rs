@@ -164,15 +164,15 @@ impl core::fmt::Debug for GraphWalkCursor<'_> {
 
 /// Identity-preserving traversal over one admitted graph generation. Layers are
 /// ordered by hop count, then by alternating edge/vertex identities, regardless
-/// of adjacency input order. The occurrence key retains duplicate input rows.
+/// of adjacency input order. Duplicate input occurrences remain distinct.
 /// Unlike the endpoint cursors, every returned path contains real edge IDs.
 pub(crate) struct GraphPathCursor<'a> {
     adjacency: Option<&'a BTreeMap<VId, Vec<(EId, VId)>>>,
     bounds: GraphWalkBounds,
     search: GraphWalkSearch,
     depth: u32,
-    frontier: BTreeMap<(GraphPath, usize), ()>,
-    pending: BTreeMap<(GraphPath, usize), ()>,
+    frontier: Vec<GraphPath>,
+    pending: std::vec::IntoIter<GraphPath>,
     settled: BTreeMap<VId, u32>,
     done: bool,
 }
@@ -192,8 +192,8 @@ impl<'a> GraphPathCursor<'a> {
             bounds,
             search,
             depth: 0,
-            frontier: BTreeMap::from([((GraphPath::new(source, Box::new([])), 0), ())]),
-            pending: BTreeMap::new(),
+            frontier: vec![GraphPath::new(source, Box::new([]))],
+            pending: Vec::new().into_iter(),
             settled: BTreeMap::new(),
             done: false,
         })
@@ -208,8 +208,8 @@ impl<'a> GraphPathCursor<'a> {
         let result = self.next_controlled(control);
         if result.is_err() {
             self.done = true;
-            self.frontier.clear();
-            self.pending.clear();
+            self.frontier = Vec::new();
+            self.pending = Vec::new().into_iter();
             self.settled.clear();
         }
         result
@@ -220,9 +220,9 @@ impl<'a> GraphPathCursor<'a> {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<GraphPath>, E> {
         loop {
-            if !self.pending.is_empty() {
+            if self.pending.len() != 0 {
                 control(GlaExecutionEvent::Work)?;
-                return Ok(self.pending.pop_first().map(|((path, _), ())| path));
+                return Ok(self.pending.next());
             }
             if self.done {
                 return Ok(None);
@@ -244,9 +244,10 @@ impl<'a> GraphPathCursor<'a> {
 
         let shortest = self.search != GraphWalkSearch::All;
         let unique = self.search == GraphWalkSearch::AnyShortest;
-        let mut next = BTreeMap::new();
+        let mut next = Vec::new();
+        let mut pending = Vec::new();
         let mut canonical = BTreeMap::<VId, GraphPath>::new();
-        for ((path, occurrence), ()) in core::mem::take(&mut self.frontier) {
+        for path in core::mem::take(&mut self.frontier) {
             control(GlaExecutionEvent::Work)?;
             let endpoint = path.steps().last().map_or(path.start(), |step| step.1);
             // Settlement starts at the lower bound, not at the first visit.
@@ -294,14 +295,13 @@ impl<'a> GraphPathCursor<'a> {
                     } else {
                         control(GlaExecutionEvent::ScratchEntry)?;
                         let child = Self::extend_path(&path, step, control)?;
-                        let occurrence = next.len();
-                        next.insert((child, occurrence), ());
+                        next.push(child);
                     }
                 }
             }
             if emit {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                self.pending.insert((path, occurrence), ());
+                pending.push(path);
             }
         }
         // Endpoint coalescing chooses identities, not endpoint ordering. Move
@@ -309,8 +309,10 @@ impl<'a> GraphPathCursor<'a> {
         for (_, path) in canonical {
             control(GlaExecutionEvent::Work)?;
             control(GlaExecutionEvent::ScratchEntry)?;
-            next.insert((path, 0), ());
+            next.push(path);
         }
+        Self::sort_paths(&mut next, control)?;
+        self.pending = pending.into_iter();
         self.frontier = next;
         self.depth += 1;
         self.done = self.frontier.is_empty();
@@ -336,6 +338,65 @@ impl<'a> GraphPathCursor<'a> {
         steps.extend_from_slice(path.steps());
         steps.push(step);
         Ok(GraphPath::new(path.start(), steps.into_boxed_slice()))
+    }
+
+    /// Fallible in-place heapsort keeps comparison work interruptible without
+    /// allocating a second path buffer or hiding fallible control in `Ord`.
+    fn sort_paths<E>(
+        paths: &mut [GraphPath],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for root in (0..paths.len() / 2).rev() {
+            Self::sift_paths(paths, root, control)?;
+        }
+        for end in (1..paths.len()).rev() {
+            control(GlaExecutionEvent::Work)?;
+            paths.swap(0, end);
+            Self::sift_paths(&mut paths[..end], 0, control)?;
+        }
+        Ok(())
+    }
+
+    fn sift_paths<E>(
+        paths: &mut [GraphPath],
+        mut root: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        while root < paths.len() / 2 {
+            control(GlaExecutionEvent::Work)?;
+            let mut child = root * 2 + 1;
+            if child + 1 < paths.len()
+                && Self::compare_paths(&paths[child], &paths[child + 1], control)?.is_lt()
+            {
+                child += 1;
+            }
+            if !Self::compare_paths(&paths[root], &paths[child], control)?.is_lt() {
+                break;
+            }
+            paths.swap(root, child);
+            root = child;
+        }
+        Ok(())
+    }
+
+    fn compare_paths<E>(
+        left: &GraphPath,
+        right: &GraphPath,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<core::cmp::Ordering, E> {
+        control(GlaExecutionEvent::Work)?;
+        let order = left.start().cmp(&right.start());
+        if !order.is_eq() {
+            return Ok(order);
+        }
+        for (left, right) in left.steps().iter().zip(right.steps()) {
+            control(GlaExecutionEvent::Work)?;
+            let order = left.cmp(right);
+            if !order.is_eq() {
+                return Ok(order);
+            }
+        }
+        Ok(left.len().cmp(&right.len()))
     }
 }
 

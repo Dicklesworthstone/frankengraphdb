@@ -69,6 +69,16 @@ impl GraphPatternBuilder {
         let mut predicates = self.predicate_count;
         let mut identities = self.identities.len();
         for clause in clauses {
+            if !clause.pattern.path_captures.is_empty()
+                || !clause.pattern.path_predicates.is_empty()
+            {
+                return Err(PatternBuildError::InvalidPathCapture);
+            }
+            if clause.pattern.variables.iter().any(|variable| {
+                self.path_captures.iter().any(|capture| capture.name == variable.name)
+            }) {
+                return Err(PatternBuildError::DuplicateVariable);
+            }
             edges = edges.saturating_add(clause.pattern.edges.len());
             predicates = predicates.saturating_add(clause.pattern.predicate_count);
             identities = identities.saturating_add(clause.pattern.identities.len());
@@ -341,13 +351,13 @@ impl GraphPatternBuilder {
         let projection = columns
             .iter()
             .zip(variables)
-            .map(|(column, variable)| {
-                let slot = scope_slots[variable];
-                match column {
-                    GraphColumn::Vertex { .. } => ValueProjection::Vertex { slot },
-                    GraphColumn::Property { key, .. } => {
-                        ValueProjection::Property { slot, key: *key }
-                    }
+            .map(|(column, variable)| match column {
+                GraphColumn::Vertex { .. } => ValueProjection::Vertex { slot: scope_slots[variable] },
+                GraphColumn::Property { key, .. } => {
+                    ValueProjection::Property { slot: scope_slots[variable], key: *key }
+                }
+                GraphColumn::Path { function, .. } => {
+                    ValueProjection::Path { capture: variable as u32, function: *function }
                 }
             })
             .collect();
@@ -404,7 +414,12 @@ impl GraphPatternBuilder {
             {
                 return Err(PatternBuildError::DuplicateProjection);
             }
-            variables.push(self.variable(column.variable())?);
+            variables.push(match column {
+                GraphColumn::Path { variable, .. } => self.path_capture(variable)?,
+                GraphColumn::Vertex { variable, .. } | GraphColumn::Property { variable, .. } => {
+                    self.variable(variable)?
+                }
+            });
         }
         Ok(variables)
     }

@@ -87,10 +87,10 @@ fn prepare_root(ops: &[GraphIntegerOp], integer_root: bool) -> Result<GraphInteg
                 if kind == Kind::Dynamic { dynamic = true; }
                 else { known = known.merge(kind).ok_or_else(wrong)?; }
             }
-            Ok(if dynamic { Kind::Dynamic } else { known })
+            Ok(if dynamic && known == Kind::Null { Kind::Dynamic } else { known })
         };
         let kind = match op {
-            Op::Literal(None) | Op::Truth(None) => Kind::Null,
+            Op::Literal(None) => Kind::Null,
             Op::Scalar(value) => match value.value() {
                 CanonicalScalar::Null => Kind::Null,
                 CanonicalScalar::Int(_) => Kind::Integer,
@@ -325,7 +325,7 @@ mod tests {
                 (Op::Or, if left == Some(true) || right == Some(true) { Some(true) }
                     else if left.is_none() || right.is_none() { None } else { Some(false) }),
             ] {
-                let ops = [Op::Truth(left), Op::Truth(right), op, Op::Literal(Some(1)), Op::Literal(Some(0)), Op::Case];
+                let ops = [Op::Truth(left), Op::Truth(right), op.clone(), Op::Literal(Some(1)), Op::Literal(Some(0)), Op::Case];
                 assert_eq!(value(&ops), Some(i64::from(truth == Some(true))));
                 let negated = [Op::Truth(left), Op::Truth(right), op, Op::Not,
                     Op::Literal(Some(1)), Op::Literal(Some(0)), Op::Case];

@@ -5,7 +5,7 @@
 mod property_comparison;
 mod value_projection;
 
-use super::{BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphWalkSearch, VertexPredicate};
+use super::{BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphPathFunction, GraphWalkSearch, IntegerComparison, VertexPredicate};
 use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_types::VId;
 use property_comparison::PropertyComparison;
@@ -44,6 +44,7 @@ pub enum PatternBuildError {
     DuplicateProjection,
     InvalidColumnName,
     RequiresValueProjection,
+    InvalidPathCapture,
     LimitExceeded {
         dimension: PatternLimitDimension,
         limit: usize,
@@ -69,6 +70,7 @@ impl core::fmt::Display for PatternBuildError {
             Self::RequiresValueProjection => f.write_str(
                 "binding property comparisons require prepare_values or its scoped variants",
             ),
+            Self::InvalidPathCapture => f.write_str("path capture requires an ordered connected root chain or a single WALK atom"),
             Self::LimitExceeded {
                 dimension,
                 limit,
@@ -122,6 +124,19 @@ struct Identity {
     equal: bool,
 }
 
+#[derive(Clone)]
+struct PathCapture {
+    name: String,
+    start: usize,
+    edge_count: usize,
+}
+
+#[derive(Clone)]
+enum PathPredicate {
+    Length { capture: u32, comparison: IntegerComparison, value: i64 },
+    Null { capture: u32, function: GraphPathFunction, is_null: bool },
+}
+
 /// Bounded definition metadata. Mutators validate before changing the builder.
 #[derive(Clone, Default)]
 pub struct GraphPatternBuilder {
@@ -129,6 +144,8 @@ pub struct GraphPatternBuilder {
     edges: Vec<Edge>,
     identities: Vec<Identity>,
     property_comparisons: Vec<PropertyComparison>,
+    path_captures: Vec<PathCapture>,
+    path_predicates: Vec<PathPredicate>,
     predicate_count: usize,
 }
 impl core::fmt::Debug for GraphPatternBuilder {
@@ -265,11 +282,13 @@ impl GraphPatternBuilder {
         {
             return Err(PatternBuildError::InvalidVariableName);
         }
-        if self.variables.iter().any(|var| var.name == name) {
+        if self.variables.iter().any(|var| var.name == name)
+            || self.path_captures.iter().any(|capture| capture.name == name)
+        {
             return Err(PatternBuildError::DuplicateVariable);
         }
         check_next(
-            self.variables.len(),
+            self.variables.len() + self.path_captures.len(),
             MAX_PATTERN_VERTICES,
             PatternLimitDimension::Vertices,
         )?;
@@ -291,6 +310,97 @@ impl GraphPatternBuilder {
     pub fn outer_vertex(&mut self, name: &str) -> Result<&mut Self, PatternBuildError> {
         self.vertex(name)?;
         self.variables.last_mut().expect("one validated variable was added").outer = true;
+        Ok(self)
+    }
+
+    /// Capture the current complete root chain in edge declaration order.
+    /// Later edges do not extend an existing capture. Captures are value-only
+    /// root bindings; scoped children cannot declare them.
+    pub fn capture_path(&mut self, name: &str) -> Result<&mut Self, PatternBuildError> {
+        // Reuse vertex-name and shared visible-name validation without leaving
+        // a vertex declaration behind if chain validation fails.
+        let bytes = name.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > MAX_PATTERN_NAME_BYTES
+            || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+            || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            return Err(PatternBuildError::InvalidVariableName);
+        }
+        if self.variables.iter().any(|variable| variable.name == name)
+            || self.path_captures.iter().any(|capture| capture.name == name)
+        {
+            return Err(PatternBuildError::DuplicateVariable);
+        }
+        check_next(
+            self.variables.len() + self.path_captures.len(),
+            MAX_PATTERN_VERTICES,
+            PatternLimitDimension::Vertices,
+        )?;
+        if self.variables.is_empty() {
+            return Err(PatternBuildError::EmptyPattern);
+        }
+        if self.variables.iter().any(|variable| variable.outer)
+            || (self.edges.len() > 1 && self.edges.iter().any(|edge| edge.walk.is_some()))
+        {
+            return Err(PatternBuildError::InvalidPathCapture);
+        }
+        let start = self.edges.first().map_or(0, |edge| edge.source);
+        let mut visited = vec![false; self.variables.len()];
+        visited[start] = true;
+        let mut endpoint = start;
+        for edge in &self.edges {
+            endpoint = if edge.source == endpoint {
+                edge.destination
+            } else if edge.destination == endpoint {
+                edge.source
+            } else {
+                return Err(PatternBuildError::InvalidPathCapture);
+            };
+            if visited[endpoint] {
+                return Err(PatternBuildError::InvalidPathCapture);
+            }
+            visited[endpoint] = true;
+        }
+        if visited.iter().any(|visited| !visited) {
+            return Err(PatternBuildError::InvalidPathCapture);
+        }
+        self.path_captures.push(PathCapture {
+            name: name.to_owned(),
+            start,
+            edge_count: self.edges.len(),
+        });
+        Ok(self)
+    }
+
+    fn path_capture(&self, name: &str) -> Result<usize, PatternBuildError> {
+        self.path_captures.iter().position(|capture| capture.name == name)
+            .ok_or(PatternBuildError::UnknownVariable)
+    }
+
+    pub fn filter_path_length(
+        &mut self,
+        variable: &str,
+        comparison: IntegerComparison,
+        value: i64,
+    ) -> Result<&mut Self, PatternBuildError> {
+        let capture = self.path_capture(variable)? as u32;
+        check_next(self.predicate_count, MAX_PATTERN_PREDICATES, PatternLimitDimension::Predicates)?;
+        self.path_predicates.push(PathPredicate::Length { capture, comparison, value });
+        self.predicate_count += 1;
+        Ok(self)
+    }
+
+    pub fn filter_path_null(
+        &mut self,
+        variable: &str,
+        function: GraphPathFunction,
+        is_null: bool,
+    ) -> Result<&mut Self, PatternBuildError> {
+        let capture = self.path_capture(variable)? as u32;
+        check_next(self.predicate_count, MAX_PATTERN_PREDICATES, PatternLimitDimension::Predicates)?;
+        self.path_predicates.push(PathPredicate::Null { capture, function, is_null });
+        self.predicate_count += 1;
         Ok(self)
     }
 
@@ -553,6 +663,11 @@ impl GraphPatternBuilder {
         let mut slots = vec![None; self.variables.len()];
         let mut emitted = vec![false; self.identities.len()];
         let mut consumed = vec![false; self.edges.len()];
+        let mut path_segments = if self.path_captures.is_empty() {
+            Vec::new()
+        } else {
+            vec![None; self.edges.len()]
+        };
         let mut operators = Vec::new();
         let mut next_slot;
         if root.is_some() || self.edges.is_empty() {
@@ -589,6 +704,9 @@ impl GraphPatternBuilder {
                 self.select(first.destination, BindingSlot(1), &mut operators);
             }
             consumed[0] = true;
+            if !path_segments.is_empty() {
+                path_segments[0] = Some(BindingSlot(1));
+            }
             next_slot = 2;
         }
         loop {
@@ -609,6 +727,9 @@ impl GraphPatternBuilder {
                 let appended = BindingSlot(next_slot);
                 next_slot += 1;
                 operators.push(edge.expansion(source, direction));
+                if !path_segments.is_empty() {
+                    path_segments[at] = Some(appended);
+                }
                 let previous = slots[target];
                 if let Some(representative) = previous {
                     operators.push(GlaOperator::VertexIdentity {
@@ -653,6 +774,25 @@ impl GraphPatternBuilder {
             .into_iter()
             .map(|slot| slot.expect("every component has been bound"))
             .collect();
+        for (capture, definition) in self.path_captures.iter().enumerate() {
+            operators.push(GlaOperator::CapturePath {
+                capture: capture as u32,
+                start: slots[definition.start],
+                segments: path_segments[..definition.edge_count].iter()
+                    .map(|slot| slot.expect("every captured edge has been bound"))
+                    .collect(),
+            });
+        }
+        for predicate in &self.path_predicates {
+            operators.push(match *predicate {
+                PathPredicate::Length { capture, comparison, value } => {
+                    GlaOperator::SelectPathLength { capture, comparison, value }
+                }
+                PathPredicate::Null { capture, function, is_null } => {
+                    GlaOperator::SelectPathNull { capture, function, is_null }
+                }
+            });
+        }
         self.emit_property_comparisons(&slots, &mut operators);
         Ok((operators, slots))
     }

@@ -187,87 +187,186 @@ impl GraphIntegerExpression {
         &self, values: &[GraphValue],
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<i64>, GraphIntegerEvaluationError<E>> {
+        scalar_integer(&self.evaluate_scalar_with_control(values, control)?).map_err(|kind|
+            GraphIntegerEvaluationError::Value(GraphIntegerError { instruction: self.code.len(), kind }))
+    }
+
+    /// Evaluate borrowed inputs without copying their payloads. Each payload
+    /// scan is charged in work units; new payload storage is reserved through
+    /// ScratchEntry checkpoints before allocation, including the owned return.
+    pub fn evaluate_scalar_with_control<E>(
+        &self, values: &[GraphValue],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
         for _ in 0..self.stack_entries {
             control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
         }
-        // Static admission proves each cell's domain. Conditions use only
-        // None/0/1 internally and can never be consumed by integer arithmetic.
-        let mut stack: Vec<Option<i64>> = Vec::with_capacity(self.stack_entries);
+        let mut stack: Vec<Cow<'_, CanonicalScalar>> = Vec::with_capacity(self.stack_entries);
         let mut at = 0;
         while let Some(op) = self.code.get(at) {
             control(GlaExecutionEvent::Work).map_err(GraphIntegerEvaluationError::Control)?;
             let failure = |kind| GraphIntegerEvaluationError::Value(GraphIntegerError { instruction: at, kind });
             match op {
-                Instruction::Column(column) => {
+                Instruction::Column(column) | Instruction::ScalarColumn(column) => {
                     let value = match values.get(*column) {
-                        Some(GraphValue::Scalar(CanonicalScalar::Int(value))) => Some(*value),
-                        Some(GraphValue::Scalar(CanonicalScalar::Null)) => None,
-                        Some(_) => return Err(failure(GraphIntegerErrorKind::NonInteger)),
+                        Some(GraphValue::Scalar(value)) => value,
+                        Some(_) => return Err(failure(if matches!(op, Instruction::Column(_)) {
+                            GraphIntegerErrorKind::NonInteger
+                        } else { GraphIntegerErrorKind::NonScalar })),
                         None => return Err(failure(GraphIntegerErrorKind::MissingColumn)),
                     };
-                    stack.push(value);
+                    if matches!(op, Instruction::Column(_)) { scalar_integer(value).map_err(failure)?; }
+                    stack.push(Cow::Borrowed(value));
                 }
-                Instruction::Literal(value) => stack.push(*value),
+                Instruction::Scalar(value) => stack.push(Cow::Borrowed(value.value())),
+                Instruction::Literal(value) => stack.push(Cow::Owned(integer_scalar(*value))),
+                Instruction::Truth(value) => stack.push(Cow::Owned(boolean_scalar(*value))),
                 Instruction::Unary(op) => {
                     let value = stack.last_mut().expect("validated unary stack");
-                    if let Some(number) = *value {
-                        *value = Some(match op {
+                    let number = scalar_integer(value).map_err(failure)?;
+                    let result = match number {
+                        None => None,
+                        Some(number) => Some(match op {
                             GraphIntegerUnary::Plus => Some(number),
                             GraphIntegerUnary::Negate => number.checked_neg(),
                             GraphIntegerUnary::Abs => number.checked_abs(),
-                        }.ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?);
-                    }
+                        }.ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?),
+                    };
+                    *value = Cow::Owned(integer_scalar(result));
                 }
                 Instruction::Binary(op) => {
                     let right = stack.pop().expect("validated right operand");
                     let left = stack.last_mut().expect("validated left operand");
-                    *left = apply_binary(*op, *left, right).map_err(failure)?;
+                    let a = scalar_integer(left).map_err(failure)?;
+                    let b = scalar_integer(&right).map_err(failure)?;
+                    *left = Cow::Owned(integer_scalar(apply_binary(*op, a, b).map_err(failure)?));
                 }
                 Instruction::JumpIfPresent(target) => {
-                    if stack.last().expect("validated coalesce operand").is_some() {
+                    if !matches!(stack.last().expect("validated coalesce operand").as_ref(), CanonicalScalar::Null) {
                         at = *target; continue;
                     }
                     let _ = stack.pop();
                 }
-                Instruction::Truth(value) => stack.push(value.map(i64::from)),
                 Instruction::Compare(comparison) => {
                     let right = stack.pop().expect("validated comparison right operand");
                     let left = stack.last_mut().expect("validated comparison left operand");
-                    *left = (*left).zip(right).map(|(a, b)| i64::from(match comparison {
-                        IntegerComparison::Equal => a == b,
-                        IntegerComparison::NotEqual => a != b,
-                        IntegerComparison::Less => a < b,
-                        IntegerComparison::LessOrEqual => a <= b,
-                        IntegerComparison::Greater => a > b,
-                        IntegerComparison::GreaterOrEqual => a >= b,
-                    }));
+                    let result = compare_scalars(*comparison, left, &right, at, control)?;
+                    *left = Cow::Owned(boolean_scalar(result));
                 }
                 Instruction::IsNull(is_null) => {
                     let value = stack.last_mut().expect("validated null operand");
-                    *value = Some(i64::from(value.is_none() == *is_null));
+                    *value = Cow::Owned(CanonicalScalar::Bool(matches!(value.as_ref(), CanonicalScalar::Null) == *is_null));
                 }
                 Instruction::Not => {
                     let value = stack.last_mut().expect("validated Boolean operand");
-                    *value = (*value).map(|value| 1 - value);
+                    *value = Cow::Owned(boolean_scalar(scalar_boolean(value).map_err(failure)?.map(|value| !value)));
                 }
                 Instruction::And | Instruction::Or => {
                     let right = stack.pop().expect("validated Boolean right operand");
                     let left = stack.last_mut().expect("validated Boolean left operand");
-                    *left = if matches!(op, Instruction::And) {
-                        if *left == Some(0) || right == Some(0) { Some(0) }
-                        else if left.is_none() || right.is_none() { None } else { Some(1) }
-                    } else if *left == Some(1) || right == Some(1) { Some(1) }
-                    else if left.is_none() || right.is_none() { None } else { Some(0) };
+                    let a = scalar_boolean(left).map_err(failure)?;
+                    let b = scalar_boolean(&right).map_err(failure)?;
+                    let result = if matches!(op, Instruction::And) {
+                        if a == Some(false) || b == Some(false) { Some(false) }
+                        else if a.is_none() || b.is_none() { None } else { Some(true) }
+                    } else if a == Some(true) || b == Some(true) { Some(true) }
+                    else if a.is_none() || b.is_none() { None } else { Some(false) };
+                    *left = Cow::Owned(boolean_scalar(result));
+                }
+                Instruction::Upper | Instruction::Lower | Instruction::Trim | Instruction::CharLength => {
+                    let value = stack.last_mut().expect("validated text operand");
+                    let result = if let Some(text) = scalar_text(value).map_err(failure)? {
+                        charge_payload(text.len(), false, control)?;
+                        match op {
+                            Instruction::CharLength => CanonicalScalar::Int(i64::try_from(text.chars().count())
+                                .map_err(|_| failure(GraphIntegerErrorKind::Overflow))?),
+                            Instruction::Trim => make_text(text.trim(), at, control)?,
+                            _ => {
+                                // Unicode case mapping expands a scalar by at most three
+                                // times its UTF-8 bytes. Reserve before str allocates.
+                                let bound = text.len().checked_mul(3).ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
+                                charge_payload(bound, true, control)?;
+                                let mapped = if matches!(op, Instruction::Upper) { text.to_uppercase() }
+                                    else { text.to_lowercase() };
+                                make_text(&mapped, at, control)?
+                            }
+                        }
+                    } else { CanonicalScalar::Null };
+                    *value = Cow::Owned(result);
+                }
+                Instruction::Concat | Instruction::StartsWith | Instruction::EndsWith | Instruction::Contains => {
+                    let right = stack.pop().expect("validated text right operand");
+                    let left = stack.last_mut().expect("validated text left operand");
+                    let a = scalar_text(left).map_err(failure)?;
+                    let b = scalar_text(&right).map_err(failure)?;
+                    let result = if let (Some(a), Some(b)) = (a, b) {
+                        charge_payload(a.len(), false, control)?;
+                        charge_payload(b.len(), false, control)?;
+                        match op {
+                            Instruction::Concat => {
+                                let size = a.len().checked_add(b.len()).ok_or_else(|| failure(GraphIntegerErrorKind::Overflow))?;
+                                charge_payload(size, true, control)?;
+                                let mut joined = String::with_capacity(size);
+                                joined.push_str(a); joined.push_str(b);
+                                make_text(&joined, at, control)?
+                            }
+                            Instruction::StartsWith => CanonicalScalar::Bool(a.starts_with(b)),
+                            Instruction::EndsWith => CanonicalScalar::Bool(a.ends_with(b)),
+                            _ => CanonicalScalar::Bool(a.contains(b)),
+                        }
+                    } else { CanonicalScalar::Null };
+                    *left = Cow::Owned(result);
+                }
+                Instruction::Substring => {
+                    let length = stack.pop().expect("validated substring length");
+                    let start = stack.pop().expect("validated substring start");
+                    let value = stack.last_mut().expect("validated substring text");
+                    let text = scalar_text(value).map_err(failure)?;
+                    let start = scalar_integer(&start).map_err(failure)?;
+                    let length = scalar_integer(&length).map_err(failure)?;
+                    if length.is_some_and(|length| length < 0) {
+                        return Err(failure(GraphIntegerErrorKind::InvalidSubstring));
+                    }
+                    let result = if let (Some(text), Some(start), Some(length)) = (text, start, length) {
+                        charge_payload(text.len(), false, control)?;
+                        // Intersect the requested [start, start + length) with
+                        // one-based Unicode positions. i128 avoids i64 overflow.
+                        let begin = (i128::from(start) - 1).max(0);
+                        let end = (i128::from(start) - 1 + i128::from(length)).max(0);
+                        let mut first = text.len();
+                        let mut last = text.len();
+                        for (position, (byte, _)) in text.char_indices().enumerate() {
+                            let position = position as i128;
+                            if position == begin { first = byte; }
+                            if position == end { last = byte; break; }
+                        }
+                        make_text(&text[first..last], at, control)?
+                    } else { CanonicalScalar::Null };
+                    *value = Cow::Owned(result);
+                }
+                Instruction::InList { members } => {
+                    let base = stack.len() - *members - 1;
+                    let mut result = Some(false);
+                    for candidate in &stack[base + 1..] {
+                        let equal = compare_scalars(IntegerComparison::Equal, &stack[base], candidate, at, control)?;
+                        if equal == Some(true) { result = Some(true); }
+                        else if equal.is_none() && result != Some(true) { result = None; }
+                    }
+                    stack.truncate(base);
+                    stack.push(Cow::Owned(boolean_scalar(result)));
                 }
                 Instruction::JumpUnlessTrue(target) => {
-                    if stack.pop().expect("validated CASE condition") != Some(1) {
+                    let condition = stack.pop().expect("validated CASE condition");
+                    if scalar_boolean(&condition).map_err(failure)? != Some(true) {
                         at = *target; continue;
                     }
                 }
                 Instruction::JumpUnlessEqual(target) => {
                     let candidate = stack.pop().expect("validated WHEN operand");
-                    let selector = *stack.last().expect("validated CASE selector");
-                    if selector.is_none() || selector != candidate { at = *target; continue; }
+                    let selector = stack.last().expect("validated CASE selector");
+                    if compare_scalars(IntegerComparison::Equal, selector, &candidate, at, control)? != Some(true) {
+                        at = *target; continue;
+                    }
                     let _ = stack.pop();
                 }
                 Instruction::Jump(target) => { at = *target; continue; }
@@ -277,7 +376,15 @@ impl GraphIntegerExpression {
             at += 1;
         }
         debug_assert_eq!(stack.len(), 1);
-        Ok(stack.pop().expect("one validated scalar result"))
+        let value = stack.pop().expect("one validated scalar result");
+        if !matches!(value.as_ref(), CanonicalScalar::Null | CanonicalScalar::Int(_)
+            | CanonicalScalar::Bool(_) | CanonicalScalar::Text(_)) {
+            return Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
+                instruction: self.code.len(), kind: GraphIntegerErrorKind::NonScalar,
+            }));
+        }
+        if let Cow::Borrowed(value) = &value { charge_payload(scalar_payload_bytes(value), true, control)?; }
+        Ok(value.into_owned())
     }
 
     /// Value-bearing application transcript. Existing instruction tags remain
@@ -330,10 +437,109 @@ impl GraphIntegerExpression {
                     bytes.push(13); bytes.extend_from_slice(&(*target as u64).to_be_bytes());
                 }
                 Instruction::Drop => bytes.push(14),
+                Instruction::Scalar(value) => {
+                    bytes.push(15);
+                    let value = value.canonical_value_bytes();
+                    bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(value);
+                }
+                Instruction::ScalarColumn(column) => {
+                    bytes.push(16); bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                }
+                Instruction::Upper => bytes.push(17),
+                Instruction::Lower => bytes.push(18),
+                Instruction::Trim => bytes.push(19),
+                Instruction::CharLength => bytes.push(20),
+                Instruction::Substring => bytes.push(21),
+                Instruction::Concat => bytes.push(22),
+                Instruction::StartsWith => bytes.push(23),
+                Instruction::EndsWith => bytes.push(24),
+                Instruction::Contains => bytes.push(25),
+                Instruction::InList { members } => {
+                    bytes.push(26); bytes.extend_from_slice(&(*members as u64).to_be_bytes());
+                }
             }
         }
         bytes
     }
+}
+
+fn integer_scalar(value: Option<i64>) -> CanonicalScalar {
+    value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)
+}
+
+fn boolean_scalar(value: Option<bool>) -> CanonicalScalar {
+    value.map_or(CanonicalScalar::Null, CanonicalScalar::Bool)
+}
+
+fn scalar_integer(value: &CanonicalScalar) -> Result<Option<i64>, GraphIntegerErrorKind> {
+    match value {
+        CanonicalScalar::Null => Ok(None),
+        CanonicalScalar::Int(value) => Ok(Some(*value)),
+        _ => Err(GraphIntegerErrorKind::NonInteger),
+    }
+}
+
+fn scalar_boolean(value: &CanonicalScalar) -> Result<Option<bool>, GraphIntegerErrorKind> {
+    match value {
+        CanonicalScalar::Null => Ok(None),
+        CanonicalScalar::Bool(value) => Ok(Some(*value)),
+        _ => Err(GraphIntegerErrorKind::NonBoolean),
+    }
+}
+
+fn scalar_text(value: &CanonicalScalar) -> Result<Option<&str>, GraphIntegerErrorKind> {
+    match value {
+        CanonicalScalar::Null => Ok(None),
+        CanonicalScalar::Text(value) => Ok(Some(value.as_str())),
+        _ => Err(GraphIntegerErrorKind::NonText),
+    }
+}
+
+fn scalar_payload_bytes(value: &CanonicalScalar) -> usize {
+    match value {
+        CanonicalScalar::Text(value) => value.len().saturating_add(value.canonical_sort_key().map_or(0, <[u8]>::len)),
+        _ => 0,
+    }
+}
+
+fn charge_payload<E>(
+    bytes: usize, allocate: bool,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), GraphIntegerEvaluationError<E>> {
+    for _ in 0..bytes.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
+        control(GlaExecutionEvent::Work).map_err(GraphIntegerEvaluationError::Control)?;
+        if allocate {
+            control(GlaExecutionEvent::ScratchEntry).map_err(GraphIntegerEvaluationError::Control)?;
+        }
+    }
+    Ok(())
+}
+
+fn make_text<E>(
+    text: &str, instruction: usize,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<CanonicalScalar, GraphIntegerEvaluationError<E>> {
+    charge_payload(text.len(), true, control)?;
+    CanonicalScalar::ucs_basic_text(text).map_err(|_| GraphIntegerEvaluationError::Value(
+        GraphIntegerError { instruction, kind: GraphIntegerErrorKind::TextConstruction }))
+}
+
+fn compare_scalars<E>(
+    comparison: IntegerComparison, left: &CanonicalScalar, right: &CanonicalScalar,
+    instruction: usize, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<bool>, GraphIntegerEvaluationError<E>> {
+    if matches!(left, CanonicalScalar::Null) || matches!(right, CanonicalScalar::Null) {
+        return Ok(None);
+    }
+    if core::mem::discriminant(left) != core::mem::discriminant(right) {
+        return Err(GraphIntegerEvaluationError::Value(GraphIntegerError {
+            instruction, kind: GraphIntegerErrorKind::IncompatibleOperands,
+        }));
+    }
+    charge_payload(scalar_payload_bytes(left), false, control)?;
+    charge_payload(scalar_payload_bytes(right), false, control)?;
+    Ok(Some(comparison.accepts_scalar_pair(Some(left), Some(right))))
 }
 
 fn apply_binary(op: GraphIntegerBinary, left: Option<i64>, right: Option<i64>)
