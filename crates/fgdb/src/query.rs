@@ -131,6 +131,64 @@ impl<V: Vfs + Clone> Database<V> {
         resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
         budget: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
+        let trimmed = text.trim_start();
+        if trimmed
+            .get(..7)
+            .is_some_and(|word| word.eq_ignore_ascii_case("EXPLAIN"))
+            && trimmed
+                .as_bytes()
+                .get(7)
+                .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'(')
+        {
+            let mut statement = trimmed[7..].trim_start();
+            let certificate = if let Some(options) = statement.strip_prefix('(') {
+                let Some((option, rest)) = options.split_once(')') else {
+                    return Err(QueryError::Unsupported {
+                        diagnostics: vec!["unclosed EXPLAIN option".to_owned()],
+                    });
+                };
+                if !option.trim().eq_ignore_ascii_case("CERTIFICATE") {
+                    return Err(QueryError::Unsupported {
+                        diagnostics: vec!["expected EXPLAIN (CERTIFICATE)".to_owned()],
+                    });
+                }
+                statement = rest.trim_start();
+                true
+            } else {
+                false
+            };
+            let (listing, certificate) = self.explain(statement, params, resolver, certificate)?;
+            let mut rows =
+                Vec::with_capacity(listing.len() + usize::from(certificate.is_some()) * 2);
+            let cell = |text: &str| {
+                fgdb_types::CanonicalScalar::ucs_basic_text(text)
+                    .map(|value| {
+                        GraphAggregateValue::Value(fgdb_gql::algebra::GraphValue::Scalar(value))
+                    })
+                    .map_err(|_| QueryError::Unsupported {
+                        diagnostics: vec![
+                            "EXPLAIN text exceeds canonical scalar bounds".to_owned(),
+                        ],
+                    })
+            };
+            for row in listing {
+                rows.push(vec![cell(&row.operator)?, cell(&row.detail)?]);
+            }
+            if let Some(certificate) = certificate {
+                rows.push(vec![
+                    cell("Certificate")?,
+                    cell(&format!("{:?}", certificate.digest()))?,
+                ]);
+                rows.push(vec![
+                    cell("Snapshot")?,
+                    cell(&certificate.snapshot_seq().0.to_string())?,
+                ]);
+            }
+            return Ok(QueryResult::Rows {
+                columns: vec!["operator".to_owned(), "detail".to_owned()],
+                rows,
+            });
+        }
         PreparedNativeRead::prepare(text, params, resolver)?.execute(self, cx, params, budget)
     }
 

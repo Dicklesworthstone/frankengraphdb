@@ -1,7 +1,7 @@
 //! Compound query preparation over the shared graph-text lexer and compiler.
 //! Syntax is parsed before catalog access; execution sees only PreparedGraphSet.
 
-use crate::algebra::{GraphOrderError, GraphValueOrder};
+use crate::algebra::{GraphOrderError, GraphValueOrder, IntegerComparison};
 use crate::set_ops::MAX_GRAPH_SET_DEPTH;
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters, GraphPatternTextError,
@@ -70,7 +70,10 @@ fn pattern_kind(offset: usize, kind: GraphPatternTextErrorKind) -> GraphSetTextE
 pub(crate) enum ReadValueTemplate {
     Column(usize),
     List(Vec<ReadValueTemplate>),
-    Index { list: Box<ReadValueTemplate>, index: Box<ReadValueTemplate> },
+    Index {
+        list: Box<ReadValueTemplate>,
+        index: Box<ReadValueTemplate>,
+    },
     Size(Box<ReadValueTemplate>),
     Literal(crate::GqlScalarParameter),
     Parameter {
@@ -83,12 +86,20 @@ pub(crate) enum ReadValueTemplate {
     },
 }
 impl ReadValueTemplate {
-    pub(crate) fn column_type(&self, input: &[GraphSetColumnType], parameters: &[GqlParameterSpec]) -> GraphSetColumnType {
+    pub(crate) fn column_type(
+        &self,
+        input: &[GraphSetColumnType],
+        parameters: &[GqlParameterSpec],
+    ) -> GraphSetColumnType {
         match self {
             Self::Column(index) => input[*index],
             Self::List(_) => GraphSetColumnType::List,
             Self::Index { .. } => GraphSetColumnType::Any,
-            Self::Parameter { index, .. } if parameters[*index].parameter_type == GqlParameterType::List => GraphSetColumnType::List,
+            Self::Parameter { index, .. }
+                if parameters[*index].parameter_type == GqlParameterType::List =>
+            {
+                GraphSetColumnType::List
+            }
             _ => GraphSetColumnType::Scalar,
         }
     }
@@ -102,6 +113,273 @@ pub(crate) struct ReadProjectionTemplate {
 pub(crate) enum ReadPageNumber {
     Literal(u64),
     Parameter(usize),
+}
+impl ReadValueTemplate {
+    /// Shared resolved-unbound transcript: structural identity only. Literal
+    /// scalars keep their canonical bytes; parameters appear as declaration
+    /// indices; statement offsets never enter.
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        fn ordinal(bytes: &mut Vec<u8>, value: usize) {
+            bytes.extend_from_slice(&(value as u64).to_be_bytes());
+        }
+        match self {
+            Self::Column(index) => {
+                bytes.push(0);
+                ordinal(bytes, *index);
+            }
+            Self::List(items) => {
+                bytes.push(1);
+                ordinal(bytes, items.len());
+                for item in items {
+                    item.append_template_transcript(bytes);
+                }
+            }
+            Self::Index { list, index } => {
+                bytes.push(2);
+                list.append_template_transcript(bytes);
+                index.append_template_transcript(bytes);
+            }
+            Self::Size(inner) => {
+                bytes.push(3);
+                inner.append_template_transcript(bytes);
+            }
+            Self::Literal(scalar) => {
+                bytes.push(4);
+                let encoded = scalar.canonical_bytes();
+                ordinal(bytes, encoded.len());
+                bytes.extend_from_slice(encoded);
+            }
+            Self::Parameter { index, .. } => {
+                bytes.push(5);
+                ordinal(bytes, *index);
+            }
+            Self::Integer { program, .. } => {
+                bytes.push(6);
+                ordinal(bytes, program.len());
+                for op in program {
+                    op.append_template_transcript(bytes);
+                }
+            }
+        }
+    }
+}
+impl ReadProjectionTemplate {
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&(self.name.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(self.name.as_bytes());
+        self.value.append_template_transcript(bytes);
+    }
+}
+impl ReadPageNumber {
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        match self {
+            Self::Literal(value) => {
+                bytes.push(0);
+                bytes.extend_from_slice(&value.to_be_bytes());
+            }
+            Self::Parameter(index) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+            }
+        }
+    }
+}
+impl ReadFilterOperand {
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        match self {
+            Self::Column(index) => {
+                bytes.push(0);
+                bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+            }
+            Self::Literal(scalar) => {
+                bytes.push(1);
+                let encoded = scalar.canonical_bytes();
+                bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(encoded);
+            }
+            Self::Parameter { index, .. } => {
+                bytes.push(2);
+                bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+            }
+        }
+    }
+}
+impl ReadFilterOp {
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        match self {
+            Self::Compare {
+                left,
+                comparison,
+                right,
+            } => {
+                bytes.push(0);
+                left.append_template_transcript(bytes);
+                bytes.push(comparison_tag(*comparison));
+                right.append_template_transcript(bytes);
+            }
+            Self::IsNull { operand, is_null } => {
+                bytes.push(1);
+                operand.append_template_transcript(bytes);
+                bytes.push(u8::from(*is_null));
+            }
+            Self::Truth(value) => {
+                bytes.push(2);
+                bytes.push(match value {
+                    None => 0,
+                    Some(false) => 1,
+                    Some(true) => 2,
+                });
+            }
+            Self::Not => bytes.push(3),
+            Self::And => bytes.push(4),
+            Self::Or => bytes.push(5),
+        }
+    }
+}
+impl ReadStageTemplate {
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        match self {
+            Self::Unwind { name, value, .. } => {
+                bytes.push(0);
+                bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(name.as_bytes());
+                value.append_template_transcript(bytes);
+            }
+            Self::Project {
+                projection,
+                quantifier,
+                ..
+            } => {
+                bytes.push(1);
+                bytes.push(match quantifier {
+                    GraphSetQuantifier::All => 0,
+                    GraphSetQuantifier::Distinct => 1,
+                });
+                append_projection_transcript(bytes, projection);
+            }
+            Self::Filter { code, .. } => {
+                bytes.push(2);
+                bytes.extend_from_slice(&(code.len() as u64).to_be_bytes());
+                for op in code {
+                    op.append_template_transcript(bytes);
+                }
+            }
+            Self::Page {
+                order,
+                offset,
+                count,
+                ..
+            } => {
+                bytes.push(3);
+                bytes.extend_from_slice(&(order.len() as u64).to_be_bytes());
+                for column in order {
+                    bytes.push(u8::from(column.descending));
+                    bytes.extend_from_slice(&(column.column as u64).to_be_bytes());
+                    bytes.push(u8::from(column.nulls_first));
+                }
+                offset.append_template_transcript(bytes);
+                match count {
+                    None => bytes.push(0),
+                    Some(count) => {
+                        bytes.push(1);
+                        count.append_template_transcript(bytes);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Comparison tag shared with the boolean/aggregate transcript convention.
+pub(crate) fn comparison_tag(comparison: IntegerComparison) -> u8 {
+    match comparison {
+        IntegerComparison::Equal => 0,
+        IntegerComparison::NotEqual => 1,
+        IntegerComparison::Less => 2,
+        IntegerComparison::LessOrEqual => 3,
+        IntegerComparison::Greater => 4,
+        IntegerComparison::GreaterOrEqual => 5,
+    }
+}
+
+fn append_projection_transcript(bytes: &mut Vec<u8>, items: &[ReadProjectionTemplate]) {
+    bytes.extend_from_slice(&(items.len() as u64).to_be_bytes());
+    for item in items {
+        item.append_template_transcript(bytes);
+    }
+}
+
+impl BoundSetTextInput {
+    /// Shared resolved-unbound input transcript: nested selection template,
+    /// parameter schema names+types, projection, stage pipelines and
+    /// correlations. Statement text and argument values never enter.
+    pub(crate) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        fn ordinal(bytes: &mut Vec<u8>, value: usize) {
+            bytes.extend_from_slice(&(value as u64).to_be_bytes());
+        }
+        match &self.selection {
+            None => bytes.push(0),
+            Some(selection) => {
+                bytes.push(1);
+                let encoded = selection.template_bytes();
+                ordinal(bytes, encoded.len());
+                bytes.extend_from_slice(&encoded);
+            }
+        }
+        ordinal(bytes, self.parameters.len());
+        for spec in &self.parameters {
+            ordinal(bytes, spec.name.len());
+            bytes.extend_from_slice(spec.name.as_bytes());
+            bytes.push(parameter_type_tag(spec.parameter_type));
+        }
+        match &self.projection {
+            None => bytes.push(0),
+            Some(items) => {
+                bytes.push(1);
+                append_projection_transcript(bytes, items);
+            }
+        }
+        bytes.push(match self.quantifier {
+            GraphSetQuantifier::All => 0,
+            GraphSetQuantifier::Distinct => 1,
+        });
+        ordinal(bytes, self.pipeline.len());
+        for stage in &self.pipeline {
+            stage.append_template_transcript(bytes);
+        }
+        bytes.push(u8::from(self.singleton));
+        ordinal(bytes, self.leading.len());
+        for stage in &self.leading {
+            stage.append_template_transcript(bytes);
+        }
+        ordinal(bytes, self.correlations.len());
+        for (from, to) in &self.correlations {
+            ordinal(bytes, *from);
+            ordinal(bytes, *to);
+        }
+    }
+}
+
+fn parameter_type_tag(kind: GqlParameterType) -> u8 {
+    match kind {
+        GqlParameterType::Int64 => 0,
+        GqlParameterType::UInt64 => 1,
+        GqlParameterType::List => 2,
+        GqlParameterType::Scalar(kind) => 3 + kind as u8,
+    }
+}
+
+fn set_column_type_tag(kind: GraphSetColumnType) -> u8 {
+    match kind {
+        GraphSetColumnType::Vertex => 0,
+        GraphSetColumnType::Scalar => 1,
+        GraphSetColumnType::Path => 2,
+        GraphSetColumnType::Vertices => 3,
+        GraphSetColumnType::Edges => 4,
+        GraphSetColumnType::Edge => 5,
+        GraphSetColumnType::List => 6,
+        GraphSetColumnType::Any => 7,
+    }
 }
 #[derive(Clone)]
 pub(crate) enum ReadFilterOperand {
@@ -120,6 +398,7 @@ pub(crate) enum ReadFilterOp {
         operand: ReadFilterOperand,
         is_null: bool,
     },
+
     Truth(Option<bool>),
     Not,
     And,
@@ -127,7 +406,11 @@ pub(crate) enum ReadFilterOp {
 }
 #[derive(Clone)]
 pub(crate) enum ReadStageTemplate {
-    Unwind { at: usize, name: String, value: ReadValueTemplate },
+    Unwind {
+        at: usize,
+        name: String,
+        value: ReadValueTemplate,
+    },
     Project {
         at: usize,
         projection: Vec<ReadProjectionTemplate>,
@@ -467,8 +750,15 @@ impl<'a> Composition<'a> {
             let height = input.depth + 1;
             return Node::new(NodeKind::Scope(Box::new(input)), at, height);
         }
-        if !(self.current().word("MATCH") || self.current().word("UNWIND") || self.current().word("RETURN") || self.current().word("WITH")) {
-            return Err(expected(at, "read pipeline or parenthesized set expression"));
+        if !(self.current().word("MATCH")
+            || self.current().word("UNWIND")
+            || self.current().word("RETURN")
+            || self.current().word("WITH"))
+        {
+            return Err(expected(
+                at,
+                "read pipeline or parenthesized set expression",
+            ));
         }
         if self.spans.len() == MAX_GRAPH_SET_OPERANDS {
             return Err(fail(
@@ -557,9 +847,13 @@ impl<'a> Composition<'a> {
         {
             next += 1;
         }
-        self.tokens
-            .get(next)
-            .is_some_and(|token| token.word("MATCH") || token.word("UNWIND") || token.word("RETURN") || token.word("WITH") || token.punct(b'('))
+        self.tokens.get(next).is_some_and(|token| {
+            token.word("MATCH")
+                || token.word("UNWIND")
+                || token.word("RETURN")
+                || token.word("WITH")
+                || token.punct(b'(')
+        })
     }
     fn tail(&mut self, node: &mut Node) -> Result<(), GraphSetTextError> {
         if self.take_word("ORDER") {
@@ -844,6 +1138,138 @@ impl PreparedGraphSetText {
     #[must_use]
     pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
         &self.parameters
+    }
+    /// Versioned, value-independent template transcript: the set-operator
+    /// tree, per-leaf nested input templates, ordering and paging shape, and
+    /// the declaration-wide parameter schema. Statement text, byte offsets and
+    /// parameter values never enter.
+    #[must_use]
+    pub fn canonical_template_bytes(&self) -> Vec<u8> {
+        fn ordinal(bytes: &mut Vec<u8>, value: usize) {
+            bytes.extend_from_slice(&(value as u64).to_be_bytes());
+        }
+        fn name(bytes: &mut Vec<u8>, value: &str) {
+            ordinal(bytes, value.len());
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        fn page(bytes: &mut Vec<u8>, number: &PageNumber) {
+            match number {
+                PageNumber::Literal(value) => {
+                    bytes.push(0);
+                    bytes.extend_from_slice(&value.to_be_bytes());
+                }
+                PageNumber::Parameter(parameter) => {
+                    bytes.push(1);
+                    name(bytes, parameter);
+                }
+            }
+        }
+        fn node(bytes: &mut Vec<u8>, tree: &Node) {
+            match &tree.kind {
+                NodeKind::Leaf(input) => {
+                    bytes.push(0);
+                    ordinal(bytes, *input);
+                }
+                NodeKind::Scope(inner) => {
+                    bytes.push(1);
+                    node(bytes, inner);
+                }
+                NodeKind::Binary {
+                    operation,
+                    quantifier,
+                    left,
+                    right,
+                } => {
+                    bytes.push(2);
+                    bytes.push(match operation {
+                        GraphSetOperation::Union => 0,
+                        GraphSetOperation::Intersect => 1,
+                        GraphSetOperation::Except => 2,
+                    });
+                    bytes.push(match quantifier {
+                        GraphSetQuantifier::All => 0,
+                        GraphSetQuantifier::Distinct => 1,
+                    });
+                    node(bytes, left);
+                    node(bytes, right);
+                }
+            }
+            ordinal(bytes, tree.order.len());
+            for key in &tree.order {
+                name(bytes, &key.name);
+                bytes.push(u8::from(key.order.descending));
+                ordinal(bytes, key.order.column);
+                bytes.push(u8::from(key.order.nulls_first));
+            }
+            page(bytes, &tree.offset);
+            match &tree.count {
+                None => bytes.push(0),
+                Some(count) => {
+                    bytes.push(1);
+                    page(bytes, count);
+                }
+            }
+        }
+        let mut bytes = b"fgdb:gql:set-text-template:v1\0".to_vec();
+        node(&mut bytes, &self.root);
+        bytes.extend_from_slice(&(self.inputs.len() as u64).to_be_bytes());
+        for (_, input) in &self.inputs {
+            input.append_template_transcript(&mut bytes);
+        }
+        ordinal(&mut bytes, self.columns.len());
+        for column in &self.columns {
+            name(&mut bytes, column);
+        }
+        ordinal(&mut bytes, self.types.len());
+        for kind in &self.types {
+            bytes.push(set_column_type_tag(*kind));
+        }
+        ordinal(&mut bytes, self.parameters.len());
+        for spec in &self.parameters {
+            name(&mut bytes, &spec.name);
+            bytes.push(parameter_type_tag(spec.parameter_type));
+        }
+        bytes
+    }
+
+    /// Logical template operators of the compound statement in evaluation
+    /// order, derived from the resolved set-operator tree: leaf scan, scope
+    /// nesting, binary set operators, per-node ordering/pagination.
+    #[must_use]
+    pub fn template_operators(&self) -> Vec<&'static str> {
+        fn node(operators: &mut Vec<&'static str>, tree: &Node) {
+            match &tree.kind {
+                NodeKind::Leaf(_) => operators.push("ScanLeaf"),
+                NodeKind::Scope(inner) => {
+                    operators.push("ScopeBegin");
+                    node(operators, inner);
+                    operators.push("ScopeEnd");
+                }
+                NodeKind::Binary {
+                    operation,
+                    left,
+                    right,
+                    ..
+                } => {
+                    node(operators, left);
+                    node(operators, right);
+                    operators.push(match operation {
+                        GraphSetOperation::Union => "Union",
+                        GraphSetOperation::Intersect => "Intersect",
+                        GraphSetOperation::Except => "Except",
+                    });
+                }
+            }
+            if !tree.order.is_empty() {
+                operators.push("OrderByValues");
+            }
+            if !matches!(tree.offset, PageNumber::Literal(0)) || tree.count.is_some() {
+                operators.push("Limit");
+            }
+        }
+        let mut operators = Vec::new();
+        node(&mut operators, &self.root);
+        operators
     }
 
     pub fn bind_parameters(

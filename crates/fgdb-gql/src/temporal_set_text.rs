@@ -6,6 +6,7 @@
 //! computed projections, ordering and pagination retain their existing parser
 //! and diagnostics. Every set operand executes against the same selected snapshot.
 
+use crate::temporal_text::{TemplateSequenceSelector, append_template_sequence_selector};
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters,
     GraphPatternTextErrorKind, GraphSetTextErrorKind, GraphSymbol, GraphSymbolKind,
@@ -443,6 +444,31 @@ impl PreparedTemporalGraphSetText {
     #[must_use]
     pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
         &self.parameters
+    }
+
+    /// Versioned resolved set template transcript, including the snapshot selector.
+    /// Literal constants and parameter names are retained; statement text,
+    /// diagnostic offsets and bound argument values are excluded.
+    #[must_use]
+    pub fn canonical_template_bytes(&self) -> Vec<u8> {
+        let mut bytes = b"fgdb:gql:temporal-set-text-template:v1\0".to_vec();
+        let inner = self.inner.canonical_template_bytes();
+        bytes.extend_from_slice(&(inner.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&inner);
+        let selector = match &self.selector {
+            Selector::Literal(value) => TemplateSequenceSelector::Literal(*value),
+            Selector::Parameter { name, .. } => TemplateSequenceSelector::Parameter(name),
+        };
+        append_template_sequence_selector(&mut bytes, selector);
+        bytes
+    }
+
+    /// Snapshot selection followed by the wrapped logical set operators.
+    #[must_use]
+    pub fn template_operators(&self) -> Vec<&'static str> {
+        let mut operators = self.inner.template_operators();
+        operators.insert(0, "TemporalSnapshotSelect");
+        operators
     }
 
     pub fn bind_parameters(

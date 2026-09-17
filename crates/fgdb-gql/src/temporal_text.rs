@@ -74,6 +74,29 @@ enum SequenceSelector {
     Parameter { name: String, offset: usize },
 }
 
+pub(super) enum TemplateSequenceSelector<'a> {
+    Literal(u64),
+    Parameter(&'a str),
+}
+
+/// Frame a resolved, unbound sequence selector without diagnostic offsets.
+pub(super) fn append_template_sequence_selector(
+    bytes: &mut Vec<u8>,
+    selector: TemplateSequenceSelector<'_>,
+) {
+    match selector {
+        TemplateSequenceSelector::Literal(value) => {
+            bytes.push(0);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        TemplateSequenceSelector::Parameter(name) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RootTokenKind<'a> {
     Word(&'a str),
@@ -496,6 +519,31 @@ impl PreparedTemporalGraphText {
     #[must_use]
     pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
         &self.parameters
+    }
+
+    /// Versioned resolved template transcript, including the snapshot selector.
+    /// Literal constants and parameter names are retained; statement text,
+    /// diagnostic offsets and bound argument values are excluded.
+    #[must_use]
+    pub fn canonical_template_bytes(&self) -> Vec<u8> {
+        let mut bytes = b"fgdb:gql:temporal-text-template:v1\0".to_vec();
+        let inner = self.inner.template_bytes();
+        bytes.extend_from_slice(&(inner.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&inner);
+        let selector = match &self.selector {
+            SequenceSelector::Literal(value) => TemplateSequenceSelector::Literal(*value),
+            SequenceSelector::Parameter { name, .. } => TemplateSequenceSelector::Parameter(name),
+        };
+        append_template_sequence_selector(&mut bytes, selector);
+        bytes
+    }
+
+    /// Snapshot selection followed by the wrapped logical template operators.
+    #[must_use]
+    pub fn template_operators(&self) -> Vec<&'static str> {
+        let mut operators = self.inner.template_operators();
+        operators.insert(0, "TemporalSnapshotSelect");
+        operators
     }
 
     pub fn bind_parameters(

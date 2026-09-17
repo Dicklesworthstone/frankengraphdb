@@ -3,11 +3,11 @@
 //! This is preparation metadata. Binding emits the existing
 //! PreparedGraphAggregate with its real source leaf and relational input.
 
-use crate::set_text::{BoundSetTextInput, ReadFilterOp, ReadPageNumber};
+use crate::set_text::{BoundSetTextInput, ReadFilterOp, ReadPageNumber, ReadStageTemplate};
 use crate::{
     GqlParameterSpec, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateFunction,
-    GraphAggregateOrder, GraphAggregateTextSlot, GraphHavingError, GraphPatternTextError,
-    GraphSetTextError, GraphSetTextErrorKind,
+    GraphAggregateOrder, GraphAggregateTextSlot, GraphHavingError, GraphNullPlacement,
+    GraphPatternTextError, GraphSetTextError, GraphSetTextErrorKind,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,5 +125,164 @@ impl PreparedGraphPipelineAggregateText {
     #[must_use]
     pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
         self.input.parameter_schema()
+    }
+
+    /// Versioned, value-independent template transcript: WITH pipeline stages
+    /// (unwind/project/filter/page in declaration order), correlations,
+    /// aggregate keys/summaries, HAVING program, ordering and paging shape.
+    /// Statement text, byte offsets and parameter values never enter; each
+    /// parameter appears as its declared argument index.
+    #[must_use]
+    pub fn canonical_template_bytes(&self) -> Vec<u8> {
+        fn ordinal(bytes: &mut Vec<u8>, value: usize) {
+            bytes.extend_from_slice(&(value as u64).to_be_bytes());
+        }
+        let mut bytes = b"fgdb:gql:pipeline-aggregate-text-template:v1\0".to_vec();
+        self.input.append_template_transcript(&mut bytes);
+        ordinal(&mut bytes, self.keys.len());
+        for key in &self.keys {
+            ordinal(&mut bytes, *key);
+        }
+        ordinal(&mut bytes, self.output_keys.len());
+        for key in &self.output_keys {
+            ordinal(&mut bytes, *key);
+        }
+        ordinal(&mut bytes, self.summaries.len());
+        for summary in &self.summaries {
+            bytes.push(match summary.function {
+                GraphAggregateFunction::CountRows => 0,
+                GraphAggregateFunction::Count => 1,
+                GraphAggregateFunction::CountDistinct => 2,
+                GraphAggregateFunction::SumInt => 3,
+                GraphAggregateFunction::SumIntDistinct => 4,
+                GraphAggregateFunction::AverageInt => 5,
+                GraphAggregateFunction::AverageIntDistinct => 6,
+                GraphAggregateFunction::Min => 7,
+                GraphAggregateFunction::Max => 8,
+                GraphAggregateFunction::Collect => 9,
+                GraphAggregateFunction::CollectDistinct => 10,
+            });
+            match summary.column {
+                None => bytes.push(0),
+                Some(column) => {
+                    bytes.push(1);
+                    ordinal(&mut bytes, column);
+                }
+            }
+        }
+        bytes.push(u8::from(self.output_distinct));
+        ordinal(&mut bytes, self.names.len());
+        for column in &self.names {
+            ordinal(&mut bytes, column.len());
+            bytes.extend_from_slice(column.as_bytes());
+        }
+        ordinal(&mut bytes, self.slots.len());
+        for slot in &self.slots {
+            match slot {
+                GraphAggregateTextSlot::GroupKey(at) => {
+                    bytes.push(0);
+                    ordinal(&mut bytes, *at);
+                }
+                GraphAggregateTextSlot::Aggregate(at) => {
+                    bytes.push(1);
+                    ordinal(&mut bytes, *at);
+                }
+            }
+        }
+        ordinal(&mut bytes, self.having.len());
+        for op in &self.having {
+            op.append_template_transcript(&mut bytes);
+        }
+        ordinal(&mut bytes, self.having_columns.len());
+        for column in &self.having_columns {
+            encode_aggregate_column(&mut bytes, column);
+        }
+        ordinal(&mut bytes, self.ordering.len());
+        for order in &self.ordering {
+            encode_aggregate_column(&mut bytes, &order.column);
+            bytes.push(u8::from(order.descending));
+            bytes.push(match order.nulls {
+                GraphNullPlacement::First => 0,
+                GraphNullPlacement::Last => 1,
+            });
+        }
+        self.offset.append_template_transcript(&mut bytes);
+        match &self.count {
+            None => bytes.push(0),
+            Some(count) => {
+                bytes.push(1);
+                count.append_template_transcript(&mut bytes);
+            }
+        }
+        bytes
+    }
+
+    /// Logical template operators in evaluation order: the WITH row stages,
+    /// then grouping/summaries, optional HAVING, ordering and output shaping.
+    #[must_use]
+    pub fn template_operators(&self) -> Vec<&'static str> {
+        fn stages(operators: &mut Vec<&'static str>, stages: &[ReadStageTemplate]) {
+            for stage in stages {
+                operators.push(match stage {
+                    ReadStageTemplate::Unwind { .. } => "Unwind",
+                    ReadStageTemplate::Project { .. } => "ProjectValues",
+                    ReadStageTemplate::Filter { .. } => "Select",
+                    ReadStageTemplate::Page { .. } => "OrderByPage",
+                });
+                if matches!(
+                    stage,
+                    ReadStageTemplate::Project {
+                        quantifier: crate::GraphSetQuantifier::Distinct,
+                        ..
+                    }
+                ) {
+                    operators.push("Distinct");
+                }
+            }
+        }
+        let mut operators = Vec::new();
+        stages(&mut operators, &self.input.leading);
+        if let Some(selection) = &self.input.selection {
+            operators.push("ScanGraphText");
+            operators.extend(selection.template_operators());
+            if !self.input.leading.is_empty() || self.input.singleton {
+                operators.push("CrossJoin");
+                if !self.input.correlations.is_empty() {
+                    operators.push("Select");
+                }
+            }
+        }
+        if self.input.projection.is_some() {
+            operators.push("ProjectValues");
+            if self.input.quantifier == crate::GraphSetQuantifier::Distinct {
+                operators.push("Distinct");
+            }
+        }
+        stages(&mut operators, &self.input.pipeline);
+        operators.push("Aggregate");
+        if !self.having.is_empty() {
+            operators.push("SelectHaving");
+        }
+        if !self.ordering.is_empty() {
+            operators.push("OrderByAggregate");
+        }
+        if self.output_distinct {
+            operators.push("Distinct");
+        }
+        operators.push("Limit");
+        operators
+    }
+}
+
+fn encode_aggregate_column(bytes: &mut Vec<u8>, column: &GraphAggregateColumn) {
+    match column {
+        GraphAggregateColumn::GroupKey(at) => {
+            bytes.push(0);
+            bytes.extend_from_slice(&(*at as u64).to_be_bytes());
+        }
+        GraphAggregateColumn::Aggregate(at) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&(*at as u64).to_be_bytes());
+        }
     }
 }

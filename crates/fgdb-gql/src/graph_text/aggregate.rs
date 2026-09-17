@@ -515,7 +515,7 @@ impl PreparedGraphAggregateText {
     /// Statement text and parameter values never enter; parameters appear as
     /// their declared indices through the shared numeric operand encoding.
     #[must_use]
-    pub(crate) fn canonical_template_bytes(&self) -> Vec<u8> {
+    pub fn canonical_template_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:gql:aggregate-text-template:v1\0".to_vec();
         let child = self.child.template_bytes();
         bytes.extend_from_slice(&(child.len() as u64).to_be_bytes());
@@ -524,7 +524,10 @@ impl PreparedGraphAggregateText {
             None => bytes.push(0),
             Some(projection) => {
                 bytes.push(1);
-                encode_projection(&mut bytes, projection);
+                bytes.extend_from_slice(&(projection.len() as u64).to_be_bytes());
+                for item in projection {
+                    item.append_template_transcript(&mut bytes);
+                }
             }
         }
         fn ordinal(bytes: &mut Vec<u8>, value: usize) {
@@ -627,7 +630,7 @@ impl PreparedGraphAggregateText {
     /// order: the child scan topology, optional projection, grouping and
     /// summaries, optional HAVING, ordering and output shaping.
     #[must_use]
-    pub(crate) fn template_operators(&self) -> Vec<&'static str> {
+    pub fn template_operators(&self) -> Vec<&'static str> {
         let mut operators = self.child.template_operators();
         if self.input_projection.is_some() {
             operators.push("ProjectValues");
@@ -644,61 +647,6 @@ impl PreparedGraphAggregateText {
         }
         operators.push("Limit");
         operators
-    }
-}
-
-fn encode_projection(bytes: &mut Vec<u8>, projection: &[ReadProjectionTemplate]) {
-    bytes.extend_from_slice(&(projection.len() as u64).to_be_bytes());
-    for item in projection {
-        bytes.extend_from_slice(&(item.name.len() as u64).to_be_bytes());
-        bytes.extend_from_slice(item.name.as_bytes());
-        encode_value_template(bytes, &item.value);
-    }
-}
-
-fn encode_value_template(bytes: &mut Vec<u8>, value: &ReadValueTemplate) {
-    match value {
-        ReadValueTemplate::Column(index) => {
-            bytes.push(0);
-            bytes.extend_from_slice(&(*index as u64).to_be_bytes());
-        }
-        ReadValueTemplate::List(items) => {
-            bytes.push(1);
-            encode_value_template_list(bytes, items);
-        }
-        ReadValueTemplate::Index { list, index } => {
-            bytes.push(2);
-            encode_value_template(bytes, list);
-            encode_value_template(bytes, index);
-        }
-        ReadValueTemplate::Size(inner) => {
-            bytes.push(3);
-            encode_value_template(bytes, inner);
-        }
-        ReadValueTemplate::Literal(scalar) => {
-            bytes.push(4);
-            let encoded = scalar.canonical_bytes();
-            bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
-            bytes.extend_from_slice(encoded);
-        }
-        ReadValueTemplate::Parameter { index, .. } => {
-            bytes.push(5);
-            bytes.extend_from_slice(&(*index as u64).to_be_bytes());
-        }
-        ReadValueTemplate::Integer { program, .. } => {
-            bytes.push(6);
-            bytes.extend_from_slice(&(program.len() as u64).to_be_bytes());
-            for op in program {
-                op.append_template_transcript(bytes);
-            }
-        }
-    }
-}
-
-fn encode_value_template_list(bytes: &mut Vec<u8>, items: &[ReadValueTemplate]) {
-    bytes.extend_from_slice(&(items.len() as u64).to_be_bytes());
-    for item in items {
-        encode_value_template(bytes, item);
     }
 }
 

@@ -243,26 +243,18 @@ impl NativeCertificatePlan for PreparedNativeRead {
         PreparedNativeRead::facade_class(self)
     }
     fn canonical_bytes(&self) -> Vec<u8> {
-        // v1 template identity: the resolved, unbound template bytes per
-        // facade class. Argument values are never present because preparation
-        // precedes binding. Classes whose facade accessor is not landed yet
-        // fall back to the statement bytes with an explicit class tag, so a
-        // Pattern plan never collides with an Aggregate plan of equal text.
         let mut bytes = b"fgdb:native-template-identity:v2\0".to_vec();
-        match self {
-            Self::Pattern(prepared) => {
-                bytes.push(0);
-                let encoded = prepared.template_bytes();
-                bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
-                bytes.extend_from_slice(&encoded);
-            }
-            other => {
-                bytes.push(1);
-                let statement = other.statement().as_bytes();
-                bytes.extend_from_slice(&(statement.len() as u64).to_be_bytes());
-                bytes.extend_from_slice(statement);
-            }
-        }
+        let encoded = match self {
+            Self::Pattern(prepared) => prepared.template_bytes(),
+            Self::Aggregate(prepared) => prepared.canonical_template_bytes(),
+            Self::PipelineAggregate(prepared) => prepared.canonical_template_bytes(),
+            Self::Set(prepared) => prepared.canonical_template_bytes(),
+            Self::TemporalPattern(prepared) => prepared.canonical_template_bytes(),
+            Self::TemporalSet(prepared) => prepared.canonical_template_bytes(),
+            Self::TemporalAggregate(prepared) => prepared.canonical_template_bytes(),
+        };
+        bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&encoded);
         bytes
     }
     fn parameter_schema(&self) -> &[GqlParameterSpec] {
@@ -313,9 +305,7 @@ pub struct ExplainRow {
 }
 
 /// Deterministic human-readable operator rows derived from the resolved
-/// template, never from an executed snapshot read. Facade classes whose
-/// template operator accessors are landed emit their real per-operator
-/// listing; the others emit their template size and parameter table only.
+/// template, never from statement text or an executed snapshot read.
 #[must_use]
 pub fn explain_rows(prepared: &PreparedNativeRead) -> Vec<ExplainRow> {
     let class = prepared.facade_class();
@@ -326,17 +316,19 @@ pub fn explain_rows(prepared: &PreparedNativeRead) -> Vec<ExplainRow> {
             prepared.parameter_schema().len()
         ),
     }];
-    if let PreparedNativeRead::Pattern(pattern) = prepared {
-        for operator in pattern.template_operators() {
-            rows.push(ExplainRow {
-                operator: operator.to_owned(),
-                detail: "resolved template".to_owned(),
-            });
-        }
-    } else {
+    let operators = match prepared {
+        PreparedNativeRead::Pattern(plan) => plan.template_operators(),
+        PreparedNativeRead::Aggregate(plan) => plan.template_operators(),
+        PreparedNativeRead::PipelineAggregate(plan) => plan.template_operators(),
+        PreparedNativeRead::Set(plan) => plan.template_operators(),
+        PreparedNativeRead::TemporalPattern(plan) => plan.template_operators(),
+        PreparedNativeRead::TemporalSet(plan) => plan.template_operators(),
+        PreparedNativeRead::TemporalAggregate(plan) => plan.template_operators(),
+    };
+    for operator in operators {
         rows.push(ExplainRow {
-            operator: "Template".to_owned(),
-            detail: format!("{} statement bytes", prepared.statement().len()),
+            operator: operator.to_owned(),
+            detail: "resolved template".to_owned(),
         });
     }
     for spec in prepared.parameter_schema() {

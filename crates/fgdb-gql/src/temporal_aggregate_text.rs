@@ -5,6 +5,7 @@
 //! compiler. This preserves original UTF-8 offsets, row-stage boundaries,
 //! catalog resolution and parameter binding. Execution remains host-owned.
 
+use crate::temporal_text::{TemplateSequenceSelector, append_template_sequence_selector};
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters, GraphAggregateTextSlot,
     GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, GraphTemporalTextError,
@@ -484,6 +485,39 @@ impl PreparedTemporalGraphAggregateText {
     #[must_use]
     pub fn output_slots(&self) -> &[GraphAggregateTextSlot] {
         self.inner.output_slots()
+    }
+
+    /// Versioned resolved aggregate template transcript, including the snapshot
+    /// selector and direct/pipeline shape. Literal constants and parameter
+    /// names are retained; statement text, diagnostic offsets and bound
+    /// argument values are excluded.
+    #[must_use]
+    pub fn canonical_template_bytes(&self) -> Vec<u8> {
+        let mut bytes = b"fgdb:gql:temporal-aggregate-text-template:v1\0".to_vec();
+        let (tag, inner) = match &self.inner {
+            AggregateTemplate::Direct(inner) => (0, inner.canonical_template_bytes()),
+            AggregateTemplate::Pipeline(inner) => (1, inner.canonical_template_bytes()),
+        };
+        bytes.extend_from_slice(&(inner.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&inner);
+        bytes.push(tag);
+        let selector = match &self.selector {
+            SequenceSelector::Literal(value) => TemplateSequenceSelector::Literal(*value),
+            SequenceSelector::Parameter { name, .. } => TemplateSequenceSelector::Parameter(name),
+        };
+        append_template_sequence_selector(&mut bytes, selector);
+        bytes
+    }
+
+    /// Snapshot selection followed by the wrapped logical aggregate operators.
+    #[must_use]
+    pub fn template_operators(&self) -> Vec<&'static str> {
+        let mut operators = match &self.inner {
+            AggregateTemplate::Direct(inner) => inner.template_operators(),
+            AggregateTemplate::Pipeline(inner) => inner.template_operators(),
+        };
+        operators.insert(0, "TemporalSnapshotSelect");
+        operators
     }
 
     pub fn bind_parameters(
