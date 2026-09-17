@@ -314,7 +314,9 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphAggregateError
         match self {
             Self::Source(error) => Some(error),
             Self::InputRelation(error) => Some(error),
-            Self::InputExpression { error, .. } | Self::OutputExpression { error, .. } => Some(error),
+            Self::InputExpression { error, .. } | Self::OutputExpression { error, .. } => {
+                Some(error)
+            }
             _ => None,
         }
     }
@@ -406,9 +408,22 @@ impl core::fmt::Debug for GraphAggregateRow {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BoundAggregate {
+pub struct BoundAggregate {
     function: GraphAggregateFunction,
     column: Option<usize>,
+}
+
+impl BoundAggregate {
+    /// The evaluated aggregate function, including hidden suffix aggregates.
+    #[must_use]
+    pub fn function(&self) -> GraphAggregateFunction {
+        self.function
+    }
+    /// The value column the aggregate reads; `None` is COUNT(*)-style.
+    #[must_use]
+    pub fn argument_column(&self) -> Option<usize> {
+        self.column
+    }
 }
 
 /// Only a nonidentity output projection allocates this metadata. Evaluation
@@ -601,6 +616,72 @@ impl PreparedGraphAggregate {
             return &self.output_names;
         }
         &self.aggregate_names[..self.output_aggregates]
+    }
+
+    /// The evaluation aggregate specs, including hidden suffix aggregates.
+    /// These describe EVALUATION, not the visible output schema: output
+    /// projection, distinct and pagination modifiers stay independent.
+    #[must_use]
+    pub fn aggregates(&self) -> &[BoundAggregate] {
+        &self.aggregates
+    }
+
+    /// The evaluation grouping-key columns, before any output projection.
+    #[must_use]
+    pub fn group_key_columns(&self) -> &[usize] {
+        &self.keys
+    }
+
+    /// Whether this definition has the untransformed aggregate shape supported
+    /// by the current delta maintainer. This does not validate the input pattern
+    /// or aggregate functions; the consumer must check those separately.
+    #[must_use]
+    pub fn supports_incremental_maintenance(&self) -> bool {
+        self.computed_input.is_none()
+            && self.relational_input.is_none()
+            && self.having.is_empty()
+            && self.having_expression.is_none()
+            && self.output_projection.is_none()
+            && !self.output_distinct
+            && self.offset == 0
+            && self.count.is_none()
+            && self.ordering.is_empty()
+            && self.key_output.is_none()
+            && self.output_aggregates == self.aggregates.len()
+    }
+
+    /// Construct the plain global COUNT/SUM row used by a delta maintainer.
+    /// Refuses transformed definitions and mismatched result domains.
+    pub fn incremental_global_row(
+        &self,
+        values: Vec<GraphAggregateValue>,
+    ) -> Option<GraphAggregateRow> {
+        if !self.supports_incremental_maintenance()
+            || !self.keys.is_empty()
+            || values.len() != self.aggregates.len()
+            || !self
+                .aggregates
+                .iter()
+                .zip(&values)
+                .all(|(aggregate, value)| {
+                    matches!(
+                        (aggregate.function, value),
+                        (
+                            GraphAggregateFunction::CountRows | GraphAggregateFunction::Count,
+                            GraphAggregateValue::Count(_)
+                        ) | (
+                            GraphAggregateFunction::SumInt,
+                            GraphAggregateValue::Integer(_)
+                        )
+                    ) || (aggregate.function == GraphAggregateFunction::SumInt && value.is_null())
+                })
+        {
+            return None;
+        }
+        Some(GraphAggregateRow {
+            keys: Box::new([]),
+            values: values.into_boxed_slice(),
+        })
     }
 
     /// The full evaluation schema used by HAVING, ORDER BY, and aggregate
@@ -991,7 +1072,10 @@ impl ValueRef<'_> {
 enum Accumulator<'a> {
     Count(u64),
     Distinct(BTreeSet<ValueRef<'a>>),
-    Sum { value: i128, present: bool },
+    Sum {
+        value: i128,
+        present: bool,
+    },
     Extreme(Option<ValueRef<'a>>),
     Numeric(numeric::NumericAccumulator),
     Collect {
@@ -1079,7 +1163,11 @@ fn update<'a, E, C>(
                 seen.insert(value);
             }
         }
-        Accumulator::Collect { values, seen, max_payload } => {
+        Accumulator::Collect {
+            values,
+            seen,
+            max_payload,
+        } => {
             // Collection must visit every occurrence; topology weights do not
             // retain the row order and are deliberately ineligible.
             if multiplicity != weighted::Multiplicity::ONE {
@@ -1094,7 +1182,8 @@ fn update<'a, E, C>(
                 // Bound both tree searches and recursive payload comparisons
                 // before the set can inspect or retain the argument.
                 let levels = (seen.len().saturating_add(1)).ilog2() as usize + 1;
-                for _ in 0..levels.saturating_mul(24)
+                for _ in 0..levels
+                    .saturating_mul(24)
                     .saturating_mul(max_payload.saturating_add(1))
                 {
                     control(GlaExecutionEvent::Work)?;

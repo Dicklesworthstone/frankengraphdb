@@ -130,7 +130,12 @@ mod memvfs;
 mod prepared_write;
 mod query;
 mod scrub;
+mod standing_query;
 pub use scrub::{LostCapsule, ScrubCrashPoint, ScrubSummary};
+pub use standing_query::{
+    StandingQueryError, StandingQueryFailure, StandingQueryHandle, StandingQueryStats,
+    StandingQueryView,
+};
 mod write_txn;
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
@@ -1906,6 +1911,7 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// survives moves and publication, but reopening earns a fresh identity.
     /// This is not a durable identity or an authorization/session protocol.
     handle_owner: Arc<()>,
+    standing_queries: Vec<standing_query::StandingQuery>,
     coordinator: CommitCoordinator<V>,
     store: BlockStore<V>,
     /// The ONE mutable object in the directory (doctrine 5): the dual-slot
@@ -2449,6 +2455,7 @@ impl<V: Vfs + Clone> Database<V> {
             next_txn_obligation: 0,
             identity_allocation: std::sync::Arc::default(),
             handle_owner: Arc::new(()),
+            standing_queries: Vec::new(),
         })
     }
 
@@ -3744,6 +3751,16 @@ impl<V: Vfs + Clone> Database<V> {
         self.state = DatabaseState::Healthy {
             published_frontier: self.snapshot.frontier,
         };
+        // Maintenance is derived, synchronous and fail-closed. A refusal must
+        // never turn this already-durable successful publication into an abort.
+        if !self.standing_queries.is_empty() {
+            let batch = self
+                .snapshot
+                .delta_index
+                .get(frontier)
+                .expect("successful publication retains its committed delta");
+            standing_query::publish(&mut self.standing_queries, cx, batch);
+        }
         Ok(self.snapshot.frontier)
     }
 
