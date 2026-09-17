@@ -86,8 +86,13 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let seq = db.write(cx, batch).await?;
 
         let before = db.neighbours(VId(1), KNOWS)?;
-        let gql_before = db.query(query_cx,
-            "MATCH (a)-[:KNOWS]->(b) RETURN b", &params, resolver, budget)?;
+        let gql_before = db.query(
+            query_cx,
+            "MATCH (a)-[:KNOWS]->(b) RETURN b",
+            &params,
+            resolver,
+            budget,
+        )?;
         let root_before = db.partition_root()?;
         println!("  committed at seq {seq:?}");
         println!("  neighbours(1) before drop: {before:?}");
@@ -97,8 +102,13 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         // exist yet; see IMPLEMENTATION_STATUS.md) --------------------------------
         db.compact(cx).await?;
         let after_compact = db.neighbours(VId(1), KNOWS)?;
-        let gql_after_compact = db.query(query_cx,
-            "MATCH (a)-[:KNOWS]->(b) RETURN b", &params, resolver, budget)?;
+        let gql_after_compact = db.query(
+            query_cx,
+            "MATCH (a)-[:KNOWS]->(b) RETURN b",
+            &params,
+            resolver,
+            budget,
+        )?;
         println!("  neighbours(1) after compact: {after_compact:?}");
         println!("  GQL MATCH after compact: {gql_after_compact:?}");
         assert_eq!(before, after_compact, "compact must not change adjacency");
@@ -111,8 +121,13 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         // ---- reopen with nothing but the path and the keys ------------------
         let db = Database::open(cx, &path, keys).await?;
         let after = db.neighbours(VId(1), KNOWS)?;
-        let gql_after = db.query(query_cx,
-            "MATCH (a)-[:KNOWS]->(b) RETURN b", &params, resolver, budget)?;
+        let gql_after = db.query(
+            query_cx,
+            "MATCH (a)-[:KNOWS]->(b) RETURN b",
+            &params,
+            resolver,
+            budget,
+        )?;
         println!("  neighbours(1) after reopen: {after:?}");
         println!("  GQL MATCH (1)-[:KNOWS]->(b) RETURN b after reopen: {gql_after:?}");
 

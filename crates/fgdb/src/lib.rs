@@ -120,9 +120,8 @@ mod gql_cert;
 mod gql_exec;
 mod memvfs;
 mod prepared_write;
-mod write_txn;
 mod query;
-pub use query::{QueryError, QueryResult, QueryValue, QueryWriteError};
+mod write_txn;
 /// The pinned-GQL surface types callers need to drive
 /// [`Database::execute_gql`]: the bind map is caller-supplied (no invented
 /// catalog), and the plan is re-exported so tests can state that the executor
@@ -133,6 +132,7 @@ pub use fgdb_gql::{BoundPlan, RelationBind};
 /// bind digests, so the same graph state, text, and bind are auditable as
 /// byte-identical.
 pub use gql_cert::{GqlCertificate, GqlPlanCertificate};
+pub use query::{QueryError, QueryResult, QueryValue, QueryWriteError};
 pub use write_txn::{WriteTxn, WriteTxnError};
 
 /// The in-memory [`Vfs`](asupersync::fs::Vfs) behind the embedded spine's
