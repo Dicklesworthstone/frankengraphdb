@@ -17,6 +17,10 @@ use std::time::{Duration, Instant};
 // one core; lower it for a quick local smoke.
 const ITERATIONS: usize = 5_000;
 const SEEDS: usize = 5;
+// INSERT, literal, index, size, UNWIND, collect, list parameter, edge DELETE,
+// ACYCLIC and SIMPLE. EXPLAIN is owned by fgdb and exercised there.
+const FAMILY_COUNT: usize = 10;
+const FAMILY_FLOOR: usize = 100;
 
 mod fuzz_gen {
     pub struct Rng {
@@ -69,6 +73,25 @@ mod fuzz_gen {
                 ")".repeat(depth)
             )
         }
+        pub fn surface_statement(&mut self, family: usize) -> String {
+            let value = self.rng.below(100);
+            match family {
+                0 => format!("INSERT (n:L {{p:{value}}})"),
+                1 => format!("MATCH (n) RETURN [{value},NULL,[n.p]] AS xs"),
+                2 => format!("MATCH (n) WITH [{value},n.p] AS xs RETURN xs[0] AS x"),
+                3 => format!("MATCH (n) RETURN size([{value},n.p]) AS k"),
+                4 => format!("MATCH (n) WITH [{value},n.p] AS xs UNWIND xs AS x RETURN x"),
+                5 => "MATCH (n) RETURN collect(n.p) AS xs".into(),
+                6 => "MATCH (n) UNWIND $xs AS x RETURN x".into(),
+                7 => "MATCH (a)-[e:R]->(b) DELETE e".into(),
+                8 => format!(
+                    "MATCH ACYCLIC (a)-[:R*0..{}]->(b) RETURN a,b",
+                    1 + value % 4
+                ),
+                9 => format!("MATCH SIMPLE (a)-[:R*0..{}]->(b) RETURN a,b", 1 + value % 4),
+                _ => unreachable!("bounded family index"),
+            }
+        }
         pub fn unmutated_statement(&mut self) -> String {
             if self.rng.below(100) < 2 {
                 self.depth = (64 + self.rng.below(193)) as u32;
@@ -106,7 +129,7 @@ mod fuzz_gen {
             } else {
                 ""
             };
-            match self.rng.below(100) {
+            match self.rng.below(120) {
                 0..=19 => {
                     let mut text = format!("MATCH (a:{label})");
                     for index in 0..self.rng.below(4) {
@@ -147,7 +170,20 @@ mod fuzz_gen {
                         "MATCH (a){temporal} RETURN a AS x {op} {quantifier} MATCH (b) RETURN b AS x"
                     )
                 }
-                73..=77 => format!("MATCH SHORTEST WALK (a)-[:{relation}*1..3]->(b) RETURN a,b"),
+                73..=77 => {
+                    // Restricted-walk surface: WALK/ACYCLIC/SIMPLE + quantified bounds.
+                    let mode = self.rng.pick(&[
+                        "WALK",
+                        "ACYCLIC",
+                        "SIMPLE",
+                        "ALL SHORTEST",
+                        "ANY SHORTEST",
+                    ]);
+                    let bounds = self
+                        .rng
+                        .pick(&["*1..3", "*0..4", "*2", "*", "*2..1", "*1025"]);
+                    format!("MATCH {mode} (a)-[:{relation}{bounds}]->(b) RETURN a,b")
+                }
                 78..=85 => {
                     let verb = self.rng.pick(&["INSERT", "CREATE"]);
                     let mut text = format!("{verb} (n:{label} {{p:{value}}})");
@@ -164,6 +200,10 @@ mod fuzz_gen {
                     }
                 }
                 91..=94 => format!("MATCH (n) {}DELETE n", self.rng.pick(&["", "DETACH "])),
+                100..=119 => {
+                    let family = self.rng.below(super::FAMILY_COUNT);
+                    self.surface_statement(family)
+                }
                 _ => match self.rng.below(4) {
                     0 => format!("MERGE (n:{label} {{p:{value}}})"),
                     1 => format!(
@@ -403,4 +443,75 @@ fn grammatical_seeds_reach_every_preparation_facade() {
         "CREATE (n:L {p:1}); MATCH (n) SET n.q=2",
         RelationId(1)
     );
+}
+
+#[test]
+fn each_new_surface_family_prepares_and_is_refused_by_the_facades() {
+    let mut counts = [(0usize, 0usize); FAMILY_COUNT];
+    let mut executed = 0usize;
+    for seed in 0..SEEDS {
+        let mut corpus = fuzz_gen::Corpus::new(0x5EED_2001 + seed as u64);
+        for index in 0..ITERATIONS {
+            let family = index % FAMILY_COUNT;
+            let base = corpus.surface_statement(family);
+            let stmt = match (index / FAMILY_COUNT) % 3 {
+                0 => base,
+                1 => format!("{base} @"),
+                _ => corpus.mutate(&base),
+            };
+            let started = Instant::now();
+            let outcome: Result<(), String> = match family {
+                0 => PreparedGraphInsertText::prepare(&stmt, RelationId(1), symbols)
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:?}")),
+                5 => PreparedGraphAggregateText::prepare(&stmt, symbols)
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:?}")),
+                7 => PreparedGraphDeleteText::prepare(&stmt, RelationId(1), symbols)
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:?}")),
+                8 | 9 => PreparedGraphText::prepare(&stmt, symbols)
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:?}")),
+                _ => {
+                    let types: &[(&str, fgdb_gql::GqlParameterType)] = if stmt.contains("$xs") {
+                        &[("xs", fgdb_gql::GqlParameterType::List)]
+                    } else {
+                        &[]
+                    };
+                    PreparedGraphSetText::prepare_with_parameter_types(&stmt, types, symbols)
+                        .map(|_| ())
+                        .map_err(|err| format!("{err:?}"))
+                }
+            };
+            match &outcome {
+                Ok(()) => counts[family].0 += 1,
+                Err(detail) => {
+                    counts[family].1 += 1;
+                    assert!(!detail.is_empty(), "refusal must carry a typed detail");
+                    if (index / FAMILY_COUNT) % 3 == 0 {
+                        panic!("family {family}: grammatical base refused: {stmt}: {detail}");
+                    }
+                }
+            }
+            assert!(
+                started.elapsed() <= Duration::from_secs(2),
+                "family {family}: {stmt}"
+            );
+            prepare_all(&stmt);
+            executed += 1;
+        }
+    }
+    assert!(executed >= 20_000, "executed {executed} below 20k floor");
+    for (family, (prepared, refused)) in counts.iter().enumerate() {
+        assert!(
+            *prepared >= FAMILY_FLOOR,
+            "family {family} prepared {prepared}; counts={counts:?}"
+        );
+        assert!(
+            *refused >= FAMILY_FLOOR,
+            "family {family} refused {refused}; counts={counts:?}"
+        );
+    }
+    eprintln!("family counts (prepared, refused) = {counts:?}; executed = {executed}");
 }

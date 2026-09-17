@@ -2,17 +2,21 @@
 //! Every successful preparation is bound and executed; engine panics propagate.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, RelationBind, WriteBatch, WriteTxn};
+use fgdb::{
+    Database, DatabaseKeys, MemVfs, PreparedNativeRead, QueryError, QueryResult, RelationBind,
+    WriteBatch, WriteTxn,
+};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameterSpec, GqlParameterType, GqlParameters, GqlQueryPolicy, GraphSymbol,
-    GraphSymbolKind, GraphWriteProgramPolicy, GraphWriteStatement, PreparedGqlQuery,
-    PreparedGraphAggregateText, PreparedGraphDeleteText, PreparedGraphEdgeMergeText,
-    PreparedGraphEdgeUpsertText, PreparedGraphInsertText, PreparedGraphMutationText,
-    PreparedGraphPipelineAggregateText, PreparedGraphSetText, PreparedGraphText,
-    PreparedGraphVertexMergeText, PreparedGraphVertexUpsertText, PreparedGraphWriteProgram,
-    PreparedGraphWriteScript, PreparedTemporalGraphAggregateText, PreparedTemporalGraphSetText,
-    PreparedTemporalGraphText,
+    GqlParameterSpec, GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy,
+    GraphAggregateValue, GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy,
+    GraphWriteStatement, PreparedGqlQuery, PreparedGraphAggregateText, PreparedGraphDeleteText,
+    PreparedGraphEdgeMergeText, PreparedGraphEdgeUpsertText, PreparedGraphInsertText,
+    PreparedGraphMutationText, PreparedGraphPipelineAggregateText, PreparedGraphSetText,
+    PreparedGraphText, PreparedGraphVertexMergeText, PreparedGraphVertexUpsertText,
+    PreparedGraphWriteProgram, PreparedGraphWriteScript, PreparedTemporalGraphAggregateText,
+    PreparedTemporalGraphSetText, PreparedTemporalGraphText,
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
@@ -89,7 +93,16 @@ fn arguments(schema: &[GqlParameterSpec], variant: usize, frontier: u64) -> GqlP
                 },
             ),
             GqlParameterType::Scalar(_) => args.with_null(&spec.name),
-            GqlParameterType::List => args.with_list(&spec.name, Vec::new()),
+            GqlParameterType::List => args.with_list(
+                &spec.name,
+                vec![
+                    GraphValue::Scalar(CanonicalScalar::Int(1 + variant as i64)),
+                    GraphValue::Scalar(CanonicalScalar::Null),
+                    GraphValue::List(
+                        vec![GraphValue::Scalar(CanonicalScalar::Int(-1))].into_boxed_slice(),
+                    ),
+                ],
+            ),
         }
         .expect("generated parameter names originate in the admitted schema");
     }
@@ -209,6 +222,30 @@ fn execute_reads(
             typed(db.execute_prepared_query_governed(cx, &query, policy()))
         });
     }
+    let supplied = GqlParameters::new()
+        .with_list(
+            "xs",
+            vec![
+                GraphValue::Scalar(CanonicalScalar::Int(2)),
+                GraphValue::Scalar(CanonicalScalar::Null),
+            ],
+        )
+        .unwrap();
+    if statement
+        .trim_start()
+        .to_ascii_uppercase()
+        .starts_with("EXPLAIN ")
+    {
+        let _ = timed(statement, "EXPLAIN", || {
+            typed(db.query(cx, statement, &supplied, symbols, policy()))
+        });
+    } else if let Some(prepared) = typed(PreparedNativeRead::prepare(statement, &supplied, symbols))
+    {
+        let args = arguments(prepared.parameter_schema(), variant, frontier);
+        let _ = timed(statement, "native read", || {
+            typed(prepared.execute(db, cx, &args, policy()))
+        });
+    }
 }
 
 fn write_policy() -> GraphWriteProgramPolicy {
@@ -315,7 +352,9 @@ fn sweep(
     require_coverage: bool,
 ) {
     let mut totals = [0_usize; 15];
+    let started = Instant::now();
     for (i, statement) in corpus.into_iter().enumerate() {
+        let input_started = Instant::now();
         let variant = variant_seed(i);
         let (executed, report) =
             run_async_under_lab(0x46_55_5A_31 + i as u64, move |root| async move {
@@ -344,6 +383,14 @@ fn sweep(
         for slot in 0..15 {
             totals[slot] += executed[slot];
         }
+        assert!(
+            input_started.elapsed() <= Duration::from_secs(5),
+            "{label} input #{i} exceeded wall bound"
+        );
+        assert!(
+            started.elapsed() <= Duration::from_secs(90),
+            "{label} campaign exceeded wall bound"
+        );
     }
     if require_coverage {
         for (slot, count) in totals.iter().enumerate() {
@@ -396,7 +443,306 @@ fn deeply_nested_statements_refuse_with_typed_error_not_stack_overflow() {
     sweep(corpus, "deep", |_| 0, false);
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct FamilyCoverage {
+    prepared: usize,
+    refused: usize,
+    executed: usize,
+}
+
+#[test]
+fn new_surface_families_prepare_refuse_and_execute_under_lab() {
+    let started = Instant::now();
+    let mut totals = [FamilyCoverage::default(); fuzz_gen::Family::ALL.len()];
+    // Reuse immutable seeded storage, but abort each mutation's own workspace.
+    // Refusals are counted only on the facade that admits this family.
+    for variant in 0..4 {
+        let (counts, report) =
+            run_async_under_lab(0x6e65_7700 + variant as u64, move |root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let cx = contexts.query();
+                let txcx = contexts.txn();
+                let mut db = seeded(&contexts.commit(), variant).await;
+                let mut generator = fuzz_gen::Corpus::new(0x7375_7266_6163_6500 + variant as u64);
+                let mut counts = [FamilyCoverage::default(); fuzz_gen::Family::ALL.len()];
+                let mut next = 100_000_u128;
+                for _ in 0..32 {
+                    for (slot, family) in fuzz_gen::Family::ALL.into_iter().enumerate() {
+                        let (valid, refused) = generator.family_pair(family);
+                        let mutated = if family == fuzz_gen::Family::Explain {
+                            format!(
+                                "EXPLAIN {}",
+                                generator.mutate(valid.strip_prefix("EXPLAIN ").unwrap())
+                            )
+                        } else {
+                            generator.mutate(&valid)
+                        };
+                        for (statement, expected) in
+                            [(valid, Some(true)), (refused, Some(false)), (mutated, None)]
+                        {
+                            let input_started = Instant::now();
+                            let params = GqlParameters::new()
+                                .with_list(
+                                    "xs",
+                                    vec![
+                                        GraphValue::Scalar(CanonicalScalar::Int(
+                                            variant as i64 + 1,
+                                        )),
+                                        GraphValue::Scalar(CanonicalScalar::Null),
+                                        GraphValue::List(
+                                            vec![GraphValue::Scalar(CanonicalScalar::Int(-2))]
+                                                .into_boxed_slice(),
+                                        ),
+                                    ],
+                                )
+                                .unwrap();
+                            let admitted = if family.is_write() {
+                                match PreparedGraphWriteScript::prepare(&statement, R, symbols) {
+                                    Ok(prepared) => {
+                                        counts[slot].prepared += 1;
+                                        let args =
+                                            arguments(prepared.parameter_schema(), variant, 0);
+                                        let program = prepared.bind_parameters(&args);
+                                        if expected == Some(true) {
+                                            assert!(
+                                                program.is_ok(),
+                                                "{family:?}: binding refused: {statement}"
+                                            );
+                                        }
+                                        if let Some(program) = typed(program) {
+                                            let mut txn = db.begin(&txcx).unwrap();
+                                            counts[slot].executed += 1;
+                                            let result = txn.execute_graph_write_program_governed(
+                                                &mut db,
+                                                &cx,
+                                                &program,
+                                                write_policy(),
+                                                |request| allocate(&mut next, request),
+                                            );
+                                            if expected == Some(true) {
+                                                result.unwrap_or_else(|error| {
+                                                    panic!("{family:?}: {statement}: {error:?}") // ubs:ignore -- intentional test failure, not library code.
+                                                });
+                                            } else {
+                                                let _ = typed(result);
+                                            }
+                                            txn.abort();
+                                            assert_eq!(txcx.outstanding_obligations(), 0);
+                                        }
+                                        true
+                                    }
+                                    Err(error) => {
+                                        let _ = expect_typed(&error);
+                                        false
+                                    }
+                                }
+                            } else if family == fuzz_gen::Family::Explain {
+                                // Database::query is the actual prefix-aware EXPLAIN facade;
+                                // unrelated read-parser prefix refusals do not earn coverage.
+                                match db.query(&cx, &statement, &params, symbols, policy()) {
+                                    Ok(QueryResult::Rows { columns, .. }) => {
+                                        assert_eq!(columns, ["operator", "detail"]);
+                                        counts[slot].prepared += 1;
+                                        counts[slot].executed += 1;
+                                        true
+                                    }
+                                    Ok(QueryResult::Write { .. }) => {
+                                        panic!("EXPLAIN executed a write") // ubs:ignore -- intentional test failure, not library code.
+                                    }
+                                    Err(error) => {
+                                        let _ = expect_typed(&error);
+                                        false
+                                    }
+                                }
+                            } else {
+                                match PreparedNativeRead::prepare(&statement, &params, symbols) {
+                                    Ok(prepared) => {
+                                        counts[slot].prepared += 1;
+                                        let args = arguments(
+                                            prepared.parameter_schema(),
+                                            variant,
+                                            db.frontier().unwrap().0,
+                                        );
+                                        counts[slot].executed += 1;
+                                        let result = prepared.execute(&db, &cx, &args, policy());
+                                        if expected == Some(true) {
+                                            assert!(matches!(
+                                                result.unwrap_or_else(|error| panic!(
+                                                    "{family:?}: {statement}: {error:?}"
+                                                )),
+                                                QueryResult::Rows { .. }
+                                            ));
+                                        } else {
+                                            let _ = typed(result);
+                                        }
+                                        true
+                                    }
+                                    Err(error) => {
+                                        let _ = expect_typed(&error);
+                                        false
+                                    }
+                                }
+                            };
+                            if !admitted {
+                                counts[slot].refused += 1;
+                            }
+                            if let Some(expected) = expected {
+                                assert_eq!(admitted, expected, "{family:?}: {statement}");
+                            }
+                            assert!(
+                                input_started.elapsed() <= Duration::from_secs(5),
+                                "{family:?}: {statement} exceeded wall bound"
+                            );
+                        }
+                    }
+                }
+                counts
+            });
+        assert!(
+            report.lab_test_passed(),
+            "surface variant {variant}: {report:?}"
+        );
+        for (total, count) in totals.iter_mut().zip(counts) {
+            total.prepared += count.prepared;
+            total.refused += count.refused;
+            total.executed += count.executed;
+        }
+        assert!(
+            started.elapsed() <= Duration::from_secs(90),
+            "surface campaign exceeded wall bound"
+        );
+    }
+    for (family, count) in fuzz_gen::Family::ALL.into_iter().zip(totals) {
+        eprintln!(
+            "{family:?}: prepared={} typed-refused={} executed={}",
+            count.prepared, count.refused, count.executed
+        );
+        assert!(
+            count.prepared >= 100 && count.refused >= 100 && count.executed >= 100,
+            "{family:?}: {count:?}"
+        );
+    }
+}
+
+#[test]
+fn generated_unwind_fanout_and_list_growth_obey_governed_budgets() {
+    let started = Instant::now();
+    let ((), report) = run_async_under_lab(0x6772_6f77_7468, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let db = seeded(&contexts.commit(), 0).await;
+        let cx = contexts.query();
+        let mut rng = fuzz_gen::Rng::new(0x6661_6e6f_7574);
+        for _ in 0..32 {
+            let length = 12 + rng.below(16);
+            let values: Vec<_> = (0..length)
+                .map(|index| GraphValue::Scalar(CanonicalScalar::Int(index as i64)))
+                .collect();
+            let params = GqlParameters::new()
+                .with_list("xs", values.clone())
+                .unwrap();
+            for (statement, tight, fanout) in [
+                (
+                    "UNWIND $xs AS x UNWIND $xs AS y RETURN x,y",
+                    GqlQueryPolicy::new(100_000, length as u64, 5_000_000, 5_000_000),
+                    true,
+                ),
+                (
+                    "UNWIND $xs AS x RETURN [$xs,$xs,x] AS grown",
+                    GqlQueryPolicy::new(100_000, 100_000, 5_000_000, 256),
+                    false,
+                ),
+            ] {
+                let input_started = Instant::now();
+                let prepared = PreparedNativeRead::prepare(statement, &params, symbols).unwrap();
+                let error = prepared.execute(&db, &cx, &params, tight).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        QueryError::Pattern(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
+                            | QueryError::Set(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_))
+                            | QueryError::Aggregate(
+                                GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)
+                            )
+                    ),
+                    "expected typed governed budget refusal: {error:?}"
+                );
+                let QueryResult::Rows { rows, .. } =
+                    prepared.execute(&db, &cx, &params, policy()).unwrap()
+                else {
+                    panic!("growth probe classified as a write") // ubs:ignore -- intentional test failure, not library code.
+                };
+                if fanout {
+                    assert_eq!(rows.len(), length * length);
+                    for (index, row) in rows.iter().enumerate() {
+                        assert_eq!(
+                            row,
+                            &vec![
+                                GraphAggregateValue::Value(values[index / length].clone()),
+                                GraphAggregateValue::Value(values[index % length].clone())
+                            ]
+                        );
+                    }
+                } else {
+                    let list = GraphValue::List(values.clone().into_boxed_slice());
+                    let expected: Vec<_> = values
+                        .iter()
+                        .map(|value| {
+                            vec![GraphAggregateValue::Value(GraphValue::List(
+                                vec![list.clone(), list.clone(), value.clone()].into_boxed_slice(),
+                            ))]
+                        })
+                        .collect();
+                    assert_eq!(rows, expected);
+                }
+                assert!(
+                    input_started.elapsed() <= Duration::from_secs(5),
+                    "growth probe exceeded wall bound: {statement}"
+                );
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+    assert!(
+        started.elapsed() <= Duration::from_secs(90),
+        "growth campaign exceeded wall bound"
+    );
+}
+
 mod fuzz_gen {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Family {
+        Insert,
+        ListLiteral,
+        ListIndex,
+        Size,
+        Unwind,
+        Collect,
+        ListParameter,
+        EdgeDelete,
+        Acyclic,
+        Simple,
+        Explain,
+    }
+
+    impl Family {
+        pub const ALL: [Self; 11] = [
+            Self::Insert,
+            Self::ListLiteral,
+            Self::ListIndex,
+            Self::Size,
+            Self::Unwind,
+            Self::Collect,
+            Self::ListParameter,
+            Self::EdgeDelete,
+            Self::Acyclic,
+            Self::Simple,
+            Self::Explain,
+        ];
+
+        pub fn is_write(self) -> bool {
+            matches!(self, Self::Insert | Self::EdgeDelete)
+        }
+    }
     pub struct Rng {
         state: u64,
     }
@@ -429,6 +775,87 @@ mod fuzz_gen {
             Self {
                 rng: Rng::new(seed),
                 depth: 0,
+            }
+        }
+        pub fn family_pair(&mut self, family: Family) -> (String, String) {
+            let value = self.rng.below(1000) as i64 - 500;
+            let property = *self.rng.pick(&["p", "q"]);
+            let relation = *self.rng.pick(&["R", "S"]);
+            let alias = format!("value{}", self.rng.below(16));
+            match family {
+                Family::Insert => {
+                    let text = match self.rng.below(3) {
+                        0 => format!("INSERT (n:L {{p:{value},q:NULL}})"),
+                        1 => format!("INSERT (a:L {{p:{value}}})-[:R]->(b:L)"),
+                        _ => format!(
+                            "MATCH (a) WHERE a.p=1 INSERT (b:L {{p:a.p+({value})}}),(a)-[:R]->(b)"
+                        ),
+                    };
+                    (text.clone(), text.replace(":L", ":MissingLabel"))
+                }
+                Family::ListLiteral => (
+                    format!("MATCH (n) RETURN [{value},NULL,[n.{property},TRUE]] AS {alias}"),
+                    format!("MATCH (n) RETURN [{value},NULL,[n.missing,TRUE]] AS {alias}"),
+                ),
+                Family::ListIndex => {
+                    let index = self.rng.below(9) as i64 - 4;
+                    (
+                        format!(
+                            "MATCH (n) WITH [{value},NULL,n.{property}] AS xs RETURN xs[{index}] AS {alias}"
+                        ),
+                        format!(
+                            "MATCH (n) WITH [{value},NULL,n.{property}] AS xs RETURN xs[{index} AS {alias}"
+                        ),
+                    )
+                }
+                Family::Size => (
+                    format!("MATCH (n) RETURN size([{value},n.{property},[]]) AS {alias}"),
+                    format!("MATCH (n) RETURN size([{value},n.missing,[]]) AS {alias}"),
+                ),
+                Family::Unwind => (
+                    format!("UNWIND [{value},NULL,{value}] AS x RETURN x AS {alias}"),
+                    format!("UNWIND [{value},NULL,{value}] AS RETURN x AS {alias}"),
+                ),
+                Family::Collect => {
+                    let distinct = *self.rng.pick(&["", "DISTINCT "]);
+                    (
+                        format!("MATCH (n) RETURN collect({distinct}n.{property}) AS {alias}"),
+                        format!("MATCH (n) RETURN collect({distinct}n.missing) AS {alias}"),
+                    )
+                }
+                Family::ListParameter => (
+                    format!("UNWIND $xs AS x RETURN x AS {alias}"),
+                    format!("UNWIND $xs AS RETURN x AS {alias}"),
+                ),
+                Family::EdgeDelete => (
+                    format!(
+                        "MATCH (a)-[e:R]->(b) WHERE a.p >= {} DELETE e",
+                        value.unsigned_abs() % 5
+                    ),
+                    format!(
+                        "MATCH (a)-[e:R]->(b) WHERE a.p >= {} DELETE missing",
+                        value.unsigned_abs() % 5
+                    ),
+                ),
+                Family::Acyclic | Family::Simple => {
+                    let mode = if family == Family::Acyclic {
+                        "ACYCLIC"
+                    } else {
+                        "SIMPLE"
+                    };
+                    let end = 1 + self.rng.below(3);
+                    (
+                        format!("MATCH {mode} (a)-[:{relation}*1..{end}]->(b) RETURN a,b"),
+                        format!("MATCH {mode} (a)-[:MissingRelation*1..{end}]->(b) RETURN a,b"),
+                    )
+                }
+                Family::Explain => {
+                    let prefix = *self.rng.pick(&["EXPLAIN", "EXPLAIN (CERTIFICATE)"]);
+                    (
+                        format!("{prefix} MATCH (n) RETURN n.{property} AS {alias}"),
+                        format!("{prefix} MATCH (n) RETURN n.missing AS {alias}"),
+                    )
+                }
             }
         }
         pub fn statement(&mut self) -> String {
