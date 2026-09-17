@@ -518,9 +518,51 @@ impl<'a> Parser<'a> {
             self.syntax.labels.push((name, label));
             self.predicates += 1;
         }
+        self.node_property_map(name)?;
         self.punct(b')', ")")?;
         Ok(name)
     }
+
+    /// Inline maps are conjunctions in this positive pattern, not assignments
+    /// or a separate evaluator. In particular, OPTIONAL owns these predicates
+    /// before null extension, and equality with NULL is not an IS NULL test.
+    fn node_property_map(&mut self, variable: Name<'a>) -> Result<(), GraphPatternTextError> {
+        if !self.take(b'{')? || self.take(b'}')? {
+            return Ok(());
+        }
+        let mut keys = Vec::new();
+        loop {
+            self.capacity(
+                self.predicates,
+                MAX_PATTERN_PREDICATES,
+                crate::algebra::PatternLimitDimension::Predicates,
+            )?;
+            let key = self.name()?;
+            if keys.contains(&key.text) {
+                return Err(error(
+                    key.at,
+                    GraphPatternTextErrorKind::Expected("distinct property name in node map"),
+                ));
+            }
+            self.punct(b':', ":")?;
+            let at = self.current.at;
+            let predicate = self.property_operand(variable, key, IntegerComparison::Equal)?;
+            if matches!(predicate, Filter::Properties { .. }) {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("literal or typed parameter in node map"),
+                ));
+            }
+            keys.push(key.text);
+            self.syntax.filters.push(predicate);
+            self.predicates += 1;
+            if !self.take(b',')? {
+                break;
+            }
+        }
+        self.punct(b'}', "}")
+    }
+
     fn number(&mut self, expected: GqlParameterType) -> Result<Number, GraphPatternTextError> {
         let at = self.current.at;
         if let TokenKind::Parameter(name) = self.current.kind {
@@ -849,6 +891,9 @@ impl PreparedGraphText {
     /// Property WHERE operands also accept single-quoted UCS_BASIC strings,
     /// TRUE/FALSE/NULL, and IS [NOT] NULL. Only doubled quotes escape a quote;
     /// quoted keywords and parameter-looking text remain literal payloads.
+    /// Nodes also accept `{key: literal, other: $parameter}` equality maps.
+    /// Empty maps are no-ops; duplicate keys and expression operands refuse.
+    /// Each entry shares the predicate budget and stays in its MATCH scope.
     /// WHERE also supports parentheses and NOT > AND > OR precedence, with
     /// three-valued comparisons over properties or vertex identities. The new
     /// Boolean program evaluates leaves eagerly; only final TRUE survives.
@@ -1345,7 +1390,7 @@ mod tests {
             "MATCH (a) RETURN a LIMIT 18446744073709551616",
             "MATCH (a) WHERE a.n = 9223372036854775808 RETURN a",
             "MATCH (a) WHERE a.n = -9223372036854775809 RETURN a",
-            "MATCH (a {n:1}) RETURN a",
+            "MATCH (a {n:}) RETURN a",
             "MATCH (a) RETURN *,a",
             "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b) } RETURN a",
         ] {
@@ -1603,5 +1648,165 @@ mod tests {
             query("MATCH (a) RETURN a AS x,a AS y").columns(),
             &["x", "y"]
         );
+    }
+
+    #[test]
+    fn inline_node_maps_lower_to_existing_predicates_in_every_match_scope() {
+        for (inline, expanded) in [
+            ("MATCH (a {}) RETURN a", "MATCH (a) RETURN a"),
+            (
+                "MATCH (a:L {n:7})-[:R]->(b {n:8}) RETURN a,b",
+                "MATCH (a:L)-[:R]->(b) WHERE a.n=7 AND b.n=8 RETURN a,b",
+            ),
+            (
+                "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b {n:7}) RETURN a,b",
+                "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n=7 RETURN a,b",
+            ),
+            (
+                "MATCH (a) MATCH (a)-[:R]->(b {n:7}) RETURN a,b",
+                "MATCH (a) MATCH (a)-[:R]->(b) WHERE b.n=7 RETURN a,b",
+            ),
+            (
+                "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b {n:7}) } RETURN a",
+                "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE b.n=7 } RETURN a",
+            ),
+            (
+                "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->(b {n:7}) } RETURN a",
+                "MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->(b) WHERE b.n=7 } RETURN a",
+            ),
+            (
+                "MATCH (a {n:'O''Brien 🦀, $x: RETURN'}) RETURN a",
+                "MATCH (a) WHERE a.n='O''Brien 🦀, $x: RETURN' RETURN a",
+            ),
+            ("MATCH (a {n:TRUE}) RETURN a", "MATCH (a) WHERE a.n=TRUE RETURN a"),
+            ("MATCH (a {n:NULL}) RETURN a", "MATCH (a) WHERE a.n=NULL RETURN a"),
+        ] {
+            assert_eq!(query(inline), query(expanded), "{inline}");
+        }
+        let text = "MATCH (a {n:$value})-[:R]->(b {n:$value}) RETURN a,b";
+        let mut resolutions = 0;
+        let template = PreparedGraphText::prepare(text, |kind, name| {
+            resolutions += 1;
+            symbols(kind, name)
+        })
+        .unwrap();
+        assert_eq!(resolutions, 2);
+        assert_eq!(template.parameter_schema().len(), 1);
+        assert_eq!(template.parameter_schema()[0].occurrences, 2);
+        let expanded = PreparedGraphText::prepare(
+            "MATCH (a)-[:R]->(b) WHERE a.n=$value AND b.n=$value RETURN a,b",
+            symbols,
+        )
+        .unwrap();
+        for value in [i64::MIN, 0, i64::MAX] {
+            let arguments = GqlParameters::new().with_int64("value", value).unwrap();
+            assert_eq!(
+                template.bind_parameters(&arguments).unwrap(),
+                expanded.bind_parameters(&arguments).unwrap()
+            );
+        }
+        let missing = template.bind_parameters(&GqlParameters::new()).unwrap_err();
+        assert_eq!(missing.kind, GraphPatternTextErrorKind::MissingParameter);
+        assert_eq!(missing.offset, text.find("$value").unwrap());
+    }
+
+    #[test]
+    fn inline_node_maps_keep_optional_rows_parallel_edges_and_null_semantics() {
+        let values = BTreeMap::from([
+            (VId(1), CanonicalScalar::Int(1)),
+            (VId(2), CanonicalScalar::Int(7)),
+            (VId(3), CanonicalScalar::Null),
+        ]);
+        let edges = [
+            (VId(1), RelationId(1), VId(2)),
+            (VId(1), RelationId(1), VId(2)),
+            (VId(1), RelationId(1), VId(3)),
+        ];
+        let run = |text: &str| {
+            query(text)
+                .plan()
+                .execute_governed_with_properties(
+                    4,
+                    [VId(1), VId(2), VId(3), VId(4)],
+                    edges,
+                    |vid, predicate| {
+                        let properties: Vec<_> = values
+                            .get(&vid)
+                            .map(|value| (PropertyKeyId(4), value.clone()))
+                            .into_iter()
+                            .collect();
+                        Ok::<_, ()>(predicate.matches(&[], &properties))
+                    },
+                    |vid, _| Ok(values.get(&vid)),
+                    policy(),
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap()
+                .value
+        };
+        let rows = run("MATCH (a {n:1}) OPTIONAL MATCH (a)-[:R]->(b {n:7}) RETURN a,b");
+        assert_eq!(vertex_rows(&rows), vec![vec![VId(1), VId(2)]; 2]);
+        let absent = run("MATCH (a {n:1}) OPTIONAL MATCH (a)-[:R]->(b {n:9}) RETURN a,b");
+        assert_eq!(absent.len(), 1);
+        assert_eq!(absent[0].get(0).unwrap().as_vertex(), Some(VId(1)));
+        assert!(absent[0].get(1).unwrap().is_null());
+        assert!(run("MATCH (a {n:NULL}) RETURN a").is_empty());
+        assert_eq!(
+            vertex_rows(&run("MATCH (a) WHERE a.n IS NULL RETURN a")),
+            vec![vec![VId(3)], vec![VId(4)]]
+        );
+        assert!(run("MATCH (a {n:1})-[:R]->(a {n:7}) RETURN a").is_empty());
+    }
+
+    #[test]
+    fn inline_node_map_errors_precede_catalog_and_share_the_global_predicate_limit() {
+        for text in [
+            "MATCH (a {n:1,n:2}) RETURN a",
+            "MATCH (a {n:1,}) RETURN a",
+            "MATCH (a {n 1}) RETURN a",
+            "MATCH (a {n:[1]}) RETURN a",
+            "MATCH (a {n:{n:1}}) RETURN a",
+            "MATCH (a {n:a.n}) RETURN a",
+            "MATCH (a {n:1+2}) RETURN a",
+            "MATCH (a {n:$x}) RETURN a LIMIT $x",
+            "MATCH (a {n:'unterminated}) RETURN a",
+        ] {
+            let mut calls = 0;
+            assert!(PreparedGraphText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            }).is_err(), "{text}");
+            assert_eq!(calls, 0, "{text}");
+        }
+        let entries = (0..MAX_PATTERN_PREDICATES)
+            .map(|index| format!("p{index}:1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let resolve = |kind, name: &str| match kind {
+            GraphSymbolKind::Property => name
+                .strip_prefix('p')
+                .and_then(|id| id.parse().ok())
+                .map(|id| GraphSymbol::Property(PropertyKeyId(id))),
+            _ => symbols(kind, name),
+        };
+        let exact = format!("MATCH (a {{{entries}}}) RETURN a");
+        let template = PreparedGraphText::prepare(&exact, resolve).unwrap();
+        assert!(template.bind_parameters(&GqlParameters::new()).is_ok());
+        for text in [
+            format!("MATCH (a {{{entries},extra:1}}) RETURN a"),
+            format!("MATCH (a:L {{{entries}}}) RETURN a"),
+            format!("MATCH (a {{{entries}}}) WHERE a.p0=1 RETURN a"),
+            format!("MATCH (a {{{entries}}}) OPTIONAL MATCH (a {{n:1}}) RETURN a"),
+        ] {
+            let mut calls = 0;
+            let failure = PreparedGraphText::prepare(&text, |kind, name| {
+                calls += 1;
+                resolve(kind, name)
+            }).unwrap_err();
+            assert!(matches!(failure.kind, GraphPatternTextErrorKind::Build(
+                PatternBuildError::LimitExceeded { limit: MAX_PATTERN_PREDICATES, .. }
+            )));
+            assert_eq!(calls, 0);
+        }
     }
 }
