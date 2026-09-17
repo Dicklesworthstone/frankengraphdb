@@ -156,9 +156,187 @@ pub enum GraphValue {
     Vertices(Box<[VId]>),
     Edges(Box<[EId]>),
     Edge(EId),
+    List(Box<[GraphValue]>),
 }
 
 impl GraphValue {
+    pub const MAX_LIST_DEPTH: usize = 64;
+    pub const MAX_LIST_NODES: usize = 65_536;
+
+    #[must_use]
+    pub fn as_list(&self) -> Option<&[GraphValue]> {
+        match self {
+            Self::List(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Bound recursive definitions before compilation or parameter admission.
+    #[must_use]
+    pub fn validate_bounds(&self) -> bool {
+        fn visit(value: &GraphValue, depth: usize, remaining: &mut usize) -> bool {
+            if depth > GraphValue::MAX_LIST_DEPTH || *remaining == 0 {
+                return false;
+            }
+            *remaining -= 1;
+            match value {
+                GraphValue::List(values) => values.iter().all(|v| visit(v, depth + 1, remaining)),
+                _ => true,
+            }
+        }
+        let mut remaining = Self::MAX_LIST_NODES;
+        visit(self, 0, &mut remaining)
+    }
+
+    /// Self-delimiting, domain-separated identity bytes. Encoding is iterative;
+    /// even externally constructed deep values never recurse on the stack.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, fgdb_types::ScalarEncodeError> {
+        enum Task<'a> {
+            Value(&'a GraphValue),
+            End(usize),
+        }
+        let mut bytes = b"fgdb:graph-value:v1\0".to_vec();
+        let mut pending = vec![Task::Value(self)];
+        while let Some(task) = pending.pop() {
+            let value = match task {
+                Task::End(at) => {
+                    let len = (bytes.len() - at - 8) as u64;
+                    bytes[at..at + 8].copy_from_slice(&len.to_be_bytes());
+                    continue;
+                }
+                Task::Value(value) => value,
+            };
+            let at = bytes.len();
+            bytes.extend_from_slice(&0u64.to_be_bytes());
+            pending.push(Task::End(at));
+            match value {
+                Self::Scalar(value) => {
+                    bytes.push(0);
+                    let encoded = value.encode()?;
+                    bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(&encoded);
+                }
+                Self::Vertex(value) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&value.0.to_be_bytes());
+                }
+                Self::Path(value) => {
+                    bytes.push(2);
+                    bytes.extend_from_slice(&value.start.0.to_be_bytes());
+                    bytes.extend_from_slice(&(value.steps.len() as u64).to_be_bytes());
+                    for (edge, vertex) in &value.steps {
+                        bytes.extend_from_slice(&edge.0.to_be_bytes());
+                        bytes.extend_from_slice(&vertex.0.to_be_bytes());
+                    }
+                }
+                Self::Vertices(values) => {
+                    bytes.push(3);
+                    bytes.extend_from_slice(&(values.len() as u64).to_be_bytes());
+                    for value in values {
+                        bytes.extend_from_slice(&value.0.to_be_bytes());
+                    }
+                }
+                Self::Edges(values) => {
+                    bytes.push(4);
+                    bytes.extend_from_slice(&(values.len() as u64).to_be_bytes());
+                    for value in values {
+                        bytes.extend_from_slice(&value.0.to_be_bytes());
+                    }
+                }
+                Self::Edge(value) => {
+                    bytes.push(5);
+                    bytes.extend_from_slice(&value.0.to_be_bytes());
+                }
+                Self::List(values) => {
+                    bytes.push(6);
+                    bytes.extend_from_slice(&(values.len() as u64).to_be_bytes());
+                    // Child tasks reserve their own length prefix when visited.
+                    for value in values.iter().rev() {
+                        pending.push(Task::Value(value));
+                    }
+                    continue;
+                }
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// Count nested cells and variable payload without cloning their storage.
+    #[must_use]
+    pub fn payload_units(&self) -> usize {
+        let mut total = 0usize;
+        let mut pending = vec![self];
+        while let Some(value) = pending.pop() {
+            total = total.saturating_add(1);
+            if let Self::List(values) = value {
+                pending.extend(values.iter());
+            } else {
+                total = total.saturating_add(value.leaf_payload_units());
+            }
+        }
+        total
+    }
+
+    fn leaf_payload_units(&self) -> usize {
+        let sizes = match self {
+            Self::Scalar(CanonicalScalar::Text(value)) => [
+                value.len(),
+                value.canonical_sort_key().map_or(0, <[u8]>::len),
+            ],
+            Self::Scalar(CanonicalScalar::Bytes(value)) => [value.as_slice().len(), 0],
+            Self::Scalar(CanonicalScalar::Timestamp(value)) => {
+                [value.zone().map_or(0, |zone| zone.identifier().len()), 0]
+            }
+            Self::Path(value) => [core::mem::size_of_val(value.steps()), 0],
+            Self::Vertices(value) => [core::mem::size_of_val(value.as_ref()), 0],
+            Self::Edges(value) => [core::mem::size_of_val(value.as_ref()), 0],
+            _ => [0, 0],
+        };
+        sizes
+            .into_iter()
+            .map(|n| n.div_ceil(GRAPH_VALUE_PAYLOAD_UNIT_BYTES))
+            .sum()
+    }
+
+    /// Iterative owned copy. Reserve traversal frames, every nested cell and
+    /// leaf payload before growing storage or cloning any payload.
+    pub fn copy_with_control<E>(
+        &self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        enum Task<'a> {
+            Value(&'a GraphValue),
+            Finish(usize),
+        }
+        control(GlaExecutionEvent::ScratchEntry)?;
+        let mut pending = vec![Task::Value(self)];
+        let mut output = Vec::new();
+        while let Some(task) = pending.pop() {
+            control(GlaExecutionEvent::Work)?;
+            match task {
+                Task::Finish(start) => {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    let children = output.split_off(start).into_boxed_slice();
+                    output.push(Self::List(children));
+                }
+                Task::Value(Self::List(values)) => {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    pending.push(Task::Finish(output.len()));
+                    for value in values.iter().rev() {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                        pending.push(Task::Value(value));
+                    }
+                }
+                Task::Value(value) => {
+                    for _ in 0..=value.leaf_payload_units() {
+                        control(GlaExecutionEvent::ScratchEntry)?;
+                    }
+                    output.push(value.clone());
+                }
+            }
+        }
+        Ok(output.pop().expect("one root copied"))
+    }
     #[must_use]
     pub fn as_scalar(&self) -> Option<&CanonicalScalar> {
         match self {
@@ -205,6 +383,7 @@ impl core::fmt::Debug for GraphValue {
             Self::Vertices(_) => "Vertices",
             Self::Edges(_) => "Edges",
             Self::Edge(_) => "Edge",
+            Self::List(_) => "List",
         };
         f.debug_tuple(kind).field(&"[REDACTED]").finish()
     }
@@ -218,6 +397,16 @@ pub struct GraphValueRow {
 }
 
 impl GraphValueRow {
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, fgdb_types::ScalarEncodeError> {
+        let mut bytes = b"fgdb:graph-row:v1\0".to_vec();
+        bytes.extend_from_slice(&(self.values.len() as u64).to_be_bytes());
+        for value in &self.values {
+            let encoded = value.canonical_bytes()?;
+            bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&encoded);
+        }
+        Ok(bytes)
+    }
     /// Compiler-owned relational operators call this only after schema checks
     /// and per-cell/payload reservations. It is not a public unchecked row API.
     pub(crate) fn from_owned_values(values: Vec<GraphValue>) -> Self {
@@ -266,6 +455,7 @@ pub(crate) enum ValueRef<'a> {
     Vertices(&'a [VId]),
     Edges(&'a [EId]),
     Edge(EId),
+    List(&'a [GraphValue]),
 }
 
 impl ValueRef<'_> {
@@ -274,6 +464,11 @@ impl ValueRef<'_> {
             Self::Path(path) => return path.len().saturating_mul(2).saturating_add(1),
             Self::Vertices(values) => return values.len(),
             Self::Edges(values) => return values.len(),
+            Self::List(values) => {
+                return values
+                    .iter()
+                    .fold(0usize, |n, v| n.saturating_add(v.payload_units()));
+            }
             _ => {}
         }
         let bytes = match self {
@@ -299,6 +494,7 @@ impl ValueRef<'_> {
             Self::Vertices(value) => GraphValue::Vertices(value.into()),
             Self::Edges(value) => GraphValue::Edges(value.into()),
             Self::Edge(value) => GraphValue::Edge(value),
+            Self::List(values) => GraphValue::List(values.into()),
         }
     }
 }
@@ -332,6 +528,7 @@ impl RowKey for GraphValueRow {
             GraphValue::Vertices(value) => ValueRef::Vertices(value),
             GraphValue::Edges(value) => ValueRef::Edges(value),
             GraphValue::Edge(value) => ValueRef::Edge(*value),
+            GraphValue::List(value) => ValueRef::List(value),
         }
     }
 }
@@ -392,7 +589,10 @@ pub(super) fn collect_values_with_paths<'a, E>(
         };
         computed[at] = match function {
             GraphPathFunction::Value => None,
-            GraphPathFunction::Edge => path.steps().first().map(|(edge, _)| GraphValue::Edge(*edge)),
+            GraphPathFunction::Edge => path
+                .steps()
+                .first()
+                .map(|(edge, _)| GraphValue::Edge(*edge)),
             GraphPathFunction::Length => {
                 Some(GraphValue::Scalar(CanonicalScalar::Int(path.len() as i64)))
             }

@@ -20,6 +20,7 @@ pub enum GqlParameterType {
     UInt64,
     /// Exact canonical kind or canonical null; no cross-kind numeric coercion.
     Scalar(CanonicalScalarKind),
+    List,
 }
 
 /// Scalar arguments own shared bounded storage. This enum is Clone, not Copy;
@@ -29,6 +30,7 @@ pub enum GqlParameterValue {
     Int64(i64),
     UInt64(u64),
     Scalar(GqlScalarParameter),
+    List(GqlListParameter),
 }
 
 impl GqlParameterValue {
@@ -38,6 +40,7 @@ impl GqlParameterValue {
             Self::Int64(_) => GqlParameterType::Int64,
             Self::UInt64(_) => GqlParameterType::UInt64,
             Self::Scalar(value) => GqlParameterType::Scalar(value.kind()),
+            Self::List(_) => GqlParameterType::List,
         }
     }
 
@@ -45,7 +48,7 @@ impl GqlParameterValue {
         match self {
             Self::Int64(value) => value.to_string(),
             Self::UInt64(value) => value.to_string(),
-            Self::Scalar(_) => {
+            Self::Scalar(_) | Self::List(_) => {
                 unreachable!("legacy template validation admits only numeric arguments")
             }
         }
@@ -55,6 +58,48 @@ impl GqlParameterValue {
 impl core::fmt::Debug for GqlParameterValue {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:?}([REDACTED])", self.parameter_type())
+    }
+}
+
+/// Checked immutable list storage; cloning arguments never clones list payloads.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GqlListParameter {
+    value: std::sync::Arc<crate::algebra::GraphValue>,
+    canonical: std::sync::Arc<[u8]>,
+}
+impl GqlListParameter {
+    pub fn new(values: Vec<crate::algebra::GraphValue>) -> Result<Self, GqlParameterError> {
+        let value = crate::algebra::GraphValue::List(values.into_boxed_slice());
+        if !value.validate_bounds() {
+            return Err(GqlParameterError::ListLiteral);
+        }
+        let canonical = value
+            .canonical_bytes()
+            .map_err(|_| GqlParameterError::ListLiteral)?;
+        if canonical.len() > crate::algebra::MAX_SCALAR_PREDICATE_BYTES {
+            return Err(GqlParameterError::ListLiteral);
+        }
+        Ok(Self {
+            value: std::sync::Arc::new(value),
+            canonical: canonical.into(),
+        })
+    }
+    #[must_use]
+    pub fn value(&self) -> &crate::algebra::GraphValue {
+        &self.value
+    }
+    #[must_use]
+    pub fn values(&self) -> &[crate::algebra::GraphValue] {
+        self.value.as_list().expect("checked list storage")
+    }
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical
+    }
+}
+impl core::fmt::Debug for GqlListParameter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("GqlListParameter([REDACTED])")
     }
 }
 
@@ -105,6 +150,18 @@ impl GqlParameters {
         Ok(self)
     }
 
+    pub fn with_list(
+        mut self,
+        name: impl Into<String>,
+        values: Vec<crate::algebra::GraphValue>,
+    ) -> Result<Self, GqlParameterError> {
+        self.insert(
+            name,
+            GqlParameterValue::List(GqlListParameter::new(values)?),
+        )?;
+        Ok(self)
+    }
+
     #[must_use]
     pub fn get(&self, name: &str) -> Option<GqlParameterValue> {
         self.values.get(name).cloned()
@@ -151,6 +208,10 @@ impl GqlParameters {
                     bytes.push(2);
                     append_bytes(&mut bytes, value.canonical_bytes());
                 }
+                GqlParameterValue::List(value) => {
+                    bytes.push(3);
+                    append_bytes(&mut bytes, value.canonical_bytes());
+                }
             }
         }
         bytes
@@ -181,6 +242,8 @@ pub enum GqlParameterError {
     Bind(BindError),
     /// The scalar could not be admitted within the canonical operand bounds.
     ScalarLiteral,
+    /// List depth, node count, scalar encoding or aggregate payload exceeded admission.
+    ListLiteral,
     InvalidParameterName {
         offset: usize,
     },
@@ -222,6 +285,7 @@ pub enum GqlParameterError {
 impl core::fmt::Display for GqlParameterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ListLiteral => write!(f, "list parameter exceeds canonical admission bounds"),
             Self::Bind(error) => core::fmt::Display::fmt(error, f),
             Self::ScalarLiteral => {
                 f.write_str("scalar argument exceeds canonical operand admission bounds")
