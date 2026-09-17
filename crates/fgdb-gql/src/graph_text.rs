@@ -219,7 +219,7 @@ impl<'a> Lexer<'a> {
                 at,
             });
         }
-        if b"()[]{}:,.<>=!-*+/%".contains(&ch) {
+        if b"()[]{}:,.<>=!-*+/%|".contains(&ch) {
             self.at += 1;
             return Ok(Token {
                 kind: TokenKind::Punct(ch),
