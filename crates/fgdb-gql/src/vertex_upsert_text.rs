@@ -14,8 +14,14 @@ pub(crate) enum VertexUpsertValueTemplate {
 
 #[derive(Clone)]
 pub(crate) enum VertexUpsertActionTemplate {
-    Property { key: PropertyKeyId, value: VertexUpsertValueTemplate },
-    Label { label: LabelId, present: bool },
+    Property {
+        key: PropertyKeyId,
+        value: VertexUpsertValueTemplate,
+    },
+    Label {
+        label: LabelId,
+        present: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -29,7 +35,8 @@ impl core::fmt::Debug for PreparedGraphVertexUpsertText {
         f.debug_struct("PreparedGraphVertexUpsertText")
             .field("on_match", &self.on_match.len())
             .field("on_create", &self.on_create.len())
-            .field("definition", &"[REDACTED]").finish()
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -47,21 +54,34 @@ pub enum GraphVertexUpsertTextErrorKind {
 }
 impl From<GraphPatternTextError> for GraphVertexUpsertTextError {
     fn from(error: GraphPatternTextError) -> Self {
-        Self { offset: error.offset, kind: GraphVertexUpsertTextErrorKind::Query(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphVertexUpsertTextErrorKind::Query(error.kind),
+        }
     }
 }
 impl core::fmt::Display for GraphVertexUpsertTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph vertex MERGE action text error at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "graph vertex MERGE action text error at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphVertexUpsertTextError {}
 
 impl PreparedGraphVertexUpsertText {
     #[must_use]
-    pub fn statement(&self) -> &str { self.merge.statement() }
+    pub fn statement(&self) -> &str {
+        self.merge.statement()
+    }
     #[must_use]
-    pub fn relation(&self) -> RelationId { self.merge.relation }
+    pub fn relation(&self) -> RelationId {
+        self.merge.relation
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[crate::GqlParameterSpec] { self.merge.parameter_schema() }
+    pub fn parameter_schema(&self) -> &[crate::GqlParameterSpec] {
+        self.merge.parameter_schema()
+    }
 }

@@ -324,8 +324,14 @@ impl<'a> GraphPathCursor<'a> {
             return Ok(());
         }
 
-        let shortest = matches!(self.search, GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest);
-        let restricted = matches!(self.search, GraphWalkSearch::Acyclic | GraphWalkSearch::Simple);
+        let shortest = matches!(
+            self.search,
+            GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest
+        );
+        let restricted = matches!(
+            self.search,
+            GraphWalkSearch::Acyclic | GraphWalkSearch::Simple
+        );
         let unique = self.search == GraphWalkSearch::AnyShortest;
         let mut next = Vec::new();
         let mut pending = Vec::new();
@@ -335,7 +341,12 @@ impl<'a> GraphPathCursor<'a> {
             let endpoint = path.steps().last().map_or(path.start(), |step| step.1);
             // Settlement starts at the lower bound, not at the first visit.
             // Recording the depth keeps every equal-depth witness eligible.
-            if shortest && self.settled.get(&endpoint).is_some_and(|&at| at < self.depth) {
+            if shortest
+                && self
+                    .settled
+                    .get(&endpoint)
+                    .is_some_and(|&at| at < self.depth)
+            {
                 continue;
             }
             let emit = self.depth >= self.bounds.minimum();
@@ -347,8 +358,10 @@ impl<'a> GraphPathCursor<'a> {
             // A SIMPLE return to the start is a complete path, never a transit
             // prefix. In particular, a lower bound cannot license reopening it.
             let closed = self.search == GraphWalkSearch::Simple
-                && !path.steps().is_empty() && endpoint == path.start();
-            if !closed && self.depth < self.bounds.maximum()
+                && !path.steps().is_empty()
+                && endpoint == path.start();
+            if !closed
+                && self.depth < self.bounds.maximum()
                 && let Some(neighbors) = self.adjacency.and_then(|map| map.get(&endpoint))
             {
                 for &step in neighbors {
@@ -358,14 +371,21 @@ impl<'a> GraphPathCursor<'a> {
                         // Keep all valid parallel edges and distinct prefixes.
                         control(GlaExecutionEvent::Work)?;
                         if step.1 == path.start() {
-                            if self.search == GraphWalkSearch::Acyclic { continue; }
+                            if self.search == GraphWalkSearch::Acyclic {
+                                continue;
+                            }
                         } else {
                             let mut repeated = false;
                             for &(_, vertex) in path.steps() {
                                 control(GlaExecutionEvent::Work)?;
-                                if vertex == step.1 { repeated = true; break; }
+                                if vertex == step.1 {
+                                    repeated = true;
+                                    break;
+                                }
                             }
-                            if repeated { continue; }
+                            if repeated {
+                                continue;
+                            }
                         }
                     }
                     if unique {
@@ -373,7 +393,8 @@ impl<'a> GraphPathCursor<'a> {
                         // routes cannot multiply the next layer's prefixes.
                         let previous = canonical.get(&step.1);
                         if let Some(previous) = previous {
-                            let candidate = path.steps().iter().copied().chain(core::iter::once(step));
+                            let candidate =
+                                path.steps().iter().copied().chain(core::iter::once(step));
                             let mut better = false;
                             for (left, &right) in candidate.zip(previous.steps()) {
                                 control(GlaExecutionEvent::Work)?;
@@ -663,9 +684,11 @@ mod repetition_tests {
         adjacency: &BTreeMap<VId, Vec<VId>>,
         mode: Repetition,
     ) -> Vec<VId> {
-        let mut cursor = GraphWalkCursor::with_repetition(
-            source, bounds, Some(adjacency), mode, &mut |_| Ok::<_, ()>(()),
-        ).unwrap();
+        let mut cursor =
+            GraphWalkCursor::with_repetition(source, bounds, Some(adjacency), mode, &mut |_| {
+                Ok::<_, ()>(())
+            })
+            .unwrap();
         let mut rows = Vec::new();
         while let Some(endpoint) = cursor.next_with_control(&mut |_| Ok::<_, ()>(())).unwrap() {
             rows.push(endpoint);
@@ -675,15 +698,19 @@ mod repetition_tests {
 
     fn bag(rows: Vec<VId>) -> BTreeMap<VId, usize> {
         let mut result = BTreeMap::new();
-        for vertex in rows { *result.entry(vertex).or_default() += 1; }
+        for vertex in rows {
+            *result.entry(vertex).or_default() += 1;
+        }
         result
     }
 
     fn valid(path: &[VId], mode: Repetition) -> bool {
-        let checked = if mode == Repetition::Simple && path.len() > 1
-            && path.first() == path.last() {
+        let checked = if mode == Repetition::Simple && path.len() > 1 && path.first() == path.last()
+        {
             &path[..path.len() - 1]
-        } else { path };
+        } else {
+            path
+        };
         mode == Repetition::Walk || checked.iter().collect::<BTreeSet<_>>().len() == checked.len()
     }
 
@@ -696,7 +723,10 @@ mod repetition_tests {
             for source in 0..3_u128 {
                 for destination in 0..3_u128 {
                     if mask & (1 << (3 * source + destination)) != 0 {
-                        adjacency.entry(VId(source)).or_default().push(VId(destination));
+                        adjacency
+                            .entry(VId(source))
+                            .or_default()
+                            .push(VId(destination));
                     }
                 }
             }
@@ -720,12 +750,18 @@ mod repetition_tests {
                 for maximum in 0..=4_u32 {
                     for minimum in 0..=maximum {
                         for mode in [Repetition::Acyclic, Repetition::Simple] {
-                            let expected = layers[minimum as usize..=maximum as usize].iter()
-                                .flatten().filter(|path| valid(path, mode))
-                                .map(|path| *path.last().unwrap()).collect();
+                            let expected = layers[minimum as usize..=maximum as usize]
+                                .iter()
+                                .flatten()
+                                .filter(|path| valid(path, mode))
+                                .map(|path| *path.last().unwrap())
+                                .collect();
                             let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
-                            assert_eq!(bag(run(VId(source), bounds, &adjacency, mode)), bag(expected),
-                                "mask={mask}, source={source}, bounds={bounds:?}, mode={mode:?}");
+                            assert_eq!(
+                                bag(run(VId(source), bounds, &adjacency, mode)),
+                                bag(expected),
+                                "mask={mask}, source={source}, bounds={bounds:?}, mode={mode:?}"
+                            );
                         }
                     }
                 }
@@ -741,17 +777,52 @@ mod repetition_tests {
             (VId(3), vec![VId(1)]),
         ]);
         let bounds = GraphWalkBounds::new(1, 1_024).unwrap();
-        assert_eq!(run(VId(1), bounds, &adjacency, Repetition::Acyclic), vec![VId(2), VId(3)]);
-        assert_eq!(run(VId(1), bounds, &adjacency, Repetition::Simple),
-            vec![VId(1), VId(1), VId(2), VId(1), VId(3), VId(1)]);
-        assert_eq!(run(VId(1), GraphWalkBounds::new(3, 1_024).unwrap(), &adjacency, Repetition::Simple),
-            vec![VId(1)]);
-        assert!(run(VId(1), GraphWalkBounds::new(4, 1_024).unwrap(), &adjacency, Repetition::Simple).is_empty());
+        assert_eq!(
+            run(VId(1), bounds, &adjacency, Repetition::Acyclic),
+            vec![VId(2), VId(3)]
+        );
+        assert_eq!(
+            run(VId(1), bounds, &adjacency, Repetition::Simple),
+            vec![VId(1), VId(1), VId(2), VId(1), VId(3), VId(1)]
+        );
+        assert_eq!(
+            run(
+                VId(1),
+                GraphWalkBounds::new(3, 1_024).unwrap(),
+                &adjacency,
+                Repetition::Simple
+            ),
+            vec![VId(1)]
+        );
+        assert!(
+            run(
+                VId(1),
+                GraphWalkBounds::new(4, 1_024).unwrap(),
+                &adjacency,
+                Repetition::Simple
+            )
+            .is_empty()
+        );
         let isolated = BTreeMap::new();
         for mode in [Repetition::Acyclic, Repetition::Simple] {
-            assert_eq!(run(VId(u128::MAX), GraphWalkBounds::new(0, 0).unwrap(), &isolated, mode),
-                vec![VId(u128::MAX)]);
-            assert!(run(VId(u128::MAX), GraphWalkBounds::new(1, 2).unwrap(), &isolated, mode).is_empty());
+            assert_eq!(
+                run(
+                    VId(u128::MAX),
+                    GraphWalkBounds::new(0, 0).unwrap(),
+                    &isolated,
+                    mode
+                ),
+                vec![VId(u128::MAX)]
+            );
+            assert!(
+                run(
+                    VId(u128::MAX),
+                    GraphWalkBounds::new(1, 2).unwrap(),
+                    &isolated,
+                    mode
+                )
+                .is_empty()
+            );
         }
     }
 
@@ -765,8 +836,18 @@ mod repetition_tests {
         let bounds = GraphWalkBounds::new(0, 3).unwrap();
         for mode in [Repetition::Walk, Repetition::Acyclic, Repetition::Simple] {
             let mut total = 0;
-            let mut control = |_| { total += 1; Ok::<_, usize>(()) };
-            let mut cursor = GraphWalkCursor::with_repetition(VId(1), bounds, Some(&adjacency), mode, &mut control).unwrap();
+            let mut control = |_| {
+                total += 1;
+                Ok::<_, usize>(())
+            };
+            let mut cursor = GraphWalkCursor::with_repetition(
+                VId(1),
+                bounds,
+                Some(&adjacency),
+                mode,
+                &mut control,
+            )
+            .unwrap();
             while cursor.next_with_control(&mut control).unwrap().is_some() {}
             for stop in 1..=total {
                 let mut seen = 0;
@@ -774,22 +855,34 @@ mod repetition_tests {
                     seen += 1;
                     if seen == stop { Err(stop) } else { Ok(()) }
                 };
-                match GraphWalkCursor::with_repetition(VId(1), bounds, Some(&adjacency), mode, &mut control) {
+                match GraphWalkCursor::with_repetition(
+                    VId(1),
+                    bounds,
+                    Some(&adjacency),
+                    mode,
+                    &mut control,
+                ) {
                     Err(at) => assert_eq!(at, stop),
                     Ok(mut cursor) => {
                         loop {
                             match cursor.next_with_control(&mut control) {
                                 Ok(Some(_)) => {}
                                 Ok(None) => panic!("missed refusal {stop} in {mode:?}"),
-                                Err(at) => { assert_eq!(at, stop); break; }
+                                Err(at) => {
+                                    assert_eq!(at, stop);
+                                    break;
+                                }
                             }
                         }
                         assert!(cursor.stack.is_empty());
                         assert_eq!(cursor.stack.capacity(), 0);
                         for _ in 0..2 {
-                            assert_eq!(cursor.next_with_control(&mut |_| -> Result<(), ()> {
-                                panic!("terminal cursor called control")
-                            }), Ok(None));
+                            assert_eq!(
+                                cursor.next_with_control(&mut |_| -> Result<(), ()> {
+                                    panic!("terminal cursor called control")
+                                }),
+                                Ok(None)
+                            );
                         }
                     }
                 }
@@ -802,18 +895,32 @@ mod repetition_tests {
     fn maximum_bound_parallel_cycles_do_not_expand_illegal_prefixes() {
         let adjacency = BTreeMap::from([(VId(7), vec![VId(7); 64])]);
         let bounds = GraphWalkBounds::new(0, MAX_GRAPH_WALK_HOPS).unwrap();
-        for (mode, expected, allocations) in [(Repetition::Acyclic, 1, 1), (Repetition::Simple, 65, 65)] {
+        for (mode, expected, allocations) in
+            [(Repetition::Acyclic, 1, 1), (Repetition::Simple, 65, 65)]
+        {
             let mut work = 0;
             let mut scratch = 0;
             let mut control = |event| {
                 work += 1;
                 scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
-                assert!(work < 400, "restricted traversal expanded a cyclic descendant");
+                assert!(
+                    work < 400,
+                    "restricted traversal expanded a cyclic descendant"
+                );
                 Ok::<_, ()>(())
             };
-            let mut cursor = GraphWalkCursor::with_repetition(VId(7), bounds, Some(&adjacency), mode, &mut control).unwrap();
+            let mut cursor = GraphWalkCursor::with_repetition(
+                VId(7),
+                bounds,
+                Some(&adjacency),
+                mode,
+                &mut control,
+            )
+            .unwrap();
             let mut count = 0;
-            while cursor.next_with_control(&mut control).unwrap().is_some() { count += 1; }
+            while cursor.next_with_control(&mut control).unwrap().is_some() {
+                count += 1;
+            }
             assert_eq!(count, expected);
             assert_eq!(scratch, allocations);
         }
@@ -821,11 +928,15 @@ mod repetition_tests {
 
     #[test]
     fn longest_admitted_acyclic_path_is_iterative_and_frontier_local() {
-        let adjacency = (0..MAX_GRAPH_WALK_HOPS).map(|v|
-            (VId(u128::from(v)), vec![VId(u128::from(v + 1))])).collect();
+        let adjacency = (0..MAX_GRAPH_WALK_HOPS)
+            .map(|v| (VId(u128::from(v)), vec![VId(u128::from(v + 1))]))
+            .collect();
         let bounds = GraphWalkBounds::new(MAX_GRAPH_WALK_HOPS, MAX_GRAPH_WALK_HOPS).unwrap();
         for mode in [Repetition::Acyclic, Repetition::Simple] {
-            assert_eq!(run(VId(0), bounds, &adjacency, mode), vec![VId(u128::from(MAX_GRAPH_WALK_HOPS))]);
+            assert_eq!(
+                run(VId(0), bounds, &adjacency, mode),
+                vec![VId(u128::from(MAX_GRAPH_WALK_HOPS))]
+            );
         }
     }
 }

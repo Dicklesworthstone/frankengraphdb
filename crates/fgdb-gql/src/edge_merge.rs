@@ -40,7 +40,10 @@ pub struct GraphEdgeMergePolicy {
 impl GraphEdgeMergePolicy {
     #[must_use]
     pub const fn new(query: GqlQueryPolicy) -> Self {
-        Self { query, max_created_edges: 1 }
+        Self {
+            query,
+            max_created_edges: 1,
+        }
     }
     #[must_use]
     pub const fn with_creation_limit(mut self, limit: u64) -> Self {
@@ -68,17 +71,28 @@ pub enum GraphEdgeMergeOutcome {
 impl GraphEdgeMergeOutcome {
     #[must_use]
     pub const fn edge(self) -> Option<EId> {
-        match self { Self::NoInput => None, Self::Matched(edge) | Self::Created(edge) => Some(edge) }
+        match self {
+            Self::NoInput => None,
+            Self::Matched(edge) | Self::Created(edge) => Some(edge),
+        }
     }
     #[must_use]
-    pub const fn created(self) -> bool { matches!(self, Self::Created(_)) }
+    pub const fn created(self) -> bool {
+        matches!(self, Self::Created(_))
+    }
 }
 impl core::fmt::Debug for GraphEdgeMergeOutcome {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NoInput => f.write_str("NoInput"),
-            Self::Matched(_) => f.debug_struct("Matched").field("edge", &"[REDACTED]").finish(),
-            Self::Created(_) => f.debug_struct("Created").field("edge", &"[REDACTED]").finish(),
+            Self::Matched(_) => f
+                .debug_struct("Matched")
+                .field("edge", &"[REDACTED]")
+                .finish(),
+            Self::Created(_) => f
+                .debug_struct("Created")
+                .field("edge", &"[REDACTED]")
+                .finish(),
         }
     }
 }
@@ -98,18 +112,41 @@ pub enum GraphEdgeMergeError<E, A> {
     CreationLimit { limit: u64, observed: u128 },
     IdentityKind,
 }
-impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for GraphEdgeMergeError<E, A> {
+impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
+    for GraphEdgeMergeError<E, A>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(error) => error.fmt(f),
-            Self::IdentitySource(error) => write!(f, "relationship MERGE identity allocation: {error}"),
-            Self::InvalidSourceStatistics => f.write_str("relationship MERGE source returned inconsistent statistics"),
-            Self::InputSchema { row, column } => write!(f, "relationship MERGE row {row} has incompatible column {column}"),
-            Self::NullEndpoint { row, column } => write!(f, "relationship MERGE row {row} has null endpoint column {column}"),
-            Self::AmbiguousEndpointPairs { observed } => write!(f, "relationship MERGE selected {observed} distinct endpoint pairs; one required"),
-            Self::AmbiguousRelationships { observed } => write!(f, "relationship MERGE found {observed} parallel relationships; one required"),
-            Self::CreationLimit { limit, observed } => write!(f, "relationship MERGE creation limit exceeded: {observed} > {limit}"),
-            Self::IdentityKind => f.write_str("relationship MERGE allocator returned a non-edge identity"),
+            Self::IdentitySource(error) => {
+                write!(f, "relationship MERGE identity allocation: {error}")
+            }
+            Self::InvalidSourceStatistics => {
+                f.write_str("relationship MERGE source returned inconsistent statistics")
+            }
+            Self::InputSchema { row, column } => write!(
+                f,
+                "relationship MERGE row {row} has incompatible column {column}"
+            ),
+            Self::NullEndpoint { row, column } => write!(
+                f,
+                "relationship MERGE row {row} has null endpoint column {column}"
+            ),
+            Self::AmbiguousEndpointPairs { observed } => write!(
+                f,
+                "relationship MERGE selected {observed} distinct endpoint pairs; one required"
+            ),
+            Self::AmbiguousRelationships { observed } => write!(
+                f,
+                "relationship MERGE found {observed} parallel relationships; one required"
+            ),
+            Self::CreationLimit { limit, observed } => write!(
+                f,
+                "relationship MERGE creation limit exceeded: {observed} > {limit}"
+            ),
+            Self::IdentityKind => {
+                f.write_str("relationship MERGE allocator returned a non-edge identity")
+            }
         }
     }
 }
@@ -137,7 +174,8 @@ impl core::fmt::Debug for PreparedGraphEdgeMerge {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphEdgeMerge")
             .field("properties", &self.properties.len())
-            .field("definition", &"[REDACTED]").finish()
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 impl PreparedGraphEdgeMerge {
@@ -152,31 +190,53 @@ impl PreparedGraphEdgeMerge {
         if !matches!(columns.get(source), Some(ValueProjection::Vertex { .. })) {
             return Err(GraphEdgeMergeBuildError::SourceColumn { column: source });
         }
-        if !matches!(columns.get(destination), Some(ValueProjection::Vertex { .. })) {
-            return Err(GraphEdgeMergeBuildError::DestinationColumn { column: destination });
+        if !matches!(
+            columns.get(destination),
+            Some(ValueProjection::Vertex { .. })
+        ) {
+            return Err(GraphEdgeMergeBuildError::DestinationColumn {
+                column: destination,
+            });
         }
         if properties.len() > MAX_GRAPH_EDGE_MERGE_PROPERTIES {
             return Err(GraphEdgeMergeBuildError::TooManyProperties {
-                limit: MAX_GRAPH_EDGE_MERGE_PROPERTIES, observed: properties.len(),
+                limit: MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+                observed: properties.len(),
             });
         }
         properties.sort_by_key(|(key, _)| *key);
         if properties.windows(2).any(|pair| pair[0].0 == pair[1].0) {
             return Err(GraphEdgeMergeBuildError::DuplicateProperty);
         }
-        Ok(Self { selection, relation, source, destination, properties })
+        Ok(Self {
+            selection,
+            relation,
+            source,
+            destination,
+            properties,
+        })
     }
 
     #[must_use]
-    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> { &self.selection }
+    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> {
+        &self.selection
+    }
     #[must_use]
-    pub const fn relation(&self) -> RelationId { self.relation }
+    pub const fn relation(&self) -> RelationId {
+        self.relation
+    }
     #[must_use]
-    pub const fn source_column(&self) -> usize { self.source }
+    pub const fn source_column(&self) -> usize {
+        self.source
+    }
     #[must_use]
-    pub const fn destination_column(&self) -> usize { self.destination }
+    pub const fn destination_column(&self) -> usize {
+        self.destination
+    }
     #[must_use]
-    pub fn properties(&self) -> &[(PropertyKeyId, GqlScalarParameter)] { &self.properties }
+    pub fn properties(&self) -> &[(PropertyKeyId, GqlScalarParameter)] {
+        &self.properties
+    }
 
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {

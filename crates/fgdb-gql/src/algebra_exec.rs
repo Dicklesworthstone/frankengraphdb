@@ -12,7 +12,8 @@ pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::ProjectedRows;
 
 use crate::algebra::{
-    GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphPath, GraphWalkSearch, VertexPredicate,
+    GlaDirection, GlaIdentityOutput, GlaOperator, GlaOutput, GlaPlan, GraphPath, GraphWalkSearch,
+    VertexPredicate,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
@@ -183,10 +184,12 @@ impl<'a> WalkExpansion<'a> {
                     .map(Self::AllShortest)
             }
             GraphWalkSearch::Acyclic => {
-                crate::GraphWalkCursor::new_acyclic(source, bounds, adjacency, control).map(Self::All)
+                crate::GraphWalkCursor::new_acyclic(source, bounds, adjacency, control)
+                    .map(Self::All)
             }
             GraphWalkSearch::Simple => {
-                crate::GraphWalkCursor::new_simple(source, bounds, adjacency, control).map(Self::All)
+                crate::GraphWalkCursor::new_simple(source, bounds, adjacency, control)
+                    .map(Self::All)
             }
         }
     }
@@ -319,9 +322,21 @@ fn build_identified_index<E>(
 ) -> Result<IdentifiedIndex, E> {
     let mut index = IdentifiedIndex::new();
     for operator in operators {
-        if let GlaOperator::ScanEdges { relation, direction }
-            | GlaOperator::Expand { relation, direction, .. }
-            | GlaOperator::VarLengthExpand { relation, direction, .. } = operator {
+        if let GlaOperator::ScanEdges {
+            relation,
+            direction,
+        }
+        | GlaOperator::Expand {
+            relation,
+            direction,
+            ..
+        }
+        | GlaOperator::VarLengthExpand {
+            relation,
+            direction,
+            ..
+        } = operator
+        {
             if !index.contains_key(&(*relation, *direction)) {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 index.insert((*relation, *direction), BTreeMap::new());
@@ -330,35 +345,66 @@ fn build_identified_index<E>(
     }
     for (edge, source, relation, destination) in edges {
         control(GlaExecutionEvent::Work)?;
-        for direction in [GlaDirection::Forward, GlaDirection::Reverse, GlaDirection::Undirected] {
-            let Some(adjacency) = index.get_mut(&(relation, direction)) else { continue; };
-            let (from, to) = if direction == GlaDirection::Reverse { (destination, source) } else { (source, destination) };
+        for direction in [
+            GlaDirection::Forward,
+            GlaDirection::Reverse,
+            GlaDirection::Undirected,
+        ] {
+            let Some(adjacency) = index.get_mut(&(relation, direction)) else {
+                continue;
+            };
+            let (from, to) = if direction == GlaDirection::Reverse {
+                (destination, source)
+            } else {
+                (source, destination)
+            };
             control(GlaExecutionEvent::ScratchEntry)?;
-            if !adjacency.contains_key(&from) { control(GlaExecutionEvent::ScratchEntry)?; }
+            if !adjacency.contains_key(&from) {
+                control(GlaExecutionEvent::ScratchEntry)?;
+            }
             adjacency.entry(from).or_default().push((edge, to));
             if direction == GlaDirection::Undirected && source != destination {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                if !adjacency.contains_key(&destination) { control(GlaExecutionEvent::ScratchEntry)?; }
-                adjacency.entry(destination).or_default().push((edge, source));
+                if !adjacency.contains_key(&destination) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
+                adjacency
+                    .entry(destination)
+                    .or_default()
+                    .push((edge, source));
             }
         }
     }
     for adjacency in index.values_mut() {
-        for neighbors in adjacency.values_mut() { sort_identified_neighbors(neighbors, control)?; }
+        for neighbors in adjacency.values_mut() {
+            sort_identified_neighbors(neighbors, control)?;
+        }
     }
     Ok(index)
 }
 
-fn sort_identified_neighbors<E>(values: &mut [(EId, VId)], control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<(), E> {
-    fn sift<E>(values: &mut [(EId, VId)], mut root: usize, end: usize, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<(), E> {
+fn sort_identified_neighbors<E>(
+    values: &mut [(EId, VId)],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
+    fn sift<E>(
+        values: &mut [(EId, VId)],
+        mut root: usize,
+        end: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
         while root < end / 2 {
             let mut child = 2 * root + 1;
             if child + 1 < end {
                 control(GlaExecutionEvent::Work)?;
-                if values[child] < values[child + 1] { child += 1; }
+                if values[child] < values[child + 1] {
+                    child += 1;
+                }
             }
             control(GlaExecutionEvent::Work)?;
-            if values[root] >= values[child] { break; }
+            if values[root] >= values[child] {
+                break;
+            }
             control(GlaExecutionEvent::Work)?;
             values.swap(root, child);
             root = child;
@@ -366,7 +412,9 @@ fn sort_identified_neighbors<E>(values: &mut [(EId, VId)], control: &mut impl Fn
         Ok(())
     }
     let end = values.len();
-    for root in (0..end / 2).rev() { sift(values, root, end, control)?; }
+    for root in (0..end / 2).rev() {
+        sift(values, root, end, control)?;
+    }
     for end in (1..end).rev() {
         control(GlaExecutionEvent::Work)?;
         values.swap(0, end);
@@ -394,18 +442,38 @@ struct Execution<'i, F, C, P, Row> {
 
 impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
     fn visit_identified_expansion<E>(
-        &mut self, operators: &[GlaOperator], ordinal: usize,
-        bindings: &mut Vec<Option<VId>>, index: &Index,
-        source: VId, relation: RelationId, direction: GlaDirection,
-        bounds: crate::GraphWalkBounds, search: GraphWalkSearch,
+        &mut self,
+        operators: &[GlaOperator],
+        ordinal: usize,
+        bindings: &mut Vec<Option<VId>>,
+        index: &Index,
+        source: VId,
+        relation: RelationId,
+        direction: GlaDirection,
+        bounds: crate::GraphWalkBounds,
+        search: GraphWalkSearch,
     ) -> Result<(), E>
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[Option<VId>], &[Option<GraphPath>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
     {
-        let adjacency = self.identified_index.and_then(|index| index.get(&(relation, direction)));
-        let mut cursor = crate::walk::GraphPathCursor::new(source, bounds, search, adjacency, &mut self.control)?;
+        let adjacency = self
+            .identified_index
+            .and_then(|index| index.get(&(relation, direction)));
+        let mut cursor = crate::walk::GraphPathCursor::new(
+            source,
+            bounds,
+            search,
+            adjacency,
+            &mut self.control,
+        )?;
         let slot = bindings.len();
         while let Some(path) = cursor.next_with_control(&mut self.control)? {
             (self.control)(GlaExecutionEvent::ScratchEntry)?;
@@ -416,7 +484,12 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
             self.segments[slot] = previous;
             let _ = bindings.pop();
             result?;
-            if self.active_probe.is_some_and(|group| self.probe_matches[group]) { break; }
+            if self
+                .active_probe
+                .is_some_and(|group| self.probe_matches[group])
+            {
+                break;
+            }
         }
         Ok(())
     }
@@ -431,7 +504,13 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[Option<VId>], &[Option<GraphPath>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
     {
         let Some(operator) = operators.get(ordinal) else {
             return Ok(());
@@ -469,7 +548,10 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
                             (self.control)(GlaExecutionEvent::Work)?;
                         }
                     }
-                    if predicates.iter().all(|predicate| predicate.matches(&[], &[])) {
+                    if predicates
+                        .iter()
+                        .all(|predicate| predicate.matches(&[], &[]))
+                    {
                         self.visit(operators, ordinal + 1, bindings, index)?;
                     }
                     return Ok(());
@@ -500,7 +582,13 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
                 // The value-aware action owns the SAME property resolver as
                 // projection/aggregation. Its Boolean is only a continuation
                 // decision; no projected row is produced by this selection.
-                if (self.project)(operator, bindings, &self.paths, &mut self.projected, &mut self.control)? {
+                if (self.project)(
+                    operator,
+                    bindings,
+                    &self.paths,
+                    &mut self.projected,
+                    &mut self.control,
+                )? {
                     self.visit(operators, ordinal + 1, bindings, index)?;
                 }
             }
@@ -524,8 +612,17 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
                     return Ok(());
                 };
                 if self.identified_index.is_some() {
-                    return self.visit_identified_expansion(operators, ordinal, bindings, index,
-                        source, *relation, *direction, crate::GraphWalkBounds::new(1, 1).expect("one hop"), GraphWalkSearch::All);
+                    return self.visit_identified_expansion(
+                        operators,
+                        ordinal,
+                        bindings,
+                        index,
+                        source,
+                        *relation,
+                        *direction,
+                        crate::GraphWalkBounds::new(1, 1).expect("one hop"),
+                        GraphWalkSearch::All,
+                    );
                 }
                 if let Some(neighbors) = index
                     .get(&(*relation, *direction))
@@ -567,8 +664,10 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
                     return Ok(());
                 };
                 if self.identified_index.is_some() {
-                    return self.visit_identified_expansion(operators, ordinal, bindings, index,
-                        source, *relation, *direction, *bounds, *search);
+                    return self.visit_identified_expansion(
+                        operators, ordinal, bindings, index, source, *relation, *direction,
+                        *bounds, *search,
+                    );
                 }
                 let mut cursor = WalkExpansion::new(
                     *search,
@@ -660,7 +759,11 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
                 let _ = bindings.pop();
                 result?;
             }
-            GlaOperator::CapturePath { capture, start, segments } => {
+            GlaOperator::CapturePath {
+                capture,
+                start,
+                segments,
+            } => {
                 let at = *capture as usize;
                 let previous = self.paths[at].take();
                 if let Some(start) = bindings[start.ordinal() as usize] {
@@ -674,7 +777,10 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
                             complete = false;
                             break;
                         };
-                        if segment.start() != endpoint { complete = false; break; }
+                        if segment.start() != endpoint {
+                            complete = false;
+                            break;
+                        }
                         for step in segment.steps() {
                             (self.control)(GlaExecutionEvent::Work)?;
                             (self.control)(GlaExecutionEvent::ScratchEntry)?;
@@ -683,18 +789,29 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
                             endpoint = step.1;
                         }
                     }
-                    if complete { self.paths[at] = Some(GraphPath::new(start, steps.into_boxed_slice())); }
+                    if complete {
+                        self.paths[at] = Some(GraphPath::new(start, steps.into_boxed_slice()));
+                    }
                 }
                 let result = self.visit(operators, ordinal + 1, bindings, index);
                 self.paths[at] = previous;
                 result?;
             }
-            GlaOperator::SelectPathLength { capture, comparison, value } => {
-                if self.paths[*capture as usize].as_ref().is_some_and(|path| comparison.accepts(path.len() as i64, *value)) {
+            GlaOperator::SelectPathLength {
+                capture,
+                comparison,
+                value,
+            } => {
+                if self.paths[*capture as usize]
+                    .as_ref()
+                    .is_some_and(|path| comparison.accepts(path.len() as i64, *value))
+                {
                     self.visit(operators, ordinal + 1, bindings, index)?;
                 }
             }
-            GlaOperator::SelectPathNull { capture, is_null, .. } => {
+            GlaOperator::SelectPathNull {
+                capture, is_null, ..
+            } => {
                 if self.paths[*capture as usize].is_none() == *is_null {
                     self.visit(operators, ordinal + 1, bindings, index)?;
                 }
@@ -702,7 +819,13 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
             GlaOperator::Project { .. }
             | GlaOperator::ProjectBindings { .. }
             | GlaOperator::ProjectValues { .. } => {
-                let _ = (self.project)(operator, bindings, &self.paths, &mut self.projected, &mut self.control)?;
+                let _ = (self.project)(
+                    operator,
+                    bindings,
+                    &self.paths,
+                    &mut self.projected,
+                    &mut self.control,
+                )?;
             }
             GlaOperator::Empty
             | GlaOperator::ScanEdges { .. }
@@ -779,17 +902,39 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
         if !self.requires_identified_edges() {
-            return self.execute_with_properties_control(vertices, edges.into_iter().map(|(_, s, r, d)| (s, r, d)), test_vertex, property, control);
+            return self.execute_with_properties_control(
+                vertices,
+                edges.into_iter().map(|(_, s, r, d)| (s, r, d)),
+                test_vertex,
+                property,
+                control,
+            );
         }
         let identified = build_identified_index(self.operators(), edges, &mut control)?;
-        self.execute_projected_index(vertices, Index::new(), Some(identified), test_vertex, control,
+        self.execute_projected_index(
+            vertices,
+            Index::new(),
+            Some(identified),
+            test_vertex,
+            control,
             |operator, bindings, paths, projected, control| {
-                if matches!(operator, GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }) {
+                if matches!(
+                    operator,
+                    GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. }
+                ) {
                     return compare_properties(operator, bindings, &mut property, control);
                 }
-                Row::collect_properties_with_paths(operator, bindings, paths, projected, &mut property, control)?;
+                Row::collect_properties_with_paths(
+                    operator,
+                    bindings,
+                    paths,
+                    projected,
+                    &mut property,
+                    control,
+                )?;
                 Ok(false)
-            })
+            },
+        )
     }
 
     /// None means an absent property, not an unreadable source. The resolver's
@@ -814,7 +959,14 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 ) {
                     return compare_properties(operator, bindings, &mut property, control);
                 }
-                Row::collect_properties_with_paths(operator, bindings, paths, projected, &mut property, control)?;
+                Row::collect_properties_with_paths(
+                    operator,
+                    bindings,
+                    paths,
+                    projected,
+                    &mut property,
+                    control,
+                )?;
                 Ok(false)
             },
         )
@@ -834,9 +986,17 @@ impl<Row: GlaOutput> GlaPlan<Row> {
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[Option<VId>], &[Option<GraphPath>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
     {
-        if self.requires_identified_edges() { return Ok(Vec::new()); }
+        if self.requires_identified_edges() {
+            return Ok(Vec::new());
+        }
         let operators = self.operators();
         let index = if self.reads_edges() {
             build_index(operators, edges, &mut control)?
@@ -858,7 +1018,13 @@ impl<Row: GlaOutput> GlaPlan<Row> {
     where
         F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         C: FnMut(GlaExecutionEvent) -> Result<(), E>,
-        P: FnMut(&GlaOperator, &[Option<VId>], &[Option<GraphPath>], &mut ProjectedRows<Row>, &mut C) -> Result<bool, E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
     {
         let operators = self.operators();
         let repeated_vertex_scan = operators
@@ -906,12 +1072,20 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 relation,
                 direction,
             }) => {
-                if let Some(adjacency) = identified_index.as_ref().and_then(|index| index.get(&(*relation, *direction))) {
+                if let Some(adjacency) = identified_index
+                    .as_ref()
+                    .and_then(|index| index.get(&(*relation, *direction)))
+                {
                     for (source, neighbors) in adjacency {
                         for &(edge, destination) in neighbors {
                             (execution.control)(GlaExecutionEvent::Work)?;
-                            for _ in 0..3 { (execution.control)(GlaExecutionEvent::ScratchEntry)?; }
-                            execution.segments[1] = Some(GraphPath::new(*source, vec![(edge, destination)].into_boxed_slice()));
+                            for _ in 0..3 {
+                                (execution.control)(GlaExecutionEvent::ScratchEntry)?;
+                            }
+                            execution.segments[1] = Some(GraphPath::new(
+                                *source,
+                                vec![(edge, destination)].into_boxed_slice(),
+                            ));
                             bindings.clear();
                             bindings.extend([Some(*source), Some(destination)]);
                             execution.visit(operators, 1, &mut bindings, &index)?;

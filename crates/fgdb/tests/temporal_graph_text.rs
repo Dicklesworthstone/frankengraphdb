@@ -15,7 +15,11 @@ const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x61; 32], DatabaseSecurityNamespaceId([0x62; 32]), [0x63; 32])
+    DatabaseKeys::new(
+        [0x61; 32],
+        DatabaseSecurityNamespaceId([0x62; 32]),
+        [0x63; 32],
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -27,13 +31,19 @@ fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(10_000, 10_000, 2_000_000, 2_000_000)
 }
 fn ints(result: &fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>) -> Vec<i64> {
-    result.value.iter().map(|row| match row.values()[0].as_scalar() {
-        Some(CanonicalScalar::Int(value)) => *value,
-        other => panic!("expected integer temporal value, got {other:?}"),
-    }).collect()
+    result
+        .value
+        .iter()
+        .map(|row| match row.values()[0].as_scalar() {
+            Some(CanonicalScalar::Int(value)) => *value,
+            other => panic!("expected integer temporal value, got {other:?}"),
+        })
+        .collect()
 }
 fn bind(template: &PreparedTemporalGraphText, seq: CommitSeq) -> BoundTemporalGraphQuery {
-    template.bind_parameters(&GqlParameters::new().with_uint64("at", seq.0).unwrap()).unwrap()
+    template
+        .bind_parameters(&GqlParameters::new().with_uint64("at", seq.0).unwrap())
+        .unwrap()
 }
 
 #[test]
@@ -44,7 +54,9 @@ fn temporal_text_reads_each_retained_generation_and_matches_explicit_as_of() {
         let query = contexts.query();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
 
         let mut first = WriteBatch::new(R);
         first.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(10))]);
@@ -63,38 +75,75 @@ fn temporal_text_reads_each_retained_generation_and_matches_explicit_as_of() {
         let seq3 = db.write(&commit, third).await.unwrap();
 
         let template = PreparedTemporalGraphText::prepare(
-            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p AS p ORDER BY p", symbols,
-        ).unwrap();
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p AS p ORDER BY p",
+            symbols,
+        )
+        .unwrap();
         for (seq, expected) in [
             (seq1, vec![10, 20]),
             (seq2, vec![11, 20, 30]),
             (seq3, vec![11, 30]),
         ] {
             let bound = bind(&template, seq);
-            let via_text = db.execute_temporal_graph_text_governed(&query, &bound, policy()).unwrap();
-            let explicit = db.execute_graph_pattern_governed_at(
-                &query, bound.pattern(), seq, policy(),
-            ).unwrap();
-            assert_eq!(via_text, explicit, "text selector must be only an as_of binding");
+            let via_text = db
+                .execute_temporal_graph_text_governed(&query, &bound, policy())
+                .unwrap();
+            let explicit = db
+                .execute_graph_pattern_governed_at(&query, bound.pattern(), seq, policy())
+                .unwrap();
+            assert_eq!(
+                via_text, explicit,
+                "text selector must be only an as_of binding"
+            );
             assert_eq!(ints(&via_text), expected, "history mismatch at {seq:?}");
         }
 
         let at_seq1 = bind(&template, seq1);
-        assert_eq!(ints(&pinned.execute_temporal_graph_text_governed(&query, &at_seq1, policy()).unwrap()), vec![10, 20]);
+        assert_eq!(
+            ints(
+                &pinned
+                    .execute_temporal_graph_text_governed(&query, &at_seq1, policy())
+                    .unwrap()
+            ),
+            vec![10, 20]
+        );
         let at_seq2 = bind(&template, seq2);
-        assert_eq!(ints(&pinned.execute_temporal_graph_text_governed(&query, &at_seq2, policy()).unwrap()), vec![11, 20, 30]);
+        assert_eq!(
+            ints(
+                &pinned
+                    .execute_temporal_graph_text_governed(&query, &at_seq2, policy())
+                    .unwrap()
+            ),
+            vec![11, 20, 30]
+        );
         let at_seq3 = bind(&template, seq3);
-        assert!(pinned.execute_temporal_graph_text_governed(&query, &at_seq3, policy()).is_err(),
-            "a pinned view cannot time-travel beyond its admitted frontier");
+        assert!(
+            pinned
+                .execute_temporal_graph_text_governed(&query, &at_seq3, policy())
+                .is_err(),
+            "a pinned view cannot time-travel beyond its admitted frontier"
+        );
 
         db.compact(&commit).await.unwrap();
         drop(pinned);
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
-        for (seq, expected) in [(seq1, vec![10, 20]), (seq2, vec![11, 20, 30]), (seq3, vec![11, 30])] {
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        for (seq, expected) in [
+            (seq1, vec![10, 20]),
+            (seq2, vec![11, 20, 30]),
+            (seq3, vec![11, 30]),
+        ] {
             let bound = bind(&template, seq);
-            assert_eq!(ints(&db.execute_temporal_graph_text_governed(&query, &bound, policy()).unwrap()), expected,
-                "compaction/reopen changed temporal answer at {seq:?}");
+            assert_eq!(
+                ints(
+                    &db.execute_temporal_graph_text_governed(&query, &bound, policy())
+                        .unwrap()
+                ),
+                expected,
+                "compaction/reopen changed temporal answer at {seq:?}"
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -114,16 +163,38 @@ fn future_sequence_refuses_before_result_release_and_parameters_rebind_without_c
         let mut resolutions = 0;
         let template = PreparedTemporalGraphText::prepare(
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at WHERE n.p >= $floor RETURN n.p AS p",
-            |kind, name| { resolutions += 1; symbols(kind, name) },
-        ).unwrap();
+            |kind, name| {
+                resolutions += 1;
+                symbols(kind, name)
+            },
+        )
+        .unwrap();
         assert_eq!(resolutions, 1);
-        let args = |at| GqlParameters::new().with_uint64("at", at).unwrap().with_int64("floor", 0).unwrap();
+        let args = |at| {
+            GqlParameters::new()
+                .with_uint64("at", at)
+                .unwrap()
+                .with_int64("floor", 0)
+                .unwrap()
+        };
         let current = template.bind_parameters(&args(live.0)).unwrap();
-        assert_eq!(ints(&db.execute_temporal_graph_text_governed(&query, &current, policy()).unwrap()), vec![7]);
+        assert_eq!(
+            ints(
+                &db.execute_temporal_graph_text_governed(&query, &current, policy())
+                    .unwrap()
+            ),
+            vec![7]
+        );
         let future = template.bind_parameters(&args(live.0 + 1)).unwrap();
         let failed = db.execute_temporal_graph_text_governed(&query, &future, policy());
-        assert!(matches!(failed, Err(GqlQueryError::Source(GqlError::Read(_)))));
-        assert_eq!(resolutions, 1, "rebinding temporal parameters must not re-enter the catalog");
+        assert!(matches!(
+            failed,
+            Err(GqlQueryError::Source(GqlError::Read(_)))
+        ));
+        assert_eq!(
+            resolutions, 1,
+            "rebinding temporal parameters must not re-enter the catalog"
+        );
         assert_ne!(current.canonical_bytes(), future.canonical_bytes());
     });
     assert!(report.lab_test_passed(), "{report:?}");

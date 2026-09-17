@@ -28,7 +28,8 @@ impl core::fmt::Debug for PreparedGraphEdgeUpsertText {
         f.debug_struct("PreparedGraphEdgeUpsertText")
             .field("on_match", &self.on_match.len())
             .field("on_create", &self.on_create.len())
-            .field("definition", &"[REDACTED]").finish()
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -46,19 +47,30 @@ pub enum GraphEdgeUpsertTextErrorKind {
 }
 impl From<GraphPatternTextError> for GraphEdgeUpsertTextError {
     fn from(error: GraphPatternTextError) -> Self {
-        Self { offset: error.offset, kind: GraphEdgeUpsertTextErrorKind::Query(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphEdgeUpsertTextErrorKind::Query(error.kind),
+        }
     }
 }
 impl core::fmt::Display for GraphEdgeUpsertTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph relationship MERGE action text error at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "graph relationship MERGE action text error at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphEdgeUpsertTextError {}
 
 impl PreparedGraphEdgeUpsertText {
     #[must_use]
-    pub fn statement(&self) -> &str { self.merge.statement() }
+    pub fn statement(&self) -> &str {
+        self.merge.statement()
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[crate::GqlParameterSpec] { self.merge.parameter_schema() }
+    pub fn parameter_schema(&self) -> &[crate::GqlParameterSpec] {
+        self.merge.parameter_schema()
+    }
 }

@@ -10,12 +10,12 @@ use crate::insertion::{
     GraphInsertStats, PreparedGraphInsert,
 };
 use crate::{
-    GraphDeleteError, GraphDeletePolicy, GraphDeleteStats, PreparedGraphDelete,
-    GraphEdgeMergeError, GraphEdgeMergePolicy, GraphEdgeMergeStats, PreparedGraphEdgeMerge,
-    GraphEdgeUpsertError, GraphEdgeUpsertPolicy, GraphEdgeUpsertStats, PreparedGraphEdgeUpsert,
-    GraphVertexMergeError, GraphVertexMergePolicy, GraphVertexMergeStats,
-    GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
-    PreparedGraphVertexMerge, PreparedGraphVertexUpsert,
+    GraphDeleteError, GraphDeletePolicy, GraphDeleteStats, GraphEdgeMergeError,
+    GraphEdgeMergePolicy, GraphEdgeMergeStats, GraphEdgeUpsertError, GraphEdgeUpsertPolicy,
+    GraphEdgeUpsertStats, GraphVertexMergeError, GraphVertexMergePolicy, GraphVertexMergeStats,
+    GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats, PreparedGraphDelete,
+    PreparedGraphEdgeMerge, PreparedGraphEdgeUpsert, PreparedGraphVertexMerge,
+    PreparedGraphVertexUpsert,
 };
 
 /// One already-bound step. No source text or parameter map enters execution.
@@ -45,25 +45,39 @@ impl GraphWriteStatement {
     }
 }
 impl From<PreparedGraphMutation> for GraphWriteStatement {
-    fn from(value: PreparedGraphMutation) -> Self { Self::Mutation(value) }
+    fn from(value: PreparedGraphMutation) -> Self {
+        Self::Mutation(value)
+    }
 }
 impl From<PreparedGraphInsert> for GraphWriteStatement {
-    fn from(value: PreparedGraphInsert) -> Self { Self::Insert(value) }
+    fn from(value: PreparedGraphInsert) -> Self {
+        Self::Insert(value)
+    }
 }
 impl From<PreparedGraphVertexMerge> for GraphWriteStatement {
-    fn from(value: PreparedGraphVertexMerge) -> Self { Self::VertexMerge(value) }
+    fn from(value: PreparedGraphVertexMerge) -> Self {
+        Self::VertexMerge(value)
+    }
 }
 impl From<PreparedGraphVertexUpsert> for GraphWriteStatement {
-    fn from(value: PreparedGraphVertexUpsert) -> Self { Self::VertexUpsert(value) }
+    fn from(value: PreparedGraphVertexUpsert) -> Self {
+        Self::VertexUpsert(value)
+    }
 }
 impl From<PreparedGraphEdgeMerge> for GraphWriteStatement {
-    fn from(value: PreparedGraphEdgeMerge) -> Self { Self::EdgeMerge(value) }
+    fn from(value: PreparedGraphEdgeMerge) -> Self {
+        Self::EdgeMerge(value)
+    }
 }
 impl From<PreparedGraphEdgeUpsert> for GraphWriteStatement {
-    fn from(value: PreparedGraphEdgeUpsert) -> Self { Self::EdgeUpsert(value) }
+    fn from(value: PreparedGraphEdgeUpsert) -> Self {
+        Self::EdgeUpsert(value)
+    }
 }
 impl From<PreparedGraphDelete> for GraphWriteStatement {
-    fn from(value: PreparedGraphDelete) -> Self { Self::Delete(value) }
+    fn from(value: PreparedGraphDelete) -> Self {
+        Self::Delete(value)
+    }
 }
 
 /// Identity requests are local to a statement AND its selected occurrence.
@@ -89,8 +103,12 @@ pub struct GraphWriteProgramPolicy {
 }
 impl GraphWriteProgramPolicy {
     #[must_use]
-    pub const fn new(query: GqlQueryPolicy, max_mutation_effects: u64,
-        max_created_vertices: u64, max_created_edges: u64) -> Self {
+    pub const fn new(
+        query: GqlQueryPolicy,
+        max_mutation_effects: u64,
+        max_created_vertices: u64,
+        max_created_edges: u64,
+    ) -> Self {
         Self {
             mutations: GraphMutationPolicy::new(query, max_mutation_effects),
             max_created_vertices,
@@ -99,7 +117,11 @@ impl GraphWriteProgramPolicy {
     }
     #[must_use]
     pub const fn insertion_policy(self) -> GraphInsertPolicy {
-        GraphInsertPolicy::new(self.mutations.query, self.max_created_vertices, self.max_created_edges)
+        GraphInsertPolicy::new(
+            self.mutations.query,
+            self.max_created_vertices,
+            self.max_created_edges,
+        )
     }
     #[must_use]
     pub const fn vertex_merge_policy(self) -> GraphVertexMergePolicy {
@@ -112,8 +134,7 @@ impl GraphWriteProgramPolicy {
     }
     #[must_use]
     pub const fn edge_merge_policy(self) -> GraphEdgeMergePolicy {
-        GraphEdgeMergePolicy::new(self.mutations.query)
-            .with_creation_limit(self.max_created_edges)
+        GraphEdgeMergePolicy::new(self.mutations.query).with_creation_limit(self.max_created_edges)
     }
     #[must_use]
     pub const fn edge_upsert_policy(self) -> GraphEdgeUpsertPolicy {
@@ -146,8 +167,9 @@ pub enum GraphWriteStepError<E, A, C> {
     EdgeUpsert(GqlQueryError<GraphEdgeUpsertError<E, A>, C>),
     Delete(GqlQueryError<GraphDeleteError<E>, C>),
 }
-impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
-    core::fmt::Display for GraphWriteStepError<E, A, C> {
+impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display> core::fmt::Display
+    for GraphWriteStepError<E, A, C>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Mutation(error) => error.fmt(f),
@@ -160,8 +182,12 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
         }
     }
 }
-impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
-    C: core::error::Error + 'static> core::error::Error for GraphWriteStepError<E, A, C> {
+impl<
+    E: core::error::Error + 'static,
+    A: core::error::Error + 'static,
+    C: core::error::Error + 'static,
+> core::error::Error for GraphWriteStepError<E, A, C>
+{
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Mutation(error) => Some(error),
@@ -180,12 +206,30 @@ impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
 #[derive(Debug)]
 pub enum GraphWriteProgramError<E, A, C> {
     Program(GraphMutationProgramError<E, C>),
-    Insert { statement: usize, source: GqlQueryError<GraphInsertError<E, A>, C> },
-    VertexMerge { statement: usize, source: GqlQueryError<GraphVertexMergeError<E, A>, C> },
-    VertexUpsert { statement: usize, source: GqlQueryError<GraphVertexUpsertError<E, A>, C> },
-    EdgeMerge { statement: usize, source: GqlQueryError<GraphEdgeMergeError<E, A>, C> },
-    EdgeUpsert { statement: usize, source: GqlQueryError<GraphEdgeUpsertError<E, A>, C> },
-    Delete { statement: usize, source: GqlQueryError<GraphDeleteError<E>, C> },
+    Insert {
+        statement: usize,
+        source: GqlQueryError<GraphInsertError<E, A>, C>,
+    },
+    VertexMerge {
+        statement: usize,
+        source: GqlQueryError<GraphVertexMergeError<E, A>, C>,
+    },
+    VertexUpsert {
+        statement: usize,
+        source: GqlQueryError<GraphVertexUpsertError<E, A>, C>,
+    },
+    EdgeMerge {
+        statement: usize,
+        source: GqlQueryError<GraphEdgeMergeError<E, A>, C>,
+    },
+    EdgeUpsert {
+        statement: usize,
+        source: GqlQueryError<GraphEdgeUpsertError<E, A>, C>,
+    },
+    Delete {
+        statement: usize,
+        source: GqlQueryError<GraphDeleteError<E>, C>,
+    },
     CreationBudget {
         statement: usize,
         dimension: GraphInsertLimitDimension,
@@ -194,26 +238,54 @@ pub enum GraphWriteProgramError<E, A, C> {
     },
 }
 impl<E, A, C> From<GraphMutationProgramError<E, C>> for GraphWriteProgramError<E, A, C> {
-    fn from(error: GraphMutationProgramError<E, C>) -> Self { Self::Program(error) }
+    fn from(error: GraphMutationProgramError<E, C>) -> Self {
+        Self::Program(error)
+    }
 }
-impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
-    core::fmt::Display for GraphWriteProgramError<E, A, C> {
+impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display> core::fmt::Display
+    for GraphWriteProgramError<E, A, C>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Program(error) => error.fmt(f),
-            Self::Insert { statement, source } => write!(f, "write program creation step {statement}: {source}"),
-            Self::VertexMerge { statement, source } => write!(f, "write program vertex MERGE step {statement}: {source}"),
-            Self::VertexUpsert { statement, source } => write!(f, "write program vertex upsert step {statement}: {source}"),
-            Self::EdgeMerge { statement, source } => write!(f, "write program relationship MERGE step {statement}: {source}"),
-            Self::EdgeUpsert { statement, source } => write!(f, "write program relationship upsert step {statement}: {source}"),
-            Self::Delete { statement, source } => write!(f, "write program plain DELETE step {statement}: {source}"),
-            Self::CreationBudget { statement, dimension, limit, observed } =>
-                write!(f, "write program step {statement} created {dimension:?}: {observed} > {limit}"),
+            Self::Insert { statement, source } => {
+                write!(f, "write program creation step {statement}: {source}")
+            }
+            Self::VertexMerge { statement, source } => {
+                write!(f, "write program vertex MERGE step {statement}: {source}")
+            }
+            Self::VertexUpsert { statement, source } => {
+                write!(f, "write program vertex upsert step {statement}: {source}")
+            }
+            Self::EdgeMerge { statement, source } => write!(
+                f,
+                "write program relationship MERGE step {statement}: {source}"
+            ),
+            Self::EdgeUpsert { statement, source } => write!(
+                f,
+                "write program relationship upsert step {statement}: {source}"
+            ),
+            Self::Delete { statement, source } => {
+                write!(f, "write program plain DELETE step {statement}: {source}")
+            }
+            Self::CreationBudget {
+                statement,
+                dimension,
+                limit,
+                observed,
+            } => write!(
+                f,
+                "write program step {statement} created {dimension:?}: {observed} > {limit}"
+            ),
         }
     }
 }
-impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
-    C: core::error::Error + 'static> core::error::Error for GraphWriteProgramError<E, A, C> {
+impl<
+    E: core::error::Error + 'static,
+    A: core::error::Error + 'static,
+    C: core::error::Error + 'static,
+> core::error::Error for GraphWriteProgramError<E, A, C>
+{
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Program(error) => Some(error),
@@ -249,7 +321,9 @@ impl GraphWriteProgramStats {
     /// The sum uses u128 even when all three individual u64 caps are maximal.
     #[must_use]
     pub fn proposed_effects(&self) -> u128 {
-        u128::from(self.mutation_effects) + u128::from(self.created_vertices) + u128::from(self.created_edges)
+        u128::from(self.mutation_effects)
+            + u128::from(self.created_vertices)
+            + u128::from(self.created_edges)
     }
 }
 
@@ -262,12 +336,16 @@ pub struct PreparedGraphWriteProgram {
 }
 impl core::fmt::Debug for PreparedGraphWriteProgram {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PreparedGraphWriteProgram").field("statements", &self.statements.len())
-            .field("definition", &"[REDACTED]").finish()
+        f.debug_struct("PreparedGraphWriteProgram")
+            .field("statements", &self.statements.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 impl PreparedGraphWriteProgram {
-    pub fn prepare(statements: Vec<GraphWriteStatement>) -> Result<Self, GraphMutationProgramBuildError> {
+    pub fn prepare(
+        statements: Vec<GraphWriteStatement>,
+    ) -> Result<Self, GraphMutationProgramBuildError> {
         Self::prepare_with_statement_limit(statements, MAX_GRAPH_MUTATION_STATEMENTS)
     }
 
@@ -279,27 +357,40 @@ impl PreparedGraphWriteProgram {
         limit: usize,
     ) -> Result<Self, GraphMutationProgramBuildError> {
         let limit = limit.min(crate::PreparedGraphWriteScript::MAX_BATCH_STATEMENTS);
-        if statements.is_empty() { return Err(GraphMutationProgramBuildError::Empty); }
+        if statements.is_empty() {
+            return Err(GraphMutationProgramBuildError::Empty);
+        }
         if statements.len() > limit {
             return Err(GraphMutationProgramBuildError::TooManyStatements {
-                limit, observed: statements.len(),
+                limit,
+                observed: statements.len(),
             });
         }
         let relation = statements[0].relation();
         for (statement, input) in statements.iter().enumerate() {
-            if input.relation() != relation { return Err(GraphMutationProgramBuildError::MixedRelation { statement }); }
+            if input.relation() != relation {
+                return Err(GraphMutationProgramBuildError::MixedRelation { statement });
+            }
         }
-        Ok(Self { statements: statements.into_boxed_slice() })
+        Ok(Self {
+            statements: statements.into_boxed_slice(),
+        })
     }
     #[must_use]
-    pub fn statements(&self) -> &[GraphWriteStatement] { &self.statements }
+    pub fn statements(&self) -> &[GraphWriteStatement] {
+        &self.statements
+    }
 
     // Transfer bound definitions into an admitted batch without deep-cloning
     // each record's program a second time.
-    pub(crate) fn into_statements(self) -> Box<[GraphWriteStatement]> { self.statements }
+    pub(crate) fn into_statements(self) -> Box<[GraphWriteStatement]> {
+        self.statements
+    }
 
     #[must_use]
-    pub fn relation(&self) -> RelationId { self.statements[0].relation() }
+    pub fn relation(&self) -> RelationId {
+        self.statements[0].relation()
+    }
 
     /// The transcript binds ordered statement kinds and definitions. It is not
     /// a durable operation ID, identity-allocation log or commit acknowledgment.
@@ -332,32 +423,55 @@ impl PreparedGraphWriteProgram {
     /// Identity allocation is external and cannot be rolled back. No callback
     /// may commit; the final charged checkpoint still precedes acceptance.
     pub fn execute_governed<E, A, C>(
-        &self, policy: GraphWriteProgramPolicy,
-        mut stage: impl FnMut(usize, &GraphWriteStatement, GraphWriteProgramPolicy)
-            -> Result<GraphWriteStepStats, GraphWriteStepError<E, A, C>>,
+        &self,
+        policy: GraphWriteProgramPolicy,
+        mut stage: impl FnMut(
+            usize,
+            &GraphWriteStatement,
+            GraphWriteProgramPolicy,
+        ) -> Result<GraphWriteStepStats, GraphWriteStepError<E, A, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphWriteProgramStats, GraphWriteProgramError<E, A, C>> {
         let mut meter = MixedMeter {
-            common: ProgramMeter { policy: policy.mutations, stats: GraphMutationProgramStats::default() },
-            policy, vertices: 0, edges: 0,
+            common: ProgramMeter {
+                policy: policy.mutations,
+                stats: GraphMutationProgramStats::default(),
+            },
+            policy,
+            vertices: 0,
+            edges: 0,
         };
         for (statement, input) in self.statements.iter().enumerate() {
             checkpoint().map_err(|source| GraphMutationProgramError::Interrupted {
-                completed_statements: statement, source,
+                completed_statements: statement,
+                source,
             })?;
             meter.common.boundary(statement)?;
-            let stats = stage(statement, input, meter.remaining()).map_err(|source| match source {
-                GraphWriteStepError::Mutation(error) => meter.common.translate(statement, error).into(),
-                GraphWriteStepError::Insert(error) => meter.insert_failure(statement, error),
-                GraphWriteStepError::VertexMerge(error) => meter.vertex_merge_failure(statement, error),
-                GraphWriteStepError::VertexUpsert(error) => meter.vertex_upsert_failure(statement, error),
-                GraphWriteStepError::EdgeMerge(error) => meter.edge_merge_failure(statement, error),
-                GraphWriteStepError::EdgeUpsert(error) => meter.edge_upsert_failure(statement, error),
-                GraphWriteStepError::Delete(error) => meter.delete_failure(statement, error),
-            })?;
+            let stats =
+                stage(statement, input, meter.remaining()).map_err(|source| match source {
+                    GraphWriteStepError::Mutation(error) => {
+                        meter.common.translate(statement, error).into()
+                    }
+                    GraphWriteStepError::Insert(error) => meter.insert_failure(statement, error),
+                    GraphWriteStepError::VertexMerge(error) => {
+                        meter.vertex_merge_failure(statement, error)
+                    }
+                    GraphWriteStepError::VertexUpsert(error) => {
+                        meter.vertex_upsert_failure(statement, error)
+                    }
+                    GraphWriteStepError::EdgeMerge(error) => {
+                        meter.edge_merge_failure(statement, error)
+                    }
+                    GraphWriteStepError::EdgeUpsert(error) => {
+                        meter.edge_upsert_failure(statement, error)
+                    }
+                    GraphWriteStepError::Delete(error) => meter.delete_failure(statement, error),
+                })?;
             match (input, stats) {
                 (GraphWriteStatement::Mutation(input), GraphWriteStepStats::Mutation(stats)) => {
-                    meter.common.absorb(statement, input.actions().len(), stats)?;
+                    meter
+                        .common
+                        .absorb(statement, input.actions().len(), stats)?;
                 }
                 (GraphWriteStatement::Insert(input), GraphWriteStepStats::Insert(stats)) => {
                     meter.absorb_insert(statement, input, stats)?;
@@ -365,13 +479,19 @@ impl PreparedGraphWriteProgram {
                 (GraphWriteStatement::VertexMerge(_), GraphWriteStepStats::VertexMerge(stats)) => {
                     meter.absorb_vertex_merge(statement, stats)?;
                 }
-                (GraphWriteStatement::VertexUpsert(input), GraphWriteStepStats::VertexUpsert(stats)) => {
+                (
+                    GraphWriteStatement::VertexUpsert(input),
+                    GraphWriteStepStats::VertexUpsert(stats),
+                ) => {
                     meter.absorb_vertex_upsert(statement, input, stats)?;
                 }
                 (GraphWriteStatement::EdgeMerge(_), GraphWriteStepStats::EdgeMerge(stats)) => {
                     meter.absorb_edge_merge(statement, stats)?;
                 }
-                (GraphWriteStatement::EdgeUpsert(input), GraphWriteStepStats::EdgeUpsert(stats)) => {
+                (
+                    GraphWriteStatement::EdgeUpsert(input),
+                    GraphWriteStepStats::EdgeUpsert(stats),
+                ) => {
                     meter.absorb_edge_upsert(statement, input, stats)?;
                 }
                 (GraphWriteStatement::Delete(input), GraphWriteStepStats::Delete(stats)) => {
@@ -381,14 +501,19 @@ impl PreparedGraphWriteProgram {
             }
         }
         checkpoint().map_err(|source| GraphMutationProgramError::Interrupted {
-            completed_statements: self.statements.len(), source,
+            completed_statements: self.statements.len(),
+            source,
         })?;
         meter.common.boundary(self.statements.len())?;
         let stats = meter.common.stats;
         Ok(GraphWriteProgramStats {
-            completed_statements: stats.completed_statements, selection: stats.selection,
-            evaluator: stats.evaluator, target_vertex_visits: stats.target_vertex_visits,
-            mutation_effects: stats.effects, created_vertices: meter.vertices, created_edges: meter.edges,
+            completed_statements: stats.completed_statements,
+            selection: stats.selection,
+            evaluator: stats.evaluator,
+            target_vertex_visits: stats.target_vertex_visits,
+            mutation_effects: stats.effects,
+            created_vertices: meter.vertices,
+            created_edges: meter.edges,
         })
     }
 }
@@ -409,84 +534,155 @@ impl MixedMeter {
     }
     fn creation_counter(&self, dimension: GraphInsertLimitDimension) -> (u64, u64) {
         match dimension {
-            GraphInsertLimitDimension::Vertices => (self.vertices, self.policy.max_created_vertices),
+            GraphInsertLimitDimension::Vertices => {
+                (self.vertices, self.policy.max_created_vertices)
+            }
             GraphInsertLimitDimension::Edges => (self.edges, self.policy.max_created_edges),
         }
     }
-    fn add_creation<E, A, C>(&self, statement: usize, dimension: GraphInsertLimitDimension, count: u64)
-        -> Result<u64, GraphWriteProgramError<E, A, C>> {
+    fn add_creation<E, A, C>(
+        &self,
+        statement: usize,
+        dimension: GraphInsertLimitDimension,
+        count: u64,
+    ) -> Result<u64, GraphWriteProgramError<E, A, C>> {
         let (used, limit) = self.creation_counter(dimension);
         let observed = u128::from(used) + u128::from(count);
         if observed > u128::from(limit) {
-            return Err(GraphWriteProgramError::CreationBudget { statement, dimension, limit, observed });
+            return Err(GraphWriteProgramError::CreationBudget {
+                statement,
+                dimension,
+                limit,
+                observed,
+            });
         }
         Ok(observed as u64)
     }
-    fn absorb_insert<E, A, C>(&mut self, statement: usize, input: &PreparedGraphInsert, stats: GraphInsertStats)
-        -> Result<(), GraphWriteProgramError<E, A, C>> {
+    fn absorb_insert<E, A, C>(
+        &mut self,
+        statement: usize,
+        input: &PreparedGraphInsert,
+        stats: GraphInsertStats,
+    ) -> Result<(), GraphWriteProgramError<E, A, C>> {
         let rows = u128::from(stats.selection.result_rows);
         if u128::from(stats.created_vertices) != rows * input.vertices_per_row() as u128
             || u128::from(stats.created_edges) != rows * input.edges_per_row() as u128
-            || (input.selection().is_none() && (stats.selection.result_rows != 1 || stats.selection.snapshot_records != 0))
+            || (input.selection().is_none()
+                && (stats.selection.result_rows != 1 || stats.selection.snapshot_records != 0))
         {
             return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
         }
-        let vertices = self.add_creation(statement, GraphInsertLimitDimension::Vertices, stats.created_vertices)?;
-        let edges = self.add_creation(statement, GraphInsertLimitDimension::Edges, stats.created_edges)?;
+        let vertices = self.add_creation(
+            statement,
+            GraphInsertLimitDimension::Vertices,
+            stats.created_vertices,
+        )?;
+        let edges = self.add_creation(
+            statement,
+            GraphInsertLimitDimension::Edges,
+            stats.created_edges,
+        )?;
         // Creation has zero update/delete intents. Feed its REAL query work and
         // rows to the SAME checked meter; count creation effects separately.
-        self.common.absorb(statement, 0, GraphMutationStats {
-            selection: stats.selection, evaluator: stats.evaluator, target_vertices: 0, effects: 0,
-        })?;
+        self.common.absorb(
+            statement,
+            0,
+            GraphMutationStats {
+                selection: stats.selection,
+                evaluator: stats.evaluator,
+                target_vertices: 0,
+                effects: 0,
+            },
+        )?;
         self.vertices = vertices;
         self.edges = edges;
         Ok(())
     }
-    fn insert_failure<E, A, C>(&self, statement: usize, source: GqlQueryError<GraphInsertError<E, A>, C>)
-        -> GraphWriteProgramError<E, A, C> {
+    fn insert_failure<E, A, C>(
+        &self,
+        statement: usize,
+        source: GqlQueryError<GraphInsertError<E, A>, C>,
+    ) -> GraphWriteProgramError<E, A, C> {
         match source {
-            GqlQueryError::Rows(error) => self.common.translate(statement, GqlQueryError::Rows(error)).into(),
-            GqlQueryError::Evaluator(error) => self.common.translate(statement, GqlQueryError::Evaluator(error)).into(),
-            GqlQueryError::Source(GraphInsertError::Limit { dimension, observed: local, .. }) => {
-                self.creation_failure(statement, dimension, local)
-            }
+            GqlQueryError::Rows(error) => self
+                .common
+                .translate(statement, GqlQueryError::Rows(error))
+                .into(),
+            GqlQueryError::Evaluator(error) => self
+                .common
+                .translate(statement, GqlQueryError::Evaluator(error))
+                .into(),
+            GqlQueryError::Source(GraphInsertError::Limit {
+                dimension,
+                observed: local,
+                ..
+            }) => self.creation_failure(statement, dimension, local),
             source => GraphWriteProgramError::Insert { statement, source },
         }
     }
-    fn creation_failure<E, A, C>(&self, statement: usize, dimension: GraphInsertLimitDimension, local: u128)
-        -> GraphWriteProgramError<E, A, C> {
+    fn creation_failure<E, A, C>(
+        &self,
+        statement: usize,
+        dimension: GraphInsertLimitDimension,
+        local: u128,
+    ) -> GraphWriteProgramError<E, A, C> {
         let (used, limit) = self.creation_counter(dimension);
         match local.checked_add(u128::from(used)) {
-            Some(observed) if observed > u128::from(limit) =>
-                GraphWriteProgramError::CreationBudget { statement, dimension, limit, observed },
+            Some(observed) if observed > u128::from(limit) => {
+                GraphWriteProgramError::CreationBudget {
+                    statement,
+                    dimension,
+                    limit,
+                    observed,
+                }
+            }
             _ => GraphMutationProgramError::InvalidStatistics { statement }.into(),
         }
     }
 
-    fn absorb_delete<E, A, C>(&mut self, statement: usize, input: &PreparedGraphDelete, stats: GraphDeleteStats)
-        -> Result<(), GraphWriteProgramError<E, A, C>> {
+    fn absorb_delete<E, A, C>(
+        &mut self,
+        statement: usize,
+        input: &PreparedGraphDelete,
+        stats: GraphDeleteStats,
+    ) -> Result<(), GraphWriteProgramError<E, A, C>> {
         // Distinct targets each owe exactly one deletion intent. The common
         // meter checks target bounds, all cumulative dimensions and overflow.
         // Host stats already include incidence records/work: never add twice.
-        self.common.absorb(statement, input.target_columns().len(), GraphMutationStats {
-            selection: stats.selection,
-            evaluator: stats.evaluator,
-            target_vertices: stats.target_vertices,
-            effects: stats.target_vertices,
-        })?;
+        self.common.absorb(
+            statement,
+            input.target_columns().len(),
+            GraphMutationStats {
+                selection: stats.selection,
+                evaluator: stats.evaluator,
+                target_vertices: stats.target_vertices,
+                effects: stats.target_vertices,
+            },
+        )?;
         Ok(())
     }
 
-    fn delete_failure<E, A, C>(&self, statement: usize, source: GqlQueryError<GraphDeleteError<E>, C>)
-        -> GraphWriteProgramError<E, A, C> {
+    fn delete_failure<E, A, C>(
+        &self,
+        statement: usize,
+        source: GqlQueryError<GraphDeleteError<E>, C>,
+    ) -> GraphWriteProgramError<E, A, C> {
         match source {
-            GqlQueryError::Rows(error) => self.common.translate(statement, GqlQueryError::Rows(error)).into(),
-            GqlQueryError::Evaluator(error) => self.common.translate(statement, GqlQueryError::Evaluator(error)).into(),
-            GqlQueryError::Source(GraphDeleteError::TargetLimit { limit, observed }) => {
-                self.common.translate(statement, GqlQueryError::Source(
-                    GraphMutationError::EffectLimit { limit, observed },
-                )).into()
-            }
+            GqlQueryError::Rows(error) => self
+                .common
+                .translate(statement, GqlQueryError::Rows(error))
+                .into(),
+            GqlQueryError::Evaluator(error) => self
+                .common
+                .translate(statement, GqlQueryError::Evaluator(error))
+                .into(),
+            GqlQueryError::Source(GraphDeleteError::TargetLimit { limit, observed }) => self
+                .common
+                .translate(
+                    statement,
+                    GqlQueryError::Source(GraphMutationError::EffectLimit { limit, observed }),
+                )
+                .into(),
             source => GraphWriteProgramError::Delete { statement, source },
         }
     }

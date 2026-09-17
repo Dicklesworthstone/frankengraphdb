@@ -20,7 +20,10 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn policy() -> GraphDeletePolicy {
-    GraphDeletePolicy::new(GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000), 100)
+    GraphDeletePolicy::new(
+        GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000),
+        100,
+    )
 }
 
 #[test]
@@ -30,15 +33,20 @@ fn shared_match_where_optional_and_parameters_bind_once() {
     let template = PreparedGraphDeleteText::prepare(text, R, |kind, name| {
         calls.set(calls.get() + 1);
         symbols(kind, name)
-    }).unwrap();
+    })
+    .unwrap();
     let resolved = calls.get();
     assert_eq!(template.parameter_schema().len(), 1);
     assert_eq!(template.parameter_schema()[0].name, "min");
     assert_eq!(template.statement(), text);
-    let deletion = template.bind_parameters(
-        &GqlParameters::new().with_int64("min", 2).unwrap(),
-    ).unwrap();
-    assert_eq!(calls.get(), resolved, "binding must not re-enter the catalog");
+    let deletion = template
+        .bind_parameters(&GqlParameters::new().with_int64("min", 2).unwrap())
+        .unwrap();
+    assert_eq!(
+        calls.get(),
+        resolved,
+        "binding must not re-enter the catalog"
+    );
     assert_eq!(deletion.target_columns(), &[0, 1]);
 
     let vertices = [VId(1), VId(2), VId(3)];
@@ -48,21 +56,27 @@ fn shared_match_where_optional_and_parameters_bind_once() {
         (VId(2), CanonicalScalar::Int(2)),
         (VId(3), CanonicalScalar::Int(3)),
     ]);
-    let proposal = deletion.execute_governed(
-        policy(),
-        |selection, allowance| selection.plan().execute_governed_with_properties(
-            (vertices.len() + edges.len()) as u64,
-            vertices,
-            edges,
-            |vid, predicates| Ok::<_, ()>(predicates.iter().all(|predicate| {
-                predicate.matches_borrowed([], Some((P, props.get(&vid).unwrap())))
-            })),
-            |vid, key| Ok((key == P).then(|| props.get(&vid).unwrap())),
-            allowance,
+    let proposal = deletion
+        .execute_governed(
+            policy(),
+            |selection, allowance| {
+                selection.plan().execute_governed_with_properties(
+                    (vertices.len() + edges.len()) as u64,
+                    vertices,
+                    edges,
+                    |vid, predicates| {
+                        Ok::<_, ()>(predicates.iter().all(|predicate| {
+                            predicate.matches_borrowed([], Some((P, props.get(&vid).unwrap())))
+                        }))
+                    },
+                    |vid, key| Ok((key == P).then(|| props.get(&vid).unwrap())),
+                    allowance,
+                    || Ok::<_, ()>(()),
+                )
+            },
             || Ok::<_, ()>(()),
-        ),
-        || Ok::<_, ()>(()),
-    ).unwrap();
+        )
+        .unwrap();
     assert_eq!(proposal.targets(), &[VId(2), VId(3)]);
     assert!(!format!("{template:?} {deletion:?} {proposal:?}").contains("min"));
 }
@@ -79,10 +93,14 @@ fn malformed_delete_refuses_before_catalog_and_detach_keeps_its_old_entrypoint()
         "MATCH (a) DELETE a,",
     ] {
         let calls = Cell::new(0);
-        assert!(PreparedGraphDeleteText::prepare(text, R, |kind, name| {
-            calls.set(calls.get() + 1);
-            symbols(kind, name)
-        }).is_err(), "{text}");
+        assert!(
+            PreparedGraphDeleteText::prepare(text, R, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
         assert_eq!(calls.get(), 0, "malformed DELETE reached catalog: {text}");
     }
     assert!(PreparedGraphMutationText::prepare("MATCH (a) DETACH DELETE a", R, symbols).is_ok());
@@ -97,22 +115,40 @@ fn parameter_declarations_and_original_offsets_are_preserved() {
         R,
         &[("value", GqlParameterType::Int64)],
         symbols,
-    ).unwrap();
+    )
+    .unwrap();
     let missing = template.bind_parameters(&GqlParameters::new()).unwrap_err();
     assert_eq!(missing.offset, text.find("$value").unwrap());
-    assert!(matches!(missing.kind,
-        GraphDeleteTextErrorKind::Query(GraphPatternTextErrorKind::MissingParameter)));
+    assert!(matches!(
+        missing.kind,
+        GraphDeleteTextErrorKind::Query(GraphPatternTextErrorKind::MissingParameter)
+    ));
     let wrong = GqlParameters::new().with_uint64("value", 1).unwrap();
-    assert!(matches!(template.bind_parameters(&wrong).unwrap_err().kind,
-        GraphDeleteTextErrorKind::Query(GraphPatternTextErrorKind::ParameterTypeMismatch { .. })));
-    assert!(template.bind_parameters(
-        &GqlParameters::new().with_int64("value", 1).unwrap().with_int64("extra", 2).unwrap(),
-    ).is_err());
+    assert!(matches!(
+        template.bind_parameters(&wrong).unwrap_err().kind,
+        GraphDeleteTextErrorKind::Query(GraphPatternTextErrorKind::ParameterTypeMismatch { .. })
+    ));
+    assert!(
+        template
+            .bind_parameters(
+                &GqlParameters::new()
+                    .with_int64("value", 1)
+                    .unwrap()
+                    .with_int64("extra", 2)
+                    .unwrap(),
+            )
+            .is_err()
+    );
 }
 
 #[test]
 fn duplicate_target_is_a_typed_build_refusal() {
     let failed = PreparedGraphDeleteText::prepare("MATCH (a) DELETE a,a", R, symbols).unwrap_err();
-    assert!(matches!(failed.kind,
-        GraphDeleteTextErrorKind::Build(GraphDeleteBuildError::TargetColumn { target: 1, column: 0 })));
+    assert!(matches!(
+        failed.kind,
+        GraphDeleteTextErrorKind::Build(GraphDeleteBuildError::TargetColumn {
+            target: 1,
+            column: 0
+        })
+    ));
 }

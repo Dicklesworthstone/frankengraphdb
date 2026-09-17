@@ -343,14 +343,20 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             .chain(self.vertices.keys().copied())
     }
     fn edge_triples(&self) -> impl Iterator<Item = (VId, RelationId, VId)> + '_ {
-        self.identified_edges().map(|(_, src, relation, dst)| (src, relation, dst))
+        self.identified_edges()
+            .map(|(_, src, relation, dst)| (src, relation, dst))
     }
     fn identified_edges(&self) -> impl Iterator<Item = (EId, VId, RelationId, VId)> + '_ {
         self.borrowed
             .iter()
             .flat_map(|tables| tables.edges.iter().copied())
             .chain(self.edges.iter().map(|record| {
-                (record.entry.eid, record.entry.src, record.entry.relation, record.entry.dst)
+                (
+                    record.entry.eid,
+                    record.entry.src,
+                    record.entry.relation,
+                    record.entry.dst,
+                )
             }))
     }
     fn matches(&self, vid: VId, predicates: &[VertexPredicate]) -> Result<bool, ReadError> {

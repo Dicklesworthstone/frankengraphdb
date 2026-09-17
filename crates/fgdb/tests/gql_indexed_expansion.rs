@@ -26,7 +26,11 @@ const INCOMING_TEXT: &str = "MATCH (b)<-[:R]-(a) WHERE a.n = $n RETURN b";
 const UNDIRECTED_TEXT: &str = "MATCH (a)-[:R]-(b) WHERE a.n = $n RETURN b";
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xa2; 32], DatabaseSecurityNamespaceId([0xa3; 32]), [0xa4; 32])
+    DatabaseKeys::new(
+        [0xa2; 32],
+        DatabaseSecurityNamespaceId([0xa3; 32]),
+        [0xa4; 32],
+    )
 }
 
 /// Deterministic LCG; the closed universe has no rand crate.
@@ -44,7 +48,11 @@ impl Rng {
 /// >=5 commits mixing vertex creates, edge creates, edge deletes and property
 /// updates. Property updates keep exactly one vertex per seed bound to the
 /// property value the queries select on, so bounded answers stay stable.
-async fn generated(seed: u64, db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) -> Vec<CommitSeq> {
+async fn generated(
+    seed: u64,
+    db: &mut Database<MemVfs>,
+    cx: &fgdb_types::CommitCx,
+) -> Vec<CommitSeq> {
     let mut rng = Rng(seed | 1);
     let mut seqs = Vec::new();
     let mut next_eid = 1_000_u128;
@@ -52,11 +60,7 @@ async fn generated(seed: u64, db: &mut Database<MemVfs>, cx: &fgdb_types::Commit
     for commit in 0..6_u64 {
         let mut batch = WriteBatch::new(R);
         if commit == 0 {
-            batch.create_vertex(
-                VId(0),
-                vec![],
-                vec![(N, CanonicalScalar::Int(BOUND))],
-            );
+            batch.create_vertex(VId(0), vec![], vec![(N, CanonicalScalar::Int(BOUND))]);
             for id in 1..12_u128 {
                 batch.create_vertex(VId(id), vec![], vec![]);
             }
@@ -73,7 +77,11 @@ async fn generated(seed: u64, db: &mut Database<MemVfs>, cx: &fgdb_types::Commit
                 // property update on a non-bound vertex
                 1 => {
                     let id = 1 + (rng.next() % 10) as u128;
-                    batch.set_vertex_property(VId(id), N, Some(CanonicalScalar::Int(commit as i64)));
+                    batch.set_vertex_property(
+                        VId(id),
+                        N,
+                        Some(CanonicalScalar::Int(commit as i64)),
+                    );
                 }
                 _ => {
                     let eid = EId(next_eid);
@@ -97,7 +105,12 @@ async fn generated(seed: u64, db: &mut Database<MemVfs>, cx: &fgdb_types::Commit
 
 /// The independent oracle: one visible edge triple per EId at `as_of`, from
 /// the snapshot's decoded blocks, ordered by EId — visit_edges' winner rule.
-fn oracle(db: &Database<MemVfs>, at: CommitSeq, bound: VId, forward: Option<bool>) -> Vec<(VId, VId)> {
+fn oracle(
+    db: &Database<MemVfs>,
+    at: CommitSeq,
+    bound: VId,
+    forward: Option<bool>,
+) -> Vec<(VId, VId)> {
     let mut rows = Vec::new();
     for record in db.edges_at(at).unwrap() {
         let entry = &record.entry;
@@ -121,16 +134,23 @@ fn oracle(db: &Database<MemVfs>, at: CommitSeq, bound: VId, forward: Option<bool
 /// and at least one retired edge filtered at the post-delete cut.
 #[test]
 fn indexed_bound_answers_equal_scan_answers_across_history_and_directions() {
-    for (lab_seed, graph_seed) in [(0xa26_0001, 1_u64), (0xa26_0002, 2), (0xa26_0003, 0xdead_beef)] {
+    for (lab_seed, graph_seed) in [
+        (0xa26_0001, 1_u64),
+        (0xa26_0002, 2),
+        (0xa26_0003, 0xdead_beef),
+    ] {
         let ((), report) = run_async_under_lab(lab_seed, move |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let seqs = generated(graph_seed, &mut db, &commit).await;
-            let names = RelationBind::new().with_relation("R", R).with_property("n", N);
+            let names = RelationBind::new()
+                .with_relation("R", R)
+                .with_property("n", N);
             let bound_template = PreparedGqlTemplate::prepare(ID_TEXT, &names).unwrap();
             let incoming_template = PreparedGqlTemplate::prepare(INCOMING_TEXT, &names).unwrap();
-            let undirected_template = PreparedGqlTemplate::prepare(UNDIRECTED_TEXT, &names).unwrap();
+            let undirected_template =
+                PreparedGqlTemplate::prepare(UNDIRECTED_TEXT, &names).unwrap();
             let args = GqlParameters::new().with_int64("n", BOUND).unwrap();
             let mut saw_nonempty = false;
             let mut saw_deleted_filtered = false;
@@ -149,12 +169,14 @@ fn indexed_bound_answers_equal_scan_answers_across_history_and_directions() {
                         .collect::<std::collections::BTreeSet<_>>()
                         .into_iter()
                         .collect();
-                    let rows = db.execute_prepared_query_governed_at(
-                        &contexts.query(),
-                        &query,
-                        *at,
-                        GqlQueryPolicy::new(1_000_000, 1_000_000, 10_000_000, 10_000_000),
-                    ).unwrap();
+                    let rows = db
+                        .execute_prepared_query_governed_at(
+                            &contexts.query(),
+                            &query,
+                            *at,
+                            GqlQueryPolicy::new(1_000_000, 1_000_000, 10_000_000, 10_000_000),
+                        )
+                        .unwrap();
                     assert_eq!(rows.value, expected, "at={:?} forward={forward:?}", at);
                     saw_nonempty |= !rows.value.is_empty();
                 }
@@ -201,7 +223,9 @@ fn bound_degree_charges_stay_constant_as_unrelated_edges_grow() {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
         let query_cx = contexts.query();
-        let names = RelationBind::new().with_relation("R", R).with_property("n", N);
+        let names = RelationBind::new()
+            .with_relation("R", R)
+            .with_property("n", N);
         let template = PreparedGqlTemplate::prepare(ID_TEXT, &names).unwrap();
         let args = GqlParameters::new().with_int64("n", BOUND).unwrap();
         let query = template.bind_parameters(&args).unwrap();
@@ -223,7 +247,10 @@ fn bound_degree_charges_stay_constant_as_unrelated_edges_grow() {
         assert_eq!(one.rows.snapshot_records, two.rows.snapshot_records);
         assert_eq!(one.evaluator.work_units, two.evaluator.work_units);
         assert_eq!(one.value, two.value);
-        assert_eq!(one.rows.snapshot_records, 10, "forward bound lookup charges out-degree");
+        assert_eq!(
+            one.rows.snapshot_records, 10,
+            "forward bound lookup charges out-degree"
+        );
         assert!(one.evaluator.work_units > 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");

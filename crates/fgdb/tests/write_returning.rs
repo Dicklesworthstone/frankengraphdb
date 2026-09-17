@@ -21,7 +21,11 @@ const MARKED: LabelId = LabelId(3);
 const P: PropertyKeyId = PropertyKeyId(1);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x41; 32], DatabaseSecurityNamespaceId([0x42; 32]), [0x43; 32])
+    DatabaseKeys::new(
+        [0x41; 32],
+        DatabaseSecurityNamespaceId([0x42; 32]),
+        [0x43; 32],
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -67,33 +71,52 @@ fn create_receipt_maps_occurrences_and_is_only_durable_after_commit() {
             "MATCH (a:Source)-[:R]->(b) CREATE (x:Copy {p:a.p}),(a)-[:R]->(x)",
             R,
             symbols,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
-        assert_eq!((insertion.vertices_per_row(), insertion.edges_per_row()), (1, 1));
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        assert_eq!(
+            (insertion.vertices_per_row(), insertion.edges_per_row()),
+            (1, 1)
+        );
         let mut txn = db.begin(&txcx).unwrap();
-        let (stats, vertices, edges) = txn.execute_graph_insert_returning_governed(
-            &mut db,
-            &query,
-            &insertion,
-            insert_policy(),
-            |request| Ok::<_, ()>(match request {
-                GraphInsertRequest::Vertex { row, vertex } => {
-                    ElementId::Vertex(VId(100 + row as u128 * 10 + vertex as u128))
-                }
-                GraphInsertRequest::Edge { row, edge } => {
-                    ElementId::Edge(EId(1_000 + row as u128 * 10 + edge as u128))
-                }
-            }),
-        ).unwrap();
-        assert_eq!(stats.selection.result_rows, 2, "parallel source edges retain occurrence multiplicity");
+        let (stats, vertices, edges) = txn
+            .execute_graph_insert_returning_governed(
+                &mut db,
+                &query,
+                &insertion,
+                insert_policy(),
+                |request| {
+                    Ok::<_, ()>(match request {
+                        GraphInsertRequest::Vertex { row, vertex } => {
+                            ElementId::Vertex(VId(100 + row as u128 * 10 + vertex as u128))
+                        }
+                        GraphInsertRequest::Edge { row, edge } => {
+                            ElementId::Edge(EId(1_000 + row as u128 * 10 + edge as u128))
+                        }
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stats.selection.result_rows, 2,
+            "parallel source edges retain occurrence multiplicity"
+        );
         assert_eq!(vertices, vec![VId(100), VId(110)]);
         assert_eq!(edges, vec![EId(1_000), EId(1_010)]);
         for (vertex, edge) in vertices.iter().zip(&edges) {
-            assert!(db.vertex(*vertex).unwrap().is_none(), "receipt is not a durability claim");
+            assert!(
+                db.vertex(*vertex).unwrap().is_none(),
+                "receipt is not a durability claim"
+            );
             let staged = txn.vertex(&db, *vertex).unwrap().unwrap();
             assert_eq!(staged.labels, vec![COPY]);
             assert_eq!(staged.props, vec![(P, CanonicalScalar::Int(10))]);
             let staged_edge = txn.edge(&db, *edge).unwrap().unwrap();
-            assert_eq!((staged_edge.entry.src, staged_edge.entry.dst), (VId(1), *vertex));
+            assert_eq!(
+                (staged_edge.entry.src, staged_edge.entry.dst),
+                (VId(1), *vertex)
+            );
         }
         txn.commit(&mut db, &commit).await.unwrap();
         for (vertex, edge) in vertices.iter().zip(&edges) {
@@ -118,19 +141,36 @@ fn mutation_receipt_is_distinct_sorted_targets_not_match_occurrences_or_fields()
             "MATCH (a:Source)-[:R]->(b) SET b.p=b.p,a.p=a.p,a:Marked",
             R,
             symbols,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
         let mut txn = db.begin(&txcx).unwrap();
-        let (stats, targets) = txn.execute_graph_mutation_returning_governed(
-            &mut db, &query, &mutation, mutation_policy(),
-        ).unwrap();
+        let (stats, targets) = txn
+            .execute_graph_mutation_returning_governed(
+                &mut db,
+                &query,
+                &mutation,
+                mutation_policy(),
+            )
+            .unwrap();
         assert_eq!(stats.selection.result_rows, 2);
         assert_eq!(stats.target_vertices, 2);
-        assert_eq!(stats.effects, 3, "duplicate matches collapse per target/field");
+        assert_eq!(
+            stats.effects, 3,
+            "duplicate matches collapse per target/field"
+        );
         assert_eq!(targets, vec![VId(1), VId(2)]);
         assert_eq!(db.vertex(VId(1)).unwrap().unwrap().labels, vec![SOURCE]);
-        assert_eq!(txn.vertex(&db, VId(1)).unwrap().unwrap().labels, vec![SOURCE, MARKED]);
+        assert_eq!(
+            txn.vertex(&db, VId(1)).unwrap().unwrap().labels,
+            vec![SOURCE, MARKED]
+        );
         txn.commit(&mut db, &commit).await.unwrap();
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().labels, vec![SOURCE, MARKED]);
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().labels,
+            vec![SOURCE, MARKED]
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -146,12 +186,19 @@ fn aborted_success_and_late_failure_never_turn_receipts_into_publication() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit).await;
         let standalone = PreparedGraphInsertText::prepare("CREATE (x:Copy {p:7})", R, symbols)
-            .unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
         let mut txn = db.begin(&txcx).unwrap();
-        let (_, vertices, edges) = txn.execute_graph_insert_returning_governed(
-            &mut db, &query, &standalone, insert_policy(),
-            |_| Ok::<_, ()>(ElementId::Vertex(VId(500))),
-        ).unwrap();
+        let (_, vertices, edges) = txn
+            .execute_graph_insert_returning_governed(
+                &mut db,
+                &query,
+                &standalone,
+                insert_policy(),
+                |_| Ok::<_, ()>(ElementId::Vertex(VId(500))),
+            )
+            .unwrap();
         assert_eq!(vertices, vec![VId(500)]);
         assert!(edges.is_empty());
         assert!(txn.vertex(&db, VId(500)).unwrap().is_some());
@@ -159,8 +206,13 @@ fn aborted_success_and_late_failure_never_turn_receipts_into_publication() {
         assert!(db.vertex(VId(500)).unwrap().is_none());
 
         let insertion = PreparedGraphInsertText::prepare(
-            "MATCH (a:Source)-[:R]->(b) CREATE (x:Copy {p:a.p}),(a)-[:R]->(x)", R, symbols,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            "MATCH (a:Source)-[:R]->(b) CREATE (x:Copy {p:a.p}),(a)-[:R]->(x)",
+            R,
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
         let mut txn = db.begin(&txcx).unwrap();
         let mut prefix = WriteBatch::new(R);
         prefix.create_vertex(VId(777), vec![], vec![]);
@@ -184,9 +236,20 @@ fn aborted_success_and_late_failure_never_turn_receipts_into_publication() {
                 Ok::<_, ()>(id)
             },
         );
-        assert!(failed.is_err(), "live identity collision must refuse during ordinary storage preparation");
-        assert_eq!(issued.borrow().len(), 4, "external identities may already have been issued");
-        assert_eq!(txn.staged_effect_digest().unwrap(), before, "failed returning write preserves prior workspace");
+        assert!(
+            failed.is_err(),
+            "live identity collision must refuse during ordinary storage preparation"
+        );
+        assert_eq!(
+            issued.borrow().len(),
+            4,
+            "external identities may already have been issued"
+        );
+        assert_eq!(
+            txn.staged_effect_digest().unwrap(),
+            before,
+            "failed returning write preserves prior workspace"
+        );
         assert!(txn.vertex(&db, VId(600)).unwrap().is_none());
         txn.commit(&mut db, &commit).await.unwrap();
         assert!(db.vertex(VId(777)).unwrap().is_some());
@@ -207,28 +270,37 @@ fn mixed_program_receipt_escapes_only_after_the_whole_program_is_accepted() {
         seed(&mut db, &commit).await;
 
         let insertion = PreparedGraphInsertText::prepare("CREATE (x:Copy {p:7})", R, symbols)
-            .unwrap().bind_parameters(&GqlParameters::new()).unwrap();
-        let mutation = PreparedGraphMutationText::prepare(
-            "MATCH (x:Copy) SET x.p=x.p+1,x:Marked", R, symbols,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
+        let mutation =
+            PreparedGraphMutationText::prepare("MATCH (x:Copy) SET x.p=x.p+1,x:Marked", R, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
         let program = PreparedGraphWriteProgram::prepare(vec![
             GraphWriteStatement::Insert(insertion.clone()),
             GraphWriteStatement::Mutation(mutation),
-        ]).unwrap();
+        ])
+        .unwrap();
         let mut txn = db.begin(&txcx).unwrap();
-        let receipt = txn.execute_graph_write_program_returning_governed(
-            &mut db,
-            &query,
-            &program,
-            program_policy(),
-            |request| Ok::<_, ()>(match request {
-                GraphWriteIdentityRequest {
-                    statement: 0,
-                    request: GraphInsertRequest::Vertex { .. },
-                } => ElementId::Vertex(VId(900)),
-                _ => unreachable!(),
-            }),
-        ).unwrap();
+        let receipt = txn
+            .execute_graph_write_program_returning_governed(
+                &mut db,
+                &query,
+                &program,
+                program_policy(),
+                |request| {
+                    Ok::<_, ()>(match request {
+                        GraphWriteIdentityRequest {
+                            statement: 0,
+                            request: GraphInsertRequest::Vertex { .. },
+                        } => ElementId::Vertex(VId(900)),
+                        _ => unreachable!(),
+                    })
+                },
+            )
+            .unwrap();
         assert_eq!(receipt.stats().completed_statements, 2);
         assert_eq!(receipt.steps().len(), 2);
         assert!(matches!(
@@ -252,13 +324,16 @@ fn mixed_program_receipt_escapes_only_after_the_whole_program_is_accepted() {
             vec![(P, CanonicalScalar::Int(8))]
         );
 
-        let bad_mutation = PreparedGraphMutationText::prepare(
-            "MATCH (x:Copy) SET x.p=x.p/0", R, symbols,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        let bad_mutation =
+            PreparedGraphMutationText::prepare("MATCH (x:Copy) SET x.p=x.p/0", R, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
         let failed_program = PreparedGraphWriteProgram::prepare(vec![
             GraphWriteStatement::Insert(insertion),
             GraphWriteStatement::Mutation(bad_mutation),
-        ]).unwrap();
+        ])
+        .unwrap();
         let mut txn = db.begin(&txcx).unwrap();
         let issued = RefCell::new(Vec::new());
         let failed = txn.execute_graph_write_program_returning_governed(
@@ -280,7 +355,10 @@ fn mixed_program_receipt_escapes_only_after_the_whole_program_is_accepted() {
         );
         assert!(failed.is_err());
         assert_eq!(&*issued.borrow(), &[ElementId::Vertex(VId(901))]);
-        assert!(txn.vertex(&db, VId(901)).unwrap().is_none(), "late program failure rolls back staged creation");
+        assert!(
+            txn.vertex(&db, VId(901)).unwrap().is_none(),
+            "late program failure rolls back staged creation"
+        );
         txn.abort();
         assert!(db.vertex(VId(901)).unwrap().is_none());
         assert_eq!(txcx.outstanding_obligations(), 0);

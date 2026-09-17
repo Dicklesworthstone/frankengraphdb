@@ -230,7 +230,8 @@ impl PreparedGraphAggregateText {
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
                 let at = parser.current.at;
-                let column = parser.result_column(&returned, &groups, &mut hidden, &mut computed)?;
+                let column =
+                    parser.result_column(&returned, &groups, &mut hidden, &mut computed)?;
                 if ordering.iter().any(|previous| previous.column == column) {
                     return Err(error(
                         at,
@@ -404,25 +405,45 @@ impl PreparedGraphAggregateText {
                 let value = match expression.computed {
                     Some(index) => computed.operands[index].clone(),
                     None => {
-                        let index = computed.sources.iter().position(|(variable, property)| {
-                            variable.text == expression.variable.text
-                                && property.map(|name| name.text) == expression.property.map(|name| name.text)
-                        }).expect("every plain argument registered its source");
+                        let index = computed
+                            .sources
+                            .iter()
+                            .position(|(variable, property)| {
+                                variable.text == expression.variable.text
+                                    && property.map(|name| name.text)
+                                        == expression.property.map(|name| name.text)
+                            })
+                            .expect("every plain argument registered its source");
                         ReadValueTemplate::Column(index)
                     }
                 };
-                projection.push(ReadProjectionTemplate { name: column.alias.text.to_owned(), value });
+                projection.push(ReadProjectionTemplate {
+                    name: column.alias.text.to_owned(),
+                    value,
+                });
             }
             if computed.sources.is_empty() {
                 // SUM(1), COUNT(NULL), and constant grouping still visit every
                 // match, including isolates and duplicate WALK occurrences.
                 computed.sources.push((parser.syntax.variables[0], None));
             }
-            source_aliases.extend((0..computed.sources.len()).map(|index| format!("__aggregate_source_{index}")));
-            parser.syntax.columns = computed.sources.iter().zip(&source_aliases).map(|(&(variable, property), alias)| Column {
-                variable, property, alias: Name { text: alias.as_str(), at: variable.at },
-                path: None,
-            }).collect();
+            source_aliases.extend(
+                (0..computed.sources.len()).map(|index| format!("__aggregate_source_{index}")),
+            );
+            parser.syntax.columns = computed
+                .sources
+                .iter()
+                .zip(&source_aliases)
+                .map(|(&(variable, property), alias)| Column {
+                    variable,
+                    property,
+                    alias: Name {
+                        text: alias.as_str(),
+                        at: variable.at,
+                    },
+                    path: None,
+                })
+                .collect();
             Some(projection)
         };
         if parser.syntax.columns.is_empty() {
@@ -512,21 +533,26 @@ impl PreparedGraphAggregateText {
         let count = self.count.as_ref().map(|count| count.unsigned(&values));
         let prepared = match &self.input_projection {
             Some(projection) => PreparedGraphAggregate::prepare_projected(
-                input, Self::bind_input_projection(projection, &values)?, &self.keys, &summaries, offset, count,
+                input,
+                Self::bind_input_projection(projection, &values)?,
+                &self.keys,
+                &summaries,
+                offset,
+                count,
             ),
             None => PreparedGraphAggregate::prepare(input, &self.keys, &summaries, offset, count),
         };
         let aggregate = prepared
-        .and_then(|aggregate| aggregate.with_key_output_columns(&self.output_keys))
-        .and_then(|aggregate| aggregate.with_aggregate_output_prefix(self.output_aggregates))
-        .map(|aggregate| aggregate.with_distinct_output(self.output_distinct))
-        .and_then(|aggregate| aggregate.with_result_clauses(&having, &self.ordering))
-        .map_err(|kind| {
-            error(
-                self.child.return_at,
-                GraphPatternTextErrorKind::AggregateBuild(kind),
-            )
-        })?;
+            .and_then(|aggregate| aggregate.with_key_output_columns(&self.output_keys))
+            .and_then(|aggregate| aggregate.with_aggregate_output_prefix(self.output_aggregates))
+            .map(|aggregate| aggregate.with_distinct_output(self.output_distinct))
+            .and_then(|aggregate| aggregate.with_result_clauses(&having, &self.ordering))
+            .map_err(|kind| {
+                error(
+                    self.child.return_at,
+                    GraphPatternTextErrorKind::AggregateBuild(kind),
+                )
+            })?;
         match &self.having_expression {
             Some(expression) => expression.attach(aggregate, &values),
             None => Ok(aggregate),
@@ -553,8 +579,10 @@ impl Expression<'_> {
     fn same(self, other: Self) -> bool {
         match (self.computed, other.computed) {
             (Some(left), Some(right)) => left == right,
-            (None, None) => self.variable.text == other.variable.text
-                && self.property.map(|name| name.text) == other.property.map(|name| name.text),
+            (None, None) => {
+                self.variable.text == other.variable.text
+                    && self.property.map(|name| name.text) == other.property.map(|name| name.text)
+            }
             _ => false,
         }
     }
@@ -573,18 +601,27 @@ struct HiddenSummary<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn aggregate_expression(&mut self, computed: &mut ComputedInputs<'a>) -> Result<Expression<'a>, GraphPatternTextError> {
+    fn aggregate_expression(
+        &mut self,
+        computed: &mut ComputedInputs<'a>,
+    ) -> Result<Expression<'a>, GraphPatternTextError> {
         self.aggregate_scalar_expression(computed)
     }
 
     fn starts_aggregate_call(&self) -> Result<bool, GraphPatternTextError> {
-        let TokenKind::Word(word) = self.current.kind else { return Ok(false); };
-        Ok(["COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX"].iter()
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
+        Ok(["COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX"]
+            .iter()
             .any(|name| word.eq_ignore_ascii_case(name))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
     }
 
-    fn aggregate_item(&mut self, computed: &mut ComputedInputs<'a>) -> Result<ReturnItem<'a>, GraphPatternTextError> {
+    fn aggregate_item(
+        &mut self,
+        computed: &mut ComputedInputs<'a>,
+    ) -> Result<ReturnItem<'a>, GraphPatternTextError> {
         let at = self.current.at;
         let (expression, function, default_alias) = if self.starts_aggregate_call()? {
             let name = self.name()?;
@@ -595,23 +632,43 @@ impl<'a> Parser<'a> {
                 | GraphAggregateFunction::Count
                 | GraphAggregateFunction::CountDistinct => "count",
                 GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => "sum",
-                GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => "avg",
+                GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
+                    "avg"
+                }
                 GraphAggregateFunction::Min => "min",
                 GraphAggregateFunction::Max => "max",
             };
-            (expression, Some(function), Some(Name { text: alias, at: name.at }))
+            (
+                expression,
+                Some(function),
+                Some(Name {
+                    text: alias,
+                    at: name.at,
+                }),
+            )
         } else {
             let expression = self.aggregate_expression(computed)?;
-            let default = expression.computed.is_none().then_some(expression.property.unwrap_or(expression.variable));
+            let default = expression
+                .computed
+                .is_none()
+                .then_some(expression.property.unwrap_or(expression.variable));
             (Some(expression), None, default)
         };
         let alias = if self.take_word("AS")? {
             self.name()?
         } else {
-            default_alias.ok_or_else(|| error(at,
-                GraphPatternTextErrorKind::Expected("AS alias for computed grouping output")))?
+            default_alias.ok_or_else(|| {
+                error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("AS alias for computed grouping output"),
+                )
+            })?
         };
-        Ok(ReturnItem { expression, function, alias })
+        Ok(ReturnItem {
+            expression,
+            function,
+            alias,
+        })
     }
 
     /// Called after the opening parenthesis. RETURN and post-aggregate
@@ -721,29 +778,49 @@ impl<'a> Parser<'a> {
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
             let at = prefix + hidden.len();
-            hidden.push(HiddenSummary { expression, function, at: name.at });
+            hidden.push(HiddenSummary {
+                expression,
+                function,
+                at: name.at,
+            });
             return Ok(GraphAggregateColumn::Aggregate(at));
         }
         if let TokenKind::Word(word) = self.current.kind
-            && !matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'.' | b'('))
+            && !matches!(
+                self.lexer.clone().next()?.kind,
+                TokenKind::Punct(b'.' | b'(')
+            )
             && let Some(selected) = returned.iter().position(|item| item.alias.text == word)
         {
             self.advance()?;
             let item = &returned[selected];
             if item.function.is_some() {
                 return Ok(GraphAggregateColumn::Aggregate(
-                    returned[..selected].iter().filter(|item| item.function.is_some()).count(),
+                    returned[..selected]
+                        .iter()
+                        .filter(|item| item.function.is_some())
+                        .count(),
                 ));
             }
             let expression = item.expression.expect("nonaggregate return expression");
             return Ok(GraphAggregateColumn::GroupKey(
-                groups.iter().position(|group| group.same(expression))
+                groups
+                    .iter()
+                    .position(|group| group.same(expression))
                     .expect("nonaggregate outputs were validated as keys"),
             ));
         }
         let expression = self.aggregate_expression(computed)?;
-        groups.iter().position(|group| group.same(expression)).map(GraphAggregateColumn::GroupKey)
-            .ok_or_else(|| error(at, GraphPatternTextErrorKind::Expected("GROUP BY expression or aggregate")))
+        groups
+            .iter()
+            .position(|group| group.same(expression))
+            .map(GraphAggregateColumn::GroupKey)
+            .ok_or_else(|| {
+                error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("GROUP BY expression or aggregate"),
+                )
+            })
     }
 }
 

@@ -175,23 +175,33 @@ impl core::fmt::Debug for GraphShortestWalkCursor<'_> {
 mod tests {
     use super::*;
 
-    fn collect<E>(source: VId, bounds: GraphWalkBounds,
+    fn collect<E>(
+        source: VId,
+        bounds: GraphWalkBounds,
         adjacency: Option<&BTreeMap<VId, Vec<VId>>>,
-        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<Vec<VId>, E> {
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<VId>, E> {
         let mut cursor = GraphShortestWalkCursor::new(source, bounds, adjacency, control)?;
         let mut result = Vec::new();
-        while let Some(vertex) = cursor.next_with_control(control)? { result.push(vertex); }
+        while let Some(vertex) = cursor.next_with_control(control)? {
+            result.push(vertex);
+        }
         Ok(result)
     }
 
     /// Enumerate every bounded walk independently, then choose each endpoint's
     /// minimum admissible depth. This oracle has no settled set or BFS pruning.
-    fn oracle(source: VId, bounds: GraphWalkBounds,
-        adjacency: &BTreeMap<VId, Vec<VId>>) -> Vec<VId> {
+    fn oracle(
+        source: VId,
+        bounds: GraphWalkBounds,
+        adjacency: &BTreeMap<VId, Vec<VId>>,
+    ) -> Vec<VId> {
         let mut stack = vec![(source, 0_u32)];
         let mut walks = Vec::new();
         while let Some((vertex, depth)) = stack.pop() {
-            if depth >= bounds.minimum() { walks.push((depth, vertex)); }
+            if depth >= bounds.minimum() {
+                walks.push((depth, vertex));
+            }
             if depth < bounds.maximum() {
                 for &next in adjacency.get(&vertex).into_iter().flatten() {
                     stack.push((next, depth + 1));
@@ -200,9 +210,13 @@ mod tests {
         }
         let mut minimum = BTreeMap::<VId, u32>::new();
         for &(depth, vertex) in &walks {
-            minimum.entry(vertex).and_modify(|old| *old = (*old).min(depth)).or_insert(depth);
+            minimum
+                .entry(vertex)
+                .and_modify(|old| *old = (*old).min(depth))
+                .or_insert(depth);
         }
-        let mut result = walks.into_iter()
+        let mut result = walks
+            .into_iter()
             .filter_map(|(depth, vertex)| (minimum.get(&vertex) == Some(&depth)).then_some(vertex))
             .collect::<Vec<_>>();
         result.sort_unstable();
@@ -216,22 +230,34 @@ mod tests {
             for source in 0..3_u128 {
                 for destination in 0..3_u128 {
                     if mask & (1 << (3 * source + destination)) != 0 {
-                        adjacency.entry(VId(source)).or_default().push(VId(destination));
+                        adjacency
+                            .entry(VId(source))
+                            .or_default()
+                            .push(VId(destination));
                     }
                 }
             }
             if let Some(neighbors) = adjacency.values_mut().find(|rows| !rows.is_empty()) {
                 neighbors.push(neighbors[0]);
             }
-            for neighbors in adjacency.values_mut() { neighbors.sort_unstable(); }
+            for neighbors in adjacency.values_mut() {
+                neighbors.sort_unstable();
+            }
             for source in 0..4_u128 {
                 for maximum in 0..=3 {
                     for minimum in 0..=maximum {
                         let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
-                        let mut actual = collect(VId(source), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap();
+                        let mut actual =
+                            collect(VId(source), bounds, Some(&adjacency), &mut |_| {
+                                Ok::<_, ()>(())
+                            })
+                            .unwrap();
                         actual.sort_unstable();
-                        assert_eq!(actual, oracle(VId(source), bounds, &adjacency),
-                            "mask={mask}, source={source}, bounds={bounds:?}");
+                        assert_eq!(
+                            actual,
+                            oracle(VId(source), bounds, &adjacency),
+                            "mask={mask}, source={source}, bounds={bounds:?}"
+                        );
                     }
                 }
             }
@@ -246,11 +272,19 @@ mod tests {
             (VId(3), vec![VId(4)]),
             (VId(4), vec![VId(4)]),
         ]);
-        let rows = collect(VId(1), GraphWalkBounds::new(1, 4).unwrap(), Some(&adjacency),
-            &mut |_| Ok::<_, ()>(())).unwrap();
-        let counts = rows.into_iter().fold(BTreeMap::<VId, usize>::new(), |mut out, value| {
-            *out.entry(value).or_default() += 1; out
-        });
+        let rows = collect(
+            VId(1),
+            GraphWalkBounds::new(1, 4).unwrap(),
+            Some(&adjacency),
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+        let counts = rows
+            .into_iter()
+            .fold(BTreeMap::<VId, usize>::new(), |mut out, value| {
+                *out.entry(value).or_default() += 1;
+                out
+            });
         assert_eq!(counts.get(&VId(2)), Some(&2));
         assert_eq!(counts.get(&VId(3)), Some(&1));
         assert_eq!(counts.get(&VId(4)), Some(&3));
@@ -258,18 +292,25 @@ mod tests {
 
     #[test]
     fn lower_bound_delays_settlement_instead_of_erasing_valid_longer_paths() {
-        let adjacency = BTreeMap::from([
-            (VId(1), vec![VId(2)]),
-            (VId(2), vec![VId(1)]),
-        ]);
+        let adjacency = BTreeMap::from([(VId(1), vec![VId(2)]), (VId(2), vec![VId(1)])]);
         assert_eq!(
-            collect(VId(1), GraphWalkBounds::new(2, 3).unwrap(), Some(&adjacency),
-                &mut |_| Ok::<_, ()>(())).unwrap(),
+            collect(
+                VId(1),
+                GraphWalkBounds::new(2, 3).unwrap(),
+                Some(&adjacency),
+                &mut |_| Ok::<_, ()>(())
+            )
+            .unwrap(),
             vec![VId(1), VId(2)]
         );
         assert_eq!(
-            collect(VId(1), GraphWalkBounds::new(0, 3).unwrap(), Some(&adjacency),
-                &mut |_| Ok::<_, ()>(())).unwrap(),
+            collect(
+                VId(1),
+                GraphWalkBounds::new(0, 3).unwrap(),
+                Some(&adjacency),
+                &mut |_| Ok::<_, ()>(())
+            )
+            .unwrap(),
             vec![VId(1), VId(2)]
         );
     }
@@ -277,10 +318,22 @@ mod tests {
     #[test]
     fn maximum_depth_is_iterative_and_cycle_growth_is_pruned_after_settlement() {
         let adjacency = BTreeMap::from([(VId(7), vec![VId(7)])]);
-        let bounds = GraphWalkBounds::new(crate::MAX_GRAPH_WALK_HOPS, crate::MAX_GRAPH_WALK_HOPS).unwrap();
-        assert_eq!(collect(VId(7), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap(), vec![VId(7)]);
-        assert_eq!(collect(VId(7), GraphWalkBounds::new(0, crate::MAX_GRAPH_WALK_HOPS).unwrap(),
-            Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap(), vec![VId(7)]);
+        let bounds =
+            GraphWalkBounds::new(crate::MAX_GRAPH_WALK_HOPS, crate::MAX_GRAPH_WALK_HOPS).unwrap();
+        assert_eq!(
+            collect(VId(7), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap(),
+            vec![VId(7)]
+        );
+        assert_eq!(
+            collect(
+                VId(7),
+                GraphWalkBounds::new(0, crate::MAX_GRAPH_WALK_HOPS).unwrap(),
+                Some(&adjacency),
+                &mut |_| Ok::<_, ()>(())
+            )
+            .unwrap(),
+            vec![VId(7)]
+        );
     }
 
     #[test]
@@ -293,18 +346,24 @@ mod tests {
         let bounds = GraphWalkBounds::new(1, 3).unwrap();
         let mut calls = 0;
         let expected = collect(VId(1), bounds, Some(&adjacency), &mut |_| {
-            calls += 1; Ok::<_, usize>(())
-        }).unwrap();
+            calls += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap();
         assert!(!expected.is_empty());
         for stop in 1..=calls {
             let mut seen = 0;
             let result = collect(VId(1), bounds, Some(&adjacency), &mut |_| {
-                seen += 1; if seen == stop { Err(stop) } else { Ok(()) }
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
             });
             assert_eq!(result, Err(stop));
             assert_eq!(seen, stop);
         }
-        assert_eq!(collect(VId(1), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap(), expected);
+        assert_eq!(
+            collect(VId(1), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -329,11 +388,7 @@ mod tests {
                 let mut seen = 0;
                 let mut control = |_| {
                     seen += 1;
-                    if seen == stop {
-                        Err(stop)
-                    } else {
-                        Ok(())
-                    }
+                    if seen == stop { Err(stop) } else { Ok(()) }
                 };
                 let mut cursor =
                     GraphShortestWalkCursor::new(VId(1), bounds, Some(&adjacency), &mut control)
@@ -433,9 +488,6 @@ mod tests {
             assert_eq!(work, 1);
             assert_eq!(cursor.pending.len() - cursor.pending_at, remaining);
         }
-        assert_eq!(
-            cursor.next_with_control(&mut |_| Ok::<_, ()>(())),
-            Ok(None)
-        );
+        assert_eq!(cursor.next_with_control(&mut |_| Ok::<_, ()>(())), Ok(None));
     }
 }

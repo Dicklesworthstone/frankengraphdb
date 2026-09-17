@@ -51,63 +51,6 @@ pub use write_script::{
     MAX_GRAPH_WRITE_SCRIPT_BYTES, PreparedGraphWriteScript,
 };
 
-pub use edge_upsert::{
-    GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError,
-    GraphEdgeUpsertError, GraphEdgeUpsertPolicy, GraphEdgeUpsertStats,
-    MAX_GRAPH_EDGE_UPSERT_ACTIONS, PreparedGraphEdgeUpsert,
-};
-pub use edge_upsert_text::{
-    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertText,
-};
-pub use vertex_upsert_text::{
-    GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexUpsertText,
-};
-pub use vertex_upsert::{
-    GraphVertexUpsertAction, GraphVertexUpsertBranch, GraphVertexUpsertBuildError,
-    GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
-    MAX_GRAPH_VERTEX_UPSERT_ACTIONS, PreparedGraphVertexUpsert,
-};
-pub use edge_merge::{
-    GraphEdgeMergeBuildError, GraphEdgeMergeError, GraphEdgeMergeOutcome,
-    GraphEdgeMergePolicy, GraphEdgeMergeRequest, GraphEdgeMergeStats,
-    MAX_GRAPH_EDGE_MERGE_PROPERTIES, PreparedGraphEdgeMerge,
-};
-pub use vertex_merge::{
-    GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
-    GraphVertexMergePolicy, GraphVertexMergeStats, PreparedGraphVertexMerge,
-};
-pub use deletion::{
-    GraphDeleteBuildError, GraphDeleteError, GraphDeletePolicy, GraphDeleteProposal,
-    GraphDeleteStats, MAX_GRAPH_DELETE_TARGETS, PreparedGraphDelete,
-};
-pub use temporal_set_text::{
-    BoundTemporalGraphSetQuery, GraphTemporalSetTextError, GraphTemporalSetTextErrorKind,
-    PreparedTemporalGraphSetText,
-};
-pub use temporal_aggregate_text::{
-    BoundTemporalGraphAggregateQuery, PreparedTemporalGraphAggregateText,
-};
-pub use temporal_text::{
-    BoundTemporalGraphQuery, GraphTemporalTextError, GraphTemporalTextErrorKind, PreparedTemporalGraphText,
-};
-pub use shortest_walk::GraphShortestWalkCursor;
-pub use write_receipt::{GraphWriteProgramReceipt, GraphWriteStepReceipt};
-pub use mutation_program_template::mixed::{
-    GraphWriteProgramTemplateError, GraphWriteTemplateStatement, PreparedGraphWriteProgramTemplate,
-};
-pub use mutation_program::mixed::{
-    GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteProgramPolicy,
-    GraphWriteProgramStats, GraphWriteStatement, GraphWriteStepError, GraphWriteStepStats,
-    PreparedGraphWriteProgram,
-};
-pub use insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind, PreparedGraphInsertText};
-pub use mutation_program_template::{
-    GraphMutationProgramTemplateError, PreparedGraphMutationProgramTemplate,
-};
-pub use mutation_program::{
-    GraphMutationProgramBuildError, GraphMutationProgramDimension, GraphMutationProgramError,
-    GraphMutationProgramStats, MAX_GRAPH_MUTATION_STATEMENTS, PreparedGraphMutationProgram,
-};
 pub use aggregation::{
     GraphAggregate, GraphAggregateBuildError, GraphAggregateColumn, GraphAggregateError,
     GraphAggregateFilter, GraphAggregateFunction, GraphAggregateOrder, GraphAggregateRow,
@@ -118,6 +61,23 @@ pub use aggregation::{
 pub use algebra_exec::{
     GlaExecution, GlaExecutionError, GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats,
     GlaLimitDimension, GlaLimitExceeded, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+};
+pub use deletion::{
+    GraphDeleteBuildError, GraphDeleteError, GraphDeletePolicy, GraphDeleteProposal,
+    GraphDeleteStats, MAX_GRAPH_DELETE_TARGETS, PreparedGraphDelete,
+};
+pub use edge_merge::{
+    GraphEdgeMergeBuildError, GraphEdgeMergeError, GraphEdgeMergeOutcome, GraphEdgeMergePolicy,
+    GraphEdgeMergeRequest, GraphEdgeMergeStats, MAX_GRAPH_EDGE_MERGE_PROPERTIES,
+    PreparedGraphEdgeMerge,
+};
+pub use edge_upsert::{
+    GraphEdgeUpsertAction, GraphEdgeUpsertBranch, GraphEdgeUpsertBuildError, GraphEdgeUpsertError,
+    GraphEdgeUpsertPolicy, GraphEdgeUpsertStats, MAX_GRAPH_EDGE_UPSERT_ACTIONS,
+    PreparedGraphEdgeUpsert,
+};
+pub use edge_upsert_text::{
+    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeUpsertText,
 };
 pub use evidence_artifact::{
     GqlEvidenceArtifactKind, GqlEvidenceAuditError, GqlEvidenceDecodeError,
@@ -140,6 +100,7 @@ pub use graph_text::{
     GraphSymbolKind, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS, PreparedGraphAggregateText,
     PreparedGraphText,
 };
+pub use insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind, PreparedGraphInsertText};
 pub use integer_expression::{
     GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerError, GraphIntegerErrorKind,
     GraphIntegerEvaluationError, GraphIntegerExpression, GraphIntegerOp, GraphIntegerUnary,
@@ -149,6 +110,21 @@ pub use mutation::{
     GraphMutationAction, GraphMutationBatch, GraphMutationBuildError, GraphMutationError,
     GraphMutationIntent, GraphMutationPolicy, GraphMutationStats, GraphMutationValue,
     MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation,
+};
+pub use mutation_program::mixed::{
+    GraphWriteIdentityRequest, GraphWriteProgramError, GraphWriteProgramPolicy,
+    GraphWriteProgramStats, GraphWriteStatement, GraphWriteStepError, GraphWriteStepStats,
+    PreparedGraphWriteProgram,
+};
+pub use mutation_program::{
+    GraphMutationProgramBuildError, GraphMutationProgramDimension, GraphMutationProgramError,
+    GraphMutationProgramStats, MAX_GRAPH_MUTATION_STATEMENTS, PreparedGraphMutationProgram,
+};
+pub use mutation_program_template::mixed::{
+    GraphWriteProgramTemplateError, GraphWriteTemplateStatement, PreparedGraphWriteProgramTemplate,
+};
+pub use mutation_program_template::{
+    GraphMutationProgramTemplateError, PreparedGraphMutationProgramTemplate,
 };
 pub use mutation_text::{
     GraphDeleteTextError, GraphDeleteTextErrorKind, GraphEdgeMergeTextError,
@@ -169,10 +145,35 @@ pub use prepared::{
     GqlExecutionBudget, GqlExecutionStats, PreparedGqlQuery,
 };
 pub use set_ops::{
-    GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp,
-    GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetOperation,
-    GraphSetProjection, GraphSetProjectionError, GraphSetQuantifier, GraphSetValue,
-    MAX_GRAPH_SET_DEPTH, MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
+    GraphSetBuildError, GraphSetColumnType, GraphSetExecutionError, GraphSetFilterError,
+    GraphSetOperand, GraphSetOperation, GraphSetPredicateOp, GraphSetProjection,
+    GraphSetProjectionError, GraphSetQuantifier, GraphSetValue, MAX_GRAPH_SET_DEPTH,
+    MAX_GRAPH_SET_OPERANDS, PreparedGraphSet, PreparedGraphSetAggregate,
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
+pub use shortest_walk::GraphShortestWalkCursor;
+pub use temporal_aggregate_text::{
+    BoundTemporalGraphAggregateQuery, PreparedTemporalGraphAggregateText,
+};
+pub use temporal_set_text::{
+    BoundTemporalGraphSetQuery, GraphTemporalSetTextError, GraphTemporalSetTextErrorKind,
+    PreparedTemporalGraphSetText,
+};
+pub use temporal_text::{
+    BoundTemporalGraphQuery, GraphTemporalTextError, GraphTemporalTextErrorKind,
+    PreparedTemporalGraphText,
+};
+pub use vertex_merge::{
+    GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
+    GraphVertexMergePolicy, GraphVertexMergeStats, PreparedGraphVertexMerge,
+};
+pub use vertex_upsert::{
+    GraphVertexUpsertAction, GraphVertexUpsertBranch, GraphVertexUpsertBuildError,
+    GraphVertexUpsertError, GraphVertexUpsertPolicy, GraphVertexUpsertStats,
+    MAX_GRAPH_VERTEX_UPSERT_ACTIONS, PreparedGraphVertexUpsert,
+};
+pub use vertex_upsert_text::{
+    GraphVertexUpsertTextError, GraphVertexUpsertTextErrorKind, PreparedGraphVertexUpsertText,
+};
 pub use walk::{GraphWalkBounds, GraphWalkBoundsError, GraphWalkCursor, MAX_GRAPH_WALK_HOPS};
+pub use write_receipt::{GraphWriteProgramReceipt, GraphWriteStepReceipt};

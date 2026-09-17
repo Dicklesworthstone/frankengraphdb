@@ -25,7 +25,8 @@ pub use pattern::{
 };
 pub use predicate::{MAX_SCALAR_PREDICATE_BYTES, ScalarPredicate, ScalarPredicateError};
 pub use values::{
-    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphPath, GraphPathFunction, GraphValue, GraphValueRow, ValueProjection,
+    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GraphColumn, GraphPath, GraphPathFunction, GraphValue,
+    GraphValueRow, ValueProjection,
 };
 pub(crate) use values::{RowKey, ValueRef};
 
@@ -565,7 +566,9 @@ impl<Row> GlaPlan<Row> {
     /// Captured values require the real edge-identity input lane.
     #[must_use]
     pub fn requires_identified_edges(&self) -> bool {
-        self.operators.iter().any(|op| matches!(op, GlaOperator::CapturePath { .. }))
+        self.operators
+            .iter()
+            .any(|op| matches!(op, GlaOperator::CapturePath { .. }))
     }
 
     /// Property projections require a real source even without a predicate.
@@ -782,20 +785,34 @@ impl<Row> GlaPlan<Row> {
                     bytes.push(21);
                     expression.append_transcript(&mut bytes);
                 }
-                GlaOperator::CapturePath { capture, start, segments } => {
+                GlaOperator::CapturePath {
+                    capture,
+                    start,
+                    segments,
+                } => {
                     bytes.push(26);
                     bytes.extend_from_slice(&capture.to_be_bytes());
                     bytes.extend_from_slice(&start.0.to_be_bytes());
                     bytes.extend_from_slice(&(segments.len() as u64).to_be_bytes());
-                    for slot in segments { bytes.extend_from_slice(&slot.0.to_be_bytes()); }
+                    for slot in segments {
+                        bytes.extend_from_slice(&slot.0.to_be_bytes());
+                    }
                 }
-                GlaOperator::SelectPathLength { capture, comparison, value } => {
+                GlaOperator::SelectPathLength {
+                    capture,
+                    comparison,
+                    value,
+                } => {
                     bytes.push(27);
                     bytes.extend_from_slice(&capture.to_be_bytes());
                     bytes.push(comparison.tag());
                     bytes.extend_from_slice(&value.to_be_bytes());
                 }
-                GlaOperator::SelectPathNull { capture, function, is_null } => {
+                GlaOperator::SelectPathNull {
+                    capture,
+                    function,
+                    is_null,
+                } => {
                     bytes.push(28);
                     bytes.extend_from_slice(&capture.to_be_bytes());
                     bytes.push(*function as u8);

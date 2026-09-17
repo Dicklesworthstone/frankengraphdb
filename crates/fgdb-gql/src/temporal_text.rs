@@ -9,9 +9,9 @@
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern};
 use crate::{
-    GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters,
-    GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
-    MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS, PreparedGraphText,
+    GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters, GraphPatternTextError,
+    GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, MAX_GRAPH_TEXT_BYTES,
+    MAX_GRAPH_TEXT_TOKENS, PreparedGraphText,
 };
 use fgdb_types::CommitSeq;
 use std::collections::BTreeSet;
@@ -37,13 +37,20 @@ pub struct GraphTemporalTextError {
 
 impl core::fmt::Display for GraphTemporalTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "temporal graph text error at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "temporal graph text error at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphTemporalTextError {}
 impl From<GraphPatternTextError> for GraphTemporalTextError {
     fn from(error: GraphPatternTextError) -> Self {
-        Self { offset: error.offset, kind: GraphTemporalTextErrorKind::Query(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphTemporalTextErrorKind::Query(error.kind),
+        }
     }
 }
 
@@ -102,12 +109,36 @@ fn root_tokens(text: &str) -> Vec<RootToken<'_>> {
             continue;
         }
         match ch {
-            b'(' => { parens = parens.saturating_add(1); at += 1; continue; }
-            b')' => { parens = parens.saturating_sub(1); at += 1; continue; }
-            b'[' => { brackets = brackets.saturating_add(1); at += 1; continue; }
-            b']' => { brackets = brackets.saturating_sub(1); at += 1; continue; }
-            b'{' => { braces = braces.saturating_add(1); at += 1; continue; }
-            b'}' => { braces = braces.saturating_sub(1); at += 1; continue; }
+            b'(' => {
+                parens = parens.saturating_add(1);
+                at += 1;
+                continue;
+            }
+            b')' => {
+                parens = parens.saturating_sub(1);
+                at += 1;
+                continue;
+            }
+            b'[' => {
+                brackets = brackets.saturating_add(1);
+                at += 1;
+                continue;
+            }
+            b']' => {
+                brackets = brackets.saturating_sub(1);
+                at += 1;
+                continue;
+            }
+            b'{' => {
+                braces = braces.saturating_add(1);
+                at += 1;
+                continue;
+            }
+            b'}' => {
+                braces = braces.saturating_sub(1);
+                at += 1;
+                continue;
+            }
             _ => {}
         }
         if parens != 0 || brackets != 0 || braces != 0 {
@@ -121,30 +152,65 @@ fn root_tokens(text: &str) -> Vec<RootToken<'_>> {
         let start = at;
         if ch.is_ascii_alphabetic() || ch == b'_' {
             at += 1;
-            while bytes.get(at).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_') { at += 1; }
-            result.push(RootToken { start, end: at, kind: RootTokenKind::Word(&text[start..at]) });
+            while bytes
+                .get(at)
+                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            {
+                at += 1;
+            }
+            result.push(RootToken {
+                start,
+                end: at,
+                kind: RootTokenKind::Word(&text[start..at]),
+            });
             continue;
         }
         if ch == b'$' {
             at += 1;
             let name = at;
-            if bytes.get(at).is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') {
+            if bytes
+                .get(at)
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            {
                 at += 1;
-                while bytes.get(at).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_') { at += 1; }
-                result.push(RootToken { start, end: at, kind: RootTokenKind::Parameter(&text[name..at]) });
+                while bytes
+                    .get(at)
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
+                    at += 1;
+                }
+                result.push(RootToken {
+                    start,
+                    end: at,
+                    kind: RootTokenKind::Parameter(&text[name..at]),
+                });
             } else {
-                result.push(RootToken { start, end: at, kind: RootTokenKind::Other });
+                result.push(RootToken {
+                    start,
+                    end: at,
+                    kind: RootTokenKind::Other,
+                });
             }
             continue;
         }
         if ch.is_ascii_digit() {
             at += 1;
-            while bytes.get(at).is_some_and(u8::is_ascii_digit) { at += 1; }
-            result.push(RootToken { start, end: at, kind: RootTokenKind::Digits(&text[start..at]) });
+            while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+                at += 1;
+            }
+            result.push(RootToken {
+                start,
+                end: at,
+                kind: RootTokenKind::Digits(&text[start..at]),
+            });
             continue;
         }
         at += text[at..].chars().next().map_or(1, char::len_utf8);
-        result.push(RootToken { start, end: at, kind: RootTokenKind::Other });
+        result.push(RootToken {
+            start,
+            end: at,
+            kind: RootTokenKind::Other,
+        });
     }
     result
 }
@@ -158,7 +224,12 @@ fn parameter_names(text: &str) -> BTreeSet<String> {
             at += 1;
             while at < bytes.len() {
                 if bytes[at] == b'\'' {
-                    if bytes.get(at + 1) == Some(&b'\'') { at += 2; } else { at += 1; break; }
+                    if bytes.get(at + 1) == Some(&b'\'') {
+                        at += 2;
+                    } else {
+                        at += 1;
+                        break;
+                    }
                 } else {
                     at += text[at..].chars().next().map_or(1, char::len_utf8);
                 }
@@ -168,9 +239,17 @@ fn parameter_names(text: &str) -> BTreeSet<String> {
         if bytes[at] == b'$' {
             let start = at + 1;
             let mut end = start;
-            if bytes.get(end).is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') {
+            if bytes
+                .get(end)
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            {
                 end += 1;
-                while bytes.get(end).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_') { end += 1; }
+                while bytes
+                    .get(end)
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
+                    end += 1;
+                }
                 result.insert(text[start..end].to_owned());
                 at = end;
                 continue;
@@ -186,25 +265,36 @@ fn valid_parameter_name(name: &str) -> bool {
     !bytes.is_empty()
         && bytes.len() <= crate::algebra::MAX_PATTERN_NAME_BYTES
         && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-        && bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
-fn locate_clause(statement: &str) -> Result<(usize, usize, SequenceSelector), GraphTemporalTextError> {
+fn locate_clause(
+    statement: &str,
+) -> Result<(usize, usize, SequenceSelector), GraphTemporalTextError> {
     if statement.len() > MAX_GRAPH_TEXT_BYTES {
-        return Err(failure(MAX_GRAPH_TEXT_BYTES,
-            GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::DefinitionTooLarge)));
+        return Err(failure(
+            MAX_GRAPH_TEXT_BYTES,
+            GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::DefinitionTooLarge),
+        ));
     }
     let tokens = root_tokens(statement);
     if tokens.len() > MAX_GRAPH_TEXT_TOKENS {
-        return Err(failure(statement.len(),
-            GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::TooManyTokens)));
+        return Err(failure(
+            statement.len(),
+            GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::TooManyTokens),
+        ));
     }
-    let first_tail = tokens.iter().position(|token|
-        token.word("WHERE") || token.word("OPTIONAL") || token.word("RETURN"));
+    let first_tail = tokens
+        .iter()
+        .position(|token| token.word("WHERE") || token.word("OPTIONAL") || token.word("RETURN"));
     let mut matches = Vec::new();
     let mut loose_for = None;
     for at in 0..tokens.len() {
-        if !tokens[at].word("FOR") { continue; }
+        if !tokens[at].word("FOR") {
+            continue;
+        }
         loose_for.get_or_insert(tokens[at].start);
         if at + 5 >= tokens.len()
             || !tokens[at + 1].word("SYSTEM_TIME")
@@ -216,29 +306,56 @@ fn locate_clause(statement: &str) -> Result<(usize, usize, SequenceSelector), Gr
         }
         let selector = match tokens[at + 5].kind {
             RootTokenKind::Digits(raw) => {
-                let value = raw.parse::<u64>()
-                    .map_err(|_| failure(tokens[at + 5].start, GraphTemporalTextErrorKind::InvalidSequenceSelector))?;
+                let value = raw.parse::<u64>().map_err(|_| {
+                    failure(
+                        tokens[at + 5].start,
+                        GraphTemporalTextErrorKind::InvalidSequenceSelector,
+                    )
+                })?;
                 SequenceSelector::Literal(value)
             }
-            RootTokenKind::Parameter(name) if valid_parameter_name(name) =>
-                SequenceSelector::Parameter { name: name.to_owned(), offset: tokens[at + 5].start },
-            _ => return Err(failure(tokens[at + 5].start, GraphTemporalTextErrorKind::InvalidSequenceSelector)),
+            RootTokenKind::Parameter(name) if valid_parameter_name(name) => {
+                SequenceSelector::Parameter {
+                    name: name.to_owned(),
+                    offset: tokens[at + 5].start,
+                }
+            }
+            _ => {
+                return Err(failure(
+                    tokens[at + 5].start,
+                    GraphTemporalTextErrorKind::InvalidSequenceSelector,
+                ));
+            }
         };
         matches.push((at, tokens[at].start, tokens[at + 5].end, selector));
     }
     if matches.is_empty() {
-        return Err(failure(loose_for.unwrap_or(0), GraphTemporalTextErrorKind::MissingSystemTimeClause));
+        return Err(failure(
+            loose_for.unwrap_or(0),
+            GraphTemporalTextErrorKind::MissingSystemTimeClause,
+        ));
     }
     if matches.len() != 1 {
-        return Err(failure(matches[1].1, GraphTemporalTextErrorKind::DuplicateSystemTimeClause));
+        return Err(failure(
+            matches[1].1,
+            GraphTemporalTextErrorKind::DuplicateSystemTimeClause,
+        ));
     }
     let (token_at, start, end, selector) = matches.pop().expect("one temporal selector");
     if first_tail.is_some_and(|tail| token_at >= tail) {
-        return Err(failure(start, GraphTemporalTextErrorKind::InvalidSystemTimePosition));
+        return Err(failure(
+            start,
+            GraphTemporalTextErrorKind::InvalidSystemTimePosition,
+        ));
     }
     let next = tokens.get(token_at + 6);
-    if !next.is_some_and(|token| token.word("WHERE") || token.word("OPTIONAL") || token.word("RETURN")) {
-        return Err(failure(end, GraphTemporalTextErrorKind::InvalidSystemTimePosition));
+    if !next
+        .is_some_and(|token| token.word("WHERE") || token.word("OPTIONAL") || token.word("RETURN"))
+    {
+        return Err(failure(
+            end,
+            GraphTemporalTextErrorKind::InvalidSystemTimePosition,
+        ));
     }
     Ok((start, end, selector))
 }
@@ -276,8 +393,12 @@ impl PreparedTemporalGraphText {
         let mut seen = BTreeSet::new();
         for &(name, _) in declarations {
             if !valid_parameter_name(name) || !seen.insert(name) {
-                return Err(failure(0,
-                    GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::ParameterDeclaration)));
+                return Err(failure(
+                    0,
+                    GraphTemporalTextErrorKind::Query(
+                        GraphPatternTextErrorKind::ParameterDeclaration,
+                    ),
+                ));
             }
         }
         let temporal_name = match &selector {
@@ -285,72 +406,136 @@ impl PreparedTemporalGraphText {
             SequenceSelector::Literal(_) => None,
         };
         if let Some(name) = temporal_name
-            && declarations.iter().find(|(declared, _)| *declared == name)
+            && declarations
+                .iter()
+                .find(|(declared, _)| *declared == name)
                 .is_some_and(|(_, kind)| *kind != GqlParameterType::UInt64)
         {
-            let offset = match &selector { SequenceSelector::Parameter { offset, .. } => *offset, _ => start };
-            return Err(failure(offset, GraphTemporalTextErrorKind::ConflictingParameterType));
+            let offset = match &selector {
+                SequenceSelector::Parameter { offset, .. } => *offset,
+                _ => start,
+            };
+            return Err(failure(
+                offset,
+                GraphTemporalTextErrorKind::ConflictingParameterType,
+            ));
         }
         let mut blanked = statement.as_bytes().to_vec();
         blanked[start..end].fill(b' ');
-        let blanked = String::from_utf8(blanked).expect("replacing bytes with ASCII spaces preserves UTF-8");
+        let blanked =
+            String::from_utf8(blanked).expect("replacing bytes with ASCII spaces preserves UTF-8");
         let inner_names = parameter_names(&blanked);
         for &(name, _) in declarations {
             if !inner_names.contains(name) && temporal_name != Some(name) {
-                return Err(failure(statement.len(),
-                    GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::UnusedParameterDeclaration)));
+                return Err(failure(
+                    statement.len(),
+                    GraphTemporalTextErrorKind::Query(
+                        GraphPatternTextErrorKind::UnusedParameterDeclaration,
+                    ),
+                ));
             }
         }
-        let inner_declarations = declarations.iter().copied()
-            .filter(|(name, _)| inner_names.contains(*name)).collect::<Vec<_>>();
-        let inner = PreparedGraphText::prepare_with_parameter_types(&blanked, &inner_declarations, resolve)?;
+        let inner_declarations = declarations
+            .iter()
+            .copied()
+            .filter(|(name, _)| inner_names.contains(*name))
+            .collect::<Vec<_>>();
+        let inner = PreparedGraphText::prepare_with_parameter_types(
+            &blanked,
+            &inner_declarations,
+            resolve,
+        )?;
         let mut parameters = inner.parameter_schema().to_vec();
         if let Some(name) = temporal_name {
             if let Some(spec) = parameters.iter_mut().find(|spec| spec.name == name) {
                 if spec.parameter_type != GqlParameterType::UInt64 {
-                    let offset = match &selector { SequenceSelector::Parameter { offset, .. } => *offset, _ => start };
-                    return Err(failure(offset, GraphTemporalTextErrorKind::ConflictingParameterType));
+                    let offset = match &selector {
+                        SequenceSelector::Parameter { offset, .. } => *offset,
+                        _ => start,
+                    };
+                    return Err(failure(
+                        offset,
+                        GraphTemporalTextErrorKind::ConflictingParameterType,
+                    ));
                 }
                 spec.occurrences += 1;
             } else {
-                parameters.insert(0, GqlParameterSpec {
-                    name: name.to_owned(), parameter_type: GqlParameterType::UInt64,
-                    requires_positive: false, occurrences: 1,
-                });
+                parameters.insert(
+                    0,
+                    GqlParameterSpec {
+                        name: name.to_owned(),
+                        parameter_type: GqlParameterType::UInt64,
+                        requires_positive: false,
+                        occurrences: 1,
+                    },
+                );
             }
         }
-        Ok(Self { statement: statement.to_owned(), inner, selector, parameters })
+        Ok(Self {
+            statement: statement.to_owned(),
+            inner,
+            selector,
+            parameters,
+        })
     }
 
     #[must_use]
-    pub fn statement(&self) -> &str { &self.statement }
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { &self.parameters }
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        &self.parameters
+    }
 
-    pub fn bind_parameters(&self, arguments: &GqlParameters)
-        -> Result<BoundTemporalGraphQuery, GraphTemporalTextError> {
+    pub fn bind_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<BoundTemporalGraphQuery, GraphTemporalTextError> {
         let as_of = match &self.selector {
             SequenceSelector::Literal(value) => *value,
             SequenceSelector::Parameter { name, offset } => match arguments.get(name) {
-                None => return Err(failure(*offset, GraphTemporalTextErrorKind::MissingParameter)),
+                None => {
+                    return Err(failure(
+                        *offset,
+                        GraphTemporalTextErrorKind::MissingParameter,
+                    ));
+                }
                 Some(GqlParameterValue::UInt64(value)) => value,
-                Some(value) => return Err(failure(*offset,
-                    GraphTemporalTextErrorKind::ParameterTypeMismatch { found: value.parameter_type() })),
+                Some(value) => {
+                    return Err(failure(
+                        *offset,
+                        GraphTemporalTextErrorKind::ParameterTypeMismatch {
+                            found: value.parameter_type(),
+                        },
+                    ));
+                }
             },
         };
         let mut local = GqlParameters::new();
         for spec in self.inner.parameter_schema() {
             if let Some(value) = arguments.get(&spec.name) {
-                local.insert(spec.name.clone(), value)
+                local
+                    .insert(spec.name.clone(), value)
                     .expect("prepared parameter names are valid and unique");
             }
         }
         let pattern = self.inner.bind_parameters(&local)?;
-        let recognized = self.parameters.iter().filter(|spec| arguments.get(&spec.name).is_some()).count();
+        let recognized = self
+            .parameters
+            .iter()
+            .filter(|spec| arguments.get(&spec.name).is_some())
+            .count();
         if recognized != arguments.len() {
-            return Err(failure(self.statement.len(), GraphTemporalTextErrorKind::UnexpectedArguments));
+            return Err(failure(
+                self.statement.len(),
+                GraphTemporalTextErrorKind::UnexpectedArguments,
+            ));
         }
-        Ok(BoundTemporalGraphQuery { pattern, as_of: CommitSeq(as_of) })
+        Ok(BoundTemporalGraphQuery {
+            pattern,
+            as_of: CommitSeq(as_of),
+        })
     }
 }
 
@@ -369,9 +554,13 @@ impl core::fmt::Debug for BoundTemporalGraphQuery {
 }
 impl BoundTemporalGraphQuery {
     #[must_use]
-    pub fn pattern(&self) -> &PreparedGraphPattern<GraphValueRow> { &self.pattern }
+    pub fn pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
+        &self.pattern
+    }
     #[must_use]
-    pub const fn as_of(&self) -> CommitSeq { self.as_of }
+    pub const fn as_of(&self) -> CommitSeq {
+        self.as_of
+    }
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:temporal-graph-query:v1\0".to_vec();
@@ -402,13 +591,19 @@ mod tests {
         let source = "MATCH (a)-[:R]->(b) FOR SYSTEM_TIME AS OF SEQ 41 WHERE a.p >= 3 RETURN b";
         let mut calls = Cell::new(0);
         let temporal = PreparedTemporalGraphText::prepare(source, |kind, name| {
-            calls.set(calls.get() + 1); symbols(kind, name)
-        }).unwrap();
+            calls.set(calls.get() + 1);
+            symbols(kind, name)
+        })
+        .unwrap();
         let bound = temporal.bind_parameters(&GqlParameters::new()).unwrap();
         assert_eq!(bound.as_of(), CommitSeq(41));
         let ordinary = PreparedGraphText::prepare(
-            "MATCH (a)-[:R]->(b)                             WHERE a.p >= 3 RETURN b", symbols,
-        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+            "MATCH (a)-[:R]->(b)                             WHERE a.p >= 3 RETURN b",
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
         assert_eq!(bound.pattern(), &ordinary);
         assert_eq!(calls.get(), 2);
         assert_eq!(temporal.statement(), source);
@@ -417,39 +612,78 @@ mod tests {
 
     #[test]
     fn selector_parameter_shares_one_exact_argument_contract() {
-        let source = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $asof WHERE n.p >= $floor RETURN n LIMIT $page";
+        let source =
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $asof WHERE n.p >= $floor RETURN n LIMIT $page";
         let template = PreparedTemporalGraphText::prepare(source, symbols).unwrap();
         assert_eq!(template.parameter_schema().len(), 3);
         assert_eq!(template.parameter_schema()[0].name, "asof");
-        let args = GqlParameters::new().with_uint64("asof", 7).unwrap()
-            .with_int64("floor", -2).unwrap().with_uint64("page", 3).unwrap();
+        let args = GqlParameters::new()
+            .with_uint64("asof", 7)
+            .unwrap()
+            .with_int64("floor", -2)
+            .unwrap()
+            .with_uint64("page", 3)
+            .unwrap();
         let first = template.bind_parameters(&args).unwrap();
         assert_eq!(first.as_of(), CommitSeq(7));
-        let second = template.bind_parameters(&GqlParameters::new().with_uint64("asof", 9).unwrap()
-            .with_int64("floor", -2).unwrap().with_uint64("page", 3).unwrap()).unwrap();
+        let second = template
+            .bind_parameters(
+                &GqlParameters::new()
+                    .with_uint64("asof", 9)
+                    .unwrap()
+                    .with_int64("floor", -2)
+                    .unwrap()
+                    .with_uint64("page", 3)
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(second.as_of(), CommitSeq(9));
         assert_ne!(first.canonical_bytes(), second.canonical_bytes());
-        assert!(matches!(template.bind_parameters(&GqlParameters::new()).unwrap_err().kind,
-            GraphTemporalTextErrorKind::MissingParameter));
-        let wrong = GqlParameters::new().with_int64("asof", 7).unwrap()
-            .with_int64("floor", -2).unwrap().with_uint64("page", 3).unwrap();
-        assert!(matches!(template.bind_parameters(&wrong).unwrap_err().kind,
-            GraphTemporalTextErrorKind::ParameterTypeMismatch { .. }));
+        assert!(matches!(
+            template
+                .bind_parameters(&GqlParameters::new())
+                .unwrap_err()
+                .kind,
+            GraphTemporalTextErrorKind::MissingParameter
+        ));
+        let wrong = GqlParameters::new()
+            .with_int64("asof", 7)
+            .unwrap()
+            .with_int64("floor", -2)
+            .unwrap()
+            .with_uint64("page", 3)
+            .unwrap();
+        assert!(matches!(
+            template.bind_parameters(&wrong).unwrap_err().kind,
+            GraphTemporalTextErrorKind::ParameterTypeMismatch { .. }
+        ));
     }
 
     #[test]
     fn temporal_parameter_can_be_shared_only_as_uint64() {
         let ok = PreparedTemporalGraphText::prepare(
-            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $x RETURN n LIMIT $x", symbols,
-        ).unwrap();
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $x RETURN n LIMIT $x",
+            symbols,
+        )
+        .unwrap();
         assert_eq!(ok.parameter_schema().len(), 1);
         assert_eq!(ok.parameter_schema()[0].occurrences, 2);
-        assert_eq!(ok.bind_parameters(&GqlParameters::new().with_uint64("x", 4).unwrap()).unwrap().as_of(), CommitSeq(4));
+        assert_eq!(
+            ok.bind_parameters(&GqlParameters::new().with_uint64("x", 4).unwrap())
+                .unwrap()
+                .as_of(),
+            CommitSeq(4)
+        );
         let bad = PreparedTemporalGraphText::prepare(
-            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $x WHERE n.p = $x RETURN n", symbols,
-        ).unwrap_err();
-        assert!(matches!(bad.kind, GraphTemporalTextErrorKind::Query(
-            GraphPatternTextErrorKind::ConflictingParameterTypes) | GraphTemporalTextErrorKind::ConflictingParameterType));
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $x WHERE n.p = $x RETURN n",
+            symbols,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            bad.kind,
+            GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::ConflictingParameterTypes)
+                | GraphTemporalTextErrorKind::ConflictingParameterType
+        ));
     }
 
     #[test]
@@ -463,16 +697,33 @@ mod tests {
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ nope RETURN n",
         ] {
             let calls = Cell::new(0);
-            assert!(PreparedTemporalGraphText::prepare(source, |kind, name| {
-                calls.set(calls.get() + 1); symbols(kind, name)
-            }).is_err(), "{source}");
-            assert_eq!(calls.get(), 0, "malformed temporal syntax reached catalog: {source}");
+            assert!(
+                PreparedTemporalGraphText::prepare(source, |kind, name| {
+                    calls.set(calls.get() + 1);
+                    symbols(kind, name)
+                })
+                .is_err(),
+                "{source}"
+            );
+            assert_eq!(
+                calls.get(),
+                0,
+                "malformed temporal syntax reached catalog: {source}"
+            );
         }
         let calls = Cell::new(0);
         let result = PreparedTemporalGraphText::prepare_with_parameter_types(
-            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN n", &[("at", GqlParameterType::Int64)],
-            |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) });
-        assert!(matches!(result.unwrap_err().kind, GraphTemporalTextErrorKind::ConflictingParameterType));
+            "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN n",
+            &[("at", GqlParameterType::Int64)],
+            |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            },
+        );
+        assert!(matches!(
+            result.unwrap_err().kind,
+            GraphTemporalTextErrorKind::ConflictingParameterType
+        ));
         assert_eq!(calls.get(), 0);
     }
 
@@ -481,10 +732,18 @@ mod tests {
         let source = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 3 WHERE n.unknown = 1 RETURN n";
         let failed = PreparedTemporalGraphText::prepare(source, symbols).unwrap_err();
         assert_eq!(failed.offset, source.find("unknown").unwrap());
-        assert!(matches!(failed.kind, GraphTemporalTextErrorKind::Query(
-            GraphPatternTextErrorKind::UnknownSymbol(GraphSymbolKind::Property))));
+        assert!(matches!(
+            failed.kind,
+            GraphTemporalTextErrorKind::Query(GraphPatternTextErrorKind::UnknownSymbol(
+                GraphSymbolKind::Property
+            ))
+        ));
         let quoted = "MATCH (n) WHERE n.p = 'FOR SYSTEM_TIME AS OF SEQ 999' RETURN n";
-        assert!(matches!(PreparedTemporalGraphText::prepare(quoted, symbols).unwrap_err().kind,
-            GraphTemporalTextErrorKind::MissingSystemTimeClause));
+        assert!(matches!(
+            PreparedTemporalGraphText::prepare(quoted, symbols)
+                .unwrap_err()
+                .kind,
+            GraphTemporalTextErrorKind::MissingSystemTimeClause
+        ));
     }
 }

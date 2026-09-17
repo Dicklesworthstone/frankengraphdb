@@ -12,14 +12,18 @@ use fgdb_gql::{
     PreparedGraphInsertText, PreparedGraphMutationText, PreparedGraphWriteProgram,
 };
 use fgdb_types::{
-    CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, EId, PurposeContexts, VId,
+    CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
 };
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const COPY: LabelId = LabelId(1);
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xa1; 32], DatabaseSecurityNamespaceId([0xa2; 32]), [0xa3; 32])
+    DatabaseKeys::new(
+        [0xa1; 32],
+        DatabaseSecurityNamespaceId([0xa2; 32]),
+        [0xa3; 32],
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -42,12 +46,16 @@ fn program_policy() -> GraphWriteProgramPolicy {
     GraphWriteProgramPolicy::new(query_policy(), 10_000, 10_000, 10_000)
 }
 fn mutation(text: &str) -> fgdb_gql::PreparedGraphMutation {
-    PreparedGraphMutationText::prepare(text, R, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap()
+    PreparedGraphMutationText::prepare(text, R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 fn insertion(text: &str) -> fgdb_gql::insertion::PreparedGraphInsert {
-    PreparedGraphInsertText::prepare(text, R, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap()
+    PreparedGraphInsertText::prepare(text, R, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap()
 }
 async fn seed(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) -> fgdb_types::CommitSeq {
     let mut batch = WriteBatch::new(R);
@@ -66,9 +74,16 @@ fn mutation_autocommit_commits_targets_while_zero_match_closes_read_only() {
         let seeded = seed(&mut db, &commit).await;
 
         let update = mutation("MATCH (n) WHERE n.p >= 10 SET n.p=n.p+1");
-        let (stats, targets, completion) = db.execute_graph_mutation_returning_autocommit_governed(
-            &txcx, &query, &commit, &update, mutation_policy(),
-        ).await.unwrap();
+        let (stats, targets, completion) = db
+            .execute_graph_mutation_returning_autocommit_governed(
+                &txcx,
+                &query,
+                &commit,
+                &update,
+                mutation_policy(),
+            )
+            .await
+            .unwrap();
         assert_eq!(targets, vec![VId(1)]);
         assert_eq!((stats.target_vertices, stats.effects), (1, 1));
         let committed = match completion {
@@ -76,19 +91,33 @@ fn mutation_autocommit_commits_targets_while_zero_match_closes_read_only() {
             other => panic!("staged mutation did not commit: {other:?}"),
         };
         assert_eq!(committed.0, seeded.0 + 1);
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(11))]);
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(11))]
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
 
         let frontier = db.frontier().unwrap();
         let no_match = mutation("MATCH (n) WHERE n.p > 100 SET n.p=n.p+1");
-        let (stats, completion) = db.execute_graph_mutation_autocommit_governed(
-            &txcx, &query, &commit, &no_match, mutation_policy(),
-        ).await.unwrap();
+        let (stats, completion) = db
+            .execute_graph_mutation_autocommit_governed(
+                &txcx,
+                &query,
+                &commit,
+                &no_match,
+                mutation_policy(),
+            )
+            .await
+            .unwrap();
         assert_eq!((stats.selection.result_rows, stats.effects), (0, 0));
         assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed {
             snapshot_seq, validated_through
         } if snapshot_seq == frontier && validated_through == frontier));
-        assert_eq!(db.frontier().unwrap(), frontier, "zero-effect write must not invent a marker");
+        assert_eq!(
+            db.frontier().unwrap(),
+            frontier,
+            "zero-effect write must not invent a marker"
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -105,33 +134,67 @@ fn execution_and_allocator_refusals_abort_and_release_the_snapshot_pin() {
         let frontier = seed(&mut db, &commit).await;
 
         let arithmetic = mutation("MATCH (n) SET n.p=n.p/0");
-        assert!(db.execute_graph_mutation_autocommit_governed(
-            &txcx, &query, &commit, &arithmetic, mutation_policy(),
-        ).await.is_err());
+        assert!(
+            db.execute_graph_mutation_autocommit_governed(
+                &txcx,
+                &query,
+                &commit,
+                &arithmetic,
+                mutation_policy(),
+            )
+            .await
+            .is_err()
+        );
         assert_eq!(db.frontier().unwrap(), frontier);
-        assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(10))]);
+        assert_eq!(
+            db.vertex(VId(1)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(10))]
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
 
         let create = insertion("CREATE (x:Copy {p:7})");
-        assert!(db.execute_graph_insert_autocommit_governed(
-            &txcx, &query, &commit, &create, insert_policy(),
-            |_| Err::<ElementId, _>("allocator unavailable"),
-        ).await.is_err());
+        assert!(
+            db.execute_graph_insert_autocommit_governed(
+                &txcx,
+                &query,
+                &commit,
+                &create,
+                insert_policy(),
+                |_| Err::<ElementId, _>("allocator unavailable"),
+            )
+            .await
+            .is_err()
+        );
         assert_eq!(db.frontier().unwrap(), frontier);
         assert_eq!(txcx.outstanding_obligations(), 0);
 
-        let (stats, vertices, edges, completion) = db.execute_graph_insert_returning_autocommit_governed(
-            &txcx, &query, &commit, &create, insert_policy(),
-            |request| Ok::<_, &'static str>(match request {
-                GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(100)),
-                GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(1000)),
-            }),
-        ).await.unwrap();
+        let (stats, vertices, edges, completion) = db
+            .execute_graph_insert_returning_autocommit_governed(
+                &txcx,
+                &query,
+                &commit,
+                &create,
+                insert_policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(100)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(1000)),
+                    })
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!((stats.created_vertices, stats.created_edges), (1, 0));
         assert_eq!(vertices, vec![VId(100)]);
         assert!(edges.is_empty());
-        assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }));
-        assert_eq!(db.vertex(VId(100)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(7))]);
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
+        assert_eq!(
+            db.vertex(VId(100)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(7))]
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -149,23 +212,44 @@ fn mixed_autocommit_withholds_receipt_until_dependent_program_is_durable() {
         let create = insertion("CREATE (x:Copy {p:5})");
         let update = mutation("MATCH (n:Copy) SET n.p=n.p+1");
         let program = PreparedGraphWriteProgram::prepare(vec![
-            GraphWriteStatement::Insert(create), GraphWriteStatement::Mutation(update),
-        ]).unwrap();
-        let (receipt, completion) = db.execute_graph_write_program_returning_autocommit_governed(
-            &txcx, &query, &commit, &program, program_policy(),
-            |request| Ok::<_, &'static str>(match request {
-                GraphWriteIdentityRequest { statement: 0,
-                    request: GraphInsertRequest::Vertex { .. } } => ElementId::Vertex(VId(200)),
-                GraphWriteIdentityRequest { statement: 0,
-                    request: GraphInsertRequest::Edge { .. } } => ElementId::Edge(EId(2000)),
-                other => panic!("unexpected allocation request {other:?}"),
-            }),
-        ).await.unwrap();
-        assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }));
+            GraphWriteStatement::Insert(create),
+            GraphWriteStatement::Mutation(update),
+        ])
+        .unwrap();
+        let (receipt, completion) = db
+            .execute_graph_write_program_returning_autocommit_governed(
+                &txcx,
+                &query,
+                &commit,
+                &program,
+                program_policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request {
+                        GraphWriteIdentityRequest {
+                            statement: 0,
+                            request: GraphInsertRequest::Vertex { .. },
+                        } => ElementId::Vertex(VId(200)),
+                        GraphWriteIdentityRequest {
+                            statement: 0,
+                            request: GraphInsertRequest::Edge { .. },
+                        } => ElementId::Edge(EId(2000)),
+                        other => panic!("unexpected allocation request {other:?}"),
+                    })
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
         assert_eq!(receipt.steps().len(), 2);
         assert_eq!(receipt.steps()[0].created_vertices(), Some(&[VId(200)][..]));
         assert_eq!(receipt.steps()[1].mutation_targets(), Some(&[VId(200)][..]));
-        assert_eq!(db.vertex(VId(200)).unwrap().unwrap().props, vec![(P, CanonicalScalar::Int(6))]);
+        assert_eq!(
+            db.vertex(VId(200)).unwrap().unwrap().props,
+            vec![(P, CanonicalScalar::Int(6))]
+        );
         assert_eq!(txcx.outstanding_obligations(), 0);
 
         // A late dependent failure returns neither a partial program receipt nor
@@ -174,14 +258,23 @@ fn mixed_autocommit_withholds_receipt_until_dependent_program_is_durable() {
         let bad = PreparedGraphWriteProgram::prepare(vec![
             GraphWriteStatement::Insert(insertion("CREATE (x:Copy {p:9})")),
             GraphWriteStatement::Mutation(bad_update),
-        ]).unwrap();
-        let failed = db.execute_graph_write_program_returning_autocommit_governed(
-            &txcx, &query, &commit, &bad, program_policy(),
-            |request| Ok::<_, &'static str>(match request.request {
-                GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(300)),
-                GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(3000)),
-            }),
-        ).await;
+        ])
+        .unwrap();
+        let failed = db
+            .execute_graph_write_program_returning_autocommit_governed(
+                &txcx,
+                &query,
+                &commit,
+                &bad,
+                program_policy(),
+                |request| {
+                    Ok::<_, &'static str>(match request.request {
+                        GraphInsertRequest::Vertex { .. } => ElementId::Vertex(VId(300)),
+                        GraphInsertRequest::Edge { .. } => ElementId::Edge(EId(3000)),
+                    })
+                },
+            )
+            .await;
         assert!(failed.is_err());
         assert!(db.vertex(VId(300)).unwrap().is_none());
         assert_eq!(txcx.outstanding_obligations(), 0);

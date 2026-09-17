@@ -10,9 +10,11 @@
 
 mod collect;
 
-use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection, MAX_PATTERN_VERTICES};
-use crate::{GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution,
-    GqlQueryPolicy, GraphIntegerError, GraphMutationValue, GraphSetProjection, GraphSetValue};
+use crate::algebra::{GraphValueRow, MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection};
+use crate::{
+    GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GraphIntegerError, GraphMutationValue, GraphSetProjection, GraphSetValue,
+};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
 
@@ -78,37 +80,85 @@ pub enum GraphInsertRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GraphInsertLimitDimension { Vertices, Edges }
+pub enum GraphInsertLimitDimension {
+    Vertices,
+    Edges,
+}
 
 #[derive(Debug)]
 pub enum GraphInsertError<E, A> {
     Source(E),
     IdentitySource(A),
     InvalidSourceStatistics,
-    InputSchema { row: usize, column: usize },
-    NullEndpoint { row: usize, edge: usize, column: usize },
-    Arithmetic { row: usize, declaration: usize, property: usize, error: GraphIntegerError },
-    IdentityKind { request: GraphInsertRequest },
-    DuplicateIdentity { request: GraphInsertRequest },
-    Limit { dimension: GraphInsertLimitDimension, limit: u64, observed: u128 },
+    InputSchema {
+        row: usize,
+        column: usize,
+    },
+    NullEndpoint {
+        row: usize,
+        edge: usize,
+        column: usize,
+    },
+    Arithmetic {
+        row: usize,
+        declaration: usize,
+        property: usize,
+        error: GraphIntegerError,
+    },
+    IdentityKind {
+        request: GraphInsertRequest,
+    },
+    DuplicateIdentity {
+        request: GraphInsertRequest,
+    },
+    Limit {
+        dimension: GraphInsertLimitDimension,
+        limit: u64,
+        observed: u128,
+    },
 }
 impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for GraphInsertError<E, A> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(error) => error.fmt(f),
             Self::IdentitySource(error) => write!(f, "insertion identity allocation: {error}"),
-            Self::InvalidSourceStatistics => f.write_str("insertion source returned inconsistent statistics"),
-            Self::InputSchema { row, column } => write!(f, "insertion row {row} has incompatible column {column}"),
-            Self::NullEndpoint { row, edge, column } => write!(f, "insertion row {row} edge {edge} has null endpoint column {column}"),
-            Self::Arithmetic { row, declaration, property, error } => write!(f,
-                "insertion row {row} declaration {declaration} property {property}: {error}"),
-            Self::IdentityKind { request } => write!(f, "insertion allocator returned wrong identity kind for {request:?}"),
-            Self::DuplicateIdentity { request } => write!(f, "insertion allocator repeated an identity at {request:?}"),
-            Self::Limit { dimension, limit, observed } => write!(f, "insertion {dimension:?} limit: {observed} > {limit}"),
+            Self::InvalidSourceStatistics => {
+                f.write_str("insertion source returned inconsistent statistics")
+            }
+            Self::InputSchema { row, column } => {
+                write!(f, "insertion row {row} has incompatible column {column}")
+            }
+            Self::NullEndpoint { row, edge, column } => write!(
+                f,
+                "insertion row {row} edge {edge} has null endpoint column {column}"
+            ),
+            Self::Arithmetic {
+                row,
+                declaration,
+                property,
+                error,
+            } => write!(
+                f,
+                "insertion row {row} declaration {declaration} property {property}: {error}"
+            ),
+            Self::IdentityKind { request } => write!(
+                f,
+                "insertion allocator returned wrong identity kind for {request:?}"
+            ),
+            Self::DuplicateIdentity { request } => {
+                write!(f, "insertion allocator repeated an identity at {request:?}")
+            }
+            Self::Limit {
+                dimension,
+                limit,
+                observed,
+            } => write!(f, "insertion {dimension:?} limit: {observed} > {limit}"),
         }
     }
 }
-impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::error::Error for GraphInsertError<E, A> {
+impl<E: core::error::Error + 'static, A: core::error::Error + 'static> core::error::Error
+    for GraphInsertError<E, A>
+{
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Source(error) => Some(error),
@@ -130,7 +180,11 @@ pub struct GraphInsertPolicy {
 impl GraphInsertPolicy {
     #[must_use]
     pub const fn new(query: GqlQueryPolicy, max_vertices: u64, max_edges: u64) -> Self {
-        Self { query, max_vertices, max_edges }
+        Self {
+            query,
+            max_vertices,
+            max_edges,
+        }
     }
 }
 
@@ -145,8 +199,17 @@ pub struct GraphInsertStats {
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphInsertIntent {
-    Vertex { vertex: VId, labels: Vec<LabelId>, properties: Vec<(PropertyKeyId, CanonicalScalar)> },
-    Edge { edge: EId, source: VId, destination: VId, properties: Vec<(PropertyKeyId, CanonicalScalar)> },
+    Vertex {
+        vertex: VId,
+        labels: Vec<LabelId>,
+        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    },
+    Edge {
+        edge: EId,
+        source: VId,
+        destination: VId,
+        properties: Vec<(PropertyKeyId, CanonicalScalar)>,
+    },
 }
 impl core::fmt::Debug for GraphInsertIntent {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -161,16 +224,24 @@ pub struct GraphInsertBatch {
 }
 impl GraphInsertBatch {
     #[must_use]
-    pub fn intents(&self) -> &[GraphInsertIntent] { &self.intents }
+    pub fn intents(&self) -> &[GraphInsertIntent] {
+        &self.intents
+    }
     #[must_use]
-    pub const fn stats(&self) -> GraphInsertStats { self.stats }
+    pub const fn stats(&self) -> GraphInsertStats {
+        self.stats
+    }
     #[must_use]
-    pub fn into_intents(self) -> Vec<GraphInsertIntent> { self.intents }
+    pub fn into_intents(self) -> Vec<GraphInsertIntent> {
+        self.intents
+    }
 }
 impl core::fmt::Debug for GraphInsertBatch {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("GraphInsertBatch").field("stats", &self.stats)
-            .field("intents", &"[REDACTED]").finish()
+        f.debug_struct("GraphInsertBatch")
+            .field("stats", &self.stats)
+            .field("intents", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -180,9 +251,16 @@ struct Properties {
     projection: Vec<GraphSetProjection>,
 }
 #[derive(Clone, PartialEq, Eq)]
-struct Vertex { labels: Vec<LabelId>, properties: Properties }
+struct Vertex {
+    labels: Vec<LabelId>,
+    properties: Properties,
+}
 #[derive(Clone, PartialEq, Eq)]
-struct Edge { source: GraphInsertEndpoint, destination: GraphInsertEndpoint, properties: Properties }
+struct Edge {
+    source: GraphInsertEndpoint,
+    destination: GraphInsertEndpoint,
+    properties: Properties,
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphInsert {
@@ -194,9 +272,12 @@ pub struct PreparedGraphInsert {
 }
 impl core::fmt::Debug for PreparedGraphInsert {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PreparedGraphInsert").field("vertices_per_row", &self.vertices.len())
-            .field("edges_per_row", &self.edges.len()).field("standalone", &self.selection.is_none())
-            .field("definition", &"[REDACTED]").finish()
+        f.debug_struct("PreparedGraphInsert")
+            .field("vertices_per_row", &self.vertices.len())
+            .field("edges_per_row", &self.edges.len())
+            .field("standalone", &self.selection.is_none())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 impl PreparedGraphInsert {
@@ -205,8 +286,10 @@ impl PreparedGraphInsert {
     /// Duplicate label/property declarations refuse instead of choosing a value.
     /// All created edges use the explicit WriteBatch relation coordinate.
     pub fn prepare(
-        selection: PreparedGraphPattern<GraphValueRow>, relation: RelationId,
-        vertices: Vec<GraphInsertVertex>, edges: Vec<GraphInsertEdge>,
+        selection: PreparedGraphPattern<GraphValueRow>,
+        relation: RelationId,
+        vertices: Vec<GraphInsertVertex>,
+        edges: Vec<GraphInsertEdge>,
     ) -> Result<Self, GraphInsertBuildError> {
         Self::prepare_input(Some(selection), relation, vertices, edges)
     }
@@ -216,27 +299,45 @@ impl PreparedGraphInsert {
     /// refuses during preparation. Edges may refer to the created vertices.
     /// Constants and already-bound scalar programs use the ordinary collector.
     pub fn prepare_standalone(
-        relation: RelationId, vertices: Vec<GraphInsertVertex>, edges: Vec<GraphInsertEdge>,
+        relation: RelationId,
+        vertices: Vec<GraphInsertVertex>,
+        edges: Vec<GraphInsertEdge>,
     ) -> Result<Self, GraphInsertBuildError> {
         Self::prepare_input(None, relation, vertices, edges)
     }
 
     fn prepare_input(
-        selection: Option<PreparedGraphPattern<GraphValueRow>>, relation: RelationId,
-        vertices: Vec<GraphInsertVertex>, edges: Vec<GraphInsertEdge>,
+        selection: Option<PreparedGraphPattern<GraphValueRow>>,
+        relation: RelationId,
+        vertices: Vec<GraphInsertVertex>,
+        edges: Vec<GraphInsertEdge>,
     ) -> Result<Self, GraphInsertBuildError> {
         let declarations = vertices.len().saturating_add(edges.len());
-        if declarations == 0 { return Err(GraphInsertBuildError::Empty); }
+        if declarations == 0 {
+            return Err(GraphInsertBuildError::Empty);
+        }
         if declarations > MAX_GRAPH_INSERT_DECLARATIONS {
-            return Err(GraphInsertBuildError::TooManyDeclarations { limit: MAX_GRAPH_INSERT_DECLARATIONS, observed: declarations });
+            return Err(GraphInsertBuildError::TooManyDeclarations {
+                limit: MAX_GRAPH_INSERT_DECLARATIONS,
+                observed: declarations,
+            });
         }
-        let fields = vertices.iter().fold(0_usize, |sum, v|
-            sum.saturating_add(v.labels.len()).saturating_add(v.properties.len()));
-        let fields = edges.iter().fold(fields, |sum, e| sum.saturating_add(e.properties.len()));
+        let fields = vertices.iter().fold(0_usize, |sum, v| {
+            sum.saturating_add(v.labels.len())
+                .saturating_add(v.properties.len())
+        });
+        let fields = edges
+            .iter()
+            .fold(fields, |sum, e| sum.saturating_add(e.properties.len()));
         if fields > MAX_GRAPH_INSERT_FIELDS {
-            return Err(GraphInsertBuildError::TooManyFields { limit: MAX_GRAPH_INSERT_FIELDS, observed: fields });
+            return Err(GraphInsertBuildError::TooManyFields {
+                limit: MAX_GRAPH_INSERT_FIELDS,
+                observed: fields,
+            });
         }
-        let columns = selection.as_ref().map_or(&[][..], |pattern| pattern.value_columns());
+        let columns = selection
+            .as_ref()
+            .map_or(&[][..], |pattern| pattern.value_columns());
         for (edge, declaration) in edges.iter().enumerate() {
             for endpoint in [declaration.source, declaration.destination] {
                 match endpoint {
@@ -267,22 +368,40 @@ impl PreparedGraphInsert {
         let mut bound_edges = Vec::new();
         for (edge, declaration) in edges.into_iter().enumerate() {
             bound_edges.push(Edge {
-                source: declaration.source, destination: declaration.destination,
-                properties: Properties::prepare(declaration.properties, columns, vertex_count + edge)?,
+                source: declaration.source,
+                destination: declaration.destination,
+                properties: Properties::prepare(
+                    declaration.properties,
+                    columns,
+                    vertex_count + edge,
+                )?,
             });
         }
-        Ok(Self { selection, relation, vertices: bound_vertices, edges: bound_edges })
+        Ok(Self {
+            selection,
+            relation,
+            vertices: bound_vertices,
+            edges: bound_edges,
+        })
     }
 
     /// None denotes standalone creation with one zero-column input occurrence.
     #[must_use]
-    pub fn selection(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> { self.selection.as_ref() }
+    pub fn selection(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
+        self.selection.as_ref()
+    }
     #[must_use]
-    pub const fn relation(&self) -> RelationId { self.relation }
+    pub const fn relation(&self) -> RelationId {
+        self.relation
+    }
     #[must_use]
-    pub fn vertices_per_row(&self) -> usize { self.vertices.len() }
+    pub fn vertices_per_row(&self) -> usize {
+        self.vertices.len()
+    }
     #[must_use]
-    pub fn edges_per_row(&self) -> usize { self.edges.len() }
+    pub fn edges_per_row(&self) -> usize {
+        self.edges.len()
+    }
 
     /// Execute the frozen selection once; validate every row/endpoint/property;
     /// then allocate typed IDs and assemble one complete private proposal.
@@ -298,9 +417,12 @@ impl PreparedGraphInsert {
     /// The definition transcript does not pin nondeterministic allocator output;
     /// replay must retain the actual request-to-identity mapping separately.
     pub fn execute_governed<E, A, C>(
-        &self, policy: GraphInsertPolicy,
-        source: impl FnOnce(&PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy)
-            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        &self,
+        policy: GraphInsertPolicy,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         allocate: impl FnMut(GraphInsertRequest) -> Result<ElementId, A>,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GraphInsertBatch, GqlQueryError<GraphInsertError<E, A>, C>> {
@@ -318,13 +440,19 @@ impl PreparedGraphInsert {
             b"fgdb:standalone-graph-insert:v1\0".to_vec()
         };
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
-        let selection = self.selection.as_ref().map(|pattern| pattern.canonical_bytes()).unwrap_or_default();
+        let selection = self
+            .selection
+            .as_ref()
+            .map(|pattern| pattern.canonical_bytes())
+            .unwrap_or_default();
         bytes.extend_from_slice(&(selection.len() as u64).to_be_bytes());
         bytes.extend_from_slice(&selection);
         bytes.extend_from_slice(&(self.vertices.len() as u64).to_be_bytes());
         for vertex in &self.vertices {
             bytes.extend_from_slice(&(vertex.labels.len() as u64).to_be_bytes());
-            for label in &vertex.labels { bytes.extend_from_slice(&label.0.to_be_bytes()); }
+            for label in &vertex.labels {
+                bytes.extend_from_slice(&label.0.to_be_bytes());
+            }
             vertex.properties.append(&mut bytes);
         }
         bytes.extend_from_slice(&(self.edges.len() as u64).to_be_bytes());
@@ -334,7 +462,8 @@ impl PreparedGraphInsert {
                     GraphInsertEndpoint::Column(index) => (0, index),
                     GraphInsertEndpoint::CreatedVertex(index) => (1, index),
                 };
-                bytes.push(tag); bytes.extend_from_slice(&(index as u64).to_be_bytes());
+                bytes.push(tag);
+                bytes.extend_from_slice(&(index as u64).to_be_bytes());
             }
             edge.properties.append(&mut bytes);
         }
@@ -343,10 +472,16 @@ impl PreparedGraphInsert {
 }
 
 impl Properties {
-    fn prepare(mut fields: Vec<(PropertyKeyId, GraphMutationValue)>, columns: &[ValueProjection],
-        declaration: usize) -> Result<Self, GraphInsertBuildError> {
+    fn prepare(
+        mut fields: Vec<(PropertyKeyId, GraphMutationValue)>,
+        columns: &[ValueProjection],
+        declaration: usize,
+    ) -> Result<Self, GraphInsertBuildError> {
         if fields.len() > MAX_PATTERN_VERTICES {
-            return Err(GraphInsertBuildError::TooManyFields { limit: MAX_PATTERN_VERTICES, observed: fields.len() });
+            return Err(GraphInsertBuildError::TooManyFields {
+                limit: MAX_PATTERN_VERTICES,
+                observed: fields.len(),
+            });
         }
         fields.sort_by_key(|(key, _)| *key);
         if fields.windows(2).any(|pair| pair[0].0 == pair[1].0) {
@@ -356,14 +491,27 @@ impl Properties {
         let mut projection = Vec::new();
         for (at, (key, value)) in fields.into_iter().enumerate() {
             let check = |column| {
-                if columns.get(column).is_some_and(|column| crate::GraphSetColumnType::from(column) == crate::GraphSetColumnType::Scalar) { Ok(()) }
-                else { Err(GraphInsertBuildError::ValueColumn { declaration, column }) }
+                if columns.get(column).is_some_and(|column| {
+                    crate::GraphSetColumnType::from(column) == crate::GraphSetColumnType::Scalar
+                }) {
+                    Ok(())
+                } else {
+                    Err(GraphInsertBuildError::ValueColumn {
+                        declaration,
+                        column,
+                    })
+                }
             };
             let value = match value {
-                GraphMutationValue::Column(column) => { check(column)?; GraphSetValue::Column(column) }
+                GraphMutationValue::Column(column) => {
+                    check(column)?;
+                    GraphSetValue::Column(column)
+                }
                 GraphMutationValue::Literal(value) => GraphSetValue::Literal(value),
                 GraphMutationValue::Expression(expression) => {
-                    for column in expression.referenced_columns() { check(column)?; }
+                    for column in expression.referenced_columns() {
+                        check(column)?;
+                    }
                     GraphSetValue::Integer(expression)
                 }
             };
@@ -378,15 +526,18 @@ impl Properties {
             bytes.extend_from_slice(&key.0.to_be_bytes());
             match expression.value() {
                 GraphSetValue::Column(column) => {
-                    bytes.push(0); bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+                    bytes.push(0);
+                    bytes.extend_from_slice(&(*column as u64).to_be_bytes());
                 }
                 GraphSetValue::Literal(value) => {
-                    bytes.push(1); bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
+                    bytes.push(1);
+                    bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
                     bytes.extend_from_slice(value.canonical_bytes());
                 }
                 GraphSetValue::Integer(expression) => {
                     let expression = expression.canonical_bytes();
-                    bytes.push(2); bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
+                    bytes.push(2);
+                    bytes.extend_from_slice(&(expression.len() as u64).to_be_bytes());
                     bytes.extend_from_slice(&expression);
                 }
             }

@@ -6,17 +6,16 @@ use fgdb::{Database, DatabaseKeys, MemVfs, RelationBind, WriteBatch, WriteTxn};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
     GqlParameterSpec, GqlParameterType, GqlParameters, GqlQueryPolicy, GraphSymbol,
-    GraphSymbolKind, GraphWriteProgramPolicy, GraphWriteStatement,
-    PreparedGqlQuery, PreparedGraphAggregateText, PreparedGraphDeleteText,
-    PreparedGraphEdgeMergeText, PreparedGraphEdgeUpsertText, PreparedGraphInsertText,
-    PreparedGraphMutationText, PreparedGraphPipelineAggregateText, PreparedGraphSetText,
-    PreparedGraphText, PreparedGraphVertexMergeText, PreparedGraphVertexUpsertText,
-    PreparedGraphWriteProgram, PreparedGraphWriteScript, PreparedTemporalGraphText,
-    PreparedTemporalGraphSetText, PreparedTemporalGraphAggregateText,
+    GraphSymbolKind, GraphWriteProgramPolicy, GraphWriteStatement, PreparedGqlQuery,
+    PreparedGraphAggregateText, PreparedGraphDeleteText, PreparedGraphEdgeMergeText,
+    PreparedGraphEdgeUpsertText, PreparedGraphInsertText, PreparedGraphMutationText,
+    PreparedGraphPipelineAggregateText, PreparedGraphSetText, PreparedGraphText,
+    PreparedGraphVertexMergeText, PreparedGraphVertexUpsertText, PreparedGraphWriteProgram,
+    PreparedGraphWriteScript, PreparedTemporalGraphAggregateText, PreparedTemporalGraphSetText,
+    PreparedTemporalGraphText,
 };
 use fgdb_types::{
-    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts,
-    QueryCx, VId,
+    CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId,
 };
 use std::time::{Duration, Instant};
 
@@ -31,7 +30,11 @@ const L: LabelId = LabelId(1);
 const ITERATIONS: usize = 512;
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x61; 32], DatabaseSecurityNamespaceId([0x62; 32]), [0x63; 32])
+    DatabaseKeys::new(
+        [0x61; 32],
+        DatabaseSecurityNamespaceId([0x62; 32]),
+        [0x63; 32],
+    )
 }
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -46,20 +49,29 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 
 fn names() -> RelationBind {
-    RelationBind::new().with_relation("R", R).with_relation("S", S)
-        .with_property("p", P).with_property("q", Q).with_label("L", L)
+    RelationBind::new()
+        .with_relation("R", R)
+        .with_relation("S", S)
+        .with_property("p", P)
+        .with_property("q", Q)
+        .with_label("L", L)
 }
 
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 5_000_000, 5_000_000)
 }
 
-fn expect_typed<E: core::fmt::Debug>(err: &E) -> String { format!("{err:?}") }
+fn expect_typed<E: core::fmt::Debug>(err: &E) -> String {
+    format!("{err:?}")
+}
 
 fn typed<T, E: core::fmt::Debug>(result: Result<T, E>) -> Option<T> {
     match result {
         Ok(value) => Some(value),
-        Err(err) => { let _ = expect_typed(&err); None }
+        Err(err) => {
+            let _ = expect_typed(&err);
+            None
+        }
     }
 }
 
@@ -68,10 +80,17 @@ fn arguments(schema: &[GqlParameterSpec], variant: usize, frontier: u64) -> GqlP
     for spec in schema {
         args = match spec.parameter_type {
             GqlParameterType::Int64 => args.with_int64(&spec.name, [1, 0, -1, 5][variant % 4]),
-            GqlParameterType::UInt64 => args.with_uint64(&spec.name,
-                if spec.name == "at" { frontier } else { [1, 2, 5, 1][variant % 4] }),
+            GqlParameterType::UInt64 => args.with_uint64(
+                &spec.name,
+                if spec.name == "at" {
+                    frontier
+                } else {
+                    [1, 2, 5, 1][variant % 4]
+                },
+            ),
             GqlParameterType::Scalar(_) => args.with_null(&spec.name),
-        }.expect("generated parameter names originate in the admitted schema");
+        }
+        .expect("generated parameter names originate in the admitted schema");
     }
     args
 }
@@ -80,7 +99,10 @@ fn timed<T>(statement: &str, facade: &str, run: impl FnOnce() -> T) -> T {
     let start = Instant::now();
     let value = run();
     let elapsed = start.elapsed();
-    assert!(elapsed <= Duration::from_secs(5), "{facade} took {elapsed:?}: {statement}");
+    assert!(
+        elapsed <= Duration::from_secs(5),
+        "{facade} took {elapsed:?}: {statement}"
+    );
     value
 }
 
@@ -88,7 +110,11 @@ async fn seeded(commit: &CommitCx, variant: usize) -> Database<MemVfs> {
     let mut db = Database::open_memory(commit, keys()).await.unwrap();
     let mut left = WriteBatch::new(R);
     for vertex in 1..=5_u128 {
-        left.create_vertex(VId(vertex), vec![], vec![(P, CanonicalScalar::Int(vertex as i64))]);
+        left.create_vertex(
+            VId(vertex),
+            vec![],
+            vec![(P, CanonicalScalar::Int(vertex as i64))],
+        );
     }
     left.add_edge(EId(11), VId(1), VId(2), vec![]);
     left.add_edge(EId(12), VId(1), VId(2), vec![]);
@@ -104,15 +130,23 @@ async fn seeded(commit: &CommitCx, variant: usize) -> Database<MemVfs> {
             let mut batch = WriteBatch::new(relation);
             if relation == R {
                 for id in 6..=10_u128 {
-                    batch.create_vertex(VId(id), if rng.below(2) == 0 { vec![L] } else { vec![] },
-                        vec![(P, CanonicalScalar::Int(rng.below(11) as i64 - 5)),
-                             (Q, CanonicalScalar::Int(rng.below(5) as i64))]);
+                    batch.create_vertex(
+                        VId(id),
+                        if rng.below(2) == 0 { vec![L] } else { vec![] },
+                        vec![
+                            (P, CanonicalScalar::Int(rng.below(11) as i64 - 5)),
+                            (Q, CanonicalScalar::Int(rng.below(5) as i64)),
+                        ],
+                    );
                 }
             }
             for edge in 0..8_u128 {
-                batch.add_edge(EId(100 + u128::from(relation.0) * 10 + edge),
-                    VId(1 + rng.below(10) as u128), VId(1 + rng.below(10) as u128),
-                    vec![(P, CanonicalScalar::Int(rng.below(5) as i64))]);
+                batch.add_edge(
+                    EId(100 + u128::from(relation.0) * 10 + edge),
+                    VId(1 + rng.below(10) as u128),
+                    VId(1 + rng.below(10) as u128),
+                    vec![(P, CanonicalScalar::Int(rng.below(5) as i64))],
+                );
             }
             db.write(commit, batch).await.unwrap();
         }
@@ -120,8 +154,13 @@ async fn seeded(commit: &CommitCx, variant: usize) -> Database<MemVfs> {
     db
 }
 
-fn execute_reads(db: &Database<MemVfs>, cx: &QueryCx, statement: &str, variant: usize,
-    coverage: &mut [usize; 15]) {
+fn execute_reads(
+    db: &Database<MemVfs>,
+    cx: &QueryCx,
+    statement: &str,
+    variant: usize,
+    coverage: &mut [usize; 15],
+) {
     let frontier = db.frontier().unwrap().0;
     macro_rules! read_facade {
         ($slot:expr, $facade:ty, $execute:ident) => {
@@ -129,34 +168,61 @@ fn execute_reads(db: &Database<MemVfs>, cx: &QueryCx, statement: &str, variant: 
                 let args = arguments(template.parameter_schema(), variant, frontier);
                 if let Some(query) = typed(template.bind_parameters(&args)) {
                     coverage[$slot] += 1;
-                    let _ = timed(statement, stringify!($facade), ||
-                        typed(db.$execute(cx, &query, policy())));
+                    let _ = timed(statement, stringify!($facade), || {
+                        typed(db.$execute(cx, &query, policy()))
+                    });
                 }
             }
         };
     }
     read_facade!(0, PreparedGraphText, execute_graph_pattern_governed);
-    read_facade!(1, PreparedGraphAggregateText, execute_graph_aggregate_governed);
+    read_facade!(
+        1,
+        PreparedGraphAggregateText,
+        execute_graph_aggregate_governed
+    );
     read_facade!(2, PreparedGraphSetText, execute_graph_set_governed);
-    read_facade!(3, PreparedGraphPipelineAggregateText, execute_graph_aggregate_governed);
-    read_facade!(4, PreparedTemporalGraphText, execute_temporal_graph_text_governed);
-    read_facade!(5, PreparedTemporalGraphSetText, execute_temporal_graph_set_text_governed);
-    read_facade!(6, PreparedTemporalGraphAggregateText, execute_temporal_graph_aggregate_text_governed);
+    read_facade!(
+        3,
+        PreparedGraphPipelineAggregateText,
+        execute_graph_aggregate_governed
+    );
+    read_facade!(
+        4,
+        PreparedTemporalGraphText,
+        execute_temporal_graph_text_governed
+    );
+    read_facade!(
+        5,
+        PreparedTemporalGraphSetText,
+        execute_temporal_graph_set_text_governed
+    );
+    read_facade!(
+        6,
+        PreparedTemporalGraphAggregateText,
+        execute_temporal_graph_aggregate_text_governed
+    );
     // Keep the original numeric facade in the sweep, but never substitute it for text facades.
     if let Some(query) = typed(PreparedGqlQuery::prepare(statement, &names())) {
-        let _ = timed(statement, "PreparedGqlQuery", ||
-            typed(db.execute_prepared_query_governed(cx, &query, policy())));
+        let _ = timed(statement, "PreparedGqlQuery", || {
+            typed(db.execute_prepared_query_governed(cx, &query, policy()))
+        });
     }
 }
 
 fn write_policy() -> GraphWriteProgramPolicy {
-    GraphWriteProgramPolicy::new(GqlQueryPolicy::new(20_000, 20_000, 2_000_000, 2_000_000),
-        128, 128, 128)
+    GraphWriteProgramPolicy::new(
+        GqlQueryPolicy::new(20_000, 20_000, 2_000_000, 2_000_000),
+        128,
+        128,
+        128,
+    )
 }
 
-fn allocate(next: &mut u128, request: fgdb_gql::GraphWriteIdentityRequest)
-    -> Result<ElementId, ()>
-{
+fn allocate(
+    next: &mut u128,
+    request: fgdb_gql::GraphWriteIdentityRequest,
+) -> Result<ElementId, ()> {
     let id = *next;
     *next = next.checked_add(1).ok_or(())?;
     Ok(match request.request {
@@ -165,17 +231,35 @@ fn allocate(next: &mut u128, request: fgdb_gql::GraphWriteIdentityRequest)
     })
 }
 
-fn execute_bound<T: Into<GraphWriteStatement>>(txn: &mut WriteTxn,
-    db: &mut Database<MemVfs>, cx: &QueryCx, bound: T, next: &mut u128, statement: &str)
-{
+fn execute_bound<T: Into<GraphWriteStatement>>(
+    txn: &mut WriteTxn,
+    db: &mut Database<MemVfs>,
+    cx: &QueryCx,
+    bound: T,
+    next: &mut u128,
+    statement: &str,
+) {
     let program = typed(PreparedGraphWriteProgram::prepare(vec![bound.into()]))
         .expect("one bound statement is a valid program");
-    let _ = timed(statement, "write program", || typed(txn.execute_graph_write_program_governed(
-        db, cx, &program, write_policy(), |request| allocate(next, request))));
+    let _ = timed(statement, "write program", || {
+        typed(txn.execute_graph_write_program_governed(
+            db,
+            cx,
+            &program,
+            write_policy(),
+            |request| allocate(next, request),
+        ))
+    });
 }
 
-fn execute_writes(txn: &mut WriteTxn, db: &mut Database<MemVfs>, cx: &QueryCx,
-    statement: &str, next: &mut u128, coverage: &mut [usize; 15]) {
+fn execute_writes(
+    txn: &mut WriteTxn,
+    db: &mut Database<MemVfs>,
+    cx: &QueryCx,
+    statement: &str,
+    next: &mut u128,
+    coverage: &mut [usize; 15],
+) {
     macro_rules! write_facade {
         ($slot:expr, $facade:ty) => {
             if let Some(prepared) = typed(<$facade>::prepare(statement, R, symbols)) {
@@ -198,8 +282,16 @@ fn execute_writes(txn: &mut WriteTxn, db: &mut Database<MemVfs>, cx: &QueryCx,
     if let Some(script) = typed(PreparedGraphWriteScript::prepare(statement, R, symbols)) {
         let args = arguments(script.parameter_schema(), 0, 0);
         coverage[14] += 1;
-        let _ = timed(statement, "script", || typed(txn.execute_graph_write_script_governed(
-            db, cx, &script, &args, write_policy(), |request| allocate(next, request))));
+        let _ = timed(statement, "script", || {
+            typed(txn.execute_graph_write_script_governed(
+                db,
+                cx,
+                &script,
+                &args,
+                write_policy(),
+                |request| allocate(next, request),
+            ))
+        });
     }
 }
 
@@ -215,26 +307,38 @@ const WITNESS_SEEDS: [&str; 8] = [
     "MATCH (a),(b) MERGE (a)-[e:R]->(b) ON MATCH SET e.p=1 ON CREATE SET e.q=2",
 ];
 
-fn sweep(corpus: impl IntoIterator<Item = String>, label: &str,
-    variant_seed: impl Fn(usize) -> usize, require_coverage: bool) {
+fn sweep(
+    corpus: impl IntoIterator<Item = String>,
+    label: &str,
+    variant_seed: impl Fn(usize) -> usize,
+    require_coverage: bool,
+) {
     let mut totals = [0_usize; 15];
     for (i, statement) in corpus.into_iter().enumerate() {
         let variant = variant_seed(i);
-        let (executed, report) = run_async_under_lab(0x46_55_5A_31 + i as u64, move |root| async move {
-            let contexts = PurposeContexts::narrow_runtime_root(&root);
-            let commit = contexts.commit();
-            let query = contexts.query();
-            let txn_cx = contexts.txn();
-            let mut db = seeded(&commit, variant).await;
-            let mut coverage = [0_usize; 15];
-            execute_reads(&db, &query, &statement, variant, &mut coverage);
-            let mut next = 10_000_u128;
-            let mut txn = db.begin(&txn_cx).unwrap();
-            execute_writes(&mut txn, &mut db, &query, &statement, &mut next, &mut coverage);
-            txn.abort();
-            assert_eq!(txn_cx.outstanding_obligations(), 0);
-            coverage
-        });
+        let (executed, report) =
+            run_async_under_lab(0x46_55_5A_31 + i as u64, move |root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let query = contexts.query();
+                let txn_cx = contexts.txn();
+                let mut db = seeded(&commit, variant).await;
+                let mut coverage = [0_usize; 15];
+                execute_reads(&db, &query, &statement, variant, &mut coverage);
+                let mut next = 10_000_u128;
+                let mut txn = db.begin(&txn_cx).unwrap();
+                execute_writes(
+                    &mut txn,
+                    &mut db,
+                    &query,
+                    &statement,
+                    &mut next,
+                    &mut coverage,
+                );
+                txn.abort();
+                assert_eq!(txn_cx.outstanding_obligations(), 0);
+                coverage
+            });
         assert!(report.lab_test_passed(), "{label} #{i}: {report:?}");
         for slot in 0..15 {
             totals[slot] += executed[slot];
@@ -242,7 +346,10 @@ fn sweep(corpus: impl IntoIterator<Item = String>, label: &str,
     }
     if require_coverage {
         for (slot, count) in totals.iter().enumerate() {
-            assert!(*count > 0, "{label}: facade slot {slot} never executed; corpus needs a sample");
+            assert!(
+                *count > 0,
+                "{label}: facade slot {slot} never executed; corpus needs a sample"
+            );
         }
     }
 }

@@ -20,11 +20,17 @@ pub struct GraphPath {
 }
 
 impl GraphPath {
-    pub(crate) fn new(start: VId, steps: Box<[(EId, VId)]>) -> Self { Self { start, steps } }
+    pub(crate) fn new(start: VId, steps: Box<[(EId, VId)]>) -> Self {
+        Self { start, steps }
+    }
     #[must_use]
-    pub fn start(&self) -> VId { self.start }
+    pub fn start(&self) -> VId {
+        self.start
+    }
     #[must_use]
-    pub fn steps(&self) -> &[(EId, VId)] { &self.steps }
+    pub fn steps(&self) -> &[(EId, VId)] {
+        &self.steps
+    }
     #[must_use]
     pub fn nodes(&self) -> impl Iterator<Item = VId> + '_ {
         core::iter::once(self.start).chain(self.steps.iter().map(|(_, vertex)| *vertex))
@@ -34,13 +40,22 @@ impl GraphPath {
         self.steps.iter().map(|(edge, _)| *edge)
     }
     #[must_use]
-    pub fn len(&self) -> usize { self.steps.len() }
+    pub fn len(&self) -> usize {
+        self.steps.len()
+    }
     #[must_use]
-    pub fn is_empty(&self) -> bool { self.steps.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum GraphPathFunction { Value, Length, Nodes, Edges }
+pub enum GraphPathFunction {
+    Value,
+    Length,
+    Nodes,
+    Edges,
+}
 
 /// Preparation-only column declarations. Names are checked before being owned
 /// by a prepared pattern. The caller already resolved property key identities.
@@ -65,7 +80,11 @@ pub enum GraphColumn<'a> {
 impl<'a> GraphColumn<'a> {
     #[must_use]
     pub const fn path(name: &'a str, variable: &'a str, function: GraphPathFunction) -> Self {
-        Self::Path { name, variable, function }
+        Self::Path {
+            name,
+            variable,
+            function,
+        }
     }
     #[must_use]
     pub const fn vertex(name: &'a str, variable: &'a str) -> Self {
@@ -84,13 +103,17 @@ impl<'a> GraphColumn<'a> {
     #[must_use]
     pub const fn name(self) -> &'a str {
         match self {
-            Self::Vertex { name, .. } | Self::Property { name, .. } | Self::Path { name, .. } => name,
+            Self::Vertex { name, .. } | Self::Property { name, .. } | Self::Path { name, .. } => {
+                name
+            }
         }
     }
 
     pub(super) const fn variable(self) -> &'a str {
         match self {
-            Self::Vertex { variable, .. } | Self::Property { variable, .. } | Self::Path { variable, .. } => variable,
+            Self::Vertex { variable, .. }
+            | Self::Property { variable, .. }
+            | Self::Path { variable, .. } => variable,
         }
     }
 }
@@ -113,7 +136,10 @@ pub enum ValueProjection {
         slot: BindingSlot,
         key: PropertyKeyId,
     },
-    Path { capture: u32, function: GraphPathFunction },
+    Path {
+        capture: u32,
+        function: GraphPathFunction,
+    },
 }
 
 /// Scalar values retain their exact canonical type, collation and time binding.
@@ -148,7 +174,10 @@ impl GraphValue {
 
     #[must_use]
     pub fn as_path(&self) -> Option<&GraphPath> {
-        match self { Self::Path(value) => Some(value), _ => None }
+        match self {
+            Self::Path(value) => Some(value),
+            _ => None,
+        }
     }
     #[must_use]
     pub fn is_null(&self) -> bool {
@@ -181,7 +210,9 @@ impl GraphValueRow {
     /// and per-cell/payload reservations. It is not a public unchecked row API.
     pub(crate) fn from_owned_values(values: Vec<GraphValue>) -> Self {
         debug_assert!(!values.is_empty() && values.len() <= MAX_PATTERN_VERTICES);
-        Self { values: values.into_boxed_slice() }
+        Self {
+            values: values.into_boxed_slice(),
+        }
     }
 
     #[must_use]
@@ -338,11 +369,17 @@ pub(super) fn collect_values_with_paths<'a, E>(
     let null = CanonicalScalar::Null;
     let mut computed: [Option<GraphValue>; MAX_PATTERN_VERTICES] = core::array::from_fn(|_| None);
     for (at, column) in columns.iter().enumerate() {
-        let ValueProjection::Path { capture, function } = column else { continue; };
-        let Some(path) = paths.get(*capture as usize).and_then(Option::as_ref) else { continue; };
+        let ValueProjection::Path { capture, function } = column else {
+            continue;
+        };
+        let Some(path) = paths.get(*capture as usize).and_then(Option::as_ref) else {
+            continue;
+        };
         computed[at] = match function {
             GraphPathFunction::Value => None,
-            GraphPathFunction::Length => Some(GraphValue::Scalar(CanonicalScalar::Int(path.len() as i64))),
+            GraphPathFunction::Length => {
+                Some(GraphValue::Scalar(CanonicalScalar::Int(path.len() as i64)))
+            }
             GraphPathFunction::Nodes => {
                 for _ in 0..=path.len() {
                     control(GlaExecutionEvent::Work)?;
@@ -377,8 +414,10 @@ pub(super) fn collect_values_with_paths<'a, E>(
             }
             ValueProjection::Path { capture, function } => {
                 match (function, computed[at].as_ref()) {
-                    (GraphPathFunction::Value, _) => paths.get(*capture as usize)
-                        .and_then(Option::as_ref).map_or(ValueRef::Scalar(&null), ValueRef::Path),
+                    (GraphPathFunction::Value, _) => paths
+                        .get(*capture as usize)
+                        .and_then(Option::as_ref)
+                        .map_or(ValueRef::Scalar(&null), ValueRef::Path),
                     (_, Some(GraphValue::Scalar(value))) => ValueRef::Scalar(value),
                     (_, Some(GraphValue::Vertices(value))) => ValueRef::Vertices(value),
                     (_, Some(GraphValue::Edges(value))) => ValueRef::Edges(value),
@@ -401,7 +440,9 @@ pub(super) fn collect_values_with_paths<'a, E>(
     let mut values = Vec::new();
     for at in 0..columns.len() {
         control(GlaExecutionEvent::ScratchEntry)?;
-        if computed[at].is_some() { continue; }
+        if computed[at].is_some() {
+            continue;
+        }
         for _ in 0..key[at].payload_units() {
             control(GlaExecutionEvent::ScratchEntry)?;
         }
@@ -413,7 +454,12 @@ pub(super) fn collect_values_with_paths<'a, E>(
         }
     }
     for at in 0..columns.len() {
-        values.push(copied[at].take().or_else(|| computed[at].take()).expect("resolved cell"));
+        values.push(
+            copied[at]
+                .take()
+                .or_else(|| computed[at].take())
+                .expect("resolved cell"),
+        );
     }
     projected.insert_value(GraphValueRow {
         values: values.into_boxed_slice(),

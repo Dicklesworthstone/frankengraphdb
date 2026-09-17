@@ -18,9 +18,15 @@ pub const MAX_GRAPH_WRITE_SCRIPT_BYTES: usize =
 
 #[derive(Debug)]
 pub enum GraphWriteScriptErrorKind {
-    DefinitionTooLarge { limit: usize, observed: usize },
+    DefinitionTooLarge {
+        limit: usize,
+        observed: usize,
+    },
     EmptyStatement,
-    TooManyStatements { limit: usize, observed: usize },
+    TooManyStatements {
+        limit: usize,
+        observed: usize,
+    },
     Syntax(GraphPatternTextErrorKind),
     /// Native statement preparation, parameter binding or program-schema error.
     /// Nested statement offsets remain local; the enclosing offset is global.
@@ -54,8 +60,16 @@ impl core::error::Error for GraphWriteScriptError {
     }
 }
 impl GraphWriteScriptError {
-    pub(crate) fn syntax(statement: Option<usize>, base: usize, source: GraphPatternTextError) -> Self {
-        Self { statement, offset: base + source.offset, kind: GraphWriteScriptErrorKind::Syntax(source.kind) }
+    pub(crate) fn syntax(
+        statement: Option<usize>,
+        base: usize,
+        source: GraphPatternTextError,
+    ) -> Self {
+        Self {
+            statement,
+            offset: base + source.offset,
+            kind: GraphWriteScriptErrorKind::Syntax(source.kind),
+        }
     }
 
     pub(crate) fn program(spans: &[Range<usize>], source: GraphWriteProgramTemplateError) -> Self {
@@ -70,16 +84,20 @@ impl GraphWriteScriptError {
             W::DeleteBind { statement, source } => Some((*statement, source.offset)),
             W::Program(M::Bind { statement, source }) => Some((*statement, source.offset)),
             W::Program(M::ConflictingParameterTypes { statement, .. })
-            | W::Program(M::Definition(GraphMutationProgramBuildError::MixedRelation { statement })) => {
-                Some((*statement, 0))
-            }
+            | W::Program(M::Definition(GraphMutationProgramBuildError::MixedRelation {
+                statement,
+            })) => Some((*statement, 0)),
             W::Program(M::Definition(_) | M::UnexpectedArguments) => None,
         };
         let (statement, offset) = match location {
             Some((statement, offset)) => (Some(statement), spans[statement].start + offset),
             None => (None, 0),
         };
-        Self { statement, offset, kind: GraphWriteScriptErrorKind::Program(source) }
+        Self {
+            statement,
+            offset,
+            kind: GraphWriteScriptErrorKind::Program(source),
+        }
     }
 }
 
@@ -102,8 +120,8 @@ pub enum GraphWriteScriptExecutionError<E, A, C> {
     },
 }
 
-impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
-    core::fmt::Display for GraphWriteScriptExecutionError<E, A, C>
+impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display> core::fmt::Display
+    for GraphWriteScriptExecutionError<E, A, C>
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -112,16 +130,25 @@ impl<E: core::fmt::Display, A: core::fmt::Display, C: core::fmt::Display>
             Self::BatchBinding(source) => source.fmt(f),
             Self::BatchProgram { location, source } => {
                 if let Some(location) = location {
-                    write!(f, "graph write script batch argument set {}, statement {} at bytes {}..{}: ",
-                        location.argument_set, location.statement, location.span.start, location.span.end)?;
+                    write!(
+                        f,
+                        "graph write script batch argument set {}, statement {} at bytes {}..{}: ",
+                        location.argument_set,
+                        location.statement,
+                        location.span.start,
+                        location.span.end
+                    )?;
                 }
                 source.fmt(f)
             }
         }
     }
 }
-impl<E: core::error::Error + 'static, A: core::error::Error + 'static,
-    C: core::error::Error + 'static> core::error::Error for GraphWriteScriptExecutionError<E, A, C>
+impl<
+    E: core::error::Error + 'static,
+    A: core::error::Error + 'static,
+    C: core::error::Error + 'static,
+> core::error::Error for GraphWriteScriptExecutionError<E, A, C>
 {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
@@ -162,22 +189,30 @@ impl core::fmt::Debug for PreparedGraphWriteScript {
 }
 impl PreparedGraphWriteScript {
     #[must_use]
-    pub fn script(&self) -> &str { &self.script }
+    pub fn script(&self) -> &str {
+        &self.script
+    }
     #[must_use]
-    pub fn statements(&self) -> &[GraphWriteTemplateStatement] { self.program.statements() }
+    pub fn statements(&self) -> &[GraphWriteTemplateStatement] {
+        self.program.statements()
+    }
     #[must_use]
     pub fn statement_span(&self, statement: usize) -> Option<Range<usize>> {
         self.spans.get(statement).cloned()
     }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { self.program.parameter_schema() }
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        self.program.parameter_schema()
+    }
 
     /// No reparsing, catalog access, identity allocation, database observation
     /// or staging. A failure discards every already-bound private statement.
-    pub fn bind_parameters(&self, arguments: &GqlParameters)
-        -> Result<PreparedGraphWriteProgram, GraphWriteScriptError>
-    {
-        self.program.bind_parameters(arguments)
+    pub fn bind_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<PreparedGraphWriteProgram, GraphWriteScriptError> {
+        self.program
+            .bind_parameters(arguments)
             .map_err(|source| GraphWriteScriptError::program(&self.spans, source))
     }
 }
@@ -187,18 +222,33 @@ impl PreparedGraphWriteScript {
 #[derive(Debug)]
 pub enum GraphWriteScriptBatchError {
     Empty,
-    TooManyStatements { limit: usize, observed: u128 },
-    Arguments { argument_set: usize, source: GraphWriteScriptError },
+    TooManyStatements {
+        limit: usize,
+        observed: u128,
+    },
+    Arguments {
+        argument_set: usize,
+        source: GraphWriteScriptError,
+    },
     Definition(GraphMutationProgramBuildError),
 }
 impl core::fmt::Display for GraphWriteScriptBatchError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Empty => f.write_str("graph write script batch requires at least one argument set"),
-            Self::TooManyStatements { limit, observed } =>
-                write!(f, "graph write script batch expands to {observed} statements; limit {limit}"),
-            Self::Arguments { argument_set, source } =>
-                write!(f, "graph write script batch argument set {argument_set}: {source}"),
+            Self::Empty => {
+                f.write_str("graph write script batch requires at least one argument set")
+            }
+            Self::TooManyStatements { limit, observed } => write!(
+                f,
+                "graph write script batch expands to {observed} statements; limit {limit}"
+            ),
+            Self::Arguments {
+                argument_set,
+                source,
+            } => write!(
+                f,
+                "graph write script batch argument set {argument_set}: {source}"
+            ),
             Self::Definition(source) => source.fmt(f),
         }
     }
@@ -249,11 +299,17 @@ impl core::fmt::Debug for BoundGraphWriteScriptBatch {
 }
 impl BoundGraphWriteScriptBatch {
     #[must_use]
-    pub fn program(&self) -> &PreparedGraphWriteProgram { &self.program }
+    pub fn program(&self) -> &PreparedGraphWriteProgram {
+        &self.program
+    }
     #[must_use]
-    pub fn into_program(self) -> PreparedGraphWriteProgram { self.program }
+    pub fn into_program(self) -> PreparedGraphWriteProgram {
+        self.program
+    }
     #[must_use]
-    pub const fn argument_sets(&self) -> usize { self.argument_sets }
+    pub const fn argument_sets(&self) -> usize {
+        self.argument_sets
+    }
 
     /// Locate a failure without changing its typed source or commit outcome.
     /// Boundary indices at/after the full program length have no input record.
@@ -273,9 +329,15 @@ impl BoundGraphWriteScriptBatch {
             | W::EdgeUpsert { statement, .. }
             | W::Delete { statement, .. }
             | W::CreationBudget { statement, .. }
-            | W::Program(M::Statement { statement, .. }
-                | M::Budget { statement, .. } | M::InvalidStatistics { statement }) => Some(*statement),
-            W::Program(M::Interrupted { completed_statements, .. }) => Some(*completed_statements),
+            | W::Program(
+                M::Statement { statement, .. }
+                | M::Budget { statement, .. }
+                | M::InvalidStatistics { statement },
+            ) => Some(*statement),
+            W::Program(M::Interrupted {
+                completed_statements,
+                ..
+            }) => Some(*completed_statements),
             W::Program(M::Preflight(_)) => None,
         };
         GraphWriteScriptExecutionError::BatchProgram {
@@ -304,14 +366,18 @@ impl BoundGraphWriteScriptBatch {
     /// The corresponding contiguous slice of a successful program receipt.
     #[must_use]
     pub fn statement_range(&self, argument_set: usize) -> Option<Range<usize>> {
-        if argument_set >= self.argument_sets { return None; }
+        if argument_set >= self.argument_sets {
+            return None;
+        }
         let start = argument_set * self.spans.len();
         Some(start..start + self.spans.len())
     }
 
     #[must_use]
     pub fn location(&self, flat_statement: usize) -> Option<GraphWriteScriptBatchLocation> {
-        if flat_statement >= self.program.statements().len() { return None; }
+        if flat_statement >= self.program.statements().len() {
+            return None;
+        }
         let statement = flat_statement % self.spans.len();
         Some(GraphWriteScriptBatchLocation {
             argument_set: flat_statement / self.spans.len(),
@@ -326,9 +392,10 @@ impl PreparedGraphWriteScript {
     /// Admission of the expanded statement count precedes all value binding.
     /// Any invalid record discards the entire private bound prefix. No parsing,
     /// catalog access, identity allocation, database read or mutation occurs.
-    pub fn bind_parameter_sets(&self, arguments: &[GqlParameters])
-        -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptBatchError>
-    {
+    pub fn bind_parameter_sets(
+        &self,
+        arguments: &[GqlParameters],
+    ) -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptBatchError> {
         self.bind_parameter_sets_with_limit(arguments, crate::MAX_GRAPH_MUTATION_STATEMENTS)
     }
 
@@ -353,7 +420,9 @@ impl PreparedGraphWriteScript {
         arguments: &[GqlParameters],
         max_statements: usize,
     ) -> Result<BoundGraphWriteScriptBatch, GraphWriteScriptBatchError> {
-        if arguments.is_empty() { return Err(GraphWriteScriptBatchError::Empty); }
+        if arguments.is_empty() {
+            return Err(GraphWriteScriptBatchError::Empty);
+        }
         let observed = arguments.len() as u128 * self.spans.len() as u128;
         let limit = max_statements.min(Self::MAX_BATCH_STATEMENTS);
         if observed > limit as u128 {
@@ -361,14 +430,20 @@ impl PreparedGraphWriteScript {
         }
         let mut statements = Vec::with_capacity(observed as usize);
         for (argument_set, values) in arguments.iter().enumerate() {
-            let program = self.bind_parameters(values)
-                .map_err(|source| GraphWriteScriptBatchError::Arguments { argument_set, source })?;
+            let program = self.bind_parameters(values).map_err(|source| {
+                GraphWriteScriptBatchError::Arguments {
+                    argument_set,
+                    source,
+                }
+            })?;
             statements.extend(program.into_statements().into_vec());
         }
         let program = PreparedGraphWriteProgram::prepare_with_statement_limit(statements, limit)
             .map_err(GraphWriteScriptBatchError::Definition)?;
         Ok(BoundGraphWriteScriptBatch {
-            program, argument_sets: arguments.len(), spans: self.spans.clone(),
+            program,
+            argument_sets: arguments.len(),
+            spans: self.spans.clone(),
         })
     }
 }

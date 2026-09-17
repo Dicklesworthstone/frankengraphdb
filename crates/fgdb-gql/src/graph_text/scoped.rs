@@ -144,13 +144,14 @@ fn resolve_pattern_with_captures<'a>(
                 edge.destination.text,
                 bounds,
             ),
-            Some(bounds) if edge.search == GraphWalkSearch::AnyShortest => builder.any_shortest_walk(
-                edge.source.text,
-                relation,
-                edge.direction,
-                edge.destination.text,
-                bounds,
-            ),
+            Some(bounds) if edge.search == GraphWalkSearch::AnyShortest => builder
+                .any_shortest_walk(
+                    edge.source.text,
+                    relation,
+                    edge.direction,
+                    edge.destination.text,
+                    bounds,
+                ),
             Some(bounds) if edge.search == GraphWalkSearch::Acyclic => builder.acyclic_walk(
                 edge.source.text,
                 relation,
@@ -187,13 +188,26 @@ fn resolve_pattern_with_captures<'a>(
             Filter::PathCapture(name) => {
                 built(name.at, builder.capture_path(name.text))?;
             }
-            Filter::PathLength { variable, comparison, value } => {
+            Filter::PathLength {
+                variable,
+                comparison,
+                value,
+            } => {
                 numeric.push(BoundFilter::PathLength {
-                    variable: variable.text.to_owned(), comparison, value,
+                    variable: variable.text.to_owned(),
+                    comparison,
+                    value,
                 });
             }
-            Filter::PathNull { variable, function, is_null } => {
-                built(variable.at, builder.filter_path_null(variable.text, function, is_null))?;
+            Filter::PathNull {
+                variable,
+                function,
+                is_null,
+            } => {
+                built(
+                    variable.at,
+                    builder.filter_path_null(variable.text, function, is_null),
+                )?;
             }
             Filter::Boolean { program, at } => {
                 numeric.push(BoundFilter::Boolean(
@@ -295,7 +309,12 @@ pub(super) fn bind_builder(
 ) -> Result<GraphPatternBuilder, GraphPatternTextError> {
     let mut builder = builder.clone();
     for filter in filters {
-        if let BoundFilter::PathLength { variable, comparison, value } = filter {
+        if let BoundFilter::PathLength {
+            variable,
+            comparison,
+            value,
+        } = filter
+        {
             let GqlParameterValue::Int64(value) = value.value(values) else {
                 unreachable!("path length arguments were type-checked at preparation")
             };
@@ -348,30 +367,40 @@ fn predicate_captures<'a>(
     while let Some(filter) = pending.pop() {
         let names = match filter {
             Filter::PathCapture(_) | Filter::PathLength { .. } | Filter::PathNull { .. } => {
-                return Err(error(0, GraphPatternTextErrorKind::Expected("root path predicate")));
+                return Err(error(
+                    0,
+                    GraphPatternTextErrorKind::Expected("root path predicate"),
+                ));
             }
             Filter::Boolean { program, .. } => {
                 for item in program.iter().rev() {
-                    if let boolean::SyntaxItem::Atom(atom) = item { pending.push(atom); }
+                    if let boolean::SyntaxItem::Atom(atom) = item {
+                        pending.push(atom);
+                    }
                 }
                 continue;
             }
             Filter::Properties { left, right, .. } | Filter::Identity { left, right, .. } => {
                 [Some(*left), Some(*right)]
             }
-            Filter::VertexNull { variable, .. } | Filter::Property { variable, .. }
-            | Filter::Scalar { variable, .. } | Filter::Null { variable, .. } => {
-                [Some(*variable), None]
-            }
+            Filter::VertexNull { variable, .. }
+            | Filter::Property { variable, .. }
+            | Filter::Scalar { variable, .. }
+            | Filter::Null { variable, .. } => [Some(*variable), None],
         };
         for name in names.into_iter().flatten() {
-            if variables.iter().any(|variable| variable.text == name.text) { continue; }
+            if variables.iter().any(|variable| variable.text == name.text) {
+                continue;
+            }
             if variables.len() == MAX_PATTERN_VERTICES {
-                return Err(error(name.at, GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
-                    dimension: crate::algebra::PatternLimitDimension::Vertices,
-                    limit: MAX_PATTERN_VERTICES,
-                    observed: variables.len() + 1,
-                })));
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                        dimension: crate::algebra::PatternLimitDimension::Vertices,
+                        limit: MAX_PATTERN_VERTICES,
+                        observed: variables.len() + 1,
+                    }),
+                ));
             }
             variables.push(name);
             captures.push(name);
@@ -441,7 +470,10 @@ impl<'a> Parser<'a> {
         } else {
             GraphWalkSearch::All
         };
-        let shortest = matches!(search, GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest);
+        let shortest = matches!(
+            search,
+            GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest
+        );
         let restricted = matches!(search, GraphWalkSearch::Acyclic | GraphWalkSearch::Simple);
         let selected = shortest || restricted;
         let walk_mode = if shortest {
@@ -453,8 +485,11 @@ impl<'a> Parser<'a> {
         } else {
             self.take_word("WALK")?
         };
-        let expected_atom = if restricted { "one finite quantified ACYCLIC or SIMPLE atom" }
-            else { "one bounded atom in shortest WALK" };
+        let expected_atom = if restricted {
+            "one finite quantified ACYCLIC or SIMPLE atom"
+        } else {
+            "one bounded atom in shortest WALK"
+        };
         let first_edge = self.syntax.edges.len();
         loop {
             let mut left = self.node()?;
@@ -462,7 +497,10 @@ impl<'a> Parser<'a> {
                 // No per-atom substitution for a whole-pattern restriction or
                 // shortest-total-length selection across a compound pattern.
                 if selected && self.syntax.edges.len() != first_edge {
-                    return Err(error(self.current.at, GraphPatternTextErrorKind::Expected(expected_atom)));
+                    return Err(error(
+                        self.current.at,
+                        GraphPatternTextErrorKind::Expected(expected_atom),
+                    ));
                 }
                 self.capacity(
                     self.edge_count,
@@ -477,9 +515,14 @@ impl<'a> Parser<'a> {
                 let bound_at = self.current.at;
                 let walk = self.pattern_walk_bounds(walk_mode)?;
                 if selected && walk.is_none() {
-                    return Err(error(bound_at, GraphPatternTextErrorKind::Expected(
-                        if restricted { expected_atom } else { "finite quantified atom in shortest WALK" },
-                    )));
+                    return Err(error(
+                        bound_at,
+                        GraphPatternTextErrorKind::Expected(if restricted {
+                            expected_atom
+                        } else {
+                            "finite quantified atom in shortest WALK"
+                        }),
+                    ));
                 }
                 self.punct(b']', "]")?;
                 self.punct(b'-', "-")?;
@@ -509,14 +552,20 @@ impl<'a> Parser<'a> {
                 left = right;
             }
             if selected && self.is_punct(b',') {
-                return Err(error(self.current.at, GraphPatternTextErrorKind::Expected(expected_atom)));
+                return Err(error(
+                    self.current.at,
+                    GraphPatternTextErrorKind::Expected(expected_atom),
+                ));
             }
             if !self.take(b',')? {
                 break;
             }
         }
         if selected && self.syntax.edges.len() == first_edge {
-            return Err(error(selector_at, GraphPatternTextErrorKind::Expected(expected_atom)));
+            return Err(error(
+                selector_at,
+                GraphPatternTextErrorKind::Expected(expected_atom),
+            ));
         }
         Ok(())
     }
@@ -551,7 +600,9 @@ impl<'a> Parser<'a> {
         if !enabled {
             return Err(error(
                 at,
-                GraphPatternTextErrorKind::Expected("explicit MATCH WALK, ACYCLIC or SIMPLE for quantified atoms"),
+                GraphPatternTextErrorKind::Expected(
+                    "explicit MATCH WALK, ACYCLIC or SIMPLE for quantified atoms",
+                ),
             ));
         }
         let (minimum, maximum) = if self.take(b'.')? {
@@ -649,18 +700,24 @@ impl<'a> Parser<'a> {
     }
 
     fn starts_path_predicate(&self) -> Result<bool, GraphPatternTextError> {
-        let TokenKind::Word(word) = self.current.kind else { return Ok(false); };
+        let TokenKind::Word(word) = self.current.kind else {
+            return Ok(false);
+        };
         if self.syntax.path.is_some_and(|path| path.text == word) {
             return Ok(true);
         }
-        Ok((word.eq_ignore_ascii_case("path_length") || word.eq_ignore_ascii_case("nodes")
+        Ok((word.eq_ignore_ascii_case("path_length")
+            || word.eq_ignore_ascii_case("nodes")
             || word.eq_ignore_ascii_case("edges"))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
     }
 
     fn path_predicate(&mut self) -> Result<(), GraphPatternTextError> {
-        self.capacity(self.predicates, MAX_PATTERN_PREDICATES,
-            crate::algebra::PatternLimitDimension::Predicates)?;
+        self.capacity(
+            self.predicates,
+            MAX_PATTERN_PREDICATES,
+            crate::algebra::PatternLimitDimension::Predicates,
+        )?;
         let expression = self.name()?;
         let (variable, function) = if self.take(b'(')? {
             let function = Self::path_function(expression)?;
@@ -673,14 +730,25 @@ impl<'a> Parser<'a> {
         let filter = if self.take_word("IS")? {
             let is_null = !self.take_word("NOT")?;
             self.word("NULL")?;
-            Filter::PathNull { variable, function, is_null }
+            Filter::PathNull {
+                variable,
+                function,
+                is_null,
+            }
         } else {
             if function != GraphPathFunction::Length {
-                return Err(error(expression.at, GraphPatternTextErrorKind::Expected("path IS [NOT] NULL")));
+                return Err(error(
+                    expression.at,
+                    GraphPatternTextErrorKind::Expected("path IS [NOT] NULL"),
+                ));
             }
             let comparison = self.comparison()?;
             let value = self.number(GqlParameterType::Int64)?;
-            Filter::PathLength { variable, comparison, value }
+            Filter::PathLength {
+                variable,
+                comparison,
+                value,
+            }
         };
         self.syntax.filters.push(filter);
         self.predicates += 1;
@@ -770,8 +838,10 @@ impl<'a> Parser<'a> {
         let parsed = (|| {
             self.word("MATCH")?;
             if self.starts_path_binding()? {
-                return Err(error(self.current.at,
-                    GraphPatternTextErrorKind::Expected("path binding in root MATCH only")));
+                return Err(error(
+                    self.current.at,
+                    GraphPatternTextErrorKind::Expected("path binding in root MATCH only"),
+                ));
             }
             self.positive_pattern()?;
             let matched_variables = self.syntax.variables.len();
@@ -782,7 +852,12 @@ impl<'a> Parser<'a> {
                 // Each table has at most 65 names, so their union is bounded.
                 // Unused names are removed before any body is resolved/lowered.
                 for &name in &outer.variables {
-                    if !self.syntax.variables.iter().any(|local| local.text == name.text) {
+                    if !self
+                        .syntax
+                        .variables
+                        .iter()
+                        .any(|local| local.text == name.text)
+                    {
                         self.syntax.variables.push(name);
                     }
                 }

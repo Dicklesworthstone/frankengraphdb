@@ -11,9 +11,7 @@ mod literal;
 mod ordering;
 mod parameters;
 mod scoped;
-pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 pub use crate::algebra::GraphPathFunction;
-use scoped::{BoundScope, ScopeSyntax};
 use crate::algebra::{
     GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
     IntegerComparison, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
@@ -21,7 +19,9 @@ use crate::algebra::{
     VertexPredicate,
 };
 use crate::{GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters};
+pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use scoped::{BoundScope, ScopeSyntax};
 use std::collections::BTreeMap;
 
 /// Definition admission, not execution work or a promise of cheap matching.
@@ -490,7 +490,10 @@ impl<'a> Parser<'a> {
         self.punct(b'(', "(")?;
         let name = self.name()?;
         if self.syntax.path.is_some_and(|path| path.text == name.text) {
-            return Err(error(name.at, GraphPatternTextErrorKind::Expected("vertex distinct from path binding")));
+            return Err(error(
+                name.at,
+                GraphPatternTextErrorKind::Expected("vertex distinct from path binding"),
+            ));
         }
         if !self
             .syntax
@@ -643,9 +646,16 @@ impl<'a> Parser<'a> {
                     alias: name,
                 }));
             if let Some(name) = self.syntax.path {
-                self.capacity(self.syntax.columns.len(), MAX_PATTERN_VERTICES, PatternLimitDimension::Columns)?;
+                self.capacity(
+                    self.syntax.columns.len(),
+                    MAX_PATTERN_VERTICES,
+                    PatternLimitDimension::Columns,
+                )?;
                 self.syntax.columns.push(Column {
-                    variable: name, property: None, path: Some(GraphPathFunction::Value), alias: name,
+                    variable: name,
+                    property: None,
+                    path: Some(GraphPathFunction::Value),
+                    alias: name,
                 });
             }
         } else {
@@ -662,13 +672,29 @@ impl<'a> Parser<'a> {
                     let variable = self.path_variable()?;
                     self.punct(b')', ")")?;
                     (variable, None, Some(function))
-                } else if self.syntax.path.is_some_and(|path| path.text == expression.text) {
+                } else if self
+                    .syntax
+                    .path
+                    .is_some_and(|path| path.text == expression.text)
+                {
                     (expression, None, Some(GraphPathFunction::Value))
                 } else {
-                    if !self.syntax.variables.iter().any(|name| name.text == expression.text) {
-                        return Err(error(expression.at, GraphPatternTextErrorKind::UnknownVariable));
+                    if !self
+                        .syntax
+                        .variables
+                        .iter()
+                        .any(|name| name.text == expression.text)
+                    {
+                        return Err(error(
+                            expression.at,
+                            GraphPatternTextErrorKind::UnknownVariable,
+                        ));
                     }
-                    let property = if self.take(b'.')? { Some(self.name()?) } else { None };
+                    let property = if self.take(b'.')? {
+                        Some(self.name()?)
+                    } else {
+                        None
+                    };
                     (expression, property, None)
                 };
                 let alias = if self.take_word("AS")? {
@@ -709,7 +735,10 @@ impl<'a> Parser<'a> {
         } else if name.text.eq_ignore_ascii_case("edges") {
             Ok(GraphPathFunction::Edges)
         } else {
-            Err(error(name.at, GraphPatternTextErrorKind::Expected("path function")))
+            Err(error(
+                name.at,
+                GraphPatternTextErrorKind::Expected("path function"),
+            ))
         }
     }
 

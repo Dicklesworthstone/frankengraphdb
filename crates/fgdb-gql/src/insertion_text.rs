@@ -1,10 +1,12 @@
 //! Parse-once standalone and query-selected CREATE templates. The shared
 //! MATCH/scalar parser owns syntax; insertion owns proposals; WriteTxn stages.
 
-use crate::{GqlParameterSpec, GraphMutationTextError, GraphMutationTextErrorKind,
-    GraphPatternTextError, GraphPatternTextErrorKind, PreparedGraphText};
 use crate::insertion::{GraphInsertBuildError, GraphInsertEndpoint};
 use crate::set_text::ReadValueTemplate;
+use crate::{
+    GqlParameterSpec, GraphMutationTextError, GraphMutationTextErrorKind, GraphPatternTextError,
+    GraphPatternTextErrorKind, PreparedGraphText,
+};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 
 #[derive(Debug)]
@@ -12,7 +14,10 @@ pub enum GraphInsertTextErrorKind {
     Query(GraphPatternTextErrorKind),
     Expression(GraphMutationTextErrorKind),
     Build(GraphInsertBuildError),
-    RelationCoordinate { expected: RelationId, found: RelationId },
+    RelationCoordinate {
+        expected: RelationId,
+        found: RelationId,
+    },
 }
 #[derive(Debug)]
 pub struct GraphInsertTextError {
@@ -21,13 +26,20 @@ pub struct GraphInsertTextError {
 }
 impl core::fmt::Display for GraphInsertTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph insertion text at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "graph insertion text at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphInsertTextError {}
 impl From<GraphPatternTextError> for GraphInsertTextError {
     fn from(error: GraphPatternTextError) -> Self {
-        Self { offset: error.offset, kind: GraphInsertTextErrorKind::Query(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphInsertTextErrorKind::Query(error.kind),
+        }
     }
 }
 impl From<GraphMutationTextError> for GraphInsertTextError {
@@ -36,7 +48,10 @@ impl From<GraphMutationTextError> for GraphInsertTextError {
             GraphMutationTextErrorKind::Query(kind) => GraphInsertTextErrorKind::Query(kind),
             kind => GraphInsertTextErrorKind::Expression(kind),
         };
-        Self { offset: error.offset, kind }
+        Self {
+            offset: error.offset,
+            kind,
+        }
     }
 }
 
@@ -84,7 +99,10 @@ pub struct PreparedGraphInsertText {
 }
 impl core::fmt::Debug for PreparedGraphInsertText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PreparedGraphInsertText").field("vertices_per_row", &self.vertices.len())
-            .field("edges_per_row", &self.edges.len()).field("definition", &"[REDACTED]").finish()
+        f.debug_struct("PreparedGraphInsertText")
+            .field("vertices_per_row", &self.vertices.len())
+            .field("edges_per_row", &self.edges.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }

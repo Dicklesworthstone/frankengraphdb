@@ -5,15 +5,19 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphDeleteError, GraphDeletePolicy,
-    GraphSymbol, GraphSymbolKind, PreparedGraphDelete, PreparedGraphText,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphDeleteError, GraphDeletePolicy, GraphSymbol,
+    GraphSymbolKind, PreparedGraphDelete, PreparedGraphText,
 };
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xd1; 32], DatabaseSecurityNamespaceId([0xd2; 32]), [0xd3; 32])
+    DatabaseKeys::new(
+        [0xd1; 32],
+        DatabaseSecurityNamespaceId([0xd2; 32]),
+        [0xd3; 32],
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -22,12 +26,17 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     }
 }
 fn policy() -> GraphDeletePolicy {
-    GraphDeletePolicy::new(GqlQueryPolicy::new(10_000, 10_000, 2_000_000, 2_000_000), 100)
+    GraphDeletePolicy::new(
+        GqlQueryPolicy::new(10_000, 10_000, 2_000_000, 2_000_000),
+        100,
+    )
 }
 fn deletion(value: i64) -> PreparedGraphDelete {
     let text = format!("MATCH (n) WHERE n.p = {value} RETURN ALL n");
-    let selected = PreparedGraphText::prepare(&text, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap();
+    let selected = PreparedGraphText::prepare(&text, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
     PreparedGraphDelete::prepare(selected, R, vec![0]).unwrap()
 }
 async fn seed(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) {
@@ -53,7 +62,9 @@ fn attached_vertex_refuses_but_prior_edge_delete_makes_plain_delete_legal() {
         let before = refused.staged_effect_digest().unwrap();
         assert!(matches!(
             refused.execute_graph_delete_governed(&mut db, &query, &deletion(1), policy()),
-            Err(GqlQueryError::Source(GraphDeleteError::IncidentRelationships))
+            Err(GqlQueryError::Source(
+                GraphDeleteError::IncidentRelationships
+            ))
         ));
         assert_eq!(refused.staged_effect_digest().unwrap(), before);
         assert!(refused.vertex(&db, VId(1)).unwrap().is_some());
@@ -64,13 +75,16 @@ fn attached_vertex_refuses_but_prior_edge_delete_makes_plain_delete_legal() {
         unlink.delete_edge(EId(10));
         txn.write(&mut db, unlink).unwrap();
         assert!(txn.edge(&db, EId(10)).unwrap().is_none());
-        let (stats, targets) = txn.execute_graph_delete_returning_governed(
-            &mut db, &query, &deletion(1), policy(),
-        ).unwrap();
+        let (stats, targets) = txn
+            .execute_graph_delete_returning_governed(&mut db, &query, &deletion(1), policy())
+            .unwrap();
         assert_eq!(stats.target_vertices, 1);
         assert_eq!(targets, vec![VId(1)]);
         assert!(txn.vertex(&db, VId(1)).unwrap().is_none());
-        assert!(db.vertex(VId(1)).unwrap().is_some(), "staged DELETE is not durable yet");
+        assert!(
+            db.vertex(VId(1)).unwrap().is_some(),
+            "staged DELETE is not durable yet"
+        );
         txn.commit(&mut db, &commit).await.unwrap();
         assert!(db.vertex(VId(1)).unwrap().is_none());
         assert!(db.edge(EId(10)).unwrap().is_none());
@@ -97,7 +111,9 @@ fn earlier_staged_edge_creation_is_visible_and_refusal_preserves_it() {
         let before = txn.staged_effect_digest().unwrap();
         assert!(matches!(
             txn.execute_graph_delete_returning_governed(&mut db, &query, &deletion(3), policy()),
-            Err(GqlQueryError::Source(GraphDeleteError::IncidentRelationships))
+            Err(GqlQueryError::Source(
+                GraphDeleteError::IncidentRelationships
+            ))
         ));
         assert_eq!(txn.staged_effect_digest().unwrap(), before);
         assert!(txn.vertex(&db, VId(3)).unwrap().is_some());
@@ -121,7 +137,9 @@ fn concurrent_incident_edge_after_precheck_invalidates_completion() {
         seed(&mut db, &commit).await;
 
         let mut deleting = db.begin(&txcx).unwrap();
-        deleting.execute_graph_delete_governed(&mut db, &query, &deletion(5), policy()).unwrap();
+        deleting
+            .execute_graph_delete_governed(&mut db, &query, &deletion(5), policy())
+            .unwrap();
         assert!(deleting.vertex(&db, VId(5)).unwrap().is_none());
 
         let mut winner = db.begin(&txcx).unwrap();
@@ -130,8 +148,10 @@ fn concurrent_incident_edge_after_precheck_invalidates_completion() {
         winner.write(&mut db, edge).unwrap();
         winner.commit(&mut db, &commit).await.unwrap();
 
-        assert!(deleting.commit(&mut db, &commit).await.is_err(),
-            "the edge-scan witness must reject a topology change after plain DELETE admission");
+        assert!(
+            deleting.commit(&mut db, &commit).await.is_err(),
+            "the edge-scan witness must reject a topology change after plain DELETE admission"
+        );
         assert!(db.vertex(VId(5)).unwrap().is_some());
         assert!(db.edge(EId(60)).unwrap().is_some());
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -148,13 +168,16 @@ fn successful_plain_delete_survives_compaction_and_reopen() {
         let txcx = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         seed(&mut db, &commit).await;
         let before = db.frontier().unwrap();
         let pinned = db.read_session().unwrap();
 
         let mut txn = db.begin(&txcx).unwrap();
-        txn.execute_graph_delete_governed(&mut db, &query, &deletion(6), policy()).unwrap();
+        txn.execute_graph_delete_governed(&mut db, &query, &deletion(6), policy())
+            .unwrap();
         let seq = txn.commit(&mut db, &commit).await.unwrap();
         assert!(seq.0 > before.0);
         assert!(db.vertex(VId(6)).unwrap().is_none());
@@ -163,7 +186,9 @@ fn successful_plain_delete_survives_compaction_and_reopen() {
         drop(pinned);
         drop(db);
 
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         assert!(db.vertex(VId(6)).unwrap().is_none());
         assert!(db.vertex_at(VId(6), before).unwrap().is_some());
         assert_eq!(txcx.outstanding_obligations(), 0);

@@ -18,8 +18,13 @@ struct MergeProperty<'a> {
 }
 
 enum ParsedUpsertAction<'a> {
-    Property { key: Name<'a>, value: VertexUpsertValueTemplate },
-    Label { label: Name<'a> },
+    Property {
+        key: Name<'a>,
+        value: VertexUpsertValueTemplate,
+    },
+    Label {
+        label: Name<'a>,
+    },
 }
 
 /// Pins the action resolver's argument to one inferred source lifetime. A bare
@@ -28,16 +33,24 @@ enum ParsedUpsertAction<'a> {
 /// cache cannot outlive.
 fn upsert_action_resolver<'s, F>(resolver: F) -> F
 where
-    F: FnMut(Vec<ParsedUpsertAction<'s>>) -> Result<Vec<VertexUpsertActionTemplate>, GraphPatternTextError>,
+    F: FnMut(
+        Vec<ParsedUpsertAction<'s>>,
+    ) -> Result<Vec<VertexUpsertActionTemplate>, GraphPatternTextError>,
 {
     resolver
 }
 
 fn insert_error(at: usize, source: GraphInsertBuildError) -> GraphVertexMergeTextError {
-    GraphVertexMergeTextError { offset: at, kind: GraphVertexMergeTextErrorKind::InsertBuild(source) }
+    GraphVertexMergeTextError {
+        offset: at,
+        kind: GraphVertexMergeTextErrorKind::InsertBuild(source),
+    }
 }
 fn merge_error(at: usize, source: GraphVertexMergeBuildError) -> GraphVertexMergeTextError {
-    GraphVertexMergeTextError { offset: at, kind: GraphVertexMergeTextErrorKind::MergeBuild(source) }
+    GraphVertexMergeTextError {
+        offset: at,
+        kind: GraphVertexMergeTextErrorKind::MergeBuild(source),
+    }
 }
 fn upsert_merge_error(error: GraphVertexMergeTextError) -> GraphVertexUpsertTextError {
     GraphVertexUpsertTextError {
@@ -56,27 +69,45 @@ impl<'a> Parser<'a> {
         let mut labels = Vec::new();
         while self.take(b':')? {
             let label = self.name()?;
-            if labels.iter().any(|previous: &Name<'a>| previous.text == label.text) {
-                return Err(insert_error(label.at, GraphInsertBuildError::DuplicateLabel { vertex: 0 }));
+            if labels
+                .iter()
+                .any(|previous: &Name<'a>| previous.text == label.text)
+            {
+                return Err(insert_error(
+                    label.at,
+                    GraphInsertBuildError::DuplicateLabel { vertex: 0 },
+                ));
             }
             labels.push(label);
         }
         let mut properties = Vec::new();
         if self.take(b'{')? {
             if self.is_punct(b'}') {
-                return Err(error(self.current.at,
-                    GraphPatternTextErrorKind::Expected("at least one MERGE property")).into());
+                return Err(error(
+                    self.current.at,
+                    GraphPatternTextErrorKind::Expected("at least one MERGE property"),
+                )
+                .into());
             }
             loop {
                 if properties.len() >= crate::insertion::MAX_GRAPH_INSERT_FIELDS {
-                    return Err(insert_error(self.current.at, GraphInsertBuildError::TooManyFields {
-                        limit: crate::insertion::MAX_GRAPH_INSERT_FIELDS,
-                        observed: properties.len() + 1,
-                    }));
+                    return Err(insert_error(
+                        self.current.at,
+                        GraphInsertBuildError::TooManyFields {
+                            limit: crate::insertion::MAX_GRAPH_INSERT_FIELDS,
+                            observed: properties.len() + 1,
+                        },
+                    ));
                 }
                 let key = self.name()?;
-                if properties.iter().any(|previous: &MergeProperty<'a>| previous.key.text == key.text) {
-                    return Err(insert_error(key.at, GraphInsertBuildError::DuplicateProperty { declaration: 0 }));
+                if properties
+                    .iter()
+                    .any(|previous: &MergeProperty<'a>| previous.key.text == key.text)
+                {
+                    return Err(insert_error(
+                        key.at,
+                        GraphInsertBuildError::DuplicateProperty { declaration: 0 },
+                    ));
                 }
                 self.punct(b':', ":")?;
                 let at = self.current.at;
@@ -84,33 +115,53 @@ impl<'a> Parser<'a> {
                 let (filter, value) = match operand {
                     Operand::Literal(value) => {
                         if matches!(value.value(), CanonicalScalar::Null) {
-                            return Err(error(at, GraphPatternTextErrorKind::Expected(
-                                "non-null MERGE property value",
-                            )).into());
+                            return Err(error(
+                                at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "non-null MERGE property value",
+                                ),
+                            )
+                            .into());
                         }
-                        (Number::Literal(GqlParameterValue::Scalar(value.clone())),
-                            VertexMergeValueTemplate::Bound(value))
+                        (
+                            Number::Literal(GqlParameterValue::Scalar(value.clone())),
+                            VertexMergeValueTemplate::Bound(value),
+                        )
                     }
                     Operand::Number(Number::Literal(value)) => {
                         let scalar = scalar(value.clone(), at)?;
                         if matches!(scalar.value(), CanonicalScalar::Null) {
-                            return Err(error(at, GraphPatternTextErrorKind::Expected(
-                                "non-null MERGE property value",
-                            )).into());
+                            return Err(error(
+                                at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "non-null MERGE property value",
+                                ),
+                            )
+                            .into());
                         }
-                        (Number::Literal(value), VertexMergeValueTemplate::Bound(scalar))
+                        (
+                            Number::Literal(value),
+                            VertexMergeValueTemplate::Bound(scalar),
+                        )
                     }
-                    Operand::Number(Number::Parameter(index)) => {
-                        (Number::Parameter(index), VertexMergeValueTemplate::Parameter { index, at })
-                    }
+                    Operand::Number(Number::Parameter(index)) => (
+                        Number::Parameter(index),
+                        VertexMergeValueTemplate::Parameter { index, at },
+                    ),
                     Operand::Column(_) | Operand::Integer { .. } => {
-                        return Err(error(at, GraphPatternTextErrorKind::Expected(
-                            "scalar literal or parameter MERGE property value",
-                        )).into());
+                        return Err(error(
+                            at,
+                            GraphPatternTextErrorKind::Expected(
+                                "scalar literal or parameter MERGE property value",
+                            ),
+                        )
+                        .into());
                     }
                 };
                 properties.push(MergeProperty { key, filter, value });
-                if !self.take(b',')? { break; }
+                if !self.take(b',')? {
+                    break;
+                }
             }
             self.punct(b'}', "}")?;
         }
@@ -150,18 +201,29 @@ impl<'a> Parser<'a> {
                 saw_create = true;
                 true
             } else {
-                return Err(error(branch_at,
-                    GraphPatternTextErrorKind::Expected("MATCH or CREATE after ON")).into());
+                return Err(error(
+                    branch_at,
+                    GraphPatternTextErrorKind::Expected("MATCH or CREATE after ON"),
+                )
+                .into());
             };
             self.word("SET")?;
-            let target = if create { &mut on_create } else { &mut on_match };
+            let target = if create {
+                &mut on_create
+            } else {
+                &mut on_match
+            };
             loop {
                 if target.len() >= crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS {
                     return Err(GraphVertexUpsertTextError {
                         offset: self.current.at,
                         kind: GraphVertexUpsertTextErrorKind::UpsertBuild(
                             crate::GraphVertexUpsertBuildError::TooManyActions {
-                                branch: if create { GraphVertexUpsertBranch::Create } else { GraphVertexUpsertBranch::Match },
+                                branch: if create {
+                                    GraphVertexUpsertBranch::Create
+                                } else {
+                                    GraphVertexUpsertBranch::Match
+                                },
                                 limit: crate::MAX_GRAPH_VERTEX_UPSERT_ACTIONS,
                                 observed: target.len() + 1,
                             },
@@ -170,11 +232,16 @@ impl<'a> Parser<'a> {
                 }
                 let actual = self.name()?;
                 if actual.text != variable.text {
-                    return Err(error(actual.at,
-                        GraphPatternTextErrorKind::Expected("the MERGE vertex variable")).into());
+                    return Err(error(
+                        actual.at,
+                        GraphPatternTextErrorKind::Expected("the MERGE vertex variable"),
+                    )
+                    .into());
                 }
                 let action = if self.take(b':')? {
-                    ParsedUpsertAction::Label { label: self.name()? }
+                    ParsedUpsertAction::Label {
+                        label: self.name()?,
+                    }
                 } else {
                     self.punct(b'.', "property or label assignment")?;
                     let key = self.name()?;
@@ -182,20 +249,28 @@ impl<'a> Parser<'a> {
                     let at = self.current.at;
                     let value = match self.mutation_operand(&mut Vec::new())? {
                         Operand::Literal(value) => VertexUpsertValueTemplate::Bound(value),
-                        Operand::Number(Number::Literal(value)) =>
-                            VertexUpsertValueTemplate::Bound(scalar(value, at)?),
-                        Operand::Number(Number::Parameter(index)) =>
-                            VertexUpsertValueTemplate::Parameter { index, at },
+                        Operand::Number(Number::Literal(value)) => {
+                            VertexUpsertValueTemplate::Bound(scalar(value, at)?)
+                        }
+                        Operand::Number(Number::Parameter(index)) => {
+                            VertexUpsertValueTemplate::Parameter { index, at }
+                        }
                         Operand::Column(_) | Operand::Integer { .. } => {
-                            return Err(error(at, GraphPatternTextErrorKind::Expected(
-                                "scalar literal or parameter branch assignment",
-                            )).into());
+                            return Err(error(
+                                at,
+                                GraphPatternTextErrorKind::Expected(
+                                    "scalar literal or parameter branch assignment",
+                                ),
+                            )
+                            .into());
                         }
                     };
                     ParsedUpsertAction::Property { key, value }
                 };
                 target.push(action);
-                if !self.take(b',')? { break; }
+                if !self.take(b',')? {
+                    break;
+                }
             }
         }
         Ok((on_match, on_create))
@@ -219,7 +294,10 @@ fn resolve_merge_template<'a>(
         let GraphSymbol::Label(label_id) = symbol(GraphSymbolKind::Label, label)? else {
             unreachable!("symbol domain checked by shared resolver")
         };
-        built(label.at, builder.filter(variable.text, VertexPredicate::HasLabel(label_id)))?;
+        built(
+            label.at,
+            builder.filter(variable.text, VertexPredicate::HasLabel(label_id)),
+        )?;
         labels.push(label_id);
     }
     let mut filters = Vec::new();
@@ -244,7 +322,10 @@ fn resolve_merge_template<'a>(
         key: None,
         path: None,
     }];
-    let projected = columns.iter().map(BoundColumn::declaration).collect::<Vec<_>>();
+    let projected = columns
+        .iter()
+        .map(BoundColumn::declaration)
+        .collect::<Vec<_>>();
     built(at, builder.prepare_values(&projected, 0, None))?;
     let selection = PreparedGraphText {
         statement: statement.to_owned(),
@@ -260,7 +341,12 @@ fn resolve_merge_template<'a>(
         distinct: false,
         return_at: at,
     };
-    Ok(PreparedGraphVertexMergeText { selection, relation, labels, properties })
+    Ok(PreparedGraphVertexMergeText {
+        selection,
+        relation,
+        labels,
+        properties,
+    })
 }
 
 fn bind_merge_values(
@@ -274,9 +360,11 @@ fn bind_merge_values(
             VertexMergeValueTemplate::Parameter { index, at } => {
                 let value = scalar(values[*index].clone(), *at)?;
                 if matches!(value.value(), CanonicalScalar::Null) {
-                    return Err(error(*at, GraphPatternTextErrorKind::Expected(
-                        "non-null MERGE property value",
-                    )).into());
+                    return Err(error(
+                        *at,
+                        GraphPatternTextErrorKind::Expected("non-null MERGE property value"),
+                    )
+                    .into());
                 }
                 value
             }
@@ -286,9 +374,13 @@ fn bind_merge_values(
     let selection = template.selection.bind_values(values)?;
     let creation = PreparedGraphInsert::prepare_standalone(
         template.relation,
-        vec![GraphInsertVertex { labels: template.labels.clone(), properties: fields }],
+        vec![GraphInsertVertex {
+            labels: template.labels.clone(),
+            properties: fields,
+        }],
         Vec::new(),
-    ).map_err(|source| GraphVertexMergeTextError {
+    )
+    .map_err(|source| GraphVertexMergeTextError {
         offset: template.selection.return_at,
         kind: GraphVertexMergeTextErrorKind::InsertBuild(source),
     })?;
@@ -318,24 +410,42 @@ impl PreparedGraphVertexMergeText {
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
-            if let Some(value) = cache.get(&key) { return Ok(*value); }
+            if let Some(value) = cache.get(&key) {
+                return Ok(*value);
+            }
             let value = resolve(kind, name.text)
                 .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
             if value.kind() != kind {
-                return Err(error(name.at, GraphPatternTextErrorKind::WrongSymbolKind {
-                    expected: kind, found: value.kind(),
-                }));
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::WrongSymbolKind {
+                        expected: kind,
+                        found: value.kind(),
+                    },
+                ));
             }
             cache.insert(key, value);
             Ok(value)
         };
-        resolve_merge_template(statement, relation, syntax, variable, labels, properties, &mut symbol)
+        resolve_merge_template(
+            statement,
+            relation,
+            syntax,
+            variable,
+            labels,
+            properties,
+            &mut symbol,
+        )
     }
 
     #[must_use]
-    pub fn statement(&self) -> &str { self.selection.statement() }
+    pub fn statement(&self) -> &str {
+        self.selection.statement()
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { self.selection.parameter_schema() }
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        self.selection.parameter_schema()
+    }
 
     pub fn bind_parameters(
         &self,
@@ -362,52 +472,83 @@ impl PreparedGraphVertexUpsertText {
         mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, GraphVertexUpsertTextError> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
-        let (variable, labels, properties) = parser.vertex_merge_pattern().map_err(upsert_merge_error)?;
+        let (variable, labels, properties) =
+            parser.vertex_merge_pattern().map_err(upsert_merge_error)?;
         let (parsed_match, parsed_create) = parser.upsert_branch_actions(variable)?;
         if parsed_match.is_empty() && parsed_create.is_empty() {
-            return Err(error(statement.len(), GraphPatternTextErrorKind::Expected(
-                "ON MATCH SET or ON CREATE SET",
-            )).into());
+            return Err(error(
+                statement.len(),
+                GraphPatternTextErrorKind::Expected("ON MATCH SET or ON CREATE SET"),
+            )
+            .into());
         }
         parser.end()?;
         let syntax = parser.syntax;
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
-            if let Some(value) = cache.get(&key) { return Ok(*value); }
+            if let Some(value) = cache.get(&key) {
+                return Ok(*value);
+            }
             let value = resolve(kind, name.text)
                 .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
             if value.kind() != kind {
-                return Err(error(name.at, GraphPatternTextErrorKind::WrongSymbolKind {
-                    expected: kind, found: value.kind(),
-                }));
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::WrongSymbolKind {
+                        expected: kind,
+                        found: value.kind(),
+                    },
+                ));
             }
             cache.insert(key, value);
             Ok(value)
         };
         let mut resolve_actions = upsert_action_resolver(|parsed| {
-            parsed.into_iter().map(|action| Ok(match action {
-                ParsedUpsertAction::Property { key, value } => {
-                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, key)? else {
-                        unreachable!("symbol domain checked")
-                    };
-                    VertexUpsertActionTemplate::Property { key, value }
-                }
-                ParsedUpsertAction::Label { label } => {
-                    let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)? else {
-                        unreachable!("symbol domain checked")
-                    };
-                    VertexUpsertActionTemplate::Label { label, present: true }
-                }
-            })).collect()
+            parsed
+                .into_iter()
+                .map(|action| {
+                    Ok(match action {
+                        ParsedUpsertAction::Property { key, value } => {
+                            let GraphSymbol::Property(key) =
+                                symbol(GraphSymbolKind::Property, key)?
+                            else {
+                                unreachable!("symbol domain checked")
+                            };
+                            VertexUpsertActionTemplate::Property { key, value }
+                        }
+                        ParsedUpsertAction::Label { label } => {
+                            let GraphSymbol::Label(label) = symbol(GraphSymbolKind::Label, label)?
+                            else {
+                                unreachable!("symbol domain checked")
+                            };
+                            VertexUpsertActionTemplate::Label {
+                                label,
+                                present: true,
+                            }
+                        }
+                    })
+                })
+                .collect()
         });
         let on_match = resolve_actions(parsed_match)?;
         let on_create = resolve_actions(parsed_create)?;
         drop(resolve_actions);
         let merge = resolve_merge_template(
-            statement, relation, syntax, variable, labels, properties, &mut symbol,
-        ).map_err(upsert_merge_error)?;
-        Ok(Self { merge, on_match, on_create })
+            statement,
+            relation,
+            syntax,
+            variable,
+            labels,
+            properties,
+            &mut symbol,
+        )
+        .map_err(upsert_merge_error)?;
+        Ok(Self {
+            merge,
+            on_match,
+            on_create,
+        })
     }
 
     pub fn bind_parameters(

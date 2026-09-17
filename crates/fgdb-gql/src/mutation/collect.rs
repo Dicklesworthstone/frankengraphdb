@@ -562,18 +562,23 @@ mod tests {
         for value in [None, Some(i64::MIN), Some(0), Some(i64::MAX)] {
             let scalar = value.map_or(CanonicalScalar::Null, CanonicalScalar::Int);
             for (left, right) in [
-                (Value::Computed(scalar.clone()), Value::Property(Some(&scalar))),
-                (Value::Property(Some(&scalar)), Value::Computed(scalar.clone())),
+                (
+                    Value::Computed(scalar.clone()),
+                    Value::Property(Some(&scalar)),
+                ),
+                (
+                    Value::Property(Some(&scalar)),
+                    Value::Computed(scalar.clone()),
+                ),
             ] {
                 assert!(equal(&left, &right, &mut |_| Ok::<_, ()>(())).unwrap());
             }
             assert!(
-                !equal(&Value::Computed(scalar), &Value::Property(None), &mut |_| Ok::<
-                    _,
-                    (),
-                >(
-                    ()
-                ))
+                !equal(
+                    &Value::Computed(scalar),
+                    &Value::Property(None),
+                    &mut |_| Ok::<_, ()>(())
+                )
                 .unwrap()
             );
         }

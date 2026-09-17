@@ -29,10 +29,22 @@ impl PreparedGraphAggregate {
         offset: u64,
         count: Option<u64>,
     ) -> Result<Self, GraphAggregateBuildError> {
-        relation.check_parent_depth().map_err(GraphAggregateBuildError::RelationalInput)?;
-        let source = relation.single_pattern_input()
-            .ok_or(GraphAggregateBuildError::RequiresSingleGraphSource)?.clone();
-        Self::prepare_input(source, None, Some(relation), keys, aggregates, offset, count)
+        relation
+            .check_parent_depth()
+            .map_err(GraphAggregateBuildError::RelationalInput)?;
+        let source = relation
+            .single_pattern_input()
+            .ok_or(GraphAggregateBuildError::RequiresSingleGraphSource)?
+            .clone();
+        Self::prepare_input(
+            source,
+            None,
+            Some(relation),
+            keys,
+            aggregates,
+            offset,
+            count,
+        )
     }
 
     /// Private construction for the compound owner. The retained primary leaf
@@ -47,9 +59,19 @@ impl PreparedGraphAggregate {
         offset: u64,
         count: Option<u64>,
     ) -> Result<Self, GraphAggregateBuildError> {
-        relation.check_parent_depth().map_err(GraphAggregateBuildError::RelationalInput)?;
+        relation
+            .check_parent_depth()
+            .map_err(GraphAggregateBuildError::RelationalInput)?;
         let source = relation.first_pattern_input().clone();
-        Self::prepare_input(source, None, Some(relation), keys, aggregates, offset, count)
+        Self::prepare_input(
+            source,
+            None,
+            Some(relation),
+            keys,
+            aggregates,
+            offset,
+            count,
+        )
     }
 
     /// The actual immutable row-stage definition, distinct from input_pattern's
@@ -69,7 +91,8 @@ impl PreparedGraphAggregate {
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
         // Each borrow exists for one checkpoint, never around source execution.
         // Single-source preparation still proves that the iterators are taken
         // once; compound execution cannot enter this iterator-only interface.
@@ -78,11 +101,17 @@ impl PreparedGraphAggregate {
         self.execute_relational_with_source(
             policy,
             |pattern, remaining| {
-                let (vertices, edges) = admitted.take()
+                let (vertices, edges) = admitted
+                    .take()
                     .expect("preparation admitted exactly one immutable graph leaf");
                 pattern.plan().execute_governed_with_properties(
-                    snapshot_records, vertices, edges, &mut test_vertex, &mut property,
-                    remaining, || (*checkpoint.borrow_mut())(),
+                    snapshot_records,
+                    vertices,
+                    edges,
+                    &mut test_vertex,
+                    &mut property,
+                    remaining,
+                    || (*checkpoint.borrow_mut())(),
                 )
             },
             || (*checkpoint.borrow_mut())(),
@@ -95,11 +124,17 @@ impl PreparedGraphAggregate {
     pub(crate) fn execute_relational_with_source<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        source: impl FnMut(&PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy)
-            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
-        let relation = self.relational_input.as_ref().expect("relational input dispatch");
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        let relation = self
+            .relational_input
+            .as_ref()
+            .expect("relational input dispatch");
         // Intermediate rows are not public aggregate results. The set engine
         // still charges their traversal, retained cells, payloads and release.
         // Its work/scratch totals continue into grouping without a fresh quota.
@@ -109,7 +144,8 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let source = relation.execute_governed(source_policy, source, &mut checkpoint)
+        let source = relation
+            .execute_governed(source_policy, source, &mut checkpoint)
             .map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
         let mut evaluator = source.evaluator;
         let mut rows = GqlExecutionStats {
@@ -119,12 +155,20 @@ impl PreparedGraphAggregate {
         let mut control = |event| {
             checkpoint().map_err(GqlQueryError::Interrupted)?;
             let result_rows = if event == GlaExecutionEvent::ResultRow {
-                let next = rows.result_rows.checked_add(1).ok_or_else(||
-                    GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
-                policy.rows.check(GqlBudgetDimension::ResultRows, next).map_err(GqlQueryError::Rows)?;
+                let next = rows.result_rows.checked_add(1).ok_or_else(|| {
+                    GqlQueryError::Source(GraphAggregateError::ResultCountOverflow)
+                })?;
+                policy
+                    .rows
+                    .check(GqlBudgetDimension::ResultRows, next)
+                    .map_err(GqlQueryError::Rows)?;
                 next
-            } else { rows.result_rows };
-            evaluator.charge_event(policy.evaluator, event).map_err(GqlQueryError::Evaluator)?;
+            } else {
+                rows.result_rows
+            };
+            evaluator
+                .charge_event(policy.evaluator, event)
+                .map_err(GqlQueryError::Evaluator)?;
             rows.result_rows = result_rows;
             Ok(())
         };
@@ -133,6 +177,10 @@ impl PreparedGraphAggregate {
         // failures or aggregation. No row payload clone is needed at this seam.
         let value = self.summarize_projected_rows(&source.value, &mut control)?;
         control(GlaExecutionEvent::Work)?;
-        Ok(GqlQueryExecution { value, rows, evaluator })
+        Ok(GqlQueryExecution {
+            value,
+            rows,
+            evaluator,
+        })
     }
 }

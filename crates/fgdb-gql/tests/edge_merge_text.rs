@@ -22,23 +22,46 @@ fn forward_reverse_and_renamed_forms_compile_to_the_same_directed_definition() {
     let forward_text = "MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (a)-[:R]->(b)";
     let calls = Cell::new(0);
     let forward = PreparedGraphEdgeMergeText::prepare(forward_text, R, |kind, name| {
-        calls.set(calls.get() + 1); symbols(kind, name)
-    }).unwrap();
+        calls.set(calls.get() + 1);
+        symbols(kind, name)
+    })
+    .unwrap();
     let resolved = calls.get();
     assert_eq!(forward.parameter_schema().len(), 2);
-    let args = GqlParameters::new().with_int64("left", 1).unwrap().with_int64("right", 2).unwrap();
+    let args = GqlParameters::new()
+        .with_int64("left", 1)
+        .unwrap()
+        .with_int64("right", 2)
+        .unwrap();
     let forward = forward.bind_parameters(&args).unwrap();
-    assert_eq!(calls.get(), resolved, "binding must not re-enter the catalog");
-    assert_eq!((forward.source_column(), forward.destination_column()), (0, 1));
+    assert_eq!(
+        calls.get(),
+        resolved,
+        "binding must not re-enter the catalog"
+    );
+    assert_eq!(
+        (forward.source_column(), forward.destination_column()),
+        (0, 1)
+    );
 
     let reverse = PreparedGraphEdgeMergeText::prepare(
-        "MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (b)<-[:R]-(a)", R, symbols,
-    ).unwrap().bind_parameters(&args).unwrap();
+        "MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (b)<-[:R]-(a)",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&args)
+    .unwrap();
     assert_eq!(forward.canonical_bytes(), reverse.canonical_bytes());
 
     let renamed = PreparedGraphEdgeMergeText::prepare(
-        "MATCH (x),(y) WHERE x.p=$left AND y.p=$right MERGE (x)-[:R]->(y)", R, symbols,
-    ).unwrap().bind_parameters(&args).unwrap();
+        "MATCH (x),(y) WHERE x.p=$left AND y.p=$right MERGE (x)-[:R]->(y)",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&args)
+    .unwrap();
     assert_eq!(forward.canonical_bytes(), renamed.canonical_bytes());
 }
 
@@ -54,10 +77,19 @@ fn malformed_or_semantically_unimplemented_relationship_forms_refuse_before_cata
         "MATCH (a),(b) MERGE (a)-[:R]->(b) ON CREATE SET a.p=1",
     ] {
         let calls = Cell::new(0);
-        assert!(PreparedGraphEdgeMergeText::prepare(text, R, |kind, name| {
-            calls.set(calls.get() + 1); symbols(kind, name)
-        }).is_err(), "{text}");
-        assert_eq!(calls.get(), 0, "malformed relationship MERGE reached catalog: {text}");
+        assert!(
+            PreparedGraphEdgeMergeText::prepare(text, R, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "malformed relationship MERGE reached catalog: {text}"
+        );
     }
 }
 
@@ -70,17 +102,30 @@ fn relation_coordinate_mismatch_and_argument_errors_remain_typed() {
 
     let template = PreparedGraphEdgeMergeText::prepare(text, R, symbols).unwrap();
     let missing = template.bind_parameters(&GqlParameters::new()).unwrap_err();
-    assert!(matches!(missing.kind,
-        GraphEdgeMergeTextErrorKind::Query(GraphPatternTextErrorKind::MissingParameter)));
-    let wrong = GqlParameters::new().with_uint64("x", 1).unwrap().with_int64("y", 2).unwrap();
-    assert!(matches!(template.bind_parameters(&wrong).unwrap_err().kind,
-        GraphEdgeMergeTextErrorKind::Query(GraphPatternTextErrorKind::ParameterTypeMismatch { .. })));
+    assert!(matches!(
+        missing.kind,
+        GraphEdgeMergeTextErrorKind::Query(GraphPatternTextErrorKind::MissingParameter)
+    ));
+    let wrong = GqlParameters::new()
+        .with_uint64("x", 1)
+        .unwrap()
+        .with_int64("y", 2)
+        .unwrap();
+    assert!(matches!(
+        template.bind_parameters(&wrong).unwrap_err().kind,
+        GraphEdgeMergeTextErrorKind::Query(GraphPatternTextErrorKind::ParameterTypeMismatch { .. })
+    ));
 }
 
 #[test]
 fn self_loop_uses_one_projected_vertex_column_for_both_endpoints() {
     let merge = PreparedGraphEdgeMergeText::prepare(
-        "MATCH (a) WHERE a.p=1 MERGE (a)-[:R]->(a)", R, symbols,
-    ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        "MATCH (a) WHERE a.p=1 MERGE (a)-[:R]->(a)",
+        R,
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&GqlParameters::new())
+    .unwrap();
     assert_eq!((merge.source_column(), merge.destination_column()), (0, 0));
 }

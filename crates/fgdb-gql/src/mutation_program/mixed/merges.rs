@@ -16,14 +16,20 @@ impl MixedMeter {
             return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
         }
         let vertices = self.add_creation(
-            statement, GraphInsertLimitDimension::Vertices, stats.created_vertices,
+            statement,
+            GraphInsertLimitDimension::Vertices,
+            stats.created_vertices,
         )?;
-        self.common.absorb(statement, 0, GraphMutationStats {
-            selection: stats.match_selection,
-            evaluator: stats.evaluator,
-            target_vertices: 0,
-            effects: 0,
-        })?;
+        self.common.absorb(
+            statement,
+            0,
+            GraphMutationStats {
+                selection: stats.match_selection,
+                evaluator: stats.evaluator,
+                target_vertices: 0,
+                effects: 0,
+            },
+        )?;
         self.vertices = vertices;
         Ok(())
     }
@@ -47,9 +53,14 @@ impl MixedMeter {
         // Validate its exact branch above instead of applying the ordinary
         // mutation law effects <= selected_rows * actions to fabricated rows.
         let effects = self.common.add(
-            statement, GraphMutationProgramDimension::Effects, stats.action_effects,
+            statement,
+            GraphMutationProgramDimension::Effects,
+            stats.action_effects,
         )?;
-        let targets = self.common.stats.target_vertex_visits
+        let targets = self
+            .common
+            .stats
+            .target_vertex_visits
             .checked_add(u64::from(stats.action_effects != 0))
             .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?;
         // All action counters are checked before the common successor changes;
@@ -75,25 +86,38 @@ impl MixedMeter {
         // The existence scan is additional source work, not part of MATCH's
         // snapshot count. Charge it exactly once, including read-only matches.
         // Widen BEFORE adding so hostile stats cannot wrap at u64::MAX.
-        let records = u128::from(stats.match_selection.snapshot_records) + u128::from(stats.overlay_edges);
+        let records =
+            u128::from(stats.match_selection.snapshot_records) + u128::from(stats.overlay_edges);
         let dimension = GraphMutationProgramDimension::SnapshotRecords;
         let (used, limit) = self.common.counter(dimension);
         let observed = u128::from(used) + records;
         if observed > u128::from(limit) {
             return Err(GraphMutationProgramError::Budget {
-                statement, dimension, limit, observed,
-            }.into());
+                statement,
+                dimension,
+                limit,
+                observed,
+            }
+            .into());
         }
-        let edges = self.add_creation(statement, GraphInsertLimitDimension::Edges, stats.created_edges)?;
-        self.common.absorb(statement, 0, GraphMutationStats {
-            selection: GqlExecutionStats {
-                snapshot_records: records as u64,
-                result_rows: stats.match_selection.result_rows,
+        let edges = self.add_creation(
+            statement,
+            GraphInsertLimitDimension::Edges,
+            stats.created_edges,
+        )?;
+        self.common.absorb(
+            statement,
+            0,
+            GraphMutationStats {
+                selection: GqlExecutionStats {
+                    snapshot_records: records as u64,
+                    result_rows: stats.match_selection.result_rows,
+                },
+                evaluator: stats.evaluator,
+                target_vertices: 0,
+                effects: 0,
             },
-            evaluator: stats.evaluator,
-            target_vertices: 0,
-            effects: 0,
-        })?;
+        )?;
         self.edges = edges;
         Ok(())
     }
@@ -114,7 +138,8 @@ impl MixedMeter {
         let effects = u128::from(stats.action_effects);
         // One owned entry/work event per action and a final acceptance event.
         // Widen before addition; wrapped or underreported totals are invalid.
-        if stats.branch != branch || effects != actions.len() as u128
+        if stats.branch != branch
+            || effects != actions.len() as u128
             || u128::from(stats.evaluator.work_units)
                 != u128::from(stats.merge.evaluator.work_units) + effects + 1
             || u128::from(stats.evaluator.scratch_entries)
@@ -123,13 +148,19 @@ impl MixedMeter {
             return Err(GraphMutationProgramError::InvalidStatistics { statement }.into());
         }
         let effects = self.common.add(
-            statement, GraphMutationProgramDimension::Effects, stats.action_effects,
+            statement,
+            GraphMutationProgramDimension::Effects,
+            stats.action_effects,
         )?;
         // The total already includes MERGE. Reuse its source/creation validation
         // with the cumulative evaluator, never charge the nested work twice.
-        self.absorb_edge_merge(statement, GraphEdgeMergeStats {
-            evaluator: stats.evaluator, ..stats.merge
-        })?;
+        self.absorb_edge_merge(
+            statement,
+            GraphEdgeMergeStats {
+                evaluator: stats.evaluator,
+                ..stats.merge
+            },
+        )?;
         self.common.stats.effects = effects;
         // Updating an edge is not a vertex visit.
         Ok(())
@@ -141,10 +172,18 @@ impl MixedMeter {
         source: GqlQueryError<GraphVertexMergeError<E, A>, C>,
     ) -> GraphWriteProgramError<E, A, C> {
         match source {
-            GqlQueryError::Rows(error) => self.common.translate(statement, GqlQueryError::Rows(error)).into(),
-            GqlQueryError::Evaluator(error) => self.common.translate(statement, GqlQueryError::Evaluator(error)).into(),
+            GqlQueryError::Rows(error) => self
+                .common
+                .translate(statement, GqlQueryError::Rows(error))
+                .into(),
+            GqlQueryError::Evaluator(error) => self
+                .common
+                .translate(statement, GqlQueryError::Evaluator(error))
+                .into(),
             GqlQueryError::Source(GraphVertexMergeError::Creation(GraphInsertError::Limit {
-                dimension, observed, ..
+                dimension,
+                observed,
+                ..
             })) => self.creation_failure(statement, dimension, observed),
             source => GraphWriteProgramError::VertexMerge { statement, source },
         }
@@ -156,17 +195,36 @@ impl MixedMeter {
         source: GqlQueryError<GraphVertexUpsertError<E, A>, C>,
     ) -> GraphWriteProgramError<E, A, C> {
         match source {
-            GqlQueryError::Rows(error) => self.common.translate(statement, GqlQueryError::Rows(error)).into(),
-            GqlQueryError::Evaluator(error) => self.common.translate(statement, GqlQueryError::Evaluator(error)).into(),
+            GqlQueryError::Rows(error) => self
+                .common
+                .translate(statement, GqlQueryError::Rows(error))
+                .into(),
+            GqlQueryError::Evaluator(error) => self
+                .common
+                .translate(statement, GqlQueryError::Evaluator(error))
+                .into(),
             GqlQueryError::Source(GraphVertexUpsertError::Merge(
-                GraphVertexMergeError::Creation(GraphInsertError::Limit { dimension, observed, .. }),
+                GraphVertexMergeError::Creation(GraphInsertError::Limit {
+                    dimension,
+                    observed,
+                    ..
+                }),
             )) => self.creation_failure(statement, dimension, observed),
-            GqlQueryError::Source(GraphVertexUpsertError::ActionLimit { observed: local, .. }) => {
+            GqlQueryError::Source(GraphVertexUpsertError::ActionLimit {
+                observed: local, ..
+            }) => {
                 let dimension = GraphMutationProgramDimension::Effects;
                 let (used, limit) = self.common.counter(dimension);
                 match local.checked_add(u128::from(used)) {
-                    Some(observed) if observed > u128::from(limit) =>
-                        GraphMutationProgramError::Budget { statement, dimension, limit, observed }.into(),
+                    Some(observed) if observed > u128::from(limit) => {
+                        GraphMutationProgramError::Budget {
+                            statement,
+                            dimension,
+                            limit,
+                            observed,
+                        }
+                        .into()
+                    }
                     _ => GraphMutationProgramError::InvalidStatistics { statement }.into(),
                 }
             }
@@ -180,10 +238,17 @@ impl MixedMeter {
         source: GqlQueryError<GraphEdgeMergeError<E, A>, C>,
     ) -> GraphWriteProgramError<E, A, C> {
         match source {
-            GqlQueryError::Rows(error) => self.common.translate(statement, GqlQueryError::Rows(error)).into(),
-            GqlQueryError::Evaluator(error) => self.common.translate(statement, GqlQueryError::Evaluator(error)).into(),
-            GqlQueryError::Source(GraphEdgeMergeError::CreationLimit { observed, .. }) =>
-                self.creation_failure(statement, GraphInsertLimitDimension::Edges, observed),
+            GqlQueryError::Rows(error) => self
+                .common
+                .translate(statement, GqlQueryError::Rows(error))
+                .into(),
+            GqlQueryError::Evaluator(error) => self
+                .common
+                .translate(statement, GqlQueryError::Evaluator(error))
+                .into(),
+            GqlQueryError::Source(GraphEdgeMergeError::CreationLimit { observed, .. }) => {
+                self.creation_failure(statement, GraphInsertLimitDimension::Edges, observed)
+            }
             source => GraphWriteProgramError::EdgeMerge { statement, source },
         }
     }
@@ -194,16 +259,32 @@ impl MixedMeter {
         source: GqlQueryError<GraphEdgeUpsertError<E, A>, C>,
     ) -> GraphWriteProgramError<E, A, C> {
         match source {
-            GqlQueryError::Rows(error) => self.common.translate(statement, GqlQueryError::Rows(error)).into(),
-            GqlQueryError::Evaluator(error) => self.common.translate(statement, GqlQueryError::Evaluator(error)).into(),
-            GqlQueryError::Source(GraphEdgeUpsertError::Merge(GraphEdgeMergeError::CreationLimit { observed, .. })) =>
-                self.creation_failure(statement, GraphInsertLimitDimension::Edges, observed),
-            GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit { observed: local, .. }) => {
+            GqlQueryError::Rows(error) => self
+                .common
+                .translate(statement, GqlQueryError::Rows(error))
+                .into(),
+            GqlQueryError::Evaluator(error) => self
+                .common
+                .translate(statement, GqlQueryError::Evaluator(error))
+                .into(),
+            GqlQueryError::Source(GraphEdgeUpsertError::Merge(
+                GraphEdgeMergeError::CreationLimit { observed, .. },
+            )) => self.creation_failure(statement, GraphInsertLimitDimension::Edges, observed),
+            GqlQueryError::Source(GraphEdgeUpsertError::ActionLimit {
+                observed: local, ..
+            }) => {
                 let dimension = GraphMutationProgramDimension::Effects;
                 let (used, limit) = self.common.counter(dimension);
                 match local.checked_add(u128::from(used)) {
-                    Some(observed) if observed > u128::from(limit) =>
-                        GraphMutationProgramError::Budget { statement, dimension, limit, observed }.into(),
+                    Some(observed) if observed > u128::from(limit) => {
+                        GraphMutationProgramError::Budget {
+                            statement,
+                            dimension,
+                            limit,
+                            observed,
+                        }
+                        .into()
+                    }
                     _ => GraphMutationProgramError::InvalidStatistics { statement }.into(),
                 }
             }

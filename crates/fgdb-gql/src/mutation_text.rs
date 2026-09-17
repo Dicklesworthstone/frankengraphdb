@@ -18,9 +18,17 @@ pub(crate) enum MutationIntegerTemplateOp {
 #[derive(Clone)]
 pub(crate) enum MutationActionTemplate {
     Bound(GraphMutationAction),
-    ParameterProperty { target: usize, key: PropertyKeyId, parameter: usize },
-    IntegerProperty { target: usize, key: PropertyKeyId,
-        program: Vec<MutationIntegerTemplateOp>, at: usize },
+    ParameterProperty {
+        target: usize,
+        key: PropertyKeyId,
+        parameter: usize,
+    },
+    IntegerProperty {
+        target: usize,
+        key: PropertyKeyId,
+        program: Vec<MutationIntegerTemplateOp>,
+        at: usize,
+    },
 }
 
 /// MATCH [WALK] ... SET / REMOVE / DETACH DELETE, with one parameter schema and
@@ -37,8 +45,10 @@ pub struct PreparedGraphMutationText {
 }
 impl core::fmt::Debug for PreparedGraphMutationText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PreparedGraphMutationText").field("actions", &self.actions.len())
-            .field("definition", &"[REDACTED]").finish()
+        f.debug_struct("PreparedGraphMutationText")
+            .field("actions", &self.actions.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -57,12 +67,19 @@ pub enum GraphMutationTextErrorKind {
 }
 impl From<GraphPatternTextError> for GraphMutationTextError {
     fn from(error: GraphPatternTextError) -> Self {
-        Self { offset: error.offset, kind: GraphMutationTextErrorKind::Query(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphMutationTextErrorKind::Query(error.kind),
+        }
     }
 }
 impl core::fmt::Display for GraphMutationTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph mutation text error at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "graph mutation text error at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphMutationTextError {}
@@ -80,7 +97,8 @@ impl core::fmt::Debug for PreparedGraphDeleteText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphDeleteText")
             .field("targets", &self.targets.len())
-            .field("definition", &"[REDACTED]").finish()
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -96,12 +114,19 @@ pub enum GraphDeleteTextErrorKind {
 }
 impl From<GraphPatternTextError> for GraphDeleteTextError {
     fn from(error: GraphPatternTextError) -> Self {
-        Self { offset: error.offset, kind: GraphDeleteTextErrorKind::Query(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphDeleteTextErrorKind::Query(error.kind),
+        }
     }
 }
 impl core::fmt::Display for GraphDeleteTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph DELETE text error at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "graph DELETE text error at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphDeleteTextError {}
@@ -128,7 +153,8 @@ impl core::fmt::Debug for PreparedGraphVertexMergeText {
         f.debug_struct("PreparedGraphVertexMergeText")
             .field("labels", &self.labels.len())
             .field("properties", &self.properties.len())
-            .field("definition", &"[REDACTED]").finish()
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -145,12 +171,19 @@ pub enum GraphVertexMergeTextErrorKind {
 }
 impl From<GraphPatternTextError> for GraphVertexMergeTextError {
     fn from(error: GraphPatternTextError) -> Self {
-        Self { offset: error.offset, kind: GraphVertexMergeTextErrorKind::Query(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphVertexMergeTextErrorKind::Query(error.kind),
+        }
     }
 }
 impl core::fmt::Display for GraphVertexMergeTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph vertex MERGE text error at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "graph vertex MERGE text error at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphVertexMergeTextError {}
@@ -169,7 +202,8 @@ pub struct PreparedGraphEdgeMergeText {
 impl core::fmt::Debug for PreparedGraphEdgeMergeText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphEdgeMergeText")
-            .field("definition", &"[REDACTED]").finish()
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -186,12 +220,19 @@ pub enum GraphEdgeMergeTextErrorKind {
 }
 impl From<GraphPatternTextError> for GraphEdgeMergeTextError {
     fn from(error: GraphPatternTextError) -> Self {
-        Self { offset: error.offset, kind: GraphEdgeMergeTextErrorKind::Query(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphEdgeMergeTextErrorKind::Query(error.kind),
+        }
     }
 }
 impl core::fmt::Display for GraphEdgeMergeTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "graph relationship MERGE text error at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "graph relationship MERGE text error at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphEdgeMergeTextError {}

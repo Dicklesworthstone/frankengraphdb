@@ -18,8 +18,9 @@ pub use result::{
 };
 
 use crate::algebra::{
-    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphPath, GraphValue, GraphValueRow, MAX_PATTERN_NAME_BYTES,
-    MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection, VertexPredicate,
+    GRAPH_VALUE_PAYLOAD_UNIT_BYTES, GlaOperator, GraphPath, GraphValue, GraphValueRow,
+    MAX_PATTERN_NAME_BYTES, MAX_PATTERN_VERTICES, PreparedGraphPattern, ValueProjection,
+    VertexPredicate,
 };
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
@@ -463,11 +464,15 @@ impl PreparedGraphAggregate {
                 observed: width,
             });
         }
-        let projected_columns = computed_input.as_deref()
+        let projected_columns = computed_input
+            .as_deref()
             .map(|projection| computed::projected_schema(&input, projection))
             .transpose()?;
-        let columns = relational_input.as_ref().map(crate::PreparedGraphSet::columns)
-            .or(projected_columns.as_deref()).unwrap_or(input.columns());
+        let columns = relational_input
+            .as_ref()
+            .map(crate::PreparedGraphSet::columns)
+            .or(projected_columns.as_deref())
+            .unwrap_or(input.columns());
         let mut names = BTreeSet::new();
         for (at, column) in keys.iter().enumerate() {
             let name = columns
@@ -738,12 +743,24 @@ impl PreparedGraphAggregate {
         }
         if self.relational_input.is_some() {
             return self.execute_relational_governed(
-                snapshot_records, vertices, edges, test_vertex, property, policy, checkpoint,
+                snapshot_records,
+                vertices,
+                edges,
+                test_vertex,
+                property,
+                policy,
+                checkpoint,
             );
         }
         if self.computed_input.is_some() {
             return self.execute_projected_governed(
-                snapshot_records, vertices, edges, test_vertex, property, policy, checkpoint,
+                snapshot_records,
+                vertices,
+                edges,
+                test_vertex,
+                property,
+                policy,
+                checkpoint,
             );
         }
         checkpoint().map_err(GqlQueryError::Interrupted)?;
@@ -803,7 +820,9 @@ impl PreparedGraphAggregate {
                             };
                             ValueRef::Scalar(value.unwrap_or(&NULL))
                         }
-                        ValueProjection::Path { .. } => return Err(GqlQueryError::IdentifiedEdgesRequired),
+                        ValueProjection::Path { .. } => {
+                            return Err(GqlQueryError::IdentifiedEdgesRequired);
+                        }
                     };
                     for _ in 0..values[at].payload_units() {
                         control(GlaExecutionEvent::Work)?;

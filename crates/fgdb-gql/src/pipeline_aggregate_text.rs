@@ -27,7 +27,11 @@ pub struct GraphPipelineAggregateTextError {
 }
 impl core::fmt::Display for GraphPipelineAggregateTextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "aggregate pipeline at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "aggregate pipeline at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 impl core::error::Error for GraphPipelineAggregateTextError {
@@ -41,11 +45,16 @@ impl core::error::Error for GraphPipelineAggregateTextError {
 }
 impl From<GraphSetTextError> for GraphPipelineAggregateTextError {
     fn from(error: GraphSetTextError) -> Self {
-        Self { offset: error.offset, kind: GraphPipelineAggregateTextErrorKind::Input(error.kind) }
+        Self {
+            offset: error.offset,
+            kind: GraphPipelineAggregateTextErrorKind::Input(error.kind),
+        }
     }
 }
 impl From<GraphPatternTextError> for GraphPipelineAggregateTextError {
-    fn from(error: GraphPatternTextError) -> Self { GraphSetTextError::from(error).into() }
+    fn from(error: GraphPatternTextError) -> Self {
+        GraphSetTextError::from(error).into()
+    }
 }
 
 #[derive(Clone)]
@@ -96,16 +105,25 @@ impl core::fmt::Debug for PreparedGraphPipelineAggregateText {
         f.debug_struct("PreparedGraphPipelineAggregateText")
             .field("columns", &self.names.len())
             .field("parameters", &self.input.parameter_schema().len())
-            .field("definition", &"[REDACTED]").finish()
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 impl PreparedGraphPipelineAggregateText {
     #[must_use]
-    pub fn statement(&self) -> &str { &self.statement }
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
     #[must_use]
-    pub fn columns(&self) -> &[String] { &self.names }
+    pub fn columns(&self) -> &[String] {
+        &self.names
+    }
     #[must_use]
-    pub fn output_slots(&self) -> &[GraphAggregateTextSlot] { &self.slots }
+    pub fn output_slots(&self) -> &[GraphAggregateTextSlot] {
+        &self.slots
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { self.input.parameter_schema() }
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        self.input.parameter_schema()
+    }
 }

@@ -366,7 +366,9 @@ mod sealed {
             let GlaOperator::ProjectValues { columns } = operator else {
                 unreachable!("the private value-plan constructor owns its projection shape")
             };
-            super::super::values::collect_values_with_paths(columns, bindings, paths, projected, property, control)
+            super::super::values::collect_values_with_paths(
+                columns, bindings, paths, projected, property, control,
+            )
         }
 
         fn collect_properties<'a, E>(

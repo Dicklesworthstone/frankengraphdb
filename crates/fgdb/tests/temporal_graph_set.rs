@@ -13,7 +13,11 @@ use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, Purpos
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x81; 32], DatabaseSecurityNamespaceId([0x82; 32]), [0x83; 32])
+    DatabaseKeys::new(
+        [0x81; 32],
+        DatabaseSecurityNamespaceId([0x82; 32]),
+        [0x83; 32],
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -25,10 +29,14 @@ fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(20_000, 20_000, 5_000_000, 5_000_000)
 }
 fn ints(result: &fgdb_gql::GqlQueryExecution<fgdb_gql::algebra::GraphValueRow>) -> Vec<i64> {
-    result.value.iter().map(|row| match row.values()[0].as_scalar() {
-        Some(CanonicalScalar::Int(value)) => *value,
-        other => panic!("expected integer set value, got {other:?}"),
-    }).collect()
+    result
+        .value
+        .iter()
+        .map(|row| match row.values()[0].as_scalar() {
+            Some(CanonicalScalar::Int(value)) => *value,
+            other => panic!("expected integer set value, got {other:?}"),
+        })
+        .collect()
 }
 
 #[test]
@@ -39,7 +47,9 @@ fn union_uses_one_historical_sequence_for_every_operand_and_survives_reopen() {
         let query = contexts.query();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
 
         let mut first = WriteBatch::new(R);
         first.create_vertex(VId(1), vec![], vec![(P, CanonicalScalar::Int(1))]);
@@ -60,35 +70,68 @@ fn union_uses_one_historical_sequence_for_every_operand_and_survives_reopen() {
             "MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at WHERE a.p >= 2 RETURN a.p*2 AS p UNION DISTINCT MATCH (b) WHERE b.p <= 3 RETURN b.p*2 AS p ORDER BY p",
             symbols,
         ).unwrap();
-        let bind = |seq: CommitSeq| template.bind_parameters(
-            &GqlParameters::new().with_uint64("at", seq.0).unwrap(),
-        ).unwrap();
+        let bind = |seq: CommitSeq| {
+            template
+                .bind_parameters(&GqlParameters::new().with_uint64("at", seq.0).unwrap())
+                .unwrap()
+        };
         for (seq, expected) in [
             (seq1, vec![2, 4]),
             (seq2, vec![4, 6, 8]),
             (seq3, vec![6, 8]),
         ] {
             let bound = bind(seq);
-            let temporal = db.execute_temporal_graph_set_text_governed(&query, &bound, policy()).unwrap();
-            let explicit = db.execute_graph_set_governed_at(&query, bound.query(), seq, policy()).unwrap();
+            let temporal = db
+                .execute_temporal_graph_set_text_governed(&query, &bound, policy())
+                .unwrap();
+            let explicit = db
+                .execute_graph_set_governed_at(&query, bound.query(), seq, policy())
+                .unwrap();
             assert_eq!(temporal, explicit);
             assert_eq!(ints(&temporal), expected, "set history mismatch at {seq:?}");
         }
 
-        assert_eq!(ints(&pinned.execute_temporal_graph_set_text_governed(
-            &query, &bind(seq1), policy()).unwrap()), vec![2, 4]);
-        assert_eq!(ints(&pinned.execute_temporal_graph_set_text_governed(
-            &query, &bind(seq2), policy()).unwrap()), vec![4, 6, 8]);
-        assert!(pinned.execute_temporal_graph_set_text_governed(
-            &query, &bind(seq3), policy()).is_err(), "pinned set view cannot read its future");
+        assert_eq!(
+            ints(
+                &pinned
+                    .execute_temporal_graph_set_text_governed(&query, &bind(seq1), policy())
+                    .unwrap()
+            ),
+            vec![2, 4]
+        );
+        assert_eq!(
+            ints(
+                &pinned
+                    .execute_temporal_graph_set_text_governed(&query, &bind(seq2), policy())
+                    .unwrap()
+            ),
+            vec![4, 6, 8]
+        );
+        assert!(
+            pinned
+                .execute_temporal_graph_set_text_governed(&query, &bind(seq3), policy())
+                .is_err(),
+            "pinned set view cannot read its future"
+        );
 
         db.compact(&commit).await.unwrap();
         drop(pinned);
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
-        for (seq, expected) in [(seq1, vec![2, 4]), (seq2, vec![4, 6, 8]), (seq3, vec![6, 8])] {
-            assert_eq!(ints(&db.execute_temporal_graph_set_text_governed(
-                &query, &bind(seq), policy()).unwrap()), expected);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
+        for (seq, expected) in [
+            (seq1, vec![2, 4]),
+            (seq2, vec![4, 6, 8]),
+            (seq3, vec![6, 8]),
+        ] {
+            assert_eq!(
+                ints(
+                    &db.execute_temporal_graph_set_text_governed(&query, &bind(seq), policy())
+                        .unwrap()
+                ),
+                expected
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -113,10 +156,23 @@ fn except_and_intersect_preserve_operand_execution_at_selected_snapshot() {
             "MATCH (a) FOR SYSTEM_TIME AS OF SEQ $at WHERE a.p >= 2 RETURN a.p AS p INTERSECT MATCH (b) WHERE b.p <= 3 RETURN b.p AS p EXCEPT MATCH (c) WHERE c.p = 2 RETURN c.p AS p ORDER BY p",
             symbols,
         ).unwrap();
-        let bound = template.bind_parameters(&GqlParameters::new().with_uint64("at", seq.0).unwrap()).unwrap();
-        assert_eq!(ints(&db.execute_temporal_graph_set_text_governed(&query, &bound, policy()).unwrap()), vec![3]);
-        let future = template.bind_parameters(&GqlParameters::new().with_uint64("at", seq.0 + 1).unwrap()).unwrap();
-        assert!(db.execute_temporal_graph_set_text_governed(&query, &future, policy()).is_err());
+        let bound = template
+            .bind_parameters(&GqlParameters::new().with_uint64("at", seq.0).unwrap())
+            .unwrap();
+        assert_eq!(
+            ints(
+                &db.execute_temporal_graph_set_text_governed(&query, &bound, policy())
+                    .unwrap()
+            ),
+            vec![3]
+        );
+        let future = template
+            .bind_parameters(&GqlParameters::new().with_uint64("at", seq.0 + 1).unwrap())
+            .unwrap();
+        assert!(
+            db.execute_temporal_graph_set_text_governed(&query, &future, policy())
+                .is_err()
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

@@ -5,7 +5,10 @@
 mod property_comparison;
 mod value_projection;
 
-use super::{BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphPathFunction, GraphWalkSearch, IntegerComparison, VertexPredicate};
+use super::{
+    BindingSlot, GlaDirection, GlaOperator, GlaPlan, GraphBindingRow, GraphPathFunction,
+    GraphWalkSearch, IntegerComparison, VertexPredicate,
+};
 use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_types::VId;
 use property_comparison::PropertyComparison;
@@ -134,8 +137,16 @@ struct PathCapture {
 
 #[derive(Clone)]
 enum PathPredicate {
-    Length { capture: u32, comparison: IntegerComparison, value: i64 },
-    Null { capture: u32, function: GraphPathFunction, is_null: bool },
+    Length {
+        capture: u32,
+        comparison: IntegerComparison,
+        value: i64,
+    },
+    Null {
+        capture: u32,
+        function: GraphPathFunction,
+        is_null: bool,
+    },
 }
 
 /// Bounded definition metadata. Mutators validate before changing the builder.
@@ -283,7 +294,10 @@ impl GraphPatternBuilder {
             return Err(PatternBuildError::InvalidVariableName);
         }
         if self.variables.iter().any(|var| var.name == name)
-            || self.path_captures.iter().any(|capture| capture.name == name)
+            || self
+                .path_captures
+                .iter()
+                .any(|capture| capture.name == name)
         {
             return Err(PatternBuildError::DuplicateVariable);
         }
@@ -309,7 +323,10 @@ impl GraphPatternBuilder {
     /// Captures consume the ordinary variable and definition-wide frame caps.
     pub fn outer_vertex(&mut self, name: &str) -> Result<&mut Self, PatternBuildError> {
         self.vertex(name)?;
-        self.variables.last_mut().expect("one validated variable was added").outer = true;
+        self.variables
+            .last_mut()
+            .expect("one validated variable was added")
+            .outer = true;
         Ok(self)
     }
 
@@ -322,12 +339,17 @@ impl GraphPatternBuilder {
         if bytes.is_empty()
             || bytes.len() > MAX_PATTERN_NAME_BYTES
             || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-            || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            || !bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
         {
             return Err(PatternBuildError::InvalidVariableName);
         }
         if self.variables.iter().any(|variable| variable.name == name)
-            || self.path_captures.iter().any(|capture| capture.name == name)
+            || self
+                .path_captures
+                .iter()
+                .any(|capture| capture.name == name)
         {
             return Err(PatternBuildError::DuplicateVariable);
         }
@@ -373,7 +395,9 @@ impl GraphPatternBuilder {
     }
 
     fn path_capture(&self, name: &str) -> Result<usize, PatternBuildError> {
-        self.path_captures.iter().position(|capture| capture.name == name)
+        self.path_captures
+            .iter()
+            .position(|capture| capture.name == name)
             .ok_or(PatternBuildError::UnknownVariable)
     }
 
@@ -384,8 +408,16 @@ impl GraphPatternBuilder {
         value: i64,
     ) -> Result<&mut Self, PatternBuildError> {
         let capture = self.path_capture(variable)? as u32;
-        check_next(self.predicate_count, MAX_PATTERN_PREDICATES, PatternLimitDimension::Predicates)?;
-        self.path_predicates.push(PathPredicate::Length { capture, comparison, value });
+        check_next(
+            self.predicate_count,
+            MAX_PATTERN_PREDICATES,
+            PatternLimitDimension::Predicates,
+        )?;
+        self.path_predicates.push(PathPredicate::Length {
+            capture,
+            comparison,
+            value,
+        });
         self.predicate_count += 1;
         Ok(self)
     }
@@ -397,8 +429,16 @@ impl GraphPatternBuilder {
         is_null: bool,
     ) -> Result<&mut Self, PatternBuildError> {
         let capture = self.path_capture(variable)? as u32;
-        check_next(self.predicate_count, MAX_PATTERN_PREDICATES, PatternLimitDimension::Predicates)?;
-        self.path_predicates.push(PathPredicate::Null { capture, function, is_null });
+        check_next(
+            self.predicate_count,
+            MAX_PATTERN_PREDICATES,
+            PatternLimitDimension::Predicates,
+        )?;
+        self.path_predicates.push(PathPredicate::Null {
+            capture,
+            function,
+            is_null,
+        });
         self.predicate_count += 1;
         Ok(self)
     }
@@ -533,7 +573,10 @@ impl GraphPatternBuilder {
         bounds: crate::GraphWalkBounds,
     ) -> Result<&mut Self, PatternBuildError> {
         self.walk(source, relation, direction, destination, bounds)?;
-        self.edges.last_mut().expect("one validated atom was added").search = GraphWalkSearch::Acyclic;
+        self.edges
+            .last_mut()
+            .expect("one validated atom was added")
+            .search = GraphWalkSearch::Acyclic;
         Ok(self)
     }
 
@@ -549,7 +592,10 @@ impl GraphPatternBuilder {
         bounds: crate::GraphWalkBounds,
     ) -> Result<&mut Self, PatternBuildError> {
         self.walk(source, relation, direction, destination, bounds)?;
-        self.edges.last_mut().expect("one validated atom was added").search = GraphWalkSearch::Simple;
+        self.edges
+            .last_mut()
+            .expect("one validated atom was added")
+            .search = GraphWalkSearch::Simple;
         Ok(self)
     }
 
@@ -691,7 +737,10 @@ impl GraphPatternBuilder {
         &self,
         root: Option<usize>,
     ) -> Result<(Vec<GlaOperator>, Vec<BindingSlot>), PatternBuildError> {
-        let first_local = self.variables.iter().position(|variable| !variable.outer)
+        let first_local = self
+            .variables
+            .iter()
+            .position(|variable| !variable.outer)
             .ok_or(PatternBuildError::EmptyPattern)?;
         let mut slots = vec![None; self.variables.len()];
         let mut emitted = vec![false; self.identities.len()];
@@ -811,19 +860,32 @@ impl GraphPatternBuilder {
             operators.push(GlaOperator::CapturePath {
                 capture: capture as u32,
                 start: slots[definition.start],
-                segments: path_segments[..definition.edge_count].iter()
+                segments: path_segments[..definition.edge_count]
+                    .iter()
                     .map(|slot| slot.expect("every captured edge has been bound"))
                     .collect(),
             });
         }
         for predicate in &self.path_predicates {
             operators.push(match *predicate {
-                PathPredicate::Length { capture, comparison, value } => {
-                    GlaOperator::SelectPathLength { capture, comparison, value }
-                }
-                PathPredicate::Null { capture, function, is_null } => {
-                    GlaOperator::SelectPathNull { capture, function, is_null }
-                }
+                PathPredicate::Length {
+                    capture,
+                    comparison,
+                    value,
+                } => GlaOperator::SelectPathLength {
+                    capture,
+                    comparison,
+                    value,
+                },
+                PathPredicate::Null {
+                    capture,
+                    function,
+                    is_null,
+                } => GlaOperator::SelectPathNull {
+                    capture,
+                    function,
+                    is_null,
+                },
             });
         }
         self.emit_property_comparisons(&slots, &mut operators);

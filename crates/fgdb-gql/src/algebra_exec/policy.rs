@@ -220,7 +220,9 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
-            if self.requires_identified_edges() { return Err(GqlQueryError::IdentifiedEdgesRequired); }
+            if self.requires_identified_edges() {
+                return Err(GqlQueryError::IdentifiedEdgesRequired);
+            }
             self.execute_with_properties_control(
                 vertices,
                 edges,
@@ -245,7 +247,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
             self.execute_with_identified_properties_control(
-                vertices, edges,
+                vertices,
+                edges,
                 |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
                 |vid, key| property(vid, key).map_err(GqlQueryError::Source),
                 |event| meter.observe(event),

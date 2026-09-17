@@ -8,8 +8,8 @@
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::{
-    GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
-    GqlBudgetDimension, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
+    GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
+    GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
 };
 use fgdb_delta_types::RelationId;
 use fgdb_types::VId;
@@ -34,8 +34,14 @@ impl core::error::Error for GraphDeleteBuildError {}
 pub enum GraphDeleteError<E> {
     Source(E),
     InvalidSourceStatistics,
-    InputSchema { row: usize, column: usize },
-    TargetLimit { limit: u64, observed: u128 },
+    InputSchema {
+        row: usize,
+        column: usize,
+    },
+    TargetLimit {
+        limit: u64,
+        observed: u128,
+    },
     /// The storage adapter observed at least one live incident relationship for
     /// a requested target in the exact transaction overlay. IDs remain redacted.
     IncidentRelationships,
@@ -53,7 +59,10 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphDeleteError<E> {
 }
 impl<E: core::error::Error + 'static> core::error::Error for GraphDeleteError<E> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self { Self::Source(error) => Some(error), _ => None }
+        match self {
+            Self::Source(error) => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -83,11 +92,17 @@ pub struct GraphDeleteProposal {
 }
 impl GraphDeleteProposal {
     #[must_use]
-    pub fn targets(&self) -> &[VId] { &self.targets }
+    pub fn targets(&self) -> &[VId] {
+        &self.targets
+    }
     #[must_use]
-    pub const fn stats(&self) -> GraphDeleteStats { self.stats }
+    pub const fn stats(&self) -> GraphDeleteStats {
+        self.stats
+    }
     #[must_use]
-    pub fn into_targets(self) -> Vec<VId> { self.targets }
+    pub fn into_targets(self) -> Vec<VId> {
+        self.targets
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -110,10 +125,13 @@ impl PreparedGraphDelete {
         relation: RelationId,
         targets: Vec<usize>,
     ) -> Result<Self, GraphDeleteBuildError> {
-        if targets.is_empty() { return Err(GraphDeleteBuildError::EmptyTargets); }
+        if targets.is_empty() {
+            return Err(GraphDeleteBuildError::EmptyTargets);
+        }
         if targets.len() > MAX_GRAPH_DELETE_TARGETS {
             return Err(GraphDeleteBuildError::TooManyTargets {
-                limit: MAX_GRAPH_DELETE_TARGETS, observed: targets.len(),
+                limit: MAX_GRAPH_DELETE_TARGETS,
+                observed: targets.len(),
             });
         }
         let columns = selection.value_columns();
@@ -129,15 +147,25 @@ impl PreparedGraphDelete {
                 return Err(GraphDeleteBuildError::TargetColumn { target: at, column });
             }
         }
-        Ok(Self { selection, relation, targets })
+        Ok(Self {
+            selection,
+            relation,
+            targets,
+        })
     }
 
     #[must_use]
-    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> { &self.selection }
+    pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> {
+        &self.selection
+    }
     #[must_use]
-    pub const fn relation(&self) -> RelationId { self.relation }
+    pub const fn relation(&self) -> RelationId {
+        self.relation
+    }
     #[must_use]
-    pub fn target_columns(&self) -> &[usize] { &self.targets }
+    pub fn target_columns(&self) -> &[usize] {
+        &self.targets
+    }
 
     pub fn execute_governed<E, C>(
         &self,
@@ -152,43 +180,75 @@ impl PreparedGraphDelete {
         let selected = source(&self.selection, policy.query)
             .map_err(|error| error.map_source(GraphDeleteError::Source))?;
         if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
-            return Err(GqlQueryError::Source(GraphDeleteError::InvalidSourceStatistics));
+            return Err(GqlQueryError::Source(
+                GraphDeleteError::InvalidSourceStatistics,
+            ));
         }
         for (dimension, observed) in [
-            (GqlBudgetDimension::SnapshotRecords, selected.rows.snapshot_records),
+            (
+                GqlBudgetDimension::SnapshotRecords,
+                selected.rows.snapshot_records,
+            ),
             (GqlBudgetDimension::ResultRows, selected.rows.result_rows),
         ] {
-            policy.query.rows.check(dimension, observed).map_err(GqlQueryError::Rows)?;
+            policy
+                .query
+                .rows
+                .check(dimension, observed)
+                .map_err(GqlQueryError::Rows)?;
         }
         for (observed, limit, dimension) in [
-            (selected.evaluator.work_units, policy.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-            (selected.evaluator.scratch_entries, policy.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
+            (
+                selected.evaluator.work_units,
+                policy.query.evaluator.max_work_units,
+                GlaLimitDimension::WorkUnits,
+            ),
+            (
+                selected.evaluator.scratch_entries,
+                policy.query.evaluator.max_scratch_entries,
+                GlaLimitDimension::ScratchEntries,
+            ),
         ] {
             if observed > limit {
                 return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
-                    dimension, limit, observed: u128::from(observed),
+                    dimension,
+                    limit,
+                    observed: u128::from(observed),
                 }));
             }
         }
 
         let mut evaluator = selected.evaluator;
-        let mut event = |kind: GlaExecutionEvent| -> Result<(), GqlQueryError<GraphDeleteError<E>, C>> {
-            checkpoint().map_err(GqlQueryError::Interrupted)?;
-            let work = u128::from(evaluator.work_units) + 1;
-            let scratch = u128::from(evaluator.scratch_entries)
-                + u128::from(kind == GlaExecutionEvent::ScratchEntry);
-            for (observed, limit, dimension) in [
-                (work, policy.query.evaluator.max_work_units, GlaLimitDimension::WorkUnits),
-                (scratch, policy.query.evaluator.max_scratch_entries, GlaLimitDimension::ScratchEntries),
-            ] {
-                if observed > u128::from(limit) {
-                    return Err(GqlQueryError::Evaluator(GlaLimitExceeded { dimension, limit, observed }));
+        let mut event =
+            |kind: GlaExecutionEvent| -> Result<(), GqlQueryError<GraphDeleteError<E>, C>> {
+                checkpoint().map_err(GqlQueryError::Interrupted)?;
+                let work = u128::from(evaluator.work_units) + 1;
+                let scratch = u128::from(evaluator.scratch_entries)
+                    + u128::from(kind == GlaExecutionEvent::ScratchEntry);
+                for (observed, limit, dimension) in [
+                    (
+                        work,
+                        policy.query.evaluator.max_work_units,
+                        GlaLimitDimension::WorkUnits,
+                    ),
+                    (
+                        scratch,
+                        policy.query.evaluator.max_scratch_entries,
+                        GlaLimitDimension::ScratchEntries,
+                    ),
+                ] {
+                    if observed > u128::from(limit) {
+                        return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
+                            dimension,
+                            limit,
+                            observed,
+                        }));
+                    }
                 }
-            }
-            evaluator.work_units = work as u64;
-            evaluator.scratch_entries = scratch as u64;
-            Ok(())
-        };
+                evaluator.work_units = work as u64;
+                evaluator.scratch_entries = scratch as u64;
+                Ok(())
+            };
 
         event(GlaExecutionEvent::Work)?;
         let columns = self.selection.value_columns();
@@ -197,21 +257,30 @@ impl PreparedGraphDelete {
             event(GlaExecutionEvent::Work)?;
             if row.len() != columns.len() {
                 return Err(GqlQueryError::Source(GraphDeleteError::InputSchema {
-                    row: row_at, column: row.len().min(columns.len()),
+                    row: row_at,
+                    column: row.len().min(columns.len()),
                 }));
             }
             for &column in &self.targets {
                 event(GlaExecutionEvent::Work)?;
                 let value = &row.values()[column];
-                if value.is_null() { continue; }
+                if value.is_null() {
+                    continue;
+                }
                 let Some(vertex) = value.as_vertex() else {
-                    return Err(GqlQueryError::Source(GraphDeleteError::InputSchema { row: row_at, column }));
+                    return Err(GqlQueryError::Source(GraphDeleteError::InputSchema {
+                        row: row_at,
+                        column,
+                    }));
                 };
-                if targets.contains(&vertex) { continue; }
+                if targets.contains(&vertex) {
+                    continue;
+                }
                 let observed = targets.len() as u128 + 1;
                 if observed > u128::from(policy.max_targets) {
                     return Err(GqlQueryError::Source(GraphDeleteError::TargetLimit {
-                        limit: policy.max_targets, observed,
+                        limit: policy.max_targets,
+                        observed,
                     }));
                 }
                 event(GlaExecutionEvent::ScratchEntry)?;
@@ -236,7 +305,9 @@ impl PreparedGraphDelete {
         bytes.extend_from_slice(&(input.len() as u64).to_be_bytes());
         bytes.extend_from_slice(&input);
         bytes.extend_from_slice(&(self.targets.len() as u64).to_be_bytes());
-        for target in &self.targets { bytes.extend_from_slice(&(*target as u64).to_be_bytes()); }
+        for target in &self.targets {
+            bytes.extend_from_slice(&(*target as u64).to_be_bytes());
+        }
         bytes
     }
 }

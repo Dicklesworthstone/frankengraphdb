@@ -11,7 +11,11 @@ use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
 
 const R: RelationId = RelationId(1);
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x91; 32], DatabaseSecurityNamespaceId([0x92; 32]), [0x93; 32])
+    DatabaseKeys::new(
+        [0x91; 32],
+        DatabaseSecurityNamespaceId([0x92; 32]),
+        [0x93; 32],
+    )
 }
 fn wide() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 20_000_000, 20_000_000)
@@ -28,11 +32,18 @@ async fn seed(db: &mut Database<MemVfs>, cx: &fgdb_types::CommitCx) -> fgdb_type
     // three shortest depth-two occurrences. Endpoint 5 has two depth-two
     // occurrences; the three alternatives through 4 are longer and must lose.
     for (eid, source, destination) in [
-        (11, 1, 2), (12, 1, 2), (13, 1, 3),
-        (14, 2, 4), (15, 3, 4), (16, 4, 5),
-        (17, 2, 5), (18, 4, 6), (19, 5, 5),
+        (11, 1, 2),
+        (12, 1, 2),
+        (13, 1, 3),
+        (14, 2, 4),
+        (15, 3, 4),
+        (16, 4, 5),
+        (17, 2, 5),
+        (18, 4, 6),
+        (19, 5, 5),
         // Isolated two-cycle for lower-bound semantics.
-        (20, 10, 11), (21, 11, 10),
+        (20, 10, 11),
+        (21, 11, 10),
     ] {
         batch.add_edge(EId(eid), VId(source), VId(destination), vec![]);
     }
@@ -47,14 +58,35 @@ fn shortest_bag_tracks_historical_topology_and_survives_compaction_and_reopen() 
         let query = contexts.query();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         let seq1 = seed(&mut db, &commit).await;
 
-        let expected1 = vec![VId(2), VId(2), VId(3), VId(4), VId(4), VId(4),
-            VId(5), VId(5), VId(6), VId(6), VId(6)];
-        let first = db.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq1, wide(),
-        ).unwrap();
+        let expected1 = vec![
+            VId(2),
+            VId(2),
+            VId(3),
+            VId(4),
+            VId(4),
+            VId(4),
+            VId(5),
+            VId(5),
+            VId(6),
+            VId(6),
+            VId(6),
+        ];
+        let first = db
+            .execute_all_shortest_walk_governed_at(
+                &query,
+                VId(1),
+                R,
+                GlaDirection::Forward,
+                bounds(1, 4),
+                seq1,
+                wide(),
+            )
+            .unwrap();
         assert_eq!(first.value, expected1);
 
         // A direct shortcut changes only endpoint 6's partition: its three
@@ -63,44 +95,146 @@ fn shortest_bag_tracks_historical_topology_and_survives_compaction_and_reopen() 
         shortcut.add_edge(EId(22), VId(1), VId(6), vec![]);
         let seq2 = db.write(&commit, shortcut).await.unwrap();
         let pinned = db.read_session().unwrap();
-        let expected2 = vec![VId(2), VId(2), VId(3), VId(4), VId(4), VId(4),
-            VId(5), VId(5), VId(6)];
-        assert_eq!(db.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq2, wide(),
-        ).unwrap().value, expected2);
-        assert_eq!(db.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq1, wide(),
-        ).unwrap().value, expected1, "new shortcut leaked into historical search");
+        let expected2 = vec![
+            VId(2),
+            VId(2),
+            VId(3),
+            VId(4),
+            VId(4),
+            VId(4),
+            VId(5),
+            VId(5),
+            VId(6),
+        ];
+        assert_eq!(
+            db.execute_all_shortest_walk_governed_at(
+                &query,
+                VId(1),
+                R,
+                GlaDirection::Forward,
+                bounds(1, 4),
+                seq2,
+                wide(),
+            )
+            .unwrap()
+            .value,
+            expected2
+        );
+        assert_eq!(
+            db.execute_all_shortest_walk_governed_at(
+                &query,
+                VId(1),
+                R,
+                GlaDirection::Forward,
+                bounds(1, 4),
+                seq1,
+                wide(),
+            )
+            .unwrap()
+            .value,
+            expected1,
+            "new shortcut leaked into historical search"
+        );
 
         // Remove the depth-two route to 5. The three depth-three routes through
         // endpoint 4 now become the shortest admissible alternatives to 5.
         let mut remove = WriteBatch::new(R);
         remove.delete_edge(EId(17));
         let seq3 = db.write(&commit, remove).await.unwrap();
-        let expected3 = vec![VId(2), VId(2), VId(3), VId(4), VId(4), VId(4),
-            VId(5), VId(5), VId(5), VId(6)];
-        assert_eq!(db.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq3, wide(),
-        ).unwrap().value, expected3);
+        let expected3 = vec![
+            VId(2),
+            VId(2),
+            VId(3),
+            VId(4),
+            VId(4),
+            VId(4),
+            VId(5),
+            VId(5),
+            VId(5),
+            VId(6),
+        ];
+        assert_eq!(
+            db.execute_all_shortest_walk_governed_at(
+                &query,
+                VId(1),
+                R,
+                GlaDirection::Forward,
+                bounds(1, 4),
+                seq3,
+                wide(),
+            )
+            .unwrap()
+            .value,
+            expected3
+        );
 
-        assert_eq!(pinned.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq1, wide(),
-        ).unwrap().value, expected1);
-        assert_eq!(pinned.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq2, wide(),
-        ).unwrap().value, expected2);
-        assert!(pinned.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq3, wide(),
-        ).is_err(), "pinned shortest search cannot read beyond its frontier");
+        assert_eq!(
+            pinned
+                .execute_all_shortest_walk_governed_at(
+                    &query,
+                    VId(1),
+                    R,
+                    GlaDirection::Forward,
+                    bounds(1, 4),
+                    seq1,
+                    wide(),
+                )
+                .unwrap()
+                .value,
+            expected1
+        );
+        assert_eq!(
+            pinned
+                .execute_all_shortest_walk_governed_at(
+                    &query,
+                    VId(1),
+                    R,
+                    GlaDirection::Forward,
+                    bounds(1, 4),
+                    seq2,
+                    wide(),
+                )
+                .unwrap()
+                .value,
+            expected2
+        );
+        assert!(
+            pinned
+                .execute_all_shortest_walk_governed_at(
+                    &query,
+                    VId(1),
+                    R,
+                    GlaDirection::Forward,
+                    bounds(1, 4),
+                    seq3,
+                    wide(),
+                )
+                .is_err(),
+            "pinned shortest search cannot read beyond its frontier"
+        );
 
         db.compact(&commit).await.unwrap();
         drop(pinned);
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         for (seq, expected) in [(seq1, expected1), (seq2, expected2), (seq3, expected3)] {
-            assert_eq!(db.execute_all_shortest_walk_governed_at(
-                &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq, wide(),
-            ).unwrap().value, expected, "reopen changed shortest bag at {seq:?}");
+            assert_eq!(
+                db.execute_all_shortest_walk_governed_at(
+                    &query,
+                    VId(1),
+                    R,
+                    GlaDirection::Forward,
+                    bounds(1, 4),
+                    seq,
+                    wide(),
+                )
+                .unwrap()
+                .value,
+                expected,
+                "reopen changed shortest bag at {seq:?}"
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -117,61 +251,167 @@ fn directions_lower_bounds_missing_sources_and_exact_resource_caps_are_governed(
 
         // Reverse from 6 reaches 4, then 2/3, then source 1 through three
         // equal shortest occurrences (two parallel 1->2 edges plus 1->3).
-        assert_eq!(db.execute_all_shortest_walk_governed_at(
-            &query, VId(6), R, GlaDirection::Reverse, bounds(1, 4), seq, wide(),
-        ).unwrap().value, vec![VId(1), VId(1), VId(1), VId(2), VId(3), VId(4)]);
+        assert_eq!(
+            db.execute_all_shortest_walk_governed_at(
+                &query,
+                VId(6),
+                R,
+                GlaDirection::Reverse,
+                bounds(1, 4),
+                seq,
+                wide(),
+            )
+            .unwrap()
+            .value,
+            vec![VId(1), VId(1), VId(1), VId(2), VId(3), VId(4)]
+        );
 
         // Undirected search counts a self-loop once, not once per orientation.
-        assert_eq!(db.execute_all_shortest_walk_governed_at(
-            &query, VId(5), R, GlaDirection::Undirected, bounds(1, 2), seq, wide(),
-        ).unwrap().value,
-            vec![VId(1), VId(1), VId(2), VId(3), VId(4), VId(5), VId(6)]);
+        assert_eq!(
+            db.execute_all_shortest_walk_governed_at(
+                &query,
+                VId(5),
+                R,
+                GlaDirection::Undirected,
+                bounds(1, 2),
+                seq,
+                wide(),
+            )
+            .unwrap()
+            .value,
+            vec![VId(1), VId(1), VId(2), VId(3), VId(4), VId(5), VId(6)]
+        );
 
         // Before the lower bound, identities remain traversable but un-settled.
-        assert_eq!(db.execute_all_shortest_walk_governed_at(
-            &query, VId(10), R, GlaDirection::Forward, bounds(2, 3), seq, wide(),
-        ).unwrap().value, vec![VId(10), VId(11)]);
-        assert_eq!(db.execute_all_shortest_walk_governed_at(
-            &query, VId(10), R, GlaDirection::Forward, bounds(0, 3), seq, wide(),
-        ).unwrap().value, vec![VId(10), VId(11)]);
+        assert_eq!(
+            db.execute_all_shortest_walk_governed_at(
+                &query,
+                VId(10),
+                R,
+                GlaDirection::Forward,
+                bounds(2, 3),
+                seq,
+                wide(),
+            )
+            .unwrap()
+            .value,
+            vec![VId(10), VId(11)]
+        );
+        assert_eq!(
+            db.execute_all_shortest_walk_governed_at(
+                &query,
+                VId(10),
+                R,
+                GlaDirection::Forward,
+                bounds(0, 3),
+                seq,
+                wide(),
+            )
+            .unwrap()
+            .value,
+            vec![VId(10), VId(11)]
+        );
 
-        let missing = db.execute_all_shortest_walk_governed_at(
-            &query, VId(999), R, GlaDirection::Forward, bounds(0, 4), seq, wide(),
-        ).unwrap();
-        assert!(missing.value.is_empty(), "absent source must not fabricate a zero-hop row");
+        let missing = db
+            .execute_all_shortest_walk_governed_at(
+                &query,
+                VId(999),
+                R,
+                GlaDirection::Forward,
+                bounds(0, 4),
+                seq,
+                wide(),
+            )
+            .unwrap();
+        assert!(
+            missing.value.is_empty(),
+            "absent source must not fabricate a zero-hop row"
+        );
         assert_eq!(missing.rows.result_rows, 0);
 
-        let measured = db.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq, wide(),
-        ).unwrap();
+        let measured = db
+            .execute_all_shortest_walk_governed_at(
+                &query,
+                VId(1),
+                R,
+                GlaDirection::Forward,
+                bounds(1, 4),
+                seq,
+                wide(),
+            )
+            .unwrap();
         let exact = GqlQueryPolicy::new(
             measured.rows.snapshot_records,
             measured.rows.result_rows,
             measured.evaluator.work_units,
             measured.evaluator.scratch_entries,
         );
-        assert_eq!(db.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq, exact,
-        ).unwrap(), measured);
+        assert_eq!(
+            db.execute_all_shortest_walk_governed_at(
+                &query,
+                VId(1),
+                R,
+                GlaDirection::Forward,
+                bounds(1, 4),
+                seq,
+                exact,
+            )
+            .unwrap(),
+            measured
+        );
         for policy in [
-            GqlQueryPolicy::new(measured.rows.snapshot_records - 1, measured.rows.result_rows,
-                u64::MAX, u64::MAX),
-            GqlQueryPolicy::new(measured.rows.snapshot_records, measured.rows.result_rows - 1,
-                u64::MAX, u64::MAX),
-            GqlQueryPolicy::new(measured.rows.snapshot_records, measured.rows.result_rows,
-                measured.evaluator.work_units - 1, u64::MAX),
-            GqlQueryPolicy::new(measured.rows.snapshot_records, measured.rows.result_rows,
-                u64::MAX, measured.evaluator.scratch_entries - 1),
+            GqlQueryPolicy::new(
+                measured.rows.snapshot_records - 1,
+                measured.rows.result_rows,
+                u64::MAX,
+                u64::MAX,
+            ),
+            GqlQueryPolicy::new(
+                measured.rows.snapshot_records,
+                measured.rows.result_rows - 1,
+                u64::MAX,
+                u64::MAX,
+            ),
+            GqlQueryPolicy::new(
+                measured.rows.snapshot_records,
+                measured.rows.result_rows,
+                measured.evaluator.work_units - 1,
+                u64::MAX,
+            ),
+            GqlQueryPolicy::new(
+                measured.rows.snapshot_records,
+                measured.rows.result_rows,
+                u64::MAX,
+                measured.evaluator.scratch_entries - 1,
+            ),
         ] {
-            assert!(db.execute_all_shortest_walk_governed_at(
-                &query, VId(1), R, GlaDirection::Forward, bounds(1, 4), seq, policy,
-            ).is_err());
+            assert!(
+                db.execute_all_shortest_walk_governed_at(
+                    &query,
+                    VId(1),
+                    R,
+                    GlaDirection::Forward,
+                    bounds(1, 4),
+                    seq,
+                    policy,
+                )
+                .is_err()
+            );
         }
 
-        assert!(db.execute_all_shortest_walk_governed_at(
-            &query, VId(1), R, GlaDirection::Forward, bounds(1, 4),
-            fgdb_types::CommitSeq(seq.0 + 1), wide(),
-        ).is_err(), "future sequence must fail before search");
+        assert!(
+            db.execute_all_shortest_walk_governed_at(
+                &query,
+                VId(1),
+                R,
+                GlaDirection::Forward,
+                bounds(1, 4),
+                fgdb_types::CommitSeq(seq.0 + 1),
+                wide(),
+            )
+            .is_err(),
+            "future sequence must fail before search"
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

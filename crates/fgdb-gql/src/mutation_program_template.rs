@@ -22,17 +22,31 @@ pub enum GraphMutationProgramTemplateError {
         statement: usize,
     },
     UnexpectedArguments,
-    Bind { statement: usize, source: GraphMutationTextError },
+    Bind {
+        statement: usize,
+        source: GraphMutationTextError,
+    },
 }
 impl core::fmt::Display for GraphMutationProgramTemplateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Definition(source) => source.fmt(f),
-            Self::ConflictingParameterTypes { parameter, first_statement, statement } => {
-                write!(f, "program parameter {parameter} has incompatible types in statements {first_statement} and {statement}")
+            Self::ConflictingParameterTypes {
+                parameter,
+                first_statement,
+                statement,
+            } => {
+                write!(
+                    f,
+                    "program parameter {parameter} has incompatible types in statements {first_statement} and {statement}"
+                )
             }
-            Self::UnexpectedArguments => f.write_str("mutation program received undeclared arguments"),
-            Self::Bind { statement, source } => write!(f, "mutation program statement {statement}: {source}"),
+            Self::UnexpectedArguments => {
+                f.write_str("mutation program received undeclared arguments")
+            }
+            Self::Bind { statement, source } => {
+                write!(f, "mutation program statement {statement}: {source}")
+            }
         }
     }
 }
@@ -53,11 +67,16 @@ fn program_parameters<'a>(
 ) -> Result<Vec<GqlParameterSpec>, GraphMutationProgramTemplateError> {
     use GraphMutationProgramTemplateError as Error;
     let count = inputs.len();
-    if count == 0 { return Err(Error::Definition(GraphMutationProgramBuildError::Empty)); }
+    if count == 0 {
+        return Err(Error::Definition(GraphMutationProgramBuildError::Empty));
+    }
     if count > MAX_GRAPH_MUTATION_STATEMENTS {
-        return Err(Error::Definition(GraphMutationProgramBuildError::TooManyStatements {
-            limit: MAX_GRAPH_MUTATION_STATEMENTS, observed: count,
-        }));
+        return Err(Error::Definition(
+            GraphMutationProgramBuildError::TooManyStatements {
+                limit: MAX_GRAPH_MUTATION_STATEMENTS,
+                observed: count,
+            },
+        ));
     }
     let mut relation = None;
     let mut parameters: Vec<GqlParameterSpec> = Vec::new();
@@ -66,15 +85,21 @@ fn program_parameters<'a>(
     for (statement, (coordinate, schema)) in inputs.enumerate() {
         if let Some(expected) = relation {
             if coordinate != expected {
-                return Err(Error::Definition(GraphMutationProgramBuildError::MixedRelation { statement }));
+                return Err(Error::Definition(
+                    GraphMutationProgramBuildError::MixedRelation { statement },
+                ));
             }
-        } else { relation = Some(coordinate); }
+        } else {
+            relation = Some(coordinate);
+        }
         for spec in schema {
             if let Some(&at) = index.get(&spec.name) {
                 let previous = &mut parameters[at];
                 if previous.parameter_type != spec.parameter_type {
                     return Err(Error::ConflictingParameterTypes {
-                        parameter: at, first_statement: origins[at], statement,
+                        parameter: at,
+                        first_statement: origins[at],
+                        statement,
                     });
                 }
                 // Each input's shared lexer caps occurrences; 64 admitted
@@ -91,17 +116,25 @@ fn program_parameters<'a>(
     Ok(parameters)
 }
 
-fn check_program_arguments(parameters: &[GqlParameterSpec], arguments: &GqlParameters)
-    -> Result<(), GraphMutationProgramTemplateError> {
-    let recognized = parameters.iter().filter(|spec| arguments.get(&spec.name).is_some()).count();
-    if recognized != arguments.len() { return Err(GraphMutationProgramTemplateError::UnexpectedArguments); }
+fn check_program_arguments(
+    parameters: &[GqlParameterSpec],
+    arguments: &GqlParameters,
+) -> Result<(), GraphMutationProgramTemplateError> {
+    let recognized = parameters
+        .iter()
+        .filter(|spec| arguments.get(&spec.name).is_some())
+        .count();
+    if recognized != arguments.len() {
+        return Err(GraphMutationProgramTemplateError::UnexpectedArguments);
+    }
     Ok(())
 }
 fn local_arguments(schema: &[GqlParameterSpec], arguments: &GqlParameters) -> GqlParameters {
     let mut local = GqlParameters::new();
     for spec in schema {
         if let Some(value) = arguments.get(&spec.name) {
-            local.insert(spec.name.clone(), value)
+            local
+                .insert(spec.name.clone(), value)
                 .expect("prepared argument names are valid and locally unique");
         }
     }
@@ -129,30 +162,45 @@ impl core::fmt::Debug for PreparedGraphMutationProgramTemplate {
     }
 }
 impl PreparedGraphMutationProgramTemplate {
-    pub fn prepare(statements: Vec<PreparedGraphMutationText>)
-        -> Result<Self, GraphMutationProgramTemplateError> {
-        let parameters = program_parameters(statements.iter().map(|input| (input.relation, input.parameter_schema())))?;
-        Ok(Self { statements: statements.into_boxed_slice(), parameters })
+    pub fn prepare(
+        statements: Vec<PreparedGraphMutationText>,
+    ) -> Result<Self, GraphMutationProgramTemplateError> {
+        let parameters = program_parameters(
+            statements
+                .iter()
+                .map(|input| (input.relation, input.parameter_schema())),
+        )?;
+        Ok(Self {
+            statements: statements.into_boxed_slice(),
+            parameters,
+        })
     }
 
     /// Explicit metadata access; Debug never exports statements or names.
     #[must_use]
-    pub fn statements(&self) -> &[PreparedGraphMutationText] { &self.statements }
+    pub fn statements(&self) -> &[PreparedGraphMutationText] {
+        &self.statements
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { &self.parameters }
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        &self.parameters
+    }
 
     /// Build one complete immutable program, with no parsing, catalog callbacks,
     /// storage reads or staging. An argument used in just one statement is valid;
     /// an argument used nowhere refuses. Each statement receives its exact local
     /// map and its existing binder owns type/null validation and original UTF-8
     /// error offsets. A failure discards all already-bound private plans.
-    pub fn bind_parameters(&self, arguments: &GqlParameters)
-        -> Result<PreparedGraphMutationProgram, GraphMutationProgramTemplateError> {
+    pub fn bind_parameters(
+        &self,
+        arguments: &GqlParameters,
+    ) -> Result<PreparedGraphMutationProgram, GraphMutationProgramTemplateError> {
         check_program_arguments(&self.parameters, arguments)?;
         let mut statements = Vec::with_capacity(self.statements.len());
         for (statement, input) in self.statements.iter().enumerate() {
             let local = local_arguments(input.parameter_schema(), arguments);
-            let bound = input.bind_parameters(&local)
+            let bound = input
+                .bind_parameters(&local)
                 .map_err(|source| GraphMutationProgramTemplateError::Bind { statement, source })?;
             statements.push(bound);
         }

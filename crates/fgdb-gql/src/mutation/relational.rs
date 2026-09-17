@@ -21,9 +21,13 @@ impl PreparedGraphMutation {
         relation: RelationId,
         actions: Vec<GraphMutationAction>,
     ) -> Result<Self, GraphMutationBuildError> {
-        input.check_parent_depth().map_err(GraphMutationBuildError::RelationalInput)?;
-        let selection = input.single_pattern_input()
-            .ok_or(GraphMutationBuildError::RequiresSingleGraphSource)?.clone();
+        input
+            .check_parent_depth()
+            .map_err(GraphMutationBuildError::RelationalInput)?;
+        let selection = input
+            .single_pattern_input()
+            .ok_or(GraphMutationBuildError::RequiresSingleGraphSource)?
+            .clone();
         Self::prepare_input(selection, Some(input), relation, actions)
     }
 
@@ -35,8 +39,10 @@ impl PreparedGraphMutation {
     pub(super) fn select_governed<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        source: impl FnOnce(&PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy)
-            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        source: impl FnOnce(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: &mut impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphMutationError<E>, C>> {
         let Some(input) = &self.input_relation else {
@@ -44,8 +50,14 @@ impl PreparedGraphMutation {
                 .map_err(|error| error.map_source(GraphMutationError::Source));
         };
         let mut source = Some(source);
-        input.execute_governed(policy, |pattern, remaining| {
-            source.take().expect("preparation admitted one graph leaf")(pattern, remaining)
-        }, checkpoint).map_err(|error| error.map_source(GraphMutationError::InputRelation))
+        input
+            .execute_governed(
+                policy,
+                |pattern, remaining| {
+                    source.take().expect("preparation admitted one graph leaf")(pattern, remaining)
+                },
+                checkpoint,
+            )
+            .map_err(|error| error.map_source(GraphMutationError::InputRelation))
     }
 }

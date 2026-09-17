@@ -47,38 +47,61 @@ impl PreparedGraphSetAggregate {
         count: Option<u64>,
     ) -> Result<Self, GraphAggregateBuildError> {
         Ok(Self {
-            summary: PreparedGraphAggregate::prepare_set_relation(input, keys, aggregates, offset, count)?,
+            summary: PreparedGraphAggregate::prepare_set_relation(
+                input, keys, aggregates, offset, count,
+            )?,
         })
     }
 
     #[must_use]
     pub fn input(&self) -> &PreparedGraphSet {
-        self.summary.input_relation().expect("compound owner always has a relation")
+        self.summary
+            .input_relation()
+            .expect("compound owner always has a relation")
     }
     #[must_use]
-    pub fn key_columns(&self) -> &[String] { self.summary.key_columns() }
+    pub fn key_columns(&self) -> &[String] {
+        self.summary.key_columns()
+    }
     #[must_use]
-    pub fn aggregate_columns(&self) -> &[String] { self.summary.aggregate_columns() }
+    pub fn aggregate_columns(&self) -> &[String] {
+        self.summary.aggregate_columns()
+    }
     #[must_use]
-    pub fn evaluation_key_columns(&self) -> &[String] { self.summary.evaluation_key_columns() }
+    pub fn evaluation_key_columns(&self) -> &[String] {
+        self.summary.evaluation_key_columns()
+    }
     #[must_use]
-    pub fn evaluation_aggregate_columns(&self) -> &[String] { self.summary.evaluation_aggregate_columns() }
+    pub fn evaluation_aggregate_columns(&self) -> &[String] {
+        self.summary.evaluation_aggregate_columns()
+    }
 
     pub fn with_result_clauses(
-        mut self, having: &[GraphAggregateFilter], ordering: &[GraphAggregateOrder],
+        mut self,
+        having: &[GraphAggregateFilter],
+        ordering: &[GraphAggregateOrder],
     ) -> Result<Self, GraphAggregateBuildError> {
         self.summary = self.summary.with_result_clauses(having, ordering)?;
         Ok(self)
     }
-    pub fn with_having_expression(mut self, expression: &GraphHavingExpression) -> Result<Self, GraphHavingError> {
+    pub fn with_having_expression(
+        mut self,
+        expression: &GraphHavingExpression,
+    ) -> Result<Self, GraphHavingError> {
         self.summary = self.summary.with_having_expression(expression)?;
         Ok(self)
     }
-    pub fn with_key_output_columns(mut self, columns: &[usize]) -> Result<Self, GraphAggregateBuildError> {
+    pub fn with_key_output_columns(
+        mut self,
+        columns: &[usize],
+    ) -> Result<Self, GraphAggregateBuildError> {
         self.summary = self.summary.with_key_output_columns(columns)?;
         Ok(self)
     }
-    pub fn with_aggregate_output_prefix(mut self, count: usize) -> Result<Self, GraphAggregateBuildError> {
+    pub fn with_aggregate_output_prefix(
+        mut self,
+        count: usize,
+    ) -> Result<Self, GraphAggregateBuildError> {
         self.summary = self.summary.with_aggregate_output_prefix(count)?;
         Ok(self)
     }
@@ -93,7 +116,9 @@ impl PreparedGraphSetAggregate {
     /// changing any operand, quantifier or local page changes the definition.
     /// These are application bytes, not a durable format or result certificate.
     #[must_use]
-    pub fn canonical_bytes(&self) -> Vec<u8> { self.summary.canonical_bytes() }
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        self.summary.canonical_bytes()
+    }
 
     /// Execute every real input through a trusted immutable-snapshot adapter.
     /// The host must pin the SAME database sequence/transaction overlay and
@@ -109,11 +134,15 @@ impl PreparedGraphSetAggregate {
     pub fn execute_governed<E, C>(
         &self,
         policy: GqlQueryPolicy,
-        source: impl FnMut(&PreparedGraphPattern<GraphValueRow>, GqlQueryPolicy)
-            -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
-        self.summary.execute_relational_with_source(policy, source, checkpoint)
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        self.summary
+            .execute_relational_with_source(policy, source, checkpoint)
     }
 }
 
@@ -126,7 +155,8 @@ impl PreparedGraphSet {
         loop {
             match &current.node {
                 SetNode::Pattern(pattern) => return pattern,
-                SetNode::Scope(input) | SetNode::Project { input, .. }
+                SetNode::Scope(input)
+                | SetNode::Project { input, .. }
                 | SetNode::Filter { input, .. } => current = input,
                 SetNode::Binary { left, .. } => current = left,
             }

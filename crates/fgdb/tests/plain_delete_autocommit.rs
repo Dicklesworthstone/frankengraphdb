@@ -5,16 +5,21 @@ use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::{
-    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphDeleteError, GraphDeletePolicy,
-    GraphSymbol, GraphSymbolKind, PreparedGraphDelete, PreparedGraphText,
+    GqlParameters, GqlQueryError, GqlQueryPolicy, GraphDeleteError, GraphDeletePolicy, GraphSymbol,
+    GraphSymbolKind, PreparedGraphDelete, PreparedGraphText,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
-    PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
+};
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xe1; 32], DatabaseSecurityNamespaceId([0xe2; 32]), [0xe3; 32])
+    DatabaseKeys::new(
+        [0xe1; 32],
+        DatabaseSecurityNamespaceId([0xe2; 32]),
+        [0xe3; 32],
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -24,8 +29,10 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 }
 fn deletion(value: i64) -> PreparedGraphDelete {
     let text = format!("MATCH (n) WHERE n.p = {value} RETURN ALL n");
-    let selection = PreparedGraphText::prepare(&text, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap();
+    let selection = PreparedGraphText::prepare(&text, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
     PreparedGraphDelete::prepare(selection, R, vec![0]).unwrap()
 }
 fn policy() -> GraphDeletePolicy {
@@ -49,30 +56,61 @@ fn autocommit_delete_distinguishes_commit_read_close_and_incident_refusal() {
         db.write(&commit, seed).await.unwrap();
 
         let before = db.frontier().unwrap();
-        let (stats, targets, completion) = db.execute_graph_delete_returning_autocommit_governed(
-            &txcx, &query, &commit, &deletion(3), policy(),
-        ).await.unwrap();
+        let (stats, targets, completion) = db
+            .execute_graph_delete_returning_autocommit_governed(
+                &txcx,
+                &query,
+                &commit,
+                &deletion(3),
+                policy(),
+            )
+            .await
+            .unwrap();
         assert_eq!(stats.target_vertices, 1);
         assert_eq!(targets, vec![VId(3)]);
-        assert!(matches!(completion, EmbeddedTxnCompletion::WriteCommitted { .. }));
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::WriteCommitted { .. }
+        ));
         assert!(db.vertex(VId(3)).unwrap().is_none());
         assert!(db.frontier().unwrap().0 > before.0);
         assert_eq!(txcx.outstanding_obligations(), baseline);
 
         let after_delete = db.frontier().unwrap();
-        let (stats, completion) = db.execute_graph_delete_autocommit_governed(
-            &txcx, &query, &commit, &deletion(99), policy(),
-        ).await.unwrap();
+        let (stats, completion) = db
+            .execute_graph_delete_autocommit_governed(
+                &txcx,
+                &query,
+                &commit,
+                &deletion(99),
+                policy(),
+            )
+            .await
+            .unwrap();
         assert_eq!(stats.target_vertices, 0);
-        assert!(matches!(completion, EmbeddedTxnCompletion::ReadClosed { .. }));
-        assert_eq!(db.frontier().unwrap(), after_delete, "empty DELETE must not allocate a commit sequence");
+        assert!(matches!(
+            completion,
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
+        assert_eq!(
+            db.frontier().unwrap(),
+            after_delete,
+            "empty DELETE must not allocate a commit sequence"
+        );
         assert_eq!(txcx.outstanding_obligations(), baseline);
 
         assert!(matches!(
             db.execute_graph_delete_autocommit_governed(
-                &txcx, &query, &commit, &deletion(1), policy(),
-            ).await,
-            Err(GqlQueryError::Source(GraphDeleteError::IncidentRelationships))
+                &txcx,
+                &query,
+                &commit,
+                &deletion(1),
+                policy(),
+            )
+            .await,
+            Err(GqlQueryError::Source(
+                GraphDeleteError::IncidentRelationships
+            ))
         ));
         assert!(db.vertex(VId(1)).unwrap().is_some());
         assert!(db.edge(EId(10)).unwrap().is_some());

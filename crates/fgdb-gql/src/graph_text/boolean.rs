@@ -233,12 +233,30 @@ impl<'a> Parser<'a> {
                 TokenKind::Punct(b'|') => return Ok(true),
                 TokenKind::Punct(b'+' | b'*' | b'/' | b'%') => arithmetic = true,
                 TokenKind::Word(word) => {
-                    if ["UPPER", "LOWER", "TRIM", "SUBSTRING", "CHAR_LENGTH", "STARTS", "ENDS", "CONTAINS"]
-                        .iter().any(|keyword| word.eq_ignore_ascii_case(keyword)) {
+                    if [
+                        "UPPER",
+                        "LOWER",
+                        "TRIM",
+                        "SUBSTRING",
+                        "CHAR_LENGTH",
+                        "STARTS",
+                        "ENDS",
+                        "CONTAINS",
+                    ]
+                    .iter()
+                    .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    {
                         return Ok(true);
                     }
-                    if depth == 0 && ["AND", "OR", "RETURN", "SET", "REMOVE", "WITH", "MATCH", "OPTIONAL"]
-                        .iter().any(|keyword| word.eq_ignore_ascii_case(keyword)) { break; }
+                    if depth == 0
+                        && [
+                            "AND", "OR", "RETURN", "SET", "REMOVE", "WITH", "MATCH", "OPTIONAL",
+                        ]
+                        .iter()
+                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    {
+                        break;
+                    }
                     // A bare literal left operand with an IN/NOT IN list takes
                     // the shared scalar path so three-valued membership keeps
                     // its unknown result instead of a Boolean Truth leaf.
@@ -442,8 +460,11 @@ impl BoundBooleanTemplate {
         for instruction in program {
             resolved.push(match instruction {
                 SyntaxItem::Expression { columns, program } => Item::Expression {
-                    columns: columns.into_iter().map(|(variable, key)|
-                        property(key).map(|key| (variable.text.to_owned(), key)))
+                    columns: columns
+                        .into_iter()
+                        .map(|(variable, key)| {
+                            property(key).map(|key| (variable.text.to_owned(), key))
+                        })
                         .collect::<Result<Vec<_>, _>>()?,
                     program,
                 },
@@ -508,8 +529,13 @@ impl BoundBooleanTemplate {
                     }
                     // Path predicates bind only at the root scope (see
                     // scoped::predicate_captures); a Boolean program refuses them.
-                    Filter::PathCapture(_) | Filter::PathLength { .. } | Filter::PathNull { .. } => {
-                        return Err(error(at, GraphPatternTextErrorKind::Expected("root path predicate")));
+                    Filter::PathCapture(_)
+                    | Filter::PathLength { .. }
+                    | Filter::PathNull { .. } => {
+                        return Err(error(
+                            at,
+                            GraphPatternTextErrorKind::Expected("root path predicate"),
+                        ));
                     }
                 }),
             });
@@ -548,19 +574,37 @@ impl BoundBooleanTemplate {
                 _ => Ok(None),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let expressions = self.program.iter().map(|item| match item {
-            Item::Expression { program, .. } => Parser::bind_boolean_scalar(program, values, self.at).map(Some),
-            _ => Ok(None),
-        }).collect::<Result<Vec<_>, GraphPatternTextError>>()?;
-        let expression_columns = self.program.iter().map(|item| match item {
-            Item::Expression { columns, .. } => columns.iter().map(|(variable, key)| Operand::Property { variable, key: *key }).collect(),
-            _ => Vec::new(),
-        }).collect::<Vec<Vec<Operand<'_>>>>();
+        let expressions = self
+            .program
+            .iter()
+            .map(|item| match item {
+                Item::Expression { program, .. } => {
+                    Parser::bind_boolean_scalar(program, values, self.at).map(Some)
+                }
+                _ => Ok(None),
+            })
+            .collect::<Result<Vec<_>, GraphPatternTextError>>()?;
+        let expression_columns = self
+            .program
+            .iter()
+            .map(|item| match item {
+                Item::Expression { columns, .. } => columns
+                    .iter()
+                    .map(|(variable, key)| Operand::Property {
+                        variable,
+                        key: *key,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<Vec<Operand<'_>>>>();
         let mut program = Vec::new();
         for (index, (item, literal)) in self.program.iter().zip(&literals).enumerate() {
             program.push(match item {
                 Item::Expression { .. } => Op::Expression {
-                    expression: expressions[index].as_ref().expect("bound scalar expression"),
+                    expression: expressions[index]
+                        .as_ref()
+                        .expect("bound scalar expression"),
                     columns: &expression_columns[index],
                 },
                 Item::Truth(value) => Op::Truth(*value),

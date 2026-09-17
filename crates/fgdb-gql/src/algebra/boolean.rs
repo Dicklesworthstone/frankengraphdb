@@ -6,11 +6,11 @@
 //! not suppress fallible reads. Only a final TRUE survives WHERE. No program,
 //! literal value or variable name is exposed by Debug.
 
+use super::GraphValue;
 use super::{
     BindingSlot, IntegerComparison, MAX_PATTERN_NAME_BYTES, MAX_PATTERN_PREDICATES,
     PatternBuildError, ScalarPredicate, ScalarPredicateError,
 };
-use super::GraphValue;
 use crate::{GlaExecutionEvent, GraphIntegerEvaluationError};
 use fgdb_delta_types::PropertyKeyId;
 use fgdb_types::{CanonicalScalar, VId};
@@ -95,7 +95,9 @@ impl core::fmt::Display for GraphBooleanError {
             Self::InvalidVertexComparison => {
                 f.write_str("vertex operands require vertex equality or inequality")
             }
-            Self::InvalidExpressionColumn => f.write_str("Boolean expression references an unknown value column"),
+            Self::InvalidExpressionColumn => {
+                f.write_str("Boolean expression references an unknown value column")
+            }
             Self::Scalar(error) => core::fmt::Display::fmt(error, f),
         }
     }
@@ -164,7 +166,10 @@ impl<S> Instruction<S> {
                 operand: operand.try_map(map)?,
                 is_null: *is_null,
             },
-            Self::Expression { expression, columns } => {
+            Self::Expression {
+                expression,
+                columns,
+            } => {
                 let mut mapped = Vec::with_capacity(columns.len());
                 for column in columns {
                     mapped.push(column.try_map(map)?);
@@ -322,8 +327,14 @@ impl GraphBooleanExpression {
                     operand: own(operand)?,
                     is_null,
                 },
-                GraphBooleanOp::Expression { expression, columns } => {
-                    if expression.referenced_columns().any(|column| column >= columns.len()) {
+                GraphBooleanOp::Expression {
+                    expression,
+                    columns,
+                } => {
+                    if expression
+                        .referenced_columns()
+                        .any(|column| column >= columns.len())
+                    {
                         return Err(GraphBooleanError::InvalidExpressionColumn);
                     }
                     let mut mapped = Vec::with_capacity(columns.len());
@@ -529,7 +540,10 @@ impl BoundBooleanExpression {
                 Instruction::IsNull { operand, is_null } => Truth::from(Some(
                     resolve(operand, bindings, property, control)?.is_null() == *is_null,
                 )),
-                Instruction::Expression { expression, columns } => {
+                Instruction::Expression {
+                    expression,
+                    columns,
+                } => {
                     for _ in columns {
                         control(GlaExecutionEvent::ScratchEntry)?;
                     }
@@ -541,7 +555,9 @@ impl BoundBooleanExpression {
                                 crate::algebra_exec::charge_payload(value, control)?;
                                 GraphValue::Scalar(value.clone())
                             }
-                            Value::Vertex(None) | Value::Scalar(None) => GraphValue::Scalar(CanonicalScalar::Null),
+                            Value::Vertex(None) | Value::Scalar(None) => {
+                                GraphValue::Scalar(CanonicalScalar::Null)
+                            }
                         };
                         values.push(value);
                     }
@@ -604,7 +620,10 @@ impl BoundBooleanExpression {
                 Instruction::And => bytes.push(3),
                 Instruction::Or => bytes.push(4),
                 Instruction::Not => bytes.push(5),
-                Instruction::Expression { expression, columns } => {
+                Instruction::Expression {
+                    expression,
+                    columns,
+                } => {
                     bytes.push(6);
                     let encoded = expression.canonical_bytes();
                     bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());

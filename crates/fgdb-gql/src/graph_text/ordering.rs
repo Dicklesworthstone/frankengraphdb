@@ -16,7 +16,9 @@ impl Parser<'_> {
                 let variable = self.path_variable()?;
                 self.punct(b')', ")")?;
                 Some((variable, function))
-            } else { None };
+            } else {
+                None
+            };
             let property = if function.is_none() && self.take(b'.')? {
                 Some(self.name()?)
             } else {
@@ -39,7 +41,8 @@ impl Parser<'_> {
                     .position(|column| column.alias.text == name.text)
                     .or_else(|| {
                         self.syntax.columns.iter().position(|column| {
-                            column.property.is_none() && column.variable.text == name.text
+                            column.property.is_none()
+                                && column.variable.text == name.text
                                 && matches!(column.path, None | Some(GraphPathFunction::Value))
                         })
                     })

@@ -3,7 +3,9 @@
 //! from a database sample, parameter spelling, value, or text substitution.
 
 use super::*;
-use crate::set_text::{BoundSetTextInput, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate};
+use crate::set_text::{
+    BoundSetTextInput, ReadProjectionTemplate, ReadStageTemplate, ReadValueTemplate,
+};
 
 impl PreparedGraphText {
     /// Prepare with explicit types for selected argument names (without `$`).
@@ -46,7 +48,9 @@ impl PreparedGraphText {
                 TokenKind::End => TextKind::End,
             };
             tokens.push(TextToken { kind, at: token.at });
-            if matches!(token.kind, TokenKind::End) { break; }
+            if matches!(token.kind, TokenKind::End) {
+                break;
+            }
             parser.advance()?;
         }
         Ok(tokens)
@@ -59,7 +63,8 @@ impl PreparedGraphText {
         statement: &'a str,
         declarations: &[(&str, GqlParameterType)],
     ) -> Result<UnresolvedGraphText<'a>, crate::GraphSetTextError> {
-        Parser::new_with_parameter_types(statement, declarations)?.parse_return_for_composition(statement)
+        Parser::new_with_parameter_types(statement, declarations)?
+            .parse_return_for_composition(statement)
     }
 }
 
@@ -83,42 +88,69 @@ impl UnresolvedGraphText<'_> {
             None if column.property.is_some() => Scalar,
             None => Vertex,
         };
-        let (mut names, mut types): (Vec<String>, Vec<crate::GraphSetColumnType>) = if let Some(projection) = &self.projection {
-            projection.iter().map(|column| {
-                let kind = match &column.value {
-                    ReadValueTemplate::Column(input) => column_type(&self.syntax.columns[*input]),
-                    _ => Scalar,
-                };
-                (column.name.clone(), kind)
-            }).unzip()
-        } else {
-            self.syntax.columns.iter().map(|column| (
-                column.alias.text.to_owned(), column_type(column),
-            )).unzip()
-        };
+        let (mut names, mut types): (Vec<String>, Vec<crate::GraphSetColumnType>) =
+            if let Some(projection) = &self.projection {
+                projection
+                    .iter()
+                    .map(|column| {
+                        let kind = match &column.value {
+                            ReadValueTemplate::Column(input) => {
+                                column_type(&self.syntax.columns[*input])
+                            }
+                            _ => Scalar,
+                        };
+                        (column.name.clone(), kind)
+                    })
+                    .unzip()
+            } else {
+                self.syntax
+                    .columns
+                    .iter()
+                    .map(|column| (column.alias.text.to_owned(), column_type(column)))
+                    .unzip()
+            };
         for stage in &self.pipeline {
             if let ReadStageTemplate::Project { projection, .. } = stage {
-                let next = projection.iter().map(|column| match &column.value {
-                    ReadValueTemplate::Column(input) => types[*input],
-                    _ => Scalar,
-                }).collect();
-                names = projection.iter().map(|column| column.name.clone()).collect();
+                let next = projection
+                    .iter()
+                    .map(|column| match &column.value {
+                        ReadValueTemplate::Column(input) => types[*input],
+                        _ => Scalar,
+                    })
+                    .collect();
+                names = projection
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect();
                 types = next;
             }
         }
         (names, types)
     }
     pub(crate) fn depth(&self) -> usize {
-        1 + usize::from(self.projection.is_some()) + self.pipeline.iter()
-            .filter(|stage| !matches!(stage, ReadStageTemplate::Page { .. })).count()
+        1 + usize::from(self.projection.is_some())
+            + self
+                .pipeline
+                .iter()
+                .filter(|stage| !matches!(stage, ReadStageTemplate::Page { .. }))
+                .count()
     }
-    pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] { &self.syntax.parameters }
-    pub(crate) fn parameter_offsets(&self) -> &[usize] { &self.syntax.parameter_offsets }
+    pub(crate) fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        &self.syntax.parameters
+    }
+    pub(crate) fn parameter_offsets(&self) -> &[usize] {
+        &self.syntax.parameter_offsets
+    }
 
-    pub(crate) fn resolve(self, mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>)
-        -> Result<BoundSetTextInput, GraphPatternTextError> {
-        let quantifier = if self.syntax.distinct { crate::GraphSetQuantifier::Distinct }
-            else { crate::GraphSetQuantifier::All };
+    pub(crate) fn resolve(
+        self,
+        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<BoundSetTextInput, GraphPatternTextError> {
+        let quantifier = if self.syntax.distinct {
+            crate::GraphSetQuantifier::Distinct
+        } else {
+            crate::GraphSetQuantifier::All
+        };
         let selection = if self.projection.is_none() {
             PreparedGraphText::from_syntax(self.statement, self.syntax, resolve)?
         } else {
@@ -126,48 +158,82 @@ impl UnresolvedGraphText<'_> {
             let mut cache = BTreeMap::new();
             let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
                 let key = (kind, name.text.to_owned());
-                if let Some(value) = cache.get(&key) { return Ok(*value); }
-                let value = resolve(kind, name.text)
-                    .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
+                if let Some(value) = cache.get(&key) {
+                    return Ok(*value);
+                }
+                let value = resolve(kind, name.text).ok_or_else(|| {
+                    error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind))
+                })?;
                 if value.kind() != kind {
-                    return Err(error(name.at, GraphPatternTextErrorKind::WrongSymbolKind { expected: kind, found: value.kind() }));
+                    return Err(error(
+                        name.at,
+                        GraphPatternTextErrorKind::WrongSymbolKind {
+                            expected: kind,
+                            found: value.kind(),
+                        },
+                    ));
                 }
                 cache.insert(key, value);
                 Ok(value)
             };
             let (builder, filters) = scoped::resolve_pattern(
-                &syntax.variables[..syntax.root_variables], &syntax.labels, &syntax.edges,
-                syntax.filters, &mut symbol,
+                &syntax.variables[..syntax.root_variables],
+                &syntax.labels,
+                &syntax.edges,
+                syntax.filters,
+                &mut symbol,
             )?;
             let mut scopes = Vec::new();
-            for scope in syntax.scopes { scopes.push(scope.resolve(&mut symbol)?); }
+            for scope in syntax.scopes {
+                scopes.push(scope.resolve(&mut symbol)?);
+            }
             let mut columns = Vec::new();
             for (index, column) in syntax.columns.into_iter().enumerate() {
                 let key = if let Some(name) = column.property {
-                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)? else {
+                    let GraphSymbol::Property(key) = symbol(GraphSymbolKind::Property, name)?
+                    else {
                         unreachable!("the shared resolver checked the property domain")
                     };
                     Some(key)
-                } else { None };
+                } else {
+                    None
+                };
                 columns.push(BoundColumn {
-                    alias: format!("_return_input_{index}"), variable: column.variable.text.to_owned(), key,
+                    alias: format!("_return_input_{index}"),
+                    variable: column.variable.text.to_owned(),
+                    key,
                     path: column.path,
                 });
             }
             let clauses: Vec<_> = scopes.iter().map(BoundScope::clause).collect();
             let projected: Vec<_> = columns.iter().map(BoundColumn::declaration).collect();
-            built(syntax.return_at, builder.prepare_values_with_clauses(&clauses, &projected, 0, None))?;
+            built(
+                syntax.return_at,
+                builder.prepare_values_with_clauses(&clauses, &projected, 0, None),
+            )?;
             // Never push public DISTINCT or pagination into these hidden input
             // rows: equal output values may arise from different input tuples.
             PreparedGraphText {
-                statement: self.statement.to_owned(), builder, filters, scopes, columns,
-                ordering: Vec::new(), parameters: syntax.parameters,
+                statement: self.statement.to_owned(),
+                builder,
+                filters,
+                scopes,
+                columns,
+                ordering: Vec::new(),
+                parameters: syntax.parameters,
                 parameter_offsets: syntax.parameter_offsets,
-                offset: Number::Literal(GqlParameterValue::UInt64(0)), count: None,
-                distinct: false, return_at: syntax.return_at,
+                offset: Number::Literal(GqlParameterValue::UInt64(0)),
+                count: None,
+                distinct: false,
+                return_at: syntax.return_at,
             }
         };
-        Ok(BoundSetTextInput { selection, projection: self.projection, quantifier, pipeline: self.pipeline })
+        Ok(BoundSetTextInput {
+            selection,
+            projection: self.projection,
+            quantifier,
+            pipeline: self.pipeline,
+        })
     }
 }
 

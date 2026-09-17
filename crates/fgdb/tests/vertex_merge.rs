@@ -11,15 +11,20 @@ use fgdb_gql::{
     GraphSymbol, GraphSymbolKind, GraphVertexMergeError, GraphVertexMergeOutcome,
     GraphVertexMergePolicy, PreparedGraphText, PreparedGraphVertexMerge,
 };
-use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion,
-    PurposeContexts, VId};
+use fgdb_types::{
+    CanonicalScalar, DatabaseSecurityNamespaceId, EId, EmbeddedTxnCompletion, PurposeContexts, VId,
+};
 use std::cell::Cell;
 
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(1);
 const MERGED: LabelId = LabelId(1);
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xf1; 32], DatabaseSecurityNamespaceId([0xf2; 32]), [0xf3; 32])
+    DatabaseKeys::new(
+        [0xf1; 32],
+        DatabaseSecurityNamespaceId([0xf2; 32]),
+        [0xf3; 32],
+    )
 }
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -39,11 +44,14 @@ fn creation(value: i64) -> PreparedGraphInsert {
             properties: vec![(P, GraphMutationValue::Literal(scalar(value)))],
         }],
         vec![],
-    ).unwrap()
+    )
+    .unwrap()
 }
 fn merge(text: &str, value: i64) -> PreparedGraphVertexMerge {
-    let selection = PreparedGraphText::prepare(text, symbols).unwrap()
-        .bind_parameters(&GqlParameters::new()).unwrap();
+    let selection = PreparedGraphText::prepare(text, symbols)
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
     PreparedGraphVertexMerge::prepare(selection, R, 0, creation(value)).unwrap()
 }
 fn policy() -> GraphVertexMergePolicy {
@@ -67,24 +75,31 @@ fn duplicate_match_occurrences_collapse_to_one_existing_vertex_without_allocatio
         let txcx = contexts.txn();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         seed(&mut db, &commit).await;
-        let definition = merge(
-            "MATCH (n)-[:R]->(m) WHERE n.p = 7 RETURN ALL n",
-            7,
-        );
+        let definition = merge("MATCH (n)-[:R]->(m) WHERE n.p = 7 RETURN ALL n", 7);
         let allocations = Cell::new(0);
         let mut txn = db.begin(&txcx).unwrap();
-        let (stats, outcome) = txn.execute_graph_vertex_merge_governed(
-            &mut db, &query, &definition, policy(), |_| {
+        let (stats, outcome) = txn
+            .execute_graph_vertex_merge_governed(&mut db, &query, &definition, policy(), |_| {
                 allocations.set(allocations.get() + 1);
                 Ok::<_, ()>(ElementId::Vertex(VId(100)))
-            },
-        ).unwrap();
-        assert_eq!(stats.match_selection.result_rows, 2, "parallel edges preserve MATCH multiplicity");
+            })
+            .unwrap();
+        assert_eq!(
+            stats.match_selection.result_rows, 2,
+            "parallel edges preserve MATCH multiplicity"
+        );
         assert_eq!(stats.created_vertices, 0);
         assert_eq!(outcome.vertex(), VId(1));
         assert!(!outcome.created());
-        assert_eq!(allocations.get(), 0, "matched MERGE must not ask for an identity");
-        assert!(matches!(txn.finish(&mut db, &commit).await.unwrap(), EmbeddedTxnCompletion::ReadClosed { .. }));
+        assert_eq!(
+            allocations.get(),
+            0,
+            "matched MERGE must not ask for an identity"
+        );
+        assert!(matches!(
+            txn.finish(&mut db, &commit).await.unwrap(),
+            EmbeddedTxnCompletion::ReadClosed { .. }
+        ));
         assert_eq!(txcx.outstanding_obligations(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -106,14 +121,17 @@ fn two_distinct_matches_refuse_before_allocator_or_workspace_change() {
         let allocations = Cell::new(0);
         let mut txn = db.begin(&txcx).unwrap();
         let before = txn.staged_effect_digest().unwrap();
-        let result = txn.execute_graph_vertex_merge_governed(
-            &mut db, &query, &definition, policy(), |_| {
+        let result =
+            txn.execute_graph_vertex_merge_governed(&mut db, &query, &definition, policy(), |_| {
                 allocations.set(allocations.get() + 1);
                 Ok::<_, ()>(ElementId::Vertex(VId(100)))
-            },
-        );
-        assert!(matches!(result,
-            Err(GqlQueryError::Source(GraphVertexMergeError::AmbiguousMatches { observed: 2 }))));
+            });
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(
+                GraphVertexMergeError::AmbiguousMatches { observed: 2 }
+            ))
+        ));
         assert_eq!(allocations.get(), 0);
         assert_eq!(txn.staged_effect_digest().unwrap(), before);
         txn.abort();
@@ -131,17 +149,28 @@ fn zero_match_creates_exactly_one_vertex_and_survives_reopen() {
         let txcx = contexts.txn();
         let vfs = MemVfs::new().unwrap();
         let path = vfs.database_dir();
-        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys())
+            .await
+            .unwrap();
         seed(&mut db, &commit).await;
         let before = db.frontier().unwrap();
         let definition = merge("MATCH (n) WHERE n.p = 42 RETURN ALL n", 42);
         let mut txn = db.begin(&txcx).unwrap();
-        let (stats, outcome) = txn.execute_graph_vertex_merge_governed(
-            &mut db, &query, &definition, policy(), |request| {
-                assert_eq!(request, fgdb_gql::insertion::GraphInsertRequest::Vertex { row: 0, vertex: 0 });
-                Ok::<_, ()>(ElementId::Vertex(VId(100)))
-            },
-        ).unwrap();
+        let (stats, outcome) = txn
+            .execute_graph_vertex_merge_governed(
+                &mut db,
+                &query,
+                &definition,
+                policy(),
+                |request| {
+                    assert_eq!(
+                        request,
+                        fgdb_gql::insertion::GraphInsertRequest::Vertex { row: 0, vertex: 0 }
+                    );
+                    Ok::<_, ()>(ElementId::Vertex(VId(100)))
+                },
+            )
+            .unwrap();
         assert_eq!(stats.match_selection.result_rows, 0);
         assert_eq!(stats.created_vertices, 1);
         assert_eq!(outcome, GraphVertexMergeOutcome::Created(VId(100)));
@@ -154,7 +183,9 @@ fn zero_match_creates_exactly_one_vertex_and_survives_reopen() {
         assert!(db.vertex(VId(100)).unwrap().is_some());
         db.compact(&commit).await.unwrap();
         drop(db);
-        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys())
+            .await
+            .unwrap();
         let row = db.vertex(VId(100)).unwrap().unwrap();
         assert_eq!(row.props, vec![(P, CanonicalScalar::Int(42))]);
         assert_eq!(txcx.outstanding_obligations(), 0);
@@ -174,10 +205,14 @@ fn allocator_collision_refuses_without_partial_creation() {
         let definition = merge("MATCH (n) WHERE n.p = 42 RETURN ALL n", 42);
         let mut txn = db.begin(&txcx).unwrap();
         let before = txn.staged_effect_digest().unwrap();
-        let result = txn.execute_graph_vertex_merge_governed(
-            &mut db, &query, &definition, policy(), |_| Ok::<_, ()>(ElementId::Vertex(VId(1))),
-        );
-        assert!(matches!(result, Err(GqlQueryError::Source(GraphVertexMergeError::Creation(_)))));
+        let result =
+            txn.execute_graph_vertex_merge_governed(&mut db, &query, &definition, policy(), |_| {
+                Ok::<_, ()>(ElementId::Vertex(VId(1)))
+            });
+        assert!(matches!(
+            result,
+            Err(GqlQueryError::Source(GraphVertexMergeError::Creation(_)))
+        ));
         assert_eq!(txn.staged_effect_digest().unwrap(), before);
         assert!(txn.vertex(&db, VId(1)).unwrap().is_some());
         txn.abort();
@@ -198,9 +233,11 @@ fn concurrent_matching_create_invalidates_zero_match_merge_at_completion() {
         let definition = merge("MATCH (n) WHERE n.p = 42 RETURN ALL n", 42);
 
         let mut first = db.begin(&txcx).unwrap();
-        let (_, outcome) = first.execute_graph_vertex_merge_governed(
-            &mut db, &query, &definition, policy(), |_| Ok::<_, ()>(ElementId::Vertex(VId(100))),
-        ).unwrap();
+        let (_, outcome) = first
+            .execute_graph_vertex_merge_governed(&mut db, &query, &definition, policy(), |_| {
+                Ok::<_, ()>(ElementId::Vertex(VId(100)))
+            })
+            .unwrap();
         assert_eq!(outcome, GraphVertexMergeOutcome::Created(VId(100)));
 
         let mut competitor = db.begin(&txcx).unwrap();
@@ -209,8 +246,10 @@ fn concurrent_matching_create_invalidates_zero_match_merge_at_completion() {
         competitor.write(&mut db, batch).unwrap();
         competitor.commit(&mut db, &commit).await.unwrap();
 
-        assert!(first.commit(&mut db, &commit).await.is_err(),
-            "zero-match scan witness must prevent a concurrent matching create from serializing before MERGE");
+        assert!(
+            first.commit(&mut db, &commit).await.is_err(),
+            "zero-match scan witness must prevent a concurrent matching create from serializing before MERGE"
+        );
         assert!(db.vertex(VId(100)).unwrap().is_none());
         assert!(db.vertex(VId(200)).unwrap().is_some());
         assert_eq!(txcx.outstanding_obligations(), 0);

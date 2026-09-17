@@ -4,8 +4,10 @@
 //! ordering used by set equality. Evaluation is eager and three-valued; only
 //! TRUE retains a row. Project computed operands first, then filter their cells.
 
-use super::{check_depth, GraphSetBuildError, GraphSetColumnType, PreparedGraphSet, SetNode};
-use crate::algebra::{GraphValue, GraphValueRow, IntegerComparison, MAX_BOOLEAN_INSTRUCTIONS, MAX_PATTERN_PREDICATES};
+use super::{GraphSetBuildError, GraphSetColumnType, PreparedGraphSet, SetNode, check_depth};
+use crate::algebra::{
+    GraphValue, GraphValueRow, IntegerComparison, MAX_BOOLEAN_INSTRUCTIONS, MAX_PATTERN_PREDICATES,
+};
 use crate::{GlaExecutionEvent, GqlScalarParameter};
 use fgdb_types::CanonicalScalar;
 
@@ -27,8 +29,15 @@ impl core::fmt::Debug for GraphSetOperand {
 /// Aliases and parameter names are resolved during preparation, not execution.
 #[derive(Clone, PartialEq, Eq)]
 pub enum GraphSetPredicateOp {
-    Compare { left: GraphSetOperand, comparison: IntegerComparison, right: GraphSetOperand },
-    IsNull { operand: GraphSetOperand, is_null: bool },
+    Compare {
+        left: GraphSetOperand,
+        comparison: IntegerComparison,
+        right: GraphSetOperand,
+    },
+    IsNull {
+        operand: GraphSetOperand,
+        is_null: bool,
+    },
     Truth(Option<bool>),
     Not,
     And,
@@ -42,8 +51,10 @@ impl core::fmt::Debug for GraphSetPredicateOp {
 impl GraphSetPredicateOp {
     // Native preparation validates even parameterized filters before catalog
     // callbacks. Placeholder scalar values prove structure, never truth.
-    pub(crate) fn validate_schema(types: &[GraphSetColumnType], code: &[Self])
-        -> Result<(), GraphSetFilterError> {
+    pub(crate) fn validate_schema(
+        types: &[GraphSetColumnType],
+        code: &[Self],
+    ) -> Result<(), GraphSetFilterError> {
         RowPredicate::prepare(types, code).map(|_| ())
     }
 }
@@ -71,19 +82,30 @@ pub(super) struct RowPredicate {
     code: Box<[GraphSetPredicateOp]>,
 }
 impl RowPredicate {
-    pub(super) fn prepare(types: &[GraphSetColumnType], code: &[GraphSetPredicateOp])
-        -> Result<Self, GraphSetFilterError> {
+    pub(super) fn prepare(
+        types: &[GraphSetColumnType],
+        code: &[GraphSetPredicateOp],
+    ) -> Result<Self, GraphSetFilterError> {
         use GraphSetFilterError as Error;
-        if code.is_empty() { return Err(Error::Empty); }
+        if code.is_empty() {
+            return Err(Error::Empty);
+        }
         if code.len() > MAX_BOOLEAN_INSTRUCTIONS {
-            return Err(Error::TooManyInstructions { limit: MAX_BOOLEAN_INSTRUCTIONS, observed: code.len() });
+            return Err(Error::TooManyInstructions {
+                limit: MAX_BOOLEAN_INSTRUCTIONS,
+                observed: code.len(),
+            });
         }
         let mut depth = 0;
         let mut predicates = 0;
         for (instruction, op) in code.iter().enumerate() {
             let domain = |operand: &GraphSetOperand| match operand {
-                GraphSetOperand::Column(column) => types.get(*column).copied()
-                    .ok_or(Error::UnknownInput { instruction, column: *column }),
+                GraphSetOperand::Column(column) => {
+                    types.get(*column).copied().ok_or(Error::UnknownInput {
+                        instruction,
+                        column: *column,
+                    })
+                }
                 GraphSetOperand::Literal(_) => Ok(GraphSetColumnType::Scalar),
             };
             match op {
@@ -92,41 +114,77 @@ impl RowPredicate {
                     depth -= 1;
                     continue;
                 }
-                GraphSetPredicateOp::Compare { left, comparison, right } => {
+                GraphSetPredicateOp::Compare {
+                    left,
+                    comparison,
+                    right,
+                } => {
                     let left = domain(left)?;
                     let right = domain(right)?;
-                    if matches!(left, GraphSetColumnType::Path | GraphSetColumnType::Vertices | GraphSetColumnType::Edges)
-                        || matches!(right, GraphSetColumnType::Path | GraphSetColumnType::Vertices | GraphSetColumnType::Edges) {
+                    if matches!(
+                        left,
+                        GraphSetColumnType::Path
+                            | GraphSetColumnType::Vertices
+                            | GraphSetColumnType::Edges
+                    ) || matches!(
+                        right,
+                        GraphSetColumnType::Path
+                            | GraphSetColumnType::Vertices
+                            | GraphSetColumnType::Edges
+                    ) {
                         return Err(Error::InvalidValueComparison { instruction });
                     }
                     if (left == GraphSetColumnType::Vertex || right == GraphSetColumnType::Vertex)
-                        && !(left == right && matches!(comparison, IntegerComparison::Equal | IntegerComparison::NotEqual)) {
+                        && !(left == right
+                            && matches!(
+                                comparison,
+                                IntegerComparison::Equal | IntegerComparison::NotEqual
+                            ))
+                    {
                         return Err(Error::InvalidVertexComparison { instruction });
                     }
                 }
-                GraphSetPredicateOp::IsNull { operand, .. } => { domain(operand)?; }
+                GraphSetPredicateOp::IsNull { operand, .. } => {
+                    domain(operand)?;
+                }
                 GraphSetPredicateOp::Truth(_) => {}
                 _ => return Err(Error::InvalidStack { instruction }),
             }
             depth += 1;
             predicates += 1;
             if predicates > MAX_PATTERN_PREDICATES {
-                return Err(Error::TooManyPredicates { limit: MAX_PATTERN_PREDICATES, observed: predicates });
+                return Err(Error::TooManyPredicates {
+                    limit: MAX_PATTERN_PREDICATES,
+                    observed: predicates,
+                });
             }
         }
-        if depth != 1 { return Err(Error::InvalidStack { instruction: code.len() }); }
+        if depth != 1 {
+            return Err(Error::InvalidStack {
+                instruction: code.len(),
+            });
+        }
         // The complete definition and schema are checked before cloning literals.
-        Ok(Self { code: code.to_vec().into_boxed_slice() })
+        Ok(Self {
+            code: code.to_vec().into_boxed_slice(),
+        })
     }
 
-    pub(super) fn evaluate<E>(&self, row: &GraphValueRow,
-        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<bool, E> {
+    pub(super) fn evaluate<E>(
+        &self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
         let mut stack: [Option<bool>; MAX_PATTERN_PREDICATES] = [None; MAX_PATTERN_PREDICATES];
         let mut depth = 0;
         for op in self.code.iter() {
             control(GlaExecutionEvent::Work)?;
             let value = match op {
-                GraphSetPredicateOp::Compare { left, comparison, right } => {
+                GraphSetPredicateOp::Compare {
+                    left,
+                    comparison,
+                    right,
+                } => {
                     let left = resolve(left, row, control)?;
                     let right = resolve(right, row, control)?;
                     for value in [left, right] {
@@ -149,10 +207,16 @@ impl RowPredicate {
                     depth -= 1;
                     let left = stack[depth - 1];
                     stack[depth - 1] = if matches!(op, GraphSetPredicateOp::And) {
-                        if left == Some(false) || right == Some(false) { Some(false) }
-                        else { left.zip(right).map(|(a, b)| a && b) }
-                    } else if left == Some(true) || right == Some(true) { Some(true) }
-                    else { left.zip(right).map(|(a, b)| a || b) };
+                        if left == Some(false) || right == Some(false) {
+                            Some(false)
+                        } else {
+                            left.zip(right).map(|(a, b)| a && b)
+                        }
+                    } else if left == Some(true) || right == Some(true) {
+                        Some(true)
+                    } else {
+                        left.zip(right).map(|(a, b)| a || b)
+                    };
                     continue;
                 }
             };
@@ -167,13 +231,20 @@ impl RowPredicate {
         bytes.extend_from_slice(&(self.code.len() as u64).to_be_bytes());
         for op in self.code.iter() {
             match op {
-                GraphSetPredicateOp::Compare { left, comparison, right } => {
+                GraphSetPredicateOp::Compare {
+                    left,
+                    comparison,
+                    right,
+                } => {
                     bytes.push(0);
                     append_operand(left, bytes);
                     bytes.push(match comparison {
-                        IntegerComparison::Equal => 0, IntegerComparison::NotEqual => 1,
-                        IntegerComparison::Greater => 2, IntegerComparison::Less => 3,
-                        IntegerComparison::GreaterOrEqual => 4, IntegerComparison::LessOrEqual => 5,
+                        IntegerComparison::Equal => 0,
+                        IntegerComparison::NotEqual => 1,
+                        IntegerComparison::Greater => 2,
+                        IntegerComparison::Less => 3,
+                        IntegerComparison::GreaterOrEqual => 4,
+                        IntegerComparison::LessOrEqual => 5,
                     });
                     append_operand(right, bytes);
                 }
@@ -182,9 +253,14 @@ impl RowPredicate {
                     append_operand(operand, bytes);
                     bytes.push(u8::from(*is_null));
                 }
-                GraphSetPredicateOp::Truth(value) => bytes.extend_from_slice(&[2, match value {
-                    None => 0, Some(false) => 1, Some(true) => 2,
-                }]),
+                GraphSetPredicateOp::Truth(value) => bytes.extend_from_slice(&[
+                    2,
+                    match value {
+                        None => 0,
+                        Some(false) => 1,
+                        Some(true) => 2,
+                    },
+                ]),
                 GraphSetPredicateOp::Not => bytes.push(3),
                 GraphSetPredicateOp::And => bytes.push(4),
                 GraphSetPredicateOp::Or => bytes.push(5),
@@ -194,39 +270,56 @@ impl RowPredicate {
 }
 
 #[derive(Clone, Copy)]
-enum Cell<'a> { Scalar(&'a CanonicalScalar), Vertex(fgdb_types::VId), Incompatible }
-impl Cell<'_> {
-    fn is_null(self) -> bool { matches!(self, Self::Scalar(CanonicalScalar::Null)) }
+enum Cell<'a> {
+    Scalar(&'a CanonicalScalar),
+    Vertex(fgdb_types::VId),
+    Incompatible,
 }
-fn resolve<'a, E>(operand: &'a GraphSetOperand, row: &'a GraphValueRow,
-    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<Cell<'a>, E> {
+impl Cell<'_> {
+    fn is_null(self) -> bool {
+        matches!(self, Self::Scalar(CanonicalScalar::Null))
+    }
+}
+fn resolve<'a, E>(
+    operand: &'a GraphSetOperand,
+    row: &'a GraphValueRow,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Cell<'a>, E> {
     control(GlaExecutionEvent::Work)?;
     Ok(match operand {
         GraphSetOperand::Column(column) => match &row.values()[*column] {
             GraphValue::Vertex(value) => Cell::Vertex(*value),
             GraphValue::Scalar(value) => Cell::Scalar(value),
-            GraphValue::Path(_) | GraphValue::Vertices(_) | GraphValue::Edges(_) => Cell::Incompatible,
+            GraphValue::Path(_) | GraphValue::Vertices(_) | GraphValue::Edges(_) => {
+                Cell::Incompatible
+            }
         },
         GraphSetOperand::Literal(value) => Cell::Scalar(value.value()),
     })
 }
 fn compare(left: Cell<'_>, right: Cell<'_>, comparison: IntegerComparison) -> Option<bool> {
-    if left.is_null() || right.is_null() { return None; }
+    if left.is_null() || right.is_null() {
+        return None;
+    }
     match (left, right) {
         (Cell::Vertex(left), Cell::Vertex(right)) => Some(match comparison {
             IntegerComparison::Equal => left == right,
             IntegerComparison::NotEqual => left != right,
             _ => unreachable!("vertex ordering is rejected before execution"),
         }),
-        (Cell::Scalar(left), Cell::Scalar(right)) if core::mem::discriminant(left) == core::mem::discriminant(right) =>
-            Some(comparison.accepts_scalar_pair(Some(left), Some(right))),
+        (Cell::Scalar(left), Cell::Scalar(right))
+            if core::mem::discriminant(left) == core::mem::discriminant(right) =>
+        {
+            Some(comparison.accepts_scalar_pair(Some(left), Some(right)))
+        }
         _ => None,
     }
 }
 fn append_operand(operand: &GraphSetOperand, bytes: &mut Vec<u8>) {
     match operand {
         GraphSetOperand::Column(column) => {
-            bytes.push(0); bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
         }
         GraphSetOperand::Literal(value) => {
             bytes.push(1);
@@ -252,9 +345,17 @@ impl PreparedGraphSet {
         check_depth(depth).map_err(GraphSetFilterError::SetBuild)?;
         let predicate = RowPredicate::prepare(&self.types, code)?;
         Ok(Self {
-            columns: self.columns.clone(), types: self.types.clone(), operands: self.operands,
-            depth, node: SetNode::Filter { input: Box::new(self), predicate },
-            order: Vec::new(), offset: 0, count: None,
+            columns: self.columns.clone(),
+            types: self.types.clone(),
+            operands: self.operands,
+            depth,
+            node: SetNode::Filter {
+                input: Box::new(self),
+                predicate,
+            },
+            order: Vec::new(),
+            offset: 0,
+            count: None,
         })
     }
 }

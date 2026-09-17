@@ -23,12 +23,22 @@ impl core::fmt::Debug for GraphEdgeUpsertAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GraphEdgeUpsertBranch { NoInput, Match, Create }
+pub enum GraphEdgeUpsertBranch {
+    NoInput,
+    Match,
+    Create,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphEdgeUpsertBuildError {
-    TooManyActions { branch: GraphEdgeUpsertBranch, limit: usize, observed: usize },
-    DuplicateProperty { branch: GraphEdgeUpsertBranch },
+    TooManyActions {
+        branch: GraphEdgeUpsertBranch,
+        limit: usize,
+        observed: usize,
+    },
+    DuplicateProperty {
+        branch: GraphEdgeUpsertBranch,
+    },
 }
 impl core::fmt::Display for GraphEdgeUpsertBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -67,11 +77,16 @@ pub enum GraphEdgeUpsertError<E, A> {
     ActionLimit { limit: u64, observed: u128 },
     Staging(E),
 }
-impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display for GraphEdgeUpsertError<E, A> {
+impl<E: core::fmt::Display, A: core::fmt::Display> core::fmt::Display
+    for GraphEdgeUpsertError<E, A>
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Merge(error) => error.fmt(f),
-            Self::ActionLimit { limit, observed } => write!(f, "relationship MERGE branch action limit exceeded: {observed} > {limit}"),
+            Self::ActionLimit { limit, observed } => write!(
+                f,
+                "relationship MERGE branch action limit exceeded: {observed} > {limit}"
+            ),
             Self::Staging(error) => error.fmt(f),
         }
     }
@@ -99,15 +114,19 @@ impl core::fmt::Debug for PreparedGraphEdgeUpsert {
         f.debug_struct("PreparedGraphEdgeUpsert")
             .field("on_match", &self.on_match.len())
             .field("on_create", &self.on_create.len())
-            .field("definition", &"[REDACTED]").finish()
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
-fn validate(branch: GraphEdgeUpsertBranch, actions: &[GraphEdgeUpsertAction])
-    -> Result<(), GraphEdgeUpsertBuildError>
-{
+fn validate(
+    branch: GraphEdgeUpsertBranch,
+    actions: &[GraphEdgeUpsertAction],
+) -> Result<(), GraphEdgeUpsertBuildError> {
     if actions.len() > MAX_GRAPH_EDGE_UPSERT_ACTIONS {
         return Err(GraphEdgeUpsertBuildError::TooManyActions {
-            branch, limit: MAX_GRAPH_EDGE_UPSERT_ACTIONS, observed: actions.len(),
+            branch,
+            limit: MAX_GRAPH_EDGE_UPSERT_ACTIONS,
+            observed: actions.len(),
         });
     }
     let mut keys = BTreeSet::new();
@@ -126,11 +145,24 @@ impl PreparedGraphEdgeUpsert {
     ) -> Result<Self, GraphEdgeUpsertBuildError> {
         validate(GraphEdgeUpsertBranch::Match, &on_match)?;
         validate(GraphEdgeUpsertBranch::Create, &on_create)?;
-        Ok(Self { merge, on_match, on_create })
+        Ok(Self {
+            merge,
+            on_match,
+            on_create,
+        })
     }
-    #[must_use] pub fn merge(&self) -> &PreparedGraphEdgeMerge { &self.merge }
-    #[must_use] pub fn on_match(&self) -> &[GraphEdgeUpsertAction] { &self.on_match }
-    #[must_use] pub fn on_create(&self) -> &[GraphEdgeUpsertAction] { &self.on_create }
+    #[must_use]
+    pub fn merge(&self) -> &PreparedGraphEdgeMerge {
+        &self.merge
+    }
+    #[must_use]
+    pub fn on_match(&self) -> &[GraphEdgeUpsertAction] {
+        &self.on_match
+    }
+    #[must_use]
+    pub fn on_create(&self) -> &[GraphEdgeUpsertAction] {
+        &self.on_create
+    }
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = b"fgdb:directed-edge-upsert:v1\0".to_vec();
@@ -141,7 +173,9 @@ impl PreparedGraphEdgeUpsert {
             bytes.extend_from_slice(&(actions.len() as u64).to_be_bytes());
             for action in actions {
                 bytes.extend_from_slice(&action.key.0.to_be_bytes());
-                bytes.extend_from_slice(&(action.value.canonical_bytes().len() as u64).to_be_bytes());
+                bytes.extend_from_slice(
+                    &(action.value.canonical_bytes().len() as u64).to_be_bytes(),
+                );
                 bytes.extend_from_slice(action.value.canonical_bytes());
             }
         }

@@ -26,7 +26,15 @@ impl PreparedGraphAggregate {
         offset: u64,
         count: Option<u64>,
     ) -> Result<Self, GraphAggregateBuildError> {
-        Self::prepare_input(input, Some(projection), None, keys, aggregates, offset, count)
+        Self::prepare_input(
+            input,
+            Some(projection),
+            None,
+            keys,
+            aggregates,
+            offset,
+            count,
+        )
     }
 
     /// The optional value transformation between matching and aggregation.
@@ -47,7 +55,8 @@ impl PreparedGraphAggregate {
         property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
         let projection = self.computed_input.as_ref().expect("projected dispatch");
         // MATCH rows are private aggregate input, not public result rows. They
         // still pay every ordinary GLA instruction and allocation. Source
@@ -58,23 +67,43 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let source = self.input.plan().execute_governed_with_properties(
-            snapshot_records, vertices, edges, test_vertex, property,
-            source_policy, &mut checkpoint,
-        ).map_err(|error| error.map_source(GraphAggregateError::Source))?;
+        let source = self
+            .input
+            .plan()
+            .execute_governed_with_properties(
+                snapshot_records,
+                vertices,
+                edges,
+                test_vertex,
+                property,
+                source_policy,
+                &mut checkpoint,
+            )
+            .map_err(|error| error.map_source(GraphAggregateError::Source))?;
         let mut evaluator = source.evaluator;
-        let mut rows = GqlExecutionStats { snapshot_records: source.rows.snapshot_records, result_rows: 0 };
+        let mut rows = GqlExecutionStats {
+            snapshot_records: source.rows.snapshot_records,
+            result_rows: 0,
+        };
         let mut control = |event| {
             checkpoint().map_err(GqlQueryError::Interrupted)?;
             let result_rows = if event == GlaExecutionEvent::ResultRow {
                 // The vector backing a completed result cannot contain 2^64
                 // rows. The checked path keeps the refusal explicit anyway.
-                let next = rows.result_rows.checked_add(1).ok_or_else(||
-                    GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
-                policy.rows.check(GqlBudgetDimension::ResultRows, next).map_err(GqlQueryError::Rows)?;
+                let next = rows.result_rows.checked_add(1).ok_or_else(|| {
+                    GqlQueryError::Source(GraphAggregateError::ResultCountOverflow)
+                })?;
+                policy
+                    .rows
+                    .check(GqlBudgetDimension::ResultRows, next)
+                    .map_err(GqlQueryError::Rows)?;
                 next
-            } else { rows.result_rows };
-            evaluator.charge_event(policy.evaluator, event).map_err(GqlQueryError::Evaluator)?;
+            } else {
+                rows.result_rows
+            };
+            evaluator
+                .charge_event(policy.evaluator, event)
+                .map_err(GqlQueryError::Evaluator)?;
             rows.result_rows = result_rows;
             Ok(())
         };
@@ -85,22 +114,34 @@ impl PreparedGraphAggregate {
             // frozen column references and lazy arithmetic-only COALESCE. All
             // source reads above remain eager and source errors stay errors.
             let value = GraphSetProjection::evaluate_row_with_control(
-                &input, projection, &mut control,
-                |column, error| GqlQueryError::Source(GraphAggregateError::InputExpression {
-                    row, column, error,
-                }),
+                &input,
+                projection,
+                &mut control,
+                |column, error| {
+                    GqlQueryError::Source(GraphAggregateError::InputExpression {
+                        row,
+                        column,
+                        error,
+                    })
+                },
             )?;
             computed.push(value);
         }
         let value = self.summarize_projected_rows(&computed, &mut control)?;
         control(GlaExecutionEvent::Work)?;
-        Ok(GqlQueryExecution { value, rows, evaluator })
+        Ok(GqlQueryExecution {
+            value,
+            rows,
+            evaluator,
+        })
     }
 
     pub(super) fn summarize_projected_rows<'a, E, C>(
         &self,
         input: &'a [GraphValueRow],
-        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<Vec<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
         let mut groups: BTreeMap<Vec<ValueRef<'a>>, Vec<Accumulator<'a>>> = BTreeMap::new();
         if self.keys.is_empty() {
@@ -119,7 +160,9 @@ impl PreparedGraphAggregate {
                     GraphValue::Vertices(vertices) => ValueRef::Vertices(vertices),
                     GraphValue::Edges(edges) => ValueRef::Edges(edges),
                 };
-                for _ in 0..values[at].payload_units() { control(GlaExecutionEvent::Work)?; }
+                for _ in 0..values[at].payload_units() {
+                    control(GlaExecutionEvent::Work)?;
+                }
             }
             let mut key = [ValueRef::Scalar(&NULL); MAX_PATTERN_VERTICES];
             for (at, column) in self.keys.iter().enumerate() {
@@ -139,7 +182,13 @@ impl PreparedGraphAggregate {
                 groups.insert(owned_key, state);
             }
             let state = groups.get_mut(key).expect("admitted projected group");
-            update_group(&self.aggregates, state, &values[..row.len()], weighted::Multiplicity::ONE, control)?;
+            update_group(
+                &self.aggregates,
+                state,
+                &values[..row.len()],
+                weighted::Multiplicity::ONE,
+                control,
+            )?;
         }
         // The existing result engine still owns HAVING, hidden keys/summaries,
         // exact averages, output DISTINCT, ranking, paging and owned release.
@@ -147,7 +196,9 @@ impl PreparedGraphAggregate {
     }
 
     pub(super) fn append_input_projection(&self, bytes: &mut Vec<u8>) {
-        let Some(projection) = &self.computed_input else { return; };
+        let Some(projection) = &self.computed_input else {
+            return;
+        };
         bytes.extend_from_slice(b"fgdb:aggregate-input-projection:v1\0");
         bytes.extend_from_slice(&(projection.len() as u64).to_be_bytes());
         for column in projection {

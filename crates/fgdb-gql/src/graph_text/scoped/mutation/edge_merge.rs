@@ -12,7 +12,10 @@ struct ParsedEdgeMerge<'a> {
     relation: Name<'a>,
 }
 fn build_error(at: usize, source: crate::GraphEdgeMergeBuildError) -> GraphEdgeMergeTextError {
-    GraphEdgeMergeTextError { offset: at, kind: GraphEdgeMergeTextErrorKind::Build(source) }
+    GraphEdgeMergeTextError {
+        offset: at,
+        kind: GraphEdgeMergeTextErrorKind::Build(source),
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -31,8 +34,11 @@ impl<'a> Parser<'a> {
         self.punct(b'-', "-")?;
         let outgoing = self.take(b'>')?;
         if incoming == outgoing {
-            return Err(error(relation.at,
-                GraphPatternTextErrorKind::Expected("exactly one relationship direction")).into());
+            return Err(error(
+                relation.at,
+                GraphPatternTextErrorKind::Expected("exactly one relationship direction"),
+            )
+            .into());
         }
 
         self.punct(b'(', "(")?;
@@ -40,9 +46,17 @@ impl<'a> Parser<'a> {
         self.punct(b')', ")")?;
         self.end()?;
         Ok(if incoming {
-            ParsedEdgeMerge { source: right, destination: left, relation }
+            ParsedEdgeMerge {
+                source: right,
+                destination: left,
+                relation,
+            }
         } else {
-            ParsedEdgeMerge { source: left, destination: right, relation }
+            ParsedEdgeMerge {
+                source: left,
+                destination: right,
+                relation,
+            }
         })
     }
 }
@@ -78,14 +92,19 @@ impl PreparedGraphEdgeMergeText {
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
-            if let Some(value) = cache.get(&key) { return Ok(*value); }
+            if let Some(value) = cache.get(&key) {
+                return Ok(*value);
+            }
             let value = resolve(kind, name.text)
                 .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
             if value.kind() != kind {
-                return Err(error(name.at, GraphPatternTextErrorKind::WrongSymbolKind {
-                    expected: kind,
-                    found: value.kind(),
-                }));
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::WrongSymbolKind {
+                        expected: kind,
+                        found: value.kind(),
+                    },
+                ));
             }
             cache.insert(key, value);
             Ok(value)
@@ -98,8 +117,11 @@ impl PreparedGraphEdgeMergeText {
             &mut symbol,
         )?;
         let mut scopes = Vec::new();
-        for scope in syntax.scopes { scopes.push(scope.resolve(&mut symbol)?); }
-        let GraphSymbol::Relation(found) = symbol(GraphSymbolKind::Relation, parsed.relation)? else {
+        for scope in syntax.scopes {
+            scopes.push(scope.resolve(&mut symbol)?);
+        }
+        let GraphSymbol::Relation(found) = symbol(GraphSymbolKind::Relation, parsed.relation)?
+        else {
             unreachable!("symbol domain checked by shared resolver")
         };
         if found != relation {
@@ -109,15 +131,25 @@ impl PreparedGraphEdgeMergeText {
             });
         }
 
-        let columns = projections.into_iter().enumerate().map(|(index, projection)| BoundColumn {
-            alias: format!("_edge_merge_{index}"),
-            variable: projection.variable.text.to_owned(),
-            key: None,
-            path: None,
-        }).collect::<Vec<_>>();
+        let columns = projections
+            .into_iter()
+            .enumerate()
+            .map(|(index, projection)| BoundColumn {
+                alias: format!("_edge_merge_{index}"),
+                variable: projection.variable.text.to_owned(),
+                key: None,
+                path: None,
+            })
+            .collect::<Vec<_>>();
         let clauses = scopes.iter().map(BoundScope::clause).collect::<Vec<_>>();
-        let projected = columns.iter().map(BoundColumn::declaration).collect::<Vec<_>>();
-        built(at, builder.prepare_values_with_clauses(&clauses, &projected, 0, None))?;
+        let projected = columns
+            .iter()
+            .map(BoundColumn::declaration)
+            .collect::<Vec<_>>();
+        built(
+            at,
+            builder.prepare_values_with_clauses(&clauses, &projected, 0, None),
+        )?;
         let selection = PreparedGraphText {
             statement: statement.to_owned(),
             builder,
@@ -132,13 +164,22 @@ impl PreparedGraphEdgeMergeText {
             distinct: false,
             return_at: at,
         };
-        Ok(Self { selection, relation, source, destination })
+        Ok(Self {
+            selection,
+            relation,
+            source,
+            destination,
+        })
     }
 
     #[must_use]
-    pub fn statement(&self) -> &str { self.selection.statement() }
+    pub fn statement(&self) -> &str {
+        self.selection.statement()
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { self.selection.parameter_schema() }
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        self.selection.parameter_schema()
+    }
 
     /// Bind without lexing, catalog access or storage observation.
     pub fn bind_parameters(
@@ -153,6 +194,7 @@ impl PreparedGraphEdgeMergeText {
             self.source,
             self.destination,
             Vec::new(),
-        ).map_err(|source| build_error(self.selection.return_at, source))
+        )
+        .map_err(|source| build_error(self.selection.return_at, source))
     }
 }

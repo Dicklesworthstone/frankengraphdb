@@ -273,7 +273,11 @@ impl PreparedGraphMutation {
         }
         let columns: Vec<_> = match &input_relation {
             Some(input) => input.column_types().to_vec(),
-            None => selection.value_columns().iter().map(GraphSetColumnType::from).collect(),
+            None => selection
+                .value_columns()
+                .iter()
+                .map(GraphSetColumnType::from)
+                .collect(),
         };
         let deleting = matches!(actions[0], GraphMutationAction::DetachDelete { .. });
         for (at, action) in actions.iter().enumerate() {

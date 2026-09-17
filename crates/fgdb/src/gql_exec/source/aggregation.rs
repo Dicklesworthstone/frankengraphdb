@@ -3,14 +3,14 @@
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};
 use crate::{Database, EmbeddedReadView, GqlError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
+use fgdb_delta_types::RelationId;
+use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::{
     GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
     GqlBudgetDimension, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
     GraphAggregateError, GraphAggregateRow, GraphShortestWalkCursor, GraphWalkBounds,
     PreparedGraphAggregate,
 };
-use fgdb_gql::algebra::GlaDirection;
-use fgdb_delta_types::RelationId;
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::collections::BTreeMap;
 
@@ -141,7 +141,9 @@ impl<V: Vfs + Clone> Database<V> {
         policy: GqlQueryPolicy,
     ) -> SetResult<GqlError> {
         let as_of = self.frontier().map_err(|error| {
-            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)))
+            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(
+                error,
+            )))
         })?;
         self.execute_graph_set_governed_at(cx, query, as_of, policy)
     }
@@ -156,13 +158,18 @@ impl<V: Vfs + Clone> Database<V> {
         self.ensure_readable()
             .and_then(|()| self.snapshot.check_frontier(as_of))
             .map_err(|error| {
-                GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)))
+                GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(
+                    error,
+                )))
             })?;
         cx.with_restriction(|| {
             query.execute_governed(
                 policy,
-                |pattern, allowance| crate::gql_exec::execute_pattern_at(
-                    self, pattern, as_of, allowance, || cx.checkpoint()),
+                |pattern, allowance| {
+                    crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
+                        cx.checkpoint()
+                    })
+                },
                 || cx.checkpoint(),
             )
         })
@@ -196,13 +203,18 @@ impl EmbeddedReadView {
         policy: GqlQueryPolicy,
     ) -> SetResult<GqlError> {
         self.snapshot.check_frontier(as_of).map_err(|error| {
-            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(error)))
+            GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(
+                error,
+            )))
         })?;
         cx.with_restriction(|| {
             query.execute_governed(
                 policy,
-                |pattern, allowance| crate::gql_exec::execute_pattern_at(
-                    self, pattern, as_of, allowance, || cx.checkpoint()),
+                |pattern, allowance| {
+                    crate::gql_exec::execute_pattern_at(self, pattern, as_of, allowance, || {
+                        cx.checkpoint()
+                    })
+                },
                 || cx.checkpoint(),
             )
         })
@@ -218,10 +230,8 @@ impl EmbeddedReadView {
     }
 }
 
-type ShortestResult = Result<
-    GqlQueryExecution<VId>,
-    GqlQueryError<GqlError, Box<asupersync::error::Error>>,
->;
+type ShortestResult =
+    Result<GqlQueryExecution<VId>, GqlQueryError<GqlError, Box<asupersync::error::Error>>>;
 
 impl<V: Vfs + Clone> Database<V> {
     /// Return every shortest WALK occurrence from one existing source to each
@@ -239,7 +249,10 @@ impl<V: Vfs + Clone> Database<V> {
         bounds: GraphWalkBounds,
         policy: GqlQueryPolicy,
     ) -> ShortestResult {
-        let as_of = self.frontier().map_err(GqlError::Read).map_err(GqlQueryError::Source)?;
+        let as_of = self
+            .frontier()
+            .map_err(GqlError::Read)
+            .map_err(GqlQueryError::Source)?;
         self.execute_all_shortest_walk_governed_at(
             cx, source, relation, direction, bounds, as_of, policy,
         )
@@ -255,11 +268,22 @@ impl<V: Vfs + Clone> Database<V> {
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> ShortestResult {
-        self.ensure_readable().and_then(|()| self.snapshot.check_frontier(as_of))
-            .map_err(GqlError::Read).map_err(GqlQueryError::Source)?;
-        cx.with_restriction(|| execute_shortest_at(
-            &self.snapshot, source, relation, direction, bounds, as_of, policy, || cx.checkpoint(),
-        ))
+        self.ensure_readable()
+            .and_then(|()| self.snapshot.check_frontier(as_of))
+            .map_err(GqlError::Read)
+            .map_err(GqlQueryError::Source)?;
+        cx.with_restriction(|| {
+            execute_shortest_at(
+                &self.snapshot,
+                source,
+                relation,
+                direction,
+                bounds,
+                as_of,
+                policy,
+                || cx.checkpoint(),
+            )
+        })
     }
 }
 
@@ -274,7 +298,13 @@ impl EmbeddedReadView {
         policy: GqlQueryPolicy,
     ) -> ShortestResult {
         self.execute_all_shortest_walk_governed_at(
-            cx, source, relation, direction, bounds, self.frontier(), policy,
+            cx,
+            source,
+            relation,
+            direction,
+            bounds,
+            self.frontier(),
+            policy,
         )
     }
 
@@ -288,10 +318,22 @@ impl EmbeddedReadView {
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> ShortestResult {
-        self.snapshot.check_frontier(as_of).map_err(GqlError::Read).map_err(GqlQueryError::Source)?;
-        cx.with_restriction(|| execute_shortest_at(
-            &self.snapshot, source, relation, direction, bounds, as_of, policy, || cx.checkpoint(),
-        ))
+        self.snapshot
+            .check_frontier(as_of)
+            .map_err(GqlError::Read)
+            .map_err(GqlQueryError::Source)?;
+        cx.with_restriction(|| {
+            execute_shortest_at(
+                &self.snapshot,
+                source,
+                relation,
+                direction,
+                bounds,
+                as_of,
+                policy,
+                || cx.checkpoint(),
+            )
+        })
     }
 }
 
@@ -342,13 +384,20 @@ fn execute_shortest_at<C>(
     let exists = super::find_vertex(&snapshot.patches, source, as_of, &mut |event| {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         usage.observe::<GqlError, C>(policy, event)
-    })?.is_some();
+    })?
+    .is_some();
     if !exists {
-        return usage.finish(policy, Ok(GqlQueryExecution {
-            value: Vec::new(),
-            rows: GqlExecutionStats { snapshot_records: usage.records, result_rows: 0 },
-            evaluator: GlaExecutionStats::default(),
-        }));
+        return usage.finish(
+            policy,
+            Ok(GqlQueryExecution {
+                value: Vec::new(),
+                rows: GqlExecutionStats {
+                    snapshot_records: usage.records,
+                    result_rows: 0,
+                },
+                evaluator: GlaExecutionStats::default(),
+            }),
+        );
     }
 
     let edges = super::scan_edges(&snapshot.blocks, as_of, &mut |event| {
@@ -359,20 +408,28 @@ fn execute_shortest_at<C>(
     for (_, left, actual_relation, right) in edges {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         usage.observe::<GqlError, C>(policy, super::SourceEvent::Work)?;
-        if actual_relation != relation { continue; }
+        if actual_relation != relation {
+            continue;
+        }
         let directions = match direction {
             GlaDirection::Forward => [(left, right), (left, right)],
             GlaDirection::Reverse => [(right, left), (right, left)],
             GlaDirection::Undirected => [(left, right), (right, left)],
         };
-        let count = if direction == GlaDirection::Undirected && left != right { 2 } else { 1 };
+        let count = if direction == GlaDirection::Undirected && left != right {
+            2
+        } else {
+            1
+        };
         for &(from, to) in directions.iter().take(count) {
             usage.observe::<GqlError, C>(policy, super::SourceEvent::Work)?;
             if !pairs.contains_key(&(from, to)) {
                 usage.observe::<GqlError, C>(policy, super::SourceEvent::ScratchEntry)?;
             }
             let multiplicity = pairs.entry((from, to)).or_default();
-            *multiplicity = multiplicity.checked_add(1).expect("visible edge count fits u64");
+            *multiplicity = multiplicity
+                .checked_add(1)
+                .expect("visible edge count fits u64");
         }
     }
     let mut adjacency = BTreeMap::<VId, Vec<VId>>::new();
@@ -390,15 +447,20 @@ fn execute_shortest_at<C>(
     let remaining = usage.remaining(policy);
     let result = (|| {
         let mut evaluator = GlaExecutionStats::default();
-        let mut control = |event| charge_shortest(
-            &mut evaluator, remaining.evaluator, event, &mut checkpoint,
-        );
-        let mut cursor = GraphShortestWalkCursor::new(source, bounds, Some(&adjacency), &mut control)?;
+        let mut control =
+            |event| charge_shortest(&mut evaluator, remaining.evaluator, event, &mut checkpoint);
+        let mut cursor =
+            GraphShortestWalkCursor::new(source, bounds, Some(&adjacency), &mut control)?;
         let mut counts = BTreeMap::<VId, u64>::new();
         let mut occurrences = 0_u64;
         while let Some(endpoint) = cursor.next_with_control(&mut control)? {
-            let next = occurrences.checked_add(1).expect("in-memory result count fits u64");
-            policy.rows.check(GqlBudgetDimension::ResultRows, next).map_err(GqlQueryError::Rows)?;
+            let next = occurrences
+                .checked_add(1)
+                .expect("in-memory result count fits u64");
+            policy
+                .rows
+                .check(GqlBudgetDimension::ResultRows, next)
+                .map_err(GqlQueryError::Rows)?;
             occurrences = next;
             // Price the logical retained occurrence even though equal endpoints
             // are compressed into one counter until deterministic release.
@@ -408,7 +470,9 @@ fn execute_shortest_at<C>(
                 control(GlaExecutionEvent::ScratchEntry)?;
             }
             let count = counts.entry(endpoint).or_default();
-            *count = count.checked_add(1).expect("bounded result multiplicity fits u64");
+            *count = count
+                .checked_add(1)
+                .expect("bounded result multiplicity fits u64");
         }
         let mut value = Vec::new();
         for (endpoint, multiplicity) in counts {
@@ -419,7 +483,10 @@ fn execute_shortest_at<C>(
         }
         Ok(GqlQueryExecution {
             value,
-            rows: GqlExecutionStats { snapshot_records: usage.records, result_rows: occurrences },
+            rows: GqlExecutionStats {
+                snapshot_records: usage.records,
+                result_rows: occurrences,
+            },
             evaluator,
         })
     })();

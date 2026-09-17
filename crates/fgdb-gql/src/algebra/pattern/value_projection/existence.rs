@@ -75,7 +75,9 @@ impl GraphPatternBuilder {
                 return Err(PatternBuildError::InvalidPathCapture);
             }
             if clause.pattern.variables.iter().any(|variable| {
-                self.path_captures.iter().any(|capture| capture.name == variable.name)
+                self.path_captures
+                    .iter()
+                    .any(|capture| capture.name == variable.name)
             }) {
                 return Err(PatternBuildError::DuplicateVariable);
             }
@@ -108,7 +110,8 @@ impl GraphPatternBuilder {
             let mut captures = Vec::new();
             for (at, variable) in inner.variables.iter().enumerate() {
                 if variable.outer {
-                    let outer = scope.variable(&variable.name)
+                    let outer = scope
+                        .variable(&variable.name)
                         .map_err(|_| PatternBuildError::UnknownOuterVertex)?;
                     captures.push((at, scope_slots[outer]));
                 }
@@ -134,9 +137,9 @@ impl GraphPatternBuilder {
                     edge.direction = super::super::reverse(edge.direction);
                 }
                 (Some(outer_at), None)
-            } else if let Some((inner_at, outer_at)) =
-                (0..inner.variables.len()).filter(|&at| !inner.variables[at].outer)
-                    .find_map(|at| correlation(at).map(|outer| (at, outer)))
+            } else if let Some((inner_at, outer_at)) = (0..inner.variables.len())
+                .filter(|&at| !inner.variables[at].outer)
+                .find_map(|at| correlation(at).map(|outer| (at, outer)))
             {
                 (Some(outer_at), Some(inner_at))
             } else {
@@ -150,8 +153,10 @@ impl GraphPatternBuilder {
                 super::super::MAX_PATTERN_BINDINGS,
                 PatternLimitDimension::Bindings,
             )?;
-            let captures: Vec<_> = captures.into_iter()
-                .map(|(at, outer)| (inner_slots[at], outer)).collect();
+            let captures: Vec<_> = captures
+                .into_iter()
+                .map(|(at, outer)| (inner_slots[at], outer))
+                .collect();
             let correlations: Vec<_> = inner
                 .variables
                 .iter()
@@ -204,7 +209,8 @@ impl GraphPatternBuilder {
                         // must reject it. Neither is another graph scan. Do not
                         // emit NULL = NULL for captures: they are value copies,
                         // not additional positive identity constraints.
-                        if let Some((_, outer)) = captures.iter()
+                        if let Some((_, outer)) = captures
+                            .iter()
                             .find(|(inner, _)| inner.ordinal() == available)
                         {
                             operators.push(GlaOperator::BindOuterVertex { source: *outer });
@@ -352,13 +358,17 @@ impl GraphPatternBuilder {
             .iter()
             .zip(variables)
             .map(|(column, variable)| match column {
-                GraphColumn::Vertex { .. } => ValueProjection::Vertex { slot: scope_slots[variable] },
-                GraphColumn::Property { key, .. } => {
-                    ValueProjection::Property { slot: scope_slots[variable], key: *key }
-                }
-                GraphColumn::Path { function, .. } => {
-                    ValueProjection::Path { capture: variable as u32, function: *function }
-                }
+                GraphColumn::Vertex { .. } => ValueProjection::Vertex {
+                    slot: scope_slots[variable],
+                },
+                GraphColumn::Property { key, .. } => ValueProjection::Property {
+                    slot: scope_slots[variable],
+                    key: *key,
+                },
+                GraphColumn::Path { function, .. } => ValueProjection::Path {
+                    capture: variable as u32,
+                    function: *function,
+                },
             })
             .collect();
         operators.extend([

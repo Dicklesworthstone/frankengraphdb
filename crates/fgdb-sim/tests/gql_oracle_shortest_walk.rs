@@ -63,8 +63,8 @@ fn policy() -> GqlQueryPolicy {
 /// distances between the pinned and live graphs.
 async fn generate(db: &mut Database<MemVfs>, cx: &CommitCx, seed: u64) -> (CommitSeq, CommitSeq) {
     let mut batch = WriteBatch::new(R);
-    for id in 1..=9 {
-        batch.create_vertex(VId(u128::from(id)), vec![], vec![]);
+    for id in 1u128..=9 {
+        batch.create_vertex(VId(id), vec![], vec![]);
     }
     let mut eid: u128 = 1;
     let mut edge = |batch: &mut WriteBatch, src: u128, dst: u128| {
@@ -89,7 +89,7 @@ async fn generate(db: &mut Database<MemVfs>, cx: &CommitCx, seed: u64) -> (Commi
     edge(&mut batch, 3, 2);
     edge(&mut batch, 3, 2);
     // Seed-varied shortcut: three of four seeds give 1 a direct edge into 6.
-    let varied = edge(&mut batch, 1 + (seed % 3), 6);
+    let varied = edge(&mut batch, u128::from(1 + seed % 3), 6);
     let basis1 = db.write(cx, batch).await.unwrap();
 
     let mut first = WriteBatch::new(R);
@@ -180,23 +180,17 @@ fn settled(
     settled
 }
 
-/// One ALL-style expected row per walk occurrence at the settled level, or
-/// one ANY-style row per settled pair.
-fn expected_rows(
-    graph: &ReferenceGraph,
-    m: u64,
-    n: u64,
-    direction: u8,
-    any: bool,
-) -> Vec<(VId, VId)> {
+/// One ANY-style row per settled pair, or one ALL-style row per walk
+/// occurrence at the settled level.
+fn expected_rows(graph: &ReferenceGraph, m: u64, n: u64, direction: u8, any: bool) -> Vec<(VId, VId)> {
     let mut rows = Vec::new();
     for id in SOURCES {
-        for (dst, count) in settled(graph, VId(u128::from(id)), m, n, direction, false) {
+        for (dst, count) in settled(graph, VId(id), m, n, direction, false) {
             if any {
-                rows.push((VId(u128::from(id)), dst));
+                rows.push((VId(id), dst));
             } else {
                 for _ in 0..count {
-                    rows.push((VId(u128::from(id)), dst));
+                    rows.push((VId(id), dst));
                 }
             }
         }
@@ -255,10 +249,7 @@ fn compare_at(
     );
     actual.sort();
     expected.sort();
-    assert_eq!(
-        actual, expected,
-        "seed={seed:#x}; as-of {basis:?}; query={text}"
-    );
+    assert_eq!(actual, expected, "seed={seed:#x}; as-of {basis:?}; query={text}");
 }
 
 fn check_families(
@@ -285,9 +276,9 @@ fn check_families(
         "MATCH ANY SHORTEST WALK (a)-[:R*1..3]->(b) RETURN a,b",
         any,
     );
-    // ALL SHORTEST with m = 0: empty walks settle self-pairs; the self-loop
-    // gives (8,8) two tied zero-and-one-hop... no: settled at k=0 with one
-    // empty walk; the parallel pair into 2 gives a multiplicity >= 2 pair.
+    // ALL SHORTEST with m = 0: empty walks settle self-pairs (so (8,8) and
+    // every isolated pair appears), and the parallel pair into 2 makes some
+    // pair's settled multiplicity >= 2.
     let all = expected_rows(live, 0, 3, 0, false);
     assert!(all.contains(&(VId(8), VId(8))), "empty walk settles (8,8)");
     assert!(
@@ -327,25 +318,16 @@ fn check_families(
     let bounded: Vec<(VId, VId)> = {
         let mut rows = Vec::new();
         for id in SOURCES {
-            for (dst, count) in settled(live, VId(u128::from(id)), 1, 2, 0, true) {
+            for (dst, count) in settled(live, VId(id), 1, 2, 0, true) {
                 for _ in 0..count {
-                    rows.push((VId(u128::from(id)), dst));
+                    rows.push((VId(id), dst));
                 }
             }
         }
         rows
     };
-    assert!(
-        bounded.contains(&(VId(1), VId(1))),
-        "cycle closes in 2 hops"
-    );
-    compare(
-        db,
-        cx,
-        seed,
-        "MATCH WALK (a)-[:R*1..2]->(b) RETURN a,b",
-        bounded,
-    );
+    assert!(bounded.contains(&(VId(1), VId(1))), "cycle closes in 2 hops");
+    compare(db, cx, seed, "MATCH WALK (a)-[:R*1..2]->(b) RETURN a,b", bounded);
     // A lower bound above the only route's length excludes the pair: with
     // *3..3 the one-hop route into 5 no longer settles it.
     let tightened = expected_rows(live, 3, 3, 0, true);
@@ -357,9 +339,9 @@ fn check_families(
         "MATCH ANY SHORTEST WALK (a)-[:R*3..3]->(b) RETURN a,b",
         tightened,
     );
-    // Temporal family: pinned before the tie-edge delete, the ALL answer has
-    // strictly more rows somewhere (the deleted shortcut/tie changes some
-    // settled multiplicity), and both pinned and live match their own graph.
+    // Temporal family: pinned before the tie-edge delete, the ALL answer
+    // differs from the live answer, and both pinned and live match their own
+    // graph under the registered settlement semantics.
     let pinned_rows = expected_rows(pinned, 1, 3, 0, false);
     let live_rows = expected_rows(live, 1, 3, 0, false);
     assert_ne!(pinned_rows, live_rows, "the delete must move the answer");

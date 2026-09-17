@@ -7,7 +7,10 @@ use crate::{
 };
 
 fn build_error(at: usize, source: GraphDeleteBuildError) -> GraphDeleteTextError {
-    GraphDeleteTextError { offset: at, kind: GraphDeleteTextErrorKind::Build(source) }
+    GraphDeleteTextError {
+        offset: at,
+        kind: GraphDeleteTextErrorKind::Build(source),
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -39,7 +42,9 @@ impl<'a> Parser<'a> {
                 ));
             }
             targets.push(target);
-            if !self.take(b',')? { break; }
+            if !self.take(b',')? {
+                break;
+            }
         }
         self.end()?;
         Ok((columns, targets))
@@ -76,14 +81,19 @@ impl PreparedGraphDeleteText {
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'_>| -> Result<GraphSymbol, GraphPatternTextError> {
             let key = (kind, name.text.to_owned());
-            if let Some(value) = cache.get(&key) { return Ok(*value); }
+            if let Some(value) = cache.get(&key) {
+                return Ok(*value);
+            }
             let value = resolve(kind, name.text)
                 .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
             if value.kind() != kind {
-                return Err(error(name.at, GraphPatternTextErrorKind::WrongSymbolKind {
-                    expected: kind,
-                    found: value.kind(),
-                }));
+                return Err(error(
+                    name.at,
+                    GraphPatternTextErrorKind::WrongSymbolKind {
+                        expected: kind,
+                        found: value.kind(),
+                    },
+                ));
             }
             cache.insert(key, value);
             Ok(value)
@@ -96,17 +106,29 @@ impl PreparedGraphDeleteText {
             &mut symbol,
         )?;
         let mut scopes = Vec::new();
-        for scope in syntax.scopes { scopes.push(scope.resolve(&mut symbol)?); }
+        for scope in syntax.scopes {
+            scopes.push(scope.resolve(&mut symbol)?);
+        }
 
-        let columns = projections.into_iter().enumerate().map(|(index, projection)| BoundColumn {
-            alias: format!("_delete_{index}"),
-            variable: projection.variable.text.to_owned(),
-            key: None,
-            path: None,
-        }).collect::<Vec<_>>();
+        let columns = projections
+            .into_iter()
+            .enumerate()
+            .map(|(index, projection)| BoundColumn {
+                alias: format!("_delete_{index}"),
+                variable: projection.variable.text.to_owned(),
+                key: None,
+                path: None,
+            })
+            .collect::<Vec<_>>();
         let clauses = scopes.iter().map(BoundScope::clause).collect::<Vec<_>>();
-        let projected = columns.iter().map(BoundColumn::declaration).collect::<Vec<_>>();
-        built(at, builder.prepare_values_with_clauses(&clauses, &projected, 0, None))?;
+        let projected = columns
+            .iter()
+            .map(BoundColumn::declaration)
+            .collect::<Vec<_>>();
+        built(
+            at,
+            builder.prepare_values_with_clauses(&clauses, &projected, 0, None),
+        )?;
         let selection = PreparedGraphText {
             statement: statement.to_owned(),
             builder,
@@ -121,13 +143,21 @@ impl PreparedGraphDeleteText {
             distinct: false,
             return_at: at,
         };
-        Ok(Self { selection, relation, targets })
+        Ok(Self {
+            selection,
+            relation,
+            targets,
+        })
     }
 
     #[must_use]
-    pub fn statement(&self) -> &str { self.selection.statement() }
+    pub fn statement(&self) -> &str {
+        self.selection.statement()
+    }
     #[must_use]
-    pub fn parameter_schema(&self) -> &[GqlParameterSpec] { self.selection.parameter_schema() }
+    pub fn parameter_schema(&self) -> &[GqlParameterSpec] {
+        self.selection.parameter_schema()
+    }
 
     /// Bind without lexing, catalog access or storage observation.
     pub fn bind_parameters(

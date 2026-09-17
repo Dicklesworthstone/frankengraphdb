@@ -49,13 +49,17 @@ impl GraphPatternBuilder {
             .iter()
             .zip(variables)
             .map(|(column, variable)| match column {
-                GraphColumn::Vertex { .. } => ValueProjection::Vertex { slot: slots[variable] },
-                GraphColumn::Property { key, .. } => {
-                    ValueProjection::Property { slot: slots[variable], key: *key }
-                }
-                GraphColumn::Path { function, .. } => {
-                    ValueProjection::Path { capture: variable as u32, function: *function }
-                }
+                GraphColumn::Vertex { .. } => ValueProjection::Vertex {
+                    slot: slots[variable],
+                },
+                GraphColumn::Property { key, .. } => ValueProjection::Property {
+                    slot: slots[variable],
+                    key: *key,
+                },
+                GraphColumn::Path { function, .. } => ValueProjection::Path {
+                    capture: variable as u32,
+                    function: *function,
+                },
             })
             .collect();
         operators.extend([
