@@ -78,6 +78,11 @@ pub enum GraphWalkSearch {
     /// equal its first. A closing return is terminal, including a self-loop.
     /// This is vertex restriction, not edge-unique TRAIL or shortest selection.
     Simple,
+    /// Every path without a repeated EId. Vertices, including the source, may
+    /// repeat and closed trails may continue. Real edge identities are needed
+    /// even when the output contains only endpoints. No shortest selection or
+    /// edge uniqueness across separate atoms is implied.
+    Trail,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,7 +214,7 @@ pub enum GlaOperator {
         direction: GlaDirection,
     },
     /// Append an endpoint for each selected path occurrence in the inclusive
-    /// finite interval. Search chooses WALK, shortest WALK, ACYCLIC or SIMPLE.
+    /// finite interval. Search selects WALK, shortest WALK, ACYCLIC, SIMPLE or TRAIL.
     /// Endpoint predicates apply after expansion, not to transit vertices.
     /// A CapturePath operator may retain the real identified route. Repetition
     /// restrictions apply to this atom, not to a surrounding compound path.
@@ -563,12 +568,14 @@ impl<Row> GlaPlan<Row> {
         })
     }
 
-    /// Captured values require the real edge-identity input lane.
+    /// Captures and edge-unique traversal require actual source EIds. TRAIL
+    /// cannot drop its identities merely because only endpoints are projected.
     #[must_use]
     pub fn requires_identified_edges(&self) -> bool {
-        self.operators
-            .iter()
-            .any(|op| matches!(op, GlaOperator::CapturePath { .. }))
+        self.operators.iter().any(|op| {
+            matches!(op, GlaOperator::CapturePath { .. }
+                | GlaOperator::VarLengthExpand { search: GraphWalkSearch::Trail, .. })
+        })
     }
 
     /// Scalar property projections require a real vertex source even without
@@ -690,6 +697,7 @@ impl<Row> GlaPlan<Row> {
                         GraphWalkSearch::AnyShortest => 24,
                         GraphWalkSearch::Acyclic => 29,
                         GraphWalkSearch::Simple => 30,
+                        GraphWalkSearch::Trail => 31,
                     });
                     bytes.extend_from_slice(&source.0.to_be_bytes());
                     bytes.extend_from_slice(&relation.0.to_be_bytes());

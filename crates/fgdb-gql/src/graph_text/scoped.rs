@@ -4,8 +4,8 @@
 //! Bodies without shared variables are independent, not malformed correlations.
 //! Child WHERE may read visible outer vertices absent from its positive pattern;
 //! those values are captured with null intact, not introduced as node matches.
-//! Shortest WALK, ACYCLIC and SIMPLE require one finite quantified atom per
-//! selected positive pattern. Restrictions preserve occurrence multiplicity;
+//! Shortest WALK, TRAIL, ACYCLIC and SIMPLE require one finite quantified atom
+//! per selected positive pattern. Restrictions preserve occurrence multiplicity;
 //! they never imply a global DISTINCT. An explicit root binding captures the
 //! selected path, including its real ordered edge identities.
 
@@ -176,6 +176,13 @@ fn resolve_pattern_with_captures<'a>(
                 bounds,
             ),
             Some(bounds) if edge.search == GraphWalkSearch::Simple => builder.simple_walk(
+                edge.source.text,
+                relation,
+                edge.direction,
+                edge.destination.text,
+                bounds,
+            ),
+            Some(bounds) if edge.search == GraphWalkSearch::Trail => builder.trail_walk(
                 edge.source.text,
                 relation,
                 edge.direction,
@@ -403,31 +410,53 @@ fn predicate_captures<'a>(
     filters: &[Filter<'a>],
     edges: &[Edge<'a>],
 ) -> Result<Vec<Name<'a>>, GraphPatternTextError> {
+    // Expression columns carry variable references just as comparison atoms
+    // do. Keep both on the same work stack so mixed expressions and atoms
+    // preserve first-reference order, deduplication and the admission bound.
+    enum Pending<'query, 'syntax> {
+        Predicate(&'syntax Filter<'query>),
+        Variable(Name<'query>),
+    }
+
     let mut captures = Vec::new();
-    let mut pending: Vec<_> = filters.iter().rev().collect();
-    while let Some(filter) = pending.pop() {
-        let names = match filter {
-            Filter::PathCapture(_) | Filter::PathLength { .. } | Filter::PathNull { .. } => {
-                return Err(error(
-                    0,
-                    GraphPatternTextErrorKind::Expected("root path predicate"),
-                ));
-            }
-            Filter::Boolean { program, .. } => {
-                for item in program.iter().rev() {
-                    if let boolean::SyntaxItem::Atom(atom) = item {
-                        pending.push(atom);
-                    }
+    let mut pending: Vec<_> = filters.iter().rev().map(Pending::Predicate).collect();
+    while let Some(item) = pending.pop() {
+        let names = match item {
+            Pending::Variable(name) => [Some(name), None],
+            Pending::Predicate(filter) => match filter {
+                Filter::PathCapture(_) | Filter::PathLength { .. } | Filter::PathNull { .. } => {
+                    return Err(error(
+                        0,
+                        GraphPatternTextErrorKind::Expected("root path predicate"),
+                    ));
                 }
-                continue;
-            }
-            Filter::Properties { left, right, .. } | Filter::Identity { left, right, .. } => {
-                [Some(*left), Some(*right)]
-            }
-            Filter::VertexNull { variable, .. }
-            | Filter::Property { variable, .. }
-            | Filter::Scalar { variable, .. }
-            | Filter::Null { variable, .. } => [Some(*variable), None],
+                Filter::Boolean { program, .. } => {
+                    for item in program.iter().rev() {
+                        match item {
+                            boolean::SyntaxItem::Atom(atom) => {
+                                pending.push(Pending::Predicate(atom));
+                            }
+                            boolean::SyntaxItem::Expression { columns, .. } => {
+                                for &(variable, _) in columns.iter().rev() {
+                                    pending.push(Pending::Variable(variable));
+                                }
+                            }
+                            boolean::SyntaxItem::Truth(_)
+                            | boolean::SyntaxItem::And
+                            | boolean::SyntaxItem::Or
+                            | boolean::SyntaxItem::Not => {}
+                        }
+                    }
+                    continue;
+                }
+                Filter::Properties { left, right, .. } | Filter::Identity { left, right, .. } => {
+                    [Some(*left), Some(*right)]
+                }
+                Filter::VertexNull { variable, .. }
+                | Filter::Property { variable, .. }
+                | Filter::Scalar { variable, .. }
+                | Filter::Null { variable, .. } => [Some(*variable), None],
+            },
         };
         for name in names.into_iter().flatten() {
             if edges.iter().any(|edge| edge.variable.is_some_and(|variable| variable.text == name.text)) {
@@ -497,9 +526,9 @@ impl<'a> Parser<'a> {
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'=')))
     }
     /// One positive-pattern parser, used at the root and in each scope. A
-    /// quantifier requires explicit WALK, ACYCLIC or SIMPLE semantics. Restricted
-    /// native patterns contain one finite atom; separate MATCH clauses keep
-    /// separate restrictions. Definition-wide counters never reset per clause.
+    /// quantifier requires explicit WALK, TRAIL, ACYCLIC or SIMPLE semantics.
+    /// Restricted native patterns contain one finite atom; separate MATCH
+    /// clauses keep separate restrictions. Definition-wide counters never reset.
     fn positive_pattern(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         let selector_at = self.current.at;
@@ -511,6 +540,8 @@ impl<'a> Parser<'a> {
             GraphWalkSearch::Acyclic
         } else if self.take_word("SIMPLE")? {
             GraphWalkSearch::Simple
+        } else if self.take_word("TRAIL")? {
+            GraphWalkSearch::Trail
         } else {
             GraphWalkSearch::All
         };
@@ -518,7 +549,10 @@ impl<'a> Parser<'a> {
             search,
             GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest
         );
-        let restricted = matches!(search, GraphWalkSearch::Acyclic | GraphWalkSearch::Simple);
+        let restricted = matches!(
+            search,
+            GraphWalkSearch::Acyclic | GraphWalkSearch::Simple | GraphWalkSearch::Trail
+        );
         let selected = shortest || restricted;
         let walk_mode = if shortest {
             self.word("SHORTEST")?;
@@ -529,7 +563,9 @@ impl<'a> Parser<'a> {
         } else {
             self.take_word("WALK")?
         };
-        let expected_atom = if restricted {
+        let expected_atom = if search == GraphWalkSearch::Trail {
+            "one finite quantified TRAIL atom"
+        } else if restricted {
             "one finite quantified ACYCLIC or SIMPLE atom"
         } else {
             "one bounded atom in shortest WALK"
@@ -651,7 +687,7 @@ impl<'a> Parser<'a> {
             return Err(error(
                 at,
                 GraphPatternTextErrorKind::Expected(
-                    "explicit MATCH WALK, ACYCLIC or SIMPLE for quantified atoms",
+                    "explicit MATCH WALK, TRAIL, ACYCLIC or SIMPLE for quantified atoms",
                 ),
             ));
         }
@@ -958,5 +994,200 @@ impl<'a> Parser<'a> {
         }
         self.syntax.scopes.push(ScopeSyntax { kind, body });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use crate::GqlQueryPolicy;
+    use fgdb_types::{CanonicalScalar, VId};
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "n") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            _ => None,
+        }
+    }
+
+    fn run(
+        text: &str,
+        arguments: &GqlParameters,
+        values: &BTreeMap<VId, CanonicalScalar>,
+    ) -> Vec<Vec<Option<VId>>> {
+        let pattern = PreparedGraphText::prepare(text, symbols)
+            .unwrap()
+            .bind_parameters(arguments)
+            .unwrap();
+        pattern
+            .plan()
+            .execute_governed_with_properties(
+                5,
+                (1..=5).map(VId),
+                [(VId(1), RelationId(1), VId(2))],
+                |vid, predicate| {
+                    let properties: Vec<_> = values
+                        .get(&vid)
+                        .map(|value| (PropertyKeyId(1), value.clone()))
+                        .into_iter()
+                        .collect();
+                    Ok::<_, ()>(predicate.matches(&[], &properties))
+                },
+                |vid, _| Ok(values.get(&vid)),
+                GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap()
+            .value
+            .iter()
+            .map(|row| row.values().iter().map(|value| value.as_vertex()).collect())
+            .collect()
+    }
+
+    fn numbers() -> BTreeMap<VId, CanonicalScalar> {
+        BTreeMap::from([
+            (VId(1), CanonicalScalar::Int(1)),
+            (VId(2), CanonicalScalar::Int(2)),
+            (VId(3), CanonicalScalar::Int(2)),
+            (VId(4), CanonicalScalar::Null),
+        ])
+    }
+
+    #[test]
+    fn expression_captures_keep_first_reference_order_without_matching_outer_nodes() {
+        let syntax = Parser::new(
+            "MATCH (a),(b),(unused) OPTIONAL MATCH (n) \
+             WHERE n.n + b.n > a.n + b.n AND a.n = 1 RETURN n",
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        let body = &syntax.scopes[0].body;
+        assert_eq!(
+            body.variables.iter().map(|name| name.text).collect::<Vec<_>>(),
+            vec!["n", "b", "a"]
+        );
+        assert_eq!(
+            body.captures.iter().map(|name| name.text).collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
+    }
+
+    #[test]
+    fn arithmetic_captures_execute_in_required_optional_and_existential_scopes() {
+        let values = numbers();
+        for clause in ["MATCH", "OPTIONAL MATCH"] {
+            let text = format!(
+                "MATCH (a {{n:1}}) {clause} (b) \
+                 WHERE b.n = a.n + $offset RETURN a,b"
+            );
+            let arguments = GqlParameters::new().with_int64("offset", 1).unwrap();
+            assert_eq!(
+                run(&text, &arguments, &values),
+                vec![vec![Some(VId(1)), Some(VId(2))], vec![Some(VId(1)), Some(VId(3))]]
+            );
+            let arguments = GqlParameters::new().with_int64("offset", 10).unwrap();
+            let expected = if clause == "MATCH" {
+                Vec::new()
+            } else {
+                vec![vec![Some(VId(1)), None]]
+            };
+            assert_eq!(run(&text, &arguments, &values), expected);
+        }
+        let arguments = GqlParameters::new();
+        assert_eq!(
+            run(
+                "MATCH (a) WHERE EXISTS { MATCH (b) WHERE b.n = a.n + 1 } RETURN a",
+                &arguments,
+                &values,
+            ),
+            vec![vec![Some(VId(1))]]
+        );
+        assert_eq!(
+            run(
+                "MATCH (a) WHERE NOT EXISTS { MATCH (b) WHERE b.n = a.n + 1 } RETURN a",
+                &arguments,
+                &values,
+            ),
+            (2..=5).map(|id| vec![Some(VId(id))]).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn string_expressions_capture_outer_properties_through_the_same_path() {
+        let values = BTreeMap::from([
+            (VId(1), CanonicalScalar::ucs_basic_text("Ada").unwrap()),
+            (VId(2), CanonicalScalar::ucs_basic_text("ADA").unwrap()),
+            (VId(3), CanonicalScalar::ucs_basic_text("ADA").unwrap()),
+            (VId(4), CanonicalScalar::Null),
+        ]);
+        assert_eq!(
+            run(
+                "MATCH (a {n:'Ada'}) MATCH (b) WHERE b.n = UPPER(a.n) RETURN a,b",
+                &GqlParameters::new(),
+                &values,
+            ),
+            vec![vec![Some(VId(1)), Some(VId(2))], vec![Some(VId(1)), Some(VId(3))]]
+        );
+    }
+
+    #[test]
+    fn nullable_outer_expression_operands_never_become_fresh_positive_matches() {
+        for expression in ["b.n + 1", "UPPER(b.n)"] {
+            let text = format!(
+                "MATCH (a {{n:1}}) OPTIONAL MATCH (a)-[:R]->(b {{n:99}}) \
+                 OPTIONAL MATCH (c) WHERE c.n = {expression} RETURN a,b,c"
+            );
+            assert_eq!(
+                run(&text, &GqlParameters::new(), &numbers()),
+                vec![vec![Some(VId(1)), None, None]]
+            );
+        }
+    }
+
+    #[test]
+    fn expression_capture_admission_counts_distinct_names_at_the_exact_boundary() {
+        let storage: Vec<_> = (0..MAX_PATTERN_VERTICES)
+            .map(|index| format!("v{index}"))
+            .collect();
+        let mut variables: Vec<_> = storage[..MAX_PATTERN_VERTICES - 1]
+            .iter()
+            .map(|text| Name { text, at: 0 })
+            .collect();
+        let last = Name {
+            text: &storage[MAX_PATTERN_VERTICES - 1],
+            at: 11,
+        };
+        let key = Name { text: "n", at: 0 };
+        let filter = Filter::Boolean {
+            program: vec![boolean::SyntaxItem::Expression {
+                columns: vec![(variables[0], key), (last, key), (last, key)],
+                program: Vec::new(),
+            }],
+            at: 0,
+        };
+        let captures = predicate_captures(&mut variables, &[filter]).unwrap();
+        assert_eq!(variables.len(), MAX_PATTERN_VERTICES);
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].text, last.text);
+        let overflow = Filter::Boolean {
+            program: vec![boolean::SyntaxItem::Expression {
+                columns: vec![(Name { text: "overflow", at: 29 }, key)],
+                program: Vec::new(),
+            }],
+            at: 0,
+        };
+        let failure = predicate_captures(&mut variables, &[overflow]).err().unwrap();
+        assert_eq!(failure.offset, 29);
+        assert!(matches!(
+            failure.kind,
+            GraphPatternTextErrorKind::Build(PatternBuildError::LimitExceeded {
+                dimension: crate::algebra::PatternLimitDimension::Vertices,
+                limit: MAX_PATTERN_VERTICES,
+                ..
+            })
+        ));
+        assert_eq!(variables.len(), MAX_PATTERN_VERTICES);
     }
 }

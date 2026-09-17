@@ -6,6 +6,7 @@ mod comparison;
 mod join;
 mod policy;
 mod projection;
+mod trail;
 pub(crate) use comparison::{charge_payload, compare_element_properties, compare_properties};
 pub use policy::{GqlQueryError, GqlQueryExecution, GqlQueryPolicy};
 pub use projection::ProjectedRows;
@@ -189,6 +190,9 @@ impl<'a> WalkExpansion<'a> {
             GraphWalkSearch::Simple => {
                 crate::GraphWalkCursor::new_simple(source, bounds, adjacency, control)
                     .map(Self::All)
+            }
+            GraphWalkSearch::Trail => {
+                unreachable!("TRAIL requires the identified-edge execution lane")
             }
         }
     }
@@ -467,19 +471,20 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
         let adjacency = self
             .identified_index
             .and_then(|index| index.get(&(relation, direction)));
-        let mut cursor = crate::walk::GraphPathCursor::new(
+        let capture = operators.iter().any(|op| matches!(op, GlaOperator::CapturePath { .. }));
+        let mut cursor = trail::IdentifiedExpansion::new(
             source,
             bounds,
             search,
             adjacency,
+            capture,
             &mut self.control,
         )?;
         let slot = bindings.len();
-        while let Some(path) = cursor.next_with_control(&mut self.control)? {
+        while let Some((destination, segment)) = cursor.next_with_control(&mut self.control)? {
             (self.control)(GlaExecutionEvent::ScratchEntry)?;
-            let destination = path.steps().last().map_or(path.start(), |step| step.1);
             bindings.push(Some(destination));
-            let previous = self.segments[slot].replace(path);
+            let previous = core::mem::replace(&mut self.segments[slot], segment);
             let result = self.visit(operators, ordinal + 1, bindings, index);
             self.segments[slot] = previous;
             let _ = bindings.pop();

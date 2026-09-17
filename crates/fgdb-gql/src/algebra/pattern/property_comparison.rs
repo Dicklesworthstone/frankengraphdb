@@ -1,4 +1,4 @@
-//! Binding-dependent property predicates for the connected-pattern compiler.
+//! Source-sensitive definitions and property predicates for the pattern compiler.
 
 use super::*;
 use crate::algebra::IntegerComparison;
@@ -17,6 +17,28 @@ pub(super) enum PropertyComparison {
 }
 
 impl GraphPatternBuilder {
+    /// Add a finite, edge-unique TRAIL atom. Repeated vertices and continued
+    /// closed trails are legal, but an actual EId cannot be used twice, even
+    /// in opposite directions. Parallel edges retain independent identities.
+    /// The restriction is local to this atom, not a surrounding compound path.
+    ///
+    /// Use prepare_values or its scoped variants, even for endpoint-only output,
+    /// and the governed identified-edge entrypoint. Legacy predicate-only
+    /// projections cannot provide the identities needed to enforce this mode.
+    /// Database readers provide the identified source automatically.
+    pub fn trail_walk(
+        &mut self,
+        source: &str,
+        relation: RelationId,
+        direction: GlaDirection,
+        destination: &str,
+        bounds: crate::GraphWalkBounds,
+    ) -> Result<&mut Self, PatternBuildError> {
+        self.walk(source, relation, direction, destination, bounds)?;
+        self.edges.last_mut().expect("one validated atom was added").search = GraphWalkSearch::Trail;
+        Ok(self)
+    }
+
     /// Compare canonical properties of two variables in this positive MATCH
     /// scope. Both variables must be declared, but neither need be projected.
     /// This is a selection predicate, not a new edge or an implicit Cartesian
@@ -83,6 +105,7 @@ impl GraphPatternBuilder {
         if self.property_comparisons.is_empty()
             && self.path_captures.is_empty()
             && self.path_predicates.is_empty()
+            && !self.edges.iter().any(|edge| edge.search == GraphWalkSearch::Trail)
         {
             Ok(())
         } else {
