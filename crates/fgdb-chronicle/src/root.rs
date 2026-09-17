@@ -62,9 +62,18 @@ pub const ROOT_MAGIC: [u8; 4] = *b"FGRT";
 /// Format major this build writes. A different major is not readable.
 pub const ROOT_FORMAT_MAJOR: u16 = 1;
 
-/// Format minor this build writes. A HIGHER minor is still readable —
-/// additive-minor is the durable-format contract (§16.6).
-pub const ROOT_FORMAT_MINOR: u16 = 0;
+/// Format minor this build writes. Higher minors remain structurally readable
+/// (§16.6 additive-minor).
+///
+/// Minor 1 (fgdb-hkiy): the PLAIN opener binds a DEK commitment as a versioned
+/// bundle inside `RootBootstrap.opener_payload` — object kind (u16 LE), bundle
+/// version (u16 LE), then the 32-byte BLAKE3 keyed-DEK hash of
+/// `fgdb.spine.dek-commitment.v1` and the namespace. Minor 0 left the payload
+/// a bare 2-byte object kind, so the first capsule decryption was the only key
+/// authentication and an empty database accepted any DEK. Minor-0 slots decode
+/// unchanged: a legacy empty slot carries no DEK binding, and capsule
+/// decryption remains its key check.
+pub const ROOT_FORMAT_MINOR: u16 = 1;
 
 /// Domain separator for the tear checksum.
 pub const TEAR_CHECKSUM_DOMAIN: &[u8] = b"fgdb:root-slot-tear:v1";
@@ -685,4 +694,87 @@ pub fn recover_root_object(
         return Err(RootRecoveryError::IdentityTupleMismatch);
     }
     Ok(recovered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minor_slot(minor: u16) -> RootSlot {
+        let mut bootstrap = RootBootstrap {
+            root_encoding_id: [0; 32],
+            root_placement_id: [0; 32],
+            root_placement_epoch: 0,
+            failure_domain_policy_id: 0,
+            root_failure_domain_id: 0,
+            segment_id: 0,
+            offset: 0,
+            encoded_len: 7,
+            root_symbol_inventory_digest: [0; 32],
+            object_kind: 1,
+            canonical_plaintext_len: 7,
+            codec_profile: 0,
+            compressed_len: 7,
+            data_crypto_profile: 0,
+            dek_id: [0; 16],
+            nonce_len: 0,
+            nonce_or_siv: [0; NONCE_CAPACITY],
+            object_tag_len: 0,
+            fec_profile: 0,
+            transfer_length: 7,
+            oti_common: 0,
+            oti_scheme: 0,
+            symbol_size: 0,
+            source_block_count: 0,
+            symbol_auth_profile: 0,
+            ciphertext_id: [0; 32],
+            ciphertext_digest: [0; 32],
+            opener_kind: 2,
+            oid_key_id: [0; 16],
+            opener_payload_len: 2,
+            opener_payload: [0; OPENER_PAYLOAD_LEN],
+            opener_digest: [0; 32],
+        };
+        bootstrap.opener_payload[..2].copy_from_slice(&1u16.to_le_bytes());
+        if minor >= 1 {
+            bootstrap.opener_payload_len = 36;
+            bootstrap.opener_payload[2..4].copy_from_slice(&1u16.to_le_bytes());
+            bootstrap.opener_payload[4..36].copy_from_slice(&[0x11; 32]);
+        }
+        RootSlot {
+            format_major: ROOT_FORMAT_MAJOR,
+            format_minor: minor,
+            slot_generation: 3,
+            local_writer_fence_epoch: 1,
+            database_id: [9; 16],
+            database_security_namespace_id: [8; 32],
+            cluster_incarnation: 1,
+            incarnation_continuity_profile_id: 0,
+            cluster_incarnation_continuity_digest: [0; 32],
+            continuity_cas_version: 0,
+            service_visibility_epoch: 0,
+            root_manifest_oid: [7; 32],
+            bootstrap,
+        }
+    }
+
+    /// The versioned opener bundle survives the durable slot codec intact.
+    #[test]
+    fn versioned_opener_bundle_round_trips() {
+        let slot = minor_slot(ROOT_FORMAT_MINOR);
+        let parsed = RootSlot::parse(&slot.serialize()).unwrap();
+        assert_eq!(parsed, slot);
+        assert_eq!(parsed.bootstrap.opener_payload_len, 36);
+        assert_eq!(&parsed.bootstrap.opener_payload[4..36], &[0x11; 32]);
+    }
+
+    /// §16.6 legacy decode: a minor-0 slot (pre-fgdb-hkiy) with the
+    /// original bare object-kind payload still parses byte-for-byte.
+    #[test]
+    fn legacy_minor_zero_slot_with_unbound_dek_still_decodes() {
+        let slot = minor_slot(0);
+        let parsed = RootSlot::parse(&slot.serialize()).unwrap();
+        assert_eq!(parsed, slot);
+        assert_eq!(parsed.bootstrap.opener_payload_len, 2);
+    }
 }

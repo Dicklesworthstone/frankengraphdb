@@ -1192,13 +1192,7 @@ fn typed_failures_keep_stdout_machine_readable_and_key_material_private() {
         &db.key,
     ])
     .failure(5, "io");
-    // Escalated engine gap (fgdb-ziq6, mails 807/808): on an EMPTY database
-    // the PLAIN root slot binds no DEK, so Database::open accepts a wrong
-    // capsule DEK and this CLI reports success (exit 0) where the acceptance
-    // table demands 4. Namespace and K_oid wrong-key cases below are
-    // engine-authenticated and DO classify as open failures. When the engine
-    // owner lands authenticated key binding at the slot boundary, this
-    // assertion must be tightened back to .failure(4, "open").
+    // Even an empty database authenticates its create-time DEK (fgdb-hkiy).
     let wrong = scratch("wrong-key");
     std::fs::write(
         &wrong,
@@ -1218,7 +1212,7 @@ fn typed_failures_keep_stdout_machine_readable_and_key_material_private() {
         wrong.to_str().unwrap(),
         "MATCH (p:Person) RETURN p.name",
     ])
-    .success();
+    .failure(4, "open");
     let wrong_namespace = scratch("wrong-namespace");
     std::fs::write(
         &wrong_namespace,

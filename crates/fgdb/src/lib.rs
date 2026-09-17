@@ -1813,7 +1813,7 @@ fn validate_plain_slot(slot: &RootSlot, keys: &DatabaseKeys, path: &Path) -> Res
         expected.bootstrap.opener_payload[4..36]
             .copy_from_slice(&slot.bootstrap.opener_payload[4..36]);
     }
-    if false && *slot != expected {
+    if *slot != expected {
         return Err(OpenError::ForeignSlot {
             path: path.to_path_buf(),
         });

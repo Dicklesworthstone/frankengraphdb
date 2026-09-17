@@ -302,6 +302,7 @@ fn open_failure(error: fgdb::OpenError) -> Failure {
         | E::NotADatabase { .. }
         | E::AlreadyADatabase { .. }
         | E::ForeignSlot { .. }
+        | E::WrongDek { .. }
         | E::SlotDisagreesWithStream { .. }
         | E::SlotUnrecoverable { .. }
         | E::NotEmpty { .. } => Failure::open(error),
