@@ -239,6 +239,17 @@ impl<'a> Parser<'a> {
                     }
                     if depth == 0 && ["AND", "OR", "RETURN", "SET", "REMOVE", "WITH", "MATCH", "OPTIONAL"]
                         .iter().any(|keyword| word.eq_ignore_ascii_case(keyword)) { break; }
+                    // A bare literal left operand with an IN/NOT IN list takes
+                    // the shared scalar path so three-valued membership keeps
+                    // its unknown result instead of a Boolean Truth leaf.
+                    if depth == 0
+                        && (word.eq_ignore_ascii_case("IN")
+                            || (word.eq_ignore_ascii_case("NOT")
+                                && matches!(lexer.next()?.kind, TokenKind::Word(next)
+                                    if next.eq_ignore_ascii_case("IN"))))
+                    {
+                        return Ok(true);
+                    }
                 }
                 _ => {}
             }
