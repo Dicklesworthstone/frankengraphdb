@@ -118,8 +118,6 @@ impl<'a> Parser<'a> {
     fn pipeline_summary(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
-        projection: &mut Vec<ReadProjectionTemplate>,
-        types: &mut Vec<GraphSetColumnType>,
     ) -> Result<(GraphAggregateFunction, Option<usize>), Error> {
         use GraphAggregateFunction as F;
         let name = self.name()?;
@@ -153,26 +151,10 @@ impl<'a> Parser<'a> {
             self.take_word("ALL")?;
         }
         let at = self.current.at;
-        let value = self.read_row_value(schema, 0)?;
-        self.punct(b')', "aggregate argument followed by )")?;
-        let input_types = schema.iter().map(|(_, kind)| *kind).collect::<Vec<_>>();
-        let kind = value.column_type(&input_types, &self.syntax.parameters);
-        let column = if let ReadValueTemplate::Column(column) = value {
-            column
-        } else {
-            self.capacity(projection.len(), MAX_PATTERN_VERTICES,
-                crate::algebra::PatternLimitDimension::Columns)?;
-            let column = projection.len();
-            let mut name = format!("_aggregate_input_{column}");
-            while projection.iter().any(|item| item.name == name) {
-                name.push('_');
-            }
-            projection.push(ReadProjectionTemplate { name, value });
-            types.push(kind);
-            column
-        };
+        let column = self.pipeline_column(schema)?;
+        self.punct(b')', "one projected row alias as the aggregate argument")?;
         if matches!(function, F::SumInt | F::AverageInt)
-            && !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Any)
+            && !matches!(schema[column].1, GraphSetColumnType::Scalar | GraphSetColumnType::Any)
         {
             return Err(expected(at, "a scalar WITH alias for a numeric aggregate"));
         }
@@ -234,10 +216,6 @@ impl PreparedGraphPipelineAggregateText {
         }
         let mut returned: Vec<Returned<'_>> = Vec::new();
         let mut summaries = Vec::new();
-        let mut argument_projection = schema.iter().enumerate().map(|(column, (name, _))| {
-            ReadProjectionTemplate { name: name.text.to_owned(), value: ReadValueTemplate::Column(column) }
-        }).collect::<Vec<_>>();
-        let mut argument_types = schema.iter().map(|(_, kind)| *kind).collect::<Vec<_>>();
         loop {
             parser.capacity(
                 returned.len(),
@@ -248,8 +226,7 @@ impl PreparedGraphPipelineAggregateText {
             let call = matches!(parser.current.kind, TokenKind::Word(_))
                 && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
             let (name, value) = if call {
-                let (function, column) = parser.pipeline_summary(
-                    &schema, &mut argument_projection, &mut argument_types)?;
+                let (function, column) = parser.pipeline_summary(&schema)?;
                 parser.word("AS")?;
                 let name = parser.name()?;
                 let index = summaries.len();
@@ -335,7 +312,7 @@ impl PreparedGraphPipelineAggregateText {
                         summary.function,
                         GraphAggregateFunction::Min | GraphAggregateFunction::Max
                     ) {
-                        argument_types[summary.column.expect("extrema have one argument")]
+                        schema[summary.column.expect("extrema have one argument")].1
                     } else if matches!(summary.function,
                         GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct)
                     {
@@ -398,18 +375,6 @@ impl PreparedGraphPipelineAggregateText {
             count = limit;
         }
         parser.end()?;
-        if argument_projection.len() > schema.len() {
-            if depth + 1 >= crate::MAX_GRAPH_SET_DEPTH {
-                return Err(build(aggregate_at, GraphAggregateBuildError::RelationalInput(
-                    crate::GraphSetBuildError::TooDeep {
-                        limit: crate::MAX_GRAPH_SET_DEPTH, observed: depth + 2,
-                    })));
-            }
-            stages.push(ReadStageTemplate::Project {
-                at: aggregate_at, projection: argument_projection,
-                quantifier: crate::GraphSetQuantifier::All,
-            });
-        }
         let input = parser
             .finish_graph_projection(statement, head, stages)?
             .resolve(resolve)?;
