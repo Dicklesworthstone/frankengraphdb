@@ -492,19 +492,16 @@ fn maximum_optional_chain_keeps_all_65_columns_without_sentinel_or_slot_aliasing
     ));
 }
 
-/// The u77c fix (5f3b80ad) moved the heavy visitor branches into
-/// `#[inline(never)]` helpers so a 65-clause OPTIONAL chain no longer
-/// overflows the default 2 MiB test stack. This guard holds that property
-/// at a deliberately tighter bound: if per-frame cost regrows, this thread
-/// overflows while the default-stack tests still pass, so the regression is
-/// caught before the main stack is exhausted. Sized from the measured HEAD
-/// peak (~316 KiB) with 3x headroom; see the bead's measurement notes.
+/// The flat continuation machine made stack use independent of clause count
+/// (fgdb-fuh7): the measured minimum passing stack for the 65-column chain is
+/// 128 KiB at 16 KiB granularity, flat from 8 to 64 clauses (recursive HEAD
+/// measured 704 KiB at 64). This guard holds that property at a deliberately
+/// tighter bound than the old 1 MiB: if per-clause recursion regrows, this
+/// thread overflows while the default-stack tests still pass. Sized at 2x the
+/// measured minimum; see the bead's measurement notes.
 #[test]
 fn maximum_optional_chain_fits_tight_small_stack_guard() {
-    // 1 MiB = one half of the default test-thread stack; the measured
-    // HEAD peak for the 65-column chain is ~316 KiB, so ~708 KiB of
-    // headroom must remain before this bound fires.
-    const GUARD_STACK: usize = 1024 * 1024;
+    const GUARD_STACK: usize = 256 * 1024;
     let result = std::thread::Builder::new()
         .stack_size(GUARD_STACK)
         .spawn(move || {
@@ -782,4 +779,112 @@ fn streaming_counts_distinguish_outer_rows_from_nullable_vertices_and_properties
         )
         .unwrap();
     assert_eq!(empty.value[0].get(0).unwrap().as_count(), Some(0));
+}
+
+/// Independent left-join expansion, including a later match after an earlier
+/// miss and duplicate physical occurrences. Seeded cases span every legal depth.
+#[test]
+fn seeded_optional_chains_preserve_bags_and_governed_events() {
+    use fgdb_gql::GlaExecutionEvent;
+    let mut seed = 0xd1b5_4a32_d192_ed03_u64;
+    for depth in 1..=MAX_PATTERN_EDGES {
+        let names: Vec<_> = (0..=depth).map(|at| format!("n{at}")).collect();
+        let root = builder(&[&names[0]], &[]);
+        let mut inners = Vec::new();
+        let mut edges = Vec::new();
+        let mut anchors = Vec::new();
+        for at in 1..=depth {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let anchor = if seed & 1 == 0 { 0 } else { at - 1 };
+            anchors.push(anchor);
+            let relation = RelationId(at as u64);
+            inners.push(builder(
+                &[&names[anchor], &names[at]],
+                &[(&names[anchor], relation, GlaDirection::Forward, &names[at])],
+            ));
+            if seed & 6 != 0 {
+                let edge = (VId(anchor as u128), relation, VId(at as u128));
+                edges.push(edge);
+                if at == depth / 2 + 1 {
+                    edges.push(edge);
+                }
+            }
+        }
+        let clauses: Vec<_> = inners.iter().map(GraphMatchClause::optional).collect();
+        let columns: Vec<_> = names
+            .iter()
+            .map(|name| GraphColumn::vertex(name, name))
+            .collect();
+        let pattern = root
+            .prepare_values_with_clauses(&clauses, &columns, 0, None)
+            .unwrap()
+            .with_duplicates();
+        // Complete assignments, not production slots or traversal state.
+        let mut expected = vec![vec![Some(VId(0))]];
+        for (at, &anchor) in anchors.iter().enumerate() {
+            let mut next = Vec::new();
+            for row in expected {
+                let before = next.len();
+                for &(source, relation, target) in &edges {
+                    if row[anchor] == Some(source) && relation == RelationId((at + 1) as u64) {
+                        let mut matched = row.clone();
+                        matched.push(Some(target));
+                        next.push(matched);
+                    }
+                }
+                if next.len() == before {
+                    let mut absent = row;
+                    absent.push(None);
+                    next.push(absent);
+                }
+            }
+            expected = next;
+        }
+        expected.sort();
+        let mut events = Vec::new();
+        let rows = pattern
+            .plan()
+            .execute_with_properties_control(
+                [VId(0)],
+                edges.iter().copied(),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                |event| {
+                    events.push(event);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(plain(&rows), expected, "depth {depth}");
+        let mut checkpoints = 0;
+        let governed = pattern
+            .plan()
+            .execute_governed_with_properties(
+                1 + edges.len() as u64,
+                [VId(0)],
+                edges.iter().copied(),
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                wide(),
+                || {
+                    checkpoints += 1;
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(governed.value, rows, "depth {depth}");
+        assert_eq!(governed.rows.snapshot_records, 1 + edges.len() as u64);
+        assert_eq!(governed.evaluator.work_units, events.len() as u64);
+        assert_eq!(
+            governed.evaluator.scratch_entries,
+            events
+                .iter()
+                .filter(|&&event| event == GlaExecutionEvent::ScratchEntry)
+                .count() as u64
+        );
+        assert_eq!(checkpoints, events.len() + 2);
+        println!("OPTIONAL_TRANSCRIPT {depth} {expected:?} {governed:?} {checkpoints} {events:?}");
+    }
 }
