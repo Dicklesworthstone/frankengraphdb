@@ -341,6 +341,7 @@ impl GraphPatternBuilder {
                 GraphWalkSearch::AnyShortest => 2,
                 GraphWalkSearch::Acyclic => 3,
                 GraphWalkSearch::Simple => 4,
+                GraphWalkSearch::Trail => 5,
             });
         }
         ordinal(&mut bytes, self.identities.len());

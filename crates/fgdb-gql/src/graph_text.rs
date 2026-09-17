@@ -2006,7 +2006,7 @@ mod tests {
                             .map(|value| (PropertyKeyId(4), value.clone()))
                             .into_iter()
                             .collect();
-                        Ok::<_, ()>(predicate.matches(&[], &properties))
+                        Ok::<_, ()>(predicate.iter().all(|p| p.matches(&[], &properties)))
                     },
                     |vid, _| Ok(values.get(&vid)),
                     policy(),

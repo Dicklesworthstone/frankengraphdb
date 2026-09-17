@@ -1032,7 +1032,7 @@ mod capture_tests {
                         .map(|value| (PropertyKeyId(1), value.clone()))
                         .into_iter()
                         .collect();
-                    Ok::<_, ()>(predicate.matches(&[], &properties))
+                    Ok::<_, ()>(predicate.iter().all(|p| p.matches(&[], &properties)))
                 },
                 |vid, _| Ok(values.get(&vid)),
                 GqlQueryPolicy::new(100, 100, 100_000, 100_000),
@@ -1167,7 +1167,7 @@ mod capture_tests {
             }],
             at: 0,
         };
-        let captures = predicate_captures(&mut variables, &[filter]).unwrap();
+        let captures = predicate_captures(&mut variables, &[filter], &[]).unwrap();
         assert_eq!(variables.len(), MAX_PATTERN_VERTICES);
         assert_eq!(captures.len(), 1);
         assert_eq!(captures[0].text, last.text);
@@ -1178,7 +1178,7 @@ mod capture_tests {
             }],
             at: 0,
         };
-        let failure = predicate_captures(&mut variables, &[overflow]).err().unwrap();
+        let failure = predicate_captures(&mut variables, &[overflow], &[]).err().unwrap();
         assert_eq!(failure.offset, 29);
         assert!(matches!(
             failure.kind,

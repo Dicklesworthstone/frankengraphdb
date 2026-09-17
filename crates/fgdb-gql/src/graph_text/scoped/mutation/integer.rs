@@ -634,7 +634,7 @@ mod predicate_boundary_tests {
                 (1..=5).map(VId),
                 [],
                 |vid, predicate| {
-                    Ok::<_, ()>(predicate.matches(&[], &values[vid.0 as usize - 1]))
+                    Ok::<_, ()>(predicate.iter().all(|p| p.matches(&[], &values[vid.0 as usize - 1])))
                 },
                 |vid, key| {
                     Ok(values[vid.0 as usize - 1]
