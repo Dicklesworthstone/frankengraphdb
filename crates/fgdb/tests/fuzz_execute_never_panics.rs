@@ -2,7 +2,7 @@
 //! Every successful preparation is bound and executed; engine panics propagate.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, RelationBind, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, RelationBind, WriteBatch, WriteTxn};
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
     GqlParameterSpec, GqlParameterType, GqlParameters, GqlQueryPolicy, GraphSymbol,
@@ -16,7 +16,7 @@ use fgdb_gql::{
 };
 use fgdb_types::{
     CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts,
-    QueryCx, TxnCx, VId, WriteTxn,
+    QueryCx, VId,
 };
 use std::time::{Duration, Instant};
 
@@ -25,7 +25,9 @@ const S: RelationId = RelationId(2);
 const P: PropertyKeyId = PropertyKeyId(1);
 const Q: PropertyKeyId = PropertyKeyId(2);
 const L: LabelId = LabelId(1);
-// knob: edit ITERATIONS to shrink debug runtime; each corpus also spans four graphs.
+// knob: corpus inputs per test (plus 6 WITNESS_SEEDS). 512 keeps debug runtime
+// well under ~60s on one core while binding every facade slot; lower it for a
+// quick local smoke. Each corpus also spans four seeded graph variants.
 const ITERATIONS: usize = 512;
 
 fn keys() -> DatabaseKeys {
@@ -97,7 +99,7 @@ async fn seeded(commit: &CommitCx, variant: usize) -> Database<MemVfs> {
     right.add_edge(EId(22), VId(2), VId(3), vec![]);
     db.write(commit, right).await.unwrap();
     if variant != 0 {
-        let mut rng = gen::Rng::new(0x67_72_61_70_68 + variant as u64);
+        let mut rng = fuzz_gen::Rng::new(0x67_72_61_70_68 + variant as u64);
         for relation in [R, S] {
             let mut batch = WriteBatch::new(relation);
             if relation == R {
@@ -192,7 +194,7 @@ fn execute_writes(txn: &mut WriteTxn, db: &mut Database<MemVfs>, cx: &QueryCx,
     write_facade!(11, PreparedGraphVertexMergeText);
     write_facade!(12, PreparedGraphVertexUpsertText);
     write_facade!(13, PreparedGraphEdgeUpsertText);
-    // The script facade overlaps the native ones; its entrypoint itself binds parameters.
+    // The script facade overlaps the native ones; its entrypoint binds parameters.
     if let Some(script) = typed(PreparedGraphWriteScript::prepare(statement, R, symbols)) {
         let args = arguments(script.parameter_schema(), 0, 0);
         coverage[14] += 1;
@@ -201,11 +203,24 @@ fn execute_writes(txn: &mut WriteTxn, db: &mut Database<MemVfs>, cx: &QueryCx,
     }
 }
 
-async fn sweep(corpus: impl IntoIterator<Item = String>, label: &str, variant_seed: impl Fn(usize) -> usize) {
-    let mut coverage = [0_usize; 15];
+/// Deterministic statements that bind through rarely-drawn facade slots.
+const WITNESS_SEEDS: [&str; 7] = [
+    "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN COUNT(n.p) AS total HAVING total > 0",
+    "MATCH (a),(b) MERGE (a)-[:R]->(b)",
+    "CREATE (n:L {p:1})",
+    "MATCH (n) SET n.p = 1",
+    "MATCH (n) DELETE n",
+    "MERGE (n:L {p:1})",
+    "MERGE (n:L {p:1}) ON MATCH SET n.q=1 ON CREATE SET n.q=2",
+    "MATCH (a),(b) MERGE (a)-[e:R]->(b) ON MATCH SET e.p=1 ON CREATE SET e.q=2",
+];
+
+fn sweep(corpus: impl IntoIterator<Item = String>, label: &str,
+    variant_seed: impl Fn(usize) -> usize, require_coverage: bool) {
+    let mut totals = [0_usize; 15];
     for (i, statement) in corpus.into_iter().enumerate() {
         let variant = variant_seed(i);
-        let ((), report) = run_async_under_lab(0x46_55_5A_31 + i as u64, |root| async move {
+        let (executed, report) = run_async_under_lab(0x46_55_5A_31 + i as u64, move |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
             let query = contexts.query();
@@ -218,41 +233,49 @@ async fn sweep(corpus: impl IntoIterator<Item = String>, label: &str, variant_se
             execute_writes(&mut txn, &mut db, &query, &statement, &mut next, &mut coverage);
             txn.abort();
             assert_eq!(txn_cx.outstanding_obligations(), 0);
+            coverage
         });
         assert!(report.lab_test_passed(), "{label} #{i}: {report:?}");
+        for slot in 0..15 {
+            totals[slot] += executed[slot];
+        }
     }
-    for (slot, count) in coverage.iter().enumerate() {
-        assert!(*count > 0, "facade slot {slot} never executed; corpus needs a sample");
+    if require_coverage {
+        for (slot, count) in totals.iter().enumerate() {
+            assert!(*count > 0, "{label}: facade slot {slot} never executed; corpus needs a sample");
+        }
     }
 }
 
 #[test]
 fn execute_random_statements_under_lab_never_panics() {
     let mut corpus = Vec::new();
-    let mut rng = gen::Rng::new(0x46_55_5A_31);
+    let mut rng = fuzz_gen::Rng::new(0x46_55_5A_31);
     for _ in 0..ITERATIONS {
-        let mut gen_rng = gen::Rng::new(0x46_55_5A_31 ^ rng.next_u64());
-        corpus.push(gen::Corpus::new(gen_rng.next_u64()).statement());
+        let mut rng_gen = fuzz_gen::Rng::new(0x46_55_5A_31 ^ rng.next_u64());
+        corpus.push(fuzz_gen::Corpus::new(rng_gen.next_u64()).statement());
     }
-    sweep(corpus, "random", |i| i % 4);
+    corpus.extend(WITNESS_SEEDS.iter().map(|s| (*s).to_string()));
+    sweep(corpus, "random", |i| i % 4, true);
 }
 
 #[test]
 fn mutated_statements_prepared_and_executed_never_panic() {
     let mut corpus = Vec::new();
-    let mut rng = gen::Rng::new(0x46_55_5A_32);
+    let mut rng = fuzz_gen::Rng::new(0x46_55_5A_32);
     for _ in 0..ITERATIONS {
-        let base = gen::Corpus::new(rng.next_u64()).unmutated_statement();
-        corpus.push(gen::Corpus::new(rng.next_u64()).mutate(&base));
+        let base = fuzz_gen::Corpus::new(rng.next_u64()).unmutated_statement();
+        corpus.push(fuzz_gen::Corpus::new(rng.next_u64()).mutate(&base));
     }
-    sweep(corpus, "mutated", |i| (i + 1) % 4);
+    corpus.extend(WITNESS_SEEDS.iter().map(|s| (*s).to_string()));
+    sweep(corpus, "mutated", |i| (i + 1) % 4, true);
 }
 
 #[test]
 fn deeply_nested_statements_refuse_with_typed_error_not_stack_overflow() {
     let mut corpus = Vec::new();
     for depth in [8_usize, 64, 256] {
-        corpus.push(gen::deep_statement(depth));
+        corpus.push(fuzz_gen::Corpus::deep_statement(depth));
     }
     let mut build = String::new();
     for i in 0..256 {
@@ -262,247 +285,226 @@ fn deeply_nested_statements_refuse_with_typed_error_not_stack_overflow() {
     }
     build.push_str("RETURN v0");
     corpus.push(build);
-    sweep(corpus, "deep", |_| 0);
+    sweep(corpus, "deep", |_| 0, false);
 }
 
-mod gen {
-    //! Private in-file generator copied from the shared fuzz corpus contract.
-    //! Splitmix64; families cover MATCH chains, OPTIONAL MATCH, WHERE, WITH,
-    //! aggregates + HAVING, set operations, SHORTEST WALK, INSERT/CREATE,
-    //! SET/REMOVE, DELETE/DETACH DELETE, MERGE, and parameters. Mutation ops
-    //! apply to about half of statements; deep nesting is bounded at build time.
-
-    pub struct Rng { state: u64 }
-
+mod fuzz_gen {
+    pub struct Rng {
+        state: u64,
+    }
     impl Rng {
-        pub fn new(seed: u64) -> Self { Self { state: seed } }
-
+        pub fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
         pub fn next_u64(&mut self) -> u64 {
-            self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
+            self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut value = self.state;
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^ (value >> 31)
         }
-
-        pub fn below(&mut self, n: u64) -> u64 {
-            self.next_u64() % n.max(1)
+        pub fn below(&mut self, n: usize) -> usize {
+            assert!(n > 0);
+            (self.next_u64() % n as u64) as usize
         }
-
         pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
-            &items[self.below(items.len() as u64) as usize]
+            &items[self.below(items.len())]
         }
     }
 
-    pub struct Corpus { rng: Rng, depth: u32 }
-
+    pub struct Corpus {
+        rng: Rng,
+        depth: u32,
+    }
     impl Corpus {
-        pub fn new(seed: u64) -> Self { Self { rng: Rng::new(seed), depth: 0 } }
-
-        pub fn unmutated_statement(&mut self) -> String { self.build() }
-
+        pub fn new(seed: u64) -> Self {
+            Self {
+                rng: Rng::new(seed),
+                depth: 0,
+            }
+        }
         pub fn statement(&mut self) -> String {
-            let statement = self.build();
-            if self.rng.below(2) == 0 { self.mutate(&statement) } else { statement }
-        }
-
-        pub fn mutate(&mut self, text: &str) -> String {
-            let bytes: Vec<char> = text.chars().collect();
-            if bytes.is_empty() { return "MATCH (a) RETURN a".to_string(); }
-            match self.rng.below(5) {
-                0 => { // token drop
-                    let at = self.rng.below(bytes.len() as u64) as usize;
-                    let mut out = String::new();
-                    for (j, ch) in bytes.iter().enumerate() {
-                        if j != at { out.push(*ch); }
-                    }
-                    out
-                }
-                1 => { // token duplicate
-                    let at = self.rng.below(bytes.len() as u64) as usize;
-                    let mut out = String::new();
-                    for (j, ch) in bytes.iter().enumerate() {
-                        out.push(*ch);
-                        if j == at { out.push(*ch); }
-                    }
-                    out
-                }
-                2 => { // adjacent swap
-                    let at = self.rng.below(bytes.len() as u64) as usize;
-                    let mut out: String = bytes[..at].iter().collect();
-                    if at + 1 < bytes.len() {
-                        out.push(bytes[at + 1]);
-                        out.push(bytes[at]);
-                        out.extend(bytes[at + 2..].iter());
-                    } else { out.push(bytes[at]); }
-                    out
-                }
-                3 => { // byte flip on a printable ASCII char, valid UTF-8 boundary
-                    let at = self.rng.below(bytes.len() as u64) as usize;
-                    let mut out: String = bytes[..at].iter().collect();
-                    let replacement = (33 + self.rng.below(90)) as u8 as char;
-                    out.push(replacement);
-                    out.extend(bytes[at + 1..].iter());
-                    out
-                }
-                _ => { // truncation at a char boundary
-                    let at = self.rng.below(bytes.len() as u64) as usize;
-                    bytes[..at].iter().collect()
-                }
+            let base = self.unmutated_statement();
+            if self.rng.below(2) == 0 {
+                self.mutate(&base)
+            } else {
+                base
             }
         }
-
         pub fn deep_statement(depth: usize) -> String {
-            let mut out = String::new();
-            for _ in 0..depth {
-                out.push_str("MATCH (a)-[:R]->(b) ");
+            let depth = depth.min(256);
+            format!(
+                "MATCH (n) WHERE {}n.p = 1{} RETURN n",
+                "(".repeat(depth),
+                ")".repeat(depth)
+            )
+        }
+        pub fn unmutated_statement(&mut self) -> String {
+            if self.rng.below(100) < 2 {
+                self.depth = (64 + self.rng.below(193)) as u32;
+                return match self.rng.below(3) {
+                    0 => Self::deep_statement(self.depth as usize),
+                    1 => format!(
+                        "MATCH (n){} RETURN n",
+                        " OPTIONAL MATCH (n)-[:R]->(m)".repeat(self.depth as usize)
+                    ),
+                    _ => format!(
+                        "MATCH (n){} RETURN n",
+                        " WITH n MATCH (n)".repeat(self.depth as usize)
+                    ),
+                };
             }
-            out.push_str("RETURN b");
-            out
-        }
-
-        fn build(&mut self) -> String {
-            self.depth = 0;
-            self.statement(0)
-        }
-
-        fn statement(&mut self, level: u32) -> String {
-            self.depth = level;
-            let family = self.rng.below(100);
-            match family {
-                0..=19 => self.match_chain(),
-                20..=29 => self.optional_match(),
-                30..=44 => self.where_expression(),
-                45..=54 => self.with_pipeline(),
-                55..=64 => self.aggregate(),
-                65..=72 => self.set_operation(),
-                73..=77 => self.shortest_walk(),
-                78..=85 => self.insert_or_create(),
-                86..=90 => self.set_or_remove(),
-                91..=94 => self.delete_or_detach(),
-                _ => self.merge_statement(),
-            }
-        }
-
-        fn pattern(&mut self, tag: u32) -> String {
-            let label = if self.rng.below(3) == 0 { ":L" } else { "" };
-            format!("({}{})", self.name(tag), label)
-        }
-
-        fn name(&mut self, tag: u32) -> String {
-            format!("{}{tag}", ['a', 'b', 'c', 'v', 'n'][self.rng.below(5) as usize])
-        }
-
-        fn relation(&mut self) -> &'static str {
-            if self.rng.below(2) == 0 { "R" } else { "S" }
-        }
-
-        fn match_chain(&mut self) -> String {
-            let hops = 1 + self.rng.below(3) as u32;
-            let mut out = String::from("MATCH ");
-            out.push_str(&self.pattern(0));
-            for tag in 1..=hops {
-                let direction = self.rng.below(3);
-                let rel = self.relation();
-                if direction == 0 {
-                    out.push_str(&format!("-[:{rel}]->"));
-                } else if direction == 1 {
-                    out.push_str(&format!("<-[:{rel}]-"));
-                } else {
-                    out.push_str(&format!("-[:{rel}]-"));
+            let relation = *self.rng.pick(&["R", "R", "S", "missing"]);
+            let property = *self.rng.pick(&["p", "q"]);
+            let value = *self.rng.pick(&[
+                "0",
+                "1",
+                "-1",
+                "9223372036854775807",
+                "$name",
+                "$value",
+                "NULL",
+                "'λ'",
+            ]);
+            let label = if self.rng.below(1024) == 0 {
+                "zzplantedzz"
+            } else {
+                "L"
+            };
+            let temporal = if self.rng.below(5) == 0 {
+                " FOR SYSTEM_TIME AS OF SEQ 1"
+            } else {
+                ""
+            };
+            match self.rng.below(100) {
+                0..=19 => {
+                    let mut text = format!("MATCH (a:{label})");
+                    for index in 0..self.rng.below(4) {
+                        text.push_str(&format!("-[:{relation}]->(v{index})"));
+                    }
+                    text.push_str(&format!(
+                        "{temporal} RETURN ALL a LIMIT {}",
+                        self.rng.pick(&["3", "$limit"])
+                    ));
+                    text
                 }
-                out.push_str(&self.pattern(tag));
+                20..=29 => format!("MATCH (a) OPTIONAL MATCH (a)-[:{relation}]->(b) RETURN a,b"),
+                30..=44 => {
+                    let op = self.rng.pick(&["=", "<>", "<", ">=", "+", "AND", "OR"]);
+                    format!(
+                        "MATCH (n){temporal} WHERE (n.{property} {op} {value}) AND NOT (n.q IS NULL) RETURN n"
+                    )
+                }
+                45..=54 => {
+                    if self.rng.below(2) == 0 {
+                        format!(
+                            "MATCH (n) WITH n.{property} AS x RETURN SUM(x) AS total HAVING total > 0"
+                        )
+                    } else {
+                        format!("MATCH (n) WITH n AS x WHERE x.{property} = {value} RETURN x")
+                    }
+                }
+                55..=64 => {
+                    let aggregate = self.rng.pick(&["COUNT", "SUM", "MIN", "MAX", "AVG"]);
+                    format!(
+                        "MATCH (n){temporal} RETURN {aggregate}(n.{property}) AS total HAVING total > 0"
+                    )
+                }
+                65..=72 => {
+                    let op = self.rng.pick(&["UNION", "EXCEPT", "INTERSECT"]);
+                    let quantifier = self.rng.pick(&["ALL", "DISTINCT"]);
+                    format!(
+                        "MATCH (a){temporal} RETURN a AS x {op} {quantifier} MATCH (b) RETURN b AS x"
+                    )
+                }
+                73..=77 => format!("MATCH SHORTEST WALK (a)-[:{relation}*1..3]->(b) RETURN a,b"),
+                78..=85 => {
+                    let verb = self.rng.pick(&["INSERT", "CREATE"]);
+                    let mut text = format!("{verb} (n:{label} {{p:{value}}})");
+                    if self.rng.below(3) == 0 {
+                        text.push_str("; MATCH (n) SET n.q = 2");
+                    }
+                    text
+                }
+                86..=90 => {
+                    if self.rng.below(2) == 0 {
+                        format!("MATCH (n) SET n.{property} = {value}")
+                    } else {
+                        format!("MATCH (n) REMOVE n.{property}")
+                    }
+                }
+                91..=94 => format!("MATCH (n) {}DELETE n", self.rng.pick(&["", "DETACH "])),
+                _ => match self.rng.below(4) {
+                    0 => format!("MERGE (n:{label} {{p:{value}}})"),
+                    1 => format!(
+                        "MERGE (n:{label} {{p:{value}}}) ON MATCH SET n.q=1 ON CREATE SET n.q=2"
+                    ),
+                    2 => "MATCH (a),(b) MERGE (a)-[e:R]->(b)".into(),
+                    _ => format!(
+                        "MATCH (a),(b) MERGE (a)-[e:R]->(b) ON MATCH SET e.p={value} ON CREATE SET e.q=2"
+                    ),
+                },
             }
-            out.push_str(&self.return_clause());
-            out
         }
-
-        fn optional_match(&mut self) -> String {
-            format!("MATCH {} OPTIONAL MATCH {}-[:{}]->{} RETURN ALL {}",
-                self.pattern(0), self.name(0), self.relation(), self.pattern(1), self.name(1))
-        }
-
-        fn predicate(&mut self) -> String {
-            let v = self.name(9);
-            let prop = if self.rng.below(2) == 0 { "p" } else { "q" };
+        pub fn mutate(&mut self, input: &str) -> String {
+            // Split punctuation from identifiers, preserving every UTF-8 boundary.
+            let mut ranges = Vec::new();
+            let mut start = None;
+            for (at, ch) in input.char_indices() {
+                if ch.is_alphanumeric() || ch == '_' {
+                    start.get_or_insert(at);
+                } else {
+                    if let Some(begin) = start.take() {
+                        ranges.push((begin, at));
+                    }
+                    if !ch.is_whitespace() {
+                        ranges.push((at, at + ch.len_utf8()));
+                    }
+                }
+            }
+            if let Some(begin) = start {
+                ranges.push((begin, input.len()));
+            }
+            if ranges.is_empty() {
+                return input.to_owned();
+            }
+            let token = self.rng.below(ranges.len());
+            let (start, end) = ranges[token];
+            let mut text = input.to_owned();
             match self.rng.below(5) {
-                0 => format!("{v}.{prop}={}", self.rng.below(5) as i64 - 2),
-                1 => format!("{v}.{prop}<$p"),
-                2 => format!("{v}.{prop} IS NOT NULL"),
-                3 => format!("{v}.{prop}=$q"),
-                _ => format!("{v}.{prop} IS NULL"),
+                0 => {
+                    text.replace_range(start..end, "");
+                }
+                1 => {
+                    text.insert_str(end, &format!(" {}", &input[start..end]));
+                }
+                2 if token + 1 < ranges.len() => {
+                    let (next_start, next_end) = ranges[token + 1];
+                    text.replace_range(
+                        start..next_end,
+                        &format!(
+                            "{}{}{}",
+                            &input[next_start..next_end],
+                            &input[end..next_start],
+                            &input[start..end]
+                        ),
+                    );
+                }
+                2 => {
+                    text.insert_str(start, "(");
+                }
+                3 => {
+                    let boundaries: Vec<_> = input.char_indices().map(|(at, _)| at).collect();
+                    let at = boundaries[self.rng.below(boundaries.len())];
+                    let end = at + input[at..].chars().next().unwrap().len_utf8();
+                    let replacement = char::from(32 + self.rng.below(95) as u8).to_string();
+                    text.replace_range(at..end, &replacement);
+                }
+                _ => {
+                    text.truncate(start);
+                }
             }
-        }
-
-        fn where_expression(&mut self) -> String {
-            format!("MATCH {} WHERE {} RETURN {}",
-                self.pattern(0), self.predicate(), self.name(0))
-        }
-
-        fn with_pipeline(&mut self) -> String {
-            format!("MATCH {} WITH {}.p AS value WHERE value IS NOT NULL RETURN value",
-                self.pattern(0), self.name(0))
-        }
-
-        fn aggregate(&mut self) -> String {
-            let op = self.pick(&["COUNT(*)", "SUM(x)", "MIN(x)", "MAX(x)", "AVG(x)"]);
-            format!("MATCH {} WITH {}.p AS x {} AS stat RETURN stat",
-                self.pattern(0), self.name(0), op)
-        }
-
-        fn pick(&mut self, options: &[&str]) -> &str {
-            options[self.rng.below(options.len() as u64) as usize]
-        }
-
-        fn set_operation(&mut self) -> String {
-            let op = self.pick(&["UNION", "EXCEPT", "INTERSECT"]);
-            let all = if self.rng.below(2) == 0 { "ALL" } else { "DISTINCT" };
-            format!("MATCH ({}) RETURN ALL {}.p {op} {all} MATCH ({}) RETURN ALL {}.p",
-                "a", "a", "b", "b")
-        }
-
-        fn shortest_walk(&mut self) -> String {
-            format!("MATCH {} SHORTEST {} WALK (a)-[:R*1..3]->(b) RETURN b",
-                self.pattern(0), if self.rng.below(2) == 0 { "2" } else { "1" })
-        }
-
-        fn insert_or_create(&mut self) -> String {
-            if self.rng.below(2) == 0 {
-                format!("INSERT ({}:Person {{p:1}})", self.name(0))
-            } else {
-                format!("CREATE ({} {{p:1,q:2}})", self.name(0))
-            }
-        }
-
-        fn set_or_remove(&mut self) -> String {
-            let v = self.name(0);
-            if self.rng.below(2) == 0 {
-                format!("MATCH {v} SET {v}.p=1,{v}.q=$q")
-            } else {
-                format!("MATCH {v} REMOVE {v}.p,{v}:L")
-            }
-        }
-
-        fn delete_or_detach(&mut self) -> String {
-            let v = self.name(0);
-            if self.rng.below(2) == 0 {
-                format!("MATCH {v} DELETE {v}")
-            } else {
-                format!("MATCH {v} DETACH DELETE {v}")
-            }
-        }
-
-        fn merge_statement(&mut self) -> String {
-            format!("MERGE ({} {{p:$p}})", self.name(0))
-        }
-
-        fn return_clause(&mut self) -> String {
-            let target = self.name(0);
-            if self.rng.below(3) == 0 {
-                format!(" RETURN DISTINCT {target}")
-            } else {
-                format!(" RETURN ALL {target}")
-            }
+            text
         }
     }
 }
