@@ -604,3 +604,149 @@ fn hidden_order_properties_match_storage_scan_oracle() {
         assert!(report.lab_test_passed(), "seed={seed} report={report:?}");
     }
 }
+
+#[test]
+fn existential_subqueries_match_storage_scan_oracle() {
+    for seed in [0xD031_u64, 0xD032, 0xD033] {
+        let ((), report) = run_async_under_lab(seed, move |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let cx = contexts.query();
+            let dir = std::env::temp_dir().join(format!(
+                "fgdb-oracle-dbcg-exists-{}-{seed}",
+                std::process::id()
+            ));
+            let mut db = Database::create(
+                &commit,
+                &dir,
+                DatabaseKeys::new(
+                    [0x6b; 32],
+                    DatabaseSecurityNamespaceId([0x78; 32]),
+                    [0x3d; 32],
+                ),
+            )
+            .await
+            .expect("existential oracle database");
+            let mut batch = WriteBatch::new(R);
+            for id in 1..=5 {
+                let props = match id {
+                    2 => vec![(AGE, CanonicalScalar::Int(5))],
+                    3 => vec![(AGE, CanonicalScalar::Null)],
+                    _ => vec![],
+                };
+                batch.create_vertex(VId(id), vec![PERSON], props);
+            }
+            batch.add_edge(EId(1), VId(1), VId(2), vec![]);
+            batch.add_edge(EId(2), VId(1), VId(3), vec![]);
+            batch.add_edge(EId(3), VId(2), VId(3), vec![]);
+            batch.add_edge(EId(4), VId(3), VId(4), vec![]);
+            for extra in 0..=seed % 3 {
+                batch.add_edge(EId(u128::from(10 + extra)), VId(1), VId(2), vec![]);
+            }
+            let historical = db.write(&commit, batch).await.expect("existential fixture");
+            let mut deletion = WriteBatch::new(R);
+            deletion.delete_vertex(VId(2));
+            deletion.delete_edge(EId(4));
+            let frontier = db
+                .write(&commit, deletion)
+                .await
+                .expect("existential deletion");
+            let mut snapshots = Vec::new();
+            for (seq, temporal) in [
+                (
+                    historical,
+                    format!(" FOR SYSTEM_TIME AS OF SEQ {}", historical.0),
+                ),
+                (frontier, String::new()),
+            ] {
+                let vertices = db.vertices_at(seq).expect("visible vertices");
+                let edges = db.edges_at(seq).expect("visible edges");
+                let mut cases = Vec::new();
+                for filtered in [false, true] {
+                    let mut partition = Vec::new();
+                    for anti in [false, true] {
+                        let mut expected: Vec<VId> = vertices
+                            .iter()
+                            .filter(|v| v.labels.contains(&PERSON))
+                            .filter(|source| {
+                                let exists = edges.iter().any(|edge| {
+                                    edge.entry.relation == R
+                                        && edge.entry.src == source.vid
+                                        && vertices.iter().any(|target| {
+                                            target.vid == edge.entry.dst
+                                                && (!filtered
+                                                    || target.props.iter().any(|(key, value)| {
+                                                        *key == AGE
+                                                            && matches!(
+                                                                value,
+                                                                CanonicalScalar::Int(n) if *n > 0
+                                                            )
+                                                    }))
+                                        })
+                                });
+                                exists != anti
+                            })
+                            .map(|v| v.vid)
+                            .collect();
+                        expected.sort_unstable();
+                        partition.extend(expected.iter().copied());
+                        let inner = if filtered {
+                            "(p)-[:KNOWS]->(q) WHERE q.age > 0"
+                        } else {
+                            "(p)-[:KNOWS]->()"
+                        };
+                        let not = if anti { "NOT " } else { "" };
+                        let text = format!(
+                            "MATCH (p:Person) WHERE {not}EXISTS {{ MATCH {inner} }}{temporal} RETURN p ORDER BY p"
+                        );
+                        let result = db
+                            .query(
+                                &cx,
+                                &text,
+                                &GqlParameters::new(),
+                                symbols,
+                                GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+                            )
+                            .unwrap_or_else(|e| panic!("seed={seed} query={text}: {e:?}"));
+                        let QueryResult::Rows { rows, .. } = result else {
+                            panic!("expected rows: {result:?}")
+                        };
+                        let actual: Vec<Vec<GraphAggregateValue>> = rows.into_iter().collect();
+                        let expected_rows: Vec<Vec<GraphAggregateValue>> = expected
+                            .iter()
+                            .map(|vid| vec![GraphAggregateValue::Value(GraphValue::Vertex(*vid))])
+                            .collect();
+                        assert_eq!(actual, expected_rows, "seed={seed} query={text}");
+                        cases.push(expected);
+                    }
+                    partition.sort_unstable();
+                    let mut all: Vec<_> = vertices
+                        .iter()
+                        .filter(|v| v.labels.contains(&PERSON))
+                        .map(|v| v.vid)
+                        .collect();
+                    all.sort_unstable();
+                    assert_eq!(
+                        partition, all,
+                        "semi/anti partition, never witness multiplicity"
+                    );
+                }
+                assert!(!cases[0].is_empty() && !cases[1].is_empty());
+                assert!(
+                    cases[1].contains(&VId(5)),
+                    "isolated vertex is an anti match"
+                );
+                assert_ne!(
+                    cases[0], cases[2],
+                    "NULL and missing property witnesses differ from positive integers"
+                );
+                snapshots.push(cases);
+            }
+            assert_ne!(
+                snapshots[0], snapshots[1],
+                "deleted witnesses change existence"
+            );
+        });
+        assert!(report.lab_test_passed(), "seed={seed} report={report:?}");
+    }
+}
