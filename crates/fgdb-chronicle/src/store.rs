@@ -547,12 +547,25 @@ impl<V: Vfs> RootStore<V> {
 
     async fn read_file(&self, cx: &impl StorageReadCx) -> Result<Vec<u8>, StoreError> {
         cx.with_restriction_async(async {
-            let file = self.vfs.open_read(&self.path).await?;
-            let len = file.metadata().await?.len();
+            // The reread and recovery must observe what a *recovering
+            // process* would select: the bytes the backing store holds, not
+            // a shared volatile page cache that a lying sync left dirty.
+            // Under the lab VFS, `Vfs::read` is exactly that crash-view
+            // sample (the fault model serves it from durable backing); the
+            // ordinary handle reads keep their honest dirty-byte semantics.
+            // Under UnixVfs/MemVfs it is the same observable bytes the old
+            // `open_read` path returned, so production behavior is
+            // unchanged. The length probe keeps the typed malformed refusal
+            // ahead of any allocation; `read_bounded_root` then re-checks
+            // the exact length on the captured bytes. The root file is
+            // written only by this store's slot alternation, so no racing
+            // writer can grow it between probe and read.
+            let len = self.vfs.metadata(&self.path).await?.len();
             if len != ROOT_FILE_LEN as u64 {
                 return Err(StoreError::MalformedFile { len });
             }
-            read_bounded_root(file).await
+            let bytes = Vfs::read(&self.vfs, &self.path).await?;
+            read_bounded_root(bytes.as_slice()).await
         })
         .await
     }
