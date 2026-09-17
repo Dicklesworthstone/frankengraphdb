@@ -380,21 +380,11 @@ impl CanonicalScalar {
     /// Decodes one scalar against an explicit content-addressed artifact
     /// resolver. Artifact-bound text and timestamps are recomputed against
     /// the exact pinned artifacts; no host locale or tzdb is consulted.
-    pub fn decode_with_resolver<R: CanonicalScalarResolver>(
+    pub fn decode_with_resolver(
         bytes: &[u8],
-        resolver: &R,
+        resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, ScalarDecodeError> {
-        Self::decode_with_dyn_resolver(bytes, Some(resolver))
-    }
-
-    /// The borrowed-trait-object seam: a reader carrying an arbitrary
-    /// pinned-artifact resolver decodes through the same single body. The
-    /// resolver only narrows what the encoded bytes already name.
-    pub fn decode_with_dyn_resolver(
-        bytes: &[u8],
-        resolver: Option<&dyn CanonicalScalarResolver>,
-    ) -> Result<Self, ScalarDecodeError> {
-        Self::decode_inner(bytes, resolver)
+        Self::decode_inner(bytes, Some(resolver))
     }
 
     fn decode_inner(

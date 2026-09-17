@@ -33,11 +33,7 @@ use crate::{
     CoordinateEntry, DeltaRow, ElementId, EscrowDomainId, LabelId, LogicalDeltaTemplate,
     OperationKey, PropertyKeyId, RelationId, SchemaEpoch, ValidTimePeriod,
 };
-use fgdb_types::text::{CollationResolverError, NonBinaryTextBinding};
-use fgdb_types::{
-    BranchId, CanonicalScalar, CanonicalScalarResolver, CollationResolver, EId, GraphId, ObjectId,
-    TzdbResolver, VId,
-};
+use fgdb_types::{BranchId, CanonicalScalar, CanonicalScalarResolver, EId, GraphId, ObjectId, VId};
 
 /// Format version of the canonical delta encoding.
 ///
@@ -303,57 +299,6 @@ impl Writer {
     }
 }
 
-/// The resolver-free decode path: offset-only scalars decode; zoned
-/// values refuse typed because no pinned artifact is available.
-struct NoArtifacts;
-
-impl TzdbResolver for NoArtifacts {
-    fn contains_tzdb(&self, _tzdb_oid: &ObjectId) -> bool {
-        false
-    }
-
-    fn canonical_utc_offset_seconds(
-        &self,
-        _tzdb_oid: &ObjectId,
-        _zone_identifier: &str,
-        _instant_utc_nanos: i128,
-    ) -> Option<i32> {
-        None
-    }
-}
-
-impl CollationResolver for NoArtifacts {
-    fn artifact_available(&self, _object_id: &ObjectId) -> bool {
-        false
-    }
-
-    fn canonical_sort_key_len(
-        &self,
-        _binding: &NonBinaryTextBinding,
-        _text: &str,
-    ) -> Result<usize, CollationResolverError> {
-        Err(CollationResolverError::new(0))
-    }
-
-    fn write_canonical_sort_key(
-        &self,
-        _binding: &NonBinaryTextBinding,
-        _text: &str,
-        _out: &mut [u8],
-    ) -> Result<usize, CollationResolverError> {
-        Err(CollationResolverError::new(0))
-    }
-
-    fn canonical_sort_key_matches(
-        &self,
-        _binding: &NonBinaryTextBinding,
-        _text: &str,
-        _candidate: &[u8],
-    ) -> Result<bool, CollationResolverError> {
-        Err(CollationResolverError::new(0))
-    }
-}
-
 /// Bounds-checked canonical reader. Every accessor returns `Result`, so a
 /// truncated input can never produce a partially-populated row.
 struct Reader<'a> {
@@ -520,7 +465,7 @@ impl<'a> Reader<'a> {
         // A resolver-free reader refuses zoned values with the same typed
         // law: admitting them would give committed bytes no stable meaning.
         match resolver {
-            Some(resolver) => CanonicalScalar::decode_with_dyn_resolver(encoded, Some(resolver))
+            Some(resolver) => CanonicalScalar::decode_with_resolver(encoded, resolver)
                 .map_err(|_| CanonicalError::Scalar),
             None => CanonicalScalar::decode(encoded).map_err(|_| CanonicalError::Scalar),
         }
@@ -802,26 +747,25 @@ impl DeltaRow {
 
     /// Decode one row, requiring the input to be exactly one row.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CanonicalError> {
-        Self::read_with_dyn_resolver(bytes, &NoArtifacts)
+        Self::read_with_dyn_resolver(bytes, None)
     }
 
     /// Decode one row under an explicit pinned-artifact resolver. Zoned
     /// scalars resolve against exactly the recorded artifacts; the resolver
     /// never widens what the bytes name.
-    pub fn decode_canonical_with_resolver<R: CanonicalScalarResolver>(
+    pub fn decode_canonical_with_resolver(
         bytes: &[u8],
-        resolver: &R,
+        resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, CanonicalError> {
-        let resolver: &dyn CanonicalScalarResolver = resolver;
-        Self::read_with_dyn_resolver(bytes, resolver)
+        Self::read_with_dyn_resolver(bytes, Some(resolver))
     }
 
     /// Decode one already-length-bounded row from `bytes` under `resolver`.
     fn read_with_dyn_resolver(
         bytes: &[u8],
-        resolver: &dyn CanonicalScalarResolver,
+        resolver: Option<&dyn CanonicalScalarResolver>,
     ) -> Result<Self, CanonicalError> {
-        let mut r = Reader::new(bytes, Some(resolver));
+        let mut r = Reader::new(bytes, resolver);
         let row = Self::read(&mut r)?;
         if !r.is_exhausted() {
             return Err(CanonicalError::TrailingBytes {
@@ -990,10 +934,7 @@ impl CoordinateEntry {
         for _ in 0..row_count {
             let len = r.count(1)?;
             let encoded = r.take(len)?;
-            let Some(resolver) = r.resolver else {
-                return Err(CanonicalError::Scalar);
-            };
-            rows.push(DeltaRow::read_with_dyn_resolver(encoded, resolver)?);
+            rows.push(DeltaRow::read_with_dyn_resolver(encoded, r.resolver)?);
         }
         Ok(CoordinateEntry {
             graph,
@@ -1026,18 +967,24 @@ impl LogicalDeltaTemplate {
     /// stable digest, so admitting one would let the same logical change
     /// present two identities.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CanonicalError> {
-        Self::decode_canonical_with_resolver(bytes, &NoArtifacts)
+        Self::decode_inner(bytes, None)
     }
 
     /// Decode a template under an explicit pinned-artifact resolver. Zoned
     /// timestamp properties resolve against exactly the recorded tzdb
     /// artifacts; unknown artifacts refuse typed instead of reinterpreting.
-    pub fn decode_canonical_with_resolver<R: CanonicalScalarResolver>(
+    pub fn decode_canonical_with_resolver(
         bytes: &[u8],
-        resolver: &R,
+        resolver: &dyn CanonicalScalarResolver,
     ) -> Result<Self, CanonicalError> {
-        let resolver: &dyn CanonicalScalarResolver = resolver;
-        let mut r = Reader::new(bytes, Some(resolver));
+        Self::decode_inner(bytes, Some(resolver))
+    }
+
+    fn decode_inner(
+        bytes: &[u8],
+        resolver: Option<&dyn CanonicalScalarResolver>,
+    ) -> Result<Self, CanonicalError> {
+        let mut r = Reader::new(bytes, resolver);
         let format = r.u16()?;
         if format != DELTA_FORMAT_V1 {
             return Err(CanonicalError::UnsupportedFormat { format });
