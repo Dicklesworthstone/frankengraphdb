@@ -3572,7 +3572,7 @@ impl<V: Vfs + Clone> Database<V> {
                          publication cannot name the same patch identity twice",
                     )
             })
-            .collect();
+            .collect::<Vec<VertexPatchRows>>();
         self.writer = folded;
         self.snapshot = Arc::new(Snapshot {
             adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&decoded)),
@@ -4680,7 +4680,7 @@ async fn reopen_from_verified_checkpoint<V: Vfs>(
         Snapshot {
             adjacency_index: Arc::new(gql_exec::source::AdjacencyIndex::build(&blocks)),
             property_index: Arc::new(gql_exec::source::PropertyEqualityIndex::build(
-                &decoded_patches,
+                &patches,
             )),
             blocks,
             refs: root.blocks,

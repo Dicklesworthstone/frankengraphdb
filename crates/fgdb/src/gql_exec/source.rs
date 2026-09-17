@@ -231,13 +231,19 @@ fn bound_vertices<'a, E, Row>(
     let mut rows = Vec::new();
     for vid in snapshot.property_index.lookup(key, &value) {
         control(SourceEvent::Work)?;
-        if bound_predicates
-            .iter()
-            .all(|predicate| predicate.matches(&row.labels, &row.props))
-        {
-            control(SourceEvent::SnapshotRecord)?;
-            control(SourceEvent::ScratchEntry)?;
-            rows.push(row);
+        // The visible winner at as_of is the authority; the index only names
+        // candidates. Resolution uses find_vertex' replacement rule, exactly
+        // like visit_vertices' winner selection, then re-checks the full
+        // predicate. Lookup order keeps ascending VId.
+        if let Some(row) = find_vertex(&snapshot.patches, *vid, as_of, control)? {
+            if bound_predicates
+                .iter()
+                .all(|predicate| predicate.matches(&row.labels, &row.props))
+            {
+                control(SourceEvent::SnapshotRecord)?;
+                control(SourceEvent::ScratchEntry)?;
+                rows.push(row);
+            }
         }
     }
     Ok(Some(rows))
@@ -361,6 +367,77 @@ mod indexed_tests {
         for stop in 1..=total {
             assert_eq!(run(stop), (Err(stop), stop));
         }
+    }
+
+    #[test]
+    fn property_index_candidates_are_a_superset_of_visible_winners() {
+        let row = |vid: u64, created: u64, retired: Option<u64>, value: i64| VertexRow {
+            vid: VId(vid as u128),
+            birth_ordinal: vid,
+            created_at: CommitSeq(created),
+            retired_at: retired.map(CommitSeq),
+            labels: vec![fgdb_delta_types::LabelId(1)],
+            props: vec![(PropertyKeyId(1), CanonicalScalar::Int(value))],
+        };
+        let patch = |rows: &[VertexRow]| {
+            let bytes = fgdb_strata::vertex::encode_patch(rows).unwrap();
+            fgdb_strata::vertex::decode_patch(&bytes).unwrap()
+        };
+        let patches = vec![
+            // v1: value 7 at creation, changed to 8; v2 created with 7 later.
+            patch(&[VertexRow { ..row(1, 1, None, 7) }]),
+            patch(&[
+                VertexRow {
+                    retired_at: Some(CommitSeq(2)),
+                    ..row(1, 1, None, 7)
+                },
+                row(1, 2, None, 8),
+                row(2, 2, None, 7),
+            ]),
+            // v2 deleted at seq 3.
+            patch(&[VertexRow {
+                retired_at: Some(CommitSeq(3)),
+                ..row(2, 2, None, 7)
+            }]),
+        ];
+        let index = PropertyEqualityIndex::build(&patches);
+        // Candidates cover every history carrier of the value; they are a
+        // superset of the visible winners at any single cut.
+        let candidates: Vec<VId> = index
+            .lookup(PropertyKeyId(1), &CanonicalScalar::Int(7))
+            .to_vec();
+        assert_eq!(candidates, vec![VId(1), VId(2)]);
+        let mut ever_nonempty = false;
+        for at in 0..=4 {
+            let visible = scan_vertices(&patches, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .into_iter()
+                .filter(|row| {
+                    row.props.iter().any(|(key, value)| {
+                        *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7)
+                    })
+                })
+                .map(|row| row.vid)
+                .collect::<Vec<_>>();
+            // At every cut the re-checked winner set equals the scan answer.
+            let mut winners = Vec::new();
+            for vid in index.lookup(PropertyKeyId(1), &CanonicalScalar::Int(7)) {
+                if let Some(row) = find_vertex(&patches, *vid, CommitSeq(at), &mut |_| Ok::<_, ()>(()))
+                    .unwrap()
+                {
+                    if row
+                        .props
+                        .iter()
+                        .any(|(key, value)| *key == PropertyKeyId(1) && *value == CanonicalScalar::Int(7))
+                    {
+                        winners.push(row.vid);
+                    }
+                }
+            }
+            assert_eq!(winners, visible, "at={at}: recheck must equal the scan");
+            ever_nonempty |= !visible.is_empty();
+        }
+        assert!(ever_nonempty);
     }
 }
 
