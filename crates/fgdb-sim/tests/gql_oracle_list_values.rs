@@ -33,8 +33,8 @@ use fgdb_chronicle::commit::CommitCoordinator;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphSymbol, GraphSymbolKind,
-    PreparedGraphAggregateText,
+    GqlParameters, GqlQueryPolicy, GraphAggregateValue, GraphIntegerBinary, GraphIntegerExpression,
+    GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
 };
 use fgdb_reference::ReferenceGraph;
 use fgdb_sim::{replay, replay_through};
@@ -160,6 +160,12 @@ fn rows<V: Vfs + Clone>(
                 row.into_iter()
                     .map(|cell| match cell {
                         GraphAggregateValue::Value(value) => Ok(value),
+                        GraphAggregateValue::Integer(value) => i64::try_from(value)
+                            .map(int)
+                            .map_err(|error| error.to_string()),
+                        GraphAggregateValue::Count(value) => i64::try_from(value)
+                            .map(int)
+                            .map_err(|error| error.to_string()),
                         other => Err(format!("expected value cell, got {other:?}")),
                     })
                     .collect()
@@ -304,35 +310,65 @@ fn list_value_families_match_independent_reference_across_seeds() {
                 "anti-vacuity: surviving duplicates distinguish collect from DISTINCT"
             );
 
-            // Grouped collect, compared as canonical multisets (group ROW
-            // order is an engine canonical-order question, not a list one).
-            // The `db.query` facades reject GROUP BY (their aggregate pipeline
-            // template demands WITH/UNWIND), so grouped aggregation goes
-            // through the dedicated PreparedGraphAggregateText facade; its
-            // GROUP BY binds pattern expressions (n.p), not RETURN aliases.
-            let grouped_template = PreparedGraphAggregateText::prepare(
+            // Both spellings must resolve to the same governed aggregation.
+            let grouped = rows(
+                &db,
+                &cx,
+                "MATCH (n) RETURN n.p AS p, collect(n.p) AS xs GROUP BY p",
+                &params,
+            );
+            assert_eq!(
+                grouped,
+                rows(
+                    &db,
+                    &cx,
+                    "MATCH (n) RETURN n.p AS p, collect(n.p) AS xs GROUP BY n.p",
+                    &params,
+                ),
+                "GROUP BY alias and expression produce identical ordered rows"
+            );
+            // Alias resolution retains the same expression and public names;
+            // it must not introduce a second template identity.
+            let alias_template = PreparedGraphAggregateText::prepare(
+                "MATCH (n) RETURN n.p AS p, collect(n.p) AS xs GROUP BY p",
+                symbols,
+            )
+            .expect("alias template");
+            let expression_template = PreparedGraphAggregateText::prepare(
                 "MATCH (n) RETURN n.p AS p, collect(n.p) AS xs GROUP BY n.p",
                 symbols,
             )
-            .expect("grouped aggregate template");
-            let grouped_query = grouped_template
-                .bind_parameters(&params)
-                .expect("grouped aggregate bind");
-            let grouped: Vec<Vec<GraphValue>> = db
-                .execute_graph_aggregate_governed(&cx, &grouped_query, policy())
-                .expect("grouped aggregate executes")
-                .value
-                .iter()
-                .map(|row| {
-                    vec![
-                        row.keys()[0].clone(),
-                        match row.get(0).expect("collect cell") {
-                            GraphAggregateValue::Value(value) => value.clone(),
-                            other => panic!("collect yields values, got {other:?}"),
-                        },
-                    ]
-                })
-                .collect();
+            .expect("expression template");
+            assert_eq!(
+                alias_template.canonical_template_bytes(),
+                expression_template.canonical_template_bytes()
+            );
+            let other_key = PreparedGraphAggregateText::prepare(
+                "MATCH (n) RETURN n.q AS p, collect(n.p) AS xs GROUP BY n.q",
+                |kind, name| {
+                    if kind == GraphSymbolKind::Property && name == "q" {
+                        Some(GraphSymbol::Property(PropertyKeyId(2)))
+                    } else {
+                        symbols(kind, name)
+                    }
+                },
+            )
+            .expect("distinct grouping key template");
+            assert_ne!(
+                alias_template.canonical_template_bytes(),
+                other_key.canonical_template_bytes()
+            );
+            assert!(
+                db.query(
+                    &cx,
+                    "MATCH (n) RETURN n.p AS p, collect(n.p) AS xs GROUP BY absent",
+                    &params,
+                    symbols,
+                    policy(),
+                )
+                .is_err(),
+                "GROUP BY must reject a key outside the projected and pattern scopes"
+            );
             // Distinct group keys over live vertices: NULL for missing/explicit
             // NULL, plus each distinct int value.
             let mut keys: Vec<CanonicalScalar> = live
@@ -434,22 +470,29 @@ fn list_value_families_match_independent_reference_across_seeds() {
                 "NULL UNWIND produces zero rows"
             );
 
-            // `size` over LISTS (literals and WITH-bound lists) through the
-            // db.query facade; `size(collect(...))` is NOT a supported
-            // composition (the aggregate facades reject a scalar function
-            // wrapping an aggregate), so the collect-length family is verified
-            // by taking the length of the returned list itself. The literal
-            // cases are the bead's size(NULL)/size([])/NULL-element contract.
-            let collected = rows(&db, &cx, "MATCH (n) RETURN collect(n.p) AS xs", &params);
-            assert_eq!(
-                collected,
-                vec![vec![list(reference_collect(graph, false, false))]],
-                "collect returns the NULL-excluded list the oracle counts"
-            );
+            // Evaluate size after collect; expected cardinality comes only
+            // from the independent reference graph, never engine rows.
             let count = reference_collect(graph, false, false).len() as i64;
-            assert!(
-                count >= 1,
-                "anti-vacuity: collected list is non-empty before size checks"
+            assert!(count > 1, "anti-vacuity: grouping combines multiple inputs");
+            assert_eq!(
+                rows(
+                    &db,
+                    &cx,
+                    "MATCH (n) RETURN size(collect(n.p)) AS len",
+                    &params
+                ),
+                vec![vec![int(count)]],
+                "size(collect) counts NULL-excluded members after grouping"
+            );
+            assert_eq!(
+                canonical_sorted(rows(
+                    &db,
+                    &cx,
+                    "MATCH (n) RETURN size(collect(n.p)) AS len, count(*) + 1 AS next_count, abs(sum(n.p)) AS magnitude, coalesce(max(n.p), 0) AS fallback GROUP BY n.p",
+                    &params,
+                )),
+                canonical_sorted(expected_group_families(graph)),
+                "scalar functions and arithmetic execute after grouping through Database::query"
             );
             assert_eq!(
                 rows(
@@ -465,11 +508,11 @@ fn list_value_families_match_independent_reference_across_seeds() {
                 rows(
                     &db,
                     &cx,
-                    "MATCH (n) WHERE n.p = 999 RETURN collect(n.p) AS xs",
+                    "MATCH (n) WHERE n.p = 999 RETURN collect(n.p) AS xs, size(collect(n.p)) AS len, coalesce(max(n.p), 0) AS fallback",
                     &params
                 ),
-                vec![vec![list(vec![])]],
-                "empty match collects empty list (aggregate RETURN stays alone)"
+                vec![vec![list(vec![]), int(0), int(0)]],
+                "empty group retains collect, size zero and coalesce fallback"
             );
             assert_eq!(
                 rows(
@@ -515,12 +558,15 @@ fn list_value_families_match_independent_reference_across_seeds() {
                     &db,
                     &cx,
                     &format!(
-                        "MATCH (n) FOR SYSTEM_TIME AS OF SEQ {} RETURN collect(n.p) AS xs",
+                        "MATCH (n) FOR SYSTEM_TIME AS OF SEQ {} RETURN collect(n.p) AS xs, size(collect(n.p)) AS len",
                         epochs[4].0
                     ),
                     &params
                 ),
-                vec![vec![list(pre_members.clone())]],
+                vec![vec![
+                    list(pre_members.clone()),
+                    int(pre_members.len() as i64)
+                ]],
                 "AS OF prefix collect retains the to-be-deleted member"
             );
             assert_ne!(
@@ -534,4 +580,170 @@ fn list_value_families_match_independent_reference_across_seeds() {
             "seed={graph_seed} report={report:?}"
         );
     }
+}
+
+/// Group reference vertices by property equality, treating missing as NULL.
+/// COUNT(*) includes NULL rows; COLLECT/SUM/MAX ignore NULL arguments.
+fn expected_group_families(graph: &ReferenceGraph) -> Vec<Vec<GraphValue>> {
+    let mut groups = std::collections::BTreeMap::<CanonicalScalar, Vec<Option<i64>>>::new();
+    for (_, vertex) in graph.iter_vertices() {
+        let key = vertex
+            .props
+            .get(&P)
+            .cloned()
+            .unwrap_or(CanonicalScalar::Null);
+        let value = match &key {
+            CanonicalScalar::Int(value) => Some(*value),
+            CanonicalScalar::Null => None,
+            _ => unreachable!("integer/NULL fixture required"),
+        };
+        groups.entry(key).or_default().push(value);
+    }
+    groups
+        .into_values()
+        .map(|members| {
+            let integers: Vec<i64> = members.iter().flatten().copied().collect();
+            let sum = if integers.is_empty() {
+                null()
+            } else {
+                int(integers.iter().sum::<i64>().abs())
+            };
+            vec![
+                int(i64::try_from(integers.len()).expect("small fixture")),
+                int(i64::try_from(members.len()).expect("small fixture") + 1),
+                sum,
+                int(integers.into_iter().max().unwrap_or(0)),
+            ]
+        })
+        .collect()
+}
+
+/// Post-group scalar families through the real facade + with_output_projection:
+/// size(collect), abs(sum), coalesce(max, 0), and arithmetic over count.
+/// Proves the governed projection VM end to end, including the NULL-keyed
+/// group (coalesce fallback 0, size 0).
+#[test]
+fn scalar_families_over_aggregates_match_independent_reference() {
+    let graph_seed = 0x1A49_u64;
+    let ((), report) = run_async_under_lab(graph_seed, move |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let cx = contexts.query();
+        let dir = std::env::temp_dir().join(format!(
+            "fgdb-senc-projection-{}-{graph_seed}",
+            std::process::id()
+        ));
+        let mut db = Database::create(&commit, &dir, keys())
+            .await
+            .expect("oracle database");
+        build(&mut db, &commit, graph_seed).await;
+        drop(db);
+        let coordinator = CommitCoordinator::open(&commit, &dir, capsule_keys())
+            .await
+            .expect("oracle coordinator");
+        let full = replay(&commit, &coordinator)
+            .await
+            .expect("full stream replay")
+            .database;
+        let graph = full.graph(GRAPH, BRANCH).expect("oracle graph");
+        drop(coordinator);
+        let db = Database::open(&commit, &dir, keys())
+            .await
+            .expect("reopen query database after independent replay");
+        let params = GqlParameters::new();
+
+        // Facade template with every summary the projections reference; GROUP
+        // BY n.p keeps the grouping key in evaluation column 0.
+        let template = PreparedGraphAggregateText::prepare(
+            "MATCH (n) RETURN n.p AS p, count(*) AS n, sum(n.p) AS s, max(n.p) AS m, collect(n.p) AS xs GROUP BY n.p",
+            symbols,
+        )
+        .expect("grouped template");
+        // Evaluation columns: key n.p = 0, count = 1, sum = 2, max = 3, collect = 4.
+        let count_plus_one = GraphIntegerExpression::prepare_scalar(&[
+            fgdb_gql::GraphIntegerOp::Column(1),
+            fgdb_gql::GraphIntegerOp::Literal(Some(1)),
+            fgdb_gql::GraphIntegerOp::Binary(GraphIntegerBinary::Add),
+        ])
+        .expect("count+1 program");
+        let abs_sum = GraphIntegerExpression::prepare_scalar(&[
+            fgdb_gql::GraphIntegerOp::Column(2),
+            fgdb_gql::GraphIntegerOp::Unary(fgdb_gql::GraphIntegerUnary::Abs),
+        ])
+        .expect("abs(sum) program");
+        let coalesce_max = GraphIntegerExpression::prepare_scalar(&[
+            fgdb_gql::GraphIntegerOp::Column(3),
+            fgdb_gql::GraphIntegerOp::Literal(Some(0)),
+            fgdb_gql::GraphIntegerOp::Coalesce,
+        ])
+        .expect("coalesce(max,0) program");
+        let projections = vec![
+            fgdb_gql::GraphSetProjection::new(
+                "len",
+                fgdb_gql::GraphSetValue::Size(Box::new(fgdb_gql::GraphSetValue::Column(4))),
+            ),
+            fgdb_gql::GraphSetProjection::new(
+                "count_plus_one",
+                fgdb_gql::GraphSetValue::Integer(count_plus_one),
+            ),
+            fgdb_gql::GraphSetProjection::new(
+                "absolute_sum",
+                fgdb_gql::GraphSetValue::Integer(abs_sum),
+            ),
+            fgdb_gql::GraphSetProjection::new(
+                "max_fallback",
+                fgdb_gql::GraphSetValue::Integer(coalesce_max),
+            ),
+        ];
+        let prepared = template
+            .bind_parameters(&params)
+            .expect("bind")
+            .with_output_projection(projections)
+            .expect("projection attaches");
+        let projected: Vec<Vec<GraphValue>> = db
+            .execute_graph_aggregate_governed(&cx, &prepared, policy())
+            .expect("projected aggregate executes")
+            .value
+            .iter()
+            .map(|row| {
+                assert!(row.keys().is_empty(), "projected rows are keyless");
+                assert_eq!(row.values().len(), 4, "four projected columns");
+                let cell = |at: usize| match row.get(at).expect("projected cell") {
+                    GraphAggregateValue::Integer(value) => {
+                        int(i64::try_from(*value).expect("smoke values stay i64"))
+                    }
+                    GraphAggregateValue::Count(value) => {
+                        int(i64::try_from(*value).expect("small fixture count"))
+                    }
+                    GraphAggregateValue::Value(GraphValue::Scalar(scalar)) => {
+                        GraphValue::Scalar(scalar.clone())
+                    }
+                    other => unreachable!("expected integer projection, got {other:?}"),
+                };
+                vec![cell(0), cell(1), cell(2), cell(3)]
+            })
+            .collect();
+
+        // INDEPENDENT oracle: group members from the reference graph only.
+        let expected = expected_group_families(graph);
+        assert!(
+            expected.iter().any(|row| row[0] == int(0)),
+            "anti-vacuity: NULL-keyed group exists (coalesce fallback exercised)"
+        );
+        assert!(
+            expected.iter().any(|row| row[0] > int(1)),
+            "anti-vacuity: a multi-member group exercises real aggregation"
+        );
+        assert_eq!(
+            canonical_sorted(projected),
+            canonical_sorted(expected),
+            "size/count+1/abs(sum)/coalesce(max,0) per group vs independent oracle"
+        );
+
+        drop(db);
+    });
+    assert!(
+        report.lab_test_passed(),
+        "seed={graph_seed} report={report:?}"
+    );
 }

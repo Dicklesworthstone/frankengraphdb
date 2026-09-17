@@ -154,7 +154,10 @@ impl<'a> Parser<'a> {
         let column = self.pipeline_column(schema)?;
         self.punct(b')', "one projected row alias as the aggregate argument")?;
         if matches!(function, F::SumInt | F::AverageInt)
-            && !matches!(schema[column].1, GraphSetColumnType::Scalar | GraphSetColumnType::Any)
+            && !matches!(
+                schema[column].1,
+                GraphSetColumnType::Scalar | GraphSetColumnType::Any
+            )
         {
             return Err(expected(at, "a scalar WITH alias for a numeric aggregate"));
         }
@@ -198,7 +201,8 @@ impl PreparedGraphPipelineAggregateText {
             ));
         }
         let head = parser.graph_projection_head()?;
-        let (mut stages, schema, depth) = parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
+        let (mut stages, schema, depth) =
+            parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
         let aggregate_at = parser.current.at;
         if depth >= crate::MAX_GRAPH_SET_DEPTH {
             return Err(build(
@@ -313,9 +317,10 @@ impl PreparedGraphPipelineAggregateText {
                         GraphAggregateFunction::Min | GraphAggregateFunction::Max
                     ) {
                         schema[summary.column.expect("extrema have one argument")].1
-                    } else if matches!(summary.function,
-                        GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct)
-                    {
+                    } else if matches!(
+                        summary.function,
+                        GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+                    ) {
                         GraphSetColumnType::List
                     } else {
                         GraphSetColumnType::Scalar

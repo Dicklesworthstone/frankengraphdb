@@ -75,7 +75,8 @@ impl Summary {
 /// Parse-once grouped text definition. Binding returns the existing aggregate
 /// with one shared governed source at execution time. The explicit profile
 /// requires every nonaggregate RETURN expression in GROUP BY, but grouping
-/// expressions may be omitted from RETURN. Grouping uses expressions, not aliases.
+/// expressions may be omitted from RETURN. Projected aliases resolve to their
+/// original grouping expression, preserving its canonical identity.
 /// SUM/SUM_INT and AVG/AVG_INT accept integer/null arguments; argument DISTINCT
 /// follows expression evaluation. AVG returns an exact reduced fraction.
 ///
@@ -94,6 +95,7 @@ impl Summary {
 pub struct PreparedGraphAggregateText {
     child: PreparedGraphText,
     input_projection: Option<Vec<ReadProjectionTemplate>>,
+    output_projection: Option<Vec<ReadProjectionTemplate>>,
     keys: Vec<usize>,
     output_keys: Vec<usize>,
     summaries: Vec<Summary>,
@@ -142,6 +144,7 @@ impl PreparedGraphAggregateText {
         let mut key_aliases: Vec<(String, usize)> = Vec::new();
         let mut source_aliases: Vec<String> = Vec::new();
         let mut computed = ComputedInputs::default();
+        let mut output_leaves = Vec::new();
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
         parser.parse_head()?;
         let distinct = parser.take_word("DISTINCT")?;
@@ -155,7 +158,7 @@ impl PreparedGraphAggregateText {
                 MAX_PATTERN_VERTICES,
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
-            let item = parser.aggregate_item(&mut computed)?;
+            let item = parser.aggregate_item(&mut computed, &mut output_leaves)?;
             if returned
                 .iter()
                 .any(|previous: &ReturnItem<'_>| previous.alias.text == item.alias.text)
@@ -179,7 +182,20 @@ impl PreparedGraphAggregateText {
                     MAX_PATTERN_VERTICES,
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
-                let expression = parser.aggregate_expression(&mut computed)?;
+                let expression = if let TokenKind::Word(word) = parser.current.kind
+                    && !matches!(
+                        parser.lexer.clone().next()?.kind,
+                        TokenKind::Punct(b'.' | b'(')
+                    )
+                    && let Some(item) = returned.iter().find(|item| {
+                        item.alias.text == word && item.function.is_none() && item.output.is_none()
+                    }) {
+                    let expression = item.expression.expect("nonaggregate RETURN expression");
+                    parser.advance()?;
+                    expression
+                } else {
+                    parser.aggregate_expression(&mut computed)?
+                };
                 if groups
                     .iter()
                     .any(|previous: &Expression<'_>| previous.same(expression))
@@ -197,6 +213,7 @@ impl PreparedGraphAggregateText {
         }
         for item in &returned {
             if item.function.is_none()
+                && item.output.is_none()
                 && !groups
                     .iter()
                     .any(|group| group.same(item.expression.expect("key expression")))
@@ -223,6 +240,60 @@ impl PreparedGraphAggregateText {
             )?;
         }
         let mut hidden = Vec::new();
+        let has_output_projection = returned.iter().any(|item| item.output.is_some());
+        let visible = returned
+            .iter()
+            .filter(|item| item.function.is_some())
+            .count();
+        let mut output_columns = Vec::new();
+        for leaf in &output_leaves {
+            let column = match leaf {
+                OutputLeaf::Aggregate(leaf) => {
+                    let index = if let Some(index) = returned
+                        .iter()
+                        .filter(|item| item.function.is_some())
+                        .position(|item| {
+                            item.function == Some(leaf.function)
+                                && same_expression(item.expression, leaf.expression)
+                        }) {
+                        index
+                    } else if let Some(index) =
+                        hidden.iter().position(|item: &HiddenSummary<'_>| {
+                            item.function == leaf.function
+                                && same_expression(item.expression, leaf.expression)
+                        })
+                    {
+                        visible + index
+                    } else {
+                        parser.capacity(
+                            groups.len() + visible + hidden.len(),
+                            MAX_PATTERN_VERTICES,
+                            crate::algebra::PatternLimitDimension::Columns,
+                        )?;
+                        let index = visible + hidden.len();
+                        hidden.push(HiddenSummary {
+                            expression: leaf.expression,
+                            function: leaf.function,
+                            at: leaf.at,
+                        });
+                        index
+                    };
+                    groups.len() + index
+                }
+                OutputLeaf::Group(expression) => groups
+                    .iter()
+                    .position(|group| group.same(*expression))
+                    .ok_or_else(|| {
+                        error(
+                            expression.variable.at,
+                            GraphPatternTextErrorKind::Expected(
+                                "nonaggregate RETURN expression in GROUP BY",
+                            ),
+                        )
+                    })?,
+            };
+            output_columns.push(column);
+        }
         let (having, having_expression) =
             having::parse(&mut parser, &returned, &groups, &mut hidden, &mut computed)?;
         let mut ordering: Vec<GraphAggregateOrder> = Vec::new();
@@ -303,6 +374,7 @@ impl PreparedGraphAggregateText {
         for (at, group) in groups.iter().enumerate() {
             if let Some(item) = returned.iter().find(|item| {
                 item.function.is_none()
+                    && item.output.is_none()
                     && item
                         .expression
                         .is_some_and(|expression| expression.same(*group))
@@ -322,7 +394,8 @@ impl PreparedGraphAggregateText {
         }
         // With every grouping key visible, output DISTINCT is redundant.
         // Preserve that existing profile's exact bound definitions/transcripts.
-        let output_distinct = distinct && output_keys.len() != groups.len();
+        let output_distinct =
+            distinct && (has_output_projection || output_keys.len() != groups.len());
         // Emit all logical group inputs before aggregate arguments. Until the
         // computed/source split below, these Columns are only schema metadata.
         let mut inputs: Vec<Expression<'_>> = Vec::new();
@@ -343,8 +416,22 @@ impl PreparedGraphAggregateText {
         let mut summaries = Vec::new();
         let mut slots = Vec::new();
         let mut names = Vec::new();
+        let mut output_projection = has_output_projection.then(Vec::new);
         for item in &returned {
             names.push(item.alias.text.to_owned());
+            if let Some(value) = &item.output {
+                let mut value = value.clone();
+                remap_output_columns(&mut value, &output_columns);
+                output_projection
+                    .as_mut()
+                    .expect("computed output projection")
+                    .push(ReadProjectionTemplate {
+                        name: item.alias.text.to_owned(),
+                        value,
+                    });
+                slots.push(GraphAggregateTextSlot::Aggregate(names.len() - 1));
+                continue;
+            }
             if let Some(function) = item.function {
                 let column = item.expression.map(|expression| {
                     if let Some(at) = inputs.iter().position(|previous| previous.same(expression)) {
@@ -360,6 +447,12 @@ impl PreparedGraphAggregateText {
                     });
                     at
                 });
+                if let Some(projection) = &mut output_projection {
+                    projection.push(ReadProjectionTemplate {
+                        name: item.alias.text.to_owned(),
+                        value: ReadValueTemplate::Column(groups.len() + summaries.len()),
+                    });
+                }
                 slots.push(GraphAggregateTextSlot::Aggregate(summaries.len()));
                 summaries.push(Summary {
                     function,
@@ -367,12 +460,29 @@ impl PreparedGraphAggregateText {
                     alias: item.alias.text.to_owned(),
                 });
             } else {
+                if let Some(projection) = &mut output_projection {
+                    projection.push(ReadProjectionTemplate {
+                        name: item.alias.text.to_owned(),
+                        value: ReadValueTemplate::Column(
+                            groups
+                                .iter()
+                                .position(|group| {
+                                    group.same(item.expression.expect("key expression"))
+                                })
+                                .expect("group checked above"),
+                        ),
+                    });
+                }
                 slots.push(GraphAggregateTextSlot::GroupKey(
                     output_keys
                         .iter()
                         .position(|at| groups[*at].same(item.expression.expect("key expression")))
                         .expect("group checked above"),
                 ));
+            }
+            if has_output_projection {
+                *slots.last_mut().expect("returned slot") =
+                    GraphAggregateTextSlot::Aggregate(names.len() - 1);
             }
         }
         // Computed summaries form one returned prefix followed by a private
@@ -475,6 +585,7 @@ impl PreparedGraphAggregateText {
         Ok(Self {
             child,
             input_projection,
+            output_projection,
             keys,
             output_keys,
             summaries,
@@ -623,6 +734,13 @@ impl PreparedGraphAggregateText {
                 append_number(&mut bytes, count);
             }
         }
+        if let Some(projection) = &self.output_projection {
+            bytes.extend_from_slice(b"fgdb:gql:aggregate-output-projection:v1\0");
+            ordinal(&mut bytes, projection.len());
+            for item in projection {
+                item.append_template_transcript(&mut bytes);
+            }
+        }
         bytes
     }
 
@@ -638,6 +756,9 @@ impl PreparedGraphAggregateText {
         operators.push("Aggregate");
         if !self.having.is_empty() || self.having_expression.is_some() {
             operators.push("SelectHaving");
+        }
+        if self.output_projection.is_some() {
+            operators.push("ProjectValues");
         }
         if !self.ordering.is_empty() {
             operators.push("OrderByAggregate");
@@ -713,8 +834,19 @@ impl PreparedGraphAggregateText {
                     GraphPatternTextErrorKind::AggregateBuild(kind),
                 )
             })?;
-        match &self.having_expression {
-            Some(expression) => expression.attach(aggregate, &values),
+        let aggregate = match &self.having_expression {
+            Some(expression) => expression.attach(aggregate, &values)?,
+            None => aggregate,
+        };
+        match &self.output_projection {
+            Some(projection) => aggregate
+                .with_output_projection(Self::bind_input_projection(projection, &values)?)
+                .map_err(|kind| {
+                    error(
+                        self.child.return_at,
+                        GraphPatternTextErrorKind::AggregateBuild(kind),
+                    )
+                }),
             None => Ok(aggregate),
         }
     }
@@ -751,6 +883,7 @@ struct ReturnItem<'a> {
     expression: Option<Expression<'a>>,
     function: Option<GraphAggregateFunction>,
     alias: Name<'a>,
+    output: Option<ReadValueTemplate>,
 }
 /// Shared first-use registry for explicit nonreturned aggregate calls. Its
 /// entries retain source offsets; aliases are assigned only after parsing.
@@ -758,6 +891,39 @@ struct HiddenSummary<'a> {
     expression: Option<Expression<'a>>,
     function: GraphAggregateFunction,
     at: usize,
+}
+
+enum OutputLeaf<'a> {
+    Aggregate(HiddenSummary<'a>),
+    Group(Expression<'a>),
+}
+
+fn remap_output_columns(value: &mut ReadValueTemplate, columns: &[usize]) {
+    match value {
+        ReadValueTemplate::Column(index) => *index = columns[*index],
+        ReadValueTemplate::List(items) => {
+            for item in items {
+                remap_output_columns(item, columns);
+            }
+        }
+        ReadValueTemplate::Index { list, index } => {
+            remap_output_columns(list, columns);
+            remap_output_columns(index, columns);
+        }
+        ReadValueTemplate::Size(inner) => remap_output_columns(inner, columns),
+        ReadValueTemplate::Integer { program, .. } => {
+            for op in program {
+                if let crate::mutation_text::MutationIntegerTemplateOp::Bound(
+                    crate::GraphIntegerOp::Column(index)
+                    | crate::GraphIntegerOp::ScalarColumn(index),
+                ) = op
+                {
+                    *index = columns[*index];
+                }
+            }
+        }
+        ReadValueTemplate::Literal(_) | ReadValueTemplate::Parameter { .. } => {}
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -780,11 +946,128 @@ impl<'a> Parser<'a> {
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
     }
 
+    /// Look ahead using the shared lexer only to select the scalar compiler.
+    /// A lone aggregate retains its original lowering and canonical bytes.
+    fn return_contains_aggregate(&self) -> Result<bool, GraphPatternTextError> {
+        let mut lexer = self.lexer.clone();
+        let mut token = self.current;
+        let direct = self.starts_aggregate_call()?;
+        let mut depth = 0usize;
+        let mut aggregate = false;
+        let mut direct_closed = false;
+        let mut continued = false;
+        loop {
+            if depth == 0
+                && (matches!(token.kind, TokenKind::End | TokenKind::Punct(b',' | b';'))
+                    || matches!(token.kind, TokenKind::Word(word) if ["AS", "GROUP", "HAVING", "ORDER", "SKIP", "OFFSET", "LIMIT"].iter().any(|name| word.eq_ignore_ascii_case(name))))
+            {
+                break;
+            }
+            if direct_closed {
+                continued = true;
+            }
+            let next = lexer.next()?;
+            if let TokenKind::Word(word) = token.kind
+                && matches!(next.kind, TokenKind::Punct(b'('))
+                && [
+                    "COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT",
+                ]
+                .iter()
+                .any(|name| word.eq_ignore_ascii_case(name))
+            {
+                aggregate = true;
+            }
+            match token.kind {
+                TokenKind::Punct(b'(' | b'[') => depth += 1,
+                TokenKind::Punct(b')' | b']') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && direct {
+                        direct_closed = true;
+                    }
+                }
+                TokenKind::End => break,
+                _ => {}
+            }
+            token = next;
+        }
+        Ok(aggregate && (!direct || continued))
+    }
+
+    fn aggregate_output_item(
+        &mut self,
+        computed: &mut ComputedInputs<'a>,
+        leaves: &mut Vec<OutputLeaf<'a>>,
+    ) -> Result<ReturnItem<'a>, GraphPatternTextError> {
+        let value = self
+            .read_resolved_value(
+                &mut |parser| {
+                    let leaf = if parser.starts_aggregate_call()? {
+                        let name = parser.name()?;
+                        parser.punct(b'(', "(")?;
+                        // Arguments use the input compiler, which cannot resolve an
+                        // aggregate as an operand: nested aggregate calls stay invalid.
+                        let (expression, function) = parser.aggregate_call(name, computed)?;
+                        OutputLeaf::Aggregate(HiddenSummary {
+                            expression,
+                            function,
+                            at: name.at,
+                        })
+                    } else if matches!(parser.current.kind, TokenKind::Word(word)
+                if parser.syntax.variables.iter().any(|variable| variable.text == word))
+                    {
+                        let variable = parser.variable()?;
+                        let property = if parser.take(b'.')? {
+                            Some(parser.name()?)
+                        } else {
+                            None
+                        };
+                        OutputLeaf::Group(Expression {
+                            variable,
+                            property,
+                            computed: None,
+                        })
+                    } else {
+                        return Ok(None);
+                    };
+                    parser.capacity(
+                        leaves.len(),
+                        crate::MAX_GRAPH_INTEGER_INSTRUCTIONS,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                    let index = leaves.len();
+                    leaves.push(leaf);
+                    Ok(Some(index))
+                },
+                0,
+            )
+            .map_err(|source| {
+                let kind = match source.kind {
+                    crate::GraphSetTextErrorKind::Pattern(kind) => kind,
+                    _ => GraphPatternTextErrorKind::Expected(
+                        "valid bounded aggregate output expression",
+                    ),
+                };
+                error(source.offset, kind)
+            })?;
+        self.word("AS")?;
+        let alias = self.name()?;
+        Ok(ReturnItem {
+            expression: None,
+            function: None,
+            alias,
+            output: Some(value),
+        })
+    }
+
     fn aggregate_item(
         &mut self,
         computed: &mut ComputedInputs<'a>,
+        output_leaves: &mut Vec<OutputLeaf<'a>>,
     ) -> Result<ReturnItem<'a>, GraphPatternTextError> {
         let at = self.current.at;
+        if self.return_contains_aggregate()? {
+            return self.aggregate_output_item(computed, output_leaves);
+        }
         let (expression, function, default_alias) = if self.starts_aggregate_call()? {
             let name = self.name()?;
             self.punct(b'(', "(")?;
@@ -833,6 +1116,7 @@ impl<'a> Parser<'a> {
             expression,
             function,
             alias,
+            output: None,
         })
     }
 
@@ -962,6 +1246,12 @@ impl<'a> Parser<'a> {
         {
             self.advance()?;
             let item = &returned[selected];
+            if item.output.is_some() {
+                return Err(error(
+                    at,
+                    GraphPatternTextErrorKind::Expected("GROUP BY expression or aggregate"),
+                ));
+            }
             if item.function.is_some() {
                 return Ok(GraphAggregateColumn::Aggregate(
                     returned[..selected]
