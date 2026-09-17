@@ -974,6 +974,9 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    // labels(vertex) and type(edge) require catalog names, not numeric IDs.
+    // The embedded symbol resolver is forward-only; until a reverse-name
+    // catalog is available these functions refuse here, before resolution.
     fn path_function(name: Name<'a>) -> Result<GraphPathFunction, GraphPatternTextError> {
         if name.text.eq_ignore_ascii_case("path_length") {
             Ok(GraphPathFunction::Length)
@@ -1505,6 +1508,27 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn element_name_functions_refuse_before_catalog_resolution() {
+        for function in ["labels(p)", "type(r)"] {
+            let text = format!("MATCH (p:L)-[r:R]->(q) RETURN {function}");
+            let calls = Cell::new(0);
+            let failure = PreparedGraphText::prepare(&text, |kind, name| {
+                calls.set(calls.get() + 1);
+                symbols(kind, name)
+            })
+            .unwrap_err();
+            assert_eq!(
+                failure,
+                GraphPatternTextError {
+                    offset: text.find(function).unwrap(),
+                    kind: GraphPatternTextErrorKind::Expected("path function"),
+                }
+            );
+            assert_eq!(calls.get(), 0, "refusal must precede catalog resolution");
+        }
     }
 
     #[test]
