@@ -57,6 +57,22 @@ impl BoundScope {
             ScopeKind::NotExists => GraphMatchClause::not_exists(&self.builder),
         }
     }
+    /// Facade transcript tag for this scope kind, matching the resolved
+    /// lowering distinction: optional extends nulls, exists/not-exists probe.
+    pub(super) fn kind_tag(&self) -> u8 {
+        match self.kind {
+            ScopeKind::Required => 0,
+            ScopeKind::Optional => 1,
+            ScopeKind::Exists => 2,
+            ScopeKind::NotExists => 3,
+        }
+    }
+    pub(super) fn builder(&self) -> &GraphPatternBuilder {
+        &self.builder
+    }
+    pub(super) fn filters(&self) -> &[BoundFilter] {
+        &self.filters
+    }
 
     pub(super) fn bind_values(
         &self,

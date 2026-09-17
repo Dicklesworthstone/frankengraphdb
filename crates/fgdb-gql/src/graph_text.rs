@@ -1035,6 +1035,138 @@ impl PreparedGraphText {
         &self.parameters
     }
 
+    /// Versioned, value-independent template transcript: resolved builder
+    /// template, filters, scopes, projections, ordering, paging shape and
+    /// parameter identity. Statement text and parameter values never enter.
+    #[must_use]
+    pub(crate) fn template_bytes(&self) -> Vec<u8> {
+        use crate::graph_text::boolean::append_number;
+        fn append_name(bytes: &mut Vec<u8>, value: &str) {
+            bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        fn comparison_tag(comparison: IntegerComparison) -> u8 {
+            match comparison {
+                IntegerComparison::Equal => 0,
+                IntegerComparison::NotEqual => 1,
+                IntegerComparison::Less => 2,
+                IntegerComparison::LessOrEqual => 3,
+                IntegerComparison::Greater => 4,
+                IntegerComparison::GreaterOrEqual => 5,
+            }
+        }
+        fn append_filter(bytes: &mut Vec<u8>, filter: &BoundFilter) {
+            match filter {
+                BoundFilter::PathLength {
+                    variable,
+                    comparison,
+                    value,
+                } => {
+                    bytes.push(0);
+                    append_name(bytes, variable);
+                    bytes.push(comparison_tag(*comparison));
+                    append_number(bytes, value);
+                }
+                BoundFilter::Property {
+                    variable,
+                    key,
+                    comparison,
+                    value,
+                } => {
+                    bytes.push(1);
+                    append_name(bytes, variable);
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                    bytes.push(comparison_tag(*comparison));
+                    append_number(bytes, value);
+                }
+                BoundFilter::Boolean(template) => {
+                    bytes.push(2);
+                    let encoded = template.template_bytes();
+                    bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(&encoded);
+                }
+            }
+        }
+        fn append_scope(bytes: &mut Vec<u8>, scope: &BoundScope) {
+            bytes.push(scope.kind_tag());
+            bytes.extend_from_slice(&scope.builder().canonical_template_bytes());
+            bytes.extend_from_slice(&(scope.filters().len() as u64).to_be_bytes());
+            for filter in scope.filters() {
+                append_filter(bytes, filter);
+            }
+        }
+        let mut bytes = b"fgdb:gql:pattern-text-template:v1\0".to_vec();
+        bytes.extend_from_slice(&self.builder.canonical_template_bytes());
+        bytes.extend_from_slice(&(self.scopes.len() as u64).to_be_bytes());
+        for scope in &self.scopes {
+            append_scope(&mut bytes, scope);
+        }
+        bytes.extend_from_slice(&(self.filters.len() as u64).to_be_bytes());
+        for filter in &self.filters {
+            append_filter(&mut bytes, filter);
+        }
+        bytes.extend_from_slice(&(self.columns.len() as u64).to_be_bytes());
+        for column in &self.columns {
+            append_name(&mut bytes, &column.alias);
+            append_name(&mut bytes, &column.variable);
+            match column.key {
+                None => bytes.push(0),
+                Some(key) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                }
+            }
+            match column.path {
+                None => bytes.push(0),
+                Some(function) => {
+                    bytes.push(1);
+                    bytes.push(function as u8);
+                }
+            }
+        }
+        bytes.extend_from_slice(&(self.ordering.len() as u64).to_be_bytes());
+        for order in &self.ordering {
+            bytes.push(u8::from(order.descending));
+            bytes.push(u8::from(order.nulls_first));
+        }
+        append_number(&mut bytes, &self.offset);
+        match &self.count {
+            None => bytes.push(0),
+            Some(count) => {
+                bytes.push(1);
+                append_number(&mut bytes, count);
+            }
+        }
+        bytes.push(u8::from(self.distinct));
+        bytes
+    }
+
+    /// Logical template operators in declaration order, before lowering.
+    #[must_use]
+    pub(crate) fn template_operators(&self) -> Vec<&'static str> {
+        let mut operators = self.builder.template_operators();
+        operators.extend(std::iter::repeat_n(
+            "MatchScope",
+            self.scopes.len(),
+        ));
+        for filter in &self.filters {
+            operators.push(match filter {
+                BoundFilter::PathLength { .. } => "FilterPathLength",
+                BoundFilter::Property { .. } => "FilterProperty",
+                BoundFilter::Boolean(_) => "FilterBoolean",
+            });
+        }
+        operators.push("Project");
+        if self.distinct {
+            operators.push("Distinct");
+        }
+        if !self.ordering.is_empty() {
+            operators.push("OrderBy");
+        }
+        operators.push("Limit");
+        operators
+    }
+
     /// Validate the exact argument set before building any concrete predicate.
     /// Returned plans are owned and immutable and use all existing governed
     /// snapshot/transaction entrypoints, including their original refusals.

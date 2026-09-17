@@ -459,6 +459,157 @@ pub(super) struct BoundBooleanTemplate {
 }
 
 impl BoundBooleanTemplate {
+    /// Append the resolved unbound program: variable/property identities,
+    /// comparisons and structure only. Numeric operands encode as typed
+    /// literals or parameter indices through the shared helper; scalar
+    /// predicates keep their canonical transcript. Values never enter.
+    pub(super) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        fn encode_atom(bytes: &mut Vec<u8>, atom: &Atom) {
+            match atom {
+                Atom::Property {
+                    variable,
+                    key,
+                    comparison,
+                    value,
+                } => {
+                    bytes.push(0);
+                    append_name(bytes, variable);
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                    bytes.push(comparison_tag(*comparison));
+                    append_number(bytes, value);
+                }
+                Atom::Scalar {
+                    variable,
+                    key,
+                    predicate,
+                } => {
+                    bytes.push(1);
+                    append_name(bytes, variable);
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                    append_scalar_predicate(bytes, predicate);
+                }
+                Atom::Null {
+                    variable,
+                    key,
+                    is_null,
+                } => {
+                    bytes.push(2);
+                    append_name(bytes, variable);
+                    bytes.extend_from_slice(&key.0.to_be_bytes());
+                    bytes.push(u8::from(*is_null));
+                }
+                Atom::VertexNull { variable, is_null } => {
+                    bytes.push(3);
+                    append_name(bytes, variable);
+                    bytes.push(u8::from(*is_null));
+                }
+                Atom::Identity { left, right, equal } => {
+                    bytes.push(4);
+                    append_name(bytes, left);
+                    append_name(bytes, right);
+                    bytes.push(u8::from(*equal));
+                }
+                Atom::Properties {
+                    left,
+                    left_key,
+                    right,
+                    right_key,
+                    comparison,
+                } => {
+                    bytes.push(5);
+                    append_name(bytes, left);
+                    bytes.extend_from_slice(&left_key.0.to_be_bytes());
+                    append_name(bytes, right);
+                    bytes.extend_from_slice(&right_key.0.to_be_bytes());
+                    bytes.push(comparison_tag(*comparison));
+                }
+            }
+        }
+        fn encode_item(bytes: &mut Vec<u8>, item: &Item) {
+            match item {
+                Item::Atom(atom) => {
+                    bytes.push(0);
+                    encode_atom(bytes, atom);
+                }
+                Item::Expression { columns, program } => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
+                    for (variable, key) in columns {
+                        append_name(bytes, variable);
+                        bytes.extend_from_slice(&key.0.to_be_bytes());
+                    }
+                    bytes.extend_from_slice(&(program.len() as u64).to_be_bytes());
+                    for op in program {
+                        op.append_template_transcript(bytes);
+                    }
+                }
+                Item::Truth(value) => {
+                    bytes.push(2);
+                    bytes.push(match value {
+                        None => 0,
+                        Some(false) => 1,
+                        Some(true) => 2,
+                    });
+                }
+                Item::And => bytes.push(3),
+                Item::Or => bytes.push(4),
+                Item::Not => bytes.push(5),
+            }
+        }
+        bytes.extend_from_slice(&(self.program.len() as u64).to_be_bytes());
+        for instruction in &self.program {
+            encode_item(bytes, instruction);
+        }
+    }
+}
+
+/// Local comparison tag mirroring the algebra transcript convention.
+fn comparison_tag(comparison: IntegerComparison) -> u8 {
+    match comparison {
+        IntegerComparison::Equal => 0,
+        IntegerComparison::NotEqual => 1,
+        IntegerComparison::Less => 2,
+        IntegerComparison::LessOrEqual => 3,
+        IntegerComparison::Greater => 4,
+        IntegerComparison::GreaterOrEqual => 5,
+    }
+}
+
+/// Canonical scalar predicate identity: kind-tagged canonical value plus the
+/// comparison tag, without the algebra-private transcript convention.
+fn append_scalar_predicate(bytes: &mut Vec<u8>, predicate: &ScalarPredicate) {
+    bytes.push(comparison_tag(predicate.comparison()));
+    let value = predicate.canonical_value_bytes();
+    bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(value);
+}
+
+/// Fixed-width identifier framing over resolved, immutable variable names.
+fn append_name(bytes: &mut Vec<u8>, name: &str) {
+    bytes.extend_from_slice(&(name.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(name.as_bytes());
+}
+
+/// Shared unbound numeric operand encoding: typed literal or parameter index.
+pub(super) fn append_number(bytes: &mut Vec<u8>, number: &Number) {
+    match number {
+        Number::Literal(GqlParameterValue::Int64(value)) => {
+            bytes.push(0);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        Number::Literal(GqlParameterValue::UInt64(value)) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        Number::Parameter(index) => {
+            bytes.push(2);
+            bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+        }
+        Number::Literal(_) => unreachable!("numeric syntax and schema agree"),
+    }
+}
+
+impl BoundBooleanTemplate {
     pub(super) fn resolve<'a>(
         program: Vec<SyntaxItem<'a>>,
         at: usize,
@@ -581,8 +732,7 @@ impl BoundBooleanTemplate {
                     GqlParameterValue::Scalar(value) => {
                         Ok(Some(value.predicate(IntegerComparison::Equal)))
                     }
-                    GqlParameterValue::UInt64(_)
-                    | GqlParameterValue::List(_) => {
+                    GqlParameterValue::UInt64(_) | GqlParameterValue::List(_) => {
                         Err(error(self.at, GraphPatternTextErrorKind::BooleanExpression))
                     }
                 },
@@ -702,6 +852,98 @@ impl BoundBooleanTemplate {
         }
         GraphBooleanExpression::prepare(&program)
             .map_err(|_| error(self.at, GraphPatternTextErrorKind::BooleanExpression))
+    }
+    pub(super) fn template_bytes(&self) -> Vec<u8> {
+        let mut bytes = b"fgdb:gql:boolean-text-template:v1\0".to_vec();
+        self.append_template_transcript(&mut bytes);
+        bytes
+    }
+}
+
+/// Same spelling, different resolved meaning: the transcript follows the
+/// catalog symbols and argument contract, not the source text bytes.
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    fn template(
+        statement: &str,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Vec<u8> {
+        boolean_template_bytes(&PreparedGraphText::prepare(statement, resolve).unwrap())
+    }
+
+    fn template_with_parameters(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Vec<u8> {
+        boolean_template_bytes(
+            &PreparedGraphText::prepare_with_parameter_types(statement, declarations, resolve)
+                .unwrap(),
+        )
+    }
+
+    /// Full resolved template via the facade accessor.
+    fn boolean_template_bytes(prepared: &PreparedGraphText) -> Vec<u8> {
+        prepared.template_bytes()
+    }
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            _ => None,
+        }
+    }
+
+    fn other_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(2))),
+            (GraphSymbolKind::Property, "q") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn template_tracks_resolved_symbols_and_parameter_identity() {
+        let base = template("MATCH (n) WHERE n.p = 1 RETURN n", symbols);
+        assert_eq!(base, template("MATCH (n) WHERE n.p = 1 RETURN n", symbols));
+        assert_ne!(base, template("MATCH (n) WHERE n.q = 1 RETURN n", symbols));
+        assert_ne!(base, template("MATCH (n) WHERE n.p = 2 RETURN n", symbols));
+        assert_ne!(
+            base,
+            template("MATCH (n) WHERE n.p = 1 AND TRUE RETURN n", symbols)
+        );
+        assert_ne!(
+            base,
+            template("MATCH (n) WHERE n.p = 1 OR TRUE RETURN n", symbols)
+        );
+        assert_ne!(
+            base,
+            template("MATCH (n) WHERE n.p IS NULL RETURN n", symbols)
+        );
+        let literal = template("MATCH (n) WHERE n.p = 1 RETURN n", symbols);
+        let hole = template_with_parameters(
+            "MATCH (n) WHERE n.p = $x RETURN n",
+            &[("x", GqlParameterType::Int64)],
+            symbols,
+        );
+        assert_ne!(literal, hole);
+        let other_hole = template_with_parameters(
+            "MATCH (n) WHERE n.p = $y RETURN n",
+            &[("y", GqlParameterType::Int64)],
+            symbols,
+        );
+        assert_eq!(hole, other_hole);
+        assert_ne!(
+            template("MATCH (n) WHERE n.p = 1 RETURN n", symbols),
+            template("MATCH (n) WHERE n.p = 1 RETURN n", other_symbols),
+        );
+        assert_ne!(
+            template("MATCH (n) WHERE n.p <> 1 RETURN n", symbols),
+            template("MATCH (n) WHERE NOT n.p <> 1 RETURN n", symbols),
+        );
     }
 }
 
