@@ -1069,10 +1069,10 @@ fn refused_zoned_timestamp_preserves_cli_history_reopen_and_rebuild() {
                     vec![LabelId(1)],
                     vec![(PropertyKeyId(2), zoned)],
                 );
-                let result = database.write(&commit, batch).await;
+                let result = database.prepare_write(batch);
                 steps.push((
                     "native zoned preflight refusal".into(),
-                    matches!(&result, Err(WriteError::FirstCommitterWins { law, detail }) if *law == "FG-LAW-FCW-01" && detail == "malformed logical delta template: Scalar"),
+                    matches!(&result, Err(WriteError::ZonedTimestampRequiresResolver { tzdb_oid }) if *tzdb_oid == TZDB),
                     format!("{result:?}"),
                 ));
                 let frontier = database.frontier();

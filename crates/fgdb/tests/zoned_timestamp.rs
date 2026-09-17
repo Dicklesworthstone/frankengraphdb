@@ -3,7 +3,8 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, QueryResult, QueryWriteError, WriteBatch, WriteError, WriteTxnError,
+    Database, DatabaseKeys, QueryResult, QueryWriteError, WriteBatch, WriteError,
+    WriteMismatchPolicy, WriteTxnError,
 };
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
@@ -14,7 +15,7 @@ use fgdb_gql::{
     GraphWriteScriptExecutionError,
 };
 use fgdb_types::{
-    CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId, ObjectId,
+    CanonicalScalar, CanonicalTimestamp, CommitSeq, DatabaseSecurityNamespaceId, EId, ObjectId,
     PurposeContexts, QueryCx, TzdbResolver, VId,
 };
 use std::fmt::Debug;
@@ -226,9 +227,9 @@ fn reproduce(path: WritePath, seed: u64) {
                 WritePath::Native => {
                     let mut batch = WriteBatch::new(R);
                     batch.create_vertex(target, vec![TIMESTAMP], vec![(P, expected.clone())]);
-                    let result = db.write(&commit, batch).await;
-                    eprintln!("{phase}/write: {result:?}");
-                    matches!(result, Err(WriteError::FirstCommitterWins { law, detail }) if law == "FG-LAW-FCW-01" && detail == "malformed logical delta template: Scalar")
+                    let result = db.prepare_write(batch);
+                    eprintln!("{phase}/prepare: {result:?}");
+                    matches!(result, Err(WriteError::ZonedTimestampRequiresResolver { tzdb_oid }) if tzdb_oid == TZDB_OID)
                 }
                 WritePath::Insert | WritePath::Set => {
                     let mut reserved = if matches!(path, WritePath::Insert) {
@@ -270,10 +271,21 @@ fn reproduce(path: WritePath, seed: u64) {
                     eprintln!("{phase}/write: {result:?}");
                     matches!(result,
                         Err(QueryWriteError::Execute(GraphWriteScriptExecutionError::Program(
-                            GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(
-                                WriteTxnError::Write(WriteError::FirstCommitterWins { law, detail })
-                            ))
-                        ))) if law == "FG-LAW-FCW-01" && detail == "malformed logical delta template: Scalar")
+                            GraphWriteProgramError::Insert { statement: 0, source:
+                                fgdb_gql::GqlQueryError::Source(fgdb_gql::insertion::GraphInsertError::Source(
+                                    WriteTxnError::Write(WriteError::ZonedTimestampRequiresResolver { tzdb_oid })
+                                ))
+                            }
+                        ))) if tzdb_oid == TZDB_OID)
+                        || matches!(result,
+                        Err(QueryWriteError::Execute(GraphWriteScriptExecutionError::Program(
+                            GraphWriteProgramError::Program(GraphMutationProgramError::Statement {
+                                statement: 0, source:
+                                fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphMutationError::Source(
+                                    WriteTxnError::Write(WriteError::ZonedTimestampRequiresResolver { tzdb_oid })
+                                ))
+                            })
+                        ))) if tzdb_oid == TZDB_OID)
                 }
             };
             eprintln!(
@@ -321,7 +333,7 @@ fn reproduce(path: WritePath, seed: u64) {
             }
             if !refused {
                 failures.push(format!(
-                    "{phase}: expected current FCW malformed-scalar refusal"
+                    "{phase}: expected exact ZonedTimestampRequiresResolver with fixture tzdb OID"
                 ));
             }
         }
@@ -351,4 +363,206 @@ fn gql_insert_zoned_timestamp_refusal_preserves_baseline() {
 #[test]
 fn gql_set_zoned_timestamp_refusal_preserves_baseline() {
     reproduce(WritePath::Set, 0x209e_0003);
+}
+
+#[test]
+fn native_preparation_refuses_every_zoned_scalar_before_noops_and_netfold() {
+    type Case = (&'static str, fn(&mut WriteBatch));
+    let cases: &[Case] = &[
+        ("vertex", |b| {
+            b.create_vertex(VId(3), vec![TIMESTAMP], vec![(P, zoned())]);
+        }),
+        ("edge", |b| {
+            b.add_edge(EId(2), BASELINE_ID, TARGET_ID, vec![(P, zoned())]);
+        }),
+        ("set-vertex", |b| {
+            b.set_vertex_property(TARGET_ID, P, Some(zoned()));
+        }),
+        ("set-edge", |b| {
+            b.set_edge_property(EId(1), P, Some(zoned()));
+        }),
+        ("cas-vertex-expected-noop", |b| {
+            b.compare_and_set_vertex_property(
+                TARGET_ID,
+                P,
+                Some(zoned()),
+                CanonicalScalar::Int(8),
+                WriteMismatchPolicy::NoOp,
+            );
+        }),
+        ("cas-vertex-value-noop", |b| {
+            b.compare_and_set_vertex_property(
+                TARGET_ID,
+                P,
+                Some(CanonicalScalar::Int(404)),
+                zoned(),
+                WriteMismatchPolicy::NoOp,
+            );
+        }),
+        ("cas-edge-expected-noop", |b| {
+            b.compare_and_set_edge_property(
+                EId(1),
+                P,
+                Some(zoned()),
+                CanonicalScalar::Int(8),
+                WriteMismatchPolicy::NoOp,
+            );
+        }),
+        ("cas-edge-value-noop", |b| {
+            b.compare_and_set_edge_property(
+                EId(1),
+                P,
+                Some(CanonicalScalar::Int(404)),
+                zoned(),
+                WriteMismatchPolicy::NoOp,
+            );
+        }),
+        ("ensure-vertex-noop", |b| {
+            b.ensure_vertex(TARGET_ID, vec![TIMESTAMP], vec![(P, zoned())]);
+        }),
+        ("ensure-edge-noop", |b| {
+            b.ensure_edge_by_triple(EId(2), BASELINE_ID, TARGET_ID, vec![(P, zoned())]);
+        }),
+        ("overwritten-vertex-property", |b| {
+            b.set_vertex_property(TARGET_ID, P, Some(zoned()));
+            b.set_vertex_property(TARGET_ID, P, Some(CanonicalScalar::Int(8)));
+        }),
+        ("overwritten-edge-property", |b| {
+            b.set_edge_property(EId(1), P, Some(zoned()));
+            b.set_edge_property(EId(1), P, Some(CanonicalScalar::Int(8)));
+        }),
+        ("netfold-vertex", |b| {
+            b.create_vertex(VId(3), vec![TIMESTAMP], vec![(P, zoned())]);
+            b.delete_vertex(VId(3));
+        }),
+        ("netfold-edge", |b| {
+            b.add_edge(EId(2), BASELINE_ID, TARGET_ID, vec![(P, zoned())]);
+            b.delete_edge(EId(2));
+        }),
+    ];
+    let (failures, report) = run_async_under_lab(0x209e_0004, move |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut failures = Vec::new();
+        let offset =
+            CanonicalScalar::Timestamp(CanonicalTimestamp::offset_only(INSTANT, OFFSET).unwrap());
+        for rebuilding in [false, true] {
+            let mode = if rebuilding { "rebuilding" } else { "fast" };
+            let dir = std::env::temp_dir()
+                .join(format!("fgdb-zoned-prepare-{}-{mode}", std::process::id()));
+            let mut db = Database::create(&commit, &dir, keys()).await.unwrap();
+            let mut baseline = WriteBatch::new(R);
+            baseline.create_vertex(
+                BASELINE_ID,
+                vec![BASELINE],
+                vec![(P, CanonicalScalar::Int(99))],
+            );
+            baseline.create_vertex(TARGET_ID, vec![TIMESTAMP], vec![(P, offset.clone())]);
+            baseline.add_edge(EId(1), BASELINE_ID, TARGET_ID, vec![(P, offset.clone())]);
+            // The same instant and offset without a zone is supported and commits.
+            let before = db.write(&commit, baseline).await.unwrap();
+            let original_vertices = db.vertices().unwrap();
+            let original_edges = db.edges().unwrap();
+            assert_eq!(
+                db.vertex(TARGET_ID).unwrap().unwrap().props,
+                [(P, offset.clone())]
+            );
+            assert_eq!(
+                db.edge(EId(1)).unwrap().unwrap().props,
+                [(P, offset.clone())]
+            );
+            for &(name, build) in cases {
+                let phase = format!("prepare/{mode}/{name}");
+                let mut batch = WriteBatch::new(R);
+                build(&mut batch);
+                let result = db.prepare_write(batch);
+                eprintln!("{phase}: {result:?}");
+                if !matches!(result, Err(WriteError::ZonedTimestampRequiresResolver { tzdb_oid }) if tzdb_oid == TZDB_OID)
+                {
+                    failures.push(format!("{phase}: expected exact typed resolver refusal"));
+                }
+                inspect(
+                    &db,
+                    &query,
+                    &phase,
+                    TARGET_ID,
+                    before,
+                    before,
+                    Some(&offset),
+                    Some(&offset),
+                    &mut failures,
+                );
+                record(
+                    &format!("{phase}/vertices"),
+                    &db.vertices(),
+                    |rows| *rows == original_vertices,
+                    &mut failures,
+                );
+                record(
+                    &format!("{phase}/edges"),
+                    &db.edges(),
+                    |rows| *rows == original_edges,
+                    &mut failures,
+                );
+                record(
+                    &format!("{phase}/historical-edges"),
+                    &db.edges_at(before),
+                    |rows| *rows == original_edges,
+                    &mut failures,
+                );
+            }
+            drop(db);
+            let reopened = if rebuilding {
+                Database::open_rebuilding(&commit, &dir, keys()).await
+            } else {
+                Database::open(&commit, &dir, keys()).await
+            };
+            match reopened {
+                Ok(db) => {
+                    let phase = format!("prepare/{mode}/reopened");
+                    inspect(
+                        &db,
+                        &query,
+                        &phase,
+                        TARGET_ID,
+                        before,
+                        before,
+                        Some(&offset),
+                        Some(&offset),
+                        &mut failures,
+                    );
+                    record(
+                        &format!("{phase}/vertices"),
+                        &db.vertices(),
+                        |rows| *rows == original_vertices,
+                        &mut failures,
+                    );
+                    record(
+                        &format!("{phase}/edges"),
+                        &db.edges(),
+                        |rows| *rows == original_edges,
+                        &mut failures,
+                    );
+                    record(
+                        &format!("{phase}/historical-edges"),
+                        &db.edges_at(before),
+                        |rows| *rows == original_edges,
+                        &mut failures,
+                    );
+                }
+                Err(error) => failures.push(format!("prepare/{mode}/open: {error:?}")),
+            }
+        }
+        failures
+    });
+    assert!(
+        report.lab_test_passed(),
+        "{report:?}; outcomes: {failures:?}"
+    );
+    assert!(
+        failures.is_empty(),
+        "zoned preparation failures:\n{}",
+        failures.join("\n")
+    );
 }

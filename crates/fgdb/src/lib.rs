@@ -139,8 +139,8 @@ pub use fgdb_gql::{BoundPlan, RelationBind};
 /// byte-identical.
 pub use gql_cert::{GqlCertificate, GqlPlanCertificate, NativeReadClass};
 pub use query::{
-    NativeExplainCertificate, NativeResultCertificate, PreparedNativeRead, QueryError,
-    QueryResult, QueryValue, QueryWriteError, ReplayRefusal,
+    NativeExplainCertificate, PreparedNativeRead, QueryError, QueryResult, QueryValue,
+    QueryWriteError,
 };
 pub use write_txn::{WriteTxn, WriteTxnError};
 
@@ -515,6 +515,11 @@ pub enum WriteError {
     /// commit consumes a sequence and publishes a marker, and a caller that did
     /// that by accident should be told.
     EmptyBatch,
+    /// This writer has no pinned tzdb resolver for durable replay. Refused
+    /// during preparation, not misreported as a transaction conflict.
+    ZonedTimestampRequiresResolver {
+        tzdb_oid: ObjectId,
+    },
     /// A delete named an edge this database holds no live version of, at the
     /// point in the batch where the delete sits. Refused before anything
     /// durable happens (fgdb-p3ok).
@@ -797,6 +802,9 @@ impl core::fmt::Display for WriteError {
                 write!(f, "prepared-write conflict history is unavailable: {error}")
             }
             Self::EmptyBatch => write!(f, "an empty batch consumes a commit sequence for nothing"),
+            Self::ZonedTimestampRequiresResolver { .. } => {
+                f.write_str("zoned timestamp writes require a pinned tzdb resolver")
+            }
             Self::UnknownEdge { eid } => {
                 write!(f, "no live version of {eid:?} to delete")
             }
@@ -2714,6 +2722,45 @@ impl<V: Vfs + Clone> Database<V> {
     fn build_write_template(&self, batch: WriteBatch) -> Result<LogicalDeltaTemplate, WriteError> {
         if batch.is_empty() {
             return Err(WriteError::EmptyBatch);
+        }
+        // Validate before normalization/ensure can erase an unsupported input.
+        // Encoding preserves zones, but the writer and recovery decoder have
+        // no pinned artifact resolver. Never publish bytes replay cannot read.
+        let admit = |value: &CanonicalScalar| -> Result<(), WriteError> {
+            if let CanonicalScalar::Timestamp(timestamp) = value
+                && let Some(zone) = timestamp.zone()
+            {
+                return Err(WriteError::ZonedTimestampRequiresResolver {
+                    tzdb_oid: zone.tzdb_oid(),
+                });
+            }
+            Ok(())
+        };
+        for pending in &batch.rows {
+            match pending {
+                PendingRow::Vertex { props, .. } | PendingRow::Edge { props, .. } => {
+                    for (_, value) in props {
+                        admit(value)?;
+                    }
+                }
+                PendingRow::SetProperty { value, .. }
+                | PendingRow::SetEdgeProperty { value, .. } => {
+                    if let Some(value) = value {
+                        admit(value)?;
+                    }
+                }
+                PendingRow::CompareAndSet {
+                    expected, value, ..
+                } => {
+                    if let Some(expected) = expected {
+                        admit(expected)?;
+                    }
+                    admit(value)?;
+                }
+                PendingRow::DeleteEdge { .. }
+                | PendingRow::DeleteVertex { .. }
+                | PendingRow::SetLabel { .. } => {}
+            }
         }
 
         // Build durable rows SEQUENTIALLY, deriving every delete's
