@@ -559,10 +559,30 @@ fn source_oracle(db: &Database<MemVfs>, at: CommitSeq) -> Vec<(Vec<VId>, u64)> {
             }
         }
     }
+    // Cost derivation (fgdb-dewk adjudication): the source layer charges one
+    // SnapshotRecord per distinct admitted element the shape must read, from
+    // storage facts only — never from engine counters.
+    // q0 vertex scan: every visible vertex row is admitted once.
+    let vertex_charge = vertices.len() as u64;
+    // q1 bound-edge scan (fgdb-dewk adjudication): the bound slot is b
+    // (slot 1), so the expansion walks each qualifying vertex's incoming
+    // adjacency and charges one SnapshotRecord per newly selected visible
+    // R-edge whose dst passes the bound predicate. Deduped by edge
+    // identity; vertices_at/edges_at are the sole derivation source.
+    let edge_charge = edges
+        .iter()
+        .filter(|r| r.entry.relation == R && qualifying(r.entry.dst))
+        .map(|r| r.entry.eid)
+        .collect::<BTreeSet<_>>()
+        .len() as u64;
+    // q2 two-hop closure: the plan's first operator is an unbound edge scan
+    // (no Select precedes the Expands), so the source keeps the original
+    // full-scan accounting verbatim: one SnapshotRecord per visible edge.
+    let closed_charge = edges.len() as u64;
     vec![
-        (nodes, vertices.len() as u64),
-        (destinations.into_iter().collect(), edges.len() as u64),
-        (closed.into_iter().collect(), edges.len() as u64),
+        (nodes, vertex_charge),
+        (destinations.into_iter().collect(), edge_charge),
+        (closed.into_iter().collect(), closed_charge),
     ]
 }
 
@@ -589,7 +609,14 @@ fn check_source_history(
                 .execute_prepared_query_governed_at(query_cx, query, at, generous())
                 .unwrap();
             assert_eq!(run.value, *rows);
-            assert_eq!(run.rows.snapshot_records, *count);
+            assert_eq!(
+                run.rows.snapshot_records,
+                *count,
+                "query_idx={} seq={seq} rows={:?} expected_count={count}",
+                queries.iter().position(|q| std::ptr::eq(q, query)).unwrap(),
+                rows,
+                seq = at.0,
+            );
             assert_eq!(
                 view.execute_prepared_query_governed_at(query_cx, query, at, generous())
                     .unwrap(),
