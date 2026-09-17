@@ -22,7 +22,7 @@ const R: RelationId = RelationId(1);
 const N: PropertyKeyId = PropertyKeyId(1);
 const BOUND: i64 = 7;
 const ID_TEXT: &str = "MATCH (a)-[:R]->(b) WHERE a.n = $n RETURN b";
-const INCOMING_TEXT: &str = "MATCH (b)<-[:R]-(a) WHERE a.n = $n RETURN b";
+const INCOMING_TEXT: &str = "MATCH (a)<-[:R]-(b) WHERE a.n = $n RETURN b";
 const UNDIRECTED_TEXT: &str = "MATCH (a)-[:R]-(b) WHERE a.n = $n RETURN b";
 
 fn keys() -> DatabaseKeys {
@@ -64,6 +64,14 @@ async fn generated(
             for id in 1..12_u128 {
                 batch.create_vertex(VId(id), vec![], vec![]);
             }
+            batch.add_edge(EId(1), VId(0), VId(11), vec![]);
+            batch.add_edge(EId(2), VId(11), VId(0), vec![]);
+        }
+        if commit == 2 {
+            batch.set_edge_property(EId(2), N, Some(CanonicalScalar::Int(42)));
+        }
+        if commit == 3 {
+            batch.delete_edge(EId(1));
         }
         for _ in 0..10 {
             let roll = rng.next() % 5;
@@ -153,7 +161,6 @@ fn indexed_bound_answers_equal_scan_answers_across_history_and_directions() {
                 PreparedGqlTemplate::prepare(UNDIRECTED_TEXT, &names).unwrap();
             let args = GqlParameters::new().with_int64("n", BOUND).unwrap();
             let mut saw_nonempty = false;
-            let mut saw_deleted_filtered = false;
             for at in &seqs {
                 for (template, forward) in [
                     (&bound_template, Some(true)),
@@ -165,7 +172,13 @@ fn indexed_bound_answers_equal_scan_answers_across_history_and_directions() {
                     // distinct single-column rows.
                     let expected: Vec<VId> = oracle(&db, *at, VId(0), forward)
                         .into_iter()
-                        .map(|(_, other)| other)
+                        .map(|(src, dst)| {
+                            if forward == Some(false) || (forward.is_none() && dst == VId(0)) {
+                                src
+                            } else {
+                                dst
+                            }
+                        })
                         .collect::<std::collections::BTreeSet<_>>()
                         .into_iter()
                         .collect();
@@ -181,30 +194,9 @@ fn indexed_bound_answers_equal_scan_answers_across_history_and_directions() {
                     saw_nonempty |= !rows.value.is_empty();
                 }
             }
-            // Deleted edges must actually filter: every commit after the
-            // first deletes edges, so bound-incident triples ever created
-            // must exceed what remains visible at the final cut.
-            let final_at = *seqs.last().unwrap();
-            let mut ever_incident = 0_u64;
-            let mut visible_incident = 0_u64;
-            let mut seen_eids = std::collections::BTreeSet::new();
-            for record in db.edges_at(final_at).unwrap() {
-                let entry = &record.entry;
-                if entry.relation == R && (entry.src == VId(0) || entry.dst == VId(0)) {
-                    seen_eids.insert(entry.eid);
-                }
-            }
-            for eid in seen_eids {
-                ever_incident += 1;
-                if db.edge_at(eid, final_at).unwrap().is_some() {
-                    visible_incident += 1;
-                }
-            }
-            saw_deleted_filtered = ever_incident > visible_incident;
-            assert!(
-                saw_deleted_filtered,
-                "seed {graph_seed}: no deleted edge was ever filtered"
-            );
+            assert!(db.edge_at(EId(1), seqs[2]).unwrap().is_some());
+            assert!(db.edge_at(EId(1), seqs[3]).unwrap().is_none());
+            assert!(db.edge_at(EId(1), seqs[5]).unwrap().is_none());
             assert!(
                 saw_nonempty,
                 "seed {graph_seed}: differential produced no rows"
@@ -214,46 +206,46 @@ fn indexed_bound_answers_equal_scan_answers_across_history_and_directions() {
     }
 }
 
-/// Expanding from the bound vertex charges Work/SnapshotRecord events
-/// proportional to its degree d: identical neighbourhoods on a 1k-edge and a
-/// 50k-edge graph produce identical charged counts for the same bound query.
+/// Identical neighbourhoods on 1k and 50k edge snapshots must charge the same work.
 #[test]
 fn bound_degree_charges_stay_constant_as_unrelated_edges_grow() {
-    let ((), report) = run_async_under_lab(0xa26_0042, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let commit = contexts.commit();
-        let query_cx = contexts.query();
-        let names = RelationBind::new()
-            .with_relation("R", R)
-            .with_property("n", N);
-        let template = PreparedGqlTemplate::prepare(ID_TEXT, &names).unwrap();
-        let args = GqlParameters::new().with_int64("n", BOUND).unwrap();
-        let query = template.bind_parameters(&args).unwrap();
-        let wide = GqlQueryPolicy::new(1_000_000, 1_000_000, 10_000_000, 10_000_000);
-        // Identical degree-20 bound neighbourhood on both sizes.
-        let mut small = Database::open_memory(&commit, keys()).await.unwrap();
-        let at_small = graph_of_degree(&mut small, &commit, 1_000, 20).await;
-        let mut large = Database::open_memory(&commit, keys()).await.unwrap();
-        let at_large = graph_of_degree(&mut large, &commit, 50_000, 20).await;
-        assert_eq!(at_small, at_large);
-        let one = small
-            .execute_prepared_query_governed_at(&query_cx, &query, at_small, wide)
-            .unwrap();
-        let two = large
-            .execute_prepared_query_governed_at(&query_cx, &query, at_large, wide)
-            .unwrap();
-        // Admission is degree-proportional: the source Work and SnapshotRecord
-        // charges must be identical; the scan path would charge |E| records.
-        assert_eq!(one.rows.snapshot_records, two.rows.snapshot_records);
-        assert_eq!(one.evaluator.work_units, two.evaluator.work_units);
-        assert_eq!(one.value, two.value);
-        assert_eq!(
-            one.rows.snapshot_records, 10,
-            "forward bound lookup charges out-degree"
-        );
-        assert!(one.evaluator.work_units > 0);
-    });
-    assert!(report.lab_test_passed(), "{report:?}");
+    // Two sequential single-database lab runs: (edges, expected records).
+    let mut charged = Vec::new();
+    for (lab_seed, total) in [(0xa26_0042_u64, 1_000_usize), (0xa26_0043, 50_000)] {
+        let (result, report) = run_async_under_lab(lab_seed, move |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let query_cx = contexts.query();
+            let names = RelationBind::new()
+                .with_relation("R", R)
+                .with_property("n", N);
+            let template = PreparedGqlTemplate::prepare(ID_TEXT, &names).unwrap();
+            let args = GqlParameters::new().with_int64("n", BOUND).unwrap();
+            let query = template.bind_parameters(&args).unwrap();
+            let wide = GqlQueryPolicy::new(1_000_000, 1_000_000, 10_000_000, 10_000_000);
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let at = graph_of_degree(&mut db, &commit, total, 20).await;
+            let run = db
+                .execute_prepared_query_governed_at(&query_cx, &query, at, wide)
+                .unwrap();
+            (
+                run.rows.snapshot_records,
+                run.evaluator.work_units,
+                run.value,
+            )
+        });
+        assert!(report.lab_test_passed(), "total {total}: {report:?}");
+        charged.push((total, result));
+    }
+    // Identical degree-20 bound neighbourhood: source charges must match.
+    assert_eq!(charged[0].1.0, charged[1].1.0, "snapshot records");
+    assert_eq!(charged[0].1.1, charged[1].1.1, "work units");
+    assert_eq!(charged[0].1.2, charged[1].1.2, "result rows");
+    assert_eq!(
+        charged[0].1.0, 10,
+        "forward bound lookup charges out-degree"
+    );
+    assert!(charged[0].1.1 > 0);
 }
 
 /// One commit building `total` edges where the bound vertex owns exactly
@@ -267,7 +259,7 @@ async fn graph_of_degree(
 ) -> CommitSeq {
     let mut batch = WriteBatch::new(R);
     batch.create_vertex(VId(0), vec![], vec![(N, CanonicalScalar::Int(BOUND))]);
-    let others = (total / 8).max(4);
+    let others = 32;
     for id in 1..=others as u128 {
         batch.create_vertex(VId(id), vec![], vec![]);
     }
@@ -287,4 +279,51 @@ async fn graph_of_degree(
         batch.add_edge(eid, src, dst, vec![]);
     }
     db.write(cx, batch).await.unwrap()
+}
+
+#[test]
+fn bound_fixed_edge_keeps_topology_for_later_walk() {
+    let ((), report) = run_async_under_lab(0xa26_0050, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 1..=4 {
+            batch.create_vertex(VId(id), vec![], vec![(N, CanonicalScalar::Int(id as i64))]);
+        }
+        for id in 1..=3 {
+            batch.add_edge(EId(id), VId(id), VId(id + 1), vec![]);
+        }
+        let at = db.write(&commit, batch).await.unwrap();
+        let query = fgdb_gql::PreparedGraphText::prepare(
+            "MATCH WALK (a)-[:R]->(b)-[:R*2..2]->(c) WHERE a.n = 1 RETURN ALL c",
+            |kind, name| match (kind, name) {
+                (fgdb_gql::GraphSymbolKind::Relation, "R") => {
+                    Some(fgdb_gql::GraphSymbol::Relation(R))
+                }
+                (fgdb_gql::GraphSymbolKind::Property, "n") => {
+                    Some(fgdb_gql::GraphSymbol::Property(N))
+                }
+                _ => None,
+            },
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        let run = db
+            .execute_graph_pattern_governed_at(
+                &contexts.query(),
+                &query,
+                at,
+                GqlQueryPolicy::new(1000, 1000, 100_000, 100_000),
+            )
+            .unwrap();
+        let ids: Vec<_> = run
+            .value
+            .iter()
+            .map(|row| row.values()[0].as_vertex().unwrap())
+            .collect();
+        assert_eq!(ids, vec![VId(4)]);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
