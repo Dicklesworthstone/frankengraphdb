@@ -32,6 +32,7 @@
 //! | shape | what breaks |
 //! |---|---|
 //! | `ingest-power-law` | uniform-degree benchmarks hide supernode ingest cost |
+//! | `bulk-load` | caller-key mapping and bounded durable ingestion of 10,000 edges |
 //! | `point-reads-supernode` | p99 under degree skew on a warm decoded cache |
 //! | `version-chain` | one-key history amplification: bytes/version + historical probe cost |
 //! | `cold-reopen` | the store path instead of the memory path |
@@ -41,9 +42,9 @@
 //! `crates/fgdb/tests/hostile_shapes.rs` for the same statement in witness
 //! form). The harness cannot measure what the engine cannot express.
 
-use fgdb::{Database, DatabaseKeys, WriteBatch};
-use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::context::CommitCx;
+use fgdb::{BulkEdge, BulkLoadPolicy, BulkRow, BulkVertex, Database, DatabaseKeys, WriteBatch};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
+use fgdb_types::context::{CommitCx, QueryCx};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use fgdb_types::{CanonicalScalar, EId, VId};
 use std::collections::BTreeMap;
@@ -529,6 +530,139 @@ pub async fn shape_ingest_power_law(cx: &CommitCx) -> Result<(), String> {
     Ok(())
 }
 
+/// Bulk ingestion with generated caller keys, through the production two-fsync
+/// commit path. Only `bulk_load` is timed; generation, reopen, and exhaustive
+/// logical record verification are outside the measurement.
+pub async fn shape_bulk_load(query_cx: &QueryCx, cx: &CommitCx) -> Result<(), String> {
+    const VERTICES: usize = 1_024;
+    const EDGES: usize = 10_000;
+    const ROWS_PER_CHUNK: usize = 256;
+    let mut rng = Lcg::new(LOAD_SEED);
+    let vertex_keys: Vec<String> = (0..VERTICES).map(|i| format!("vertex-{i}")).collect();
+    let mut rows = Vec::with_capacity(VERTICES + EDGES);
+    for (index, key) in vertex_keys.iter().enumerate() {
+        rows.push(BulkRow::Vertex(BulkVertex {
+            key: key.clone(),
+            labels: vec![LabelId(2)],
+            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64))],
+        }));
+    }
+    for index in 0..EDGES {
+        rows.push(BulkRow::Edge(BulkEdge {
+            key: format!("edge-{index}"),
+            source: vertex_keys[rng.below(VERTICES)].clone(),
+            destination: vertex_keys[rng.below(VERTICES)].clone(),
+            relation: if index % 2 == 0 { KNOWS } else { RelationId(2) },
+            props: vec![(WEIGHT, CanonicalScalar::Int(index as i64))],
+        }));
+    }
+    let dir = scratch("bulk-load");
+    let mut db = Database::create(cx, &dir, keys())
+        .await
+        .map_err(|error| format!("bulk-load create: {error}"))?;
+    let started = Instant::now();
+    let checkpoint = db
+        .bulk_load(
+            query_cx,
+            cx,
+            rows.iter().cloned(),
+            BulkLoadPolicy::new(ROWS_PER_CHUNK, KNOWS),
+        )
+        .await
+        .map_err(|error| format!("bulk-load: {error}"))?;
+    let elapsed_us = started.elapsed().as_micros();
+    if checkpoint.next_row != rows.len()
+        || checkpoint.vertices.len() != VERTICES
+        || checkpoint.edges.len() != EDGES
+        || checkpoint.committed_chunks != rows.len().div_ceil(ROWS_PER_CHUNK)
+    {
+        return Err("bulk-load checkpoint does not cover the complete input".to_string());
+    }
+    // Releasing the writer lease and reopening ensures the checked records
+    // came from durable state, not merely the loader's decoded cache.
+    drop(db);
+    let db = Database::open(cx, &dir, keys())
+        .await
+        .map_err(|error| format!("bulk-load reopen: {error}"))?;
+    if db
+        .frontier()
+        .map_err(|error| format!("bulk-load frontier: {error}"))?
+        != checkpoint.frontier
+    {
+        return Err("bulk-load recovered frontier differs from checkpoint".to_string());
+    }
+    for row in &rows {
+        match row {
+            BulkRow::Vertex(expected) => {
+                let vid = checkpoint
+                    .vertices
+                    .get(&expected.key)
+                    .ok_or_else(|| format!("bulk-load missing vertex key {}", expected.key))?;
+                let actual = db
+                    .vertex(*vid)
+                    .map_err(|error| format!("bulk-load vertex read: {error}"))?
+                    .ok_or_else(|| format!("bulk-load missing vertex {}", expected.key))?;
+                if actual.vid != *vid
+                    || actual.labels != expected.labels
+                    || actual.props != expected.props
+                {
+                    return Err(format!(
+                        "bulk-load vertex {} differs from input",
+                        expected.key
+                    ));
+                }
+            }
+            BulkRow::Edge(expected) => {
+                let eid = checkpoint
+                    .edges
+                    .get(&expected.key)
+                    .ok_or_else(|| format!("bulk-load missing edge key {}", expected.key))?;
+                let source = checkpoint
+                    .vertices
+                    .get(&expected.source)
+                    .ok_or_else(|| format!("bulk-load missing endpoint {}", expected.source))?;
+                let destination =
+                    checkpoint
+                        .vertices
+                        .get(&expected.destination)
+                        .ok_or_else(|| {
+                            format!("bulk-load missing endpoint {}", expected.destination)
+                        })?;
+                let actual = db
+                    .edge(*eid)
+                    .map_err(|error| format!("bulk-load edge read: {error}"))?
+                    .ok_or_else(|| format!("bulk-load missing edge {}", expected.key))?;
+                if actual.entry.eid != *eid
+                    || actual.entry.src != *source
+                    || actual.entry.dst != *destination
+                    || actual.entry.relation != expected.relation
+                    || actual.props != expected.props
+                {
+                    return Err(format!(
+                        "bulk-load edge {} differs from input",
+                        expected.key
+                    ));
+                }
+            }
+        }
+    }
+    shape_result(
+        "bulk-load",
+        &format!(
+            "vertices={VERTICES} edges={EDGES} rows_per_chunk={ROWS_PER_CHUNK} durable=two-fsync fsync=on timing=bulk-load-only verification=reopened-records"
+        ),
+        &[
+            ("total_edges", EDGES as u128),
+            ("elapsed_us", elapsed_us),
+            ("edges_per_s", EDGES as u128 * 1_000_000 / elapsed_us.max(1)),
+            ("bytes_on_disk", bytes_on_disk(&dir) as u128),
+            ("seed", LOAD_SEED as u128),
+            ("commits", checkpoint.committed_chunks as u128),
+        ],
+    );
+    Ok(())
+}
+
 /// Shape 2: warm point reads under degree skew — supernode and tail on one
 /// decoded cache, every measured read checked against the model. Both
 /// adjacency faces are verified: the warm pass walks the whole graph, and the
@@ -870,10 +1004,11 @@ pub async fn shape_compaction_under_load(cx: &CommitCx) -> Result<(), String> {
 
 /// Dispatch one named shape. Names are the published contract of the binary's
 /// shape selector; an unknown name is a caller error, not a silent skip.
-pub async fn run_shape(name: &str, cx: &CommitCx) -> Result<(), String> {
+pub async fn run_shape(name: &str, query_cx: &QueryCx, cx: &CommitCx) -> Result<(), String> {
     eprintln!("==> {name}");
     match name {
         "ingest-power-law" => shape_ingest_power_law(cx).await,
+        "bulk-load" => shape_bulk_load(query_cx, cx).await,
         "point-reads-supernode" => shape_point_reads_supernode(cx).await,
         "version-chain" => shape_version_chain(cx).await,
         "cold-reopen" => shape_cold_reopen(cx).await,

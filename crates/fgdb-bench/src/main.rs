@@ -10,7 +10,9 @@ fn main() {
     let which = std::env::args().nth(1).unwrap_or_else(|| "all".to_string());
     let runtime = RuntimeBuilder::new().build().expect("runtime builds");
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
-    let cx = PurposeContexts::narrow_runtime_root(&root).commit();
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let query_cx = contexts.query();
+    let cx = contexts.commit();
 
     let logical_cores = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
@@ -43,6 +45,7 @@ fn main() {
     let selected: Vec<&str> = if which == "all" {
         vec![
             "ingest-power-law",
+            "bulk-load",
             "point-reads-supernode",
             "version-chain",
             "cold-reopen",
@@ -55,7 +58,7 @@ fn main() {
     let failures = runtime.block_on(async {
         let mut failures = 0;
         for name in selected {
-            match run_shape(name, &cx).await {
+            match run_shape(name, &query_cx, &cx).await {
                 Ok(()) => {}
                 Err(error) if error.starts_with("ENGINE_LIMIT: ") => {
                     // The harness worked; the engine hit a documented limit.

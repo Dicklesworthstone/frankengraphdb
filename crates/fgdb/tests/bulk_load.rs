@@ -337,8 +337,13 @@ async fn native_create(db: &mut Database, contexts: &PurposeContexts, rows: &[Bu
 }
 
 fn query_answers(db: &Database, query_cx: &QueryCx, relation: RelationId) -> Vec<Vec<i64>> {
+    // The accepted text surface projects vertex variables (e.g. the corpus's
+    // "RETURN ALL a,c.p AS score"); edge-variable projections like "e.k" are
+    // refused by the parser. Edge payloads are verified exhaustively through
+    // logical_state instead; this differential pins the same GQL pattern
+    // answers over both graphs.
     let text = format!(
-        "MATCH (a)-[e:{}]->(b) RETURN ALL a.k,e.k,b.k,e.p",
+        "MATCH (a)-[:{}]->(b) RETURN ALL a.k, b.k",
         if relation == R { "R" } else { "S" }
     );
     let query = PreparedGraphText::prepare(&text, symbols)

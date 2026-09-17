@@ -27,18 +27,19 @@ use fgdb_types::context::PurposeContexts;
 /// production.
 const BIN_SHAPES: &[&str] = &[
     "ingest-power-law",
+    "bulk-load",
     "point-reads-supernode",
     "version-chain",
     "cold-reopen",
     "compaction-under-load",
 ];
 
-fn runtime_cx() -> fgdb_types::context::CommitCx {
+fn runtime_cx() -> PurposeContexts {
     let runtime = RuntimeBuilder::new()
         .build()
         .expect("production runtime builds for bench witness");
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
-    PurposeContexts::narrow_runtime_root(&root).commit()
+    PurposeContexts::narrow_runtime_root(&root)
 }
 
 #[test]
@@ -50,8 +51,9 @@ fn shape_dispatch_arms_match_binary_list() {
     // real I/O; instead, the test verifies the unknown-name path closes the
     // dispatch and the binary list is non-empty + carries every name we
     // know the library to support.
-    assert_eq!(BIN_SHAPES.len(), 5, "five published shapes today");
+    assert_eq!(BIN_SHAPES.len(), 6, "six published shapes today");
     assert!(BIN_SHAPES.contains(&"ingest-power-law"));
+    assert!(BIN_SHAPES.contains(&"bulk-load"));
     assert!(BIN_SHAPES.contains(&"point-reads-supernode"));
     assert!(BIN_SHAPES.contains(&"version-chain"));
     assert!(BIN_SHAPES.contains(&"cold-reopen"));
@@ -68,8 +70,10 @@ fn unknown_shape_is_refused_not_panicked() {
         .build()
         .expect("production runtime builds for dispatch test");
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
-    let cx = PurposeContexts::narrow_runtime_root(&root).commit();
-    let bad = runtime.block_on(async { run_shape("not-a-real-shape", &cx).await });
+    let contexts = PurposeContexts::narrow_runtime_root(&root);
+    let bad = runtime.block_on(async {
+        run_shape("not-a-real-shape", &contexts.query(), &contexts.commit()).await
+    });
     let err = bad.expect_err("unknown shape must be a typed Err, not Ok");
     assert!(
         err.contains("not-a-real-shape"),
@@ -84,7 +88,8 @@ fn cold_reopen_shape_runs_against_the_real_durable_path() {
     // reopen path has lost something the bench library itself relies on.
     let cx = runtime_cx();
     let runtime = RuntimeBuilder::new().build().expect("runtime builds");
-    let result = runtime.block_on(async { run_shape("cold-reopen", &cx).await });
+    let result =
+        runtime.block_on(async { run_shape("cold-reopen", &cx.query(), &cx.commit()).await });
     result.expect("cold-reopen shape must succeed on the real durable path");
 }
 
@@ -98,6 +103,7 @@ fn point_reads_supernode_shape_verifies_both_adjacency_faces() {
     let runtime = RuntimeBuilder::new()
         .build()
         .expect("production runtime builds for point-reads shape");
-    let result = runtime.block_on(async { run_shape("point-reads-supernode", &cx).await });
+    let result = runtime
+        .block_on(async { run_shape("point-reads-supernode", &cx.query(), &cx.commit()).await });
     result.expect("point-reads-supernode shape must verify both faces");
 }
