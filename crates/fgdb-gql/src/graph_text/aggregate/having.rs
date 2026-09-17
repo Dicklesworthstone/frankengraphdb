@@ -5,7 +5,7 @@
 //! IN/NOT IN list constructors and BETWEEN/NOT BETWEEN inclusive ranges lower
 //! to the existing eager three-valued comparisons. An operand can be a public
 //! alias, grouping expression, hidden aggregate, scalar literal or parameter.
-
+use super::super::boolean::comparison_tag;
 use super::*;
 use crate::algebra::ScalarPredicate;
 use crate::{GraphHavingExpression, GraphHavingOp, GraphHavingOperand, MAX_HAVING_INSTRUCTIONS};
@@ -100,6 +100,79 @@ impl HavingTemplate {
             .with_having_expression(&expression)
             .map_err(failure)
     }
+
+    /// Resolved unbound HAVING program: column identities, comparisons,
+    /// literal/parameter operands and structure. Values never enter.
+    pub(super) fn append_template_transcript(&self, bytes: &mut Vec<u8>) {
+        fn operand(bytes: &mut Vec<u8>, operand: &Operand) {
+            match operand {
+                Operand::Column(column) => {
+                    bytes.push(0);
+                    match column {
+                        GraphAggregateColumn::GroupKey(at) => {
+                            bytes.push(0);
+                            bytes.extend_from_slice(&(*at as u64).to_be_bytes());
+                        }
+                        GraphAggregateColumn::Aggregate(at) => {
+                            bytes.push(1);
+                            bytes.extend_from_slice(&(*at as u64).to_be_bytes());
+                        }
+                    }
+                }
+                Operand::Number { value, .. } => {
+                    bytes.push(1);
+                    super::append_number(bytes, value);
+                }
+                Operand::Scalar(value) => {
+                    bytes.push(2);
+                    let encoded = value.canonical_value_bytes();
+                    bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+                    bytes.extend_from_slice(encoded);
+                }
+            }
+        }
+        bytes.extend_from_slice(&(self.program.len() as u64).to_be_bytes());
+        for op in &self.program {
+            match op {
+                Op::Compare {
+                    left,
+                    comparison,
+                    right,
+                } => {
+                    bytes.push(0);
+                    operand(bytes, left);
+                    bytes.push(comparison_tag(*comparison));
+                    operand(bytes, right);
+                }
+                Op::IsNull {
+                    operand: inner,
+                    is_null,
+                } => {
+                    bytes.push(1);
+                    operand(bytes, inner);
+                    bytes.push(u8::from(*is_null));
+                }
+                Op::Truth(value) => {
+                    bytes.push(2);
+                    bytes.push(match value {
+                        None => 0,
+                        Some(false) => 1,
+                        Some(true) => 2,
+                    });
+                }
+                Op::And => bytes.push(3),
+                Op::Or => bytes.push(4),
+                Op::Not => bytes.push(5),
+            }
+        }
+    }
+}
+
+/// Length-framed facade view of one resolved HAVING template.
+pub(super) fn template_program_bytes(template: &HavingTemplate) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    template.append_template_transcript(&mut bytes);
+    bytes
 }
 
 pub(super) fn parse<'a>(

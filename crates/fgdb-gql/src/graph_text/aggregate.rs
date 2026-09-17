@@ -5,6 +5,7 @@
 
 mod having;
 
+use super::boolean::{append_number, comparison_tag};
 use super::*;
 use crate::set_text::{ReadProjectionTemplate, ReadValueTemplate};
 use crate::{
@@ -508,6 +509,213 @@ impl PreparedGraphAggregateText {
         &self.slots
     }
 
+    /// Versioned, value-independent template transcript: child template,
+    /// computed input projection, resolved grouping/summary structure,
+    /// HAVING (filters and expression program), ordering and paging shape.
+    /// Statement text and parameter values never enter; parameters appear as
+    /// their declared indices through the shared numeric operand encoding.
+    #[must_use]
+    pub(crate) fn canonical_template_bytes(&self) -> Vec<u8> {
+        let mut bytes = b"fgdb:gql:aggregate-text-template:v1\0".to_vec();
+        let child = self.child.template_bytes();
+        bytes.extend_from_slice(&(child.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&child);
+        match &self.input_projection {
+            None => bytes.push(0),
+            Some(projection) => {
+                bytes.push(1);
+                encode_projection(&mut bytes, projection);
+            }
+        }
+        fn ordinal(bytes: &mut Vec<u8>, value: usize) {
+            bytes.extend_from_slice(&(value as u64).to_be_bytes());
+        }
+        ordinal(&mut bytes, self.keys.len());
+        for key in &self.keys {
+            ordinal(&mut bytes, *key);
+        }
+        ordinal(&mut bytes, self.output_keys.len());
+        for key in &self.output_keys {
+            ordinal(&mut bytes, *key);
+        }
+        ordinal(&mut bytes, self.summaries.len());
+        for summary in &self.summaries {
+            bytes.push(match summary.function {
+                GraphAggregateFunction::CountRows => 0,
+                GraphAggregateFunction::Count => 1,
+                GraphAggregateFunction::CountDistinct => 2,
+                GraphAggregateFunction::SumInt => 3,
+                GraphAggregateFunction::SumIntDistinct => 4,
+                GraphAggregateFunction::AverageInt => 5,
+                GraphAggregateFunction::AverageIntDistinct => 6,
+                GraphAggregateFunction::Min => 7,
+                GraphAggregateFunction::Max => 8,
+                GraphAggregateFunction::Collect => 9,
+                GraphAggregateFunction::CollectDistinct => 10,
+            });
+            match summary.column {
+                None => bytes.push(0),
+                Some(column) => {
+                    bytes.push(1);
+                    ordinal(&mut bytes, column);
+                }
+            }
+        }
+        ordinal(&mut bytes, self.output_aggregates);
+        bytes.push(u8::from(self.output_distinct));
+        ordinal(&mut bytes, self.names.len());
+        for name in &self.names {
+            ordinal(&mut bytes, name.len());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        ordinal(&mut bytes, self.slots.len());
+        for slot in &self.slots {
+            match slot {
+                GraphAggregateTextSlot::GroupKey(at) => {
+                    bytes.push(0);
+                    ordinal(&mut bytes, *at);
+                }
+                GraphAggregateTextSlot::Aggregate(at) => {
+                    bytes.push(1);
+                    ordinal(&mut bytes, *at);
+                }
+            }
+        }
+        ordinal(&mut bytes, self.having.len());
+        for filter in &self.having {
+            encode_aggregate_column(&mut bytes, &filter.column);
+            match &filter.test {
+                HavingTest::Integer { comparison, value } => {
+                    bytes.push(0);
+                    bytes.push(comparison_tag(*comparison));
+                    append_number(&mut bytes, value);
+                }
+                HavingTest::IsNull => bytes.push(1),
+                HavingTest::IsNotNull => bytes.push(2),
+            }
+        }
+        match &self.having_expression {
+            None => bytes.push(0),
+            Some(expression) => {
+                bytes.push(1);
+                let program = having::template_program_bytes(expression);
+                bytes.extend_from_slice(&(program.len() as u64).to_be_bytes());
+                bytes.extend_from_slice(&program);
+            }
+        }
+        ordinal(&mut bytes, self.ordering.len());
+        for order in &self.ordering {
+            encode_aggregate_column(&mut bytes, &order.column);
+            bytes.push(u8::from(order.descending));
+            bytes.push(match order.nulls {
+                GraphNullPlacement::First => 0,
+                GraphNullPlacement::Last => 1,
+            });
+        }
+        append_number(&mut bytes, &self.offset);
+        match &self.count {
+            None => bytes.push(0),
+            Some(count) => {
+                bytes.push(1);
+                append_number(&mut bytes, count);
+            }
+        }
+        bytes
+    }
+
+    /// Logical template operators of the aggregate pipeline in evaluation
+    /// order: the child scan topology, optional projection, grouping and
+    /// summaries, optional HAVING, ordering and output shaping.
+    #[must_use]
+    pub(crate) fn template_operators(&self) -> Vec<&'static str> {
+        let mut operators = self.child.template_operators();
+        if self.input_projection.is_some() {
+            operators.push("ProjectValues");
+        }
+        operators.push("Aggregate");
+        if !self.having.is_empty() || self.having_expression.is_some() {
+            operators.push("SelectHaving");
+        }
+        if !self.ordering.is_empty() {
+            operators.push("OrderByAggregate");
+        }
+        if self.output_distinct {
+            operators.push("Distinct");
+        }
+        operators.push("Limit");
+        operators
+    }
+}
+
+fn encode_projection(bytes: &mut Vec<u8>, projection: &[ReadProjectionTemplate]) {
+    bytes.extend_from_slice(&(projection.len() as u64).to_be_bytes());
+    for item in projection {
+        bytes.extend_from_slice(&(item.name.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(item.name.as_bytes());
+        encode_value_template(bytes, &item.value);
+    }
+}
+
+fn encode_value_template(bytes: &mut Vec<u8>, value: &ReadValueTemplate) {
+    match value {
+        ReadValueTemplate::Column(index) => {
+            bytes.push(0);
+            bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+        }
+        ReadValueTemplate::List(items) => {
+            bytes.push(1);
+            encode_value_template_list(bytes, items);
+        }
+        ReadValueTemplate::Index { list, index } => {
+            bytes.push(2);
+            encode_value_template(bytes, list);
+            encode_value_template(bytes, index);
+        }
+        ReadValueTemplate::Size(inner) => {
+            bytes.push(3);
+            encode_value_template(bytes, inner);
+        }
+        ReadValueTemplate::Literal(scalar) => {
+            bytes.push(4);
+            let encoded = scalar.canonical_bytes();
+            bytes.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(encoded);
+        }
+        ReadValueTemplate::Parameter { index, .. } => {
+            bytes.push(5);
+            bytes.extend_from_slice(&(*index as u64).to_be_bytes());
+        }
+        ReadValueTemplate::Integer { program, .. } => {
+            bytes.push(6);
+            bytes.extend_from_slice(&(program.len() as u64).to_be_bytes());
+            for op in program {
+                op.append_template_transcript(bytes);
+            }
+        }
+    }
+}
+
+fn encode_value_template_list(bytes: &mut Vec<u8>, items: &[ReadValueTemplate]) {
+    bytes.extend_from_slice(&(items.len() as u64).to_be_bytes());
+    for item in items {
+        encode_value_template(bytes, item);
+    }
+}
+
+fn encode_aggregate_column(bytes: &mut Vec<u8>, column: &GraphAggregateColumn) {
+    match column {
+        GraphAggregateColumn::GroupKey(at) => {
+            bytes.push(0);
+            bytes.extend_from_slice(&(*at as u64).to_be_bytes());
+        }
+        GraphAggregateColumn::Aggregate(at) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&(*at as u64).to_be_bytes());
+        }
+    }
+}
+
+impl PreparedGraphAggregateText {
     /// One argument validation and one lowering; no parsing, resolving, source
     /// access, or materialization of child matches. Previously bound aggregates
     /// remain immutable. Output pagination does not alter the child pattern.
@@ -616,9 +824,11 @@ impl<'a> Parser<'a> {
         let TokenKind::Word(word) = self.current.kind else {
             return Ok(false);
         };
-        Ok(["COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT"]
-            .iter()
-            .any(|name| word.eq_ignore_ascii_case(name))
+        Ok([
+            "COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT",
+        ]
+        .iter()
+        .any(|name| word.eq_ignore_ascii_case(name))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
     }
 
@@ -641,7 +851,9 @@ impl<'a> Parser<'a> {
                 }
                 GraphAggregateFunction::Min => "min",
                 GraphAggregateFunction::Max => "max",
-                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => "collect",
+                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => {
+                    "collect"
+                }
             };
             (
                 expression,
