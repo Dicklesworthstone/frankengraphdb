@@ -7,6 +7,8 @@
 //! work/growth events. Events count entries, not allocator bytes: callers own
 //! key-size, comparison and callback costs. No durable encoding is introduced.
 
+pub mod incremental;
+
 use crate::{LimbLimit, ZWeight, ZWeightError};
 use std::collections::{BTreeMap, btree_map::Entry};
 
