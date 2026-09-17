@@ -45,7 +45,7 @@ impl<'a> Parser<'a> {
     ) -> Result<Expression<'a>, GraphPatternTextError> {
         let at = self.current.at;
         let mut sources: Vec<_> = computed.sources.iter().map(|&(variable, property)|
-            Projection { variable, property }).collect();
+            Projection { variable, property, path: None }).collect();
         // A bound vertex with a literal-looking name retains its identity.
         // Integer operators cannot silently cast it into a scalar column.
         let bare_vertex = if self.starts_integer_case()? { false }

@@ -12,10 +12,10 @@ mod ordering;
 mod parameters;
 mod scoped;
 pub use aggregate::{GraphAggregateTextSlot, PreparedGraphAggregateText};
+pub use crate::algebra::GraphPathFunction;
 use scoped::{BoundScope, ScopeSyntax};
-
 use crate::algebra::{
-    GlaDirection, GraphColumn, GraphPathFunction, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
+    GlaDirection, GraphColumn, GraphPatternBuilder, GraphValueOrder, GraphValueRow,
     IntegerComparison, MAX_PATTERN_EDGES, MAX_PATTERN_IDENTITIES, MAX_PATTERN_NAME_BYTES,
     MAX_PATTERN_PREDICATES, MAX_PATTERN_VERTICES, PatternBuildError, PreparedGraphPattern,
     VertexPredicate,

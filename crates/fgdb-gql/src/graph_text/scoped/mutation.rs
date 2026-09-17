@@ -17,10 +17,11 @@ use crate::mutation_text::{MutationActionTemplate, MutationIntegerTemplateOp};
 use crate::{GraphMutationAction, GraphMutationBuildError, GraphMutationTextError,
     GraphMutationTextErrorKind, GraphMutationValue, GqlScalarParameter,
     MAX_GRAPH_MUTATION_ACTIONS, PreparedGraphMutation, PreparedGraphMutationText};
+use crate::graph_text::GraphPathFunction;
 use fgdb_types::CanonicalScalar;
 
 #[derive(Clone, Copy)]
-struct Projection<'a> { variable: Name<'a>, property: Option<Name<'a>> }
+struct Projection<'a> { variable: Name<'a>, property: Option<Name<'a>>, path: Option<GraphPathFunction> }
 enum Operand {
     Column(usize), Number(Number), Literal(GqlScalarParameter),
     Integer { program: Vec<MutationIntegerTemplateOp>, at: usize },
@@ -55,7 +56,7 @@ impl<'a> Parser<'a> {
         }
         self.capacity(columns.len(), MAX_PATTERN_VERTICES, crate::algebra::PatternLimitDimension::Columns)?;
         let at = columns.len();
-        columns.push(Projection { variable, property });
+        columns.push(Projection { variable, property, path: None });
         Ok(at)
     }
 
