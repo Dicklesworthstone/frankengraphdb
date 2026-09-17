@@ -11,6 +11,7 @@ mod query_source {
     include!("aggregate_queries.rs");
 
     type EdgeTriple = (VId, RelationId, VId);
+    type IdentifiedEdge = (EId, VId, RelationId, VId);
     struct VertexView<'a> {
         labels: &'a [LabelId],
         props: &'a [(PropertyKeyId, CanonicalScalar)],
@@ -42,12 +43,15 @@ mod query_source {
     pub(super) struct OverlayQuerySource<'a, Row = VId> {
         pub(super) logical: GlaPlan<Row>,
         vertices: Vec<(VId, VertexView<'a>)>,
-        edges: Vec<EdgeTriple>,
+        edges: Vec<IdentifiedEdge>,
         pub(super) snapshot_records: usize,
     }
     impl<Row: GlaOutput> OverlayQuerySource<'_, Row> {
         pub(super) fn vertex_ids(&self) -> impl Iterator<Item = VId> + '_ { self.vertices.iter().map(|(vid, _)| *vid) }
-        pub(super) fn edge_triples(&self) -> impl Iterator<Item = EdgeTriple> + '_ { self.edges.iter().copied() }
+        pub(super) fn identified_edges(&self) -> impl Iterator<Item = IdentifiedEdge> + '_ { self.edges.iter().copied() }
+        pub(super) fn edge_triples(&self) -> impl Iterator<Item = EdgeTriple> + '_ {
+            self.edges.iter().map(|&(_, src, relation, dst)| (src, relation, dst))
+        }
         pub(super) fn matches(&self, vid: VId, predicates: &[VertexPredicate]) -> bool {
             self.vertices.binary_search_by_key(&vid, |(vid, _)| *vid).ok()
                 .is_some_and(|at| predicates.iter().all(|predicate| self.vertices[at].1.matches(predicate)))
@@ -173,7 +177,7 @@ mod query_source {
                     }
                 }
             }
-            let mut vertices = BTreeMap::new(); let mut edges = OverlayEdgeMap::new();
+            let mut edges = BTreeMap::<EId, (VId, RelationId, VId)>::new();
             if reads_edges {
                 source::visit_edges(&snapshot.blocks, self.basis, control, |entry, control| {
                     for element in [ElementId::Edge(entry.eid), ElementId::Vertex(entry.src), ElementId::Vertex(entry.dst)] {
@@ -218,7 +222,7 @@ mod query_source {
             }
             if edge_scan && logical.needs_vertex_values() {
                 let mut candidates = BTreeSet::new();
-                for &(src, relation, dst) in edges.values() {
+                for &(_, src, relation, dst) in edges.values() {
                     control(SourceEvent::Work)?;
                     let requested = logical.operators().iter().any(|op| match op {
                         GlaOperator::ScanEdges { relation: required, .. } | GlaOperator::Expand { relation: required, .. } => *required == relation,
@@ -245,8 +249,9 @@ mod query_source {
                 control(SourceEvent::ScratchEntry)?; vertex_rows.push((vid, row));
             }
             let mut edge_rows = Vec::new();
-            for triple in edges.into_values() {
-                control(SourceEvent::Work)?; control(SourceEvent::SnapshotRecord)?; control(SourceEvent::ScratchEntry)?; edge_rows.push(triple);
+            for (eid, (src, relation, dst)) in edges {
+                control(SourceEvent::Work)?; control(SourceEvent::SnapshotRecord)?; control(SourceEvent::ScratchEntry)?;
+                edge_rows.push((eid, src, relation, dst));
             }
             let snapshot_records = edge_rows.len() + if edge_scan { 0 } else { vertex_rows.len() };
             Ok(OverlayQuerySource { logical, vertices: vertex_rows, edges: edge_rows, snapshot_records })
