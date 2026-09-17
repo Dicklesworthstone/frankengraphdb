@@ -7,11 +7,12 @@
 //! The embedded adapter submits them through ordinary WriteTxn preparation.
 
 mod collect;
+mod relational;
 
 use crate::algebra::{GraphValueRow, PreparedGraphPattern, ValueProjection};
 use crate::{
     GlaExecutionStats, GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy,
-    GqlScalarParameter, GraphIntegerError, GraphIntegerExpression,
+    GqlScalarParameter, GraphIntegerError, GraphIntegerExpression, GraphSetColumnType,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, VId};
@@ -75,6 +76,8 @@ impl core::fmt::Debug for GraphMutationAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphMutationBuildError {
+    RequiresSingleGraphSource,
+    RelationalInput(crate::GraphSetBuildError),
     EmptyActions,
     TooManyActions { limit: usize, observed: usize },
     TargetColumn { action: usize, column: usize },
@@ -91,6 +94,8 @@ impl core::error::Error for GraphMutationBuildError {}
 #[derive(Debug)]
 pub enum GraphMutationError<E> {
     Source(E),
+    /// A relational selection failed before any assignment was proposed.
+    InputRelation(crate::GraphSetExecutionError<E>),
     InvalidSourceStatistics,
     InputSchema {
         row: usize,
@@ -116,6 +121,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphMutationError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(error) => error.fmt(f),
+            Self::InputRelation(error) => write!(f, "mutation input relation: {error}"),
             Self::InvalidSourceStatistics => {
                 f.write_str("mutation source returned inconsistent statistics")
             }
@@ -144,6 +150,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphMutationError<
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Source(error) => Some(error),
+            Self::InputRelation(error) => Some(error),
             Self::Arithmetic { error, .. } => Some(error),
             _ => None,
         }
@@ -151,7 +158,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphMutationError<
 }
 
 /// Bounds selection plus canonical proposal materialization. Query result_rows
-/// bounds MATCH occurrences before assignment deduplication; max_effects bounds
+/// bounds completed selection rows before assignment deduplication; max_effects bounds
 /// distinct vertex/field intents. Storage preparation and cascade/commit costs
 /// retain their own existing contracts and are not priced by these counters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +230,8 @@ impl GraphMutationBatch {
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphMutation {
     selection: PreparedGraphPattern<GraphValueRow>,
+    input_relation: Option<crate::PreparedGraphSet>,
+    columns: Vec<GraphSetColumnType>,
     relation: RelationId,
     actions: Vec<GraphMutationAction>,
 }
@@ -244,6 +253,15 @@ impl PreparedGraphMutation {
         relation: RelationId,
         actions: Vec<GraphMutationAction>,
     ) -> Result<Self, GraphMutationBuildError> {
+        Self::prepare_input(selection, None, relation, actions)
+    }
+
+    fn prepare_input(
+        selection: PreparedGraphPattern<GraphValueRow>,
+        input_relation: Option<crate::PreparedGraphSet>,
+        relation: RelationId,
+        actions: Vec<GraphMutationAction>,
+    ) -> Result<Self, GraphMutationBuildError> {
         if actions.is_empty() {
             return Err(GraphMutationBuildError::EmptyActions);
         }
@@ -253,11 +271,17 @@ impl PreparedGraphMutation {
                 observed: actions.len(),
             });
         }
-        let columns = selection.value_columns();
+        let columns: Vec<_> = match &input_relation {
+            Some(input) => input.column_types().to_vec(),
+            None => selection.value_columns().iter().map(|column| match column {
+                ValueProjection::Vertex { .. } => GraphSetColumnType::Vertex,
+                ValueProjection::Property { .. } => GraphSetColumnType::Scalar,
+            }).collect(),
+        };
         let deleting = matches!(actions[0], GraphMutationAction::DetachDelete { .. });
         for (at, action) in actions.iter().enumerate() {
             let target = action.target();
-            if !matches!(columns.get(target), Some(ValueProjection::Vertex { .. })) {
+            if columns.get(target) != Some(&GraphSetColumnType::Vertex) {
                 return Err(GraphMutationBuildError::TargetColumn {
                     action: at,
                     column: target,
@@ -265,7 +289,7 @@ impl PreparedGraphMutation {
             }
             if let GraphMutationAction::SetProperty { value, .. } = action {
                 let check = |column: usize| {
-                    if matches!(columns.get(column), Some(ValueProjection::Property { .. })) {
+                    if columns.get(column) == Some(&GraphSetColumnType::Scalar) {
                         Ok(())
                     } else {
                         Err(GraphMutationBuildError::ValueColumn { action: at, column })
@@ -287,11 +311,15 @@ impl PreparedGraphMutation {
         }
         Ok(Self {
             selection,
+            input_relation,
+            columns,
             relation,
             actions,
         })
     }
     #[must_use]
+    /// Actual graph source for the trusted reader. Actions address the completed
+    /// input_relation schema when present, not this leaf's private columns.
     pub fn selection(&self) -> &PreparedGraphPattern<GraphValueRow> {
         &self.selection
     }
@@ -367,6 +395,12 @@ impl PreparedGraphMutation {
                 }
                 GraphMutationAction::DetachDelete { .. } => bytes.push(3),
             }
+        }
+        if let Some(relation) = &self.input_relation {
+            bytes.extend_from_slice(b"fgdb:mutation-relational-input:v1\0");
+            let input = relation.canonical_bytes();
+            bytes.extend_from_slice(&(input.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&input);
         }
         bytes
     }

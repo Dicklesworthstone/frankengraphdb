@@ -136,8 +136,7 @@ pub(super) fn execute<E, C>(
     mut checkpoint: impl FnMut() -> Result<(), C>,
 ) -> ResultOf<GraphMutationBatch, E, C> {
     checkpoint().map_err(GqlQueryError::Interrupted)?;
-    let selected = source(&mutation.selection, policy.query)
-        .map_err(|error| error.map_source(GraphMutationError::Source))?;
+    let selected = mutation.select_governed(policy.query, source, &mut checkpoint)?;
     if u64::try_from(selected.value.len()).ok() != Some(selected.rows.result_rows) {
         return Err(GqlQueryError::Source(
             GraphMutationError::InvalidSourceStatistics,
@@ -182,7 +181,7 @@ pub(super) fn execute<E, C>(
         checkpoint,
     };
     meter.event(GlaExecutionEvent::Work)?;
-    let columns = mutation.selection.value_columns();
+    let columns = &mutation.columns;
     let mut proposals = BTreeMap::<(VId, Field), Proposal<'_>>::new();
     for (row_at, row) in selected.value.iter().enumerate() {
         meter.event(GlaExecutionEvent::Work)?;
@@ -195,8 +194,8 @@ pub(super) fn execute<E, C>(
         for (column, (value, expression)) in row.values().iter().zip(columns).enumerate() {
             meter.event(GlaExecutionEvent::Work)?;
             let valid = match expression {
-                ValueProjection::Vertex { .. } => value.is_null() || value.as_vertex().is_some(),
-                ValueProjection::Property { .. } => matches!(value, GraphValue::Scalar(_)),
+                GraphSetColumnType::Vertex => value.is_null() || value.as_vertex().is_some(),
+                GraphSetColumnType::Scalar => matches!(value, GraphValue::Scalar(_)),
             };
             if !valid {
                 return Err(GqlQueryError::Source(GraphMutationError::InputSchema {
