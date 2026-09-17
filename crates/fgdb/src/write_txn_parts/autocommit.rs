@@ -253,6 +253,140 @@ impl<V: Vfs + Clone> Database<V> {
             Ok(if vertex { ElementId::Vertex(VId(*high)) } else { ElementId::Edge(EId(*high)) })
         })
     }
+
+    /// Create graph structures with engine-owned identities and complete the
+    /// private transaction in one call; no caller allocator is accepted. The
+    /// identity reservation shares the explicit-transaction allocator: an
+    /// aborted autocommit never reissues or reclaims its issued identities on
+    /// this handle, and reopen rebuilds the floor from the committed stream.
+    pub async fn execute_graph_insert_autocommit_engine_governed(
+        &mut self,
+        txcx: &TxnCx,
+        query_cx: &fgdb_types::QueryCx,
+        commit_cx: &CommitCx,
+        insertion: &fgdb_gql::insertion::PreparedGraphInsert,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+    ) -> Result<
+        (fgdb_gql::insertion::GraphInsertStats, EmbeddedTxnCompletion),
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
+    > {
+        use fgdb_gql::{GqlQueryError, insertion::GraphInsertError};
+        let infrastructure = |error| GqlQueryError::Source(GraphInsertError::Source(error));
+        let mut transaction = self.begin(txcx)
+            .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
+        let stats = match transaction.execute_graph_insert_engine_governed(
+            self, query_cx, insertion, policy,
+        ) {
+            Ok(stats) => stats,
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
+        };
+        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        Ok((stats, completion))
+    }
+
+    /// Autocommit CREATE with engine-issued identities returned after the
+    /// completion future resolves; no caller allocator closure is involved.
+    pub async fn execute_graph_insert_returning_autocommit_engine_governed(
+        &mut self,
+        txcx: &TxnCx,
+        query_cx: &fgdb_types::QueryCx,
+        commit_cx: &CommitCx,
+        insertion: &fgdb_gql::insertion::PreparedGraphInsert,
+        policy: fgdb_gql::insertion::GraphInsertPolicy,
+    ) -> Result<
+        (fgdb_gql::insertion::GraphInsertStats, Vec<VId>, Vec<EId>, EmbeddedTxnCompletion),
+        fgdb_gql::GqlQueryError<
+            fgdb_gql::insertion::GraphInsertError<WriteTxnError, WriteTxnError>,
+            Box<asupersync::error::Error>,
+        >,
+    > {
+        use fgdb_gql::{GqlQueryError, insertion::GraphInsertError};
+        let infrastructure = |error| GqlQueryError::Source(GraphInsertError::Source(error));
+        let mut transaction = self.begin(txcx)
+            .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
+        let (stats, vertices, edges) = match transaction
+            .execute_graph_insert_returning_engine_governed(
+                self, query_cx, insertion, policy,
+            ) {
+            Ok(result) => result,
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
+        };
+        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        Ok((stats, vertices, edges, completion))
+    }
+
+    /// Mixed autocommit program with database-owned identity reservations.
+    pub async fn execute_graph_write_program_autocommit_engine_governed(
+        &mut self,
+        txcx: &TxnCx,
+        query_cx: &fgdb_types::QueryCx,
+        commit_cx: &CommitCx,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+    ) -> Result<
+        (fgdb_gql::GraphWriteProgramStats, EmbeddedTxnCompletion),
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, WriteTxnError, Box<asupersync::error::Error>>,
+    > {
+        use fgdb_gql::{GraphMutationProgramError, GraphWriteProgramError};
+        let infrastructure = |error| {
+            GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error))
+        };
+        let mut transaction = self.begin(txcx)
+            .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
+        let stats = match transaction.execute_graph_write_program_engine_governed(
+            self, query_cx, program, policy,
+        ) {
+            Ok(stats) => stats,
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
+        };
+        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        Ok((stats, completion))
+    }
+
+    /// Mixed autocommit program receipt with engine-issued identities; the
+    /// receipt escapes only after the outer completion succeeds.
+    pub async fn execute_graph_write_program_returning_autocommit_engine_governed(
+        &mut self,
+        txcx: &TxnCx,
+        query_cx: &fgdb_types::QueryCx,
+        commit_cx: &CommitCx,
+        program: &fgdb_gql::PreparedGraphWriteProgram,
+        policy: fgdb_gql::GraphWriteProgramPolicy,
+    ) -> Result<
+        (fgdb_gql::GraphWriteProgramReceipt, EmbeddedTxnCompletion),
+        fgdb_gql::GraphWriteProgramError<WriteTxnError, WriteTxnError, Box<asupersync::error::Error>>,
+    > {
+        use fgdb_gql::{GraphMutationProgramError, GraphWriteProgramError};
+        let infrastructure = |error| {
+            GraphWriteProgramError::Program(GraphMutationProgramError::Preflight(error))
+        };
+        let mut transaction = self.begin(txcx)
+            .map_err(|error| infrastructure(WriteTxnError::Write(error)))?;
+        let receipt = match transaction
+            .execute_graph_write_program_returning_engine_governed(
+                self, query_cx, program, policy,
+            ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                transaction.abort();
+                return Err(error);
+            }
+        };
+        let completion = transaction.finish(self, commit_cx).await.map_err(infrastructure)?;
+        Ok((receipt, completion))
+    }
 }
 
 impl WriteTxn {

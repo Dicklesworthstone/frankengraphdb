@@ -1839,6 +1839,9 @@ pub struct Database<V: Vfs = UnixVfs> {
     /// recovery path, and `incremental_publish_equals_rebuild.rs` pins that a
     /// clone-publish of this writer is byte-identical to that rebuild.
     writer: BlockWriter,
+    /// Per-open-handle, engine-owned identity reservations (never recycled;
+    /// the durable floor is re-derived from the committed stream at open).
+    identity_allocation: std::sync::Arc<std::sync::Mutex<crate::write_txn::IdentityAllocation>>,
     /// Truthfulness fence for the retained writer/snapshot pair. D2 moves
     /// this out of `Healthy` before any derived work can fail; only completing
     /// the snapshot swap (or constructing a fresh handle in `open`) moves it
@@ -2352,6 +2355,7 @@ impl<V: Vfs + Clone> Database<V> {
             vfs,
             crypto_verification_events,
             next_txn_obligation: 0,
+            identity_allocation: std::sync::Arc::default(),
             handle_owner: Arc::new(()),
         })
     }
