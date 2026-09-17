@@ -211,12 +211,7 @@ impl<V: Vfs + Clone> Database<V> {
             }
             Err(error) => diagnostics.push(error.to_string()),
         }
-        match PreparedGraphAggregateText::prepare_with_parameter_types(
-            text,
-            &declarations,
-            &mut resolve,
-        ) {
-            Ok(prepared) => {
+        match PreparedGraphText::prepare_with_parameter_types(text, &declarations, &mut resolve) {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::PatternText)?;

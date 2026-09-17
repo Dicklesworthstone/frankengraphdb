@@ -29,7 +29,7 @@ const R: RelationId = RelationId(1);
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x77; 32]);
 const GRAPH: GraphId = GraphId(1);
 const BRANCH: BranchId = BranchId(1);
-const SOURCES: [u64; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const SOURCES: [u128; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
@@ -66,8 +66,8 @@ async fn generate(db: &mut Database<MemVfs>, cx: &CommitCx, seed: u64) -> (Commi
     for id in 1..=9 {
         batch.create_vertex(VId(id), vec![], vec![]);
     }
-    let mut eid = 1u64;
-    let mut edge = |batch: &mut WriteBatch, src: u64, dst: u64| {
+    let mut eid: u128 = 1;
+    let mut edge = |batch: &mut WriteBatch, src: u128, dst: u128| {
         batch.add_edge(EId(eid), VId(src), VId(dst), vec![]);
         eid += 1;
         EId(eid - 1)

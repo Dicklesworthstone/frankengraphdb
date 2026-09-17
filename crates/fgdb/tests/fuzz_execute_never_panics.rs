@@ -204,7 +204,7 @@ fn execute_writes(txn: &mut WriteTxn, db: &mut Database<MemVfs>, cx: &QueryCx,
 }
 
 /// Deterministic statements that bind through rarely-drawn facade slots.
-const WITNESS_SEEDS: [&str; 7] = [
+const WITNESS_SEEDS: [&str; 8] = [
     "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 1 RETURN COUNT(n.p) AS total HAVING total > 0",
     "MATCH (a),(b) MERGE (a)-[:R]->(b)",
     "CREATE (n:L {p:1})",
