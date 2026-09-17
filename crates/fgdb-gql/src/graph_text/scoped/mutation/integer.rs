@@ -9,6 +9,7 @@ use crate::{
     GraphIntegerBinary, GraphIntegerBuildError, GraphIntegerExpression, GraphIntegerOp,
     GraphIntegerUnary, MAX_GRAPH_INTEGER_INSTRUCTIONS,
 };
+use fgdb_types::CanonicalScalarKind;
 
 const MAX_INTEGER_NESTING: usize = 64;
 // The precedence/CASE compiler is shared by graph assignments and relational
@@ -185,7 +186,18 @@ impl<'a> Parser<'a> {
                     ))
                 }
                 ParsedOp::Atom(Operand::Number(Number::Parameter(index)), at) => {
-                    if self.syntax.parameters[index].parameter_type == GqlParameterType::UInt64 {
+                    // Integer operand slots accept only integer-valued
+                    // parameters. The declared type is known at prepare time,
+                    // so a non-integer canonical scalar (Text, Boolean, ...)
+                    // refuses here rather than failing at bind or execution.
+                    let parameter_type = self.syntax.parameters[index].parameter_type;
+                    let integer_typed = matches!(parameter_type, GqlParameterType::Int64)
+                        || matches!(
+                            parameter_type,
+                            GqlParameterType::Scalar(kind)
+                                if kind == CanonicalScalarKind::of(&CanonicalScalar::Int(0)),
+                        );
+                    if !integer_typed {
                         return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
                     }
                     MutationIntegerTemplateOp::Parameter { index, at }

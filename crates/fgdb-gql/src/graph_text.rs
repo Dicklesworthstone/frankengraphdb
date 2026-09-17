@@ -1126,6 +1126,7 @@ impl PreparedGraphText {
         }
         bytes.extend_from_slice(&(self.ordering.len() as u64).to_be_bytes());
         for order in &self.ordering {
+            bytes.extend_from_slice(&(order.column as u64).to_be_bytes());
             bytes.push(u8::from(order.descending));
             bytes.push(u8::from(order.nulls_first));
         }
@@ -1145,10 +1146,7 @@ impl PreparedGraphText {
     #[must_use]
     pub fn template_operators(&self) -> Vec<&'static str> {
         let mut operators = self.builder.template_operators();
-        operators.extend(std::iter::repeat_n(
-            "MatchScope",
-            self.scopes.len(),
-        ));
+        operators.extend(std::iter::repeat_n("MatchScope", self.scopes.len()));
         for filter in &self.filters {
             operators.push(match filter {
                 BoundFilter::PathLength { .. } => "FilterPathLength",
@@ -1537,7 +1535,6 @@ mod tests {
             "MATCH (a) RETURN a LIMIT 18446744073709551616",
             "MATCH (a) WHERE a.n = 9223372036854775808 RETURN a",
             "MATCH (a) WHERE a.n = -9223372036854775809 RETURN a",
-            "MATCH (a {n:1}) RETURN a",
             "MATCH (a) RETURN *,a",
             "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b) } RETURN a",
         ] {
@@ -1563,19 +1560,55 @@ mod tests {
         .expect("named relationship captures are legal since fgdb-kp80 (482e77f0)");
         let pattern = prepared.bind_parameters(&GqlParameters::new()).unwrap();
         assert_eq!(pattern.columns(), &["a"]);
-        let actual = pattern.plan().execute_governed_with_properties(
-            3,
-            [],
-            [(VId(1), RelationId(1), VId(2)),
-             (VId(1), RelationId(1), VId(3)),
-             (VId(2), RelationId(2), VId(3))],
-            |_, _| Ok::<_, ()>(true),
-            |_, _| Ok(None),
-            policy(),
-            || Ok::<_, ()>(()),
-        ).unwrap();
+        let actual = pattern
+            .plan()
+            .execute_governed_with_identified_properties(
+                3,
+                [],
+                [
+                    (fgdb_types::EId(1), VId(1), RelationId(1), VId(2)),
+                    (fgdb_types::EId(2), VId(1), RelationId(1), VId(3)),
+                    (fgdb_types::EId(3), VId(2), RelationId(2), VId(3)),
+                ],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
         assert_eq!(vertex_rows(&actual.value), vec![vec![VId(1)], vec![VId(1)]]);
         assert!(calls > 0, "legal input must reach name resolution");
+    }
+
+    #[test]
+    fn inline_property_map_selects_only_equal_values() {
+        let pattern = query("MATCH (a {n:1}) RETURN a");
+        let values = [CanonicalScalar::Int(1), CanonicalScalar::Int(2)];
+        let actual = pattern
+            .plan()
+            .execute_governed_with_properties(
+                3,
+                [VId(1), VId(2), VId(3)],
+                [],
+                |vid, predicates| {
+                    Ok::<_, ()>(predicates.iter().all(|predicate| match predicate {
+                        VertexPredicate::IntegerProperty {
+                            key: _,
+                            comparison,
+                            value,
+                        } => {
+                            values.get(vid.0 as usize - 1) == Some(&CanonicalScalar::Int(*value))
+                                && *comparison == IntegerComparison::Equal
+                        }
+                        _ => true,
+                    }))
+                },
+                |vid, _| Ok(values.get(vid.0 as usize - 1)),
+                policy(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(vertex_rows(&actual.value), vec![vec![VId(1)]]);
     }
 
     #[test]

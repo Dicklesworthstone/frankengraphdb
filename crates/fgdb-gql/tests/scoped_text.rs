@@ -343,6 +343,31 @@ fn existential_scopes_are_local_and_do_not_multiply_outer_occurrences() {
 }
 
 #[test]
+fn required_match_after_optional_preserves_bound_correlations_without_rebinding_null() {
+    let pattern = query("MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) MATCH (b)-[:S]->(c) RETURN a,b,c");
+    let actual = pattern
+        .plan()
+        .execute_governed_with_properties(
+            7,
+            [VId(1), VId(2), VId(3), VId(4)],
+            [
+                (VId(1), R, VId(2)),
+                (VId(2), S, VId(3)),
+                (VId(4), S, VId(3)),
+            ],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert_eq!(
+        ids(&actual.value),
+        vec![vec![Some(VId(1)), Some(VId(2)), Some(VId(3))]]
+    );
+}
+
+#[test]
 fn malformed_or_out_of_scope_definitions_refuse_before_catalog_access() {
     for text in [
         "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(local) } RETURN local",
@@ -356,7 +381,6 @@ fn malformed_or_out_of_scope_definitions_refuse_before_catalog_access() {
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b) } RETURN a",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n > 0 OR RETURN a",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.n > 0 OR OR b.n < 0 RETURN a",
-        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) MATCH (b)-[:S]->(c) RETURN a",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE missing.n > 0 RETURN a",
         "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE b.n > $x } RETURN a LIMIT $x",
     ] {

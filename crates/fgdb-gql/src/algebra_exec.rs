@@ -441,6 +441,7 @@ struct Execution<'i, F, C, P, Row> {
 }
 
 impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
+    #[inline(never)]
     fn visit_identified_expansion<E>(
         &mut self,
         operators: &[GlaOperator],
@@ -497,6 +498,255 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
     fn visit<E>(
         &mut self,
         operators: &[GlaOperator],
+        mut ordinal: usize,
+        bindings: &mut Vec<Option<VId>>,
+        index: &Index,
+    ) -> Result<(), E>
+    where
+        F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
+    {
+        // Single-successor operators advance without retaining a call frame.
+        // Non-inlined helpers keep backtracking enumerators out of this
+        // dispatcher frame, which is retained across nested OPTIONAL scopes.
+        loop {
+            let Some(operator) = operators.get(ordinal) else {
+                return Ok(());
+            };
+            (self.control)(GlaExecutionEvent::Work)?;
+            match operator {
+                GlaOperator::VertexIdentity { left, right, equal } => {
+                    // NULL = NULL and NULL <> x are not matching predicates.
+                    if let (Some(Some(left)), Some(Some(right))) = (
+                        bindings.get(left.ordinal() as usize),
+                        bindings.get(right.ordinal() as usize),
+                    ) && (left == right) == *equal
+                    {
+                        ordinal += 1;
+                        continue;
+                    }
+                    return Ok(());
+                }
+                GlaOperator::OptionalEnd { group } => {
+                    // This boundary is before all subsequent clauses. A later
+                    // semijoin rejecting this witness cannot invent a null row.
+                    self.optional_matches[*group as usize] = true;
+                    ordinal += 1;
+                    continue;
+                }
+                GlaOperator::SelectPathLength {
+                    capture,
+                    comparison,
+                    value,
+                } => {
+                    if self.paths[*capture as usize]
+                        .as_ref()
+                        .is_some_and(|path| comparison.accepts(path.len() as i64, *value))
+                    {
+                        ordinal += 1;
+                        continue;
+                    }
+                    return Ok(());
+                }
+                GlaOperator::SelectPathNull {
+                    capture, is_null, ..
+                } => {
+                    if self.paths[*capture as usize].is_none() == *is_null {
+                        ordinal += 1;
+                        continue;
+                    }
+                    return Ok(());
+                }
+                GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. } => {
+                    // The value-aware action owns the SAME property resolver as
+                    // projection/aggregation. Its Boolean is only a continuation
+                    // decision; no projected row is produced by this selection.
+                    if (self.project)(
+                        operator,
+                        bindings,
+                        &self.paths,
+                        &mut self.projected,
+                        &mut self.control,
+                    )? {
+                        ordinal += 1;
+                        continue;
+                    }
+                    return Ok(());
+                }
+                GlaOperator::Select { slot, predicates } => {
+                    let Some(value) = bindings.get(slot.ordinal() as usize).copied() else {
+                        return Ok(());
+                    };
+                    let Some(vid) = value else {
+                        // Only a nullable value capture can reach this selection
+                        // without a positive vertex match. Its property operands
+                        // are null, not an unreadable or fabricated vertex. Reuse
+                        // the ordinary missing-property predicate semantics; no
+                        // source callback or identity-keyed cache entry is created.
+                        for predicate in predicates {
+                            for _ in 0..predicate.comparison_work_units() {
+                                (self.control)(GlaExecutionEvent::Work)?;
+                            }
+                        }
+                        if predicates
+                            .iter()
+                            .all(|predicate| predicate.matches(&[], &[]))
+                        {
+                            ordinal += 1;
+                            continue;
+                        }
+                        return Ok(());
+                    };
+                    let key = (ordinal, vid);
+                    let keep = if let Some(keep) = self.predicate_cache.get(&key) {
+                        *keep
+                    } else {
+                        (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                        // Reserve bounded canonical literal payload comparisons
+                        // before entering the source. Cache hits neither reread
+                        // the row nor repeat this work. Old fixed predicates add
+                        // no events, preserving their existing physical counters.
+                        for predicate in predicates {
+                            for _ in 0..predicate.comparison_work_units() {
+                                (self.control)(GlaExecutionEvent::Work)?;
+                            }
+                        }
+                        let keep = (self.test_vertex)(vid, predicates)?;
+                        self.predicate_cache.insert(key, keep);
+                        keep
+                    };
+                    if keep {
+                        ordinal += 1;
+                        continue;
+                    }
+                    return Ok(());
+                }
+                GlaOperator::Project { .. }
+                | GlaOperator::ProjectBindings { .. }
+                | GlaOperator::ProjectValues { .. } => {
+                    let _ = (self.project)(
+                        operator,
+                        bindings,
+                        &self.paths,
+                        &mut self.projected,
+                        &mut self.control,
+                    )?;
+                    return Ok(());
+                }
+                GlaOperator::Empty
+                | GlaOperator::ScanEdges { .. }
+                | GlaOperator::Distinct
+                | GlaOperator::OrderByVertexId
+                | GlaOperator::OrderByBindings
+                | GlaOperator::OrderByValues
+                | GlaOperator::OrderByValueColumns { .. }
+                | GlaOperator::Limit { .. } => return Ok(()),
+                GlaOperator::ScanVertices => {
+                    return self.visit_scan_vertices(operators, ordinal, bindings, index);
+                }
+                GlaOperator::Expand {
+                    source,
+                    relation,
+                    direction,
+                } => {
+                    let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten()
+                    else {
+                        return Ok(());
+                    };
+                    if self.identified_index.is_some() {
+                        return self.visit_identified_expansion(
+                            operators,
+                            ordinal,
+                            bindings,
+                            index,
+                            source,
+                            *relation,
+                            *direction,
+                            crate::GraphWalkBounds::new(1, 1).expect("one hop"),
+                            GraphWalkSearch::All,
+                        );
+                    }
+                    return self.visit_expand(
+                        operators, ordinal, bindings, index, source, *relation, *direction,
+                    );
+                }
+                GlaOperator::VarLengthExpand {
+                    source,
+                    relation,
+                    direction,
+                    bounds,
+                    search,
+                } => {
+                    let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten()
+                    else {
+                        return Ok(());
+                    };
+                    if self.identified_index.is_some() {
+                        return self.visit_identified_expansion(
+                            operators, ordinal, bindings, index, source, *relation, *direction,
+                            *bounds, *search,
+                        );
+                    }
+                    return self.visit_walk_expansion(
+                        operators, ordinal, bindings, index, source, *relation, *direction,
+                        *bounds, *search,
+                    );
+                }
+                GlaOperator::Probe { group, end, anti } => {
+                    return self
+                        .visit_probe(operators, ordinal, bindings, index, *group, *end, *anti);
+                }
+                GlaOperator::ProbeEnd { group } => {
+                    debug_assert_eq!(self.active_probe, Some(*group as usize));
+                    self.probe_matches[*group as usize] = true;
+                    return Ok(());
+                }
+                GlaOperator::Optional { group, end, slots } => {
+                    return self
+                        .visit_optional(operators, ordinal, bindings, index, *group, *end, *slots);
+                }
+                GlaOperator::BindVertex { source } => {
+                    let Some(value) = bindings[source.ordinal() as usize] else {
+                        return Ok(());
+                    };
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    bindings.push(Some(value));
+                    let result = self.visit(operators, ordinal + 1, bindings, index);
+                    let _ = bindings.pop();
+                    return result;
+                }
+                GlaOperator::BindOuterVertex { source } => {
+                    let value = bindings[source.ordinal() as usize];
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    bindings.push(value);
+                    let result = self.visit(operators, ordinal + 1, bindings, index);
+                    let _ = bindings.pop();
+                    return result;
+                }
+                GlaOperator::CapturePath {
+                    capture,
+                    start,
+                    segments,
+                } => {
+                    return self.visit_capture_path(
+                        operators, ordinal, bindings, index, *capture, *start, segments,
+                    );
+                }
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn visit_scan_vertices<E>(
+        &mut self,
+        operators: &[GlaOperator],
         ordinal: usize,
         bindings: &mut Vec<Option<VId>>,
         index: &Index,
@@ -512,330 +762,263 @@ impl<F, C, P, Row: GlaOutput> Execution<'_, F, C, P, Row> {
             &mut C,
         ) -> Result<bool, E>,
     {
-        let Some(operator) = operators.get(ordinal) else {
-            return Ok(());
-        };
-        (self.control)(GlaExecutionEvent::Work)?;
-        match operator {
-            GlaOperator::ScanVertices => {
-                for at in 0..self.vertex_domain.len() {
-                    let vid = self.vertex_domain[at];
-                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                    bindings.push(Some(vid));
-                    let result = self.visit(operators, ordinal + 1, bindings, index);
-                    let _ = bindings.pop();
-                    result?;
-                    if self
-                        .active_probe
-                        .is_some_and(|group| self.probe_matches[group])
-                    {
-                        break;
-                    }
-                }
+        for at in 0..self.vertex_domain.len() {
+            let vid = self.vertex_domain[at];
+            (self.control)(GlaExecutionEvent::ScratchEntry)?;
+            bindings.push(Some(vid));
+            let result = self.visit(operators, ordinal + 1, bindings, index);
+            let _ = bindings.pop();
+            result?;
+            if self
+                .active_probe
+                .is_some_and(|group| self.probe_matches[group])
+            {
+                break;
             }
-            GlaOperator::Select { slot, predicates } => {
-                let Some(value) = bindings.get(slot.ordinal() as usize).copied() else {
-                    return Ok(());
-                };
-                let Some(vid) = value else {
-                    // Only a nullable value capture can reach this selection
-                    // without a positive vertex match. Its property operands
-                    // are null, not an unreadable or fabricated vertex. Reuse
-                    // the ordinary missing-property predicate semantics; no
-                    // source callback or identity-keyed cache entry is created.
-                    for predicate in predicates {
-                        for _ in 0..predicate.comparison_work_units() {
-                            (self.control)(GlaExecutionEvent::Work)?;
-                        }
-                    }
-                    if predicates
-                        .iter()
-                        .all(|predicate| predicate.matches(&[], &[]))
-                    {
-                        self.visit(operators, ordinal + 1, bindings, index)?;
-                    }
-                    return Ok(());
-                };
-                let key = (ordinal, vid);
-                let keep = if let Some(keep) = self.predicate_cache.get(&key) {
-                    *keep
-                } else {
-                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                    // Reserve bounded canonical literal payload comparisons
-                    // before entering the source. Cache hits neither reread
-                    // the row nor repeat this work. Old fixed predicates add
-                    // no events, preserving their existing physical counters.
-                    for predicate in predicates {
-                        for _ in 0..predicate.comparison_work_units() {
-                            (self.control)(GlaExecutionEvent::Work)?;
-                        }
-                    }
-                    let keep = (self.test_vertex)(vid, predicates)?;
-                    self.predicate_cache.insert(key, keep);
-                    keep
-                };
-                if keep {
-                    self.visit(operators, ordinal + 1, bindings, index)?;
-                }
-            }
-            GlaOperator::CompareProperties { .. } | GlaOperator::SelectBoolean { .. } => {
-                // The value-aware action owns the SAME property resolver as
-                // projection/aggregation. Its Boolean is only a continuation
-                // decision; no projected row is produced by this selection.
-                if (self.project)(
-                    operator,
-                    bindings,
-                    &self.paths,
-                    &mut self.projected,
-                    &mut self.control,
-                )? {
-                    self.visit(operators, ordinal + 1, bindings, index)?;
-                }
-            }
-            GlaOperator::VertexIdentity { left, right, equal } => {
-                // NULL = NULL and NULL <> x are not matching predicates.
-                if let (Some(Some(left)), Some(Some(right))) = (
-                    bindings.get(left.ordinal() as usize),
-                    bindings.get(right.ordinal() as usize),
-                ) && (left == right) == *equal
-                {
-                    self.visit(operators, ordinal + 1, bindings, index)?;
-                }
-            }
-            GlaOperator::Expand {
-                source,
-                relation,
-                direction,
-            } => {
-                let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten()
-                else {
-                    return Ok(());
-                };
-                if self.identified_index.is_some() {
-                    return self.visit_identified_expansion(
-                        operators,
-                        ordinal,
-                        bindings,
-                        index,
-                        source,
-                        *relation,
-                        *direction,
-                        crate::GraphWalkBounds::new(1, 1).expect("one hop"),
-                        GraphWalkSearch::All,
-                    );
-                }
-                if let Some(neighbors) = index
-                    .get(&(*relation, *direction))
-                    .and_then(|adjacency| adjacency.get(&source))
-                {
-                    let mut candidates = join::candidates(
-                        operators,
-                        ordinal,
-                        bindings,
-                        neighbors,
-                        index,
-                        &mut self.control,
-                    )?;
-                    while let Some(destination) = candidates.next(&mut self.control)? {
-                        bindings.push(Some(destination));
-                        let result = self.visit(operators, ordinal + 1, bindings, index);
-                        let _ = bindings.pop();
-                        result?;
-                        // Existence resolves at its clause boundary, not by
-                        // counting final results or watching DISTINCT change.
-                        if self
-                            .active_probe
-                            .is_some_and(|group| self.probe_matches[group])
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-            GlaOperator::VarLengthExpand {
-                source,
-                relation,
-                direction,
-                bounds,
-                search,
-            } => {
-                let Some(source) = bindings.get(source.ordinal() as usize).copied().flatten()
-                else {
-                    return Ok(());
-                };
-                if self.identified_index.is_some() {
-                    return self.visit_identified_expansion(
-                        operators, ordinal, bindings, index, source, *relation, *direction,
-                        *bounds, *search,
-                    );
-                }
-                let mut cursor = WalkExpansion::new(
-                    *search,
-                    source,
-                    *bounds,
-                    index.get(&(*relation, *direction)),
-                    &mut self.control,
-                )?;
-                while let Some(destination) = cursor.next_with_control(&mut self.control)? {
-                    // The hop frontier is private to the cursor. Only the
-                    // endpoint occupies the compiler-assigned binding slot.
-                    // Rejecting it below must not prune transit through it.
-                    bindings.push(Some(destination));
-                    let result = self.visit(operators, ordinal + 1, bindings, index);
-                    let _ = bindings.pop();
-                    result?;
-                    if self
-                        .active_probe
-                        .is_some_and(|group| self.probe_matches[group])
-                    {
-                        break;
-                    }
-                }
-            }
-            GlaOperator::Probe { group, end, anti } => {
-                let group = *group as usize;
-                let previous = self.active_probe;
-                self.active_probe = Some(group);
-                self.probe_matches[group] = false;
-                let width = bindings.len();
-                let result = self.visit(operators, ordinal + 1, bindings, index);
-                // Restore scope even on source, work, scratch or cancellation
-                // refusal. No failure is converted into NOT EXISTS success.
-                bindings.truncate(width);
-                self.active_probe = previous;
-                result?;
-                if self.probe_matches[group] != *anti {
-                    self.visit(operators, *end as usize + 1, bindings, index)?;
-                }
-            }
-            GlaOperator::ProbeEnd { group } => {
-                debug_assert_eq!(self.active_probe, Some(*group as usize));
-                self.probe_matches[*group as usize] = true;
-            }
-            GlaOperator::Optional { group, end, slots } => {
-                let group = *group as usize;
-                let width = bindings.len();
-                self.optional_matches[group] = false;
-                let result = self.visit(operators, ordinal + 1, bindings, index);
-                bindings.truncate(width);
-                // Only a successfully exhausted scope can establish absence.
-                // Failure after a witness must not return a partial outer bag.
-                result?;
-                if !self.optional_matches[group] {
-                    let result = (|| {
-                        for _ in 0..*slots {
-                            (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                            bindings.push(None);
-                        }
-                        self.visit(operators, *end as usize + 1, bindings, index)
-                    })();
-                    // A refusal halfway through null extension restores the
-                    // original frame just as a refused real expansion does.
-                    bindings.truncate(width);
-                    result?;
-                }
-            }
-            GlaOperator::OptionalEnd { group } => {
-                // This boundary is before all subsequent clauses. A later
-                // semijoin rejecting this witness cannot invent a null row.
-                self.optional_matches[*group as usize] = true;
-                self.visit(operators, ordinal + 1, bindings, index)?;
-            }
-            GlaOperator::BindVertex { source } => {
-                let Some(value) = bindings[source.ordinal() as usize] else {
-                    return Ok(());
-                };
-                (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                bindings.push(Some(value));
-                let result = self.visit(operators, ordinal + 1, bindings, index);
-                let _ = bindings.pop();
-                result?;
-            }
-            GlaOperator::BindOuterVertex { source } => {
-                let value = bindings[source.ordinal() as usize];
-                (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                bindings.push(value);
-                let result = self.visit(operators, ordinal + 1, bindings, index);
-                let _ = bindings.pop();
-                result?;
-            }
-            GlaOperator::CapturePath {
-                capture,
-                start,
-                segments,
-            } => {
-                let at = *capture as usize;
-                let previous = self.paths[at].take();
-                if let Some(start) = bindings[start.ordinal() as usize] {
-                    let mut steps = Vec::new();
-                    let mut complete = true;
-                    let mut endpoint = start;
-                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                    for slot in segments {
-                        (self.control)(GlaExecutionEvent::Work)?;
-                        let Some(segment) = &self.segments[slot.ordinal() as usize] else {
-                            complete = false;
-                            break;
-                        };
-                        if segment.start() != endpoint {
-                            complete = false;
-                            break;
-                        }
-                        for step in segment.steps() {
-                            (self.control)(GlaExecutionEvent::Work)?;
-                            (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                            (self.control)(GlaExecutionEvent::ScratchEntry)?;
-                            steps.push(*step);
-                            endpoint = step.1;
-                        }
-                    }
-                    if complete {
-                        self.paths[at] = Some(GraphPath::new(start, steps.into_boxed_slice()));
-                    }
-                }
-                let result = self.visit(operators, ordinal + 1, bindings, index);
-                self.paths[at] = previous;
-                result?;
-            }
-            GlaOperator::SelectPathLength {
-                capture,
-                comparison,
-                value,
-            } => {
-                if self.paths[*capture as usize]
-                    .as_ref()
-                    .is_some_and(|path| comparison.accepts(path.len() as i64, *value))
-                {
-                    self.visit(operators, ordinal + 1, bindings, index)?;
-                }
-            }
-            GlaOperator::SelectPathNull {
-                capture, is_null, ..
-            } => {
-                if self.paths[*capture as usize].is_none() == *is_null {
-                    self.visit(operators, ordinal + 1, bindings, index)?;
-                }
-            }
-            GlaOperator::Project { .. }
-            | GlaOperator::ProjectBindings { .. }
-            | GlaOperator::ProjectValues { .. } => {
-                let _ = (self.project)(
-                    operator,
-                    bindings,
-                    &self.paths,
-                    &mut self.projected,
-                    &mut self.control,
-                )?;
-            }
-            GlaOperator::Empty
-            | GlaOperator::ScanEdges { .. }
-            | GlaOperator::Distinct
-            | GlaOperator::OrderByVertexId
-            | GlaOperator::OrderByBindings
-            | GlaOperator::OrderByValues
-            | GlaOperator::OrderByValueColumns { .. }
-            | GlaOperator::Limit { .. } => {}
         }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn visit_expand<E>(
+        &mut self,
+        operators: &[GlaOperator],
+        ordinal: usize,
+        bindings: &mut Vec<Option<VId>>,
+        index: &Index,
+        source: VId,
+        relation: RelationId,
+        direction: GlaDirection,
+    ) -> Result<(), E>
+    where
+        F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
+    {
+        if let Some(neighbors) = index
+            .get(&(relation, direction))
+            .and_then(|adjacency| adjacency.get(&source))
+        {
+            let mut candidates = join::candidates(
+                operators,
+                ordinal,
+                bindings,
+                neighbors,
+                index,
+                &mut self.control,
+            )?;
+            while let Some(destination) = candidates.next(&mut self.control)? {
+                bindings.push(Some(destination));
+                let result = self.visit(operators, ordinal + 1, bindings, index);
+                let _ = bindings.pop();
+                result?;
+                // Existence resolves at its clause boundary, not by
+                // counting final results or watching DISTINCT change.
+                if self
+                    .active_probe
+                    .is_some_and(|group| self.probe_matches[group])
+                {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn visit_walk_expansion<E>(
+        &mut self,
+        operators: &[GlaOperator],
+        ordinal: usize,
+        bindings: &mut Vec<Option<VId>>,
+        index: &Index,
+        source: VId,
+        relation: RelationId,
+        direction: GlaDirection,
+        bounds: crate::GraphWalkBounds,
+        search: GraphWalkSearch,
+    ) -> Result<(), E>
+    where
+        F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
+    {
+        let mut cursor = WalkExpansion::new(
+            search,
+            source,
+            bounds,
+            index.get(&(relation, direction)),
+            &mut self.control,
+        )?;
+        while let Some(destination) = cursor.next_with_control(&mut self.control)? {
+            // The hop frontier is private to the cursor. Only the
+            // endpoint occupies the compiler-assigned binding slot.
+            // Rejecting it below must not prune transit through it.
+            bindings.push(Some(destination));
+            let result = self.visit(operators, ordinal + 1, bindings, index);
+            let _ = bindings.pop();
+            result?;
+            if self
+                .active_probe
+                .is_some_and(|group| self.probe_matches[group])
+            {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn visit_probe<E>(
+        &mut self,
+        operators: &[GlaOperator],
+        ordinal: usize,
+        bindings: &mut Vec<Option<VId>>,
+        index: &Index,
+        group: u32,
+        end: u32,
+        anti: bool,
+    ) -> Result<(), E>
+    where
+        F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
+    {
+        let group = group as usize;
+        let previous = self.active_probe;
+        self.active_probe = Some(group);
+        self.probe_matches[group] = false;
+        let width = bindings.len();
+        let result = self.visit(operators, ordinal + 1, bindings, index);
+        // Restore scope even on source, work, scratch or cancellation
+        // refusal. No failure is converted into NOT EXISTS success.
+        bindings.truncate(width);
+        self.active_probe = previous;
+        result?;
+        if self.probe_matches[group] != anti {
+            self.visit(operators, end as usize + 1, bindings, index)?;
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn visit_optional<E>(
+        &mut self,
+        operators: &[GlaOperator],
+        ordinal: usize,
+        bindings: &mut Vec<Option<VId>>,
+        index: &Index,
+        group: u32,
+        end: u32,
+        slots: u32,
+    ) -> Result<(), E>
+    where
+        F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
+    {
+        let group = group as usize;
+        let width = bindings.len();
+        self.optional_matches[group] = false;
+        let result = self.visit(operators, ordinal + 1, bindings, index);
+        bindings.truncate(width);
+        // Only a successfully exhausted scope can establish absence.
+        // Failure after a witness must not return a partial outer bag.
+        result?;
+        if !self.optional_matches[group] {
+            let result = (|| {
+                for _ in 0..slots {
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    bindings.push(None);
+                }
+                self.visit(operators, end as usize + 1, bindings, index)
+            })();
+            // A refusal halfway through null extension restores the
+            // original frame just as a refused real expansion does.
+            bindings.truncate(width);
+            result?;
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn visit_capture_path<E>(
+        &mut self,
+        operators: &[GlaOperator],
+        ordinal: usize,
+        bindings: &mut Vec<Option<VId>>,
+        index: &Index,
+        capture: u32,
+        start: crate::algebra::BindingSlot,
+        segments: &[crate::algebra::BindingSlot],
+    ) -> Result<(), E>
+    where
+        F: FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        C: FnMut(GlaExecutionEvent) -> Result<(), E>,
+        P: FnMut(
+            &GlaOperator,
+            &[Option<VId>],
+            &[Option<GraphPath>],
+            &mut ProjectedRows<Row>,
+            &mut C,
+        ) -> Result<bool, E>,
+    {
+        let at = capture as usize;
+        let previous = self.paths[at].take();
+        if let Some(start) = bindings[start.ordinal() as usize] {
+            let mut steps = Vec::new();
+            let mut complete = true;
+            let mut endpoint = start;
+            (self.control)(GlaExecutionEvent::ScratchEntry)?;
+            for slot in segments {
+                (self.control)(GlaExecutionEvent::Work)?;
+                let Some(segment) = &self.segments[slot.ordinal() as usize] else {
+                    complete = false;
+                    break;
+                };
+                if segment.start() != endpoint {
+                    complete = false;
+                    break;
+                }
+                for step in segment.steps() {
+                    (self.control)(GlaExecutionEvent::Work)?;
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    (self.control)(GlaExecutionEvent::ScratchEntry)?;
+                    steps.push(*step);
+                    endpoint = step.1;
+                }
+            }
+            if complete {
+                self.paths[at] = Some(GraphPath::new(start, steps.into_boxed_slice()));
+            }
+        }
+        let result = self.visit(operators, ordinal + 1, bindings, index);
+        self.paths[at] = previous;
+        result?;
         Ok(())
     }
 }
