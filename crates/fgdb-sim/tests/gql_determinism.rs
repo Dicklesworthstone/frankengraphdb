@@ -1,28 +1,19 @@
-//! Native GQL determinism suite (doctrine #4 / bet B5): the same database
-//! state + same query + same policy ⇒ byte-identical results, always,
-//! including result order.
+//! Native GQL determinism: exact value-tagged result bytes, including row order.
+//! Four generated histories each run under three lab seeds; D4 compares their
+//! complete transcripts across seeds, rather than merely rerunning assertions.
+//! D1 repeats the frontier battery five times. D2 compares every query and its
+//! EXPLAIN certificate at every commit, then compares historical reads after
+//! fast reopen. D3 compares single-commit and causally shuffled batchings.
 //!
-//! Relations, each over a canonical byte encoding of the full `QueryResult`
-//! (tag-exact enum variants, value-exact cells, order-exact rows):
-//! D1 repeated execution — N≥5 runs of every battery query on one snapshot.
-//! D2 independent databases — two databases built from the identical write
-//!     sequence (separate MemVfs; one reopened fast) agree per battery query
-//!     at the frontier and on `FOR SYSTEM_TIME AS OF SEQ s` reads at every
-//!     commit seq of their shared history, plus identical plan certificates.
-//! D3 alternate batching — one big commit vs twelve small commits vs a
-//!     shuffled single commit of the same units produce identical frontier
-//!     results for every battery query, including the unordered scan.
-//! D4 lab-seed independence — the battery under ≥3 lab runtime seeds.
-//!
-//! Order honesty: six battery queries carry ORDER BY over distinct keys (the
-//! two-hop query exercises ties: two vertices share property values). The
-//! seventh (`unordered-scan`) names no ORDER BY; the engine's plan compiler
-//! still emits a total order over the scan (explicit keys, then the canonical
-//! complete-row LexMin tie-break of plan §8.6), so its output is canonical
-//! rather than arbitrary — asserted as equality here, and cited rather than
-//! claimed as unspecified-behavior freedom.
+//! Unordered projection is canonical here, not unspecified: fgdb-gql's
+//! algebra_exec/projection.rs ProjectedRows::into_rows returns one sorted
+//! stream; algebra/values.rs GraphValue/GraphValueRow define canonical order.
+//! We compare both full bytes and multisets for the unordered scan. Explicit
+//! ORDER BY p leaves ties resolved by the engine, not by sorting test output.
+//! No claim about parallel query execution, float reductions, or certificate
+//! replay. Early epochs may have empty path results; frontier witnesses must
+//! be nonempty and include distinct rows tied on p and a NULL ordering key.
 
-use asupersync::fs::Vfs;
 use asupersync::lab::run_async_under_lab;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryResult, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -58,11 +49,10 @@ fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 20_000_000, 20_000_000)
 }
 
-// Twelve independent unit updates describing one logical final graph. Every
-// batching re-partitions these same units; fixed element ids make all
-// batchings materialize byte-identical elements.
+// Causally layered units: vertex creates, edge creates, then independent
+// updates/deletion. Only units within one layer may be shuffled.
 fn unit_0(b: &mut WriteBatch) {
-    b.create_vertex(VId(1), vec![PERSON], vec![(P, CanonicalScalar::Int(2))]);
+    b.create_vertex(VId(1), vec![PERSON], vec![(P, CanonicalScalar::Int(1))]);
 }
 fn unit_1(b: &mut WriteBatch) {
     b.create_vertex(VId(2), vec![PERSON], vec![(P, CanonicalScalar::Int(2))]);
@@ -90,14 +80,14 @@ fn unit_7(b: &mut WriteBatch) {
     b.add_edge(EId(13), VId(3), VId(4), vec![]);
 }
 fn unit_8(b: &mut WriteBatch) {
-    b.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(9)));
+    b.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(2)));
 }
 fn unit_9(b: &mut WriteBatch) {
     b.set_vertex_property(VId(2), Q, Some(CanonicalScalar::Int(4)));
 }
 fn unit_10(b: &mut WriteBatch) {
     b.set_vertex_label(VId(4), PERSON, true);
-    b.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(6)));
+    b.set_vertex_property(VId(4), Q, Some(CanonicalScalar::Int(6)));
 }
 fn unit_11(b: &mut WriteBatch) {
     b.delete_edge(EId(12));
@@ -110,75 +100,121 @@ const UNIT_FNS: [fn(&mut WriteBatch); UNITS] = [
 
 /// Apply `groups` of unit indices as one commit per group; returns the
 /// per-commit sequence numbers.
-async fn apply(db: &mut Database<MemVfs>, cx: &CommitCx, groups: &[Vec<usize>]) -> Vec<CommitSeq> {
+async fn apply(
+    db: &mut Database<MemVfs>,
+    cx: &CommitCx,
+    groups: &[Vec<usize>],
+    graph_seed: u64,
+) -> Vec<CommitSeq> {
     let mut epochs = Vec::new();
     for group in groups {
         let mut batch = WriteBatch::new(R);
         for unit in group {
             UNIT_FNS[*unit](&mut batch);
+            if *unit == 9 {
+                let value = graph_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                batch.set_vertex_property(
+                    VId(2),
+                    Q,
+                    Some(CanonicalScalar::Int((value >> 33) as i64)),
+                );
+            }
         }
         epochs.push(db.write(cx, batch).await.expect("history commits"));
     }
     epochs
 }
 
-/// The battery: six ordered queries (one per read family, ordered by DISTINCT
-/// keys) plus one unordered scan whose plan canonicalization is documented in
-/// the module docs.
-fn battery() -> Vec<(&'static str, String, GqlParameters)> {
-    let params = |text: &str| {
-        let mut bound = GqlParameters::new();
-        for (name, value) in [("min", 2), ("src", 1)] {
-            if text.contains(&format!("${name}")) {
-                bound = bound.with_int64(name, value).expect("scalar parameter");
-            }
+/// Exercise every live read classification and each temporal counterpart.
+fn battery(at: Option<CommitSeq>) -> Vec<(&'static str, String, GqlParameters)> {
+    let temporal = at.map_or_else(String::new, |_| " FOR SYSTEM_TIME AS OF SEQ $at".into());
+    let mut queries = Vec::new();
+    let mut push = |name, text: String| {
+        let mut params = GqlParameters::new();
+        if text.contains("$min") {
+            params = params.with_int64("min", 2).expect("minimum parameter");
         }
-        bound
+        if let Some(seq) = at {
+            params = params.with_uint64("at", seq.0).expect("sequence parameter");
+        }
+        queries.push((name, text, params));
     };
-    vec![
-        (
-            "two-hop-ties",
-            "MATCH (a)-[:R]->(b)-[:R]->(c) WHERE a.p >= $min RETURN ALL a.p AS ap, c.p AS cp ORDER BY ap, cp".to_owned(),
-            params("MATCH (a)-[:R]->(b)-[:R]->(c) WHERE a.p >= $min RETURN ALL a.p AS ap, c.p AS cp ORDER BY ap, cp"),
+    push(
+        "ordered-ties",
+        format!("MATCH (n){temporal} RETURN n, n.p AS p, n.q AS q ORDER BY p"),
+    );
+    push(
+        "unordered-scan",
+        format!("MATCH (n){temporal} RETURN n, n.p AS p, n.q AS q"),
+    );
+    push(
+        "two-hop",
+        format!(
+            "MATCH (a)-[:R]->(b)-[:R]->(c){temporal} WHERE a.p >= $min RETURN ALL a.p AS ap, c.p AS cp ORDER BY ap, cp"
         ),
-        (
-            "aggregate",
-            "MATCH (n) WHERE n.p >= $min RETURN COUNT(*) AS c, SUM(n.p) AS s, AVG(n.p) AS mean".to_owned(),
-            params("MATCH (n) WHERE n.p >= $min RETURN COUNT(*) AS c, SUM(n.p) AS s, AVG(n.p) AS mean"),
+    );
+    push(
+        "optional",
+        format!("MATCH (a){temporal} OPTIONAL MATCH (a)-[:R]->(b) RETURN a, b.p AS p ORDER BY p"),
+    );
+    push(
+        "aggregate",
+        format!("MATCH (n){temporal} RETURN COUNT(*) AS c, SUM(n.p) AS s, AVG(n.p) AS mean"),
+    );
+    push(
+        "grouped",
+        format!("MATCH (n){temporal} RETURN n.p AS p, COUNT(*) AS c GROUP BY n.p ORDER BY p"),
+    );
+    push(
+        "pipeline",
+        format!(
+            "MATCH (n){temporal} WHERE n.p >= $min WITH n.p AS x ORDER BY x DESC LIMIT 4 RETURN COUNT(*) AS c, SUM(x) AS s"
         ),
-        (
-            "grouped",
-            "MATCH (n) RETURN ABS(n.p) AS bucket, COUNT(*) AS c GROUP BY ABS(n.p) ORDER BY bucket".to_owned(),
-            params("MATCH (n) RETURN ABS(n.p) AS bucket, COUNT(*) AS c GROUP BY ABS(n.p) ORDER BY bucket"),
+    );
+    push(
+        "union",
+        format!(
+            "MATCH (a){temporal} RETURN a.p AS p UNION DISTINCT MATCH (b) RETURN b.p AS p ORDER BY p"
         ),
-        (
-            "pipeline",
-            "MATCH (n) WHERE n.p >= $min WITH n.p AS x ORDER BY x DESC LIMIT 4 RETURN COUNT(*) AS c, SUM(x) AS s".to_owned(),
-            params("MATCH (n) WHERE n.p >= $min WITH n.p AS x ORDER BY x DESC LIMIT 4 RETURN COUNT(*) AS c, SUM(x) AS s"),
+    );
+    push(
+        "except-all",
+        format!(
+            "MATCH (a){temporal} RETURN a.p AS p EXCEPT ALL MATCH (b) WHERE b.p > 9 RETURN b.p AS p ORDER BY p"
         ),
-        (
-            "union",
-            "MATCH (a) WHERE a.p >= $min RETURN a.p AS p UNION DISTINCT MATCH (b) WHERE b.p <= 9 RETURN b.p AS p ORDER BY p".to_owned(),
-            params("MATCH (a) WHERE a.p >= $min RETURN a.p AS p UNION DISTINCT MATCH (b) WHERE b.p <= 9 RETURN b.p AS p ORDER BY p"),
+    );
+    push(
+        "any-shortest",
+        format!(
+            "MATCH p = ANY SHORTEST WALK (a)-[:R*1..3]->(b){temporal} WHERE a.p = 2 RETURN path_length(p) AS hops, b.p AS bp ORDER BY hops, bp"
         ),
-        (
-            "any-shortest",
-            "MATCH p = ANY SHORTEST WALK (a)-[:R*1..3]->(b) WHERE a.p = $src RETURN path_length(p) AS hops, b.p AS bp ORDER BY hops, bp".to_owned(),
-            params("MATCH p = ANY SHORTEST WALK (a)-[:R*1..3]->(b) WHERE a.p = $src RETURN path_length(p) AS hops, b.p AS bp ORDER BY hops, bp"),
+    );
+    push(
+        "all-shortest",
+        format!(
+            "MATCH p = ALL SHORTEST WALK (a)-[:R*1..3]->(b){temporal} WHERE a.p = 2 RETURN path_length(p) AS hops, b.p AS bp ORDER BY hops, bp"
         ),
-        (
-            "unordered-scan",
-            "MATCH (n) RETURN n.p AS p".to_owned(),
-            params("MATCH (n) RETURN n.p AS p"),
-        ),
-    ]
+    );
+    push(
+        "acyclic",
+        format!("MATCH p = ACYCLIC (a)-[:R*1..3]->(b){temporal} RETURN b.p AS bp ORDER BY bp"),
+    );
+    push(
+        "simple",
+        format!("MATCH p = SIMPLE (a)-[:R*1..3]->(b){temporal} RETURN b.p AS bp ORDER BY bp"),
+    );
+    queries
 }
 
 /// Canonical byte encoding of a full `QueryResult`: tag-exact over the enum
 /// variants, value-exact over every cell, order-exact over rows.
 fn canonical(result: &QueryResult) -> Vec<u8> {
+    assert!(
+        matches!(result, QueryResult::Rows { .. }),
+        "read result required"
+    );
     let QueryResult::Rows { columns, rows } = result else {
-        panic!("battery queries must return rows");
+        unreachable!()
     };
     let mut bytes = b"fgdb:query-result:v1\0".to_vec();
     bytes.extend_from_slice(&(columns.len() as u64).to_be_bytes());
@@ -215,174 +251,192 @@ fn canonical(result: &QueryResult) -> Vec<u8> {
     bytes
 }
 
-fn query_one<V: Vfs + Clone>(
-    db: &Database<V>,
-    cx: &QueryCx,
-    text: &str,
-    params: &GqlParameters,
-) -> Vec<u8> {
-    let result = db.query(cx, text, params, symbols, policy());
-    assert!(result.is_ok(), "query={text}: {result:?}");
-    canonical(&result.expect("query success asserted"))
+fn run(db: &Database<MemVfs>, cx: &QueryCx, at: Option<CommitSeq>, frontier: bool) -> Vec<Vec<u8>> {
+    battery(at).into_iter().map(|(name, text, params)| {
+        let result = db.query(cx, &text, &params, symbols, policy());
+        assert!(result.is_ok(), "{name} at={at:?} query={text}: {result:?}");
+        let result = result.expect("query success asserted");
+        let QueryResult::Rows { rows, .. } = &result else { unreachable!("read battery") };
+        if frontier {
+            assert!(!rows.is_empty(), "{name}: frontier witness required");
+            if name == "ordered-ties" {
+                assert!(rows.iter().any(|row| matches!(&row[1], fgdb_gql::GraphAggregateValue::Value(value) if value.is_null())), "NULL sort key required");
+                assert!(rows.iter().enumerate().any(|(i, row)| rows[i + 1..].iter().any(|other| row[1] == other[1] && row[0] != other[0])), "distinct rows tied on p required");
+            }
+        }
+        canonical(&result)
+    }).collect()
 }
 
-/// Run the whole battery at the frontier; returns canonical bytes per query.
-fn run<V: Vfs + Clone>(db: &Database<V>, cx: &QueryCx) -> Vec<Vec<u8>> {
-    battery()
-        .iter()
+fn certificates(
+    db: &Database<MemVfs>,
+    at: Option<CommitSeq>,
+) -> Vec<fgdb::NativeExplainCertificate> {
+    battery(at)
+        .into_iter()
         .map(|(name, text, params)| {
-            let bytes = query_one(db, cx, text, params);
-            assert!(bytes.len() > 40, "{name}: non-empty rows required");
-            bytes
+            let (_, certificate) = db.explain(&text, &params, symbols, true).expect(name);
+            certificate.expect("requested certificate")
         })
         .collect()
 }
 
-/// Historical arm: canonical bytes of the ordered temporal scan at every
-/// epoch. Shared only by databases with the identical commit numbering.
-fn historical<V: Vfs + Clone>(
-    db: &Database<V>,
-    cx: &QueryCx,
-    epochs: &[CommitSeq],
-) -> Vec<Vec<u8>> {
-    let text = "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at RETURN n.p AS p ORDER BY p";
-    epochs
-        .iter()
-        .map(|epoch| {
-            let params = GqlParameters::new()
-                .with_uint64("at", epoch.0)
-                .expect("sequence parameter");
-            query_one(db, cx, text, &params)
-        })
-        .collect()
+fn assert_unordered_bag(db: &Database<MemVfs>, other: &Database<MemVfs>, cx: &QueryCx) {
+    let text = "MATCH (n) RETURN n, n.p AS p, n.q AS q";
+    let bag = |db: &Database<MemVfs>| {
+        let result = db
+            .query(cx, text, &GqlParameters::new(), symbols, policy())
+            .expect("unordered scan");
+        let QueryResult::Rows { columns, rows } = result else {
+            unreachable!()
+        };
+        let mut encoded: Vec<_> = rows
+            .into_iter()
+            .map(|row| {
+                canonical(&QueryResult::Rows {
+                    columns: columns.clone(),
+                    rows: vec![row],
+                })
+            })
+            .collect();
+        encoded.sort();
+        encoded
+    };
+    assert_eq!(bag(db), bag(other), "D3 unordered multiset drift");
 }
 
 #[test]
 fn seeded_histories_are_byte_identical_across_repeats_databases_batchings_and_seeds() {
-    for seed in [0x0D20_u64, 0x0D21, 0x0D22] {
-        let ((), report) = run_async_under_lab(seed, move |root| async move {
-            let contexts = PurposeContexts::narrow_runtime_root(&root);
-            let commit = contexts.commit();
-            let cx = contexts.query();
-
-            // Primary history: twelve small commits (rich epoch numbering).
-            let vfs = MemVfs::new().expect("primary filesystem");
-            let dir = vfs.database_dir();
-            let mut db = Database::create_with_vfs(&commit, vfs.clone(), dir.clone(), keys())
-                .await
-                .expect("create primary database");
-            let singles: Vec<Vec<usize>> = (0..UNITS).map(|unit| vec![unit]).collect();
-            let epochs = apply(&mut db, &commit, &singles).await;
-            assert_eq!(epochs.len(), UNITS);
-
-            // D1: repeated execution on one snapshot.
-            let first = run(&db, &cx);
-            for repeat in 1..REPEATS {
-                assert_eq!(run(&db, &cx), first, "D1 repeat {repeat}");
-            }
-
-            // D2a: twin database, identical sequence, separate MemVfs.
-            let twin_vfs = MemVfs::new().expect("twin filesystem");
-            let twin_dir = twin_vfs.database_dir();
-            let mut twin = Database::create_with_vfs(&commit, twin_vfs, twin_dir, keys())
-                .await
-                .expect("create twin database");
-            apply(&mut twin, &commit, &singles).await;
-            assert_eq!(run(&twin, &cx), first, "D2 twin frontier drift");
-
-            // D2b: fast reopen of the primary after close.
-            drop(db);
-            let reopened = Database::<MemVfs>::open_with_vfs(&commit, vfs, dir, keys())
-                .await
-                .expect("fast reopen of the primary");
-            assert_eq!(run(&reopened, &cx), first, "D2 reopen frontier drift");
-
-            // D2 historical: identical commit numbering shares every seq.
-            let primary_history = historical(&twin, &cx, &epochs);
-            assert_eq!(
-                historical(&reopened, &cx, &epochs),
-                primary_history,
-                "D2 reopen history drift"
-            );
-
-            // D3: alternate batchings of the same units.
-            let big_vfs = MemVfs::new().expect("big filesystem");
-            let big_dir = big_vfs.database_dir();
-            let mut big = Database::create_with_vfs(&commit, big_vfs, big_dir, keys())
-                .await
-                .expect("create big-batch database");
-            let all: Vec<usize> = (0..UNITS).collect();
-            let big_epochs = apply(&mut big, &commit, &[all.clone()]).await;
-            assert_eq!(big_epochs.len(), 1, "batchings must differ in commit count");
-
-            let shuffled_vfs = MemVfs::new().expect("shuffled filesystem");
-            let shuffled_dir = shuffled_vfs.database_dir();
-            let mut shuffled =
-                Database::create_with_vfs(&commit, shuffled_vfs, shuffled_dir, keys())
+    let mut graph_outputs = Vec::new();
+    for graph_seed in [0xD20_u64, 0xD21, 0xD22, 0xD23] {
+        let mut scheduling_baseline = None;
+        for lab_seed in [0xA01, 0xA02, 0xA03] {
+            let (transcript, report) = run_async_under_lab(lab_seed, move |root| async move {
+                let contexts = PurposeContexts::narrow_runtime_root(&root);
+                let commit = contexts.commit();
+                let cx = contexts.query();
+                let vfs = MemVfs::new().expect("primary filesystem");
+                let dir = vfs.database_dir();
+                let mut db = Database::create_with_vfs(&commit, vfs.clone(), dir.clone(), keys())
                     .await
-                    .expect("create shuffled database");
-            // Shuffle only within causal layers: vertices (0..4), edges
-            // (4..8) whose endpoints exist after the vertex layer, updates
-            // (8..12) that touch existing elements. A batch never references
-            // an element its own earlier units have not created.
-            let mut order = Vec::with_capacity(all.len());
-            let mut random = seed ^ 0x9E37_79B9_7F4A_7C15;
-            let mut layer = |range: std::ops::Range<usize>, random: &mut u64| {
-                let mut pending: Vec<usize> = range.collect();
-                for index in (1..pending.len()).rev() {
-                    *random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    let pick = ((*random >> 33) % (index as u64 + 1)) as usize;
-                    pending.swap(index, pick);
+                    .expect("primary");
+                let twin_vfs = MemVfs::new().expect("twin filesystem");
+                let twin_dir = twin_vfs.database_dir();
+                let mut twin = Database::create_with_vfs(&commit, twin_vfs, twin_dir, keys())
+                    .await
+                    .expect("twin");
+                let mut history = Vec::new();
+                let mut epochs = Vec::new();
+                let mut plan_history = Vec::new();
+                for unit in 0..UNITS {
+                    let groups = [vec![unit]];
+                    let seq = apply(&mut db, &commit, &groups, graph_seed).await[0];
+                    assert_eq!(
+                        apply(&mut twin, &commit, &groups, graph_seed).await,
+                        vec![seq]
+                    );
+                    let rows = run(&db, &cx, None, unit + 1 == UNITS);
+                    assert_eq!(
+                        run(&twin, &cx, None, unit + 1 == UNITS),
+                        rows,
+                        "D2 graph={graph_seed} seq={seq:?}"
+                    );
+                    let plans = certificates(&db, None);
+                    assert_eq!(
+                        certificates(&twin, None),
+                        plans,
+                        "D2 certificates at {seq:?}"
+                    );
+                    history.push(rows);
+                    plan_history.push(plans);
+                    epochs.push(seq);
                 }
-                order.append(&mut pending);
-            };
-            layer(0..4, &mut random);
-            layer(4..8, &mut random);
-            layer(8..UNITS, &mut random);
-            let shuffled_epochs = apply(&mut shuffled, &commit, &[order]).await;
-            assert_eq!(shuffled_epochs.len(), 1);
-
-            // D3 at the frontier: every battery query, including the
-            // canonically ordered unordered scan, agrees across batchings.
-            assert_eq!(run(&big, &cx), first, "D3 big-batch drift");
-            // D4 is the enclosing loop: three lab seeds ran the full battery.
-            drop(reopened);
-        });
-        assert!(report.lab_test_passed(), "seed={seed} report={report:?}");
+                let first = history.last().expect("committed history");
+                for repeat in 1..REPEATS {
+                    assert_eq!(&run(&db, &cx, None, true), first, "D1 repeat {repeat}");
+                }
+                drop(db);
+                let reopened = Database::<MemVfs>::open_with_vfs(&commit, vfs, dir, keys())
+                    .await
+                    .expect("fast reopen");
+                assert_eq!(&run(&reopened, &cx, None, true), first, "D2 reopen");
+                for (index, seq) in epochs.iter().enumerate() {
+                    assert_eq!(
+                        run(&reopened, &cx, Some(*seq), false),
+                        history[index],
+                        "D2 historical seq={seq:?}"
+                    );
+                    assert_eq!(
+                        run(&twin, &cx, Some(*seq), false),
+                        history[index],
+                        "D2 twin historical seq={seq:?}"
+                    );
+                    assert_eq!(
+                        certificates(&reopened, Some(*seq)),
+                        certificates(&twin, Some(*seq)),
+                        "D2 historical certificates {seq:?}"
+                    );
+                }
+                let big_vfs = MemVfs::new().expect("big filesystem");
+                let big_dir = big_vfs.database_dir();
+                let mut big = Database::create_with_vfs(&commit, big_vfs, big_dir, keys())
+                    .await
+                    .expect("big");
+                let all: Vec<_> = (0..UNITS).collect();
+                apply(&mut big, &commit, &[all.clone()], graph_seed).await;
+                assert!(
+                    big.frontier().expect("big frontier")
+                        < reopened.frontier().expect("small frontier"),
+                    "batchings differ in commit count"
+                );
+                assert_eq!(&run(&big, &cx, None, true), first, "D3 big-batch drift");
+                assert_unordered_bag(&big, &reopened, &cx);
+                let shuffled_vfs = MemVfs::new().expect("shuffled filesystem");
+                let shuffled_dir = shuffled_vfs.database_dir();
+                let mut shuffled =
+                    Database::create_with_vfs(&commit, shuffled_vfs, shuffled_dir, keys())
+                        .await
+                        .expect("shuffled");
+                let mut order = all;
+                let mut random = graph_seed;
+                for range in [0..4, 4..8, 8..UNITS] {
+                    for i in (range.start + 1..range.end).rev() {
+                        random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let j = range.start + ((random >> 33) as usize % (i - range.start + 1));
+                        order.swap(i, j);
+                    }
+                }
+                assert_ne!(
+                    order,
+                    (0..UNITS).collect::<Vec<_>>(),
+                    "shuffle must change insertion order"
+                );
+                apply(&mut shuffled, &commit, &[order], graph_seed).await;
+                assert_eq!(&run(&shuffled, &cx, None, true), first, "D3 shuffled drift");
+                assert_unordered_bag(&shuffled, &reopened, &cx);
+                (history, plan_history)
+            });
+            assert!(
+                report.lab_test_passed(),
+                "graph={graph_seed} lab={lab_seed} report={report:?}"
+            );
+            if let Some(baseline) = &scheduling_baseline {
+                assert_eq!(
+                    &transcript, baseline,
+                    "D4 graph={graph_seed} lab={lab_seed}"
+                );
+            } else {
+                scheduling_baseline = Some(transcript);
+            }
+        }
+        graph_outputs.push(scheduling_baseline.expect("three scheduling runs").0);
     }
-}
-
-#[test]
-fn certificates_bind_plans_across_independent_databases() {
-    let ((), report) = run_async_under_lab(0x0D23, |root| async move {
-        let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let commit = contexts.commit();
-        let cx = contexts.query();
-        let text = "MATCH (a)-[:R]->(b) WHERE a.p >= 2 RETURN b.p AS bp ORDER BY bp";
-        let params = GqlParameters::new();
-        let mut make = |label: &str| {
-            let vfs = MemVfs::new().unwrap_or_else(|error| panic!("{label}: {error}"));
-            let dir = vfs.database_dir();
-            (vfs, dir)
-        };
-        let (vfs_a, dir_a) = make("database a");
-        let (vfs_b, dir_b) = make("database b");
-        let mut a = Database::create_with_vfs(&commit, vfs_a, dir_a, keys())
-            .await
-            .expect("database a");
-        let mut b = Database::create_with_vfs(&commit, vfs_b, dir_b, keys())
-            .await
-            .expect("database b");
-        let all: Vec<usize> = (0..UNITS).collect();
-        apply(&mut a, &commit, &[all.clone()]).await;
-        apply(&mut b, &commit, &[all]).await;
-        let (_, cert_a) = a.explain(text, &params, symbols, true).expect("explain a");
-        let (_, cert_b) = b.explain(text, &params, symbols, true).expect("explain b");
-        assert_eq!(
-            cert_a.expect("certificate a").digest(),
-            cert_b.expect("certificate b").digest(),
-            "identical plans must certify identically"
-        );
-    });
-    assert!(report.lab_test_passed(), "report={report:?}");
+    for i in 0..graph_outputs.len() {
+        for j in i + 1..graph_outputs.len() {
+            assert_ne!(
+                graph_outputs[i], graph_outputs[j],
+                "graph seeds must vary observable history"
+            );
+        }
+    }
 }
