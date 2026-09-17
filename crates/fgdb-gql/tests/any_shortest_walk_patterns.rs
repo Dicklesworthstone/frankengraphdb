@@ -116,6 +116,11 @@ fn selector_transcripts_are_distinct_and_ordinary_tags_stay_frozen() {
             GraphWalkSearch::AnyShortest => {
                 b.any_shortest_walk("a", R, GlaDirection::Forward, "b", bounds(0, 3))
             }
+            // The table above enumerates only the walk and shortest selectors;
+            // restricted-path transcripts are pinned in restricted_path_text.rs.
+            GraphWalkSearch::Acyclic | GraphWalkSearch::Simple => {
+                unreachable!("selector table lists only walk and shortest searches")
+            }
         }
         .unwrap();
         let query = b
