@@ -7,6 +7,9 @@
 //! work/growth events. Events count entries, not allocator bytes: callers own
 //! key-size, comparison and callback costs. No durable encoding is introduced.
 
+pub mod aggregate;
+pub mod incremental;
+
 use crate::{LimbLimit, ZWeight, ZWeightError};
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -46,6 +49,45 @@ impl<E: core::error::Error + 'static> core::error::Error for ZSetError<E> {}
 #[derive(PartialEq, Eq)]
 pub struct ZSet<T: Ord> {
     entries: BTreeMap<T, ZWeight>,
+}
+
+/// A prepared integration into a materialized relation. The exclusive borrow
+/// pins the old value while downstream operators/sinks prepare. Dropping this
+/// guard changes nothing; commit executes no fallible arithmetic or callback.
+/// This is synchronous in-process publication, not a durable commit protocol.
+#[must_use = "dropping a Z-set update aborts it"]
+pub struct ZSetUpdate<'a, T: Ord> {
+    owner: &'a mut ZSet<T>,
+    replacements: BTreeMap<T, ZWeight>,
+}
+
+impl<T: Ord> ZSetUpdate<'_, T> {
+    /// Inspect the prospective value without publishing it. A zero replacement
+    /// is absent support; it must never fall through to the old nonzero value.
+    pub fn weight(&self, key: &T) -> Option<&ZWeight> {
+        match self.replacements.get(key) {
+            Some(weight) => (!weight.is_zero()).then_some(weight),
+            None => self.owner.weight(key),
+        }
+    }
+}
+
+impl<T: Ord + Clone> ZSetUpdate<'_, T> {
+    /// Publish only after every participant has prepared successfully, with no
+    /// intervening fallible work. Collection allocation and arbitrary user-key
+    /// code retain the same boundary as ordinary ZSet::integrate.
+    pub fn commit(self) {
+        self.owner.publish(self.replacements);
+    }
+}
+
+impl<T: Ord> core::fmt::Debug for ZSetUpdate<'_, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ZSetUpdate")
+            .field("changed_keys", &self.replacements.len())
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl<T: Ord> core::fmt::Debug for ZSet<T> {
@@ -242,10 +284,22 @@ impl<T: Ord + Clone> ZSet<T> {
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<(), ZSetError<E>> {
+        self.prepare_update(delta, limbs, control)?.commit();
+        Ok(())
+    }
+
+    /// Stage a sink/input relation alongside prepared join, DISTINCT and
+    /// aggregate operators. No unaffected key is cloned or scanned. The
+    /// ordinary integrate method uses this same path and event sequence.
+    pub fn prepare_update<E>(
+        &mut self,
+        delta: &Self,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<ZSetUpdate<'_, T>, ZSetError<E>> {
         let replacements = self.prepare_integration(delta, limbs, control)?;
         event(control, ZSetEvent::Work)?;
-        self.publish(replacements);
-        Ok(())
+        Ok(ZSetUpdate { owner: self, replacements })
     }
 
     pub(crate) fn prepare_integration<E>(

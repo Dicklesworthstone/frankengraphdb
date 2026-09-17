@@ -6,6 +6,14 @@
 //! reached too early may still be reached by a shortest walk satisfying the
 //! requested interval. This cursor returns endpoints only; it is not yet a GQL
 //! path value, TRAIL/SIMPLE selector, weighted shortest path, or path witness.
+//!
+//! ALL keeps a shared reachable-vertex layer rather than one frontier entry per
+//! path occurrence. A backward viability pass and an iterative, reusable frame
+//! array enumerate each layer lazily in the original adjacency-occurrence order.
+//! Multiplicity is structural: no fixed-width path count can overflow or saturate.
+//! Retained traversal state is O(hops * reachable vertices), not O(path count).
+//! Output can still be exponential; each occurrence remains individually governed.
+//! This is query scratch over an admitted index, not larger-than-memory storage.
 
 use crate::{GlaExecutionEvent, GraphWalkBounds};
 use fgdb_types::VId;
@@ -26,6 +34,124 @@ pub struct GraphShortestWalkCursor<'a> {
     pending_at: usize,
     done: bool,
     one_per_endpoint: bool,
+    all: AllShortestLayers,
+}
+
+#[derive(Clone, Copy)]
+struct WalkFrame {
+    vertex: VId,
+    next_neighbor: usize,
+}
+
+/// The layer graph shares every (depth, vertex) across all path occurrences.
+/// `viable[k]` contains vertices with an eligible continuation of exactly k
+/// hops to the current output layer. It removes dead suffixes before traversal;
+/// otherwise even lazy DFS could enumerate exponentially many rejected prefixes.
+#[derive(Default)]
+struct AllShortestLayers {
+    layers: Vec<BTreeSet<VId>>,
+    viable: Vec<BTreeSet<VId>>,
+    frames: Vec<WalkFrame>,
+    frame_at: usize,
+    walking: bool,
+}
+
+impl AllShortestLayers {
+    fn prepare_output<E>(
+        &mut self,
+        adjacency: Option<&BTreeMap<VId, Vec<VId>>>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.viable = Vec::new();
+        self.frames = Vec::new();
+        self.frame_at = 0;
+        self.walking = false;
+        // Rebuild only Boolean reachability, never a bag of partial paths.
+        // Across all result depths this may revisit O(hops^2) layers; the work
+        // is governed and independent of tied-route multiplicity.
+        for layer in self.layers.iter().rev() {
+            control(GlaExecutionEvent::Work)?;
+            let mut live = BTreeSet::new();
+            for &vertex in layer {
+                control(GlaExecutionEvent::Work)?;
+                let mut reaches_output = self.viable.is_empty();
+                if let Some(suffix) = self.viable.last()
+                    && let Some(neighbors) = adjacency.and_then(|map| map.get(&vertex))
+                {
+                    for destination in neighbors {
+                        control(GlaExecutionEvent::Work)?;
+                        if suffix.contains(destination) {
+                            reaches_output = true;
+                            break;
+                        }
+                    }
+                }
+                if reaches_output {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    live.insert(vertex);
+                }
+            }
+            control(GlaExecutionEvent::ScratchEntry)?;
+            self.viable.push(live);
+        }
+        // The first layer has exactly the construction source. An empty root
+        // viability set means there is no output, not an invented zero-hop row.
+        if let Some(&source) = self.viable.last().and_then(BTreeSet::first) {
+            for _ in 0..self.layers.len() {
+                control(GlaExecutionEvent::ScratchEntry)?;
+                self.frames.push(WalkFrame {
+                    vertex: source,
+                    next_neighbor: 0,
+                });
+            }
+            self.walking = true;
+        }
+        Ok(())
+    }
+
+    fn next<E>(
+        &mut self,
+        adjacency: Option<&BTreeMap<VId, Vec<VId>>>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<VId>, E> {
+        while self.walking {
+            // Includes every delivery and backtrack. Cancellation between pulls
+            // cannot be bypassed by a previously admitted layer or frame array.
+            control(GlaExecutionEvent::Work)?;
+            let frame = self.frames[self.frame_at];
+            if self.frame_at + 1 == self.frames.len() {
+                if self.frame_at == 0 {
+                    self.walking = false;
+                } else {
+                    self.frame_at -= 1;
+                }
+                return Ok(Some(frame.vertex));
+            }
+            let destination = adjacency
+                .and_then(|map| map.get(&frame.vertex))
+                .and_then(|neighbors| neighbors.get(frame.next_neighbor));
+            let Some(&destination) = destination else {
+                if self.frame_at == 0 {
+                    self.walking = false;
+                } else {
+                    self.frame_at -= 1;
+                }
+                continue;
+            };
+            self.frames[self.frame_at].next_neighbor += 1;
+            let remaining = self.viable.len() - self.frame_at - 2;
+            if self.viable[remaining].contains(&destination) {
+                self.frame_at += 1;
+                // Every slot was admitted before the first output. Reuse it
+                // instead of allocating a stack entry for each path occurrence.
+                self.frames[self.frame_at] = WalkFrame {
+                    vertex: destination,
+                    next_neighbor: 0,
+                };
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl<'a> GraphShortestWalkCursor<'a> {
@@ -46,13 +172,14 @@ impl<'a> GraphShortestWalkCursor<'a> {
             pending_at: 0,
             done: false,
             one_per_endpoint: false,
+            all: AllShortestLayers::default(),
         })
     }
 
-    /// Return one endpoint occurrence. A complete layer is processed before its
-    /// first result is released so equal-depth alternatives cannot be mistaken
-    /// for longer paths. Source/work/scratch refusal returns no fabricated row.
-    /// Every endpoint delivery, including buffered ones, charges a work event.
+    /// Return one endpoint occurrence. A complete reachability layer is admitted
+    /// before its first result, but ALL does not materialize its occurrence bag.
+    /// Source/work/scratch refusal returns no fabricated row. Every endpoint
+    /// delivery and every lazy traversal step charges a work event.
     /// A refusal is terminal: discard retained traversal state and return `None`
     /// on later calls without invoking the controller again.
     pub fn next_with_control<E>(
@@ -68,6 +195,7 @@ impl<'a> GraphShortestWalkCursor<'a> {
             self.pending = Vec::new();
             self.pending_at = 0;
             self.settled.clear();
+            self.all = AllShortestLayers::default();
         }
         result
     }
@@ -82,6 +210,11 @@ impl<'a> GraphShortestWalkCursor<'a> {
                 // may have cancelled or exhausted its budget between pulls.
                 control(GlaExecutionEvent::Work)?;
                 self.pending_at += 1;
+                return Ok(Some(value));
+            }
+            if !self.one_per_endpoint
+                && let Some(value) = self.all.next(self.adjacency, control)?
+            {
                 return Ok(Some(value));
             }
             if self.done {
@@ -101,60 +234,58 @@ impl<'a> GraphShortestWalkCursor<'a> {
         control(GlaExecutionEvent::Work)?;
         if self.depth > self.bounds.maximum() || self.frontier.is_empty() {
             self.done = true;
-            self.pending.clear();
-            self.pending_at = 0;
+            self.frontier = Vec::new();
+            self.settled.clear();
+            self.all = AllShortestLayers::default();
             return Ok(());
         }
 
-        self.pending.clear();
-        self.pending_at = 0;
-        let mut newly_settled = BTreeSet::new();
-        if self.depth >= self.bounds.minimum() {
-            for &vertex in &self.frontier {
-                control(GlaExecutionEvent::Work)?;
-                // A vertex settled on a previous admissible layer is no longer
-                // eligible. Equal-depth occurrences remain eligible even after
-                // the first one installs this layer's settled marker.
-                if self.settled.contains(&vertex) && !newly_settled.contains(&vertex) {
-                    continue;
-                }
+        let admissible = self.depth >= self.bounds.minimum();
+        let mut active = BTreeSet::new();
+        // Before the minimum, a vertex may recur at later depths. At and after
+        // the minimum, its first eligible layer settles it. Sharing that layer
+        // does NOT remove tied paths: the lazy walk uses real adjacency entries.
+        for &vertex in &self.frontier {
+            control(GlaExecutionEvent::Work)?;
+            if admissible && self.settled.contains(&vertex) {
+                continue;
+            }
+            control(GlaExecutionEvent::ScratchEntry)?;
+            active.insert(vertex);
+            if admissible {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                self.pending.push(vertex);
-                if newly_settled.insert(vertex) {
-                    // The temporary layer set and the retained settled set each
-                    // own one logical entry. Charge both before either can grow.
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    control(GlaExecutionEvent::ScratchEntry)?;
-                    let inserted = self.settled.insert(vertex);
-                    debug_assert!(inserted);
-                }
+                self.settled.insert(vertex);
             }
         }
 
-        let mut next = Vec::new();
+        let mut next = BTreeSet::new();
         if self.depth < self.bounds.maximum() {
-            for &vertex in &self.frontier {
+            for &vertex in &active {
                 control(GlaExecutionEvent::Work)?;
-                // A vertex settled on an EARLIER admissible layer cannot lie on
-                // a shortest continuation. Same-layer shortest occurrences all
-                // expand so multiplicity reaches downstream endpoints exactly.
-                if self.settled.contains(&vertex) && !newly_settled.contains(&vertex) {
-                    continue;
-                }
                 if let Some(neighbors) = self.adjacency.and_then(|map| map.get(&vertex)) {
                     for &destination in neighbors {
                         control(GlaExecutionEvent::Work)?;
+                        if self.settled.contains(&destination) || next.contains(&destination) {
+                            continue;
+                        }
                         control(GlaExecutionEvent::ScratchEntry)?;
-                        next.push(destination);
+                        next.insert(destination);
                     }
                 }
             }
         }
-        self.frontier = next;
-        self.depth += 1;
-        if self.depth > self.bounds.maximum() && self.pending.is_empty() {
-            self.done = true;
+        let mut frontier = Vec::new();
+        for vertex in next {
+            control(GlaExecutionEvent::ScratchEntry)?;
+            frontier.push(vertex);
         }
+        self.frontier = frontier;
+        control(GlaExecutionEvent::ScratchEntry)?;
+        self.all.layers.push(active);
+        if admissible {
+            self.all.prepare_output(self.adjacency, control)?;
+        }
+        self.depth += 1;
         Ok(())
     }
 }
@@ -373,7 +504,7 @@ mod tests {
             (VId(2), vec![VId(3), VId(4)]),
             (VId(3), vec![VId(4)]),
         ]);
-        for minimum in 0..=1 {
+        for minimum in [0, 1, 3] {
             let bounds = GraphWalkBounds::new(minimum, 3).unwrap();
             let mut calls = 0;
             collect(VId(1), bounds, Some(&adjacency), &mut |_| {
@@ -411,6 +542,14 @@ mod tests {
                 assert_eq!(cursor.pending_at, 0);
                 assert_eq!(cursor.frontier.capacity(), 0);
                 assert_eq!(cursor.pending.capacity(), 0);
+                assert!(cursor.all.layers.is_empty());
+                assert!(cursor.all.viable.is_empty());
+                assert!(cursor.all.frames.is_empty());
+                assert_eq!(cursor.all.layers.capacity(), 0);
+                assert_eq!(cursor.all.viable.capacity(), 0);
+                assert_eq!(cursor.all.frames.capacity(), 0);
+                assert!(!cursor.all.walking);
+                assert_eq!(cursor.all.frame_at, 0);
 
                 for _ in 0..3 {
                     // Any callback after refusal would return this sentinel.
@@ -424,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_between_buffered_results_returns_no_more_rows() {
+    fn cancellation_between_factorized_results_returns_no_more_rows() {
         let adjacency = BTreeMap::from([(VId(1), vec![VId(2), VId(3)])]);
         let bounds = GraphWalkBounds::new(1, 1).unwrap();
         let mut cursor = GraphShortestWalkCursor::new(
@@ -438,7 +577,9 @@ mod tests {
             cursor.next_with_control(&mut |_| Ok::<_, ()>(())),
             Ok(Some(VId(2)))
         );
-        assert_eq!(cursor.pending.len() - cursor.pending_at, 1);
+        assert!(cursor.pending.is_empty());
+        assert!(cursor.all.walking);
+        assert_eq!(cursor.all.frames.len(), 2);
 
         let mut checks = 0;
         assert_eq!(
@@ -457,10 +598,13 @@ mod tests {
         assert!(cursor.pending.is_empty());
         assert!(cursor.frontier.is_empty());
         assert!(cursor.settled.is_empty());
+        assert!(cursor.all.frames.is_empty());
+        assert!(cursor.all.layers.is_empty());
+        assert!(cursor.all.viable.is_empty());
     }
 
     #[test]
-    fn each_buffered_parallel_occurrence_charges_delivery_work() {
+    fn each_factorized_parallel_occurrence_charges_delivery_work() {
         let adjacency = BTreeMap::from([(VId(1), vec![VId(2), VId(3), VId(3)])]);
         let bounds = GraphWalkBounds::new(1, 1).unwrap();
         let mut cursor = GraphShortestWalkCursor::new(
@@ -485,9 +629,192 @@ mod tests {
                 }),
                 Ok(Some(VId(3)))
             );
-            assert_eq!(work, 1);
-            assert_eq!(cursor.pending.len() - cursor.pending_at, remaining);
+            // One neighbor step and one delivery; neither allocates another
+            // frame or materializes the remaining parallel occurrences.
+            assert_eq!(work, 2);
+            assert!(cursor.pending.is_empty());
+            assert_eq!(cursor.all.frames[0].next_neighbor, 3 - remaining);
         }
         assert_eq!(cursor.next_with_control(&mut |_| Ok::<_, ()>(())), Ok(None));
+    }
+
+    /// Independent unpruned BFS: every raw walk enters the queue, including
+    /// walks through an endpoint already returned at a shorter admissible depth.
+    /// This oracle checks order as well as the multiset, without layer sharing.
+    fn ordered_oracle(
+        source: VId,
+        bounds: GraphWalkBounds,
+        adjacency: &BTreeMap<VId, Vec<VId>>,
+    ) -> Vec<(u32, VId)> {
+        let mut queue = std::collections::VecDeque::from([(source, 0_u32)]);
+        let mut first = BTreeMap::new();
+        let mut output = Vec::new();
+        while let Some((vertex, depth)) = queue.pop_front() {
+            if depth >= bounds.minimum() && *first.entry(vertex).or_insert(depth) == depth {
+                output.push((depth, vertex));
+            }
+            if depth < bounds.maximum() {
+                for &neighbor in adjacency.get(&vertex).into_iter().flatten() {
+                    queue.push_back((neighbor, depth + 1));
+                }
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn shared_layers_preserve_exact_bfs_occurrence_order_on_every_small_multigraph() {
+        for mask in 0..512_u32 {
+            let mut adjacency = BTreeMap::<VId, Vec<VId>>::new();
+            for source in 0..3_u128 {
+                for destination in 0..3_u128 {
+                    if mask & (1 << (3 * source + destination)) != 0 {
+                        adjacency.entry(VId(source)).or_default().push(VId(destination));
+                    }
+                }
+            }
+            // Noncontiguous duplicates and unsorted neighbor lists prove that
+            // neither set ordering nor run-length assumptions choose row order.
+            for neighbors in adjacency.values_mut() {
+                neighbors.push(neighbors[0]);
+                neighbors.reverse();
+            }
+            for source in 0..4_u128 {
+                for maximum in 0..=4 {
+                    for minimum in 0..=maximum {
+                        let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
+                        let mut cursor = GraphShortestWalkCursor::new(
+                            VId(source),
+                            bounds,
+                            Some(&adjacency),
+                            &mut |_| Ok::<_, ()>(()),
+                        )
+                        .unwrap();
+                        let mut actual = Vec::new();
+                        while let Some(vertex) =
+                            cursor.next_with_control(&mut |_| Ok::<_, ()>(())).unwrap()
+                        {
+                            actual.push((cursor.depth - 1, vertex));
+                        }
+                        assert_eq!(
+                            actual,
+                            ordered_oracle(VId(source), bounds, &adjacency),
+                            "mask={mask}, source={source}, {bounds:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exponential_maximum_depth_ties_stream_without_count_overflow_or_bag_storage() {
+        use std::cell::Cell;
+        let adjacency = BTreeMap::from([(VId(7), vec![VId(7); 8])]);
+        let hops = crate::MAX_GRAPH_WALK_HOPS;
+        let bounds = GraphWalkBounds::new(hops, hops).unwrap();
+        let work = Cell::new(0_u64);
+        let scratch = Cell::new(0_u64);
+        let mut control = |event| {
+            if event == GlaExecutionEvent::ScratchEntry {
+                scratch.set(scratch.get() + 1);
+            } else {
+                assert_eq!(event, GlaExecutionEvent::Work);
+                work.set(work.get() + 1);
+            }
+            if work.get() + scratch.get() > 100_000 {
+                Err("enumerated tied prefixes before first output")
+            } else {
+                Ok(())
+            }
+        };
+        let mut cursor =
+            GraphShortestWalkCursor::new(VId(7), bounds, Some(&adjacency), &mut control).unwrap();
+        assert_eq!(cursor.next_with_control(&mut control), Ok(Some(VId(7))));
+        let admitted = scratch.get();
+        // The complete bag has 8^1024 occurrences, more than any machine-word
+        // count. Only consume a prefix; ALL must neither overflow nor become ANY.
+        for _ in 0..31 {
+            assert_eq!(cursor.next_with_control(&mut control), Ok(Some(VId(7))));
+            assert_eq!(scratch.get(), admitted, "delivery allocated another path");
+        }
+        assert!(work.get() < 40_000);
+        assert!(scratch.get() <= 8 * (u64::from(hops) + 1));
+        assert!(cursor.pending.is_empty());
+        assert!(cursor.frontier.is_empty());
+        assert_eq!(cursor.all.layers.len(), hops as usize + 1);
+        assert_eq!(cursor.all.viable.len(), hops as usize + 1);
+        assert_eq!(cursor.all.frames.len(), hops as usize + 1);
+        assert!(cursor.all.layers.iter().all(|layer| layer.len() == 1));
+        assert!(cursor.all.viable.iter().all(|layer| layer.len() == 1));
+        assert_eq!(
+            cursor.next_with_control(&mut |_| Err("cancelled after prefix")),
+            Err("cancelled after prefix")
+        );
+        assert_eq!(cursor.all.layers.capacity(), 0);
+        assert_eq!(cursor.all.viable.capacity(), 0);
+        assert_eq!(cursor.all.frames.capacity(), 0);
+        assert_eq!(cursor.next_with_control(&mut |_| Err::<(), _>("resumed")), Ok(None));
+    }
+
+    #[test]
+    fn backward_viability_skips_exponential_dead_prefixes() {
+        let mut adjacency = BTreeMap::from([(VId(0), vec![VId(1), VId(100)])]);
+        for source in 1..20_u128 {
+            adjacency.insert(VId(source), vec![VId(source + 1); 8]);
+        }
+        for source in 100..140_u128 {
+            adjacency.insert(VId(source), vec![VId(source + 1)]);
+        }
+        let mut events = 0;
+        let rows = collect(
+            VId(0),
+            GraphWalkBounds::new(41, 41).unwrap(),
+            Some(&adjacency),
+            &mut |_| {
+                events += 1;
+                if events > 5_000 {
+                    Err("enumerated dead paths")
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(rows, vec![VId(140)]);
+    }
+
+    #[test]
+    fn exact_work_and_scratch_limits_succeed_and_one_below_refuses() {
+        let adjacency = BTreeMap::from([
+            (VId(1), vec![VId(3), VId(2), VId(2)]),
+            (VId(2), vec![VId(1), VId(3)]),
+            (VId(3), vec![VId(2), VId(4)]),
+        ]);
+        let bounds = GraphWalkBounds::new(2, 4).unwrap();
+        let mut measured = [0_u64; 2];
+        let expected = collect(VId(1), bounds, Some(&adjacency), &mut |event| {
+            measured[usize::from(event == GlaExecutionEvent::ScratchEntry)] += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        for dimension in 0..2 {
+            for short in [false, true] {
+                let mut limits = measured;
+                limits[dimension] -= u64::from(short);
+                let mut seen = [0_u64; 2];
+                let result = collect(VId(1), bounds, Some(&adjacency), &mut |event| {
+                    let at = usize::from(event == GlaExecutionEvent::ScratchEntry);
+                    seen[at] += 1;
+                    if seen[at] > limits[at] { Err(at) } else { Ok(()) }
+                });
+                if short {
+                    assert_eq!(result, Err(dimension));
+                } else {
+                    assert_eq!(result, Ok(expected.clone()));
+                    assert_eq!(seen, measured);
+                }
+            }
+        }
     }
 }

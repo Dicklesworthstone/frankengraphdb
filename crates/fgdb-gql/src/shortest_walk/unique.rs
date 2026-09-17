@@ -3,16 +3,18 @@
 //! Dominance is depth-local before the lower bound: two WALK prefixes ending
 //! at the same vertex and depth have identical possible continuations. Only
 //! after the lower bound may a first visit settle that vertex across depths.
-//! This is valid for endpoint-only ANY shortest WALK, not ALL, captured paths,
-//! edge/vertex-simple modes, costs, or predicates on the path interior.
+//! Discarding tied occurrences is valid only for endpoint-only ANY shortest
+//! WALK. ALL shares reachability but must still enumerate every tie. Neither
+//! mode here implements captured paths, repetition restrictions, or path costs.
 
 use super::*;
 
 impl<'a> GraphShortestWalkCursor<'a> {
     /// Select one minimum-hop occurrence for each endpoint within `bounds`.
-    /// Unlike `new`, this coalesces equal-depth prefixes before expansion, so
-    /// tied routes and parallel edges cannot multiply the frontier. The result
-    /// contains endpoints only; it does not choose or expose a captured path.
+    /// Unlike `new`, this emits just one occurrence and needs no retained
+    /// layer graph for replaying ties. Both modes share reachability by depth;
+    /// only ALL enumerates the distinct routes and parallel-edge occurrences.
+    /// The result does not choose or expose a captured path.
     /// Adjacency must belong to one admitted snapshot, as for `new`.
     pub fn new_any<E>(
         source: VId,
@@ -206,7 +208,19 @@ mod tests {
         };
         let mut all =
             GraphShortestWalkCursor::new(VId(7), bounds, Some(&adjacency), &mut control).unwrap();
-        assert_eq!(all.next_with_control(&mut control), Err("route explosion"));
+        // ALL may now deliver a prefix without materializing the whole bag.
+        // It must still eventually exhaust this finite work allowance rather
+        // than silently coalescing 8^1024 occurrences into the ANY result.
+        loop {
+            match all.next_with_control(&mut control) {
+                Ok(Some(vertex)) => assert_eq!(vertex, VId(7)),
+                Err(error) => {
+                    assert_eq!(error, "route explosion");
+                    break;
+                }
+                Ok(None) => panic!("ALL discarded tied shortest occurrences"),
+            }
+        }
     }
 
     #[test]
