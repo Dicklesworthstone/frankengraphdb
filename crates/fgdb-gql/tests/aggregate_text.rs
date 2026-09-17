@@ -299,13 +299,52 @@ fn summaries_match_independent_oriented_edge_enumeration_and_paginate_groups() {
 }
 
 #[test]
+fn group_by_projected_vertex_alias_returns_exact_groups() {
+    // Independent expectation: a node-only MATCH visits each vertex once,
+    // so grouping by its projected identity yields one count per vertex.
+    let vertices = [VId(7), VId(2), VId(11)];
+    let result = prepare("MATCH (a) RETURN a AS x,COUNT(*) GROUP BY x")
+        .execute_governed(
+            0,
+            vertices,
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    let actual: Vec<_> = result
+        .value
+        .iter()
+        .map(|row| (row.keys().to_vec(), row.values().to_vec()))
+        .collect();
+    assert_eq!(
+        actual,
+        vec![
+            (
+                vec![GraphValue::Vertex(VId(2))],
+                vec![fgdb_gql::GraphAggregateValue::Count(1)]
+            ),
+            (
+                vec![GraphValue::Vertex(VId(7))],
+                vec![fgdb_gql::GraphAggregateValue::Count(1)]
+            ),
+            (
+                vec![GraphValue::Vertex(VId(11))],
+                vec![fgdb_gql::GraphAggregateValue::Count(1)]
+            ),
+        ]
+    );
+}
+
+#[test]
 fn malformed_ungrouped_and_unsupported_aggregates_never_resolve_names() {
     for text in [
         "MATCH (a) RETURN a",
         "MATCH (a) RETURN a,COUNT(*)",
         "MATCH (a) RETURN COUNT(*) GROUP BY missing",
         "MATCH (a) RETURN a,COUNT(*) GROUP BY a,a",
-        "MATCH (a) RETURN a AS x,COUNT(*) GROUP BY x",
         "MATCH (a) RETURN COUNT(DISTINCT *)",
         "MATCH (a) RETURN SUM(*)",
         "MATCH (a) RETURN AVG(*)",
