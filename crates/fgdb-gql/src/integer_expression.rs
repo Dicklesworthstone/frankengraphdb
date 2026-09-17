@@ -375,6 +375,20 @@ impl GraphIntegerExpression {
         compile::prepare_scalar(ops)
     }
 
+    /// Recognize only a direct property-column prefix test, after parameters
+    /// have become admitted scalar literals. Computed and nested forms stay out.
+    pub(crate) fn starts_with_literal(&self) -> Option<(usize, &str)> {
+        match self.code.as_ref() {
+            [Instruction::ScalarColumn(column), Instruction::Scalar(value), Instruction::StartsWith] => {
+                match value.value() {
+                    CanonicalScalar::Text(text) => Some((*column, text.as_str())),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub fn referenced_columns(&self) -> impl Iterator<Item = usize> + '_ {
         self.code.iter().filter_map(|op| match op {
             Instruction::Column(column) | Instruction::ScalarColumn(column) => Some(*column),

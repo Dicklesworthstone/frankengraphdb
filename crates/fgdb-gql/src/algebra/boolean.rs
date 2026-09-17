@@ -434,6 +434,52 @@ impl core::fmt::Debug for BoundBooleanExpression {
 }
 
 impl BoundBooleanExpression {
+    /// A direct STARTS WITH conjunct over one vertex slot. The original
+    /// expression must still be evaluated on the resolved visible rows.
+    /// OR, NOT, nested scalar programs and captured-edge operands are not
+    /// eligible. This exposes semantic facts, never unchecked bytecode.
+    #[must_use]
+    pub fn starts_with_conjunct(&self) -> Option<(PropertyKeyId, &str)> {
+        let local = |operand: &Operand<BindingSlot>| match operand {
+            Operand::Vertex(variable) | Operand::Property { variable, .. } => {
+                variable.ordinal() == 0
+            }
+            Operand::Literal(_) => true,
+            Operand::EdgeProperty { .. } => false,
+        };
+        let mut selected = None;
+        for instruction in self.program.iter() {
+            match instruction {
+                Instruction::Expression {
+                    expression,
+                    columns,
+                } => {
+                    if !columns.iter().all(&local) {
+                        return None;
+                    }
+                    let (column, prefix) = expression.starts_with_literal()?;
+                    let Operand::Property { variable, key } = columns.get(column)? else {
+                        return None;
+                    };
+                    if variable.ordinal() != 0 {
+                        return None;
+                    }
+                    if let Some((chosen, _)) = selected {
+                        if chosen != *key {
+                            return None;
+                        }
+                    } else {
+                        selected = Some((*key, prefix));
+                    }
+                }
+                Instruction::Compare { left, right, .. } if local(left) && local(right) => {}
+                Instruction::IsNull { operand, .. } if local(operand) => {}
+                Instruction::Truth(_) | Instruction::And => {}
+                _ => return None,
+            }
+        }
+        selected
+    }
     /// Whether any already-bound operand reads a captured relationship property.
     #[must_use]
     pub(crate) fn contains_edge_property(&self) -> bool {
