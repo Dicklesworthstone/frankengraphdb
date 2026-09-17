@@ -363,7 +363,7 @@ impl AdjacencyIndex {
         direction: fgdb_gql::algebra::GlaDirection,
         as_of: CommitSeq,
         control: &mut C,
-        mut visit: impl FnMut(&'a AdjacencyEntry, &mut C) -> Result<(), E>,
+        mut visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
     ) -> Result<(), E>
     where
         C: FnMut(SourceEvent) -> Result<(), E>,
@@ -424,7 +424,7 @@ impl AdjacencyIndex {
                 GlaDirection::Undirected => entry.src == endpoint || entry.dst == endpoint,
             };
             if incident && entry.visible_at(as_of) {
-                visit(entry, control)?;
+                visit(entry, block, row, control)?;
             }
         }
         Ok(())
@@ -740,7 +740,7 @@ mod indexed_tests {
                                 direction,
                                 CommitSeq(at),
                                 &mut |_| Ok::<_, ()>(()),
-                                |entry, _| {
+                                |entry, _, _, _| {
                                     actual.push(entry);
                                     Ok(())
                                 },
@@ -784,7 +784,7 @@ mod indexed_tests {
                     seen += 1;
                     if seen == stop { Err(stop) } else { Ok(()) }
                 },
-                |_, control| {
+                |_, _, _, control| {
                     control(SourceEvent::SnapshotRecord)?;
                     control(SourceEvent::ScratchEntry)
                 },
@@ -872,6 +872,52 @@ mod indexed_tests {
     }
 }
 
+type BorrowedEdge<'a> = (IdentifiedEdge, &'a [(PropertyKeyId, CanonicalScalar)]);
+
+fn edge_properties_at(
+    props: &[Option<fgdb_strata::edge_props::BlockProps>],
+    block: usize,
+    row: usize,
+) -> &[(PropertyKeyId, CanonicalScalar)] {
+    let Some(Some(props)) = props.get(block) else {
+        return &[];
+    };
+    let locator = props.locators[row];
+    if locator == 0 {
+        &[]
+    } else {
+        &props.rows[usize::from(locator) - 1]
+    }
+}
+
+/// Borrow properties from the exact historical row selected for the edge.
+pub(crate) fn visit_edges_with_properties<'a, E, C>(
+    snapshot: &'a Snapshot,
+    as_of: CommitSeq,
+    control: &mut C,
+    mut visit: impl FnMut(
+        &'a AdjacencyEntry,
+        &'a [(PropertyKeyId, CanonicalScalar)],
+        &mut C,
+    ) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
+    visit_edge_coordinates(
+        &snapshot.blocks,
+        as_of,
+        control,
+        |entry, block, row, control| {
+            visit(
+                entry,
+                edge_properties_at(&snapshot.block_props, block, row),
+                control,
+            )
+        },
+    )
+}
+
 pub(crate) fn visit_edges<'a, E, C>(
     blocks: &'a [Vec<AdjacencyEntry>],
     as_of: CommitSeq,
@@ -881,40 +927,58 @@ pub(crate) fn visit_edges<'a, E, C>(
 where
     C: FnMut(SourceEvent) -> Result<(), E>,
 {
-    let mut winners: BTreeMap<EId, &AdjacencyEntry> = BTreeMap::new();
-    for block in blocks {
+    visit_edge_coordinates(blocks, as_of, control, |entry, _, _, control| {
+        visit(entry, control)
+    })
+}
+
+fn visit_edge_coordinates<'a, E, C>(
+    blocks: &'a [Vec<AdjacencyEntry>],
+    as_of: CommitSeq,
+    control: &mut C,
+    mut visit: impl FnMut(&'a AdjacencyEntry, usize, usize, &mut C) -> Result<(), E>,
+) -> Result<(), E>
+where
+    C: FnMut(SourceEvent) -> Result<(), E>,
+{
+    let mut winners: BTreeMap<EId, (&AdjacencyEntry, usize, usize)> = BTreeMap::new();
+    for (block_at, block) in blocks.iter().enumerate() {
         control(SourceEvent::Work)?;
-        for entry in block {
+        for (row_at, entry) in block.iter().enumerate() {
             control(SourceEvent::Work)?;
             if entry.created_at > as_of {
                 continue;
             }
             match winners.get(&entry.eid) {
-                Some(previous) if previous.created_at > entry.created_at => continue,
+                Some((previous, _, _)) if previous.created_at > entry.created_at => continue,
                 Some(_) => {}
                 None => control(SourceEvent::ScratchEntry)?,
             }
-            winners.insert(entry.eid, entry);
+            winners.insert(entry.eid, (entry, block_at, row_at));
         }
     }
-    for entry in winners.into_values() {
+    for (entry, block, row) in winners.into_values() {
         control(SourceEvent::Work)?;
         if entry.visible_at(as_of) {
-            visit(entry, control)?;
+            visit(entry, block, row, control)?;
         }
     }
     Ok(())
 }
-fn scan_edges<E>(
+fn scan_edges<'a, E>(
     blocks: &[Vec<AdjacencyEntry>],
+    props: &'a [Option<fgdb_strata::edge_props::BlockProps>],
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<Vec<IdentifiedEdge>, E> {
+) -> Result<Vec<BorrowedEdge<'a>>, E> {
     let mut rows = Vec::new();
-    visit_edges(blocks, as_of, control, |entry, control| {
+    visit_edge_coordinates(blocks, as_of, control, |entry, block, row, control| {
         control(SourceEvent::SnapshotRecord)?;
         control(SourceEvent::ScratchEntry)?;
-        rows.push((entry.eid, entry.src, entry.relation, entry.dst));
+        rows.push((
+            (entry.eid, entry.src, entry.relation, entry.dst),
+            edge_properties_at(props, block, row),
+        ));
         Ok(())
     })?;
     Ok(rows)
@@ -1009,19 +1073,19 @@ pub(crate) fn find_vertex<'a, E>(
 
 pub(super) struct BorrowedTables<'a> {
     pub(super) vertices: Vec<&'a VertexRow>,
-    pub(super) edges: Vec<IdentifiedEdge>,
+    pub(super) edges: Vec<BorrowedEdge<'a>>,
     pub(super) snapshot_records: u64,
 }
 
 /// Admit a conservative edge closure for a predicate-bound root. The algebra
 /// still evaluates every predicate/join and owns multiplicity and ordering.
 /// Unbound scans retain the original source and its accounting verbatim.
-fn bound_edges<E, Row>(
-    snapshot: &Snapshot,
+fn bound_edges<'a, E, Row>(
+    snapshot: &'a Snapshot,
     logical: &fgdb_gql::algebra::GlaPlan<Row>,
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
-) -> Result<Option<Vec<IdentifiedEdge>>, E> {
+) -> Result<Option<Vec<BorrowedEdge<'a>>>, E> {
     use fgdb_gql::algebra::{GlaDirection, GlaOperator};
     let Some(GlaOperator::ScanEdges {
         relation,
@@ -1061,7 +1125,7 @@ fn bound_edges<E, Row>(
             GlaDirection::Undirected => GlaDirection::Undirected,
         }
     };
-    let mut selected = BTreeMap::<EId, &AdjacencyEntry>::new();
+    let mut selected = BTreeMap::<EId, BorrowedEdge<'a>>::new();
     let mut frontier = std::collections::BTreeSet::new();
     visit_vertices(&snapshot.patches, as_of, control, |row, control| {
         control(SourceEvent::Work)?;
@@ -1080,11 +1144,17 @@ fn bound_edges<E, Row>(
                 lookup_direction,
                 as_of,
                 control,
-                |entry, control| {
+                |entry, block, row, control| {
                     if entry.relation == *relation && !selected.contains_key(&entry.eid) {
                         control(SourceEvent::SnapshotRecord)?;
                         control(SourceEvent::ScratchEntry)?;
-                        selected.insert(entry.eid, entry);
+                        selected.insert(
+                            entry.eid,
+                            (
+                                (entry.eid, entry.src, entry.relation, entry.dst),
+                                edge_properties_at(&snapshot.block_props, block, row),
+                            ),
+                        );
                         for endpoint in [entry.src, entry.dst] {
                             if !frontier.contains(&endpoint) {
                                 control(SourceEvent::ScratchEntry)?;
@@ -1121,11 +1191,17 @@ fn bound_edges<E, Row>(
                 GlaDirection::Undirected,
                 as_of,
                 control,
-                |entry, control| {
+                |entry, block, row, control| {
                     if !selected.contains_key(&entry.eid) {
                         control(SourceEvent::SnapshotRecord)?;
                         control(SourceEvent::ScratchEntry)?;
-                        selected.insert(entry.eid, entry);
+                        selected.insert(
+                            entry.eid,
+                            (
+                                (entry.eid, entry.src, entry.relation, entry.dst),
+                                edge_properties_at(&snapshot.block_props, block, row),
+                            ),
+                        );
                         for endpoint in [entry.src, entry.dst] {
                             if !frontier.contains(&endpoint) {
                                 control(SourceEvent::ScratchEntry)?;
@@ -1138,12 +1214,7 @@ fn bound_edges<E, Row>(
             )?;
         }
     }
-    Ok(Some(
-        selected
-            .into_values()
-            .map(|entry| (entry.eid, entry.src, entry.relation, entry.dst))
-            .collect(),
-    ))
+    Ok(Some(selected.into_values().collect()))
 }
 
 /// Source selection is shared by scalar and tuple plans. Output columns do
@@ -1175,7 +1246,7 @@ pub(super) fn admit<'a, E, Row>(
         // vertices, admit topology once, and charge every base record to the
         // same allowance. Probe execution never rereads either source table.
         let edges = if logical.reads_edges() {
-            scan_edges(&snapshot.blocks, as_of, control)?
+            scan_edges(&snapshot.blocks, &snapshot.block_props, as_of, control)?
         } else {
             Vec::new()
         };
@@ -1187,13 +1258,13 @@ pub(super) fn admit<'a, E, Row>(
     }
     let edges = match bound_edges(snapshot, logical, as_of, control)? {
         Some(edges) => edges,
-        None => scan_edges(&snapshot.blocks, as_of, control)?,
+        None => scan_edges(&snapshot.blocks, &snapshot.block_props, as_of, control)?,
     };
     let mut vertices = Vec::new();
     // Projection-only properties need admitted vertex rows even with no WHERE.
     if logical.needs_vertex_values() {
         let mut candidates = std::collections::BTreeSet::new();
-        for &(_, src, relation, dst) in &edges {
+        for &((_, src, relation, dst), _) in &edges {
             control(SourceEvent::Work)?;
             let requested = logical.operators().iter().any(|operator| match operator {
                 GlaOperator::ScanEdges {
@@ -1228,6 +1299,17 @@ pub(super) fn admit<'a, E, Row>(
     })
 }
 impl BorrowedTables<'_> {
+    pub(super) fn edge_property(&self, eid: EId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
+        let at = self
+            .edges
+            .binary_search_by_key(&eid, |(edge, _)| edge.0)
+            .ok()?;
+        let props = self.edges[at].1;
+        props
+            .binary_search_by_key(&key, |(key, _)| *key)
+            .ok()
+            .map(|at| &props[at].1)
+    }
     pub(super) fn property(&self, vid: VId, key: PropertyKeyId) -> Option<&CanonicalScalar> {
         let row = self.vertices[self
             .vertices
@@ -1358,11 +1440,15 @@ mod tests {
                     .into_iter()
                     .map(|(entry, _)| (entry.eid, entry.src, entry.relation, entry.dst))
                     .collect::<Vec<_>>();
-            let actual = scan_edges(&blocks, CommitSeq(at), &mut |_| Ok::<_, ()>(())).unwrap();
-            assert_eq!(actual, expected);
+            let actual =
+                scan_edges(&blocks, &props, CommitSeq(at), &mut |_| Ok::<_, ()>(())).unwrap();
+            assert_eq!(
+                actual.into_iter().map(|(edge, _)| edge).collect::<Vec<_>>(),
+                expected
+            );
         }
         let mut allocations = 0;
-        scan_edges(&blocks, CommitSeq(3), &mut |event| {
+        scan_edges(&blocks, &props, CommitSeq(3), &mut |event| {
             allocations += usize::from(event == SourceEvent::ScratchEntry);
             Ok::<_, ()>(())
         })
@@ -1386,7 +1472,7 @@ mod tests {
                 let result = if vertices {
                     scan_vertices(&patches, CommitSeq(1), &mut control).map(|rows| rows.len())
                 } else {
-                    scan_edges(&blocks, CommitSeq(1), &mut control).map(|rows| rows.len())
+                    scan_edges(&blocks, &[], CommitSeq(1), &mut control).map(|rows| rows.len())
                 };
                 (result, events)
             };
