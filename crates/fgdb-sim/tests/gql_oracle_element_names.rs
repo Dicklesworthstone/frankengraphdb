@@ -50,85 +50,106 @@ fn element_names_include_empty_labels_and_preserve_historical_rows() {
             let mut batch = WriteBatch::new(RELATION);
             batch.create_vertex(VId(1), vec![PERSON, AGENT], vec![]);
             batch.create_vertex(VId(2), vec![], vec![]);
+            batch.create_vertex(VId(4), vec![PERSON], vec![]);
             batch.add_edge(EId(1), VId(1), VId(2), vec![]);
             let historical = database.write(&commit, batch).await.expect("initial graph");
             let mut later = WriteBatch::new(RELATION);
             later.create_vertex(VId(3), vec![AGENT], vec![]);
-            database.write(&commit, later).await.expect("later graph");
+            later.set_vertex_label(VId(1), PERSON, false);
+            later.set_vertex_label(VId(2), AGENT, true);
+            later.delete_vertex(VId(4));
+            let current = database.write(&commit, later).await.expect("later graph");
 
-            let vertices = database.vertices_at(historical).expect("historical scan");
-            let expected_labels: Vec<_> = vertices
-                .iter()
-                .map(|vertex| {
-                    let names = vertex
-                        .labels
-                        .iter()
-                        .map(|id| match *id {
-                            PERSON => text("Person"),
-                            AGENT => text("Agent"),
-                            other => panic!("unexpected fixture label {other:?}"),
-                        })
-                        .collect::<Vec<_>>();
-                    vec![
-                        GraphValue::Vertex(vertex.vid),
-                        GraphValue::List(names.into_boxed_slice()),
-                    ]
-                })
-                .collect();
-            assert_eq!(expected_labels[1][1], GraphValue::List(Box::new([])));
-            assert_eq!(
-                expected_labels[0][1],
-                GraphValue::List(vec![text("Person"), text("Agent")].into_boxed_slice())
-            );
-            let expected_types: Vec<_> = database
-                .edges_at(historical)
-                .expect("historical edges")
-                .iter()
-                .map(|edge| {
-                    assert_eq!(edge.entry.relation, RELATION);
-                    vec![GraphValue::Vertex(edge.entry.src), text("KNOWS")]
-                })
-                .collect();
-            for (query, expected) in [
-                (
-                    format!(
-                        "MATCH (p) FOR SYSTEM_TIME AS OF SEQ {} RETURN p, labels(p) AS names ORDER BY p",
-                        historical.0
-                    ),
-                    expected_labels,
-                ),
-                (
-                    format!(
-                        "MATCH (p)-[r:KNOWS]->(q) FOR SYSTEM_TIME AS OF SEQ {} RETURN p, type(r) AS name ORDER BY p",
-                        historical.0
-                    ),
-                    expected_types,
-                ),
-            ] {
-                let result = database
-                    .query(
-                        &cx,
-                        &query,
-                        &GqlParameters::new(),
-                        symbols,
-                        GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
-                    )
-                    .unwrap_or_else(|error| panic!("seed={seed} query={query}: {error:?}"));
-                let QueryResult::Rows { rows, .. } = result else {
-                    panic!("expected element-name rows");
-                };
-                let actual: Vec<Vec<_>> = rows
-                    .into_iter()
-                    .map(|row| {
-                        row.into_iter()
-                            .map(|cell| match cell {
-                                GraphAggregateValue::Value(value) => value,
-                                other => panic!("unexpected element-name cell {other:?}"),
+            for selected in [historical, current] {
+                let vertices = database
+                    .vertices_at(selected)
+                    .expect("selected snapshot scan");
+                let expected_labels: Vec<_> = vertices
+                    .iter()
+                    .map(|vertex| {
+                        let names = vertex
+                            .labels
+                            .iter()
+                            .map(|id| match *id {
+                                PERSON => text("Person"),
+                                AGENT => text("Agent"),
+                                other => panic!("unexpected fixture label {other:?}"),
                             })
-                            .collect()
+                            .collect::<Vec<_>>();
+                        vec![
+                            GraphValue::Vertex(vertex.vid),
+                            GraphValue::List(names.into_boxed_slice()),
+                        ]
                     })
                     .collect();
-                assert_eq!(actual, expected, "seed={seed} query={query}");
+                if selected == historical {
+                    assert_eq!(expected_labels[1][1], GraphValue::List(Box::new([])));
+                    assert_eq!(
+                        expected_labels[0][1],
+                        GraphValue::List(vec![text("Person"), text("Agent")].into_boxed_slice())
+                    );
+                    assert!(vertices.iter().any(|vertex| vertex.vid == VId(4)));
+                } else {
+                    assert_eq!(
+                        expected_labels[0][1],
+                        GraphValue::List(vec![text("Agent")].into_boxed_slice())
+                    );
+                    assert_eq!(
+                        expected_labels[1][1],
+                        GraphValue::List(vec![text("Agent")].into_boxed_slice())
+                    );
+                    assert!(!vertices.iter().any(|vertex| vertex.vid == VId(4)));
+                }
+                let expected_types: Vec<_> = database
+                    .edges_at(selected)
+                    .expect("historical edges")
+                    .iter()
+                    .map(|edge| {
+                        assert_eq!(edge.entry.relation, RELATION);
+                        vec![GraphValue::Vertex(edge.entry.src), text("KNOWS")]
+                    })
+                    .collect();
+                for (query, expected) in [
+                    (
+                        format!(
+                            "MATCH (p) FOR SYSTEM_TIME AS OF SEQ {} RETURN p, labels(p) AS names ORDER BY p",
+                            selected.0
+                        ),
+                        expected_labels,
+                    ),
+                    (
+                        format!(
+                            "MATCH (p)-[r:KNOWS]->(q) FOR SYSTEM_TIME AS OF SEQ {} RETURN p, type(r) AS name ORDER BY p",
+                            selected.0
+                        ),
+                        expected_types,
+                    ),
+                ] {
+                    let result = database
+                        .query(
+                            &cx,
+                            &query,
+                            &GqlParameters::new(),
+                            symbols,
+                            GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+                        )
+                        .unwrap_or_else(|error| panic!("seed={seed} query={query}: {error:?}"));
+                    let QueryResult::Rows { rows, .. } = result else {
+                        panic!("expected element-name rows");
+                    };
+                    let actual: Vec<Vec<_>> = rows
+                        .into_iter()
+                        .map(|row| {
+                            row.into_iter()
+                                .map(|cell| match cell {
+                                    GraphAggregateValue::Value(value) => value,
+                                    other => panic!("unexpected element-name cell {other:?}"),
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    assert_eq!(actual, expected, "seed={seed} query={query}");
+                }
             }
         });
         assert!(report.lab_test_passed(), "seed={seed} report={report:?}");
