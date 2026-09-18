@@ -324,6 +324,17 @@ pub struct AggregateUpdate<'a, K: Ord> {
     delta: AggregateDelta<K>,
 }
 impl<K: Ord> AggregateUpdate<'_, K> {
+    /// Read the prospective summary without publishing. An explicit removal
+    /// shadows the old group; it must not fall back to the retained summary.
+    /// This permits downstream row construction while the update owns its
+    /// exclusive borrow. Lookup/key-comparison costs belong to the caller.
+    pub fn get(&self, key: &K) -> Option<&AggregateValues> {
+        match self.patches.get(key) {
+            Some(patch) => patch.summary.as_deref(),
+            None => self.owner.get(key),
+        }
+    }
+
     /// Tentative output. Publish externally only after the whole tick commits.
     pub fn delta(&self) -> &AggregateDelta<K> {
         &self.delta
@@ -589,5 +600,42 @@ mod tests {
         assert!(!text.contains("919191"));
         let update = state.prepare(&rows, LIMBS, &mut allow).unwrap();
         assert!(!format!("{update:?}").contains("private-group"));
+    }
+}
+
+#[cfg(test)]
+mod prospective_tests {
+    use super::*;
+
+    #[test]
+    fn prospective_reads_shadow_removals_and_abort_without_changing_the_owner() {
+        let limbs = LimbLimit::new(4);
+        let mut allow = |_| Ok::<_, ()>(());
+        let initial = ZSet::from_updates([
+            ((1, Some(7)), ZWeight::ONE),
+            ((2, Some(5)), ZWeight::ONE),
+            ((3, None), ZWeight::ONE),
+        ], limbs, &mut allow).unwrap();
+        let delta = ZSet::from_updates([
+            ((1, Some(7)), ZWeight::from_i128(-1)),
+            ((2, Some(9)), ZWeight::ONE),
+            ((4, Some(-2)), ZWeight::ONE),
+        ], limbs, &mut allow).unwrap();
+        let mut aggregate = IncrementalAggregate::new();
+        aggregate.apply(&initial, limbs, &mut allow).unwrap();
+        let before = aggregate.snapshot(limbs, &mut allow).unwrap();
+        {
+            let pending = aggregate.prepare(&delta, limbs, &mut allow).unwrap();
+            assert!(pending.get(&1).is_none());
+            assert_eq!(pending.get(&2).unwrap().sum().unwrap().to_i128(), Some(14));
+            assert_eq!(pending.get(&3).unwrap().count_rows(), &ZWeight::ONE);
+            assert!(pending.get(&3).unwrap().sum().is_none());
+            assert_eq!(pending.get(&4).unwrap().minimum(), Some(-2));
+            assert!(pending.get(&5).is_none());
+        }
+        assert_eq!(aggregate.snapshot(limbs, &mut allow).unwrap(), before);
+        aggregate.prepare(&delta, limbs, &mut allow).unwrap().commit();
+        assert!(aggregate.get(&1).is_none());
+        assert_eq!(aggregate.get(&2).unwrap().sum().unwrap().to_i128(), Some(14));
     }
 }

@@ -1,18 +1,22 @@
-//! Session-local global equality aggregates maintained from committed logical deltas.
+//! Session-local vertex and one-hop aggregates maintained from committed deltas.
 //! This is not a durable subscription or a resumable delivery protocol.
+
+mod grouped;
+mod edge;
+use grouped::{AggregateKey, contributions};
 
 use crate::{Database, ReadError, VertexRow};
 use asupersync::fs::Vfs;
-use fgdb_delta_types::zset::aggregate::{AggregateError, IncrementalAggregate};
+use fgdb_delta_types::zset::aggregate::IncrementalAggregate;
 use fgdb_delta_types::{
     DeltaRow, ElementId, LabelId, LimbLimit, LogicalDeltaBatch, PropertyKeyId, ZSet, ZSetError,
-    ZSetEvent, ZWeight,
+    ZSetEvent,
 };
 use fgdb_gql::algebra::{
-    GlaOperator, GraphValue, IntegerComparison, ValueProjection, VertexPredicate,
+    GlaOperator, ValueProjection, VertexPredicate,
 };
 use fgdb_gql::{
-    GqlQueryPolicy, GraphAggregateFunction, GraphAggregateRow, GraphAggregateValue,
+    GqlQueryPolicy, GraphAggregateFunction, GraphAggregateRow,
     PreparedGraphAggregate,
 };
 use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, QueryCx, VId};
@@ -29,6 +33,9 @@ pub struct StandingQueryHandle {
 pub struct StandingQueryStats {
     pub delta_rows: u64,
     pub affected_vertices: u64,
+    /// Distinct retained/new edge identities examined for a one-hop tick.
+    /// Parallel edges count separately; a self-loop counts once.
+    pub affected_edges: u64,
     pub work_units: u64,
     pub scratch_entries: u64,
 }
@@ -64,7 +71,7 @@ impl core::fmt::Display for StandingQueryError {
             Self::ForeignHandle => f.write_str("standing query belongs to another opened database"),
             Self::UnknownHandle => f.write_str("unknown standing query"),
             Self::Unsupported => {
-                f.write_str("standing query is outside the global equality COUNT/SUM profile")
+                f.write_str("standing query is outside the vertex/one-hop COUNT/SUM/AVG profile")
             }
             Self::Unavailable { frontier, reason } => write!(
                 f,
@@ -98,22 +105,33 @@ impl StandingQueryView<'_> {
 
 // Only fields needed by the immutable definition are retained. Nonmatching
 // vertices remain present so a later property/label transition can admit them.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 struct VertexState {
     labels: BTreeSet<LabelId>,
     props: BTreeMap<PropertyKeyId, CanonicalScalar>,
 }
 
-#[derive(Debug)]
 pub(crate) struct StandingQuery {
     definition: PreparedGraphAggregate,
     policy: GqlQueryPolicy,
     vertices: BTreeMap<VId, VertexState>,
-    aggregate: IncrementalAggregate<usize>,
+    edges: Option<edge::State>,
+    aggregate: IncrementalAggregate<AggregateKey>,
     rows: ZSet<GraphAggregateRow>,
     frontier: CommitSeq,
     stats: StandingQueryStats,
     failure: Option<StandingQueryFailure>,
+}
+
+impl core::fmt::Debug for StandingQuery {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StandingQuery")
+            .field("frontier", &self.frontier)
+            .field("result_groups", &self.rows.len())
+            .field("failure", &self.failure)
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
 }
 
 struct Meter<'a> {
@@ -167,37 +185,40 @@ fn scalar_units(value: &CanonicalScalar) -> usize {
     1 + bytes.div_ceil(64)
 }
 fn eligible(query: &PreparedGraphAggregate) -> bool {
-    if !query.supports_incremental_maintenance() || !query.group_key_columns().is_empty() {
+    if !query.supports_incremental_maintenance() {
         return false;
     }
     let operators = query.input_pattern().plan().operators();
+    let width = match operators.first() {
+        Some(GlaOperator::ScanVertices) => 1,
+        Some(GlaOperator::ScanEdges { .. }) => 2,
+        _ => return false,
+    };
     let mut scans = 0;
-    let mut equalities = 0;
     let mut projections = 0;
-    for op in operators {
+    for (position, op) in operators.iter().enumerate() {
         match op {
-            GlaOperator::ScanVertices => scans += 1,
-            GlaOperator::Select { slot, predicates } if slot.ordinal() == 0 => {
-                for predicate in predicates {
-                    match predicate {
-                        VertexPredicate::HasLabel(_) => {}
-                        VertexPredicate::IntegerProperty {
-                            comparison: IntegerComparison::Equal,
-                            ..
-                        } => equalities += 1,
-                        VertexPredicate::ScalarProperty { predicate, .. }
-                            if predicate.comparison() == IntegerComparison::Equal =>
-                        {
-                            equalities += 1
-                        }
-                        _ => return false,
-                    }
+            GlaOperator::ScanVertices | GlaOperator::ScanEdges { .. } if position == 0 => scans += 1,
+            // Reuse the existing unary predicate semantics, including ranges,
+            // labels and missing/stored NULL. Boolean programs, multi-hop joins, pages,
+            // and row expressions remain separate unsupported operator shapes.
+            GlaOperator::Select { slot, predicates } if slot.ordinal() < width => {
+                if !predicates.iter().all(|predicate| matches!(predicate,
+                    VertexPredicate::HasLabel(_)
+                    | VertexPredicate::IntegerProperty { .. }
+                    | VertexPredicate::ScalarProperty { .. }
+                    | VertexPredicate::PropertyNull { .. })) {
+                    return false;
                 }
             }
+            GlaOperator::VertexIdentity { left, right, .. }
+                if left.ordinal() < width && right.ordinal() < width => {}
+            GlaOperator::CompareProperties { left, right, .. }
+                if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::ProjectValues { columns } => {
                 projections += 1;
                 if columns.iter().any(|column| !matches!(column,
-                    ValueProjection::Property { slot, .. } | ValueProjection::Vertex { slot } if slot.ordinal() == 0)) { return false; }
+                    ValueProjection::Property { slot, .. } | ValueProjection::Vertex { slot } if slot.ordinal() < width)) { return false; }
             }
             GlaOperator::OrderByValues
             | GlaOperator::Limit {
@@ -208,7 +229,6 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
         }
     }
     scans == 1
-        && equalities == 1
         && projections == 1
         && query
             .aggregates()
@@ -216,7 +236,7 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
             .all(|aggregate| match aggregate.function() {
                 GraphAggregateFunction::CountRows => aggregate.argument_column().is_none(),
                 GraphAggregateFunction::Count => aggregate.argument_column().is_some(),
-                GraphAggregateFunction::SumInt => {
+                GraphAggregateFunction::SumInt | GraphAggregateFunction::AverageInt => {
                     aggregate.argument_column().is_some_and(|column| {
                         matches!(
                             query.input_pattern().value_columns().get(column),
@@ -229,7 +249,13 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
 }
 fn needs_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
     query.input_pattern().value_columns().iter().any(|column| matches!(column, ValueProjection::Property { key: actual, .. } if *actual == key))
-        || query.input_pattern().plan().operators().iter().any(|op| matches!(op, GlaOperator::Select { predicates, .. } if predicates.iter().any(|p| p.property_key() == Some(key))))
+        || query.input_pattern().plan().operators().iter().any(|op| match op {
+            GlaOperator::Select { predicates, .. } => predicates.iter().any(|p| p.property_key() == Some(key)),
+            // Operands need not be returned or appear in a unary predicate.
+            // Retain and invalidate on BOTH sides of a binding-dependent test.
+            GlaOperator::CompareProperties { left_key, right_key, .. } => *left_key == key || *right_key == key,
+            _ => false,
+        })
 }
 fn needs_label(query: &PreparedGraphAggregate, label: LabelId) -> bool {
     query.input_pattern().plan().operators().iter().any(|op| matches!(op, GlaOperator::Select { predicates, .. } if predicates.iter().any(|p| matches!(p, VertexPredicate::HasLabel(actual) if *actual == label))))
@@ -257,151 +283,75 @@ fn state_from(
     }
     Ok(state)
 }
-fn contributions(
-    query: &PreparedGraphAggregate,
-    state: &VertexState,
-    sign: i128,
-    output: &mut Vec<((usize, Option<i128>), ZWeight)>,
-    meter: &mut Meter<'_>,
-) -> Result<(), StandingQueryFailure> {
-    for op in query.input_pattern().plan().operators() {
-        if let GlaOperator::Select { predicates, .. } = op {
-            for predicate in predicates {
-                meter.units(ZSetEvent::Work, 1 + predicate.comparison_work_units())?;
-                if !predicate.matches_borrowed(
-                    state.labels.iter().copied(),
-                    state.props.iter().map(|(k, v)| (*k, v)),
-                ) {
-                    return Ok(());
-                }
-            }
-        }
-    }
-    for (index, aggregate) in query.aggregates().iter().enumerate() {
-        meter.charge(ZSetEvent::Work)?;
-        let value = match aggregate
-            .argument_column()
-            .map(|column| query.input_pattern().value_columns()[column])
-        {
-            None | Some(ValueProjection::Vertex { .. }) => Some(0),
-            Some(ValueProjection::Property { key, .. }) => match state.props.get(&key) {
-                None | Some(CanonicalScalar::Null) => None,
-                Some(CanonicalScalar::Int(value))
-                    if aggregate.function() == GraphAggregateFunction::SumInt =>
-                {
-                    Some(i128::from(*value))
-                }
-                Some(_) if aggregate.function() == GraphAggregateFunction::Count => Some(0),
-                _ => return Err(StandingQueryFailure::NonIntegerSum),
-            },
-            _ => return Err(StandingQueryFailure::InvalidDelta),
-        };
-        meter.charge(ZSetEvent::ScratchEntry)?;
-        output.push(((index, value), ZWeight::from_i128(sign)));
-    }
-    Ok(())
-}
 impl StandingQuery {
-    fn integrate(
-        &mut self,
-        updates: Vec<((usize, Option<i128>), ZWeight)>,
-        meter: &mut Meter<'_>,
-    ) -> Result<(), StandingQueryFailure> {
-        // GQL output is bounded by u64 counts/i128 sums. Four limbs also admit
-        // an intermediate exact sum across one signed input tick; promotion is
-        // never allowed to become an unaccounted, unbounded allocation.
-        let limbs = LimbLimit::new(4);
-        let delta = ZSet::from_updates(updates, limbs, &mut |event| meter.charge(event))
-            .map_err(zset_error)?;
-        self.aggregate
-            .apply(&delta, limbs, &mut |event| meter.charge(event))
-            .map_err(|error| match error {
-                AggregateError::ZSet(error) => zset_error(error),
-                AggregateError::NegativeMultiplicity => StandingQueryFailure::InvalidDelta,
-            })?;
-        if self
-            .policy
-            .rows
-            .max_result_rows()
-            .is_some_and(|limit| limit < 1)
-        {
-            return Err(StandingQueryFailure::ResultBudget);
-        }
-        let mut values = Vec::new();
-        for (index, spec) in self.definition.aggregates().iter().enumerate() {
-            meter.charge(ZSetEvent::Work)?;
-            meter.charge(ZSetEvent::ScratchEntry)?;
-            let summary = self.aggregate.get(&index);
-            let value = match spec.function() {
-                GraphAggregateFunction::CountRows | GraphAggregateFunction::Count => {
-                    let count = match summary {
-                        None => 0,
-                        Some(summary) => {
-                            let weight = if spec.function() == GraphAggregateFunction::CountRows {
-                                summary.count_rows()
-                            } else {
-                                summary.count_values()
-                            };
-                            u64::try_from(weight.to_i128().ok_or(StandingQueryFailure::Arithmetic)?)
-                                .map_err(|_| StandingQueryFailure::Arithmetic)?
-                        }
-                    };
-                    GraphAggregateValue::Count(count)
-                }
-                GraphAggregateFunction::SumInt => match summary.and_then(|summary| summary.sum()) {
-                    None => GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
-                    Some(sum) => GraphAggregateValue::Integer(
-                        sum.to_i128().ok_or(StandingQueryFailure::Arithmetic)?,
-                    ),
-                },
-                _ => return Err(StandingQueryFailure::InvalidDelta),
-            };
-            values.push(value);
-        }
-        let row = self
-            .definition
-            .incremental_global_row(values)
-            .ok_or(StandingQueryFailure::InvalidDelta)?;
-        let rows = ZSet::from_updates([(row, ZWeight::ONE)], limbs, &mut |event| {
-            meter.charge(event)
-        })
-        .map_err(zset_error)?;
-        (meter.checkpoint)()?;
-        self.rows = rows;
-        Ok(())
-    }
-
     fn maintain(
         &mut self,
         batch: &LogicalDeltaBatch,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        let mut affected = BTreeSet::new();
-        for row in batch
-            .coordinate_entries()
-            .iter()
-            .flat_map(|entry| &entry.rows)
+        if batch.commit_seq() != self.frontier.checked_successor()
+            .map_err(|_| StandingQueryFailure::InvalidDelta)?
+            || batch.frontier() != batch.commit_seq()
+            || batch.commit_marker_identity().commit_seq != batch.commit_seq()
         {
+            return Err(StandingQueryFailure::InvalidDelta);
+        }
+        let mut affected = BTreeSet::new();
+        for entry in batch.coordinate_entries() {
             meter.charge(ZSetEvent::Work)?;
-            meter.stats.delta_rows += 1;
-            if let Some(vid) = affected_vertex(row) {
-                if !affected.contains(&vid) {
-                    meter.charge(ZSetEvent::ScratchEntry)?;
-                    affected.insert(vid);
+            if entry.graph != crate::GRAPH || entry.branch != crate::BRANCH {
+                continue;
+            }
+            if entry.schema_transition.is_some() {
+                return Err(StandingQueryFailure::InvalidDelta);
+            }
+            for row in &entry.rows {
+                meter.charge(ZSetEvent::Work)?;
+                meter.stats.delta_rows = meter.stats.delta_rows.checked_add(1)
+                    .ok_or(StandingQueryFailure::WorkBudget)?;
+                if matches!(row, DeltaRow::Schema { .. } | DeltaRow::Constraint { .. }) {
+                    return Err(StandingQueryFailure::InvalidDelta);
+                }
+                if let Some(vid) = affected_vertex(&self.definition, row) {
+                    if !affected.contains(&vid) {
+                        meter.charge(ZSetEvent::ScratchEntry)?;
+                        affected.insert(vid);
+                    }
                 }
             }
         }
         meter.stats.affected_vertices = affected.len() as u64;
         let mut updates = Vec::new();
+        let mut staged = BTreeMap::new();
         for vid in &affected {
             meter.charge(ZSetEvent::Work)?;
-            if let Some(state) = self.vertices.get(vid) {
-                contributions(&self.definition, state, -1, &mut updates, meter)?;
-            }
+            let next = if let Some(state) = self.vertices.get(vid) {
+                if self.edges.is_none() {
+                    contributions(&self.definition, *vid, state, -1, &mut updates, meter)?;
+                }
+                let mut next = VertexState::default();
+                meter.charge(ZSetEvent::ScratchEntry)?;
+                for label in &state.labels {
+                    meter.charge(ZSetEvent::Work)?;
+                    meter.charge(ZSetEvent::ScratchEntry)?;
+                    next.labels.insert(*label);
+                }
+                for (key, value) in &state.props {
+                    meter.charge(ZSetEvent::Work)?;
+                    meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+                    next.props.insert(*key, value.clone());
+                }
+                Some(next)
+            } else {
+                None
+            };
+            meter.charge(ZSetEvent::ScratchEntry)?;
+            staged.insert(*vid, next);
         }
         for row in batch
             .coordinate_entries()
             .iter()
+            .filter(|entry| entry.graph == crate::GRAPH && entry.branch == crate::BRANCH)
             .flat_map(|entry| &entry.rows)
         {
             meter.charge(ZSetEvent::Work)?;
@@ -413,7 +363,8 @@ impl StandingQuery {
                     props,
                     ..
                 } => {
-                    if self.vertices.contains_key(vid) {
+                    let target = staged.get_mut(vid).ok_or(StandingQueryFailure::InvalidDelta)?;
+                    if target.is_some() {
                         return Err(StandingQueryFailure::InvalidDelta);
                     }
                     // Borrow the delta fields directly; no full vertex/source clone.
@@ -434,20 +385,24 @@ impl StandingQuery {
                             state.props.insert(*key, value.clone());
                         }
                     }
-                    self.vertices.insert(*vid, state);
+                    *target = Some(state);
                 }
                 DeltaRow::DeleteVertex { vid, .. } => {
-                    self.vertices
-                        .remove(vid)
+                    staged
+                        .get_mut(vid)
+                        .and_then(Option::take)
                         .ok_or(StandingQueryFailure::InvalidDelta)?;
                 }
                 DeltaRow::LabelMembership {
-                    vid, label, after, ..
+                    vid, label, before, after,
                 } if needs_label(&self.definition, *label) => {
-                    let state = self
-                        .vertices
+                    let state = staged
                         .get_mut(vid)
+                        .and_then(Option::as_mut)
                         .ok_or(StandingQueryFailure::InvalidDelta)?;
+                    if state.labels.contains(label) != *before {
+                        return Err(StandingQueryFailure::InvalidDelta);
+                    }
                     if *after {
                         meter.charge(ZSetEvent::ScratchEntry)?;
                         state.labels.insert(*label);
@@ -458,13 +413,17 @@ impl StandingQuery {
                 DeltaRow::Property {
                     elem: ElementId::Vertex(vid),
                     property,
+                    before,
                     after,
                     ..
                 } if needs_property(&self.definition, *property) => {
-                    let state = self
-                        .vertices
+                    let state = staged
                         .get_mut(vid)
+                        .and_then(Option::as_mut)
                         .ok_or(StandingQueryFailure::InvalidDelta)?;
+                    if state.props.get(property) != before.as_ref() {
+                        return Err(StandingQueryFailure::InvalidDelta);
+                    }
                     match after {
                         Some(value) => {
                             meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
@@ -486,29 +445,46 @@ impl StandingQuery {
                 _ => {}
             }
         }
-        for vid in &affected {
-            meter.charge(ZSetEvent::Work)?;
-            if let Some(state) = self.vertices.get(vid) {
-                contributions(&self.definition, state, 1, &mut updates, meter)?;
+        let edge_patch = if let Some(edges) = &self.edges {
+            Some(edges.prepare(
+                &self.definition, batch, &self.vertices, &staged, &mut updates, meter,
+            )?)
+        } else {
+            for vid in &affected {
+                meter.charge(ZSetEvent::Work)?;
+                if let Some(state) = staged.get(vid).and_then(Option::as_ref) {
+                    contributions(&self.definition, *vid, state, 1, &mut updates, meter)?;
+                }
+            }
+            None
+        };
+        self.integrate(updates, meter)?;
+        // Aggregate and result publication succeeded; only owned map patches
+        // remain. No fallible callback or arithmetic follows this boundary.
+        for (vid, state) in staged {
+            match state {
+                Some(state) => { self.vertices.insert(vid, state); }
+                None => { self.vertices.remove(&vid); }
             }
         }
-        self.integrate(updates, meter)
+        if let (Some(edges), Some(patch)) = (&mut self.edges, edge_patch) {
+            edges.publish(patch);
+        }
+        Ok(())
     }
 }
-fn affected_vertex(row: &DeltaRow) -> Option<VId> {
+fn affected_vertex(query: &PreparedGraphAggregate, row: &DeltaRow) -> Option<VId> {
     match row {
         DeltaRow::CreateVertex { vid, .. }
-        | DeltaRow::DeleteVertex { vid, .. }
-        | DeltaRow::LabelMembership { vid, .. } => Some(*vid),
+        | DeltaRow::DeleteVertex { vid, .. } => Some(*vid),
+        DeltaRow::LabelMembership { vid, label, .. }
+            if needs_label(query, *label) => Some(*vid),
         DeltaRow::Property {
             elem: ElementId::Vertex(vid),
+            property,
             ..
-        }
-        | DeltaRow::ValidTime {
-            elem: ElementId::Vertex(vid),
-            ..
-        }
-        | DeltaRow::Counter {
+        } if needs_property(query, *property) => Some(*vid),
+        DeltaRow::Counter {
             elem: ElementId::Vertex(vid),
             ..
         }
@@ -520,12 +496,66 @@ fn affected_vertex(row: &DeltaRow) -> Option<VId> {
     }
 }
 impl<V: Vfs + Clone> Database<V> {
+    /// Register a session-local maintained result against the current committed
+    /// snapshot. Initialization and later explicit rebuilds share one admitted
+    /// source path; ordinary commit maintenance never scans that source again.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
+        let query = self.prepare_standing_query(cx, definition, policy)?;
+        let index = self.standing_queries.len();
+        self.standing_queries.push(query);
+        Ok(StandingQueryHandle {
+            owner: Arc::clone(&self.handle_owner),
+            index,
+        })
+    }
+
+    /// Rebuild an existing standing query from the authoritative current
+    /// snapshot, retaining the same handle and immutable prepared definition.
+    /// A maintenance refusal does not roll back the already durable write;
+    /// this method repairs the derived view after the cause is corrected or
+    /// a larger policy is supplied. It is also valid for a healthy view.
+    ///
+    /// Preparation is private: any read, cancellation, budget or arithmetic
+    /// refusal preserves the prior result, policy, failure and frontier. On
+    /// success all are replaced together, then later commits resume ordinary
+    /// incremental maintenance. This deliberately rebuilds the full admitted
+    /// snapshot rather than skipping deltas or trusting a partial old state.
+    /// No handle transfer across reopened databases, durable registration,
+    /// delivery replay or automatic retry is implied.
+    pub fn rebuild_standing_query(
+        &mut self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+        policy: GqlQueryPolicy,
+    ) -> Result<CommitSeq, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        if !Arc::ptr_eq(&self.handle_owner, &handle.owner) {
+            return Err(StandingQueryError::ForeignHandle);
+        }
+        self.ensure_readable().map_err(StandingQueryError::Read)?;
+        let definition = self.standing_queries
+            .get(handle.index)
+            .ok_or(StandingQueryError::UnknownHandle)?
+            .definition.clone();
+        let replacement = self.prepare_standing_query(cx, definition, policy)?;
+        let frontier = replacement.frontier;
+        // No await, source mutation or fallible callback can interleave the
+        // completed preparation and this one replacement under &mut self.
+        self.standing_queries[handle.index] = replacement;
+        Ok(frontier)
+    }
+
+    fn prepare_standing_query(
+        &self,
+        cx: &QueryCx,
+        definition: PreparedGraphAggregate,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQuery, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         if !eligible(&definition) {
@@ -541,7 +571,7 @@ impl<V: Vfs + Clone> Database<V> {
                 stats: StandingQueryStats::default(),
                 checkpoint: &mut checkpoint,
             };
-            // Registration alone may scan the snapshot. Admit and charge every
+            // Registration/rebuild may scan the snapshot. Admit and charge every
             // physical row/payload before merge_all_vertices can allocate it.
             let mut records = 0u64;
             for patch in &self.snapshot.patches {
@@ -573,10 +603,16 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                 }
             }
+            let edges = edge::State::for_definition(&definition);
+            if edges.is_some() {
+                edge::admit_snapshot(&self.snapshot, &mut records, &mut meter)
+                    .map_err(StandingQueryError::Maintenance)?;
+            }
             let mut query = StandingQuery {
                 definition,
                 policy,
                 vertices: BTreeMap::new(),
+                edges,
                 aggregate: IncrementalAggregate::new(),
                 rows: ZSet::new(),
                 frontier: self.snapshot.frontier,
@@ -587,20 +623,27 @@ impl<V: Vfs + Clone> Database<V> {
             for row in self.vertices().map_err(StandingQueryError::Read)? {
                 let state = state_from(&query.definition, &row, &mut meter)
                     .map_err(StandingQueryError::Maintenance)?;
-                contributions(&query.definition, &state, 1, &mut updates, &mut meter)
-                    .map_err(StandingQueryError::Maintenance)?;
+                if query.edges.is_none() {
+                    contributions(&query.definition, row.vid, &state, 1, &mut updates, &mut meter)
+                        .map_err(StandingQueryError::Maintenance)?;
+                }
                 query.vertices.insert(row.vid, state);
+            }
+            if let Some(edges) = &mut query.edges {
+                for row in self.edges().map_err(StandingQueryError::Read)? {
+                    edges.seed(
+                        &query.definition, &row.entry, &query.vertices, &mut updates, &mut meter,
+                    ).map_err(StandingQueryError::Maintenance)?;
+                }
             }
             query
                 .integrate(updates, &mut meter)
                 .map_err(StandingQueryError::Maintenance)?;
             query.stats = meter.stats;
-            let index = self.standing_queries.len();
-            self.standing_queries.push(query);
-            Ok(StandingQueryHandle {
-                owner: Arc::clone(&self.handle_owner),
-                index,
-            })
+            // The built query is still private, including its aggregate and
+            // result sink. Refuse cancellation before the public owner swaps.
+            (meter.checkpoint)().map_err(StandingQueryError::Maintenance)?;
+            Ok(query)
         })
     }
 
