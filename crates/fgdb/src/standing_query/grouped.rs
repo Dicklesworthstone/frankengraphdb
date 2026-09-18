@@ -55,7 +55,23 @@ pub(super) fn binding_contributions(
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
 ) -> Result<(), StandingQueryFailure> {
-    for op in query.input_pattern().plan().operators() {
+    if !keeps(query.input_pattern().plan().operators(), binding, meter)? {
+        return Ok(());
+    }
+    project_contributions(query, |slot| {
+        binding.get(slot as usize).copied().map(Some)
+            .ok_or(StandingQueryFailure::InvalidDelta)
+    }, sign, output, meter)
+}
+
+/// Test only the admitted positive scope. Null extension must never rerun its
+/// child predicates; a failed child is precisely what produces that null row.
+pub(super) fn keeps(
+    operators: &[GlaOperator],
+    binding: &[(VId, &VertexState)],
+    meter: &mut Meter<'_>,
+) -> Result<bool, StandingQueryFailure> {
+    for op in operators {
         match op {
             GlaOperator::Select { slot, predicates } => {
                 let (_, state) = binding.get(slot.ordinal() as usize)
@@ -66,7 +82,7 @@ pub(super) fn binding_contributions(
                         state.labels.iter().copied(),
                         state.props.iter().map(|(key, value)| (*key, value)),
                     ) {
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
             }
@@ -76,7 +92,7 @@ pub(super) fn binding_contributions(
                     .ok_or(StandingQueryFailure::InvalidDelta)?.0;
                 let right = binding.get(right.ordinal() as usize)
                     .ok_or(StandingQueryFailure::InvalidDelta)?.0;
-                if (left == right) != *equal { return Ok(()); }
+                if (left == right) != *equal { return Ok(false); }
             }
             GlaOperator::CompareProperties { left, left_key, right, right_key, comparison } => {
                 let (_, left) = binding.get(left.ordinal() as usize)
@@ -94,27 +110,37 @@ pub(super) fn binding_contributions(
                 // Ordinary WHERE keeps only TRUE; NULL/missing and incompatible
                 // kinds do not pass even !=. This bool must never be negated as
                 // though it represented a three-valued Boolean expression.
-                if !comparison.accepts_scalar_pair(left, right) { return Ok(()); }
+                if !comparison.accepts_scalar_pair(left, right) { return Ok(false); }
             }
             _ => {}
         }
     }
+    Ok(true)
+}
+
+/// Project an already qualified binding. A missing slot is malformed; a present
+/// nullable slot is SQL NULL, including COUNT(vertex) and grouping by identity.
+pub(super) fn project_contributions<'a>(
+    query: &PreparedGraphAggregate,
+    mut binding: impl FnMut(u32) -> Result<Option<(VId, &'a VertexState)>, StandingQueryFailure>,
+    sign: i128,
+    output: &mut Vec<Contribution>,
+    meter: &mut Meter<'_>,
+) -> Result<(), StandingQueryFailure> {
     meter.charge(ZSetEvent::ScratchEntry)?;
     let mut key = Vec::new();
     for &column in query.group_key_columns() {
         meter.charge(ZSetEvent::Work)?;
         let value = match query.input_pattern().value_columns()[column] {
             ValueProjection::Vertex { slot } => {
-                let (vid, _) = binding.get(slot.ordinal() as usize)
-                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
+                let value = binding(slot.ordinal())?;
                 meter.charge(ZSetEvent::ScratchEntry)?;
-                GraphValue::Vertex(vid)
+                value.map_or(GraphValue::Scalar(CanonicalScalar::Null), |(vid, _)| GraphValue::Vertex(vid))
             }
             ValueProjection::Property { slot, key } => {
-                let (_, state) = binding.get(slot.ordinal() as usize)
-                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
+                let state = binding(slot.ordinal())?;
                 let null = CanonicalScalar::Null;
-                let value = state.props.get(&key).unwrap_or(&null);
+                let value = state.and_then(|(_, state)| state.props.get(&key)).unwrap_or(&null);
                 meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
                 GraphValue::Scalar(value.clone())
             }
@@ -130,11 +156,10 @@ pub(super) fn binding_contributions(
             .argument_column()
             .map(|column| query.input_pattern().value_columns()[column])
         {
-            None | Some(ValueProjection::Vertex { .. }) => Some(0),
+            None => Some(0),
+            Some(ValueProjection::Vertex { slot }) => binding(slot.ordinal())?.map(|_| 0),
             Some(ValueProjection::Property { slot, key }) => {
-                let (_, state) = binding.get(slot.ordinal() as usize)
-                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
-                match state.props.get(&key) {
+                match binding(slot.ordinal())?.and_then(|(_, state)| state.props.get(&key)) {
                     None | Some(CanonicalScalar::Null) => None,
                     Some(_) if aggregate.function() == GraphAggregateFunction::Count => Some(0),
                     Some(CanonicalScalar::Int(value)) => Some(i128::from(*value)),

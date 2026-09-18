@@ -6,6 +6,8 @@
 //! One whole tick retracts each affected old binding once and inserts each new
 //! binding once, even if both endpoints and the edge changed simultaneously.
 
+mod scoped;
+
 use super::*;
 use fgdb_delta_types::RelationId;
 use fgdb_gql::algebra::GlaDirection;
@@ -19,6 +21,8 @@ type VertexPatch = BTreeMap<VId, Option<VertexState>>;
 pub(super) struct State {
     relation: RelationId,
     direction: GlaDirection,
+    scope: Option<scoped::Shape>,
+    witnesses: BTreeMap<VId, u64>,
     edges: BTreeMap<EId, Endpoints>,
     incident: BTreeMap<VId, BTreeSet<EId>>,
 }
@@ -35,6 +39,11 @@ impl core::fmt::Debug for State {
 pub(super) struct Patch {
     created: BTreeMap<EId, Endpoints>,
     removed: BTreeSet<EId>,
+    witnesses: BTreeMap<VId, u64>,
+}
+
+pub(super) fn supports_scoped(query: &PreparedGraphAggregate) -> bool {
+    scoped::Shape::of(query).is_some()
 }
 
 fn touch(
@@ -71,14 +80,35 @@ fn vertex<'a>(
 
 impl State {
     pub(super) fn for_definition(query: &PreparedGraphAggregate) -> Option<Self> {
-        let GlaOperator::ScanEdges { relation, direction } =
-            query.input_pattern().plan().operators().first()? else { return None; };
+        let scope = scoped::Shape::of(query);
+        let (relation, direction) = match query.input_pattern().plan().operators().first()? {
+            GlaOperator::ScanEdges { relation, direction } => (*relation, *direction),
+            _ => {
+                let scope = scope?;
+                (scope.relation, scope.direction)
+            }
+        };
         Some(Self {
-            relation: *relation,
-            direction: *direction,
-            edges: BTreeMap::new(),
-            incident: BTreeMap::new(),
+            relation, direction, scope, witnesses: BTreeMap::new(),
+            edges: BTreeMap::new(), incident: BTreeMap::new(),
         })
+    }
+
+    pub(super) fn finish_seed(
+        &self,
+        query: &PreparedGraphAggregate,
+        vertices: &Vertices,
+        output: &mut Vec<grouped::Contribution>,
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        if let Some(scope) = self.scope {
+            for (&vid, state) in vertices {
+                meter.charge(ZSetEvent::Work)?;
+                scope.root_contribution(query, vid, Some(state),
+                    self.witnesses.get(&vid).copied().unwrap_or(0), 1, output, meter)?;
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -133,7 +163,21 @@ impl State {
         if self.edges.contains_key(&row.eid) { return Err(StandingQueryFailure::InvalidDelta); }
         let pair = (row.src, row.dst);
         reserve_edge(pair, meter)?;
-        self.contribute(query, pair, vertices, &BTreeMap::new(), 1, output, meter)?;
+        if let Some(scope) = self.scope {
+            let mut changes = BTreeMap::new();
+            scope.contribute(query, pair, vertices, &BTreeMap::new(), 1, &mut changes, output, meter)?;
+            for (vid, change) in changes {
+                let count = i128::from(self.witnesses.get(&vid).copied().unwrap_or(0))
+                    .checked_add(change).and_then(|n| u64::try_from(n).ok())
+                    .ok_or(StandingQueryFailure::InvalidDelta)?;
+                if !self.witnesses.contains_key(&vid) {
+                    meter.charge(ZSetEvent::ScratchEntry)?;
+                }
+                self.witnesses.insert(vid, count);
+            }
+        } else {
+            self.contribute(query, pair, vertices, &BTreeMap::new(), 1, output, meter)?;
+        }
         self.insert(row.eid, pair);
         Ok(())
     }
@@ -216,10 +260,21 @@ impl State {
         meter.stats.affected_edges = u64::try_from(affected.len())
             .map_err(|_| StandingQueryFailure::WorkBudget)?;
         let empty = BTreeMap::new();
+        let mut witness_changes = BTreeMap::new();
+        if self.scope.is_some() {
+            // Roots with no incident edges still create/delete/move null rows.
+            for &vid in staged.keys() {
+                scoped::change(&mut witness_changes, vid, 0, meter)?;
+            }
+        }
         for eid in affected {
             meter.charge(ZSetEvent::Work)?;
             if let Some(&pair) = self.edges.get(&eid) {
-                self.contribute(query, pair, vertices, &empty, -1, output, meter)?;
+                if let Some(scope) = self.scope {
+                    scope.contribute(query, pair, vertices, &empty, -1, &mut witness_changes, output, meter)?;
+                } else {
+                    self.contribute(query, pair, vertices, &empty, -1, output, meter)?;
+                }
             }
             if !removed.contains(&eid) {
                 let pair = created.get(&eid).or_else(|| self.edges.get(&eid))
@@ -227,14 +282,27 @@ impl State {
                 // Also refuses incomplete cascades: every old incident edge is
                 // in `affected`, and no surviving edge can reference a staged
                 // deletion. New edges must resolve both final endpoints too.
-                self.contribute(query, pair, vertices, staged, 1, output, meter)?;
+                if let Some(scope) = self.scope {
+                    scope.contribute(query, pair, vertices, staged, 1, &mut witness_changes, output, meter)?;
+                } else {
+                    self.contribute(query, pair, vertices, staged, 1, output, meter)?;
+                }
             }
         }
+        let witnesses = match self.scope {
+            Some(scope) => scope.finish_roots(query, &self.witnesses, witness_changes,
+                vertices, staged, output, meter)?,
+            None => BTreeMap::new(),
+        };
         (meter.checkpoint)()?;
-        Ok(Patch { created, removed })
+        Ok(Patch { created, removed, witnesses })
     }
 
     pub(super) fn publish(&mut self, patch: Patch) {
+        for (vid, count) in patch.witnesses {
+            if count == 0 { self.witnesses.remove(&vid); }
+            else { self.witnesses.insert(vid, count); }
+        }
         for &eid in &patch.removed {
             if let Some((src, dst)) = self.edges.remove(&eid) {
                 for vid in [src, dst] {

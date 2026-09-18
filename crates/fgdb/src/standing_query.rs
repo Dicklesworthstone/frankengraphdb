@@ -71,7 +71,7 @@ impl core::fmt::Display for StandingQueryError {
             Self::ForeignHandle => f.write_str("standing query belongs to another opened database"),
             Self::UnknownHandle => f.write_str("unknown standing query"),
             Self::Unsupported => {
-                f.write_str("standing query is outside the vertex/one-hop COUNT/SUM/AVG profile")
+                f.write_str("standing query is outside the admitted standing COUNT/SUM/AVG profile")
             }
             Self::Unavailable { frontier, reason } => write!(
                 f,
@@ -185,9 +185,24 @@ fn scalar_units(value: &CanonicalScalar) -> usize {
     1 + bytes.div_ceil(64)
 }
 fn eligible(query: &PreparedGraphAggregate) -> bool {
-    if !query.supports_incremental_maintenance() {
-        return false;
-    }
+    query.supports_incremental_maintenance()
+        && aggregate_functions_eligible(query)
+        && (eligible_flat_input(query) || edge::supports_scoped(query))
+}
+fn aggregate_functions_eligible(query: &PreparedGraphAggregate) -> bool {
+    query.aggregates().iter().all(|aggregate| match aggregate.function() {
+        GraphAggregateFunction::CountRows => aggregate.argument_column().is_none(),
+        GraphAggregateFunction::Count => aggregate.argument_column().is_some(),
+        GraphAggregateFunction::SumInt | GraphAggregateFunction::AverageInt => {
+            aggregate.argument_column().is_some_and(|column| {
+                matches!(query.input_pattern().value_columns().get(column),
+                    Some(ValueProjection::Property { .. }))
+            })
+        }
+        _ => false,
+    })
+}
+fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
     let operators = query.input_pattern().plan().operators();
     let width = match operators.first() {
         Some(GlaOperator::ScanVertices) => 1,
@@ -228,24 +243,7 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
             _ => return false,
         }
     }
-    scans == 1
-        && projections == 1
-        && query
-            .aggregates()
-            .iter()
-            .all(|aggregate| match aggregate.function() {
-                GraphAggregateFunction::CountRows => aggregate.argument_column().is_none(),
-                GraphAggregateFunction::Count => aggregate.argument_column().is_some(),
-                GraphAggregateFunction::SumInt | GraphAggregateFunction::AverageInt => {
-                    aggregate.argument_column().is_some_and(|column| {
-                        matches!(
-                            query.input_pattern().value_columns().get(column),
-                            Some(ValueProjection::Property { .. })
-                        )
-                    })
-                }
-                _ => false,
-            })
+    scans == 1 && projections == 1
 }
 fn needs_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
     query.input_pattern().value_columns().iter().any(|column| matches!(column, ValueProjection::Property { key: actual, .. } if *actual == key))
@@ -635,6 +633,10 @@ impl<V: Vfs + Clone> Database<V> {
                         &query.definition, &row.entry, &query.vertices, &mut updates, &mut meter,
                     ).map_err(StandingQueryError::Maintenance)?;
                 }
+            }
+            if let Some(edges) = &query.edges {
+                edges.finish_seed(&query.definition, &query.vertices, &mut updates, &mut meter)
+                    .map_err(StandingQueryError::Maintenance)?;
             }
             query
                 .integrate(updates, &mut meter)
