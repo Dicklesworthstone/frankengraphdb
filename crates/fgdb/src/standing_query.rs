@@ -1,5 +1,6 @@
 //! Session-local vertex and one-hop aggregates maintained from committed deltas.
-//! This is not a durable subscription or a resumable delivery protocol.
+//! COUNT/SUM/AVG, their DISTINCT forms, and scalar/vertex MIN/MAX share atomic
+//! tick publication. This is not a durable subscription or delivery protocol.
 
 mod grouped;
 mod edge;
@@ -71,7 +72,7 @@ impl core::fmt::Display for StandingQueryError {
             Self::ForeignHandle => f.write_str("standing query belongs to another opened database"),
             Self::UnknownHandle => f.write_str("unknown standing query"),
             Self::Unsupported => {
-                f.write_str("standing query is outside the admitted standing COUNT/SUM/AVG profile")
+                f.write_str("standing query is outside the admitted COUNT/SUM/AVG/DISTINCT/MIN/MAX profile")
             }
             Self::Unavailable { frontier, reason } => write!(
                 f,
@@ -192,8 +193,14 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
 fn aggregate_functions_eligible(query: &PreparedGraphAggregate) -> bool {
     query.aggregates().iter().all(|aggregate| match aggregate.function() {
         GraphAggregateFunction::CountRows => aggregate.argument_column().is_none(),
-        GraphAggregateFunction::Count => aggregate.argument_column().is_some(),
-        GraphAggregateFunction::SumInt | GraphAggregateFunction::AverageInt => {
+        GraphAggregateFunction::Count
+        | GraphAggregateFunction::CountDistinct
+        | GraphAggregateFunction::Min
+        | GraphAggregateFunction::Max => aggregate.argument_column().is_some(),
+        GraphAggregateFunction::SumInt
+        | GraphAggregateFunction::SumIntDistinct
+        | GraphAggregateFunction::AverageInt
+        | GraphAggregateFunction::AverageIntDistinct => {
             aggregate.argument_column().is_some_and(|column| {
                 matches!(query.input_pattern().value_columns().get(column),
                     Some(ValueProjection::Property { .. }))
@@ -497,6 +504,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// Register a session-local maintained result against the current committed
     /// snapshot. Initialization and later explicit rebuilds share one admitted
     /// source path; ordinary commit maintenance never scans that source again.
+    /// COUNT/DISTINCT and MIN/MAX admit scalar or vertex arguments; integer
+    /// SUM/AVG and their DISTINCT forms require property arguments. These
+    /// functions reuse the admitted vertex, one-hop and optional/probe shapes.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,

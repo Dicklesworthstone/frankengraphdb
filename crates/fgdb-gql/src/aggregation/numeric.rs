@@ -199,6 +199,72 @@ impl NumericAccumulator {
     }
 }
 
+impl PreparedGraphAggregate {
+    /// Materialize one untransformed maintained group with its exact result
+    /// domains. The caller owns aggregation, resource admission and atomic
+    /// publication; this constructor checks schema, not result correctness.
+    ///
+    /// Scalar/vertex MIN/MAX preserve their input type. Counts cannot be NULL;
+    /// SUM/AVG may be NULL but never narrow into an ordinary scalar. Nullable
+    /// vertex slots (OPTIONAL MATCH) may supply NULL keys or extrema. Functions
+    /// and input projections outside this maintained profile fail closed.
+    pub fn materialize_incremental_row(
+        &self,
+        keys: Vec<GraphValue>,
+        values: Vec<GraphAggregateValue>,
+    ) -> Option<GraphAggregateRow> {
+        if !self.supports_incremental_maintenance()
+            || keys.len() != self.keys.len()
+            || values.len() != self.aggregates.len()
+        {
+            return None;
+        }
+        let input = self.input.value_columns();
+        let accepts = |projection: &ValueProjection, value: &GraphValue| match projection {
+            ValueProjection::Property { .. } => matches!(value, GraphValue::Scalar(_)),
+            ValueProjection::Vertex { .. } => matches!(value, GraphValue::Vertex(_)) || value.is_null(),
+            _ => false,
+        };
+        for (column, value) in self.keys.iter().zip(&keys) {
+            if !accepts(input.get(*column)?, value) {
+                return None;
+            }
+        }
+        for (aggregate, value) in self.aggregates.iter().zip(&values) {
+            let argument = aggregate.column.and_then(|column| input.get(column));
+            let accepted = match aggregate.function {
+                GraphAggregateFunction::CountRows => {
+                    aggregate.column.is_none() && matches!(value, GraphAggregateValue::Count(_))
+                }
+                GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct => {
+                    matches!(argument, Some(ValueProjection::Property { .. } | ValueProjection::Vertex { .. }))
+                        && matches!(value, GraphAggregateValue::Count(_))
+                }
+                GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
+                    matches!(argument, Some(ValueProjection::Property { .. }))
+                        && (matches!(value, GraphAggregateValue::Integer(_)) || value.is_null())
+                }
+                GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
+                    matches!(argument, Some(ValueProjection::Property { .. }))
+                        && (matches!(value, GraphAggregateValue::Average(_)) || value.is_null())
+                }
+                GraphAggregateFunction::Min | GraphAggregateFunction::Max => {
+                    match (argument, value) {
+                        (Some(argument), GraphAggregateValue::Value(value)) => accepts(argument, value),
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+            if !accepted { return None; }
+        }
+        Some(GraphAggregateRow {
+            keys: keys.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +380,57 @@ mod tests {
         ));
         assert_eq!(state.sum, before);
         assert!(!state.seen.as_ref().unwrap().contains(&9));
+    }
+
+    #[test]
+    fn maintained_rows_enforce_count_numeric_and_extremum_domains() {
+        use crate::algebra::{GraphColumn, GraphPatternBuilder};
+        let mut builder = GraphPatternBuilder::new();
+        builder.vertex("n").unwrap();
+        let input = builder.prepare_values(&[
+            GraphColumn::vertex("id", "n"),
+            GraphColumn::property("p", "n", PropertyKeyId(1)),
+        ], 0, None).unwrap().with_duplicates();
+        let definition = PreparedGraphAggregate::prepare(input.clone(), &[0], &[
+            GraphAggregate::count_distinct("count", 1),
+            GraphAggregate::sum_int_distinct("sum", 1),
+            GraphAggregate::average_int_distinct("avg", 1),
+            GraphAggregate::min("min_id", 0),
+            GraphAggregate::max("max_p", 1),
+        ], 0, None).unwrap();
+        let null = GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null));
+        let key = vec![GraphValue::Vertex(VId(u128::MAX))];
+        let values = vec![
+            GraphAggregateValue::Count(u64::MAX),
+            GraphAggregateValue::Integer(i128::MIN),
+            GraphAggregateValue::Average(GraphExactAverage::new(-5, 3).unwrap()),
+            GraphAggregateValue::Value(GraphValue::Vertex(VId(u128::MAX))),
+            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Bool(true))),
+        ];
+        let row = definition.materialize_incremental_row(key.clone(), values.clone()).unwrap();
+        assert_eq!(row.keys(), key);
+        assert_eq!(row.values(), values);
+        assert!(definition.materialize_incremental_row(vec![], values.clone()).is_none());
+        assert!(definition.materialize_incremental_row(
+            vec![GraphValue::Scalar(CanonicalScalar::Int(1))], values.clone()).is_none());
+        for index in 0..values.len() {
+            let mut bad = values.clone();
+            bad[index] = match index {
+                0 => null.clone(),
+                1 | 2 => GraphAggregateValue::Count(1),
+                3 => GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1))),
+                _ => GraphAggregateValue::Value(GraphValue::Vertex(VId(1))),
+            };
+            assert!(definition.materialize_incremental_row(key.clone(), bad).is_none());
+        }
+        let nullable = vec![GraphAggregateValue::Count(0), null.clone(), null.clone(), null.clone(), null.clone()];
+        assert!(definition.materialize_incremental_row(
+            vec![GraphValue::Scalar(CanonicalScalar::Null)], nullable).is_some());
+        let paged = PreparedGraphAggregate::prepare(input.clone(), &[],
+            &[GraphAggregate::count_rows("count")], 1, None).unwrap();
+        assert!(paged.materialize_incremental_row(vec![], vec![GraphAggregateValue::Count(0)]).is_none());
+        let collection = PreparedGraphAggregate::prepare(input, &[],
+            &[GraphAggregate::collect("values", 1)], 0, None).unwrap();
+        assert!(collection.materialize_incremental_row(vec![], vec![null]).is_none());
     }
 }

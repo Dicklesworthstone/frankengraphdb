@@ -2,17 +2,20 @@
 //! No query AST interpreter or second graph source lives here. The admitted
 //! GLA supplies predicates, binding slots and grouping positions.
 
+mod support;
+
 use super::*;
 use fgdb_delta_types::zset::aggregate::{AggregateError, AggregateValues};
 use fgdb_delta_types::ZWeight;
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GraphAggregateValue, GraphExactAverage};
 
-// Share immutable key payloads between aggregate slots and retained input keys.
-// Collection comparisons retain the Z-set API's logical-entry cost boundary;
-// payload ownership is charged here before copying from a vertex or result.
+// Share immutable key/argument payloads across prepared patches and summaries.
+// None addresses the aggregate summary; Some(value) addresses exact scalar
+// support for COUNT DISTINCT and extrema. Integer DISTINCT uses the core's
+// existing per-value counts directly. No digest stands in for value equality.
 type GroupKey = Arc<[GraphValue]>;
-pub(super) type AggregateKey = (GroupKey, usize);
+pub(super) type AggregateKey = (GroupKey, usize, Option<Arc<GraphValue>>);
 pub(super) type Contribution = ((AggregateKey, Option<i128>), ZWeight);
 
 fn copied_key(
@@ -23,12 +26,7 @@ fn copied_key(
     meter.charge(ZSetEvent::ScratchEntry)?;
     for value in key {
         meter.charge(ZSetEvent::Work)?;
-        let units = match value {
-            GraphValue::Scalar(value) => scalar_units(value),
-            GraphValue::Vertex(_) => 1,
-            _ => return Err(StandingQueryFailure::InvalidDelta),
-        };
-        meter.units(ZSetEvent::ScratchEntry, units)?;
+        meter.units(ZSetEvent::ScratchEntry, support::value_units(value)?)?;
         result.push(value.clone());
     }
     Ok(result)
@@ -118,6 +116,28 @@ pub(super) fn keeps(
     Ok(true)
 }
 
+fn projected_value<'a>(
+    column: ValueProjection,
+    binding: &mut impl FnMut(u32) -> Result<Option<(VId, &'a VertexState)>, StandingQueryFailure>,
+    meter: &mut Meter<'_>,
+) -> Result<GraphValue, StandingQueryFailure> {
+    match column {
+        ValueProjection::Vertex { slot } => {
+            let value = binding(slot.ordinal())?;
+            meter.charge(ZSetEvent::ScratchEntry)?;
+            Ok(value.map_or(GraphValue::Scalar(CanonicalScalar::Null), |(vid, _)| GraphValue::Vertex(vid)))
+        }
+        ValueProjection::Property { slot, key } => {
+            let state = binding(slot.ordinal())?;
+            let null = CanonicalScalar::Null;
+            let value = state.and_then(|(_, state)| state.props.get(&key)).unwrap_or(&null);
+            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
+            Ok(GraphValue::Scalar(value.clone()))
+        }
+        _ => Err(StandingQueryFailure::InvalidDelta),
+    }
+}
+
 /// Project an already qualified binding. A missing slot is malformed; a present
 /// nullable slot is SQL NULL, including COUNT(vertex) and grouping by identity.
 pub(super) fn project_contributions<'a>(
@@ -131,31 +151,30 @@ pub(super) fn project_contributions<'a>(
     let mut key = Vec::new();
     for &column in query.group_key_columns() {
         meter.charge(ZSetEvent::Work)?;
-        let value = match query.input_pattern().value_columns()[column] {
-            ValueProjection::Vertex { slot } => {
-                let value = binding(slot.ordinal())?;
-                meter.charge(ZSetEvent::ScratchEntry)?;
-                value.map_or(GraphValue::Scalar(CanonicalScalar::Null), |(vid, _)| GraphValue::Vertex(vid))
-            }
-            ValueProjection::Property { slot, key } => {
-                let state = binding(slot.ordinal())?;
-                let null = CanonicalScalar::Null;
-                let value = state.and_then(|(_, state)| state.props.get(&key)).unwrap_or(&null);
-                meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
-                GraphValue::Scalar(value.clone())
-            }
-            _ => return Err(StandingQueryFailure::InvalidDelta),
-        };
-        key.push(value);
+        key.push(projected_value(query.input_pattern().value_columns()[column], &mut binding, meter)?);
     }
     meter.charge(ZSetEvent::ScratchEntry)?;
     let key: GroupKey = Arc::from(key.into_boxed_slice());
     for (index, aggregate) in query.aggregates().iter().enumerate() {
         meter.charge(ZSetEvent::Work)?;
-        let value = match aggregate
-            .argument_column()
-            .map(|column| query.input_pattern().value_columns()[column])
-        {
+        let column = aggregate.argument_column()
+            .map(|column| query.input_pattern().value_columns()[column]);
+        if support::uses_support(aggregate.function()) {
+            let column = column.ok_or(StandingQueryFailure::InvalidDelta)?;
+            // Preserve source-row existence separately from distinct support:
+            // nonempty all-null groups must survive with zero/null summaries.
+            meter.charge(ZSetEvent::ScratchEntry)?;
+            output.push(((support::primary(&key, index), None), ZWeight::from_i128(sign)));
+            let value = projected_value(column, &mut binding, meter)?;
+            if !value.is_null() {
+                meter.charge(ZSetEvent::ScratchEntry)?;
+                let value = Arc::new(value);
+                meter.charge(ZSetEvent::ScratchEntry)?;
+                output.push((((Arc::clone(&key), index, Some(value)), Some(0)), ZWeight::from_i128(sign)));
+            }
+            continue;
+        }
+        let value = match column {
             None => Some(0),
             Some(ValueProjection::Vertex { slot }) => binding(slot.ordinal())?.map(|_| 0),
             Some(ValueProjection::Property { slot, key }) => {
@@ -169,7 +188,7 @@ pub(super) fn project_contributions<'a>(
             _ => return Err(StandingQueryFailure::InvalidDelta),
         };
         meter.charge(ZSetEvent::ScratchEntry)?;
-        output.push((((Arc::clone(&key), index), value), ZWeight::from_i128(sign)));
+        output.push(((support::primary(&key, index), value), ZWeight::from_i128(sign)));
     }
     Ok(())
 }
@@ -183,6 +202,7 @@ fn render<'a>(
     definition: &PreparedGraphAggregate,
     key: &GroupKey,
     mut summary: impl FnMut(usize) -> Option<&'a AggregateValues>,
+    mut extremum: impl FnMut(usize, bool, &mut Meter<'_>) -> Result<Option<Arc<GraphValue>>, StandingQueryFailure>,
     meter: &mut Meter<'_>,
 ) -> Result<GraphAggregateRow, StandingQueryFailure> {
     let mut values = Vec::new();
@@ -195,34 +215,52 @@ fn render<'a>(
             GraphAggregateFunction::CountRows => {
                 GraphAggregateValue::Count(summary.map_or(Ok(0), |s| count(s.count_rows()))?)
             }
-            GraphAggregateFunction::Count => {
+            GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct => {
                 GraphAggregateValue::Count(summary.map_or(Ok(0), |s| count(s.count_values()))?)
             }
-            GraphAggregateFunction::SumInt => match summary.and_then(AggregateValues::sum) {
-                None => null,
-                Some(sum) => GraphAggregateValue::Integer(
-                    sum.to_i128().ok_or(StandingQueryFailure::Arithmetic)?,
-                ),
-            },
-            GraphAggregateFunction::AverageInt => match summary.and_then(AggregateValues::average_parts) {
-                None => null,
-                Some((sum, denominator)) => {
-                    let sum = sum.to_i128().ok_or(StandingQueryFailure::Arithmetic)?;
-                    let denominator = count(denominator)?;
-                    // Euclidean normalization is bounded by a u64 denominator.
-                    meter.units(ZSetEvent::Work, 128)?;
-                    GraphAggregateValue::Average(
-                        GraphExactAverage::new(sum, denominator)
-                            .ok_or(StandingQueryFailure::InvalidDelta)?,
-                    )
+            GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
+                let sum = summary.and_then(|s| if spec.function() == GraphAggregateFunction::SumIntDistinct {
+                    s.sum_distinct()
+                } else { s.sum() });
+                match sum {
+                    None => null,
+                    Some(sum) => GraphAggregateValue::Integer(
+                        sum.to_i128().ok_or(StandingQueryFailure::Arithmetic)?,
+                    ),
                 }
-            },
+            }
+            GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
+                let parts = summary.and_then(|s| if spec.function() == GraphAggregateFunction::AverageIntDistinct {
+                    s.average_distinct_parts()
+                } else { s.average_parts() });
+                match parts {
+                    None => null,
+                    Some((sum, denominator)) => {
+                        let sum = sum.to_i128().ok_or(StandingQueryFailure::Arithmetic)?;
+                        let denominator = count(denominator)?;
+                        meter.units(ZSetEvent::Work, 128)?;
+                        GraphAggregateValue::Average(
+                            GraphExactAverage::new(sum, denominator)
+                                .ok_or(StandingQueryFailure::InvalidDelta)?,
+                        )
+                    }
+                }
+            }
+            GraphAggregateFunction::Min | GraphAggregateFunction::Max => {
+                match extremum(index, spec.function() == GraphAggregateFunction::Max, meter)? {
+                    None => null,
+                    Some(value) => {
+                        meter.units(ZSetEvent::ScratchEntry, support::value_units(&value)?)?;
+                        GraphAggregateValue::Value(value.as_ref().clone())
+                    }
+                }
+            }
             _ => return Err(StandingQueryFailure::InvalidDelta),
         };
         values.push(value);
     }
     let keys = copied_key(key, meter)?;
-    definition.incremental_row(keys, values).ok_or(StandingQueryFailure::InvalidDelta)
+    definition.materialize_incremental_row(keys, values).ok_or(StandingQueryFailure::InvalidDelta)
 }
 
 impl StandingQuery {
@@ -232,10 +270,11 @@ impl StandingQuery {
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         let limbs = LimbLimit::new(4);
-        let delta = ZSet::from_updates(updates, limbs, &mut |event| meter.charge(event))
+        let mut delta = ZSet::from_updates(updates, limbs, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
+        support::augment(&self.aggregate, &mut delta, meter)?;
         let mut groups = BTreeSet::new();
-        for (((key, _), _), _) in delta.iter() {
+        for (((key, _, _), _), _) in delta.iter() {
             meter.charge(ZSetEvent::Work)?;
             if !groups.contains(key) {
                 meter.charge(ZSetEvent::ScratchEntry)?;
@@ -245,7 +284,7 @@ impl StandingQuery {
         let global = self.definition.group_key_columns().is_empty();
         if global && self.rows.is_empty() && groups.is_empty() {
             // Global aggregation has one row even on empty input. A grouped
-            // empty input has none; an all-null *nonempty* group has one.
+            // empty input has none; an all-null nonempty group has one.
             meter.charge(ZSetEvent::ScratchEntry)?;
             groups.insert(Arc::from(Vec::<GraphValue>::new().into_boxed_slice()));
         }
@@ -255,12 +294,14 @@ impl StandingQuery {
             let exists = if global {
                 !self.rows.is_empty()
             } else {
-                self.aggregate.get(&(Arc::clone(&key), 0)).is_some()
+                self.aggregate.get(&support::primary(&key, 0)).is_some()
             };
             let old = if exists {
                 Some(render(
                     &self.definition, &key,
-                    |index| self.aggregate.get(&(Arc::clone(&key), index)), meter,
+                    |index| self.aggregate.get(&support::primary(&key, index)),
+                    |index, maximum, meter| support::current_extremum(&self.aggregate, &key, index, maximum, meter),
+                    meter,
                 )?)
             } else {
                 None
@@ -278,11 +319,13 @@ impl StandingQuery {
         let mut changes = Vec::new();
         for (key, old) in previous {
             meter.charge(ZSetEvent::Work)?;
-            let exists = global || prepared.get(&(Arc::clone(&key), 0)).is_some();
+            let exists = global || prepared.get(&support::primary(&key, 0)).is_some();
             let new = if exists {
                 Some(render(
                     &self.definition, &key,
-                    |index| prepared.get(&(Arc::clone(&key), index)), meter,
+                    |index| prepared.get(&support::primary(&key, index)),
+                    |index, maximum, meter| support::pending_extremum(&prepared, &key, index, maximum, meter),
+                    meter,
                 )?)
             } else {
                 None
@@ -290,9 +333,7 @@ impl StandingQuery {
             result_count = result_count.checked_sub(u128::from(old.is_some()))
                 .ok_or(StandingQueryFailure::InvalidDelta)?;
             result_count += u128::from(new.is_some());
-            if old == new {
-                continue;
-            }
+            if old == new { continue; }
             if let Some(row) = old {
                 meter.charge(ZSetEvent::ScratchEntry)?;
                 changes.push((row, ZWeight::from_i128(-1)));
@@ -302,9 +343,7 @@ impl StandingQuery {
                 changes.push((row, ZWeight::ONE));
             }
         }
-        // Check the final maintained result, not a transient remove/insert
-        // order or the number of emitted delta rows. Existing unrelated groups
-        // contribute to the limit without being scanned or reconstructed.
+        // Bound actual result groups, not internal scalar-support entries.
         if self.policy.rows.max_result_rows().is_some_and(|limit| result_count > u128::from(limit)) {
             return Err(StandingQueryFailure::ResultBudget);
         }
@@ -313,9 +352,8 @@ impl StandingQuery {
         let sink = self.rows.prepare_update(&changes, limbs, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
         (meter.checkpoint)()?;
-        // All recoverable work is complete. Publishing the aggregate and sink
-        // invokes no arithmetic or control callback; dropping either guard
-        // before this boundary leaves both prior generations intact.
+        // Support, numeric summaries and output publish together. Nothing
+        // after this boundary can perform recoverably fallible work.
         let _ = prepared.commit();
         sink.commit();
         Ok(())
