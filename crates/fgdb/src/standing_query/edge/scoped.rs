@@ -1,4 +1,4 @@
-//! A single correlated OPTIONAL expansion over the canonical standing input.
+//! Correlated one-hop OPTIONAL/EXISTS/NOT EXISTS over the canonical standing input.
 //! Qualification uses the admitted GLA predicates; this module owns only scope
 //! boundaries, per-root witness counts and null-extension derivatives. Counts
 //! advance with the same whole-commit edge/vertex/aggregate/result publication.
@@ -6,7 +6,11 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode { Optional, Exists, NotExists }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Shape {
+    mode: Mode,
     pub(super) relation: RelationId,
     pub(super) direction: GlaDirection,
     start: usize,
@@ -33,14 +37,20 @@ impl Shape {
         if !matches!(ops.first(), Some(GlaOperator::ScanVertices)) { return None; }
         let mut start = 1;
         while ops.get(start).is_some_and(|op| predicate(op, 1)) { start += 1; }
-        let GlaOperator::Optional { group, end, slots: 2 } = ops.get(start)? else {
-            return None;
+        let (mode, group, end) = match ops.get(start)? {
+            GlaOperator::Optional { group, end, slots: 2 } => (Mode::Optional, *group, *end),
+            GlaOperator::Probe { group, end, anti } => (
+                if *anti { Mode::NotExists } else { Mode::Exists }, *group, *end,
+            ),
+            _ => return None,
         };
-        let end = usize::try_from(*end).ok()?;
-        if end <= start + 2 || !matches!(ops.get(end),
-            Some(GlaOperator::OptionalEnd { group: actual }) if actual == group) {
-            return None;
-        }
+        let end = usize::try_from(end).ok()?;
+        let closes = match (mode, ops.get(end)) {
+            (Mode::Optional, Some(GlaOperator::OptionalEnd { group: actual })) => *actual == group,
+            (Mode::Exists | Mode::NotExists, Some(GlaOperator::ProbeEnd { group: actual })) => *actual == group,
+            _ => false,
+        };
+        if end <= start + 2 || !closes { return None; }
         if !matches!(ops.get(start + 1),
             Some(GlaOperator::BindVertex { source }) if source.ordinal() == 0) {
             return None;
@@ -58,16 +68,19 @@ impl Shape {
         }
         let (relation, direction) = expansion?;
         let GlaOperator::ProjectValues { columns } = ops.get(end + 1)? else { return None; };
+        // Existential locals never escape the probe frame. Only OPTIONAL
+        // exports nullable child bindings to grouping/aggregate arguments.
+        let output_width = if mode == Mode::Optional { 3 } else { 1 };
         if columns.iter().any(|column| !matches!(column,
             ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. }
-                if slot.ordinal() < 3)) {
+                if slot.ordinal() < output_width)) {
             return None;
         }
         if !matches!(&ops[end + 2..], [
             GlaOperator::OrderByValues,
             GlaOperator::Limit { offset: 0, count: None },
         ]) { return None; }
-        Some(Self { relation, direction, start, end })
+        Some(Self { mode, relation, direction, start, end })
     }
 
     fn keep_root(
@@ -106,6 +119,9 @@ impl Shape {
                 &binding, meter,
             )? { return Ok(()); }
             change(counts, root, sign, meter)?;
+            // Semi/anti output is determined once per root after the complete
+            // tick. Individual witnesses neither multiply nor retract a root.
+            if self.mode != Mode::Optional { return Ok(()); }
             // Each real edge occurrence contributes once. Qualification count is
             // independent of nullable payloads and the eventual result projection.
             grouped::project_contributions(query, |slot| {
@@ -139,12 +155,16 @@ impl Shape {
         let Some(state) = state else {
             return if witnesses == 0 { Ok(()) } else { Err(StandingQueryFailure::InvalidDelta) };
         };
-        if witnesses != 0 || !self.keep_root(query, vid, state, meter)? { return Ok(()); }
+        let selected = match self.mode {
+            Mode::Optional | Mode::NotExists => witnesses == 0,
+            Mode::Exists => witnesses != 0,
+        };
+        if !selected || !self.keep_root(query, vid, state, meter)? { return Ok(()); }
         // Preserve the outer root but null-extend the ENTIRE child frame. Do
         // not test child WHERE or root-copy identities against these nulls.
         grouped::project_contributions(query, |slot| match slot {
             0 => Ok(Some((vid, state))),
-            1 | 2 => Ok(None),
+            1 | 2 if self.mode == Mode::Optional => Ok(None),
             _ => Err(StandingQueryFailure::InvalidDelta),
         }, sign, output, meter)
     }
@@ -173,8 +193,15 @@ impl Shape {
             };
             // A whole-tick witness replacement sees old>0 and new>0: it cannot
             // create a transient null row even when all old EIds were removed.
-            self.root_contribution(query, vid, vertices.get(&vid), old, -1, output, meter)?;
-            self.root_contribution(query, vid, next, new, 1, output, meter)?;
+            // A changed witness count is not a changed semi/anti result. With
+            // an untouched root and unchanged presence, retain its aggregate
+            // contribution without copying its payload or emitting a fake tick.
+            let unchanged_presence = self.mode != Mode::Optional
+                && (old == 0) == (new == 0) && !staged.contains_key(&vid);
+            if !unchanged_presence {
+                self.root_contribution(query, vid, vertices.get(&vid), old, -1, output, meter)?;
+                self.root_contribution(query, vid, next, new, 1, output, meter)?;
+            }
             meter.charge(ZSetEvent::ScratchEntry)?;
             if old == 0 && new != 0 { meter.charge(ZSetEvent::ScratchEntry)?; }
             replacements.insert(vid, new);
@@ -206,16 +233,22 @@ mod tests {
     use fgdb_gql::GraphAggregate;
     use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 
-    fn definition() -> PreparedGraphAggregate {
+    fn definition(mode: Mode) -> PreparedGraphAggregate {
         let mut root = GraphPatternBuilder::new(); root.vertex("a").unwrap();
         let mut child = GraphPatternBuilder::new();
         child.vertex("a").unwrap().vertex("b").unwrap();
         child.edge("a", RelationId(1), GlaDirection::Undirected, "b").unwrap();
         child.compare_properties("a", PropertyKeyId(1), IntegerComparison::LessOrEqual,
             "b", PropertyKeyId(1)).unwrap();
-        let input = root.prepare_values_with_clauses(&[GraphMatchClause::optional(&child)], &[
-            GraphColumn::vertex("root", "a"), GraphColumn::vertex("child", "b"),
-            GraphColumn::property("amount", "b", PropertyKeyId(1)),
+        let clause = match mode {
+            Mode::Optional => GraphMatchClause::optional(&child),
+            Mode::Exists => GraphMatchClause::exists(&child),
+            Mode::NotExists => GraphMatchClause::not_exists(&child),
+        };
+        let value = if mode == Mode::Optional { "b" } else { "a" };
+        let input = root.prepare_values_with_clauses(&[clause], &[
+            GraphColumn::vertex("root", "a"), GraphColumn::vertex("child", value),
+            GraphColumn::property("amount", value, PropertyKeyId(1)),
         ], 0, None).unwrap().with_duplicates();
         PreparedGraphAggregate::prepare(input, &[0], &[
             GraphAggregate::count_rows("rows"), GraphAggregate::count("matches", 1),
@@ -223,8 +256,8 @@ mod tests {
         ], 0, None).unwrap()
     }
 
-    fn seeded(batch: &LogicalDeltaBatch) -> StandingQuery {
-        let definition = definition();
+    fn seeded(batch: &LogicalDeltaBatch, mode: Mode) -> StandingQuery {
+        let definition = definition(mode);
         assert!(eligible(&definition));
         let edges = State::for_definition(&definition);
         assert!(edges.as_ref().unwrap().scope.is_some());
@@ -250,7 +283,17 @@ mod tests {
 
     #[test]
     fn every_optional_checkpoint_rolls_back_witnesses_sources_and_results_then_retries() {
-        let ((), report) = run_async_under_lab(0x8f05, |runtime| async move {
+        check_every_boundary(Mode::Optional);
+    }
+
+    #[test]
+    fn every_semijoin_and_antijoin_checkpoint_preserves_counts_and_can_retry() {
+        check_every_boundary(Mode::Exists);
+        check_every_boundary(Mode::NotExists);
+    }
+
+    fn check_every_boundary(mode: Mode) {
+        let ((), report) = run_async_under_lab(0x8f05, move |runtime| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&runtime);
             let cx = contexts.commit();
             let keys = DatabaseKeys::new([1;32], DatabaseSecurityNamespaceId([2;32]), [3;32]);
@@ -270,8 +313,8 @@ mod tests {
             next.add_edge(EId(3), VId(3), VId(4), vec![]);
             let at = db.write(&cx, next).await.unwrap();
             let delta = db.delta_index().unwrap().get(at).unwrap().clone();
-            let before = seeded(&first);
-            let mut success = seeded(&first);
+            let before = seeded(&first, mode);
+            let mut success = seeded(&first, mode);
             let policy = success.policy;
             let mut total = 0;
             {
@@ -281,7 +324,7 @@ mod tests {
             }
             assert!(total > 0);
             for stop in 1..=total {
-                let mut candidate = seeded(&first);
+                let mut candidate = seeded(&first, mode);
                 let mut seen = 0;
                 {
                     let mut checkpoint = || {
@@ -307,7 +350,7 @@ mod tests {
             }
             let malformed = LogicalDeltaBatch::from_parts_for_test(entries,
                 *delta.source_template_digest(), delta.commit_marker_identity(), delta.commit_seq(), delta.frontier());
-            let mut candidate = seeded(&first);
+            let mut candidate = seeded(&first, mode);
             let mut checkpoint = || Ok(());
             let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
             assert_eq!(candidate.maintain(&malformed, &mut meter), Err(StandingQueryFailure::InvalidDelta));
