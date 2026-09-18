@@ -2,6 +2,8 @@
 //!
 //! Inputs are `(group, Option<i128>)` Z-set deltas: `None` is SQL-style NULL.
 //! Counts and sums use exact ZWeight arithmetic, including bigint promotion.
+//! DISTINCT statistics change only when a nonnull value enters or leaves
+//! positive support; duplicate insertions/retractions do not recount it.
 //! Ordered per-value counts support deleting extrema. Only changed groups and
 //! values are patched; finding a replacement extremum visits the invalidated
 //! prefix/suffix, not every group or every repeated occurrence.
@@ -14,16 +16,19 @@
 use super::{ZSet, ZSetError, ZSetEvent, admit, event};
 use crate::{LimbLimit, ZWeight};
 use std::collections::{BTreeMap, btree_map::Entry};
+use std::ops::RangeBounds;
 use std::sync::Arc;
 
-/// Exact grouped COUNT(*), COUNT(value), SUM(value), MIN(value), MAX(value).
-/// Private fields preserve `values <= rows`, nullable-sum and extrema coherence.
+/// Exact grouped COUNT, SUM, AVG sufficient statistics, and MIN/MAX.
+/// Private fields preserve nullable-sum, distinct-support and extrema coherence.
 /// Arc sharing lets result Z-sets clone keys without infallibly cloning bigints.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct AggregateValues {
     rows: ZWeight,
     values: ZWeight,
     sum: Option<ZWeight>,
+    distinct: ZWeight,
+    distinct_sum: Option<ZWeight>,
     minimum: Option<i128>,
     maximum: Option<i128>,
 }
@@ -38,6 +43,14 @@ impl AggregateValues {
     pub fn sum(&self) -> Option<&ZWeight> {
         self.sum.as_ref()
     }
+    /// Number of different nonnull values with positive integrated support.
+    pub fn count_distinct(&self) -> &ZWeight {
+        &self.distinct
+    }
+    /// Sum of each different nonnull input exactly once; NULL for no values.
+    pub fn sum_distinct(&self) -> Option<&ZWeight> {
+        self.distinct_sum.as_ref()
+    }
     pub fn minimum(&self) -> Option<i128> {
         self.minimum
     }
@@ -48,6 +61,10 @@ impl AggregateValues {
     /// This is not a rounded floating-point or normalized rational value.
     pub fn average_parts(&self) -> Option<(&ZWeight, &ZWeight)> {
         self.sum.as_ref().map(|sum| (sum, &self.values))
+    }
+    /// Exact AVG(DISTINCT value) sufficient statistics, without rounding.
+    pub fn average_distinct_parts(&self) -> Option<(&ZWeight, &ZWeight)> {
+        self.distinct_sum.as_ref().map(|sum| (sum, &self.distinct))
     }
 }
 
@@ -116,6 +133,15 @@ impl<K: Ord> IncrementalAggregate<K> {
     pub fn rows(&self) -> impl Iterator<Item = (&K, &AggregateValues)> {
         self.groups.iter().map(|(key, group)| (key, group.summary.as_ref()))
     }
+    /// Borrow an ordered key interval without scanning unrelated groups or
+    /// allocating a result. As with get(), callers govern each visited entry
+    /// and their key comparison/payload costs before consuming it.
+    pub fn range(
+        &self,
+        range: impl RangeBounds<K>,
+    ) -> impl DoubleEndedIterator<Item = (&K, &AggregateValues)> {
+        self.groups.range(range).map(|(key, group)| (key, group.summary.as_ref()))
+    }
 }
 impl<K: Ord> core::fmt::Debug for IncrementalAggregate<K> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -153,7 +179,7 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
         while let Some(((key, _), _)) = changes.peek().copied() {
             event(control, ZSetEvent::Work)?;
             let old = self.groups.get(key);
-            let (mut rows, mut values, mut sum) = if let Some(group) = old {
+            let (mut rows, mut values, mut sum, mut distinct, mut distinct_sum) = if let Some(group) = old {
                 event(control, ZSetEvent::Work)?;
                 let row = &group.summary;
                 (
@@ -163,9 +189,14 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
                         Some(sum) => sum.checked_clone(limbs).map_err(ZSetError::Arithmetic)?,
                         None => ZWeight::ZERO,
                     },
+                    row.distinct.checked_clone(limbs).map_err(ZSetError::Arithmetic)?,
+                    match &row.distinct_sum {
+                        Some(sum) => sum.checked_clone(limbs).map_err(ZSetError::Arithmetic)?,
+                        None => ZWeight::ZERO,
+                    },
                 )
             } else {
-                (ZWeight::ZERO, ZWeight::ZERO, ZWeight::ZERO)
+                (ZWeight::ZERO, ZWeight::ZERO, ZWeight::ZERO, ZWeight::ZERO, ZWeight::ZERO)
             };
             let mut counts = BTreeMap::new();
             while let Some(((next_key, value), change)) = changes.peek().copied() {
@@ -193,6 +224,19 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
                     let term = change.checked_mul_i128(*value, limbs).map_err(ZSetError::Arithmetic)?;
                     event(control, ZSetEvent::Work)?;
                     sum = sum.checked_add(&term, limbs).map_err(ZSetError::Arithmetic)?;
+                    let was_present = previous.is_some_and(|weight| !weight.is_zero());
+                    let is_present = !next.is_zero();
+                    if was_present != is_present {
+                        let sign = if is_present { 1 } else { -1 };
+                        let crossing = ZWeight::from_i128(sign);
+                        event(control, ZSetEvent::Work)?;
+                        distinct = distinct.checked_add(&crossing, limbs).map_err(ZSetError::Arithmetic)?;
+                        // Do not negate i128::MIN in the scalar domain.
+                        event(control, ZSetEvent::Work)?;
+                        let term = crossing.checked_mul_i128(*value, limbs).map_err(ZSetError::Arithmetic)?;
+                        event(control, ZSetEvent::Work)?;
+                        distinct_sum = distinct_sum.checked_add(&term, limbs).map_err(ZSetError::Arithmetic)?;
+                    }
                 }
                 // Reserve staging and any future retained input entry before
                 // cloning/inserting. Publication invokes no controller.
@@ -204,6 +248,7 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
             }
             let summary = if rows.is_zero() {
                 debug_assert!(values.is_zero() && sum.is_zero());
+                debug_assert!(distinct.is_zero() && distinct_sum.is_zero());
                 None
             } else {
                 let (minimum, maximum) = if values.is_zero() {
@@ -219,6 +264,8 @@ impl<K: Ord + Clone> IncrementalAggregate<K> {
                     rows,
                     sum: (!values.is_zero()).then_some(sum),
                     values,
+                    distinct_sum: (!distinct.is_zero()).then_some(distinct_sum),
+                    distinct,
                     minimum,
                     maximum,
                 };
@@ -335,6 +382,26 @@ impl<K: Ord> AggregateUpdate<'_, K> {
         }
     }
 
+    /// Borrow the pre-update interval while this guard holds the owner.
+    /// These are OLD summaries: use get(key) to account for staged removals
+    /// or replacements. Pair with changed_range() to include new keys.
+    pub fn retained_range(
+        &self,
+        range: impl RangeBounds<K>,
+    ) -> impl DoubleEndedIterator<Item = (&K, &AggregateValues)> {
+        self.owner.range(range)
+    }
+
+    /// Borrow only staged keys in an interval. None is an explicit removal,
+    /// not an instruction to fall back to the old summary. No scan or copy of
+    /// unrelated keys occurs. Callers govern iteration as with range().
+    pub fn changed_range(
+        &self,
+        range: impl RangeBounds<K>,
+    ) -> impl DoubleEndedIterator<Item = (&K, Option<&AggregateValues>)> {
+        self.patches.range(range).map(|(key, patch)| (key, patch.summary.as_deref()))
+    }
+
     /// Tentative output. Publish externally only after the whole tick commits.
     pub fn delta(&self) -> &AggregateDelta<K> {
         &self.delta
@@ -405,10 +472,13 @@ mod tests {
         }
         ZSet::from_updates(groups.into_iter().map(|(key, rows)| {
             let values: Vec<_> = rows.iter().filter_map(|value| *value).collect();
+            let distinct: std::collections::BTreeSet<_> = values.iter().copied().collect();
             let row = AggregateValues {
                 rows: ZWeight::from_i128(rows.len() as i128),
                 values: ZWeight::from_i128(values.len() as i128),
                 sum: (!values.is_empty()).then(|| ZWeight::from_i128(values.iter().sum())),
+                distinct: ZWeight::from_i128(distinct.len() as i128),
+                distinct_sum: (!distinct.is_empty()).then(|| ZWeight::from_i128(distinct.iter().sum())),
                 minimum: values.iter().copied().min(),
                 maximum: values.iter().copied().max(),
             };
@@ -601,6 +671,41 @@ mod tests {
         let update = state.prepare(&rows, LIMBS, &mut allow).unwrap();
         assert!(!format!("{update:?}").contains("private-group"));
     }
+
+    #[test]
+    fn distinct_statistics_change_only_at_support_zero_crossings() {
+        let mut state = seeded(&input([(0, None, 2), (0, Some(-4), 3), (0, Some(10), 1)]));
+        let assert_distinct = |state: &IncrementalAggregate<i32>, expected_sum, expected_count| {
+            let row = state.get(&0).unwrap();
+            assert_eq!(row.count_distinct().to_i128(), Some(expected_count));
+            assert_eq!(row.sum_distinct().and_then(ZWeight::to_i128), expected_sum);
+            assert_eq!(row.average_distinct_parts().map(|(sum, count)|
+                (sum.to_i128().unwrap(), count.to_i128().unwrap())),
+                expected_sum.map(|sum| (sum, expected_count)));
+        };
+        assert_distinct(&state, Some(6), 2);
+        state.apply(&input([(0, Some(-4), -2)]), LIMBS, &mut allow).unwrap();
+        assert_distinct(&state, Some(6), 2);
+        state.apply(&input([(0, Some(-4), -1), (0, Some(10), 5)]), LIMBS, &mut allow).unwrap();
+        assert_distinct(&state, Some(10), 1);
+        state.apply(&input([(0, Some(10), -6)]), LIMBS, &mut allow).unwrap();
+        assert_distinct(&state, None, 0);
+        assert_eq!(state.get(&0).unwrap().count_rows(), &ZWeight::from_i128(2));
+        state.apply(&input([(0, Some(0), 1)]), LIMBS, &mut allow).unwrap();
+        assert_distinct(&state, Some(0), 1);
+    }
+
+    #[test]
+    fn distinct_sum_promotes_and_retracts_full_width_extrema_exactly() {
+        let before = input([(0, Some(i128::MIN), 1), (0, Some(-1), 1)]);
+        let mut state = seeded(&before);
+        assert!(state.get(&0).unwrap().sum_distinct().unwrap().is_promoted());
+        state.apply(&input([(0, Some(i128::MIN), -1)]), LIMBS, &mut allow).unwrap();
+        assert_eq!(state.get(&0).unwrap().sum_distinct().unwrap().to_i128(), Some(-1));
+        let mut refused = IncrementalAggregate::new();
+        assert!(refused.apply(&before, LimbLimit::new(0), &mut allow).is_err());
+        assert_eq!(refused.group_count(), 0);
+    }
 }
 
 #[cfg(test)]
@@ -632,10 +737,14 @@ mod prospective_tests {
             assert!(pending.get(&3).unwrap().sum().is_none());
             assert_eq!(pending.get(&4).unwrap().minimum(), Some(-2));
             assert!(pending.get(&5).is_none());
+            assert_eq!(pending.retained_range(1..=3).map(|(key, _)| *key).collect::<Vec<_>>(), vec![1, 2, 3]);
+            assert_eq!(pending.changed_range(1..=4).map(|(key, row)| (*key, row.is_some())).collect::<Vec<_>>(), vec![(1, false), (2, true), (4, true)]);
+            assert_eq!(pending.changed_range(2..=4).rev().next().map(|(key, _)| *key), Some(4));
         }
         assert_eq!(aggregate.snapshot(limbs, &mut allow).unwrap(), before);
         aggregate.prepare(&delta, limbs, &mut allow).unwrap().commit();
         assert!(aggregate.get(&1).is_none());
         assert_eq!(aggregate.get(&2).unwrap().sum().unwrap().to_i128(), Some(14));
+        assert_eq!(aggregate.range(2..=3).map(|(key, _)| *key).collect::<Vec<_>>(), vec![2, 3]);
     }
 }
