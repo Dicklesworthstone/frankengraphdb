@@ -1,6 +1,6 @@
 //! Changed-group projection over the existing retractable aggregate operator.
 //! No query AST interpreter or second graph source lives here. The admitted
-//! admitted GLA supplies predicates, binding slots and grouping positions.
+//! GLA supplies predicates, binding slots and grouping positions.
 
 use super::*;
 use fgdb_delta_types::zset::aggregate::{AggregateError, AggregateValues};
@@ -77,6 +77,24 @@ pub(super) fn binding_contributions(
                 let right = binding.get(right.ordinal() as usize)
                     .ok_or(StandingQueryFailure::InvalidDelta)?.0;
                 if (left == right) != *equal { return Ok(()); }
+            }
+            GlaOperator::CompareProperties { left, left_key, right, right_key, comparison } => {
+                let (_, left) = binding.get(left.ordinal() as usize)
+                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
+                let (_, right) = binding.get(right.ordinal() as usize)
+                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
+                let left = left.props.get(left_key);
+                let right = right.props.get(right_key);
+                // Reserve variable payload comparison work before invoking
+                // the canonical borrowed comparator. No encoding, coercion or
+                // predicate-literal allocation occurs in this execution path.
+                meter.charge(ZSetEvent::Work)?;
+                meter.units(ZSetEvent::Work,
+                    left.map_or(0, scalar_units).max(right.map_or(0, scalar_units)))?;
+                // Ordinary WHERE keeps only TRUE; NULL/missing and incompatible
+                // kinds do not pass even !=. This bool must never be negated as
+                // though it represented a three-valued Boolean expression.
+                if !comparison.accepts_scalar_pair(left, right) { return Ok(()); }
             }
             _ => {}
         }

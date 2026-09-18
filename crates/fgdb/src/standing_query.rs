@@ -213,6 +213,8 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
             }
             GlaOperator::VertexIdentity { left, right, .. }
                 if left.ordinal() < width && right.ordinal() < width => {}
+            GlaOperator::CompareProperties { left, right, .. }
+                if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::ProjectValues { columns } => {
                 projections += 1;
                 if columns.iter().any(|column| !matches!(column,
@@ -247,7 +249,13 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
 }
 fn needs_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
     query.input_pattern().value_columns().iter().any(|column| matches!(column, ValueProjection::Property { key: actual, .. } if *actual == key))
-        || query.input_pattern().plan().operators().iter().any(|op| matches!(op, GlaOperator::Select { predicates, .. } if predicates.iter().any(|p| p.property_key() == Some(key))))
+        || query.input_pattern().plan().operators().iter().any(|op| match op {
+            GlaOperator::Select { predicates, .. } => predicates.iter().any(|p| p.property_key() == Some(key)),
+            // Operands need not be returned or appear in a unary predicate.
+            // Retain and invalidate on BOTH sides of a binding-dependent test.
+            GlaOperator::CompareProperties { left_key, right_key, .. } => *left_key == key || *right_key == key,
+            _ => false,
+        })
 }
 fn needs_label(query: &PreparedGraphAggregate, label: LabelId) -> bool {
     query.input_pattern().plan().operators().iter().any(|op| matches!(op, GlaOperator::Select { predicates, .. } if predicates.iter().any(|p| matches!(p, VertexPredicate::HasLabel(actual) if *actual == label))))

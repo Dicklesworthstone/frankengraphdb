@@ -296,6 +296,8 @@ mod tests {
         let mut builder = GraphPatternBuilder::new();
         builder.vertex("a").unwrap().vertex("b").unwrap();
         builder.edge("a", RelationId(1), GlaDirection::Undirected, "b").unwrap();
+        builder.compare_properties("a", PropertyKeyId(1),
+            fgdb_gql::algebra::IntegerComparison::LessOrEqual, "b", PropertyKeyId(1)).unwrap();
         let input = builder.prepare_values(&[
             GraphColumn::vertex("group", "a"),
             GraphColumn::property("amount", "b", PropertyKeyId(1)),
