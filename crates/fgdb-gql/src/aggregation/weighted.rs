@@ -6,9 +6,9 @@
 //! adds that weight; COUNT DISTINCT and MIN/MAX use positive support.
 //! No edge-identity/trail semantics are claimed by this vertex-only profile.
 //!
-//! Vertex-property projections keep every binding and use the original property
-//! reader; only topology-only plans may eliminate hidden variables. Predicates
-//! and scoped operators remain on ordinary visitation. A relation used
+//! Vertex properties and predicates keep every binding and use the original
+//! readers and selections. Only topology-only plans may eliminate hidden
+//! variables. Scoped and edge-identity operators remain ineligible. A relation used
 //! undirected must be exclusively undirected; opposite stored directions then
 //! contribute to ONE unordered pair. Mixed directed/undirected uses fall back.
 //! Sources are consumed once. Preprocessing, retained keys, multiplicity reads
@@ -114,6 +114,9 @@ fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
             _ => true,
         }),
         GlaOperator::VertexIdentity { .. }
+        | GlaOperator::Select { .. }
+        | GlaOperator::CompareProperties { .. }
+        | GlaOperator::SelectBoolean { .. }
         | GlaOperator::OrderByValues
         | GlaOperator::Limit {
             offset: 0,
@@ -253,15 +256,21 @@ where
         }
     }
 
-    // A property is a function of its vertex binding, not the edge occurrence.
-    // Coalesce parallel edge choices, but keep the original plan and ALL slots:
-    // the topology-only forest/chain rewrites must not remove a property read.
-    // The ordinary visitor still owns matching, projection and source errors.
-    let reads_properties = plan.operators().iter().any(|operator| {
-        matches!(operator, GlaOperator::ProjectValues { columns }
-            if columns.iter().any(|column| matches!(column, ValueProjection::Property { .. })))
+    // Properties and positive predicates depend on vertex bindings, not edge
+    // occurrences. Keep the original plan and ALL slots whenever either is
+    // observed: topology-only contractions must not remove a predicate/read.
+    // Selections still run in the ordinary visitor, BEFORE a complete witness
+    // contributes its multiplicity. Rejected paths cannot cause COUNT overflow.
+    let needs_original_bindings = plan.operators().iter().any(|operator| match operator {
+        GlaOperator::Select { .. }
+        | GlaOperator::CompareProperties { .. }
+        | GlaOperator::SelectBoolean { .. } => true,
+        GlaOperator::ProjectValues { columns } => columns
+            .iter()
+            .any(|column| matches!(column, ValueProjection::Property { .. })),
+        _ => false,
     });
-    if reads_properties {
+    if needs_original_bindings {
         return plan.visit_value_bindings(
             vertices,
             topology.keys().copied(),
@@ -391,14 +400,14 @@ mod tests {
             "MATCH (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) RETURN COUNT(b.n) AS n",
             "MATCH (a)-[:R]->(b) RETURN a.n,MIN(b.n) AS lo,MAX(b.n) AS hi GROUP BY a.n",
+            "MATCH (a)-[:R]->(b) WHERE a.n=1 RETURN COUNT(*) AS n",
+            "MATCH (a:L)-[:R]->(b) RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b) WHERE a.n=b.n RETURN COUNT(*) AS n",
         ] {
             assert!(eligible(&query(text)), "{text}");
         }
         for text in [
             "MATCH (a) RETURN COUNT(*) AS n",
-            "MATCH (a)-[:R]->(b) WHERE a.n=1 RETURN COUNT(*) AS n",
-            "MATCH (a:L)-[:R]->(b) RETURN COUNT(*) AS n",
-            "MATCH (a)-[:R]->(b) WHERE a.n=b.n RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) RETURN SUM(b) AS n",
             "MATCH (a)-[:R]->(b)-[:R]-(c) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN COUNT(*) AS n",
@@ -432,6 +441,13 @@ mod tests {
             "(a)-[:R]-(b)",
             "(a)-[:R]->(c)-[:R]->(b)",
             "(a)-[:R]-(b)-[:R]-(a)",
+            "(a:L)-[:R]->(b)",
+            "(a)-[:R]->(b) WHERE a.n=7",
+            "(a)-[:R]->(b) WHERE a.n=b.n",
+            "(a)-[:R]->(b) WHERE b.n IS NULL",
+            "(a)-[:R]->(b) WHERE NOT (b.n=7)",
+            "(a)-[:R]->(b) WHERE a.n=7 OR b.n IS NULL",
+            "(a)-[:R]->(c)-[:R]->(b) WHERE c.n=-2",
         ] {
             let prefix = format!(
                 "MATCH {pattern} RETURN a.n,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
@@ -450,7 +466,14 @@ mod tests {
                         edges.len() as u64,
                         (0..5).map(VId),
                         edges,
-                        |_, _| Ok::<_, ()>(true),
+                        |vid, predicates| {
+                            Ok::<_, ()>(predicates.iter().all(|predicate| {
+                                predicate.matches_borrowed(
+                                    (vid == VId(0)).then_some(fgdb_delta_types::LabelId(1)),
+                                    properties.get(&vid).map(|value| (PropertyKeyId(1), value)),
+                                )
+                            }))
+                        },
                         |vid, _| Ok::<_, ()>(properties.get(&vid)),
                         GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
                         || Ok::<_, ()>(()),
@@ -517,5 +540,59 @@ mod tests {
             assert!(matches!(result, Err(GqlQueryError::Interrupted(n)) if n == stop));
             assert_eq!(at, stop);
         }
+    }
+
+    #[test]
+    fn filtering_and_null_support_precede_overflowed_multiplicities() {
+        let pattern = format!("(a){}", "-[:R]->(a)".repeat(8));
+        // 256 choices on each of eight atoms is 2^64 complete occurrences.
+        // Only one vertex assignment is needed; expanding this bag is infeasible.
+        let edges = [(VId(0), RelationId(1), VId(0)); 256];
+        let policy = GqlQueryPolicy::new(256, 1, 100_000, 10_000);
+        let run = |aggregate: &PreparedGraphAggregate,
+                   source: &[(VId, RelationId, VId)],
+                   value: &CanonicalScalar| {
+            aggregate.execute_governed(
+                source.len() as u64,
+                [VId(0)],
+                source.iter().copied(),
+                |_, predicates| {
+                    Ok::<_, ()>(predicates.iter().all(|predicate| {
+                        predicate.matches_borrowed([], [(PropertyKeyId(1), value)])
+                    }))
+                },
+                |_, _| Ok(Some(value)),
+                policy,
+                || Ok::<_, ()>(()),
+            )
+        };
+        let rejected = query(&format!(
+            "MATCH {pattern} WHERE a.n=0 RETURN COUNT(*) AS n"
+        ));
+        assert!(eligible(&rejected));
+        let value = CanonicalScalar::Int(1);
+        assert_eq!(
+            run(&rejected, &edges, &value).unwrap().value,
+            run(&rejected, &[], &value).unwrap().value
+        );
+        let counted = query(&format!("MATCH {pattern} RETURN COUNT(a.n) AS n"));
+        assert!(matches!(
+            run(&counted, &edges, &value),
+            Err(GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow {
+                aggregate: 0
+            }))
+        ));
+        let null = CanonicalScalar::Null;
+        assert_eq!(
+            run(&counted, &edges, &null).unwrap().value,
+            run(&counted, &[], &null).unwrap().value
+        );
+        let support = query(&format!(
+            "MATCH {pattern} RETURN COUNT(DISTINCT a.n) AS n,MIN(a.n) AS lo,MAX(a.n) AS hi"
+        ));
+        assert_eq!(
+            run(&support, &edges, &value).unwrap().value,
+            run(&support, &edges[..1], &value).unwrap().value
+        );
     }
 }
