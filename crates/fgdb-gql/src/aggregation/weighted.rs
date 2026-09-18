@@ -3,11 +3,12 @@
 //! For a positive pattern, a complete vertex assignment has one independent
 //! edge choice per edge atom. Its bag weight is the product of the admitted
 //! endpoint-triple multiplicities, even when an atom/variable repeats. COUNT
-//! adds that weight; COUNT DISTINCT and vertex MIN/MAX use positive support.
+//! adds that weight; COUNT DISTINCT and MIN/MAX use positive support.
 //! No edge-identity/trail semantics are claimed by this vertex-only profile.
 //!
-//! Eligibility is structural, not adaptive: no predicates, property columns,
-//! property-pair reads or scoped operators can be skipped. A relation used
+//! Vertex-property projections keep every binding and use the original property
+//! reader; only topology-only plans may eliminate hidden variables. Predicates
+//! and scoped operators remain on ordinary visitation. A relation used
 //! undirected must be exclusively undirected; opposite stored directions then
 //! contribute to ONE unordered pair. Mixed directed/undirected uses fall back.
 //! Sources are consumed once. Preprocessing, retained keys, multiplicity reads
@@ -118,9 +119,12 @@ fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
             offset: 0,
             count: None,
         } => true,
-        GlaOperator::ProjectValues { columns } => columns
-            .iter()
-            .all(|column| matches!(column, ValueProjection::Vertex { .. })),
+        GlaOperator::ProjectValues { columns } => columns.iter().all(|column| {
+            matches!(
+                column,
+                ValueProjection::Vertex { .. } | ValueProjection::Property { .. }
+            )
+        }),
         _ => false,
     })
 }
@@ -249,6 +253,51 @@ where
         }
     }
 
+    // A property is a function of its vertex binding, not the edge occurrence.
+    // Coalesce parallel edge choices, but keep the original plan and ALL slots:
+    // the topology-only forest/chain rewrites must not remove a property read.
+    // The ordinary visitor still owns matching, projection and source errors.
+    let reads_properties = plan.operators().iter().any(|operator| {
+        matches!(operator, GlaOperator::ProjectValues { columns }
+            if columns.iter().any(|column| matches!(column, ValueProjection::Property { .. })))
+    });
+    if reads_properties {
+        return plan.visit_value_bindings(
+            vertices,
+            topology.keys().copied(),
+            test_vertex,
+            property,
+            control,
+            |columns, bindings, property, control| {
+                let mut weight = Multiplicity::ONE;
+                for access in &accesses {
+                    control(GlaExecutionEvent::Work)?;
+                    let unavailable =
+                        || GqlQueryError::Source(GraphAggregateError::MultiplicityUnavailable);
+                    let source = bindings
+                        .get(access.source)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(unavailable)?;
+                    let destination = bindings
+                        .get(access.destination)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(unavailable)?;
+                    let key = match access.direction {
+                        GlaDirection::Forward => (source, access.relation, destination),
+                        GlaDirection::Reverse => (destination, access.relation, source),
+                        GlaDirection::Undirected => {
+                            normalized(source, access.relation, destination, true)
+                        }
+                    };
+                    weight = weight.product(topology.get(&key).copied().ok_or_else(unavailable)?);
+                }
+                visit(columns, bindings, property, control, weight)
+            },
+        );
+    }
+
     // Remove only a compiler-proved unprojected forest. Messages sum distinct
     // child assignments and multiply independent branches, without generating
     // their Cartesian product. Cyclic/projected core bindings still use GLA.
@@ -335,11 +384,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_registered_topology_support_and_count_profile_is_factored() {
+    fn only_the_registered_vertex_support_and_count_profile_is_factored() {
         for text in [
             "MATCH (a)-[:R]->(b) RETURN a,COUNT(*) AS n,COUNT(b) AS m,COUNT(DISTINCT b) AS d,MIN(b) AS lo,MAX(b) AS hi GROUP BY a",
             "MATCH (a)-[:R]-(b)-[:R]-(a) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b)<-[:R]-(c) WHERE a<>c RETURN COUNT(*) AS n",
+            "MATCH (a)-[:R]->(b) RETURN COUNT(b.n) AS n",
+            "MATCH (a)-[:R]->(b) RETURN a.n,MIN(b.n) AS lo,MAX(b.n) AS hi GROUP BY a.n",
         ] {
             assert!(eligible(&query(text)), "{text}");
         }
@@ -348,13 +399,123 @@ mod tests {
             "MATCH (a)-[:R]->(b) WHERE a.n=1 RETURN COUNT(*) AS n",
             "MATCH (a:L)-[:R]->(b) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) WHERE a.n=b.n RETURN COUNT(*) AS n",
-            "MATCH (a)-[:R]->(b) RETURN COUNT(b.n) AS n",
             "MATCH (a)-[:R]->(b) RETURN SUM(b) AS n",
             "MATCH (a)-[:R]->(b)-[:R]-(c) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN COUNT(*) AS n",
             "MATCH (a)-[:R]->(b) WHERE EXISTS { MATCH (b)-[:R]->(c) } RETURN COUNT(*) AS n",
         ] {
             assert!(!eligible(&query(text)), "{text}");
+        }
+    }
+
+    #[test]
+    fn property_groups_equal_ordinary_bags_for_nulls_parallel_edges_and_directions() {
+        let properties = BTreeMap::from([
+            (VId(0), CanonicalScalar::Int(7)),
+            (VId(1), CanonicalScalar::Null),
+            (VId(2), CanonicalScalar::Int(7)),
+            (VId(3), CanonicalScalar::Int(-2)),
+        ]);
+        let edges = [
+            (VId(0), RelationId(1), VId(1)),
+            (VId(0), RelationId(1), VId(1)),
+            (VId(0), RelationId(1), VId(2)),
+            (VId(2), RelationId(1), VId(3)),
+            (VId(2), RelationId(1), VId(3)),
+            (VId(3), RelationId(1), VId(3)),
+            (VId(3), RelationId(1), VId(0)),
+            (VId(4), RelationId(1), VId(1)),
+        ];
+        for pattern in [
+            "(a)-[:R]->(b)",
+            "(a)<-[:R]-(b)",
+            "(a)-[:R]-(b)",
+            "(a)-[:R]->(c)-[:R]->(b)",
+            "(a)-[:R]-(b)-[:R]-(a)",
+        ] {
+            let prefix = format!(
+                "MATCH {pattern} RETURN a.n,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
+            );
+            let factored = query(&format!("{prefix} GROUP BY a.n"));
+            // A hidden, order-sensitive COLLECT forces ordinary bag visitation.
+            // All five visible aggregates and the input source stay identical.
+            let ordinary = query(&format!("{prefix},COLLECT(b.n) AS bag GROUP BY a.n"))
+                .with_aggregate_output_prefix(5)
+                .unwrap();
+            assert!(eligible(&factored));
+            assert!(!eligible(&ordinary));
+            let run = |aggregate: &PreparedGraphAggregate| {
+                aggregate
+                    .execute_governed(
+                        edges.len() as u64,
+                        (0..5).map(VId),
+                        edges,
+                        |_, _| Ok::<_, ()>(true),
+                        |vid, _| Ok::<_, ()>(properties.get(&vid)),
+                        GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+                        || Ok::<_, ()>(()),
+                    )
+                    .unwrap()
+            };
+            let actual = run(&factored);
+            let expected = run(&ordinary);
+            assert_eq!(actual.value, expected.value, "{pattern}");
+            assert_eq!(actual.rows, expected.rows, "{pattern}");
+        }
+    }
+
+    #[test]
+    fn property_factorization_preserves_source_errors_and_every_checkpoint() {
+        let aggregate = query("MATCH (a)-[:R]->(b) RETURN COUNT(b.n) AS n");
+        let edges = [(VId(0), RelationId(1), VId(1)); 8];
+        let policy = GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        let error = aggregate.execute_governed(
+            edges.len() as u64,
+            [VId(0), VId(1)],
+            edges,
+            |_, _| Ok::<_, &str>(true),
+            |_, _| Err::<Option<&CanonicalScalar>, _>("property source failed"),
+            policy,
+            || Ok::<_, ()>(()),
+        );
+        assert!(matches!(
+            error,
+            Err(GqlQueryError::Source(GraphAggregateError::Source(
+                "property source failed"
+            )))
+        ));
+        let value = CanonicalScalar::Int(1);
+        let mut events = 0;
+        aggregate
+            .execute_governed(
+                edges.len() as u64,
+                [VId(0), VId(1)],
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(Some(&value)),
+                policy,
+                || {
+                    events += 1;
+                    Ok::<_, usize>(())
+                },
+            )
+            .unwrap();
+        for stop in 1..=events {
+            let mut at = 0;
+            let result = aggregate.execute_governed(
+                edges.len() as u64,
+                [VId(0), VId(1)],
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(Some(&value)),
+                policy,
+                || {
+                    at += 1;
+                    if at == stop { Err(stop) } else { Ok(()) }
+                },
+            );
+            assert!(matches!(result, Err(GqlQueryError::Interrupted(n)) if n == stop));
+            assert_eq!(at, stop);
         }
     }
 }
