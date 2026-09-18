@@ -1,6 +1,6 @@
 //! Changed-group projection over the existing retractable aggregate operator.
 //! No query AST interpreter or second graph source lives here. The admitted
-//! single-vertex GLA supplies predicates, columns and grouping positions.
+//! admitted GLA supplies predicates, binding slots and grouping positions.
 
 use super::*;
 use fgdb_delta_types::zset::aggregate::{AggregateError, AggregateValues};
@@ -42,17 +42,43 @@ pub(super) fn contributions(
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
 ) -> Result<(), StandingQueryFailure> {
+    binding_contributions(query, &[(vid, state)], sign, output, meter)
+}
+
+/// Project one admitted binding through the same predicate and aggregate
+/// domains as a vertex scan. The one-hop maintainer supplies two endpoint
+/// slots, not another text parser or a second expression evaluator.
+pub(super) fn binding_contributions(
+    query: &PreparedGraphAggregate,
+    binding: &[(VId, &VertexState)],
+    sign: i128,
+    output: &mut Vec<Contribution>,
+    meter: &mut Meter<'_>,
+) -> Result<(), StandingQueryFailure> {
     for op in query.input_pattern().plan().operators() {
-        if let GlaOperator::Select { predicates, .. } = op {
-            for predicate in predicates {
-                meter.units(ZSetEvent::Work, 1 + predicate.comparison_work_units())?;
-                if !predicate.matches_borrowed(
-                    state.labels.iter().copied(),
-                    state.props.iter().map(|(key, value)| (*key, value)),
-                ) {
-                    return Ok(());
+        match op {
+            GlaOperator::Select { slot, predicates } => {
+                let (_, state) = binding.get(slot.ordinal() as usize)
+                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
+                for predicate in predicates {
+                    meter.units(ZSetEvent::Work, 1 + predicate.comparison_work_units())?;
+                    if !predicate.matches_borrowed(
+                        state.labels.iter().copied(),
+                        state.props.iter().map(|(key, value)| (*key, value)),
+                    ) {
+                        return Ok(());
+                    }
                 }
             }
+            GlaOperator::VertexIdentity { left, right, equal } => {
+                meter.charge(ZSetEvent::Work)?;
+                let left = binding.get(left.ordinal() as usize)
+                    .ok_or(StandingQueryFailure::InvalidDelta)?.0;
+                let right = binding.get(right.ordinal() as usize)
+                    .ok_or(StandingQueryFailure::InvalidDelta)?.0;
+                if (left == right) != *equal { return Ok(()); }
+            }
+            _ => {}
         }
     }
     meter.charge(ZSetEvent::ScratchEntry)?;
@@ -60,11 +86,15 @@ pub(super) fn contributions(
     for &column in query.group_key_columns() {
         meter.charge(ZSetEvent::Work)?;
         let value = match query.input_pattern().value_columns()[column] {
-            ValueProjection::Vertex { .. } => {
+            ValueProjection::Vertex { slot } => {
+                let (vid, _) = binding.get(slot.ordinal() as usize)
+                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
                 meter.charge(ZSetEvent::ScratchEntry)?;
                 GraphValue::Vertex(vid)
             }
-            ValueProjection::Property { key, .. } => {
+            ValueProjection::Property { slot, key } => {
+                let (_, state) = binding.get(slot.ordinal() as usize)
+                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
                 let null = CanonicalScalar::Null;
                 let value = state.props.get(&key).unwrap_or(&null);
                 meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
@@ -83,12 +113,16 @@ pub(super) fn contributions(
             .map(|column| query.input_pattern().value_columns()[column])
         {
             None | Some(ValueProjection::Vertex { .. }) => Some(0),
-            Some(ValueProjection::Property { key, .. }) => match state.props.get(&key) {
-                None | Some(CanonicalScalar::Null) => None,
-                Some(_) if aggregate.function() == GraphAggregateFunction::Count => Some(0),
-                Some(CanonicalScalar::Int(value)) => Some(i128::from(*value)),
-                _ => return Err(StandingQueryFailure::NonIntegerSum),
-            },
+            Some(ValueProjection::Property { slot, key }) => {
+                let (_, state) = binding.get(slot.ordinal() as usize)
+                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
+                match state.props.get(&key) {
+                    None | Some(CanonicalScalar::Null) => None,
+                    Some(_) if aggregate.function() == GraphAggregateFunction::Count => Some(0),
+                    Some(CanonicalScalar::Int(value)) => Some(i128::from(*value)),
+                    _ => return Err(StandingQueryFailure::NonIntegerSum),
+                }
+            }
             _ => return Err(StandingQueryFailure::InvalidDelta),
         };
         meter.charge(ZSetEvent::ScratchEntry)?;
@@ -270,6 +304,7 @@ mod tests {
         let policy = GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000);
         let mut query = StandingQuery {
             definition: definition(), policy, vertices: BTreeMap::new(),
+            edges: None,
             aggregate: IncrementalAggregate::new(), rows: ZSet::new(),
             frontier: CommitSeq::ORIGIN, stats: StandingQueryStats::default(), failure: None,
         };

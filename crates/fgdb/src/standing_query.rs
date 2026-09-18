@@ -1,7 +1,8 @@
-//! Session-local single-vertex aggregates maintained from committed logical deltas.
+//! Session-local vertex and one-hop aggregates maintained from committed deltas.
 //! This is not a durable subscription or a resumable delivery protocol.
 
 mod grouped;
+mod edge;
 use grouped::{AggregateKey, contributions};
 
 use crate::{Database, ReadError, VertexRow};
@@ -32,6 +33,9 @@ pub struct StandingQueryHandle {
 pub struct StandingQueryStats {
     pub delta_rows: u64,
     pub affected_vertices: u64,
+    /// Distinct retained/new edge identities examined for a one-hop tick.
+    /// Parallel edges count separately; a self-loop counts once.
+    pub affected_edges: u64,
     pub work_units: u64,
     pub scratch_entries: u64,
 }
@@ -67,7 +71,7 @@ impl core::fmt::Display for StandingQueryError {
             Self::ForeignHandle => f.write_str("standing query belongs to another opened database"),
             Self::UnknownHandle => f.write_str("unknown standing query"),
             Self::Unsupported => {
-                f.write_str("standing query is outside the single-vertex COUNT/SUM/AVG profile")
+                f.write_str("standing query is outside the vertex/one-hop COUNT/SUM/AVG profile")
             }
             Self::Unavailable { frontier, reason } => write!(
                 f,
@@ -111,6 +115,7 @@ pub(crate) struct StandingQuery {
     definition: PreparedGraphAggregate,
     policy: GqlQueryPolicy,
     vertices: BTreeMap<VId, VertexState>,
+    edges: Option<edge::State>,
     aggregate: IncrementalAggregate<AggregateKey>,
     rows: ZSet<GraphAggregateRow>,
     frontier: CommitSeq,
@@ -184,15 +189,20 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
         return false;
     }
     let operators = query.input_pattern().plan().operators();
+    let width = match operators.first() {
+        Some(GlaOperator::ScanVertices) => 1,
+        Some(GlaOperator::ScanEdges { .. }) => 2,
+        _ => return false,
+    };
     let mut scans = 0;
     let mut projections = 0;
-    for op in operators {
+    for (position, op) in operators.iter().enumerate() {
         match op {
-            GlaOperator::ScanVertices => scans += 1,
+            GlaOperator::ScanVertices | GlaOperator::ScanEdges { .. } if position == 0 => scans += 1,
             // Reuse the existing unary predicate semantics, including ranges,
-            // labels and missing/stored NULL. Boolean programs, joins, pages,
+            // labels and missing/stored NULL. Boolean programs, multi-hop joins, pages,
             // and row expressions remain separate unsupported operator shapes.
-            GlaOperator::Select { slot, predicates } if slot.ordinal() == 0 => {
+            GlaOperator::Select { slot, predicates } if slot.ordinal() < width => {
                 if !predicates.iter().all(|predicate| matches!(predicate,
                     VertexPredicate::HasLabel(_)
                     | VertexPredicate::IntegerProperty { .. }
@@ -201,10 +211,12 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
                     return false;
                 }
             }
+            GlaOperator::VertexIdentity { left, right, .. }
+                if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::ProjectValues { columns } => {
                 projections += 1;
                 if columns.iter().any(|column| !matches!(column,
-                    ValueProjection::Property { slot, .. } | ValueProjection::Vertex { slot } if slot.ordinal() == 0)) { return false; }
+                    ValueProjection::Property { slot, .. } | ValueProjection::Vertex { slot } if slot.ordinal() < width)) { return false; }
             }
             GlaOperator::OrderByValues
             | GlaOperator::Limit {
@@ -272,6 +284,7 @@ impl StandingQuery {
         if batch.commit_seq() != self.frontier.checked_successor()
             .map_err(|_| StandingQueryFailure::InvalidDelta)?
             || batch.frontier() != batch.commit_seq()
+            || batch.commit_marker_identity().commit_seq != batch.commit_seq()
         {
             return Err(StandingQueryFailure::InvalidDelta);
         }
@@ -305,7 +318,9 @@ impl StandingQuery {
         for vid in &affected {
             meter.charge(ZSetEvent::Work)?;
             let next = if let Some(state) = self.vertices.get(vid) {
-                contributions(&self.definition, *vid, state, -1, &mut updates, meter)?;
+                if self.edges.is_none() {
+                    contributions(&self.definition, *vid, state, -1, &mut updates, meter)?;
+                }
                 let mut next = VertexState::default();
                 meter.charge(ZSetEvent::ScratchEntry)?;
                 for label in &state.labels {
@@ -422,12 +437,19 @@ impl StandingQuery {
                 _ => {}
             }
         }
-        for vid in &affected {
-            meter.charge(ZSetEvent::Work)?;
-            if let Some(state) = staged.get(vid).and_then(Option::as_ref) {
-                contributions(&self.definition, *vid, state, 1, &mut updates, meter)?;
+        let edge_patch = if let Some(edges) = &self.edges {
+            Some(edges.prepare(
+                &self.definition, batch, &self.vertices, &staged, &mut updates, meter,
+            )?)
+        } else {
+            for vid in &affected {
+                meter.charge(ZSetEvent::Work)?;
+                if let Some(state) = staged.get(vid).and_then(Option::as_ref) {
+                    contributions(&self.definition, *vid, state, 1, &mut updates, meter)?;
+                }
             }
-        }
+            None
+        };
         self.integrate(updates, meter)?;
         // Aggregate and result publication succeeded; only owned map patches
         // remain. No fallible callback or arithmetic follows this boundary.
@@ -436,6 +458,9 @@ impl StandingQuery {
                 Some(state) => { self.vertices.insert(vid, state); }
                 None => { self.vertices.remove(&vid); }
             }
+        }
+        if let (Some(edges), Some(patch)) = (&mut self.edges, edge_patch) {
+            edges.publish(patch);
         }
         Ok(())
     }
@@ -570,10 +595,16 @@ impl<V: Vfs + Clone> Database<V> {
                     }
                 }
             }
+            let edges = edge::State::for_definition(&definition);
+            if edges.is_some() {
+                edge::admit_snapshot(&self.snapshot, &mut records, &mut meter)
+                    .map_err(StandingQueryError::Maintenance)?;
+            }
             let mut query = StandingQuery {
                 definition,
                 policy,
                 vertices: BTreeMap::new(),
+                edges,
                 aggregate: IncrementalAggregate::new(),
                 rows: ZSet::new(),
                 frontier: self.snapshot.frontier,
@@ -584,9 +615,18 @@ impl<V: Vfs + Clone> Database<V> {
             for row in self.vertices().map_err(StandingQueryError::Read)? {
                 let state = state_from(&query.definition, &row, &mut meter)
                     .map_err(StandingQueryError::Maintenance)?;
-                contributions(&query.definition, row.vid, &state, 1, &mut updates, &mut meter)
-                    .map_err(StandingQueryError::Maintenance)?;
+                if query.edges.is_none() {
+                    contributions(&query.definition, row.vid, &state, 1, &mut updates, &mut meter)
+                        .map_err(StandingQueryError::Maintenance)?;
+                }
                 query.vertices.insert(row.vid, state);
+            }
+            if let Some(edges) = &mut query.edges {
+                for row in self.edges().map_err(StandingQueryError::Read)? {
+                    edges.seed(
+                        &query.definition, &row.entry, &query.vertices, &mut updates, &mut meter,
+                    ).map_err(StandingQueryError::Maintenance)?;
+                }
             }
             query
                 .integrate(updates, &mut meter)
