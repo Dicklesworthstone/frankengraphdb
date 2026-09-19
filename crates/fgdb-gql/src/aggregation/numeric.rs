@@ -200,9 +200,11 @@ impl NumericAccumulator {
 }
 
 impl PreparedGraphAggregate {
-    /// Materialize one untransformed maintained group with its exact result
-    /// domains. The caller owns aggregation, resource admission and atomic
-    /// publication; this constructor checks schema, not result correctness.
+    /// Materialize one complete maintained group with its exact result domains.
+    /// The caller owns aggregation, resource admission and atomic publication;
+    /// this constructor checks schema, not result correctness or HAVING.
+    /// A definition with HAVING must subsequently use evaluate_incremental_having
+    /// before releasing the row. This does not project, order or paginate it.
     ///
     /// Scalar/vertex MIN/MAX preserve their input type. Counts cannot be NULL;
     /// SUM/AVG may be NULL but never narrow into an ordinary scalar. Nullable
@@ -213,11 +215,26 @@ impl PreparedGraphAggregate {
         keys: Vec<GraphValue>,
         values: Vec<GraphAggregateValue>,
     ) -> Option<GraphAggregateRow> {
-        if !self.supports_incremental_maintenance()
-            || keys.len() != self.keys.len()
-            || values.len() != self.aggregates.len()
+        if !self.supports_incremental_maintenance_with_having()
+            || !self.accepts_incremental_row(&keys, &values)
         {
             return None;
+        }
+        Some(GraphAggregateRow {
+            keys: keys.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+        })
+    }
+
+    /// Borrowed schema admission shared by construction and the HAVING gate.
+    /// No payload clones, coercions, source reads or definition changes occur.
+    pub(super) fn accepts_incremental_row(
+        &self,
+        keys: &[GraphValue],
+        values: &[GraphAggregateValue],
+    ) -> bool {
+        if keys.len() != self.keys.len() || values.len() != self.aggregates.len() {
+            return false;
         }
         let input = self.input.value_columns();
         let accepts = |projection: &ValueProjection, value: &GraphValue| match projection {
@@ -225,12 +242,12 @@ impl PreparedGraphAggregate {
             ValueProjection::Vertex { .. } => matches!(value, GraphValue::Vertex(_)) || value.is_null(),
             _ => false,
         };
-        for (column, value) in self.keys.iter().zip(&keys) {
-            if !accepts(input.get(*column)?, value) {
-                return None;
+        for (column, value) in self.keys.iter().zip(keys) {
+            if !input.get(*column).is_some_and(|projection| accepts(projection, value)) {
+                return false;
             }
         }
-        for (aggregate, value) in self.aggregates.iter().zip(&values) {
+        for (aggregate, value) in self.aggregates.iter().zip(values) {
             let argument = aggregate.column.and_then(|column| input.get(column));
             let accepted = match aggregate.function {
                 GraphAggregateFunction::CountRows => {
@@ -256,12 +273,9 @@ impl PreparedGraphAggregate {
                 }
                 _ => false,
             };
-            if !accepted { return None; }
+            if !accepted { return false; }
         }
-        Some(GraphAggregateRow {
-            keys: keys.into_boxed_slice(),
-            values: values.into_boxed_slice(),
-        })
+        true
     }
 }
 
