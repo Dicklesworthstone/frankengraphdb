@@ -129,3 +129,5 @@ impl GlaPlan<GraphValueRow> {
         Ok(())
     }
 }
+
+mod incremental_rows;
