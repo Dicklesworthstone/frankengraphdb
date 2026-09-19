@@ -1,12 +1,13 @@
 //! Database-owned session-local maintained queries.
 //!
-//! Native GQL aggregates and recursive topology views share one owner registry,
+//! Native GQL, recursive topology and triangle views share one owner registry,
 //! commit hook, admission meter, failure fence and explicit rebuild lifecycle.
 //! Registrations are not durable subscriptions and do not survive reopening.
 
 mod aggregate;
 mod output;
 mod recursive;
+mod triangles;
 // Reuse the concurrently introduced row-output file as one registry sink.
 #[path = "standing_query/output/values.rs"]
 mod row;
@@ -32,7 +33,7 @@ pub struct StandingQueryStats {
     pub affected_vertices: u64,
     /// Distinct retained/new edge identities examined for a one-hop tick.
     /// Parallel edges count separately; a self-loop counts once.
-    /// Recursive views currently report work/scratch and delta_rows only;
+    /// Recursive/triangle views report work/scratch and delta_rows only;
     /// their affected_vertices/affected_edges counters remain zero.
     pub affected_edges: u64,
     pub work_units: u64,
@@ -146,6 +147,7 @@ pub(crate) enum StandingQuery {
         output: Box<row::State>,
     },
     Reachability(Box<recursive::State>),
+    Triangles(Box<triangles::State>),
 }
 
 impl StandingQuery {
@@ -156,6 +158,7 @@ impl StandingQuery {
                 (query.policy, query.frontier, query.failure)
             }
             Self::Reachability(query) => (query.policy, query.frontier, query.failure),
+            Self::Triangles(query) => (query.policy, query.frontier, query.failure),
         }
     }
 
@@ -171,6 +174,9 @@ impl StandingQuery {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
             Self::Reachability(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
+            Self::Triangles(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
         };
@@ -385,6 +391,9 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Reachability(query) => StandingQuery::Reachability(Box::new(
                 self.prepare_standing_reachability(cx, query.relation(), policy)?,
             )),
+            StandingQuery::Triangles(query) => StandingQuery::Triangles(Box::new(
+                self.prepare_standing_triangles(cx, query.relation(), query.quantifier(), policy)?,
+            )),
         };
         let frontier = replacement.status().1;
         // No source mutation, await or fallible work between preparation and swap.
@@ -432,7 +441,8 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::ProjectedAggregate { source, output } => {
                 (source.as_ref(), &output.rows, output.ordered_rows())
             }
-            StandingQuery::Reachability(_) | StandingQuery::Rows { .. } => return Err(StandingQueryError::Unsupported),
+            StandingQuery::Reachability(_) | StandingQuery::Rows { .. }
+            | StandingQuery::Triangles(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
             rows,
@@ -502,6 +512,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
                 source.maintain_with_output(batch, &mut meter, Some(output.as_mut()))
             }
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);
     }

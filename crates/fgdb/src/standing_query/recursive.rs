@@ -5,7 +5,7 @@
 use super::*;
 use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::zset::committed::EdgeInputError;
-use fgdb_delta_types::zset::committed::snapshot::{EdgeSnapshotBuilder, SnapshotInputError};
+use fgdb_delta_types::zset::committed::snapshot::{EdgeSnapshot, EdgeSnapshotBuilder, SnapshotInputError};
 use fgdb_delta_types::zset::reachability::ReachabilityError;
 use fgdb_delta_types::zset::reachability::committed::{
     CommittedReachability, CommittedReachabilityError, CommittedReachabilityUpdate,
@@ -44,7 +44,7 @@ fn snapshot_error(error: SnapshotInputError<StandingQueryFailure>) -> StandingQu
 /// Account the borrowed logical rows before input preparation. Payloads that
 /// are irrelevant to pure topology are neither cloned nor charged as retained
 /// data. Schema and topology consistency checks remain in CommittedEdgeInput.
-fn observe_batch(
+pub(super) fn observe_batch(
     batch: &LogicalDeltaBatch,
     meter: &mut Meter<'_>,
 ) -> Result<(), StandingQueryFailure> {
@@ -139,15 +139,14 @@ impl State {
     }
 }
 
-impl State {
-    /// Build privately from ONE already admitted immutable database generation.
-    /// The borrowed GQL source owns statement visibility and tombstone precedence;
-    /// this adapter never interprets raw blocks or clones graph properties.
-    fn from_snapshot(
+/// Shared topology admission for recursive and analytics views. Preserve one
+/// borrowed source, the exact retained anchor and the original meter sequence;
+/// callers compose their own operator/sink before publishing a new generation.
+pub(super) fn topology_snapshot(
         snapshot: &crate::Snapshot,
         relation: RelationId,
         meter: &mut Meter<'_>,
-    ) -> Result<Self, StandingQueryFailure> {
+    ) -> Result<EdgeSnapshot, StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
         if snapshot.frontier != snapshot.delta_index.frontier() {
             return Err(StandingQueryFailure::InvalidDelta);
@@ -214,9 +213,19 @@ impl State {
                     .map_err(snapshot_error)
             },
         )?;
-        let baseline = builder
+        builder
             .finish(&mut |event| meter.charge(event))
-            .map_err(snapshot_error)?;
+            .map_err(snapshot_error)
+}
+
+impl State {
+    /// Build privately from ONE already admitted immutable database generation.
+    fn from_snapshot(
+        snapshot: &crate::Snapshot,
+        relation: RelationId,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, StandingQueryFailure> {
+        let baseline = topology_snapshot(snapshot, relation, meter)?;
         let input = CommittedReachability::from_snapshot(baseline, relation, LIMBS, &mut |event| {
             meter.charge(event)
         })
