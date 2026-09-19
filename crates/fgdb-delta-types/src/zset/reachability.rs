@@ -12,6 +12,8 @@
 //! controls admit logical entries, not allocator bytes; arbitrary key cloning,
 //! comparison, allocation failure and panic have the parent Z-set boundary.
 
+pub mod committed;
+
 use super::{ZSet, ZSetError, ZSetEvent, event};
 use crate::{LimbLimit, ZWeight};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
