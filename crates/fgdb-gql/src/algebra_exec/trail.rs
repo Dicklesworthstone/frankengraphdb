@@ -1,11 +1,14 @@
 //! Identity-sensitive expansion choices feeding the same binding continuation.
 
+mod captured_shortest;
+
 use super::{EId, GlaExecutionEvent, GraphPath, GraphWalkSearch, VId};
 use crate::{GraphTrailCursor, GraphWalkBounds};
 use std::collections::BTreeMap;
 
 pub(super) enum IdentifiedExpansion<'a> {
     Path(crate::walk::GraphPathCursor<'a>),
+    AllShortest(captured_shortest::CapturedShortestCursor<'a>),
     Trail {
         cursor: GraphTrailCursor<'a>,
         capture: bool,
@@ -26,6 +29,11 @@ impl<'a> IdentifiedExpansion<'a> {
                 cursor: GraphTrailCursor::new(source, bounds, adjacency, control)?,
                 capture,
             })
+        } else if search == GraphWalkSearch::AllShortest {
+            // The identified index is already sorted by (EId, VId). Share
+            // reachability instead of materializing every tied path prefix.
+            captured_shortest::CapturedShortestCursor::new(source, bounds, adjacency, control)
+                .map(Self::AllShortest)
         } else {
             crate::walk::GraphPathCursor::new(source, bounds, search, adjacency, control)
                 .map(Self::Path)
@@ -38,6 +46,7 @@ impl<'a> IdentifiedExpansion<'a> {
     ) -> Result<Option<(VId, Option<GraphPath>)>, E> {
         let path = match self {
             Self::Path(cursor) => cursor.next_with_control(control)?,
+            Self::AllShortest(cursor) => cursor.next_with_control(control)?,
             Self::Trail {
                 cursor,
                 capture: true,
