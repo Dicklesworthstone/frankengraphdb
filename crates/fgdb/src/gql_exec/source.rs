@@ -1199,6 +1199,7 @@ where
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn visit_edges<'a, E, C>(
     blocks: &'a [Vec<AdjacencyEntry>],
     as_of: CommitSeq,

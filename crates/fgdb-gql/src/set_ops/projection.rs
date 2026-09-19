@@ -35,6 +35,7 @@ impl GraphSetValue {
     pub(crate) fn append_canonical_bytes(&self, bytes: &mut Vec<u8>) {
         append_value_transcript(self, bytes);
     }
+    #[allow(dead_code)]
     pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
         self.append_canonical_bytes(bytes);
     }

@@ -98,8 +98,8 @@ pub use evidence_page::{
 };
 pub use graph_text::{
     GraphAggregateTextSlot, GraphPatternTextError, GraphPatternTextErrorKind, GraphSymbol,
-    GraphSymbolKind, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS, PreparedGraphAggregateText,
-    PreparedGraphText,
+    GraphSymbolKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
+    PreparedGraphAggregateText, PreparedGraphText, ReverseSymbolCatalog,
 };
 pub use insertion_text::{GraphInsertTextError, GraphInsertTextErrorKind, PreparedGraphInsertText};
 pub use integer_expression::{

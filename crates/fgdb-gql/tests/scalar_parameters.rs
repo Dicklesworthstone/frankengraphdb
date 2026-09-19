@@ -127,7 +127,7 @@ fn arbitrary_text_is_an_argument_not_syntax_and_rebindings_share_the_admitted_pa
     let template = PreparedGraphText::prepare_with_parameter_types(
         source,
         &[("value", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
-        |kind, name| {
+        |kind: GraphSymbolKind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -210,7 +210,7 @@ fn declarations_and_exact_argument_types_fail_without_reinterpreting_positions()
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphText::prepare_with_parameter_types(source, &declarations, |kind, name| {
+            PreparedGraphText::prepare_with_parameter_types(source, &declarations, |kind: GraphSymbolKind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })

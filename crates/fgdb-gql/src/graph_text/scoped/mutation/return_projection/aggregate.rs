@@ -201,7 +201,7 @@ impl PreparedGraphPipelineAggregateText {
             ));
         }
         let head = parser.graph_projection_head()?;
-        let (mut stages, schema, depth) =
+        let (stages, schema, depth) =
             parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
         let aggregate_at = parser.current.at;
         if depth >= crate::MAX_GRAPH_SET_DEPTH {

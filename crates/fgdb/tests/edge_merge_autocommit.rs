@@ -1,7 +1,7 @@
 //! Autocommit directed relationship MERGE lifecycle laws.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GqlScalarParameter, GraphEdgeMergeError,

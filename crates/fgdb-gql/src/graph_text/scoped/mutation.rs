@@ -422,6 +422,7 @@ impl PreparedGraphMutationText {
             distinct: false,
             visible_columns: None,
             return_at: at,
+            reverse_catalog: None,
         };
         Ok(Self {
             selection,

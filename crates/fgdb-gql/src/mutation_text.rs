@@ -1,8 +1,6 @@
 //! Immutable text-prepared query-selected writes. The native graph lexer owns
 //! construction and binding; these facades cannot be executed as reads.
 
-use crate::GqlParameterValue;
-use crate::graph_text::Number;
 use crate::insertion::GraphInsertBuildError;
 use crate::{
     GqlScalarParameter, GraphDeleteBuildError, GraphEdgeMergeBuildError, GraphIntegerBuildError,

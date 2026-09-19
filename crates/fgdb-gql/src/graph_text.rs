@@ -61,6 +61,82 @@ impl core::fmt::Debug for GraphSymbol {
     }
 }
 
+pub const COMMON_GRAPH_SYMBOLS: &[&str] = &[
+    "Person", "Agent", "Company", "User", "Account", "Device", "Post", "Comment",
+    "Tag", "Group", "Member", "Admin", "Item", "Product", "Order", "Customer",
+    "Source", "Copy", "Node", "Edge", "Entity", "Link", "L", "M", "N", "A", "B", "C",
+    "KNOWS", "WORKS_AT", "SHIPS", "BACKS", "TO", "R", "S", "T", "RELATION", "REL",
+];
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReverseSymbolCatalog {
+    pub labels: BTreeMap<LabelId, String>,
+    pub relations: BTreeMap<RelationId, String>,
+}
+
+impl ReverseSymbolCatalog {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert_label(&mut self, id: LabelId, name: impl Into<String>) {
+        self.labels.insert(id, name.into());
+    }
+
+    pub fn insert_relation(&mut self, id: RelationId, name: impl Into<String>) {
+        self.relations.insert(id, name.into());
+    }
+
+    pub fn from_resolver<R: GraphSymbolResolver + ?Sized>(resolver: &mut R, text: &str) -> Self {
+        if let Some(catalog) = resolver.reverse_catalog() {
+            return catalog;
+        }
+        let mut catalog = Self::default();
+        let mut probe_name = |name: &str| {
+            if let Some(GraphSymbol::Label(id)) = resolver.resolve_symbol(GraphSymbolKind::Label, name) {
+                catalog.insert_label(id, name);
+            }
+            if let Some(GraphSymbol::Relation(id)) = resolver.resolve_symbol(GraphSymbolKind::Relation, name) {
+                catalog.insert_relation(id, name);
+            }
+        };
+        for common in COMMON_GRAPH_SYMBOLS {
+            probe_name(common);
+        }
+        for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if !word.is_empty() && (word.as_bytes()[0].is_ascii_alphabetic() || word.as_bytes()[0] == b'_') {
+                probe_name(word);
+            }
+        }
+        catalog
+    }
+}
+
+pub trait GraphSymbolResolver {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol>;
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        None
+    }
+    fn reverse_label(&self, _id: LabelId) -> Option<String> {
+        None
+    }
+    fn reverse_relation(&self, _id: RelationId) -> Option<String> {
+        None
+    }
+}
+
+impl<F> GraphSymbolResolver for F
+where
+    F: FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+{
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self(kind, name)
+    }
+}
+
+
+
 /// Diagnostics contain byte positions and structural classes, not query text,
 /// identifiers, catalog IDs, or supplied argument values.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -905,7 +981,11 @@ impl<'a> Parser<'a> {
                 let (variable, property, path) = if self.is_punct(b'(') {
                     let function = Self::path_function(expression)?;
                     self.advance()?;
-                    let variable = self.path_variable()?;
+                    let variable = match function {
+                        GraphPathFunction::Labels => self.vertex_variable()?,
+                        GraphPathFunction::Type => self.edge_variable()?,
+                        _ => self.path_variable()?,
+                    };
                     self.punct(b')', ")")?;
                     (variable, None, Some(function))
                 } else if self
@@ -974,9 +1054,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    // labels(vertex) and type(edge) require catalog names, not numeric IDs.
-    // The embedded symbol resolver is forward-only; until a reverse-name
-    // catalog is available these functions refuse here, before resolution.
     fn path_function(name: Name<'a>) -> Result<GraphPathFunction, GraphPatternTextError> {
         if name.text.eq_ignore_ascii_case("path_length") {
             Ok(GraphPathFunction::Length)
@@ -984,12 +1061,37 @@ impl<'a> Parser<'a> {
             Ok(GraphPathFunction::Nodes)
         } else if name.text.eq_ignore_ascii_case("edges") {
             Ok(GraphPathFunction::Edges)
+        } else if name.text.eq_ignore_ascii_case("labels") {
+            Ok(GraphPathFunction::Labels)
+        } else if name.text.eq_ignore_ascii_case("type") {
+            Ok(GraphPathFunction::Type)
         } else {
             Err(error(
                 name.at,
                 GraphPatternTextErrorKind::Expected("path function"),
             ))
         }
+    }
+
+    fn vertex_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+        let name = self.name()?;
+        if !self.syntax.variables.iter().any(|v| v.text == name.text) {
+            return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        Ok(name)
+    }
+
+    fn edge_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
+        let name = self.name()?;
+        if !self
+            .syntax
+            .edges
+            .iter()
+            .any(|e| e.variable.is_some_and(|v| v.text == name.text))
+        {
+            return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        Ok(name)
     }
 
     fn path_variable(&mut self) -> Result<Name<'a>, GraphPatternTextError> {
@@ -1076,6 +1178,7 @@ pub struct PreparedGraphText {
     count: Option<Number>,
     distinct: bool,
     return_at: usize,
+    pub reverse_catalog: Option<std::sync::Arc<ReverseSymbolCatalog>>,
 }
 
 impl core::fmt::Debug for PreparedGraphText {
@@ -1147,10 +1250,17 @@ impl PreparedGraphText {
         Self::from_syntax(statement, Parser::new(statement)?.parse()?, resolve)
     }
 
+    pub fn prepare_with_resolver(
+        statement: &str,
+        resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, GraphPatternTextError> {
+        Self::from_syntax(statement, Parser::new(statement)?.parse()?, resolve)
+    }
+
     fn from_syntax<'a>(
         statement: &str,
         syntax: Syntax<'a>,
-        mut resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphPatternTextError> {
         let mut cache = BTreeMap::new();
         let mut symbol = |kind, name: Name<'a>| -> Result<GraphSymbol, GraphPatternTextError> {
@@ -1158,7 +1268,8 @@ impl PreparedGraphText {
             if let Some(value) = cache.get(&key) {
                 return Ok(*value);
             }
-            let value = resolve(kind, name.text)
+            let value = resolve
+                .resolve_symbol(kind, name.text)
                 .ok_or_else(|| error(name.at, GraphPatternTextErrorKind::UnknownSymbol(kind)))?;
             if value.kind() != kind {
                 return Err(error(
@@ -1232,6 +1343,14 @@ impl PreparedGraphText {
             syntax.return_at,
             builder.prepare_values_with_clauses(&clauses, &projected, 0, None),
         )?;
+        let needs_reverse = columns.iter().any(|c| {
+            matches!(c.path, Some(GraphPathFunction::Labels | GraphPathFunction::Type))
+        });
+        let reverse_catalog = if needs_reverse {
+            Some(std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut resolve, statement)))
+        } else {
+            None
+        };
         Ok(Self {
             statement: statement.to_owned(),
             builder,
@@ -1246,6 +1365,7 @@ impl PreparedGraphText {
             count: syntax.count,
             distinct: syntax.distinct,
             return_at: syntax.return_at,
+            reverse_catalog,
         })
     }
 
@@ -1460,13 +1580,16 @@ impl PreparedGraphText {
         } else {
             pattern.with_duplicates()
         };
-        let pattern = if self.ordering.is_empty() {
+        let mut pattern = if self.ordering.is_empty() {
             pattern
         } else {
             pattern.with_order_by(&self.ordering).map_err(|kind| {
                 error(self.return_at, GraphPatternTextErrorKind::OrderBuild(kind))
             })?
         };
+        if let Some(catalog) = &self.reverse_catalog {
+            pattern.logical.reverse_catalog = Some(std::sync::Arc::clone(catalog));
+        }
         Ok(match self.visible_columns {
             Some(width) => pattern.with_visible_columns(width),
             None => pattern,
@@ -1511,23 +1634,13 @@ mod tests {
     }
 
     #[test]
-    fn element_name_functions_refuse_before_catalog_resolution() {
-        for function in ["labels(p)", "type(r)"] {
+    fn element_name_functions_prepare_and_lower_positively() {
+        for (function, expected_col) in [("labels(p)", "labels"), ("type(r)", "type")] {
             let text = format!("MATCH (p:L)-[r:R]->(q) RETURN {function}");
-            let calls = Cell::new(0);
-            let failure = PreparedGraphText::prepare(&text, |kind, name| {
-                calls.set(calls.get() + 1);
-                symbols(kind, name)
-            })
-            .unwrap_err();
-            assert_eq!(
-                failure,
-                GraphPatternTextError {
-                    offset: text.find(function).unwrap(),
-                    kind: GraphPatternTextErrorKind::Expected("path function"),
-                }
-            );
-            assert_eq!(calls.get(), 0, "refusal must precede catalog resolution");
+            let template = PreparedGraphText::prepare(&text, symbols).expect("positive prepare");
+            let pattern = template.bind_parameters(&GqlParameters::new()).expect("bind");
+            assert_eq!(pattern.columns(), &[expected_col]);
+            assert!(pattern.plan().reverse_catalog.is_some());
         }
     }
 

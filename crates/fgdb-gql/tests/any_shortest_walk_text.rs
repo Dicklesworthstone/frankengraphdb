@@ -57,7 +57,7 @@ fn native_any_directions_and_rebinding_match_the_typed_builder_exactly() {
             "match any shortest walk {atom} WHERE a.p=$key RETURN ALL a,b SKIP $off LIMIT $count"
         );
         let mut calls = BTreeSet::new();
-        let prepared = PreparedGraphText::prepare(&text, |kind, name| {
+        let prepared = PreparedGraphText::prepare(&text, |kind: GraphSymbolKind, name: &str| {
             assert!(calls.insert((kind, name.to_owned())));
             symbols(kind, name)
         })
@@ -207,7 +207,7 @@ fn malformed_any_selectors_and_compound_paths_refuse_before_catalog_access() {
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphText::prepare(text, |kind, name| {
+            PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })

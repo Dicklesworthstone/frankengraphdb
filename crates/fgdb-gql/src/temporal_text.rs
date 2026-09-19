@@ -10,8 +10,8 @@
 use crate::algebra::{GraphValueRow, PreparedGraphPattern};
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters, GraphPatternTextError,
-    GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, MAX_GRAPH_TEXT_BYTES,
-    MAX_GRAPH_TEXT_TOKENS, PreparedGraphText,
+    GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, GraphSymbolResolver,
+    MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS, PreparedGraphText,
 };
 use fgdb_types::CommitSeq;
 use std::collections::BTreeSet;
@@ -417,10 +417,25 @@ impl PreparedTemporalGraphText {
         Self::prepare_with_parameter_types(statement, &[], resolve)
     }
 
+    pub fn prepare_with_resolver(
+        statement: &str,
+        resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, GraphTemporalTextError> {
+        Self::prepare_with_parameter_types_and_resolver(statement, &[], resolve)
+    }
+
     pub fn prepare_with_parameter_types(
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<Self, GraphTemporalTextError> {
+        Self::prepare_with_parameter_types_and_resolver(statement, declarations, resolve)
+    }
+
+    pub fn prepare_with_parameter_types_and_resolver(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphTemporalTextError> {
         let (start, end, selector) = locate_clause(statement)?;
         let mut seen = BTreeSet::new();
@@ -473,7 +488,7 @@ impl PreparedTemporalGraphText {
             .copied()
             .filter(|(name, _)| inner_names.contains(*name))
             .collect::<Vec<_>>();
-        let inner = PreparedGraphText::prepare_with_parameter_types(
+        let inner = PreparedGraphText::prepare_with_parameter_types_and_resolver(
             &blanked,
             &inner_declarations,
             resolve,
@@ -633,6 +648,7 @@ impl BoundTemporalGraphQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{GraphSymbol, GraphSymbolKind};
     use fgdb_delta_types::{PropertyKeyId, RelationId};
     use std::cell::Cell;
 
@@ -647,7 +663,7 @@ mod tests {
     #[test]
     fn literal_selector_reuses_the_ordinary_graph_compiler() {
         let source = "MATCH (a)-[:R]->(b) FOR SYSTEM_TIME AS OF SEQ 41 WHERE a.p >= 3 RETURN b";
-        let mut calls = Cell::new(0);
+        let calls = Cell::new(0);
         let temporal = PreparedTemporalGraphText::prepare(source, |kind, name| {
             calls.set(calls.get() + 1);
             symbols(kind, name)

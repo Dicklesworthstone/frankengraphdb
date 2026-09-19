@@ -9,11 +9,11 @@
 //! and vertices deleted after creation.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, RelationBind, WriteBatch};
+use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{
-    GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy, GqlScalarParameter,
-    GraphSymbol, GraphSymbolKind, PreparedGqlTemplate, PreparedGraphText,
+    GqlParameterType, GqlParameters, GqlQueryPolicy, GraphSymbol, GraphSymbolKind,
+    PreparedGraphText,
 };
 use fgdb_types::CanonicalScalarKind;
 use fgdb_types::CanonicalText;

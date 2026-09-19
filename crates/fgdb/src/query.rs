@@ -144,7 +144,7 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         budget: GqlQueryPolicy,
     ) -> Result<QueryResult, QueryError> {
         let trimmed = text.trim_start();

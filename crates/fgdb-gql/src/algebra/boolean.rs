@@ -404,6 +404,7 @@ impl GraphBooleanExpression {
     /// Whether any operand reads a captured relationship property. Such a
     /// program needs the element-property executor, never a vertex-only one.
     #[must_use]
+    #[allow(dead_code)]
     pub(crate) fn contains_edge_property(&self) -> bool {
         fn operand<S>(operand: &Operand<S>) -> bool {
             matches!(operand, Operand::EdgeProperty { .. })

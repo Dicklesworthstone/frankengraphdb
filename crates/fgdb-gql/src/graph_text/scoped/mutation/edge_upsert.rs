@@ -284,6 +284,7 @@ impl PreparedGraphEdgeUpsertText {
             distinct: false,
             visible_columns: None,
             return_at: at,
+            reverse_catalog: None,
         };
         let merge = PreparedGraphEdgeMergeText {
             selection,

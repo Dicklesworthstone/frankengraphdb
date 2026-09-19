@@ -197,7 +197,7 @@ use fgdb_strata::root::{
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
 use fgdb_strata::vertex::{VertexPatchRows, merge_all_vertices, merge_vertex};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
-use fgdb_strata::{AdjacencyEntry, DeltaBlockVersion, PartitionRootVersion};
+use fgdb_strata::{AdjacencyEntry, PartitionRootVersion};
 
 pub use fgdb_strata::edge_props::EdgePropertyRow;
 pub use fgdb_strata::vertex::VertexRow;
@@ -690,6 +690,12 @@ pub enum ReadError {
     /// retired cursor. `since` does not construct these; the arm exists so a
     /// new index-query error cannot be silently remapped.
     DeltaWindow(IndexError),
+    /// A vertex label in the admitted snapshot has no reverse name in the
+    /// caller's catalog or capability scope.
+    UnmappedLabel(LabelId),
+    /// An edge relation in the admitted snapshot has no reverse name in the
+    /// caller's catalog or capability scope.
+    UnmappedRelation(RelationId),
 }
 
 macro_rules! from_error {
@@ -943,6 +949,8 @@ impl core::fmt::Display for ReadError {
                 "delta cursor {asked:?} was retired: window is ({retained_after:?}, {frontier:?}]"
             ),
             Self::DeltaWindow(error) => write!(f, "delta window: {error}"),
+            Self::UnmappedLabel(id) => write!(f, "unmapped vertex label id: {id:?}"),
+            Self::UnmappedRelation(id) => write!(f, "unmapped edge relation id: {id:?}"),
         }
     }
 }

@@ -111,7 +111,6 @@ fn assert_history(db: &Database<MemVfs>, cx: &QueryCx, seq: CommitSeq) {
         (CanonicalScalar::Int(a), CanonicalScalar::Int(b)) => a.cmp(b),
         _ => panic!("integer fixture"),
     });
-    let floor = GqlParameters::new().with_int64("floor", 0).unwrap();
     let head = "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ $at";
     assert_eq!(
         query_rows(

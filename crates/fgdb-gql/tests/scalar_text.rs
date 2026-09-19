@@ -124,7 +124,7 @@ fn resolved_literals_are_reused_when_numeric_parameters_are_rebound() {
     let mut calls = BTreeMap::new();
     let template = PreparedGraphText::prepare(
         "MATCH (n:L) WHERE n.p = 'ready' AND n.p IS NOT NULL RETURN n LIMIT $take",
-        |kind, name| {
+        |kind: GraphSymbolKind, name: &str| {
             *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
             symbols(kind, name)
         },
@@ -283,7 +283,7 @@ fn malformed_or_oversized_literals_refuse_before_catalog_calls() {
     ] {
         let mut calls = 0;
         assert!(
-            PreparedGraphText::prepare(statement, |kind, name| {
+            PreparedGraphText::prepare(statement, |kind: GraphSymbolKind, name: &str| {
                 calls += 1;
                 symbols(kind, name)
             })
@@ -293,7 +293,7 @@ fn malformed_or_oversized_literals_refuse_before_catalog_calls() {
     }
     let statement = format!("MATCH (n) WHERE n.p = '{}' RETURN n", "x".repeat(60_000));
     let mut calls = 0;
-    let error = PreparedGraphText::prepare(&statement, |kind, name| {
+    let error = PreparedGraphText::prepare(&statement, |kind: GraphSymbolKind, name: &str| {
         calls += 1;
         symbols(kind, name)
     })

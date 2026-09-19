@@ -23,6 +23,50 @@ pub enum PreparedNativeRead {
     TemporalAggregate(PreparedTemporalGraphAggregateText),
 }
 
+struct CachingResolver<'a, R: ?Sized> {
+    resolver: &'a mut R,
+    symbols: BTreeMap<(GraphSymbolKind, String), Option<GraphSymbol>>,
+}
+
+impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for CachingResolver<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        *self
+            .symbols
+            .entry((kind, name.to_owned()))
+            .or_insert_with(|| self.resolver.resolve_symbol(kind, name))
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        self.resolver.reverse_catalog()
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        self.resolver.reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: fgdb_delta_types::RelationId) -> Option<String> {
+        self.resolver.reverse_relation(id)
+    }
+}
+
+impl<R: GraphSymbolResolver + ?Sized> GraphSymbolResolver for &mut CachingResolver<'_, R> {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        (**self).resolve_symbol(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        (**self).reverse_catalog()
+    }
+
+    fn reverse_label(&self, id: fgdb_delta_types::LabelId) -> Option<String> {
+        (**self).reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: fgdb_delta_types::RelationId) -> Option<String> {
+        (**self).reverse_relation(id)
+    }
+}
+
 impl PreparedNativeRead {
     /// Classify using native parsers, from more specific grammars to general ones.
     /// Resolution, including misses, is frozen across all grammar probes.
@@ -34,13 +78,11 @@ impl PreparedNativeRead {
     pub fn prepare(
         text: &str,
         params: &GqlParameters,
-        mut resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        mut resolver: impl GraphSymbolResolver,
     ) -> Result<Self, QueryError> {
-        let mut symbols = BTreeMap::new();
-        let mut resolve = |kind, name: &str| {
-            *symbols
-                .entry((kind, name.to_owned()))
-                .or_insert_with(|| resolver(kind, name))
+        let mut resolve = CachingResolver {
+            resolver: &mut resolver,
+            symbols: BTreeMap::new(),
         };
         // Numeric arguments keep native inference; explicit scalar and list
         // declarations reach every prepare_with_parameter_types facade.
@@ -64,7 +106,7 @@ impl PreparedNativeRead {
         match PreparedTemporalGraphAggregateText::prepare_with_parameter_types(
             text,
             &declarations,
-            &mut resolve,
+            |kind, name| resolve.resolve_symbol(kind, name),
         ) {
             Ok(prepared) => return Ok(Self::TemporalAggregate(prepared)),
             Err(error) => {
@@ -85,7 +127,7 @@ impl PreparedNativeRead {
                 }
             }
         }
-        match PreparedTemporalGraphText::prepare_with_parameter_types(
+        match PreparedTemporalGraphText::prepare_with_parameter_types_and_resolver(
             text,
             &declarations,
             &mut resolve,
@@ -112,7 +154,7 @@ impl PreparedNativeRead {
         match PreparedTemporalGraphSetText::prepare_with_parameter_types(
             text,
             &declarations,
-            &mut resolve,
+            |kind, name| resolve.resolve_symbol(kind, name),
         ) {
             Ok(prepared) => return Ok(Self::TemporalSet(prepared)),
             Err(error) => {
@@ -136,7 +178,7 @@ impl PreparedNativeRead {
         match PreparedGraphPipelineAggregateText::prepare_with_parameter_types(
             text,
             &declarations,
-            &mut resolve,
+            |kind, name| resolve.resolve_symbol(kind, name),
         ) {
             Ok(prepared) => return Ok(Self::PipelineAggregate(prepared)),
             Err(error) => consider(
@@ -149,7 +191,7 @@ impl PreparedNativeRead {
         match PreparedGraphAggregateText::prepare_with_parameter_types(
             text,
             &declarations,
-            &mut resolve,
+            |kind, name| resolve.resolve_symbol(kind, name),
         ) {
             Ok(prepared) => return Ok(Self::Aggregate(prepared)),
             Err(error) => consider(
@@ -159,7 +201,7 @@ impl PreparedNativeRead {
                 QueryError::PatternText(error),
             ),
         }
-        match PreparedGraphText::prepare_with_parameter_types(text, &declarations, &mut resolve) {
+        match PreparedGraphText::prepare_with_parameter_types_and_resolver(text, &declarations, &mut resolve) {
             Ok(prepared) => return Ok(Self::Pattern(prepared)),
             Err(error) => consider(
                 error.offset,
@@ -168,8 +210,11 @@ impl PreparedNativeRead {
                 QueryError::PatternText(error),
             ),
         }
-        match PreparedGraphSetText::prepare_with_parameter_types(text, &declarations, &mut resolve)
-        {
+        match PreparedGraphSetText::prepare_with_parameter_types(
+            text,
+            &declarations,
+            |kind, name| resolve.resolve_symbol(kind, name),
+        ) {
             Ok(prepared) => return Ok(Self::Set(prepared)),
             Err(error) => consider(
                 error.offset,
@@ -372,7 +417,7 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         budget: GqlQueryPolicy,
     ) -> Result<(QueryResult, NativeResultCertificate), QueryError> {
         let prepared = PreparedNativeRead::prepare(text, params, resolver)?;
@@ -428,7 +473,7 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         certificate: &NativeResultCertificate,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         budget: GqlQueryPolicy,
     ) -> Result<QueryResult, ReplayRefusal> {
         if crate::gql_cert::native_values_digest(params) != certificate.values_digest {
@@ -660,7 +705,7 @@ impl<V: Vfs + Clone> Database<V> {
         &self,
         text: &str,
         params: &GqlParameters,
-        resolver: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolver: impl GraphSymbolResolver,
         certificate: bool,
     ) -> Result<(Vec<ExplainRow>, Option<NativeExplainCertificate>), QueryError> {
         let prepared = PreparedNativeRead::prepare(text, params, resolver)?;

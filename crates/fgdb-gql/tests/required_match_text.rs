@@ -79,7 +79,7 @@ fn evaluate(text: &str, vertices: &[VId], edges: &[Edge]) -> Vec<GraphValueRow> 
 fn repeated_match_binds_to_ordered_typed_clauses_and_resolves_each_symbol_once() {
     let text = "MATCH (a:L) WHERE a.p=$lo OPTIONAL MATCH (a)-[:R]->(b) WHERE b.p >= $cut MATCH (b)<-[:S]-(c) WHERE c.p <= $hi RETURN ALL a,b,c SKIP $off LIMIT $n";
     let mut calls = BTreeSet::new();
-    let template = PreparedGraphText::prepare(text, |kind, name| {
+    let template = PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
         assert!(calls.insert((kind, name.to_owned())));
         symbols(kind, name)
     })
@@ -274,7 +274,7 @@ fn malformed_late_clauses_and_scope_overflow_refuse_before_catalog_calls() {
     ] {
         let mut calls = 0;
         assert!(
-            PreparedGraphText::prepare(text, |kind, name| {
+            PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
                 calls += 1;
                 symbols(kind, name)
             })

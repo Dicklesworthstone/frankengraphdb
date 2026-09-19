@@ -163,7 +163,7 @@ fn future_sequence_refuses_before_result_release_and_parameters_rebind_without_c
         let mut resolutions = 0;
         let template = PreparedTemporalGraphText::prepare(
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ $at WHERE n.p >= $floor RETURN n.p AS p",
-            |kind, name| {
+            |kind: GraphSymbolKind, name: &str| {
                 resolutions += 1;
                 symbols(kind, name)
             },

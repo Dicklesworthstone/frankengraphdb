@@ -320,6 +320,7 @@ pub enum GlaOperator {
 pub struct GlaPlan<Row = VId> {
     operators: Vec<GlaOperator>,
     pub(crate) visible_columns: Option<usize>,
+    pub reverse_catalog: Option<std::sync::Arc<crate::graph_text::ReverseSymbolCatalog>>,
     output: PhantomData<fn() -> Row>,
 }
 
@@ -542,6 +543,7 @@ impl<Row> GlaPlan<Row> {
         Self {
             operators,
             visible_columns: None,
+            reverse_catalog: None,
             output: PhantomData,
         }
     }
@@ -611,8 +613,29 @@ impl<Row> GlaPlan<Row> {
     }
 
     #[must_use]
+    pub fn projects_labels(&self) -> bool {
+        self.operators.iter().any(|operator| match operator {
+            GlaOperator::ProjectValues { columns } => columns
+                .iter()
+                .any(|column| matches!(column, ValueProjection::Labels { .. })),
+            _ => false,
+        })
+    }
+
+    #[must_use]
+    pub fn projects_types(&self) -> bool {
+        self.operators.iter().any(|operator| match operator {
+            GlaOperator::ProjectValues { columns } => columns
+                .iter()
+                .any(|column| matches!(column, ValueProjection::Type { .. })),
+            _ => false,
+        })
+    }
+
+    #[must_use]
     pub fn needs_vertex_values(&self) -> bool {
         self.projects_properties()
+            || self.projects_labels()
             || self.operators.iter().any(|operator| {
                 matches!(
                     operator,
@@ -753,6 +776,14 @@ impl<Row> GlaPlan<Row> {
                                 bytes.push(3);
                                 bytes.extend_from_slice(&capture.to_be_bytes());
                                 bytes.extend_from_slice(&key.0.to_be_bytes());
+                            }
+                            ValueProjection::Labels { slot } => {
+                                bytes.push(4);
+                                bytes.extend_from_slice(&slot.0.to_be_bytes());
+                            }
+                            ValueProjection::Type { capture } => {
+                                bytes.push(5);
+                                bytes.extend_from_slice(&capture.to_be_bytes());
                             }
                             ValueProjection::Path { capture, function } => {
                                 bytes.push(2);

@@ -2,7 +2,7 @@
 //! transaction obligations on success, empty selection and refusal.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::{
     GqlParameters, GqlQueryError, GqlQueryPolicy, GraphDeleteError, GraphDeletePolicy, GraphSymbol,

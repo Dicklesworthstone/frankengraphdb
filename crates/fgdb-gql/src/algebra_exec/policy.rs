@@ -233,9 +233,9 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         })
     }
 
-    /// Read captured relationship payloads under the same meter as vertex payloads.
+    /// Read captured relationship payloads and element names under the same meter as vertex payloads.
     #[allow(clippy::too_many_arguments)]
-    pub fn execute_governed_with_element_properties<'a, E, C>(
+    pub fn execute_governed_with_element_accessors<'a, E, C>(
         &self,
         snapshot_records: u64,
         vertices: impl IntoIterator<Item = VId>,
@@ -243,6 +243,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         mut test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+        mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
@@ -253,9 +255,38 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                 |vid, predicates| test_vertex(vid, predicates).map_err(GqlQueryError::Source),
                 |vid, key| property(vid, key).map_err(GqlQueryError::Source),
                 |eid, key| edge_property(eid, key).map_err(GqlQueryError::Source),
+                |vid| vertex_labels(vid).map_err(GqlQueryError::Source),
+                |eid| edge_type(eid).map_err(GqlQueryError::Source),
                 |event| meter.observe(event),
             )
         })
+    }
+
+    /// Read captured relationship payloads under the same meter as vertex payloads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_governed_with_element_properties<'a, E, C>(
+        &self,
+        snapshot_records: u64,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
+        property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        policy: GqlQueryPolicy,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
+        self.execute_governed_with_element_accessors(
+            snapshot_records,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            edge_property,
+            |_| Ok(None),
+            |_| Ok(None),
+            policy,
+            checkpoint,
+        )
     }
 }
 

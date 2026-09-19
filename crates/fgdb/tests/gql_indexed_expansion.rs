@@ -344,7 +344,7 @@ fn bound_fixed_edge_keeps_topology_for_later_walk() {
         let at = db.write(&commit, batch).await.unwrap();
         let query = fgdb_gql::PreparedGraphText::prepare(
             "MATCH WALK (a)-[:R]->(b)-[:R*2..2]->(c) WHERE a.n = 1 RETURN ALL c",
-            |kind, name| match (kind, name) {
+            |kind: fgdb_gql::GraphSymbolKind, name: &str| match (kind, name) {
                 (fgdb_gql::GraphSymbolKind::Relation, "R") => {
                     Some(fgdb_gql::GraphSymbol::Relation(R))
                 }

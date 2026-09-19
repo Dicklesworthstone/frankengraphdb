@@ -304,7 +304,7 @@ fn declared_scalar_rebinding_keeps_schema_catalog_and_prior_plans_immutable() {
                 GqlParameterType::Scalar(CanonicalScalarKind::Bool),
             ),
         ],
-        |kind, name| {
+        |kind: GraphSymbolKind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
         },
@@ -509,7 +509,7 @@ fn malformed_boolean_programs_and_scope_mixtures_refuse_before_catalog_resolutio
     ] {
         let mut calls = 0;
         assert!(
-            PreparedGraphText::prepare(statement, |kind, name| {
+            PreparedGraphText::prepare(statement, |kind: GraphSymbolKind, name: &str| {
                 calls += 1;
                 symbols(kind, name)
             })
@@ -535,7 +535,7 @@ fn malformed_boolean_programs_and_scope_mixtures_refuse_before_catalog_resolutio
     let too_many = format!("MATCH (a) WHERE {}TRUE RETURN a", "TRUE OR ".repeat(256));
     let mut calls = 0;
     assert!(
-        PreparedGraphText::prepare(&too_many, |kind, name| {
+        PreparedGraphText::prepare(&too_many, |kind: GraphSymbolKind, name: &str| {
             calls += 1;
             symbols(kind, name)
         })
