@@ -2,10 +2,12 @@
 //!
 //! ALL publishes a bag: equal projected rows add their multiplicities. DISTINCT
 //! retains each qualifying group's exact projected value under a semantic output
-//! key. The least complete group key supplies the same representative as batch
-//! execution, even when numerically equal outputs have different result variants.
-//! A tick stages changed classes only; unrelated groups/classes are not scanned.
-//! This is session-local derived state, not a delivery cursor or spill store.
+//! key. Unranked output chooses the least complete group key; ranked output uses
+//! the original ORDER BY and then the same canonical key tiebreak. Both retain
+//! support outside the visible result. This is session-local derived state,
+//! not a delivery cursor or spill store.
+
+mod ranked;
 
 use super::{Meter, StandingQueryFailure, zset_error};
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetEvent, ZWeight};
@@ -24,6 +26,7 @@ type Changes = BTreeMap<GraphAggregateRow, BTreeMap<GroupKey, Option<Arc<GraphAg
 pub(crate) struct State {
     definition: PreparedGraphAggregate,
     classes: Classes,
+    ranked: Option<ranked::State>,
     pub(super) rows: ZSet<GraphAggregateRow>,
     row_count: u128,
 }
@@ -33,6 +36,7 @@ impl core::fmt::Debug for State {
         f.debug_struct("StandingOutput")
             .field("rows", &self.row_count)
             .field("distinct_classes", &self.classes.len())
+            .field("ranked", &self.ranked.is_some())
             .field("data", &"[REDACTED]")
             .finish()
     }
@@ -76,10 +80,15 @@ fn reserve_row(row: &GraphAggregateRow, meter: &mut Meter<'_>) -> Result<(), Sta
 
 impl State {
     pub(super) fn new(definition: PreparedGraphAggregate) -> Self {
-        Self { definition, classes: BTreeMap::new(), rows: ZSet::new(), row_count: 0 }
+        let ranked = definition.has_incremental_ranking().then(ranked::State::default);
+        Self { definition, classes: BTreeMap::new(), ranked, rows: ZSet::new(), row_count: 0 }
     }
 
     pub(super) fn definition(&self) -> &PreparedGraphAggregate { &self.definition }
+
+    pub(super) fn ordered_rows(&self) -> Option<&[Arc<GraphAggregateRow>]> {
+        self.ranked.as_ref().map(|state| state.page.as_slice())
+    }
 
     /// Consume the tentative complete-group Z-set, after HAVING and before any
     /// upstream publication. Both signs are processed as one change: raw row
@@ -89,6 +98,10 @@ impl State {
         delta: &ZSet<GraphAggregateRow>,
         meter: &mut Meter<'_>,
     ) -> Result<Update<'_>, StandingQueryFailure> {
+        if let Some(ranked) = &mut self.ranked {
+            return ranked.prepare(&self.definition, delta, &mut self.rows, &mut self.row_count, meter)
+                .map(|update| Update { transition: Transition::Ranked(update) });
+        }
         meter.charge(ZSetEvent::Work)?;
         let distinct = self.definition.incremental_output_is_distinct();
         let mut changes: Changes = BTreeMap::new();
@@ -199,13 +212,31 @@ impl State {
             }
         }
         (meter.checkpoint)()?;
-        Ok(Update { classes: &mut self.classes, count: &mut self.row_count,
-            changes, row_count, sink })
+        Ok(Update { transition: Transition::Plain(PlainUpdate {
+            classes: &mut self.classes, count: &mut self.row_count,
+            changes, row_count, sink,
+        }) })
     }
 }
 
 #[must_use = "dropping an output update aborts it"]
-pub(super) struct Update<'a> {
+pub(super) struct Update<'a> { transition: Transition<'a> }
+
+enum Transition<'a> {
+    Plain(PlainUpdate<'a>),
+    Ranked(ranked::Update<'a>),
+}
+
+impl Update<'_> {
+    pub(super) fn commit(self) {
+        match self.transition {
+            Transition::Plain(update) => update.commit(),
+            Transition::Ranked(update) => update.commit(),
+        }
+    }
+}
+
+struct PlainUpdate<'a> {
     classes: &'a mut Classes,
     count: &'a mut u128,
     changes: Changes,
@@ -222,8 +253,8 @@ fn publish_members(members: &mut Members, changes: BTreeMap<GroupKey, Option<Arc
     }
 }
 
-impl Update<'_> {
-    pub(super) fn commit(self) {
+impl PlainUpdate<'_> {
+    fn commit(self) {
         let Self { classes, count, changes, row_count, sink } = self;
         for (identity, changes) in changes {
             match classes.entry(identity) {

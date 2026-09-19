@@ -370,7 +370,7 @@ fn having_precedes_output_errors_and_rebuild_preserves_the_original_projection()
 }
 
 #[test]
-fn list_output_uses_shared_exact_expression_rules_and_ranked_pages_still_refuse() {
+fn list_output_uses_shared_exact_expression_rules_with_ranked_and_empty_pages() {
     let ((), report) = run_async_under_lab(0x6a85, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -396,12 +396,14 @@ fn list_output_uses_shared_exact_expression_rules_and_ranked_pages_still_refuse(
         assert_eq!(row.get(0).unwrap().as_value().unwrap().as_list().unwrap()[0], GraphValue::Scalar(CanonicalScalar::Int(2)));
         assert_eq!(row.get(3).unwrap().as_average().unwrap().numerator(), 7);
         assert_eq!(row.get(3).unwrap().as_average().unwrap().denominator(), 2);
-        for unsupported in [
-            definition.with_result_clauses(&[], &[GraphAggregateOrder::descending(Column::Aggregate(0))]).unwrap(),
-            simple(false, 1, None).with_distinct_output(true),
-            simple(false, 0, Some(0)).with_distinct_output(true),
+        for (ranked, expected) in [
+            (definition.with_result_clauses(&[], &[GraphAggregateOrder::descending(Column::Aggregate(0))]).unwrap(), 1),
+            (simple(false, 1, None).with_distinct_output(true), 0),
+            (simple(false, 0, Some(0)).with_distinct_output(true), 0),
         ] {
-            assert!(matches!(db.register_standing_query(&query, unsupported, policy()), Err(StandingQueryError::Unsupported)));
+            let handle = db.register_standing_query(&query, ranked.clone(), policy()).unwrap();
+            check(&db, &query, &handle, &ranked);
+            assert_eq!(db.standing_query(&query, &handle).unwrap().ordered_rows().unwrap().len(), expected);
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

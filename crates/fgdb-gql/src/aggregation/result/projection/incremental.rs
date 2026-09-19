@@ -2,7 +2,7 @@
 //!
 //! Matching, aggregation and HAVING remain upstream. The projection below uses
 //! the same expression evaluator as snapshot results. DISTINCT consumers retain
-//! complete group keys to select the same canonical representative after deletes.
+//! complete groups to select the first ranked representative after deletes.
 
 mod ranking;
 
@@ -27,35 +27,36 @@ impl PreparedGraphAggregate {
     pub fn has_incremental_output_transform(&self) -> bool {
         self.output_projection.is_some() || self.key_output.is_some()
             || self.output_aggregates != self.aggregates.len() || self.output_distinct
+            || self.has_incremental_ranking()
     }
 
     #[must_use]
     pub fn incremental_output_is_distinct(&self) -> bool { self.output_distinct }
 
     /// Split out the complete-group producer once during circuit preparation.
-    /// The original definition MUST remain the downstream output owner; this
-    /// is not permission to discard its projection or DISTINCT. Source, input
-    /// expressions, aggregates and HAVING are unchanged. Ordering/pagination
-    /// refuse rather than being silently removed. No runtime source is read.
+    /// The original definition MUST remain the downstream output owner. Its
+    /// projection, DISTINCT, ordering and window execute there, never on source
+    /// bindings or incomplete groups. Source, input expressions, aggregates and
+    /// HAVING are unchanged. No runtime source is read by this split.
     #[must_use]
     pub fn incremental_source_definition(&self) -> Option<Self> {
-        if !self.supports_incremental_input() || self.offset != 0
-            || self.count.is_some() || !self.ordering.is_empty()
-        {
-            return None;
-        }
+        if !self.supports_incremental_input() { return None; }
         let mut source = self.clone();
         source.key_output = None;
         source.output_aggregates = source.aggregates.len();
         source.output_projection = None;
         source.output_names.clear();
         source.output_distinct = false;
+        source.ordering.clear();
+        source.offset = 0;
+        source.count = None;
         source.supports_incremental_maintenance_with_having().then_some(source)
     }
 
     /// Project one already HAVING-qualified, complete evaluation group. All
     /// referenced columns address the full keys followed by the full summaries.
     /// This does not execute HAVING again, deduplicate, rank or publish rows.
+    /// The caller must apply the original ordering/window AFTER projection.
     /// None denotes unsupported definition/schema, never SQL NULL. Exact count,
     /// sum and average cells remain exact, including inside scalar expressions.
     /// Every output expression executes, and errors retain their column/cause.
@@ -68,8 +69,7 @@ impl PreparedGraphAggregate {
             control(event).map_err(GqlQueryError::<GraphAggregateError<Infallible>, C>::Interrupted)
         };
         govern(GlaExecutionEvent::Work)?;
-        if !self.supports_incremental_input() || self.offset != 0
-            || self.count.is_some() || !self.ordering.is_empty()
+        if !self.supports_incremental_input()
             || row.keys.len() != self.keys.len() || row.values.len() != self.aggregates.len()
         {
             return Ok(None);
@@ -123,9 +123,9 @@ impl GraphAggregateRow {
     /// canonical result encoding. Top-level numeric cells share the exact
     /// rational domain used by the snapshot result comparator. In particular,
     /// Count(2), Integer(2), scalar Int(2) and Average(2/1) are equivalent there.
-    /// Keep the original projected row separately: its first complete group key
-    /// chooses the representative, including when equal cells have different
-    /// result variants. Nested GraphValue equality is unchanged.
+    /// Keep the original projected row separately: the first ranked complete
+    /// group chooses its concrete representative. Without explicit ordering,
+    /// complete ascending keys break ties. Nested GraphValue equality is unchanged.
     pub fn incremental_distinct_key<E>(
         &self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -208,8 +208,15 @@ mod tests {
         let reordered = reordered.project_incremental_output(&row, &mut |_| Ok::<_, ()>(())).unwrap().unwrap();
         assert_eq!(reordered.keys(), &[row.keys()[0].clone(), row.keys()[0].clone()]);
         assert_eq!(reordered.values(), &row.values()[..1]);
-        assert!(definition().with_result_clauses(&[], &[GraphAggregateOrder::ascending(
-            GraphAggregateColumn::Aggregate(0))]).unwrap().incremental_source_definition().is_none());
+        let ranked = definition().with_result_clauses(&[], &[GraphAggregateOrder::ascending(
+            GraphAggregateColumn::Aggregate(0))]).unwrap();
+        let before = ranked.canonical_bytes();
+        assert!(ranked.has_incremental_output_transform() && ranked.has_incremental_ranking());
+        let raw = ranked.incremental_source_definition().unwrap();
+        assert!(!raw.has_incremental_output_transform());
+        assert_eq!(raw.incremental_result_window(), (0, None));
+        assert_eq!(ranked.canonical_bytes(), before);
+        assert!(ranked.project_incremental_output(&row, &mut |_| Ok::<_, ()>(())).unwrap().is_some());
     }
 
     #[test]

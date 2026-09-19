@@ -93,20 +93,29 @@ impl core::error::Error for StandingQueryError {}
 #[derive(Debug)]
 pub struct StandingQueryView<'a, Row: Ord = GraphAggregateRow> {
     rows: &'a ZSet<Row>,
+    ordered: Option<&'a [Arc<Row>]>,
     frontier: CommitSeq,
     stats: &'a StandingQueryStats,
 }
 impl<Row: Ord> StandingQueryView<'_, Row> {
     pub fn frontier(&self) -> CommitSeq { self.frontier }
-    /// ALL output collisions have positive multiplicities; DISTINCT output
-    /// has weight one per semantic class. This is a bag, not a ranked sequence.
+    /// The final selected result bag, including the output window when present.
+    /// ALL collisions have positive multiplicities; DISTINCT has weight one
+    /// per selected class. Z-set key order is NOT the query's ORDER BY.
     pub fn rows(&self) -> &ZSet<Row> { self.rows }
+    /// Query-order occurrences for definitions with ORDER BY, OFFSET or LIMIT.
+    /// Includes duplicate ALL occurrences. Some(empty) is a valid empty page;
+    /// None means this view has no ranked result stage (including reachability).
+    /// Iteration borrows the same published generation as rows() and frontier().
+    pub fn ordered_rows(&self) -> Option<impl DoubleEndedIterator<Item = &Row> + ExactSizeIterator + '_> {
+        self.ordered.map(|rows| rows.iter().map(Arc::as_ref))
+    }
     pub fn last_maintenance(&self) -> &StandingQueryStats { self.stats }
 }
 
 pub(crate) enum StandingQuery {
     Aggregate(Box<aggregate::StandingQuery>),
-    /// The same complete-group producer with a prepared downstream projection.
+    /// The same complete-group producer with a prepared downstream result stage.
     ProjectedAggregate {
         source: Box<aggregate::StandingQuery>,
         output: Box<output::State>,
@@ -186,10 +195,16 @@ fn zset_error(error: ZSetError<StandingQueryFailure>) -> StandingQueryFailure {
 impl<V: Vfs + Clone> Database<V> {
     /// Register a session-local native aggregate over the current snapshot.
     /// Source expressions, grouping and HAVING remain upstream of final key/
-    /// aggregate projection, scalar output expressions and output DISTINCT.
-    /// Hidden complete groups remain maintained. Result limits count final ALL
-    /// occurrences or DISTINCT classes; work/scratch govern all retained state.
-    /// ORDER BY and pagination remain unsupported by this bag-result API.
+    /// aggregate projection, scalar output expressions, DISTINCT and ranking.
+    /// ORDER BY uses exact cells, independent NULL placement and complete-key
+    /// tiebreaks. OFFSET/LIMIT apply to final occurrences AFTER DISTINCT.
+    ///
+    /// Candidates outside a page remain available for deletion/refill. Result
+    /// limits count selected occurrences; work/scratch govern initialization
+    /// and maintenance of candidates, including output errors outside the page.
+    /// A finite page walks its ranked prefix, not the graph. Large offsets cost
+    /// that prefix; unbounded ranking materializes the complete ordered result.
+    /// Use ordered_rows() for query order and rows() for its selected Z-set bag.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,
@@ -315,19 +330,22 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(query)
     }
 
-    /// Read a native aggregate result. A reachability handle refuses rather
-    /// than masquerading as aggregate cells or panicking on the wrong row kind.
+    /// Read a native aggregate result. Its bag and optional ordered page share
+    /// one publication frontier. A reachability handle refuses rather than
+    /// masquerading as aggregate cells or panicking on the wrong row kind.
     pub fn standing_query<'a>(
         &'a self,
         cx: &QueryCx,
         handle: &StandingQueryHandle,
     ) -> Result<StandingQueryView<'a>, StandingQueryError> {
-        let (query, rows) = match self.admitted_standing_query(cx, handle)? {
-            StandingQuery::Aggregate(query) => (query.as_ref(), &query.rows),
-            StandingQuery::ProjectedAggregate { source, output } => (source.as_ref(), &output.rows),
+        let (query, rows, ordered) = match self.admitted_standing_query(cx, handle)? {
+            StandingQuery::Aggregate(query) => (query.as_ref(), &query.rows, None),
+            StandingQuery::ProjectedAggregate { source, output } => {
+                (source.as_ref(), &output.rows, output.ordered_rows())
+            }
             StandingQuery::Reachability(_) => return Err(StandingQueryError::Unsupported),
         };
-        Ok(StandingQueryView { rows, frontier: query.frontier, stats: &query.stats })
+        Ok(StandingQueryView { rows, ordered, frontier: query.frontier, stats: &query.stats })
     }
 
     /// Borrow the current recursive pair set, with the same owner, health,
@@ -340,7 +358,7 @@ impl<V: Vfs + Clone> Database<V> {
         let StandingQuery::Reachability(query) = self.admitted_standing_query(cx, handle)? else {
             return Err(StandingQueryError::Unsupported);
         };
-        Ok(StandingQueryView { rows: &query.rows, frontier: query.frontier, stats: &query.stats })
+        Ok(StandingQueryView { rows: &query.rows, ordered: None, frontier: query.frontier, stats: &query.stats })
     }
 }
 

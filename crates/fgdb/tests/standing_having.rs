@@ -378,7 +378,7 @@ fn unrelated_hidden_groups_do_not_increase_having_maintenance_work() {
 }
 
 #[test]
-fn having_preserves_supported_projection_but_still_refuses_ordered_output() {
+fn having_preserves_projection_and_admits_ranked_output() {
     let ((), report) = run_async_under_lab(0x6a56, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -396,8 +396,9 @@ fn having_preserves_supported_projection_but_still_refuses_ordered_output() {
         let ordered = base.with_result_clauses(&[], &[
             GraphAggregateOrder::descending(Column::Aggregate(0)),
         ]).unwrap();
-        assert!(matches!(db.register_standing_query(&query, ordered, policy()),
-            Err(StandingQueryError::Unsupported)));
+        let handle = db.register_standing_query(&query, ordered.clone(), policy()).unwrap();
+        check(&db, &query, &handle, &ordered);
+        assert_eq!(db.standing_query(&query, &handle).unwrap().ordered_rows().unwrap().len(), 0);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
