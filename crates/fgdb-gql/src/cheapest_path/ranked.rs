@@ -1,29 +1,35 @@
 //! Lazy cost-ranked path partitions over an acyclic (depth, vertex) state space.
 //!
-//! A suffix table chooses the cheapest completion at each depth. One heap entry
-//! represents ALL completions of a fixed prefix, but stores only their minimum.
+//! A suffix table chooses the cheapest WALK completion at each depth. One heap
+//! entry represents completions of a fixed prefix, storing their relaxed minimum.
 //! After returning that minimum, partition its remaining completions by the
 //! first different action (including STOP). The partitions are disjoint, so no
 //! global seen-path set or bag of already enumerated walks is necessary.
 
+mod history;
+use history::History;
 use super::*;
 use std::cmp::Ordering;
 
 type Step = (EId, VId);
 
-/// An owned, pull-driven enumeration of every finite WALK between two anchors,
+/// An owned, pull-driven enumeration of the selected finite path mode,
 /// ordered by exact signed cost, then canonical edge/vertex path order.
 ///
 /// Construct through [`PreparedGraphCheapestPath::cursor_with_control`]. The
 /// source is admitted once, including every selected-relation cost. This cursor
 /// owns the checked topology and weights; later source changes cannot change its
-/// answers. Parallel edges remain distinct. Repeated vertices/edges, bounded
-/// negative cycles and positive minimum hop bounds retain WALK semantics.
+/// answers. Parallel edges remain distinct. WALK permits repeated vertices and
+/// edges; the other modes retain path-local history before growing alternatives.
 ///
-/// Only requested answers are expanded into alternatives. A finite prefix does
-/// not enumerate the remaining result bag. Preparation retains polynomially
-/// many suffix states; the pending partition heap grows with requested answers
-/// and branching. This is not a spill operator, allocator-byte memory bound,
+/// Returned answers are expanded only when the next answer is requested. A
+/// finite prefix does not enumerate the remaining result bag. Preparation
+/// retains polynomially many suffix states. For WALK, the pending heap grows
+/// with requested answers and branching. For other modes, WALK suffixes are lower
+/// bounds only; invalid optimistic minima are refined at their first forbidden
+/// step, pruning all its descendants. Exact work/frontier growth can still be
+/// exponential: resource refusal is not evidence of no path. This is not a
+/// spill operator, allocator-byte memory bound,
 /// durable cursor, authorization grant, or session/lease protocol.
 ///
 /// Every refused pull is terminal: it returns no partial path and releases all
@@ -52,6 +58,7 @@ struct Search {
     source: VId,
     target: VId,
     bounds: GraphWalkBounds,
+    mode: GraphCheapestPathMode,
     forward: WeightedIndex,
     // Indexed by maximum - depth, so the immediately following depth is
     // available while building the table backwards, with no cloned maps.
@@ -80,7 +87,7 @@ impl PreparedGraphCheapestPath {
         )
     }
 
-    /// Return at most `count` cost-ranked walks. Count zero still admits the
+    /// Return at most `count` cost-ranked paths in the selected mode. Count zero still admits the
     /// source and refuses invalid weights; it is not a validation bypass.
     /// A later refusal drops the complete batch rather than returning a prefix.
     pub fn execute_k_with_control<'a, E>(
@@ -146,7 +153,7 @@ impl PreparedGraphCheapestPath {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn collect<'a, E>(
+pub(super) fn collect<'a, E>(
     query: &PreparedGraphCheapestPath,
     count: u64,
     vertices: impl IntoIterator<Item = VId>,
@@ -220,7 +227,7 @@ impl GraphCheapestPathCursor {
             return Ok(Self { search: None });
         };
         let mut search = Search {
-            source: query.source, target: query.target, bounds: query.bounds,
+            source: query.source, target: query.target, bounds: query.bounds, mode: query.mode,
             forward, suffixes, heap: Vec::new(), pending: None,
         };
         let steps = search.complete(Vec::new(), query.source, 0, control)?;
@@ -293,7 +300,14 @@ impl Search {
     ) -> Result<Option<GraphCostPath>, E> {
         // Defer all deviations from a returned answer until another pull.
         if let Some(previous) = self.pending.take() { self.expand(previous, control, failure)?; }
-        let Some(entry) = heap_pop(&mut self.heap, control)? else { return Ok(None); };
+        let entry = loop {
+            let Some(entry) = heap_pop(&mut self.heap, control)? else { return Ok(None); };
+            if self.admissible(&entry, control)? { break entry; }
+            // The optimistic WALK minimum need not be legal. Refine its
+            // partition only up to the first forbidden step; do not enumerate
+            // all invalid walks below that prefix before discovering a route.
+            self.expand(entry, control, failure)?;
+        };
         let steps = copy_steps(&entry.steps, control)?;
         control(GlaExecutionEvent::ScratchEntry)?;
         control(GlaExecutionEvent::ResultRow)?;
@@ -308,6 +322,7 @@ impl Search {
         failure: &impl Fn(GraphPathCostError) -> E,
     ) -> Result<(), E> {
         if entry.terminal { return Ok(()); }
+        let mut history = History::new(self.mode, self.source, control)?;
         let mut vertex = self.source;
         let mut prefix_cost = 0_i128;
         for depth in 0..=entry.steps.len() {
@@ -322,10 +337,26 @@ impl Search {
                 }
                 // Also visit the final STOP position: otherwise longer paths
                 // sharing an emitted path as a prefix would disappear.
-                if depth < self.bounds.maximum() as usize {
+                if !history.closed() && depth < self.bounds.maximum() as usize {
                     for (&step, &weight) in self.forward.get(&vertex).into_iter().flatten() {
                         control(GlaExecutionEvent::Work)?;
-                        if Some(step) == selected { continue; }
+                        if Some(step) == selected || !history.allows(step) { continue; }
+                        // SIMPLE may close at its start exactly once and must
+                        // stop there, even when a negative suffix would improve
+                        // the unconstrained WALK bound. Never allocate a
+                        // terminal closure that cannot satisfy the hop interval.
+                        if history.closes(step) {
+                            if step.1 == self.target && depth + 1 >= self.bounds.minimum() as usize {
+                                let cost = prefix_cost.checked_add(i128::from(weight))
+                                    .ok_or_else(|| failure(GraphPathCostError::CostOverflow))?;
+                                let mut steps = copy_steps(&entry.steps[..depth], control)?;
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                                steps.push(step);
+                                heap_push(&mut self.heap, Partition { cost, steps, fixed: depth + 1, terminal: true }, control)?;
+                            }
+                            continue;
+                        }
                         let Some(suffix) = self.suffix(depth + 1, step.1) else { continue; };
                         let cost = prefix_cost.checked_add(i128::from(weight))
                             .and_then(|value| value.checked_add(suffix.cost))
@@ -340,6 +371,8 @@ impl Search {
                 }
             }
             if let Some(step) = selected {
+                if !history.allows(step) { return Ok(()); }
+                history.advance(step, control)?;
                 prefix_cost = prefix_cost.checked_add(i128::from(self.forward[&vertex][&step]))
                     .ok_or_else(|| failure(GraphPathCostError::CostOverflow))?;
                 vertex = step.1;
@@ -415,3 +448,6 @@ fn heap_pop<E>(heap: &mut Vec<Partition>, control: &mut impl FnMut(GlaExecutionE
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod mode_tests;

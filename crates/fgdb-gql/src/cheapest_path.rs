@@ -1,10 +1,12 @@
-//! Exact, finite ANY CHEAPEST WALK with signed integer edge costs.
+//! Exact, finite cost-ranked paths with signed integer edge costs.
 //!
 //! This typed PathFind specialization wraps a compiled, captured WALK input.
 //! It keeps the least-cost prefix for each (hop, vertex), not each vertex:
 //! negative edges, cycles and a positive minimum hop bound make ordinary
 //! vertex settlement unsound. Equal-cost prefixes use canonical path order.
-//! Only the selected path is returned; no bag of candidate walks is built.
+//! History-dependent modes use lazy partition refinement, not that dominance
+//! rule. Their exact search can require exponential work and refuses at the
+//! declared resource limits; it never silently downgrades to WALK semantics.
 //!
 //! Costs are canonical Int values accumulated exactly in i128. The existing
 //! finite hop ceiling makes every admitted sum representable, with checked
@@ -27,6 +29,21 @@ use crate::{
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Repetition semantics for one bounded, edge-identified route.
+/// These are not selectors over an already enumerated WALK result bag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GraphCheapestPathMode {
+    /// Vertices and edges may repeat, including finitely bounded negative cycles.
+    #[default]
+    Walk,
+    /// Each EId may occur once; vertices, including the start, may repeat.
+    Trail,
+    /// All vertices, including the starting vertex, are pairwise distinct.
+    Acyclic,
+    /// Only the first and last vertices may coincide. A closing return is terminal.
+    Simple,
+}
 
 type WeightedIndex = BTreeMap<VId, BTreeMap<(EId, VId), i64>>;
 
@@ -100,17 +117,18 @@ impl core::fmt::Debug for GraphCostPath {
     }
 }
 
-/// Immutable typed PathFind definition over one finite captured WALK.
+/// Immutable typed PathFind definition over one finite captured input.
 ///
 /// Select the minimum-cost path between the two anchors WITHIN the hop
 /// interval. Equal costs select the lexicographically smallest GraphPath,
-/// including across different lengths, not the fewest-hop path. Repeated
-/// vertices and edges are legal. A negative cycle is finite under this bound.
+/// including across different lengths, not the fewest-hop path. The default
+/// WALK mode permits repeated vertices/edges and finitely bounded negative
+/// cycles. `with_mode` selects path-local TRAIL, ACYCLIC or SIMPLE restrictions.
 /// Parallel edges remain distinct and an undirected self-loop appears once.
 ///
 /// The ordinary compiler owns the input pattern. The physical specialization
-/// below evaluates its cost selection by dynamic programming instead of
-/// materializing that input's potentially exponential path bag.
+/// below uses dynamic programming for WALK and history-aware partition
+/// refinement for other modes, never materializing the complete input bag.
 #[derive(Clone)]
 pub struct PreparedGraphCheapestPath {
     source: VId,
@@ -119,6 +137,7 @@ pub struct PreparedGraphCheapestPath {
     direction: GlaDirection,
     weight: PropertyKeyId,
     bounds: GraphWalkBounds,
+    mode: GraphCheapestPathMode,
     input: PreparedGraphPattern<GraphValueRow>,
 }
 impl PreparedGraphCheapestPath {
@@ -138,11 +157,27 @@ impl PreparedGraphCheapestPath {
         let input = builder
             .prepare_values(&[GraphColumn::path("route", "route", GraphPathFunction::Value)], 0, None)?
             .with_duplicates();
-        Ok(Self { source, target, relation, direction, weight, bounds, input })
+        Ok(Self { source, target, relation, direction, weight, bounds, mode: GraphCheapestPathMode::Walk, input })
     }
 
-    /// Compiled input, before endpoint anchoring and cost selection. This is
-    /// also the source-admission contract, not a substitute graph or parser.
+    /// Select a path-local repetition rule without changing source admission.
+    /// History-dependent modes retain their full used-edge/visited-vertex
+    /// prefix; no vertex-only settlement or WALK-then-filter enumeration is used.
+    /// Exact search is potentially exponential and obeys the existing work and
+    /// scratch refusal boundaries. This does not add spill or weighted text GQL.
+    #[must_use]
+    pub fn with_mode(mut self, mode: GraphCheapestPathMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> GraphCheapestPathMode { self.mode }
+
+    /// Compiled WALK input before endpoint anchoring, mode and cost selection.
+    /// This is a source-admission superset, not the executable weighted query:
+    /// every mode uses the same complete identified topology and cost source.
+    /// The mode is part of this PathFind definition's canonical identity.
     #[must_use]
     pub fn input_pattern(&self) -> &PreparedGraphPattern<GraphValueRow> {
         &self.input
@@ -161,10 +196,17 @@ impl PreparedGraphCheapestPath {
     pub const fn bounds(&self) -> GraphWalkBounds { self.bounds }
 
     /// Application identity, not a durable format or an old BoundPlan certificate.
-    /// The domain pins WALK, ANY, Int64 costs, exact accumulation and path-lex ties.
+    /// The domain pins the mode, ANY, Int64 costs, exact accumulation and path-lex ties.
+    /// The default WALK transcript remains byte-for-byte compatible.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"fgdb:path-find:any-cheapest-int64-walk:path-lex:v1\0".to_vec();
+        let domain: &[u8] = match self.mode {
+            GraphCheapestPathMode::Walk => b"fgdb:path-find:any-cheapest-int64-walk:path-lex:v1\0",
+            GraphCheapestPathMode::Trail => b"fgdb:path-find:any-cheapest-int64-trail:path-lex:v1\0",
+            GraphCheapestPathMode::Acyclic => b"fgdb:path-find:any-cheapest-int64-acyclic:path-lex:v1\0",
+            GraphCheapestPathMode::Simple => b"fgdb:path-find:any-cheapest-int64-simple:path-lex:v1\0",
+        };
+        let mut bytes = domain.to_vec();
         bytes.extend_from_slice(&self.source.0.to_be_bytes());
         bytes.extend_from_slice(&self.target.0.to_be_bytes());
         bytes.extend_from_slice(&self.relation.0.to_be_bytes());
@@ -293,6 +335,10 @@ impl PreparedGraphCheapestPath {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         failure: impl Fn(GraphPathCostError) -> E,
     ) -> Result<Option<GraphCostPath>, E> {
+        if self.mode != GraphCheapestPathMode::Walk {
+            return ranked::collect(self, 1, vertices, edges, property, control, &failure)
+                .map(|mut rows| rows.pop());
+        }
         let (live, adjacency) = self.admit(vertices, edges, property, control, &failure)?;
         // Do not hide malformed weights behind missing anchors or LIMIT-like
         // output policies. The complete selected relation was admitted above.
@@ -362,6 +408,7 @@ impl core::fmt::Debug for PreparedGraphCheapestPath {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphCheapestPath")
             .field("bounds", &self.bounds)
+            .field("mode", &self.mode)
             .field("definition", &"[REDACTED]")
             .finish()
     }
