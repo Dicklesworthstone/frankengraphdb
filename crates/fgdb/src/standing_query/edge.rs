@@ -1,11 +1,12 @@
-//! Incident-indexed maintenance for an admitted one-hop GLA edge scan.
+//! Incident-indexed maintenance for admitted fixed-hop GLA inputs.
 //!
 //! These are query-owned input arrangements, never graph storage or recovery
 //! authority. Bootstrap uses the database's ordinary Strata edge read. Later
 //! ticks visit changed EIds and edges incident to changed endpoint projections.
-//! One whole tick retracts each affected old binding once and inserts each new
-//! binding once, even if both endpoints and the edge changed simultaneously.
+//! One-hop and scoped inputs retain their specialized maintainer; connected
+//! positive multi-hop plans use affected-binding joins over all input relations.
 
+mod multi_hop;
 mod scoped;
 
 use super::*;
@@ -17,8 +18,96 @@ type Endpoints = (VId, VId);
 type Vertices = BTreeMap<VId, VertexState>;
 type VertexPatch = BTreeMap<VId, Option<VertexState>>;
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) struct State {
+    input: Input,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Input {
+    OneHop(OneHopState),
+    MultiHop(multi_hop::State),
+}
+
+pub(super) struct Patch {
+    input: InputPatch,
+}
+
+enum InputPatch {
+    OneHop(OneHopPatch),
+    MultiHop(multi_hop::Patch),
+}
+
+impl State {
+    pub(super) fn for_definition(query: &PreparedGraphAggregate) -> Option<Self> {
+        let input = if let Some(state) = multi_hop::State::for_definition(query) {
+            Input::MultiHop(state)
+        } else {
+            Input::OneHop(OneHopState::for_definition(query)?)
+        };
+        Some(Self { input })
+    }
+
+    pub(super) fn seed(
+        &mut self,
+        query: &PreparedGraphAggregate,
+        row: &fgdb_strata::AdjacencyEntry,
+        vertices: &Vertices,
+        output: &mut Vec<grouped::Contribution>,
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        match &mut self.input {
+            Input::OneHop(state) => state.seed(query, row, vertices, output, meter),
+            Input::MultiHop(state) => state.seed(row, vertices, meter),
+        }
+    }
+
+    pub(super) fn finish_seed(
+        &self,
+        query: &PreparedGraphAggregate,
+        vertices: &Vertices,
+        output: &mut Vec<grouped::Contribution>,
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        match &self.input {
+            Input::OneHop(state) => state.finish_seed(query, vertices, output, meter),
+            Input::MultiHop(state) => state.finish_seed(query, vertices, output, meter),
+        }
+    }
+
+    pub(super) fn prepare(
+        &self,
+        query: &PreparedGraphAggregate,
+        batch: &LogicalDeltaBatch,
+        vertices: &Vertices,
+        staged: &VertexPatch,
+        output: &mut Vec<grouped::Contribution>,
+        meter: &mut Meter<'_>,
+    ) -> Result<Patch, StandingQueryFailure> {
+        let input = match &self.input {
+            Input::OneHop(state) => InputPatch::OneHop(
+                state.prepare(query, batch, vertices, staged, output, meter)?,
+            ),
+            Input::MultiHop(state) => InputPatch::MultiHop(
+                state.prepare(query, batch, vertices, staged, output, meter)?,
+            ),
+        };
+        Ok(Patch { input })
+    }
+
+    pub(super) fn publish(&mut self, patch: Patch) {
+        match (&mut self.input, patch.input) {
+            (Input::OneHop(state), InputPatch::OneHop(patch)) => state.publish(patch),
+            (Input::MultiHop(state), InputPatch::MultiHop(patch)) => state.publish(patch),
+            // Both variants are private. StandingQuery owns the immutable
+            // definition and the complete prepare/publish interval exclusively.
+            _ => unreachable!("a prepared standing input cannot change its physical shape"),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct OneHopState {
     relation: RelationId,
     direction: GlaDirection,
     scope: Option<scoped::Shape>,
@@ -27,7 +116,7 @@ pub(super) struct State {
     incident: BTreeMap<VId, BTreeSet<EId>>,
 }
 
-impl core::fmt::Debug for State {
+impl core::fmt::Debug for OneHopState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("StandingEdgeInput")
             .field("edge_count", &self.edges.len())
@@ -36,14 +125,16 @@ impl core::fmt::Debug for State {
     }
 }
 
-pub(super) struct Patch {
+struct OneHopPatch {
     created: BTreeMap<EId, Endpoints>,
     removed: BTreeSet<EId>,
     witnesses: BTreeMap<VId, u64>,
 }
 
+/// Additional compiled input shapes beyond the flat scan admission path.
+/// Positive multi-hop joins do not acquire OPTIONAL or probe semantics.
 pub(super) fn supports_scoped(query: &PreparedGraphAggregate) -> bool {
-    scoped::Shape::of(query).is_some()
+    scoped::Shape::of(query).is_some() || multi_hop::Shape::of(query).is_some()
 }
 
 fn touch(
@@ -78,8 +169,8 @@ fn vertex<'a>(
     }.ok_or(StandingQueryFailure::InvalidDelta)
 }
 
-impl State {
-    pub(super) fn for_definition(query: &PreparedGraphAggregate) -> Option<Self> {
+impl OneHopState {
+    fn for_definition(query: &PreparedGraphAggregate) -> Option<Self> {
         let scope = scoped::Shape::of(query);
         let (relation, direction) = match query.input_pattern().plan().operators().first()? {
             GlaOperator::ScanEdges { relation, direction } => (*relation, *direction),
@@ -94,7 +185,7 @@ impl State {
         })
     }
 
-    pub(super) fn finish_seed(
+    fn finish_seed(
         &self,
         query: &PreparedGraphAggregate,
         vertices: &Vertices,
@@ -150,7 +241,7 @@ impl State {
         }
     }
 
-    pub(super) fn seed(
+    fn seed(
         &mut self,
         query: &PreparedGraphAggregate,
         row: &fgdb_strata::AdjacencyEntry,
@@ -182,7 +273,7 @@ impl State {
         Ok(())
     }
 
-    pub(super) fn prepare(
+    fn prepare(
         &self,
         query: &PreparedGraphAggregate,
         batch: &LogicalDeltaBatch,
@@ -190,7 +281,7 @@ impl State {
         staged: &VertexPatch,
         output: &mut Vec<grouped::Contribution>,
         meter: &mut Meter<'_>,
-    ) -> Result<Patch, StandingQueryFailure> {
+    ) -> Result<OneHopPatch, StandingQueryFailure> {
         let mut affected = BTreeSet::new();
         for vid in staged.keys() {
             meter.charge(ZSetEvent::Work)?;
@@ -295,10 +386,10 @@ impl State {
             None => BTreeMap::new(),
         };
         (meter.checkpoint)()?;
-        Ok(Patch { created, removed, witnesses })
+        Ok(OneHopPatch { created, removed, witnesses })
     }
 
-    pub(super) fn publish(&mut self, patch: Patch) {
+    fn publish(&mut self, patch: OneHopPatch) {
         for (vid, count) in patch.witnesses {
             if count == 0 { self.witnesses.remove(&vid); }
             else { self.witnesses.insert(vid, count); }
@@ -322,8 +413,8 @@ impl State {
 
 /// Admit the ordinary full Strata edge read used only for initialization and
 /// rebuild. It returns properties too, so charge those payloads even though
-/// the one-hop input retains only identities/endpoints. These logical growth
-/// reservations do not claim byte-accurate allocation accounting or spill.
+/// fixed-hop inputs retain only identities, relations and endpoints. These
+/// logical reservations do not claim byte-accurate accounting or spill.
 pub(super) fn admit_snapshot(
     snapshot: &crate::Snapshot,
     records: &mut u64,
