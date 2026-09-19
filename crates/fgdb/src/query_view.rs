@@ -1,12 +1,16 @@
 //! Native reads over an already-authenticated immutable embedded generation.
 //!
-//! Only the view supplies data and the default sequence. The live writer is
-//! not borrowed or consulted, even if it advances, compacts, is fenced or drops.
+//! After admission, only the view supplies data and the default sequence. The
+//! live writer is not borrowed while results are evaluated or pulled, even if
+//! it advances, compacts, is fenced or drops.
 //! This is not a durable snapshot lease or a new authorization boundary.
 
-use super::{PreparedNativeRead, QueryError, QueryResult, aggregates, values};
-use crate::EmbeddedReadView;
-use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbolResolver};
+use super::{Cancel, PreparedNativeRead, QueryError, QueryResult, aggregates, values};
+use crate::{Database, EmbeddedReadView, ReadError};
+use asupersync::fs::Vfs;
+use fgdb_gql::algebra::GraphValueRow;
+use fgdb_gql::stream::{VertexScanCursor, VertexScanError, VertexScanSource};
+use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbolResolver};
 use fgdb_types::{CommitSeq, QueryCx};
 
 impl EmbeddedReadView {
@@ -135,6 +139,99 @@ impl PreparedNativeRead {
                     .map_err(QueryError::Set)?;
                 Ok(values(prepared.columns().to_vec(), result.value))
             }
+        }
+    }
+}
+
+impl PreparedNativeRead {
+    /// Open a native pull query over a newly pinned database generation.
+    /// Returns column names and the existing operator cursor, not an iterator
+    /// over an eagerly collected result. The cursor borrows only `cx`: the
+    /// database, template and argument map may change or drop after opening.
+    ///
+    /// The admitted profile is a single-vertex pattern with a leading vertex
+    /// identity in the projection, canonical whole-row order, vertex-local
+    /// predicates and SKIP/LIMIT. Temporal patterns use their exact bound cut.
+    /// Unsupported classes/operators refuse rather than falling back to eager
+    /// execution. The source generation is in memory; this does not add spill.
+    ///
+    /// Rows are native `GraphValueRow`s. Inspect `row.values()` using the
+    /// returned columns. Pull/close/state/statistics are the canonical cursor's
+    /// APIs. A late error is delivered once and ends the stream; earlier rows
+    /// remain delivered. Pausing or taking another page cannot reset a budget.
+    #[allow(clippy::type_complexity)]
+    pub fn stream<'q, V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &'q QueryCx,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        (
+            Vec<String>,
+            VertexScanCursor<
+                impl VertexScanSource<Error = ReadError> + 'q + use<'q, V>,
+                impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
+                GraphValueRow,
+            >,
+        ),
+        QueryError,
+    > {
+        // A fenced writer cannot mint a new read generation, including when
+        // the requested query is empty or its output allowance is zero.
+        let view = database.read_session().map_err(|error| {
+            QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(error)))
+        })?;
+        self.stream_in_view(&view, cx, params, policy)
+    }
+
+    /// Open a native pull query without reacquiring the writer's generation.
+    /// Opening clones only the view handle and compiles the existing GLA scan
+    /// specialization. It examines no candidate history and produces no row.
+    /// Close/drop releases the cursor's pin without draining unread candidates.
+    /// The caller's original view is unaffected by exhaustion, close or error.
+    #[allow(clippy::type_complexity)]
+    pub fn stream_in_view<'q>(
+        &self,
+        view: &EmbeddedReadView,
+        cx: &'q QueryCx,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        (
+            Vec<String>,
+            VertexScanCursor<
+                impl VertexScanSource<Error = ReadError> + 'q + use<'q>,
+                impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
+                GraphValueRow,
+            >,
+        ),
+        QueryError,
+    > {
+        match self {
+            Self::Pattern(prepared) => {
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::PatternText)?;
+                let columns = query.columns().to_vec();
+                let cursor = view
+                    .stream_graph_values_governed_at(cx, &query, view.frontier(), policy)
+                    .map_err(QueryError::Stream)?;
+                Ok((columns, cursor))
+            }
+            Self::TemporalPattern(prepared) => {
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::TemporalText)?;
+                let columns = query.pattern().columns().to_vec();
+                let cursor = view
+                    .stream_graph_values_governed_at(cx, query.pattern(), query.as_of(), policy)
+                    .map_err(QueryError::Stream)?;
+                Ok((columns, cursor))
+            }
+            _ => Err(QueryError::StreamingUnsupported {
+                facade: self.facade_class(),
+            }),
         }
     }
 }

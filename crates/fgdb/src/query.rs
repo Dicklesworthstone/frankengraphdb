@@ -54,6 +54,14 @@ pub enum QueryError {
     Pattern(GqlQueryError<GqlError, Cancel>),
     Aggregate(GqlQueryError<GraphAggregateError<GqlError>, Cancel>),
     Set(GqlQueryError<GraphSetExecutionError<GqlError>, Cancel>),
+    /// Opening a pull query failed in the existing governed scan compiler or
+    /// source. Later pull errors remain the cursor's native typed errors.
+    Stream(GqlQueryError<fgdb_gql::stream::VertexScanError<crate::ReadError>, Cancel>),
+    /// This native class has no pull specialization. Never collect an eager
+    /// result and misrepresent its iterator as a streaming execution.
+    StreamingUnsupported {
+        facade: crate::NativeReadClass,
+    },
     /// Ownership or lifecycle refused before transaction-read preparation.
     Transaction(Box<WriteTxnError>),
     /// Historical selectors have no defined staged-overlay semantics. A
@@ -80,6 +88,11 @@ impl core::fmt::Display for QueryError {
             Self::Pattern(e) => e.fmt(f),
             Self::Aggregate(e) => e.fmt(f),
             Self::Set(e) => e.fmt(f),
+            Self::Stream(e) => e.fmt(f),
+            Self::StreamingUnsupported { facade } => write!(
+                f,
+                "native {facade:?} read has no supported pull execution"
+            ),
             Self::Transaction(e) => e.fmt(f),
             Self::TemporalTransactionUnsupported { facade } => write!(
                 f,
@@ -95,6 +108,7 @@ impl core::error::Error for QueryError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Refused { source, .. } => Some(source.as_ref()),
+            Self::Stream(error) => Some(error),
             Self::Transaction(error) => Some(error.as_ref()),
             Self::TransactionPattern(error) => Some(error.as_ref()),
             Self::TransactionAggregate(error) => Some(error.as_ref()),
