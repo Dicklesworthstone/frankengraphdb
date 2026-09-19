@@ -1,6 +1,7 @@
 //! Aggregate, set, and bounded shortest-walk execution over one admitted snapshot source.
 
 mod cheapest_path;
+mod vertex_stream;
 
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};
 use crate::{Database, EmbeddedReadView, GqlError, ReadError, Snapshot};
@@ -252,10 +253,7 @@ impl<V: Vfs + Clone> Database<V> {
         bounds: GraphWalkBounds,
         policy: GqlQueryPolicy,
     ) -> ShortestResult {
-        let as_of = self
-            .frontier()
-            .map_err(GqlError::Read)
-            .map_err(GqlQueryError::Source)?;
+        let as_of = self.frontier().map_err(GqlError::Read).map_err(GqlQueryError::Source)?;
         self.execute_all_shortest_walk_governed_at(
             cx, source, relation, direction, bounds, as_of, policy,
         )
