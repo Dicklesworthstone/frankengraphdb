@@ -1,4 +1,6 @@
 //! Borrowed post-group expressions and governed projected ranking.
+mod incremental;
+
 use super::*;
 use crate::{GraphIntegerError, GraphIntegerErrorKind, GraphIntegerEvaluationError, GraphSetValue};
 use crate::integer_expression::ExpressionCell;
@@ -79,22 +81,23 @@ fn input_cell<'g, 'a: 'g>(group: Group<'g, 'a>, input: usize) -> Result<Cell<'g>
     }
 }
 
-fn expression<'g, 'a: 'g, E, C>(
+fn expression<'g, E, C>(
     value: &'g GraphSetValue,
-    group: Group<'g, 'a>,
+    input: impl Fn(usize) -> Result<Cell<'g>, GraphIntegerErrorKind> + Copy,
     column: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
 ) -> Result<OutputValue<'g>, QueryError<E, C>> {
+    // The same checked expression program reads batch or maintained cells.
     // Preparation bounds the recursive expression depth and number of nodes.
     control(GlaExecutionEvent::Work)?;
     Ok(match value {
-        GraphSetValue::Column(input) => OutputValue::Borrowed(
-            input_cell(group, *input).map_err(|kind| failure(column, kind))?),
+        GraphSetValue::Column(at) => OutputValue::Borrowed(
+            input(*at).map_err(|kind| failure(column, kind))?),
         GraphSetValue::Literal(value) => OutputValue::Borrowed(Cell::Value(ValueRef::Scalar(value.value()))),
         GraphSetValue::Value(value) => OutputValue::Borrowed(Cell::Value(value_ref(value))),
         GraphSetValue::Integer(expression) => {
             let value = expression.evaluate_loaded_with_control(
-                |input| input_cell(group, input).and_then(load_cell), control,
+                |at| input(at).and_then(load_cell), control,
             ).map_err(|error| match error {
                 GraphIntegerEvaluationError::Control(error) => error,
                 GraphIntegerEvaluationError::Value(error) => GqlQueryError::Source(
@@ -117,7 +120,7 @@ fn expression<'g, 'a: 'g, E, C>(
             control(GlaExecutionEvent::ScratchEntry)?;
             let mut list = Vec::new();
             for value in values {
-                let value = expression(value, group, column, control)?.into_owned(control)?;
+                let value = expression(value, input, column, control)?.into_owned(control)?;
                 // GraphValue lists have the ordinary scalar domain. Preserve
                 // exactness or fail, never truncate an aggregate into an i64.
                 let value = match value {
@@ -138,7 +141,7 @@ fn expression<'g, 'a: 'g, E, C>(
             OutputValue::Owned(GraphAggregateValue::Value(value))
         }
         GraphSetValue::Size(list) => {
-            let list = expression(list, group, column, control)?;
+            let list = expression(list, input, column, control)?;
             let value = match list.cell() {
                 cell if cell.is_null() => CanonicalScalar::Null,
                 Cell::Value(ValueRef::List(values)) => CanonicalScalar::Int(
@@ -149,8 +152,8 @@ fn expression<'g, 'a: 'g, E, C>(
             OutputValue::Owned(GraphAggregateValue::Value(GraphValue::Scalar(value)))
         }
         GraphSetValue::Index { list, index } => {
-            let list = expression(list, group, column, control)?;
-            let index = expression(index, group, column, control)?;
+            let list = expression(list, input, column, control)?;
+            let index = expression(index, input, column, control)?;
             let list_cell = list.cell();
             let index = index.cell();
             if list_cell.is_null() || index.is_null() {
@@ -319,7 +322,7 @@ impl PreparedGraphAggregate {
             let mut values = Vec::new();
             for (column, value) in projection.iter().enumerate() {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                values.push(expression(value.value(), group, column, control)?);
+                values.push(expression(value.value(), |at| input_cell(group, at), column, control)?);
             }
             control(GlaExecutionEvent::ScratchEntry)?;
             rows.push(ProjectedGroup { group, values });

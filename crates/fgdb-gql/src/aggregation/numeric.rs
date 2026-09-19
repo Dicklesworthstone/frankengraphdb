@@ -200,68 +200,82 @@ impl NumericAccumulator {
 }
 
 impl PreparedGraphAggregate {
-    /// Materialize one untransformed maintained group with its exact result
-    /// domains. The caller owns aggregation, resource admission and atomic
-    /// publication; this constructor checks schema, not result correctness.
+    /// Materialize one complete maintained group with its exact result domains.
+    /// The caller owns aggregation, resource admission and atomic publication;
+    /// this constructor checks schema, not result correctness or HAVING.
+    /// A definition with HAVING must subsequently use evaluate_incremental_having
+    /// before releasing the row. This does not project, order or paginate it.
     ///
     /// Scalar/vertex MIN/MAX preserve their input type. Counts cannot be NULL;
     /// SUM/AVG may be NULL but never narrow into an ordinary scalar. Nullable
-    /// vertex slots (OPTIONAL MATCH) may supply NULL keys or extrema. Functions
-    /// and input projections outside this maintained profile fail closed.
+    /// vertex slots (OPTIONAL MATCH) may supply NULL keys or extrema. Schema
+    /// checks use computed input positions when an input projection is present.
     pub fn materialize_incremental_row(
         &self,
         keys: Vec<GraphValue>,
         values: Vec<GraphAggregateValue>,
     ) -> Option<GraphAggregateRow> {
-        if !self.supports_incremental_maintenance()
-            || keys.len() != self.keys.len()
-            || values.len() != self.aggregates.len()
+        if !self.supports_incremental_maintenance_with_having()
+            || !self.accepts_incremental_row(&keys, &values)
         {
             return None;
-        }
-        let input = self.input.value_columns();
-        let accepts = |projection: &ValueProjection, value: &GraphValue| match projection {
-            ValueProjection::Property { .. } => matches!(value, GraphValue::Scalar(_)),
-            ValueProjection::Vertex { .. } => matches!(value, GraphValue::Vertex(_)) || value.is_null(),
-            _ => false,
-        };
-        for (column, value) in self.keys.iter().zip(&keys) {
-            if !accepts(input.get(*column)?, value) {
-                return None;
-            }
-        }
-        for (aggregate, value) in self.aggregates.iter().zip(&values) {
-            let argument = aggregate.column.and_then(|column| input.get(column));
-            let accepted = match aggregate.function {
-                GraphAggregateFunction::CountRows => {
-                    aggregate.column.is_none() && matches!(value, GraphAggregateValue::Count(_))
-                }
-                GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct => {
-                    matches!(argument, Some(ValueProjection::Property { .. } | ValueProjection::Vertex { .. }))
-                        && matches!(value, GraphAggregateValue::Count(_))
-                }
-                GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
-                    matches!(argument, Some(ValueProjection::Property { .. }))
-                        && (matches!(value, GraphAggregateValue::Integer(_)) || value.is_null())
-                }
-                GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
-                    matches!(argument, Some(ValueProjection::Property { .. }))
-                        && (matches!(value, GraphAggregateValue::Average(_)) || value.is_null())
-                }
-                GraphAggregateFunction::Min | GraphAggregateFunction::Max => {
-                    match (argument, value) {
-                        (Some(argument), GraphAggregateValue::Value(value)) => accepts(argument, value),
-                        _ => false,
-                    }
-                }
-                _ => false,
-            };
-            if !accepted { return None; }
         }
         Some(GraphAggregateRow {
             keys: keys.into_boxed_slice(),
             values: values.into_boxed_slice(),
         })
+    }
+
+    /// Borrowed schema admission shared by construction and the HAVING gate.
+    /// No payload clones, coercions, source reads or definition changes occur.
+    pub(super) fn accepts_incremental_row(
+        &self,
+        keys: &[GraphValue],
+        values: &[GraphAggregateValue],
+    ) -> bool {
+        use crate::GraphSetColumnType::{Scalar, Vertex};
+        if keys.len() != self.keys.len() || values.len() != self.aggregates.len() {
+            return false;
+        }
+        let accepts = |kind, value: &GraphValue| match kind {
+            Some(Scalar) => matches!(value, GraphValue::Scalar(_)),
+            Some(Vertex) => matches!(value, GraphValue::Vertex(_)) || value.is_null(),
+            _ => false,
+        };
+        for (column, value) in self.keys.iter().zip(keys) {
+            if !accepts(self.incremental_input_column_type(*column), value) {
+                return false;
+            }
+        }
+        for (aggregate, value) in self.aggregates.iter().zip(values) {
+            let argument = aggregate.column.and_then(|column| self.incremental_input_column_type(column));
+            let accepted = match aggregate.function {
+                GraphAggregateFunction::CountRows => {
+                    aggregate.column.is_none() && matches!(value, GraphAggregateValue::Count(_))
+                }
+                GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct => {
+                    matches!(argument, Some(Scalar | Vertex))
+                        && matches!(value, GraphAggregateValue::Count(_))
+                }
+                GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
+                    matches!(argument, Some(Scalar))
+                        && (matches!(value, GraphAggregateValue::Integer(_)) || value.is_null())
+                }
+                GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
+                    matches!(argument, Some(Scalar))
+                        && (matches!(value, GraphAggregateValue::Average(_)) || value.is_null())
+                }
+                GraphAggregateFunction::Min | GraphAggregateFunction::Max => {
+                    match value {
+                        GraphAggregateValue::Value(value) => accepts(argument, value),
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+            if !accepted { return false; }
+        }
+        true
     }
 }
 
