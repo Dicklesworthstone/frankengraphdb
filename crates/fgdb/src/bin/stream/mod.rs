@@ -96,3 +96,6 @@ fn deliver<E: std::error::Error + 'static>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod edge_tests;
