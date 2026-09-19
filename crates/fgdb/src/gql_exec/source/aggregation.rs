@@ -1,6 +1,7 @@
 //! Aggregate, set, and bounded shortest-walk execution over one admitted snapshot source.
 
 mod cheapest_path;
+mod edge_stream;
 mod vertex_stream;
 
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};

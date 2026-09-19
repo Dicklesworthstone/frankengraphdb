@@ -11,6 +11,7 @@ mod cheapest_path;
 mod cheapest_path_stream;
 mod cheapest_path_text;
 mod deletion;
+pub mod edge_stream;
 mod edge_merge;
 mod edge_upsert;
 mod edge_upsert_text;
