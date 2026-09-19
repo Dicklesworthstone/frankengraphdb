@@ -1561,18 +1561,43 @@ fn strata_batch_inode_sync_lie_fences_before_root_publication() {
         create_genesis(&cx, &dir).await;
         // D1 and D2 precede the first new Strata inode. The path assertion
         // makes this an injection into that inode, never a shifted ordinal.
-        let vfs = FaultVfs::unix(FaultPlan { fsync_lie: Trigger::At(3), ..FaultPlan::faultless() });
-        let mut db = Database::open_with_vfs(&cx, vfs.clone(), &dir, engine_keys()).await.expect("database");
-        let error = db.write(&cx, vfs_fault_batch()).await.expect_err("durable backing detects the lie");
-        let WriteError::CommittedNeedsRecovery { recovery, source } = error else { panic!("wrong refusal"); };
-        assert_eq!(recovery.failed_stage, DerivedPublicationStage::PublishVertexPatches);
-        assert!(matches!(*source, RebuildError::Store(BlockStoreError::Io(_))));
-        assert_eq!(db.state(), DatabaseState::NeedsAuthoritativeRecovery(recovery));
-        assert!(matches!(db.write(&cx, vfs_fault_batch()).await, Err(WriteError::RecoveryRequired(_))));
+        let vfs = FaultVfs::unix(FaultPlan {
+            fsync_lie: Trigger::At(3),
+            ..FaultPlan::faultless()
+        });
+        let mut db = Database::open_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+            .await
+            .expect("database");
+        let error = db
+            .write(&cx, vfs_fault_batch())
+            .await
+            .expect_err("durable backing detects the lie");
+        let WriteError::CommittedNeedsRecovery { recovery, source } = error else {
+            panic!("wrong refusal");
+        };
+        assert_eq!(
+            recovery.failed_stage,
+            DerivedPublicationStage::PublishVertexPatches
+        );
+        assert!(matches!(
+            *source,
+            RebuildError::Store(BlockStoreError::Io(_))
+        ));
+        assert_eq!(
+            db.state(),
+            DatabaseState::NeedsAuthoritativeRecovery(recovery)
+        );
+        assert!(matches!(
+            db.write(&cx, vfs_fault_batch()).await,
+            Err(WriteError::RecoveryRequired(_))
+        ));
         let events = vfs.events();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0].kind, FaultKind::FsyncLie { .. }));
-        assert_eq!(events[0].path.parent(), Some(dir.join(fgdb_strata::store::BLOCK_DIR).as_path()));
+        assert_eq!(
+            events[0].path.parent(),
+            Some(dir.join(fgdb_strata::store::BLOCK_DIR).as_path())
+        );
         vfs.crash().await.expect("crash");
         drop(db);
         assert_reopened_vertex_matches_oracle(&cx, &dir).await;
@@ -2068,17 +2093,47 @@ fn compaction_root_slot_cancellation_fences_the_borrowed_handle() {
 #[test]
 fn strata_block_publication_crashes_fence_and_recover_the_integrated_spine() {
     let scenarios = [
-        ("staging-durable", BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication, DerivedPublicationStage::PublishEdgeBlocks),
-        ("canonical-inode-durable", BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync, DerivedPublicationStage::PublishEdgeBlocks),
-        ("batch-staging-written", BlockStoreCrashPoint::AfterBatchStagingWrite, DerivedPublicationStage::PublishEdgeBlocks),
-        ("batch-renamed", BlockStoreCrashPoint::AfterBatchRenames, DerivedPublicationStage::PublishVertexPatches),
-        ("batch-files-synced", BlockStoreCrashPoint::AfterBatchFileSyncs, DerivedPublicationStage::PublishVertexPatches),
-        ("batch-directory-synced", BlockStoreCrashPoint::AfterBatchDirectorySync, DerivedPublicationStage::PublishVertexPatches),
+        (
+            "staging-durable",
+            BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication,
+            DerivedPublicationStage::PublishEdgeBlocks,
+            "complete staging inode before canonical publication",
+        ),
+        (
+            "canonical-inode-durable",
+            BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync,
+            DerivedPublicationStage::PublishEdgeBlocks,
+            "strata block inode durable before directory entry",
+        ),
+        (
+            "batch-staging-written",
+            BlockStoreCrashPoint::AfterBatchStagingWrite,
+            DerivedPublicationStage::PublishEdgeBlocks,
+            "batch staging bytes before inode sync",
+        ),
+        (
+            "batch-renamed",
+            BlockStoreCrashPoint::AfterBatchRenames,
+            DerivedPublicationStage::PublishVertexPatches,
+            "batch inodes durable before directory barrier",
+        ),
+        (
+            "batch-files-synced",
+            BlockStoreCrashPoint::AfterBatchFileSyncs,
+            DerivedPublicationStage::PublishVertexPatches,
+            "batch inodes durable before directory barrier",
+        ),
+        (
+            "batch-directory-synced",
+            BlockStoreCrashPoint::AfterBatchDirectorySync,
+            DerivedPublicationStage::PublishVertexPatches,
+            "batch directory durable before receipts",
+        ),
     ];
 
     under_lab(1_213, move |cx| async move {
         let cx = &cx;
-        for (name, crash_at, expected_stage) in scenarios {
+        for (name, crash_at, expected_stage, expected_source) in scenarios {
             let dir = scratch(&format!("database-strata-{name}"));
             create_genesis(cx, &dir).await;
             let mut db = Database::open(cx, &dir, engine_keys())
@@ -2104,22 +2159,20 @@ fn strata_block_publication_crashes_fence_and_recover_the_integrated_spine() {
             };
             assert_eq!(recovery.durable_frontier.0, 1, "{name}");
             assert_eq!(recovery.published_frontier.0, 0, "{name}");
-            assert_eq!(
-                recovery.failed_stage,
-                expected_stage,
-                "{name}"
+            assert_eq!(recovery.failed_stage, expected_stage, "{name}");
+            let RebuildError::Store(BlockStoreError::Io(io_error)) = source else {
+                panic!("{name}: crash lost typed source: {source:?}");
+            };
+            assert!(
+                io_error.to_string().contains(expected_source),
+                "{name}: wrong Strata crash instant: {io_error}"
             );
-            assert!(matches!(source, RebuildError::Store(BlockStoreError::Io(_))), "{name}: crash lost typed source: {source:?}");
             assert_eq!(
                 db.state(),
                 DatabaseState::NeedsAuthoritativeRecovery(recovery),
                 "{name}"
             );
-            assert_recovery_fence(
-                expected_stage,
-                recovery,
-                db.neighbours(VId(1), KNOWS),
-            );
+            assert_recovery_fence(expected_stage, recovery, db.neighbours(VId(1), KNOWS));
             let refused = db.write(cx, block_store_fault_batch()).await;
             assert!(
                 matches!(refused, Err(WriteError::RecoveryRequired(_))),
@@ -2162,26 +2215,58 @@ fn strata_batch_directory_barrier_is_required_for_receipts_and_names() {
         use fgdb_strata::store::{BlockStore, PublishReceipts};
         use fgdb_strata::{AdjacencyEntry, DeltaBlockVersion, block_id, encode_block};
         for crash_at in [Some(BlockStoreCrashPoint::AfterBatchRenames), None] {
-            let dir = scratch(if crash_at.is_some() { "batch-dir-before" } else { "batch-dir-after" });
+            let dir = scratch(if crash_at.is_some() {
+                "batch-dir-before"
+            } else {
+                "batch-dir-after"
+            });
             std::fs::create_dir_all(&dir).expect("fixture directory");
-            let vfs = FaultVfs::unix(FaultPlan { dirent_loss: Trigger::Always, ..FaultPlan::faultless() });
-            let store = BlockStore::open_with_vfs(&cx, vfs.clone(), &dir, K_OID, NAMESPACE).await.expect("store");
-            let bytes = encode_block(0, None, &[AdjacencyEntry {
-                src: VId(1), relation: KNOWS, dst: VId(2), eid: EId(1),
-                created_at: CommitSeq(1), retired_at: None,
-            }]).expect("block");
+            let vfs = FaultVfs::unix(FaultPlan {
+                dirent_loss: Trigger::Always,
+                ..FaultPlan::faultless()
+            });
+            let store = BlockStore::open_with_vfs(&cx, vfs.clone(), &dir, K_OID, NAMESPACE)
+                .await
+                .expect("store");
+            let bytes = encode_block(
+                0,
+                None,
+                &[AdjacencyEntry {
+                    src: VId(1),
+                    relation: KNOWS,
+                    dst: VId(2),
+                    eid: EId(1),
+                    created_at: CommitSeq(1),
+                    retired_at: None,
+                }],
+            )
+            .expect("block");
             let id = DeltaBlockVersion(block_id(&K_OID, NAMESPACE, &bytes));
             let mut receipts = PublishReceipts::new();
-            let mut batch = store.publication_batch(&cx, &mut receipts, crash_at).expect("batch");
-            assert_eq!(batch.put_verified(&cx, &bytes, None).await.expect("stage"), id);
+            let mut batch = store
+                .publication_batch(&cx, &mut receipts, crash_at)
+                .expect("batch");
+            assert_eq!(
+                batch.put_verified(&cx, &bytes, None).await.expect("stage"),
+                id
+            );
             let result = batch.finish(&cx).await;
             assert_eq!(result.is_ok(), crash_at.is_none());
             assert_eq!(receipts.holds(id), crash_at.is_none());
             vfs.crash().await.expect("namespace loss");
             if crash_at.is_none() {
-                assert_eq!(store.get_bytes(&cx, id).await.expect("acknowledged name survives"), bytes);
+                assert_eq!(
+                    store
+                        .get_bytes(&cx, id)
+                        .await
+                        .expect("acknowledged name survives"),
+                    bytes
+                );
             } else {
-                assert!(!store.path(id.0).exists(), "unsynced canonical name must be lost");
+                assert!(
+                    !store.path(id.0).exists(),
+                    "unsynced canonical name must be lost"
+                );
             }
         }
     });
