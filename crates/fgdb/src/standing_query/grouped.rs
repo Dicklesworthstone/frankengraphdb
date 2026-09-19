@@ -8,6 +8,7 @@ mod computed;
 mod support;
 
 use super::*;
+use crate::standing_query::sink::PreparedSink as _;
 use fgdb_delta_types::ZWeight;
 use fgdb_delta_types::zset::aggregate::{AggregateError, AggregateValues};
 use fgdb_gql::algebra::GraphValue;
@@ -374,14 +375,14 @@ impl StandingQuery {
         updates: Vec<Contribution>,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        self.integrate_with_output(updates, meter, None)
+        self.integrate_with_output::<crate::standing_query::output::State>(updates, meter, None)
     }
 
-    pub(super) fn integrate_with_output(
+    pub(super) fn integrate_with_output<D: crate::standing_query::sink::GroupSink>(
         &mut self,
         updates: Vec<Contribution>,
         meter: &mut Meter<'_>,
-        downstream: Option<&mut crate::standing_query::output::State>,
+        downstream: Option<&mut D>,
     ) -> Result<(), StandingQueryFailure> {
         let limbs = LimbLimit::new(4);
         let mut delta = ZSet::from_updates(updates, limbs, &mut |event| meter.charge(event))

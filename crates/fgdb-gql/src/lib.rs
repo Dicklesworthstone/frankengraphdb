@@ -8,6 +8,7 @@ mod aggregation;
 pub mod algebra;
 mod algebra_exec;
 mod cheapest_path;
+mod cheapest_path_stream;
 mod cheapest_path_text;
 mod deletion;
 mod edge_merge;
@@ -49,6 +50,7 @@ pub use cheapest_path::{
     GraphCheapestPathCursor, GraphCheapestPathError, GraphCheapestPathMode, GraphCostPath,
     GraphPathCostError, PreparedGraphCheapestPath,
 };
+pub use cheapest_path_stream::{GraphCheapestPathStream, GraphCheapestPathStreamState};
 pub use cheapest_path_text::{
     BoundGraphCheapestPathQuery, GraphCheapestPathTextError, GraphCheapestPathTextErrorKind,
     PreparedGraphCheapestPathText,

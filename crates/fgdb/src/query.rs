@@ -12,6 +12,8 @@ type Cancel = Box<asupersync::error::Error>;
 
 #[path = "query_explain.rs"]
 mod explain;
+#[path = "query_view.rs"]
+mod view;
 pub use crate::gql_cert::NativeResultCertificate;
 pub use explain::{NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 
@@ -52,6 +54,24 @@ pub enum QueryError {
     Pattern(GqlQueryError<GqlError, Cancel>),
     Aggregate(GqlQueryError<GraphAggregateError<GqlError>, Cancel>),
     Set(GqlQueryError<GraphSetExecutionError<GqlError>, Cancel>),
+    /// Opening a pull query failed in the existing governed scan compiler or
+    /// source. Later pull errors remain the cursor's native typed errors.
+    Stream(GqlQueryError<fgdb_gql::stream::VertexScanError<crate::ReadError>, Cancel>),
+    /// This native class has no pull specialization. Never collect an eager
+    /// result and misrepresent its iterator as a streaming execution.
+    StreamingUnsupported {
+        facade: crate::NativeReadClass,
+    },
+    /// Ownership or lifecycle refused before transaction-read preparation.
+    Transaction(Box<WriteTxnError>),
+    /// Historical selectors have no defined staged-overlay semantics. A
+    /// transaction read must not silently fall back to a database read.
+    TemporalTransactionUnsupported {
+        facade: crate::NativeReadClass,
+    },
+    TransactionPattern(Box<GqlQueryError<WriteTxnError, Cancel>>),
+    TransactionAggregate(Box<GqlQueryError<GraphAggregateError<WriteTxnError>, Cancel>>),
+    TransactionSet(Box<GqlQueryError<GraphSetExecutionError<WriteTxnError>, Cancel>>),
 }
 impl core::fmt::Display for QueryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -68,6 +88,19 @@ impl core::fmt::Display for QueryError {
             Self::Pattern(e) => e.fmt(f),
             Self::Aggregate(e) => e.fmt(f),
             Self::Set(e) => e.fmt(f),
+            Self::Stream(e) => e.fmt(f),
+            Self::StreamingUnsupported { facade } => write!(
+                f,
+                "native {facade:?} read has no supported pull execution"
+            ),
+            Self::Transaction(e) => e.fmt(f),
+            Self::TemporalTransactionUnsupported { facade } => write!(
+                f,
+                "native {facade:?} read cannot select history inside a staged transaction"
+            ),
+            Self::TransactionPattern(e) => e.fmt(f),
+            Self::TransactionAggregate(e) => e.fmt(f),
+            Self::TransactionSet(e) => e.fmt(f),
         }
     }
 }
@@ -75,6 +108,11 @@ impl core::error::Error for QueryError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Refused { source, .. } => Some(source.as_ref()),
+            Self::Stream(error) => Some(error),
+            Self::Transaction(error) => Some(error.as_ref()),
+            Self::TransactionPattern(error) => Some(error.as_ref()),
+            Self::TransactionAggregate(error) => Some(error.as_ref()),
+            Self::TransactionSet(error) => Some(error.as_ref()),
             _ => None,
         }
     }
@@ -95,7 +133,7 @@ impl<A: core::fmt::Display> core::fmt::Display for QueryWriteError<A> {
 }
 impl<A: core::error::Error + 'static> core::error::Error for QueryWriteError<A> {}
 
-fn values(columns: Vec<String>, rows: Vec<GraphValueRow>) -> QueryResult {
+pub(crate) fn values(columns: Vec<String>, rows: Vec<GraphValueRow>) -> QueryResult {
     QueryResult::Rows {
         columns,
         rows: rows
@@ -110,7 +148,7 @@ fn values(columns: Vec<String>, rows: Vec<GraphValueRow>) -> QueryResult {
             .collect(),
     }
 }
-fn aggregates(
+pub(crate) fn aggregates(
     columns: Vec<String>,
     slots: &[GraphAggregateTextSlot],
     rows: Vec<GraphAggregateRow>,

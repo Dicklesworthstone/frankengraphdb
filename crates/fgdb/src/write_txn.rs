@@ -5,6 +5,9 @@
 //! lifecycle and staging, vertex reads, edge/adjacency reads, overlay GQL,
 //! commit/conflict handling, and diagnostics/tests.
 
+#[path = "write_txn_parts/native_query.rs"]
+mod native_query;
+
 include!("write_txn_parts/preamble.rs");
 include!("write_txn_parts/lifecycle.rs");
 include!("write_txn_parts/vertex_reads.rs");
