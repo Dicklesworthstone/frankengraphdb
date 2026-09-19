@@ -514,6 +514,8 @@ coverage_exempt_reason() {
            Nothing local executes it and nothing hosted executes it on its own, \
            so it makes no claim this chain has to check; the verdict is \
            scripts/local_proof.sh on the exact tree (fgdb-ci-workflow-check-sh-4csa)" ;;
+    crates/fgdb/src/bin/robot_schema.json)
+      echo "illustrative pseudo-JSON template documenting the CLI robot event grammar; not parsed by the binary (ROBOT_SCHEMA in fgdb.rs is frozen and checked by cli_robot.rs)" ;;
     *)
       echo "" ;;
   esac
