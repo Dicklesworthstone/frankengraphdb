@@ -1,0 +1,421 @@
+//! Fixed-hop positive GLA joins maintained from affected edge occurrences.
+//!
+//! ScanEdges followed by Expand forms a tree of binding slots, even when
+//! VertexIdentity closes a graph cycle. Anchor a changed edge at each matching
+//! atom and join outwards through relation/endpoint arrangements. A complete
+//! binding belongs to its FIRST affected atom, so simultaneous changes and
+//! self-joins emit it once, not once per changed edge. Old and final inputs are
+//! enumerated separately: their difference includes every delta cross term.
+//!
+//! Only registration/rebuild scans all input edges. Normal ticks inspect the
+//! changed identities, incident edges of changed vertex projections, and join
+//! partners reached from those anchors. All enumeration is budgeted. This is
+//! an in-memory derived arrangement, not graph storage, spill, variable-length
+//! recursion, a durable subscription, or an implementation of scoped joins.
+
+use super::*;
+use fgdb_gql::algebra::MAX_PATTERN_EDGES;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Atom {
+    left: usize,
+    right: usize,
+    relation: RelationId,
+    direction: GlaDirection,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Shape {
+    atoms: Vec<Atom>,
+    width: usize,
+    relations: BTreeSet<RelationId>,
+}
+
+impl Shape {
+    pub(super) fn of(query: &PreparedGraphAggregate) -> Option<Self> {
+        let operators = query.input_pattern().plan().operators();
+        let GlaOperator::ScanEdges { relation, direction } = operators.first()? else {
+            return None;
+        };
+        let mut atoms = vec![Atom { left: 0, right: 1, relation: *relation, direction: *direction }];
+        let mut width = 2;
+        let mut projected = false;
+        for op in &operators[1..] {
+            match op {
+                GlaOperator::Expand { source, relation, direction }
+                    if !projected && (source.ordinal() as usize) < width
+                        && atoms.len() < MAX_PATTERN_EDGES =>
+                {
+                    atoms.push(Atom {
+                        left: source.ordinal() as usize, right: width,
+                        relation: *relation, direction: *direction,
+                    });
+                    width += 1;
+                }
+                GlaOperator::Select { slot, predicates }
+                    if !projected && (slot.ordinal() as usize) < width =>
+                {
+                    if !predicates.iter().all(|predicate| matches!(predicate,
+                        VertexPredicate::HasLabel(_)
+                        | VertexPredicate::IntegerProperty { .. }
+                        | VertexPredicate::ScalarProperty { .. }
+                        | VertexPredicate::PropertyNull { .. }))
+                    { return None; }
+                }
+                GlaOperator::VertexIdentity { left, right, .. }
+                | GlaOperator::CompareProperties { left, right, .. }
+                    if !projected && (left.ordinal() as usize) < width
+                        && (right.ordinal() as usize) < width => {}
+                GlaOperator::ProjectValues { columns } if !projected => {
+                    if columns.iter().any(|column| !matches!(column,
+                        ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. }
+                            if (slot.ordinal() as usize) < width))
+                    { return None; }
+                    projected = true;
+                }
+                GlaOperator::OrderByValues
+                | GlaOperator::Limit { offset: 0, count: None } if projected => {}
+                _ => return None,
+            }
+        }
+        if !projected || atoms.len() < 2 { return None; }
+        let relations = atoms.iter().map(|atom| atom.relation).collect();
+        Some(Self { atoms, width, relations })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Edge {
+    src: VId,
+    relation: RelationId,
+    dst: VId,
+}
+
+fn orientations(edge: Edge, direction: GlaDirection) -> [Option<Endpoints>; 2] {
+    match direction {
+        GlaDirection::Forward => [Some((edge.src, edge.dst)), None],
+        GlaDirection::Reverse => [Some((edge.dst, edge.src)), None],
+        GlaDirection::Undirected => [
+            Some((edge.src, edge.dst)),
+            (edge.src != edge.dst).then_some((edge.dst, edge.src)),
+        ],
+    }
+}
+
+#[derive(Default, PartialEq, Eq)]
+struct Arrangement {
+    edges: BTreeMap<EId, Edge>,
+    incident: BTreeMap<(RelationId, VId), BTreeSet<EId>>,
+}
+
+impl Arrangement {
+    fn insert(&mut self, eid: EId, edge: Edge) {
+        self.edges.insert(eid, edge);
+        self.incident.entry((edge.relation, edge.src)).or_default().insert(eid);
+        if edge.src != edge.dst {
+            self.incident.entry((edge.relation, edge.dst)).or_default().insert(eid);
+        }
+    }
+
+    fn remove(&mut self, eid: EId) {
+        if let Some(edge) = self.edges.remove(&eid) {
+            for vid in [edge.src, edge.dst] {
+                if let std::collections::btree_map::Entry::Occupied(mut entry) =
+                    self.incident.entry((edge.relation, vid))
+                {
+                    entry.get_mut().remove(&eid);
+                    if entry.get().is_empty() { entry.remove(); }
+                }
+                if edge.src == edge.dst { break; }
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) struct State {
+    shape: Shape,
+    input: Arrangement,
+}
+
+impl core::fmt::Debug for State {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StandingMultiHopInput")
+            .field("atoms", &self.shape.atoms.len())
+            .field("edge_count", &self.input.edges.len())
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
+}
+
+pub(super) struct Patch {
+    created: Arrangement,
+    removed: BTreeSet<EId>,
+}
+
+// Borrow the prospective graph without cloning the retained arrangement.
+// Deletions shadow both old and newly created identities (including cascades).
+struct Overlay<'a> {
+    base: &'a Arrangement,
+    created: &'a Arrangement,
+    removed: &'a BTreeSet<EId>,
+}
+
+impl Overlay<'_> {
+    fn get(&self, eid: EId) -> Option<Edge> {
+        if self.removed.contains(&eid) { return None; }
+        self.created.edges.get(&eid).or_else(|| self.base.edges.get(&eid)).copied()
+    }
+
+    fn incident(&self, relation: RelationId, vid: VId) -> impl Iterator<Item = EId> + '_ {
+        self.base.incident.get(&(relation, vid)).into_iter().flatten()
+            .chain(self.created.incident.get(&(relation, vid)).into_iter().flatten())
+            .copied()
+    }
+}
+
+struct Enumeration<'a> {
+    query: &'a PreparedGraphAggregate,
+    shape: &'a Shape,
+    graph: Overlay<'a>,
+    vertices: &'a Vertices,
+    vertex_patch: &'a VertexPatch,
+    affected: Option<&'a BTreeSet<EId>>,
+    sign: i128,
+}
+
+impl Enumeration<'_> {
+    fn run(&self, output: &mut Vec<grouped::Contribution>, meter: &mut Meter<'_>)
+        -> Result<(), StandingQueryFailure>
+    {
+        meter.units(ZSetEvent::ScratchEntry, 2 + self.shape.width + self.shape.atoms.len())?;
+        let mut binding = vec![None; self.shape.width];
+        let mut selected = vec![None; self.shape.atoms.len()];
+        for anchor in 0..self.shape.atoms.len() {
+            meter.charge(ZSetEvent::Work)?;
+            if let Some(affected) = self.affected {
+                for &eid in affected {
+                    self.anchor(anchor, eid, &mut binding, &mut selected, output, meter)?;
+                }
+            } else {
+                // Bootstrap owns each binding at atom zero, regardless of EId.
+                for &eid in self.graph.base.edges.keys().chain(self.graph.created.edges.keys()) {
+                    self.anchor(anchor, eid, &mut binding, &mut selected, output, meter)?;
+                }
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn anchor(
+        &self, anchor: usize, eid: EId, binding: &mut [Option<VId>],
+        selected: &mut [Option<EId>], output: &mut Vec<grouped::Contribution>,
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        meter.charge(ZSetEvent::Work)?;
+        let Some(edge) = self.graph.get(eid) else { return Ok(()); };
+        let atom = self.shape.atoms[anchor];
+        if atom.relation != edge.relation { return Ok(()); }
+        for (left, right) in orientations(edge, atom.direction).into_iter().flatten() {
+            meter.charge(ZSetEvent::Work)?;
+            binding[atom.left] = Some(left);
+            binding[atom.right] = Some(right);
+            selected[anchor] = Some(eid);
+            self.walk(anchor, binding, selected, output, meter)?;
+            selected[anchor] = None;
+            binding[atom.left] = None;
+            binding[atom.right] = None;
+        }
+        Ok(())
+    }
+
+    fn walk(
+        &self, anchor: usize, binding: &mut [Option<VId>], selected: &mut [Option<EId>],
+        output: &mut Vec<grouped::Contribution>, meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        let mut pending = false;
+        for (index, atom) in self.shape.atoms.iter().enumerate() {
+            meter.charge(ZSetEvent::Work)?;
+            if selected[index].is_some() { continue; }
+            pending = true;
+            let (known, vacant) = match (binding[atom.left], binding[atom.right]) {
+                (Some(_), None) => (atom.left, atom.right),
+                (None, Some(_)) => (atom.right, atom.left),
+                _ => continue,
+            };
+            let vid = binding[known].ok_or(StandingQueryFailure::InvalidDelta)?;
+            for eid in self.graph.incident(atom.relation, vid) {
+                meter.charge(ZSetEvent::Work)?;
+                // Even a removed candidate consumes work before it is skipped.
+                let Some(edge) = self.graph.get(eid) else { continue; };
+                // The earliest affected atom owns this entire occurrence.
+                // Prune before following its remaining join partners.
+                if index < anchor && self.affected.is_some_and(|set| set.contains(&eid)) {
+                    continue;
+                }
+                for (left, right) in orientations(edge, atom.direction).into_iter().flatten() {
+                    meter.charge(ZSetEvent::Work)?;
+                    if (if known == atom.left { left } else { right }) != vid { continue; }
+                    binding[vacant] = Some(if vacant == atom.left { left } else { right });
+                    selected[index] = Some(eid);
+                    self.walk(anchor, binding, selected, output, meter)?;
+                    selected[index] = None;
+                    binding[vacant] = None;
+                }
+            }
+            return Ok(());
+        }
+        if pending { return Err(StandingQueryFailure::InvalidDelta); }
+        meter.units(ZSetEvent::ScratchEntry, 1 + binding.len())?;
+        let mut row = Vec::new();
+        for vid in binding.iter() {
+            meter.charge(ZSetEvent::Work)?;
+            let vid = (*vid).ok_or(StandingQueryFailure::InvalidDelta)?;
+            row.push((vid, vertex(self.vertices, self.vertex_patch, vid)?));
+        }
+        // Reuse the existing typed GLA predicate/projector, including NULL,
+        // binding-dependent comparisons, DISTINCT and exact aggregate inputs.
+        grouped::binding_contributions(self.query, &row, self.sign, output, meter)
+    }
+}
+
+impl State {
+    pub(super) fn for_definition(query: &PreparedGraphAggregate) -> Option<Self> {
+        Some(Self { shape: Shape::of(query)?, input: Arrangement::default() })
+    }
+
+    pub(super) fn seed(
+        &mut self, row: &fgdb_strata::AdjacencyEntry, vertices: &Vertices, meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        meter.charge(ZSetEvent::Work)?;
+        if !self.shape.relations.contains(&row.relation) { return Ok(()); }
+        if self.input.edges.contains_key(&row.eid)
+            || !vertices.contains_key(&row.src) || !vertices.contains_key(&row.dst)
+        { return Err(StandingQueryFailure::InvalidDelta); }
+        reserve_edge((row.src, row.dst), meter)?;
+        self.input.insert(row.eid, Edge { src: row.src, relation: row.relation, dst: row.dst });
+        Ok(())
+    }
+
+    pub(super) fn finish_seed(
+        &self, query: &PreparedGraphAggregate, vertices: &Vertices,
+        output: &mut Vec<grouped::Contribution>, meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        let empty = Arrangement::default();
+        let removed = BTreeSet::new();
+        let vertex_patch = BTreeMap::new();
+        Enumeration {
+            query, shape: &self.shape,
+            graph: Overlay { base: &self.input, created: &empty, removed: &removed },
+            vertices, vertex_patch: &vertex_patch, affected: None, sign: 1,
+        }.run(output, meter)
+    }
+
+    pub(super) fn prepare(
+        &self, query: &PreparedGraphAggregate, batch: &LogicalDeltaBatch,
+        vertices: &Vertices, staged: &VertexPatch, output: &mut Vec<grouped::Contribution>,
+        meter: &mut Meter<'_>,
+    ) -> Result<Patch, StandingQueryFailure> {
+        let mut affected = BTreeSet::new();
+        for &vid in staged.keys() {
+            for &relation in &self.shape.relations {
+                meter.charge(ZSetEvent::Work)?;
+                if let Some(edges) = self.input.incident.get(&(relation, vid)) {
+                    for &eid in edges { touch(&mut affected, eid, meter)?; }
+                }
+            }
+        }
+        let mut created = Arrangement::default();
+        let mut removed = BTreeSet::new();
+        // Coordinates are canonical ordering, not an execution schedule. A
+        // cascade in one coordinate may name a creation in a later relation.
+        for entry in batch.coordinate_entries() {
+            meter.charge(ZSetEvent::Work)?;
+            if entry.graph != crate::GRAPH || entry.branch != crate::BRANCH { continue; }
+            for row in &entry.rows {
+                meter.charge(ZSetEvent::Work)?;
+                if let DeltaRow::CreateEdge { eid, src, relation, dst, .. } = row {
+                    if *relation != entry.relation { return Err(StandingQueryFailure::InvalidDelta); }
+                    if !self.shape.relations.contains(relation) { continue; }
+                    if self.input.edges.contains_key(eid) || created.edges.contains_key(eid) {
+                        return Err(StandingQueryFailure::InvalidDelta);
+                    }
+                    // Reserve both the private overlay and later publication.
+                    reserve_edge((*src, *dst), meter)?;
+                    reserve_edge((*src, *dst), meter)?;
+                    created.insert(*eid, Edge { src: *src, relation: *relation, dst: *dst });
+                    touch(&mut affected, *eid, meter)?;
+                }
+            }
+        }
+        for entry in batch.coordinate_entries() {
+            meter.charge(ZSetEvent::Work)?;
+            if entry.graph != crate::GRAPH || entry.branch != crate::BRANCH { continue; }
+            for row in &entry.rows {
+                meter.charge(ZSetEvent::Work)?;
+                match row {
+                    DeltaRow::DeleteEdge { eid, .. } => {
+                        let edge = created.edges.get(eid).or_else(|| self.input.edges.get(eid));
+                        if let Some(edge) = edge {
+                            if edge.relation != entry.relation { return Err(StandingQueryFailure::InvalidDelta); }
+                            touch(&mut removed, *eid, meter)?;
+                            touch(&mut affected, *eid, meter)?;
+                        } else if self.shape.relations.contains(&entry.relation) {
+                            return Err(StandingQueryFailure::InvalidDelta);
+                        }
+                    }
+                    DeltaRow::DeleteVertex { vid, sorted_retired_incident_edges, .. } => {
+                        for &eid in sorted_retired_incident_edges {
+                            meter.charge(ZSetEvent::Work)?;
+                            if let Some(edge) = created.edges.get(&eid).or_else(|| self.input.edges.get(&eid)) {
+                                if edge.src != *vid && edge.dst != *vid { return Err(StandingQueryFailure::InvalidDelta); }
+                                touch(&mut removed, eid, meter)?;
+                                touch(&mut affected, eid, meter)?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Count invalidating identities. Join partner visits are charged as
+        // work; they need not themselves be in the invalidation set.
+        meter.stats.affected_edges = u64::try_from(affected.len())
+            .map_err(|_| StandingQueryFailure::WorkBudget)?;
+        let final_graph = Overlay { base: &self.input, created: &created, removed: &removed };
+        for &eid in &affected {
+            meter.charge(ZSetEvent::Work)?;
+            if let Some(edge) = final_graph.get(eid) {
+                // Refuse incomplete cascades even when this edge currently
+                // has NO complete multi-hop match and would emit no result.
+                vertex(vertices, staged, edge.src)?;
+                vertex(vertices, staged, edge.dst)?;
+            }
+        }
+        if !affected.is_empty() {
+            let empty = Arrangement::default();
+            let no_removals = BTreeSet::new();
+            let old_vertices = BTreeMap::new();
+            Enumeration {
+                query, shape: &self.shape,
+                graph: Overlay { base: &self.input, created: &empty, removed: &no_removals },
+                vertices, vertex_patch: &old_vertices, affected: Some(&affected), sign: -1,
+            }.run(output, meter)?;
+            Enumeration {
+                query, shape: &self.shape, graph: final_graph,
+                vertices, vertex_patch: staged, affected: Some(&affected), sign: 1,
+            }.run(output, meter)?;
+        }
+        (meter.checkpoint)()?;
+        Ok(Patch { created, removed })
+    }
+
+    pub(super) fn publish(&mut self, patch: Patch) {
+        for &eid in &patch.removed { self.input.remove(eid); }
+        for (eid, edge) in patch.created.edges {
+            if !patch.removed.contains(&eid) { self.input.insert(eid, edge); }
+        }
+    }
+}
