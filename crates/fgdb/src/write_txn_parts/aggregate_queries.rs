@@ -91,6 +91,40 @@ impl WriteTxn {
         fgdb_gql::GqlQueryExecution<fgdb_gql::GraphCostPath>,
         fgdb_gql::GqlQueryError<fgdb_gql::GraphCheapestPathError<WriteTxnError>, Box<asupersync::error::Error>>,
     > {
+        self.execute_cheapest_paths_over(database, cx, query, None, policy)
+    }
+
+    /// Return a ranked prefix over the basis plus canonical staged effects.
+    /// Source point/scan dependencies survive a shorter K, zero K, an empty
+    /// answer, cost refusal or later output refusal. No extra query can repair
+    /// a lost witness; the ordinary canonical source records it once here.
+    pub fn execute_graph_cheapest_paths_governed<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphCheapestPath,
+        count: u64,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::GraphCostPath>,
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphCheapestPathError<WriteTxnError>, Box<asupersync::error::Error>>,
+    > {
+        self.execute_cheapest_paths_over(database, cx, query, Some(count), policy)
+    }
+
+    // The source admission and conflict witnesses are shared by the existing
+    // single-answer path and the lazy ranked specialization.
+    fn execute_cheapest_paths_over<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphCheapestPath,
+        count: Option<u64>,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::GraphCostPath>,
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphCheapestPathError<WriteTxnError>, Box<asupersync::error::Error>>,
+    > {
         use fgdb_gql::{GraphCheapestPathError, GqlQueryError};
         cx.with_restriction(|| {
             let snapshot = self.query_snapshot(database)
@@ -107,14 +141,25 @@ impl WriteTxn {
                     usage.observe(policy, event)
                 },
             )?;
-            let result = query.execute_governed_with_edge_properties(
-                source.snapshot_records as u64,
-                source.vertex_ids(),
-                source.identified_edges(),
-                |eid, key| Ok::<_, WriteTxnError>(source.edge_property(eid, key)),
-                usage.remaining(policy),
-                || cx.checkpoint(),
-            );
+            let result = match count {
+                Some(count) => query.execute_k_governed_with_edge_properties(
+                    count,
+                    source.snapshot_records as u64,
+                    source.vertex_ids(),
+                    source.identified_edges(),
+                    |eid, key| Ok::<_, WriteTxnError>(source.edge_property(eid, key)),
+                    usage.remaining(policy),
+                    || cx.checkpoint(),
+                ),
+                None => query.execute_governed_with_edge_properties(
+                    source.snapshot_records as u64,
+                    source.vertex_ids(),
+                    source.identified_edges(),
+                    |eid, key| Ok::<_, WriteTxnError>(source.edge_property(eid, key)),
+                    usage.remaining(policy),
+                    || cx.checkpoint(),
+                ),
+            };
             usage.finish(policy, result)
         })
     }
