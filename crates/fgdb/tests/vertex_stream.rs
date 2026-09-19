@@ -233,3 +233,103 @@ fn exact_work_limits_and_consumer_chunk_sizes_preserve_one_execution_budget() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+fn value_pattern(offset: u64, count: Option<u64>) -> PreparedGraphPattern<fgdb_gql::algebra::GraphValueRow> {
+    use fgdb_gql::algebra::GraphColumn;
+    let mut builder = GraphPatternBuilder::new(); builder.vertex("n").unwrap();
+    builder.prepare_values(&[
+        GraphColumn::vertex("id", "n"),
+        GraphColumn::property("score", "n", KEY),
+        GraphColumn::property("name", "n", PropertyKeyId(8)),
+        GraphColumn::vertex("again", "n"),
+    ], offset, count).unwrap()
+}
+
+#[test]
+fn correlated_property_rows_stream_from_pinned_live_and_historical_generations() {
+    let ((), report) = run_async_under_lab(0x51ca_0006, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query(); let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap(); let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let mut names = WriteBatch::new(R);
+        names.set_vertex_property(VId(0), PropertyKeyId(8), Some(CanonicalScalar::ucs_basic_text(&"long name".repeat(40)).unwrap()));
+        names.set_vertex_property(VId(1), KEY, None);
+        names.set_vertex_property(VId(2), KEY, Some(CanonicalScalar::Null));
+        let basis = db.write(&commit, names).await.unwrap();
+        let pattern = value_pattern(0, None);
+        let expected = db.execute_graph_pattern_governed(&cx, &pattern, wide()).unwrap().value;
+        let mut stream = db.stream_graph_values_governed(&cx, &pattern, wide()).unwrap();
+        let view = db.read_session().unwrap();
+        let pinned = view.stream_graph_values_governed(&cx, &pattern, wide()).unwrap();
+        let pinned_at = view.stream_graph_values_governed_at(&cx, &pattern, basis, wide()).unwrap();
+        drop(view); drop(pattern);
+        let first = stream.next().unwrap().unwrap();
+        assert_eq!(first, expected[0]);
+        assert_eq!(first.get(0), first.get(3));
+        let mut edit = WriteBatch::new(R);
+        edit.set_vertex_property(VId(0), PropertyKeyId(8), None);
+        edit.set_vertex_property(VId(1), KEY, Some(CanonicalScalar::Int(999)));
+        edit.delete_vertex(VId(2));
+        edit.create_vertex(VId(5), vec![], vec![(KEY, CanonicalScalar::Int(-8))]);
+        db.write(&commit, edit).await.unwrap();
+        let pattern = value_pattern(0, None).with_duplicates();
+        let current = db.execute_graph_pattern_governed(&cx, &pattern, wide()).unwrap().value;
+        let historical = db.stream_graph_values_governed_at(&cx, &pattern, basis, wide()).unwrap();
+        let live = db.stream_graph_values_governed(&cx, &pattern, wide()).unwrap();
+        db.compact(&commit).await.unwrap(); drop(db);
+        assert_eq!(stream.collect::<Result<Vec<_>, _>>().unwrap(), expected[1..]);
+        assert_eq!(pinned.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(pinned_at.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(historical.collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(live.collect::<Result<Vec<_>, _>>().unwrap(), current);
+        let reopened = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        assert_eq!(reopened.stream_graph_values_governed_at(&cx, &pattern, basis, wide()).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap(), expected);
+        assert_eq!(reopened.stream_graph_values_governed(&cx, &pattern, wide()).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap(), current);
+        assert_eq!(first, expected[0], "delivered values own their scalar payload after source release");
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn value_streams_keep_exact_shared_budgets_and_refuse_unstreamable_order_before_scanning() {
+    let ((), report) = run_async_under_lab(0x51ca_0007, |root| async move {
+        use fgdb_gql::algebra::GraphColumn;
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query(); let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap(); seed(&mut db, &commit).await;
+        let pattern = value_pattern(1, Some(3));
+        let mut baseline = db.stream_graph_values_governed(&cx, &pattern, wide()).unwrap();
+        let expected = baseline.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        let rows = baseline.row_stats(); let stats = baseline.evaluator_stats();
+        assert_eq!(rows, GqlExecutionStats { snapshot_records: 4, result_rows: 3 });
+        let exact = GqlQueryPolicy::new(4, 3, stats.work_units, stats.scratch_entries);
+        let mut cursor = db.stream_graph_values_governed(&cx, &pattern, exact).unwrap();
+        let mut actual = Vec::new();
+        actual.extend(cursor.by_ref().take(1).collect::<Result<Vec<_>, _>>().unwrap());
+        actual.extend(cursor.by_ref().take(1).collect::<Result<Vec<_>, _>>().unwrap());
+        actual.extend(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap());
+        assert_eq!(actual, expected); assert_eq!(cursor.evaluator_stats(), stats);
+        for policy in [
+            GqlQueryPolicy::new(3, 3, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(4, 2, u64::MAX, u64::MAX),
+            GqlQueryPolicy::new(4, 3, stats.work_units - 1, u64::MAX),
+            GqlQueryPolicy::new(4, 3, u64::MAX, stats.scratch_entries - 1),
+        ] {
+            let mut failed = db.stream_graph_values_governed(&cx, &pattern, policy).unwrap();
+            assert!(failed.by_ref().collect::<Result<Vec<_>, _>>().is_err());
+            assert_eq!(failed.state(), VertexScanState::Failed); assert!(failed.next().is_none());
+        }
+        let mut builder = GraphPatternBuilder::new(); builder.vertex("n").unwrap();
+        let property_only = builder.prepare_values(&[GraphColumn::property("score", "n", KEY)], 0, None).unwrap();
+        assert!(matches!(db.stream_graph_values_governed(&cx, &property_only, GqlQueryPolicy::new(0, 0, 0, 0)),
+            Err(GqlQueryError::Source(VertexScanError::Plan(_)))));
+        let empty = value_pattern(u64::MAX, Some(0));
+        let mut empty = db.stream_graph_values_governed(&cx, &empty, GqlQueryPolicy::new(0, 0, 1, 0)).unwrap();
+        assert!(empty.next().is_none()); assert_eq!(empty.evaluator_stats().scratch_entries, 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

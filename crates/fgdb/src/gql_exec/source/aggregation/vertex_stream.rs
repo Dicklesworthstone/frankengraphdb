@@ -10,10 +10,10 @@
 use crate::{Database, EmbeddedReadView, ReadError};
 use crate::gql_exec::source::SourceEvent;
 use asupersync::fs::Vfs;
-use fgdb_gql::algebra::{GlaPlan, PreparedGraphPattern};
+use fgdb_gql::algebra::{GlaPlan, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::stream::{
     VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanPlan,
-    VertexScanRow, VertexScanSource, VertexScanSourceError,
+    VertexScanRow, VertexScanSource, VertexScanSourceError, VertexScanOutput,
 };
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy, PreparedGqlQuery};
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -90,14 +90,14 @@ impl core::fmt::Debug for SnapshotVertexSource<'_> {
 fn source_error(error: ReadError) -> StreamError {
     GqlQueryError::Source(VertexScanError::Source(error))
 }
-fn open<'q>(
+fn open<'q, Row: VertexScanOutput>(
     view: EmbeddedReadView,
     cx: &'q QueryCx,
-    logical: &GlaPlan,
+    logical: &GlaPlan<Row>,
     as_of: CommitSeq,
     policy: GqlQueryPolicy,
 ) -> Result<
-    VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>,
+    VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, Row>, Row>,
     StreamError,
 > {
     view.snapshot.check_frontier(as_of).map_err(source_error)?;
@@ -109,6 +109,38 @@ fn open<'q>(
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Pull correlated property rows in canonical order without a result set.
+    /// The first projected column must be the scanned VId; remaining columns
+    /// may repeat that identity or read its canonical properties. The leading
+    /// unique identity proves whole-row order and DISTINCT without sorting.
+    /// Other projections/orderings refuse, rather than quietly changing order.
+    pub fn stream_graph_values_governed<'q>(
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>, GraphValueRow>,
+        StreamError,
+    > {
+        let view = self.read_session().map_err(source_error)?;
+        let as_of = view.frontier();
+        open(view, cx, pattern.plan(), as_of, policy)
+    }
+
+    pub fn stream_graph_values_governed_at<'q>(
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>, GraphValueRow>,
+        StreamError,
+    > {
+        open(self.read_session().map_err(source_error)?, cx, pattern.plan(), as_of, policy)
+    }
+
     /// Stream the supported single-vertex identity GLA profile. Opening pins
     /// one immutable generation but scans no candidate and builds no row set.
     /// next() is the demand signal; close/drop never drains the unused suffix.
@@ -176,6 +208,31 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 impl EmbeddedReadView {
+    pub fn stream_graph_values_governed<'q>(
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>, GraphValueRow>,
+        StreamError,
+    > {
+        open(self.clone(), cx, pattern.plan(), self.frontier(), policy)
+    }
+
+    pub fn stream_graph_values_governed_at<'q>(
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>, GraphValueRow>,
+        StreamError,
+    > {
+        open(self.clone(), cx, pattern.plan(), as_of, policy)
+    }
+
     pub fn stream_graph_vertices_governed<'q>(
         &self,
         cx: &'q QueryCx,

@@ -257,3 +257,135 @@ fn counters_refuse_before_wrap_and_diagnostics_redact_fields() {
         assert!(!diagnostic.contains("12345")); assert!(!diagnostic.contains("98765"));
     }
 }
+
+fn value_pattern(offset: u64, count: Option<u64>) -> PreparedGraphPattern<crate::algebra::GraphValueRow> {
+    use crate::algebra::GraphColumn;
+    let mut builder = GraphPatternBuilder::new(); builder.vertex("n").unwrap();
+    builder.prepare_values(&[
+        GraphColumn::vertex("id", "n"),
+        GraphColumn::property("value", "n", KEY),
+        GraphColumn::vertex("same_id", "n"),
+        GraphColumn::property("missing", "n", PropertyKeyId(999)),
+        GraphColumn::property("same_value", "n", KEY),
+    ], offset, count).unwrap()
+}
+
+#[test]
+fn property_rows_use_ordinary_projection_with_exact_nulls_types_order_and_duplicates() {
+    let text = CanonicalScalar::ucs_basic_text(&"a\0é".repeat(100)).unwrap();
+    let mut rows = vec![sample(0, 9, true), sample(1, -7, false), sample(2, -100, true),
+        sample(1_u128 << 100, 4, true), sample(u128::MAX, 0, true)];
+    rows[0].properties = vec![(KEY, text)];
+    rows[2].properties.clear();
+    rows[3].properties = vec![(KEY, CanonicalScalar::Null)];
+    for offset in [0, 1, 4, u64::MAX] {
+        for count in [None, Some(0), Some(1), Some(4)] {
+            for all in [false, true] {
+                let prepared = value_pattern(offset, count);
+                let prepared = if all { prepared.with_duplicates() } else { prepared };
+                let expected = prepared.plan().execute_governed_with_properties(
+                    rows.len() as u64, rows.iter().filter(|row| row.visible).map(|row| row.vid), [],
+                    |vid, tests| Ok::<_, ()>(rows.iter().find(|row| row.vid == vid)
+                        .is_some_and(|row| tests.iter().all(|test| test.matches(&row.labels, &row.properties)))),
+                    |vid, key| Ok(rows.iter().find(|row| row.vid == vid)
+                        .and_then(|row| row.properties.iter().find(|(actual, _)| *actual == key)).map(|(_, value)| value)),
+                    wide(), || Ok::<_, ()>(()),
+                ).unwrap().value;
+                let mut cursor = VertexScanCursor::new(source(rows.clone()),
+                    VertexScanPlan::compile(prepared.plan()).unwrap(), wide(), || Ok::<_, ()>(()));
+                let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+                assert_eq!(actual, expected);
+                for row in actual {
+                    assert_eq!(row.get(0), row.get(2));
+                    assert_eq!(row.get(1), row.get(4));
+                    assert_eq!(row.get(3).and_then(|value| value.as_scalar()), Some(&CanonicalScalar::Null));
+                }
+                assert_eq!(cursor.state(), VertexScanState::Exhausted);
+            }
+        }
+    }
+}
+
+#[test]
+fn every_property_lookup_and_payload_copy_refusal_keeps_only_complete_delivered_rows() {
+    let mut rows = vec![sample(1, 8, true), sample(2, 9, true)];
+    rows[1].properties = vec![(KEY, CanonicalScalar::ucs_basic_text(&"payload".repeat(512)).unwrap())];
+    let scan = VertexScanPlan::compile(value_pattern(0, None).plan()).unwrap();
+    let mut total = 0;
+    let mut baseline = VertexScanCursor::new(source(rows.clone()), scan.clone(), wide(), || {
+        total += 1; Ok::<_, usize>(())
+    });
+    let expected = baseline.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+    let stats = baseline.evaluator_stats();
+    drop(baseline);
+    assert!(stats.scratch_entries > 100, "large canonical payloads must be charged");
+    for stop in 1..=total {
+        let input = source(rows.clone()); let dropped = Rc::clone(&input.dropped);
+        let calls = Cell::new(0);
+        let mut cursor = VertexScanCursor::new(input, scan.clone(), wide(), || {
+            let at = calls.get() + 1; calls.set(at);
+            if at == stop { Err(stop) } else { Ok(()) }
+        });
+        let mut prefix = Vec::new();
+        loop {
+            match cursor.next().expect("chosen boundary must be reached") {
+                Ok(row) => { assert_eq!(row.len(), 5); prefix.push(row); }
+                Err(GqlQueryError::Interrupted(at)) => { assert_eq!(at, stop); break; }
+                Err(error) => panic!("unexpected refusal: {error:?}"),
+            }
+        }
+        assert!(expected.starts_with(&prefix));
+        assert_eq!(cursor.row_stats().result_rows, prefix.len() as u64);
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(dropped.get()); assert!(cursor.next().is_none());
+        assert_eq!(calls.get(), stop);
+    }
+    let exact = GqlQueryPolicy::new(2, 2, stats.work_units, stats.scratch_entries);
+    let run = |policy| VertexScanCursor::new(source(rows.clone()), scan.clone(), policy, || Ok::<_, ()>(() ))
+        .collect::<Result<Vec<_>, _>>();
+    assert_eq!(run(exact).unwrap(), expected);
+    assert!(matches!(run(GqlQueryPolicy::new(2, 2, u64::MAX, stats.scratch_entries - 1)), Err(GqlQueryError::Evaluator(_))));
+    assert!(matches!(run(GqlQueryPolicy::new(2, 2, stats.work_units - 1, u64::MAX)), Err(GqlQueryError::Evaluator(_))));
+}
+
+#[test]
+fn property_only_or_property_leading_output_refuses_instead_of_reordering_or_losing_distinctness() {
+    use crate::algebra::GraphColumn;
+    let mut builder = GraphPatternBuilder::new(); builder.vertex("n").unwrap();
+    for columns in [
+        vec![GraphColumn::property("value", "n", KEY)],
+        vec![GraphColumn::property("value", "n", KEY), GraphColumn::vertex("id", "n")],
+    ] {
+        let prepared = builder.prepare_values(&columns, 0, None).unwrap();
+        assert!(VertexScanPlan::compile(prepared.plan()).is_err());
+        assert!(VertexScanPlan::compile(prepared.with_duplicates().plan()).is_err());
+    }
+}
+
+#[test]
+fn skipped_and_output_refused_property_rows_do_not_copy_payloads_or_reset_the_budget() {
+    let mut rows = vec![sample(1, 1, true), sample(2, 2, true), sample(3, 3, true)];
+    for row in &mut rows {
+        row.properties = vec![(KEY, CanonicalScalar::ucs_basic_text(&"large".repeat(1024)).unwrap())];
+    }
+    // Skipping all matching rows needs neither property projection nor scratch.
+    let skip = VertexScanPlan::compile(value_pattern(3, None).plan()).unwrap();
+    let mut cursor = VertexScanCursor::new(source(rows.clone()), skip,
+        GqlQueryPolicy::new(3, 0, 1000, 0), || Ok::<_, ()>(()));
+    assert!(cursor.next().is_none()); assert_eq!(cursor.evaluator_stats().scratch_entries, 0);
+    // A result-row refusal is checked before any scalar payload allocation.
+    let scan = VertexScanPlan::compile(value_pattern(0, None).plan()).unwrap();
+    let mut cursor = VertexScanCursor::new(source(rows.clone()), scan.clone(),
+        GqlQueryPolicy::new(3, 0, 1000, 0), || Ok::<_, ()>(()));
+    assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Rows(_)))));
+    assert_eq!(cursor.evaluator_stats().scratch_entries, 0);
+    let mut cursor = VertexScanCursor::new(source(rows), scan,
+        GqlQueryPolicy::new(3, 1, u64::MAX, u64::MAX), || Ok::<_, ()>(()));
+    let first = cursor.next().unwrap().unwrap();
+    let scratch = cursor.evaluator_stats().scratch_entries;
+    assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Rows(_)))));
+    assert_eq!(cursor.evaluator_stats().scratch_entries, scratch);
+    assert_eq!(cursor.row_stats().result_rows, 1);
+    assert_eq!(first.len(), 5);
+    assert!(cursor.next().is_none());
+}

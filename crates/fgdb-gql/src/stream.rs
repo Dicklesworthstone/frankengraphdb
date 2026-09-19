@@ -1,11 +1,11 @@
-//! Pull execution for ordered, single-vertex GLA identity scans.
+//! Pull execution for ordered, single-vertex GLA scans.
 //!
 //! This is an operator cursor, not paging over an already computed result.
 //! Each pull advances only until the next accepted identity. The source owns
 //! one immutable, admitted generation and yields candidate identities in
 //! strictly increasing order. Historical candidates may have no visible row.
-//! Only the existing Select predicates, identity tests, identity projection,
-//! DISTINCT/ALL, canonical identity order and terminal SKIP/LIMIT are admitted.
+//! Only existing Select predicates, identity tests, identity or identity-led
+//! property projection, DISTINCT/ALL, canonical order and SKIP/LIMIT are admitted.
 //! Unsupported operators refuse before a source is driven; there is no eager
 //! fallback, AST interpreter, alternate property semantics or storage model.
 //!
@@ -23,6 +23,9 @@ use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::{CanonicalScalar, CommitSeq, VId};
 use std::iter::FusedIterator;
 use std::sync::Arc;
+
+mod output;
+pub use output::VertexScanOutput;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VertexScanBuildError {
@@ -45,14 +48,16 @@ enum Test {
 /// Checked physical specialization of an existing GLA definition.
 /// Preparation owns its predicates; polling neither reparses nor rebinds.
 #[derive(Clone)]
-pub struct VertexScanPlan {
+pub struct VertexScanPlan<Row = VId> {
     empty: bool,
     tests: Arc<[Test]>,
     offset: u64,
     count: Option<u64>,
+    projection: Arc<GlaOperator>,
+    output: core::marker::PhantomData<fn() -> Row>,
 }
-impl VertexScanPlan {
-    pub fn compile(plan: &GlaPlan) -> Result<Self, VertexScanBuildError> {
+impl<Row: VertexScanOutput> VertexScanPlan<Row> {
+    pub fn compile(plan: &GlaPlan<Row>) -> Result<Self, VertexScanBuildError> {
         let operators = plan.operators();
         let empty = match operators.first() {
             Some(GlaOperator::ScanVertices) => false,
@@ -71,17 +76,18 @@ impl VertexScanPlan {
                 {
                     tests.push(Test::Identity(*equal));
                 }
-                Some(GlaOperator::Project { slot }) if slot.ordinal() == 0 => break,
+                Some(GlaOperator::Project { .. } | GlaOperator::ProjectValues { .. }) => break,
                 _ => return Err(VertexScanBuildError { operator: at }),
             }
             at += 1;
         }
+        let projection_at = at;
         at += 1;
         if matches!(operators.get(at), Some(GlaOperator::Distinct)) { at += 1; }
-        // A strictly increasing one-row-per-identity source already implements
-        // both ALL and DISTINCT and exactly this order. Other orders need a
-        // different physical operator and cannot silently use this cursor.
-        if !matches!(operators.get(at), Some(GlaOperator::OrderByVertexId)) {
+        // A unique leading identity establishes both whole-row uniqueness and
+        // order even when later cells are properties. No global set is needed.
+        if plan.visible_columns.is_some() || !operators.get(at).is_some_and(|order|
+            Row::accepts_projection(&operators[projection_at], order)) {
             return Err(VertexScanBuildError { operator: at });
         }
         at += 1;
@@ -91,7 +97,8 @@ impl VertexScanPlan {
         if at + 1 != operators.len() {
             return Err(VertexScanBuildError { operator: at + 1 });
         }
-        Ok(Self { empty, tests: tests.into(), offset: *offset, count: *count })
+        Ok(Self { empty, tests: tests.into(), offset: *offset, count: *count,
+            projection: Arc::new(operators[projection_at].clone()), output: core::marker::PhantomData })
     }
 
     fn accepts<E>(
@@ -128,7 +135,7 @@ impl VertexScanPlan {
         Ok(true)
     }
 }
-impl core::fmt::Debug for VertexScanPlan {
+impl<Row> core::fmt::Debug for VertexScanPlan<Row> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("VertexScanPlan([REDACTED])")
     }
@@ -248,13 +255,17 @@ impl<F> Meter<F> {
         self.rows.snapshot_records = count;
         Ok(())
     }
-    fn emit<E, C>(&mut self) -> ScanResult<(), E, C>
-    where F: FnMut() -> Result<(), C> {
+    fn next_result_count<E, C>(&self) -> ScanResult<u64, E, C> {
         let count = self.rows.result_rows.checked_add(1)
             .ok_or(GqlQueryError::Source(VertexScanError::CounterExhausted))?;
         self.policy.rows.check(GqlBudgetDimension::ResultRows, count)
             .map_err(GqlQueryError::Rows)?;
-        // Last fallible boundary before the caller receives this identity.
+        Ok(count)
+    }
+    fn emit<E, C>(&mut self) -> ScanResult<(), E, C>
+    where F: FnMut() -> Result<(), C> {
+        let count = self.next_result_count()?;
+        // Last fallible boundary before the caller receives this complete row.
         self.event(VertexScanEvent::Work)?;
         self.rows.result_rows = count;
         Ok(())
@@ -265,27 +276,27 @@ impl<F> Meter<F> {
 /// allowance across ALL pulls; collecting another page cannot reset it.
 /// SnapshotRecords counts examined candidate identity histories (even when
 /// invisible at the cut), before their visible fields are resolved. ResultRows
-/// counts emitted identities AFTER predicates and SKIP/LIMIT. This is not the
+/// counts emitted rows AFTER predicates and SKIP/LIMIT. This is not the
 /// eager executor's complete-table admission count. Work/scratch are logical
 /// controls, not allocator bytes, source residency, or caller collection space.
 ///
-/// At most one borrowed row and one VId result are live in the cursor's pull
+/// At most one borrowed row and one projected result are live in the pull
 /// path; the source may retain an entire shared immutable database generation.
 /// LIMIT exhaustion does not prefetch a later candidate. Natural EOF is known
 /// on the first pull past the final result. An error is terminal, never EOF.
-pub struct VertexScanCursor<S, F> {
+pub struct VertexScanCursor<S, F, Row = VId> {
     source: Option<S>,
-    plan: VertexScanPlan,
+    plan: VertexScanPlan<Row>,
     meter: Meter<F>,
     snapshot_seq: CommitSeq,
     last: Option<VId>,
     skip: u64,
     state: VertexScanState,
 }
-impl<S: VertexScanSource, F> VertexScanCursor<S, F> {
+impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> {
     /// Pure construction: no source scan or checkpoint occurs until a pull.
     /// Database adapters admit ownership/frontier and QueryCx before this call.
-    pub fn new(source: S, plan: VertexScanPlan, policy: GqlQueryPolicy, checkpoint: F) -> Self {
+    pub fn new(source: S, plan: VertexScanPlan<Row>, policy: GqlQueryPolicy, checkpoint: F) -> Self {
         Self {
             snapshot_seq: source.snapshot_seq(),
             skip: plan.offset,
@@ -311,7 +322,7 @@ impl<S: VertexScanSource, F> VertexScanCursor<S, F> {
         self.source = None;
     }
 
-    fn advance<C>(&mut self) -> ScanResult<Option<VId>, S::Error, C>
+    fn advance<C>(&mut self) -> ScanResult<Option<Row>, S::Error, C>
     where F: FnMut() -> Result<(), C> {
         let meter = &mut self.meter;
         meter.event(VertexScanEvent::Work)?;
@@ -331,8 +342,12 @@ impl<S: VertexScanSource, F> VertexScanCursor<S, F> {
             if !self.plan.accepts(row, &mut |event| meter.event(event))? { continue; }
             meter.event(VertexScanEvent::Work)?;
             if self.skip != 0 { self.skip -= 1; continue; }
+            // Refuse an exhausted output budget before copying any property
+            // payload; count delivery only after the whole row is complete.
+            let _ = meter.next_result_count()?;
+            let value = Row::project(vid, row, &self.plan.projection, &mut |event| meter.event(event))?;
             meter.emit()?;
-            return Ok(Some(vid));
+            return Ok(Some(value));
         }
     }
 }
@@ -344,9 +359,9 @@ fn flatten<T, E, C>(
         VertexScanSourceError::Control(error) => error,
     })
 }
-impl<S, F, C> Iterator for VertexScanCursor<S, F>
-where S: VertexScanSource, F: FnMut() -> Result<(), C> {
-    type Item = ScanResult<VId, S::Error, C>;
+impl<S, F, C, Row> Iterator for VertexScanCursor<S, F, Row>
+where S: VertexScanSource, F: FnMut() -> Result<(), C>, Row: VertexScanOutput {
+    type Item = ScanResult<Row, S::Error, C>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.state != VertexScanState::Open { return None; }
         match self.advance() {
@@ -374,9 +389,9 @@ where S: VertexScanSource, F: FnMut() -> Result<(), C> {
         (0, (self.state != VertexScanState::Open).then_some(0))
     }
 }
-impl<S, F, C> FusedIterator for VertexScanCursor<S, F>
-where S: VertexScanSource, F: FnMut() -> Result<(), C> {}
-impl<S, F> core::fmt::Debug for VertexScanCursor<S, F> {
+impl<S, F, C, Row> FusedIterator for VertexScanCursor<S, F, Row>
+where S: VertexScanSource, F: FnMut() -> Result<(), C>, Row: VertexScanOutput {}
+impl<S, F, Row> core::fmt::Debug for VertexScanCursor<S, F, Row> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("VertexScanCursor")
             .field("snapshot_seq", &self.snapshot_seq)
