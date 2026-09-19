@@ -188,8 +188,10 @@ fn typed_access_ownership_work_refusal_and_final_cardinality_swaps_are_enforced(
         let commit = contexts.commit();
         let query = contexts.query();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let probe = db.register_standing_reachability(&query, R, policy()).unwrap();
+        let init_work = db.standing_reachability(&query, &probe).unwrap().last_maintenance().work_units;
         let tiny = db.register_standing_reachability(&query, R,
-            GqlQueryPolicy::new(100_000, 100_000, 1, 100_000)).unwrap();
+            GqlQueryPolicy::new(100_000, 100_000, init_work, 100_000)).unwrap();
         let one = db.register_standing_reachability(&query, R,
             GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000)).unwrap();
         let native = db.register_standing_query(&query, count_definition(), policy()).unwrap();
@@ -247,6 +249,46 @@ fn sparse_live_maintenance_does_not_rescan_unrelated_components() {
         }
         assert_eq!(measurements[0], measurements[1]);
         assert_eq!(measurements[1].delta_rows, 1);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn late_registration_does_not_replay_unrelated_property_history() {
+    let ((), report) = run_async_under_lab(0x6a83, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut measurements = Vec::new();
+        for property_commits in [0, 128] {
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut first = WriteBatch::new(R);
+            for id in 1..=3 { first.create_vertex(VId(id), vec![], vec![]); }
+            first.add_edge(EId(1), VId(1), VId(2), vec![]);
+            first.add_edge(EId(2), VId(2), VId(3), vec![]);
+            db.write(&commit, first).await.unwrap();
+            for value in 0..property_commits {
+                let mut edit = WriteBatch::new(R);
+                edit.set_vertex_property(VId(2), PropertyKeyId(99), Some(CanonicalScalar::Int(value)));
+                db.write(&commit, edit).await.unwrap();
+            }
+            // Two physical edge records suffice despite many vertex versions
+            // and historical committed rows. All three closure pairs survive.
+            let bounded = GqlQueryPolicy::new(2, 3, 10_000_000, 10_000_000);
+            let handle = db.register_standing_reachability(&query, R, bounded).unwrap();
+            check(&db, &query, &handle, R);
+            let stats = *db.standing_reachability(&query, &handle).unwrap().last_maintenance();
+            assert_eq!(stats.delta_rows, 0);
+            measurements.push(stats);
+            db.rebuild_standing_query(&query, &handle, bounded).unwrap();
+            assert_eq!(*db.standing_reachability(&query, &handle).unwrap().last_maintenance(), stats);
+            let mut last = WriteBatch::new(R);
+            last.delete_edge(EId(1));
+            db.write(&commit, last).await.unwrap();
+            check(&db, &query, &handle, R);
+            assert_eq!(db.standing_reachability(&query, &handle).unwrap().rows().len(), 1);
+        }
+        assert_eq!(measurements[0], measurements[1]);
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

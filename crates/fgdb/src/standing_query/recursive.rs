@@ -4,11 +4,13 @@
 
 use super::*;
 use fgdb_delta_types::zset::committed::EdgeInputError;
+use fgdb_delta_types::zset::committed::snapshot::{EdgeSnapshotBuilder, SnapshotInputError};
 use fgdb_delta_types::zset::reachability::ReachabilityError;
 use fgdb_delta_types::zset::reachability::committed::{
     CommittedReachability, CommittedReachabilityError, CommittedReachabilityUpdate,
 };
-use fgdb_delta_types::LimbLimit;
+use fgdb_delta_types::{LimbLimit, SchemaEpoch};
+use crate::gql_exec::source::{self, SourceEvent};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 type Pair = (VId, VId);
@@ -30,13 +32,19 @@ fn input_error(error: CommittedReachabilityError<StandingQueryFailure>) -> Stand
     }
 }
 
+fn snapshot_error(error: SnapshotInputError<StandingQueryFailure>) -> StandingQueryFailure {
+    match error {
+        SnapshotInputError::Input(EdgeInputError::Delta(error)) => zset_error(error),
+        _ => StandingQueryFailure::InvalidDelta,
+    }
+}
+
 /// Account the borrowed logical rows before input preparation. Payloads that
 /// are irrelevant to pure topology are neither cloned nor charged as retained
 /// data. Schema and topology consistency checks remain in CommittedEdgeInput.
 fn observe_batch(
     batch: &LogicalDeltaBatch,
     meter: &mut Meter<'_>,
-    snapshot_limit: Option<u64>,
 ) -> Result<(), StandingQueryFailure> {
     for coordinate in batch.coordinate_entries() {
         meter.charge(ZSetEvent::Work)?;
@@ -44,9 +52,6 @@ fn observe_batch(
             meter.charge(ZSetEvent::Work)?;
             meter.stats.delta_rows = meter.stats.delta_rows.checked_add(1)
                 .ok_or(StandingQueryFailure::WorkBudget)?;
-            if snapshot_limit.is_some_and(|limit| meter.stats.delta_rows > limit) {
-                return Err(StandingQueryFailure::SnapshotBudget);
-            }
         }
     }
     Ok(())
@@ -67,7 +72,6 @@ fn finish(
     rows: &mut ZSet<Pair>,
     pending: CommittedReachabilityUpdate<'_>,
     meter: &mut Meter<'_>,
-    bound_result: bool,
 ) -> Result<(), StandingQueryFailure> {
     let mut count = rows.len() as u128;
     for (pair, weight) in pending.delta().iter() {
@@ -82,7 +86,7 @@ fn finish(
             _ => return Err(StandingQueryFailure::InvalidDelta),
         }
     }
-    if bound_result { result_bound(count, meter.policy)?; }
+    result_bound(count, meter.policy)?;
     let sink = rows.prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
         .map_err(zset_error)?;
     (meter.checkpoint)()?;
@@ -106,10 +110,77 @@ impl State {
         if self.frontier != self.input.frontier() {
             return Err(StandingQueryFailure::InvalidDelta);
         }
-        observe_batch(batch, meter, None)?;
+        observe_batch(batch, meter)?;
         let pending = self.input.prepare_committed_successor(cx, batch, LIMBS,
             &mut |event| meter.charge(event)).map_err(input_error)?;
-        finish(&mut self.rows, pending, meter, true)
+        finish(&mut self.rows, pending, meter)
+    }
+}
+
+impl State {
+    /// Build privately from ONE already admitted immutable database generation.
+    /// The borrowed GQL source owns statement visibility and tombstone precedence;
+    /// this adapter never interprets raw blocks or clones graph properties.
+    fn from_snapshot(
+        snapshot: &crate::Snapshot,
+        relation: RelationId,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, StandingQueryFailure> {
+        meter.charge(ZSetEvent::Work)?;
+        if snapshot.frontier != snapshot.delta_index.frontier() {
+            return Err(StandingQueryFailure::InvalidDelta);
+        }
+        // Bound the PHYSICAL topology records before the source can allocate its
+        // winner map. History retained in Strata still costs work and scratch;
+        // unrelated vertex/property delta history is not replayed or scanned.
+        let mut records = 0_u64;
+        for block in &snapshot.blocks {
+            meter.charge(ZSetEvent::Work)?;
+            records = records.checked_add(u64::try_from(block.len())
+                .map_err(|_| StandingQueryFailure::SnapshotBudget)?)
+                .ok_or(StandingQueryFailure::SnapshotBudget)?;
+            if meter.policy.rows.max_snapshot_records().is_some_and(|limit| records > limit) {
+                return Err(StandingQueryFailure::SnapshotBudget);
+            }
+        }
+        // The shared builder streams directly from the borrowed source. It
+        // poisons on any swallowed insertion refusal; no temporary full edge
+        // vector, reconstructed log or fabricated insertion commit is needed.
+        meter.charge(ZSetEvent::ScratchEntry)?;
+        let mut builder = EdgeSnapshotBuilder::from_index(
+            crate::GRAPH, crate::BRANCH, &snapshot.delta_index,
+            &mut |event| meter.charge(event),
+        ).map_err(snapshot_error)?;
+        // The embedded write template fixes coordinates to SchemaEpoch(0).
+        // Record the selected relation even when empty. A schema-capable spine
+        // must supply authenticated current catalog epochs instead; the shared
+        // builder already supports them, including known empty relations.
+        builder.record_epoch(relation, SchemaEpoch(0), &mut |event| meter.charge(event))
+            .map_err(snapshot_error)?;
+        source::visit_edges(&snapshot.blocks, snapshot.frontier,
+            &mut |event| match event {
+                SourceEvent::Work | SourceEvent::SnapshotRecord => meter.charge(ZSetEvent::Work),
+                SourceEvent::ScratchEntry => meter.charge(ZSetEvent::ScratchEntry),
+            },
+            |entry, control| builder.insert(
+                entry.eid, (entry.relation, entry.src, entry.dst), SchemaEpoch(0), LIMBS,
+                &mut |event| control(match event {
+                    ZSetEvent::Work => SourceEvent::Work,
+                    ZSetEvent::ScratchEntry => SourceEvent::ScratchEntry,
+                }),
+            ).map_err(snapshot_error),
+        )?;
+        let baseline = builder.finish(&mut |event| meter.charge(event)).map_err(snapshot_error)?;
+        let input = CommittedReachability::from_snapshot(
+            baseline, relation, LIMBS, &mut |event| meter.charge(event),
+        ).map_err(input_error)?;
+        let rows = input.snapshot(LIMBS, &mut |event| meter.charge(event)).map_err(input_error)?;
+        result_bound(rows.len() as u128, meter.policy)?;
+        (meter.checkpoint)()?;
+        Ok(Self {
+            input, rows, policy: meter.policy, frontier: snapshot.frontier,
+            stats: meter.stats, failure: None,
+        })
     }
 }
 
@@ -123,49 +194,20 @@ impl<V: Vfs + Clone> Database<V> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         cx.with_restriction(|| {
-            let index = self.delta_index().map_err(StandingQueryError::Read)?;
-            let batches = index.since(CommitSeq::ORIGIN)
-                .map_err(|_| StandingQueryError::Maintenance(StandingQueryFailure::InvalidDelta))?;
             let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
             let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-            // Registry backing, input and sink are still private while replaying.
-            meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Maintenance)?;
-            let mut state = State {
-                input: CommittedReachability::new(crate::GRAPH, crate::BRANCH, relation),
-                rows: ZSet::new(), policy, frontier: CommitSeq::ORIGIN,
-                stats: StandingQueryStats::default(), failure: None,
-            };
-            for batch in batches {
-                // Bound historical input cumulatively BEFORE the next batch can
-                // allocate input/closure state. The core still checks its exact
-                // anchor, gap-free successor and envelope for every indexed tick.
-                observe_batch(batch, &mut meter, policy.rows.max_snapshot_records())
-                    .map_err(StandingQueryError::Maintenance)?;
-                let pending = state.input.prepare_next(index, LIMBS, &mut |event| meter.charge(event))
-                    .map_err(input_error).map_err(StandingQueryError::Maintenance)?
-                    .ok_or(StandingQueryError::Maintenance(StandingQueryFailure::InvalidDelta))?;
-                if pending.commit_seq() != batch.commit_seq() {
-                    return Err(StandingQueryError::Maintenance(StandingQueryFailure::InvalidDelta));
-                }
-                // Intermediate historical closures are not public results. A
-                // deleted past cycle cannot prevent rebuilding a small current
-                // view under its valid result limit. Work/scratch remain bounded.
-                finish(&mut state.rows, pending, &mut meter, false)
-                    .map_err(StandingQueryError::Maintenance)?;
-            }
-            let caught_up = state.input.prepare_next(index, LIMBS, &mut |event| meter.charge(event))
-                .map_err(input_error).map_err(StandingQueryError::Maintenance)?.is_none();
-            if !caught_up || state.input.frontier() != self.snapshot.frontier {
-                return Err(StandingQueryError::Maintenance(StandingQueryFailure::InvalidDelta));
-            }
-            result_bound(state.rows.len() as u128, policy).map_err(StandingQueryError::Maintenance)?;
-            (meter.checkpoint)().map_err(StandingQueryError::Maintenance)?;
-            state.frontier = state.input.frontier();
-            state.stats = meter.stats;
-            Ok(state)
+            // Under &self the topology and the delta anchor are one immutable
+            // generation. No new commit authority, historical log copy or cursor
+            // injection is needed. A failed build never changes a registered view.
+            State::from_snapshot(&self.snapshot, relation, &mut meter)
+                .map_err(StandingQueryError::Maintenance)
         })
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "recursive/snapshot_tests.rs"]
+mod snapshot_tests;

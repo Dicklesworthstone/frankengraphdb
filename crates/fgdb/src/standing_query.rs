@@ -226,12 +226,15 @@ impl<V: Vfs + Clone> Database<V> {
     /// This is an explicit topology API, not a new GQL grammar or a substitute
     /// for bounded WALK/path multiplicity semantics.
     ///
-    /// Initialization replays the complete retained, authenticated delta window
-    /// under one cumulative work/scratch budget. max_snapshot_records bounds
-    /// historical delta rows admitted, not only currently live edges. The
-    /// result-row budget bounds the final closure, not intermediate historical
-    /// peaks; those still consume work and scratch admission. A retired prefix
-    /// refuses. Ordinary maintenance consumes only the newly committed batch.
+    /// Initialization derives topology from the current authenticated snapshot,
+    /// not by replaying historical deltas or historical closures. Physical edge
+    /// records (including versions/tombstones) count toward max_snapshot_records;
+    /// borrowed source reads, bootstrap and result materialization share one
+    /// work/scratch allowance. The result limit bounds the CURRENT closure.
+    /// A retired window remains usable when it preserves the exact boundary
+    /// identity; a missing/foreign anchor refuses. No historical delta rows are
+    /// consumed at initialization (delta_rows is zero). Ordinary maintenance
+    /// consumes only the newly committed batch.
     ///
     /// The database owns catch-up: after each successful write the view is
     /// current or explicitly unavailable. No caller polling, second commit log,
@@ -254,8 +257,8 @@ impl<V: Vfs + Clone> Database<V> {
     }
 
     /// Repair either kind of maintained result without changing its handle or
-    /// definition. Native aggregates rebuild from the authoritative snapshot;
-    /// recursive views replay complete retained Chronicle history. Preparation
+    /// definition. Both aggregate and recursive views rebuild from the same
+    /// authoritative current snapshot, including after delta retirement. Preparation
     /// is private: any read, cancellation, budget or arithmetic refusal leaves
     /// the old rows, frontier, policy and failure untouched. Successful repair
     /// replaces all state together and resumes ordinary commit maintenance.
