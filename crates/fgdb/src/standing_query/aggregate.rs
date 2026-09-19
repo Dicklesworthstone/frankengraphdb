@@ -499,7 +499,7 @@ impl<V: Vfs + Clone> Database<V> {
                     ).map_err(StandingQueryError::Maintenance)?;
                 }
             }
-            if let Some(edges) = &query.edges {
+            if let Some(edges) = &mut query.edges {
                 edges.finish_seed(&query.definition, &query.vertices, &mut updates, &mut meter)
                     .map_err(StandingQueryError::Maintenance)?;
             }

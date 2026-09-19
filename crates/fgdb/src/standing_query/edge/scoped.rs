@@ -1,9 +1,10 @@
-//! Correlated one-hop OPTIONAL/EXISTS/NOT EXISTS over the canonical standing input.
+//! Correlated fixed-hop OPTIONAL/EXISTS/NOT EXISTS over canonical standing inputs.
 //! Qualification uses the admitted GLA predicates; this module owns only scope
 //! boundaries, per-root witness counts and null-extension derivatives. Counts
 //! advance with the same whole-commit edge/vertex/aggregate/result publication.
 
 use super::*;
+use fgdb_gql::algebra::{MAX_PATTERN_BINDINGS, MAX_PATTERN_EDGES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode { Optional, Exists, NotExists }
@@ -15,6 +16,7 @@ pub(super) struct Shape {
     pub(super) direction: GlaDirection,
     start: usize,
     end: usize,
+    width: u32,
 }
 
 fn predicate(op: &GlaOperator, width: u32) -> bool {
@@ -32,18 +34,36 @@ fn predicate(op: &GlaOperator, width: u32) -> bool {
 }
 
 impl Shape {
-    /// Recognize a compiled scope, never rewrite text or flatten OPTIONAL into
-    /// an inner join. Root slot 0 is copied to child slot 1, then expanded to 2.
-    /// Independent/nested/multiple clauses, extra scans and path captures refuse.
+    /// Preserve the specialized one-hop lane. Multi-hop scopes are admitted
+    /// separately by the affected-binding join engine, not flattened to edges.
     pub(super) fn of(query: &PreparedGraphAggregate) -> Option<Self> {
+        Self::fixed_hop(query).filter(|shape| shape.width == 3)
+    }
+
+    pub(super) fn multi_hop(query: &PreparedGraphAggregate) -> Option<Self> {
+        Self::fixed_hop(query).filter(|shape| shape.width > 3)
+    }
+
+    pub(super) fn width(self) -> usize { self.width as usize }
+
+    pub(super) fn body(self, query: &PreparedGraphAggregate) -> &[GlaOperator] {
+        &query.input_pattern().plan().operators()[self.start + 2..self.end]
+    }
+
+    /// One correlated positive child rooted at the outer vertex. The compiler
+    /// copies slot 0 to child slot 1; each expansion adds one child slot, even
+    /// when an identity predicate closes a graph cycle. Independent scans,
+    /// additional/nested scopes, captured paths and nullable outer captures
+    /// refuse. OPTIONAL must declare the exact complete child-frame width.
+    fn fixed_hop(query: &PreparedGraphAggregate) -> Option<Self> {
         let ops = query.input_pattern().plan().operators();
         if !matches!(ops.first(), Some(GlaOperator::ScanVertices)) { return None; }
         let mut start = 1;
         while ops.get(start).is_some_and(|op| predicate(op, 1)) { start += 1; }
-        let (mode, group, end) = match ops.get(start)? {
-            GlaOperator::Optional { group, end, slots: 2 } => (Mode::Optional, *group, *end),
+        let (mode, group, end, slots) = match ops.get(start)? {
+            GlaOperator::Optional { group, end, slots } => (Mode::Optional, *group, *end, Some(*slots)),
             GlaOperator::Probe { group, end, anti } => (
-                if *anti { Mode::NotExists } else { Mode::Exists }, *group, *end,
+                if *anti { Mode::NotExists } else { Mode::Exists }, *group, *end, None,
             ),
             _ => return None,
         };
@@ -59,21 +79,28 @@ impl Shape {
             return None;
         }
         let mut expansion = None;
+        let mut width = 2_u32;
+        let mut hops = 0;
         for op in &ops[start + 2..end] {
             match op {
                 GlaOperator::Expand { source, relation, direction }
-                    if expansion.is_none() && source.ordinal() == 1 => {
-                        expansion = Some((*relation, *direction));
+                    if source.ordinal() >= 1 && source.ordinal() < width
+                        && hops < MAX_PATTERN_EDGES => {
+                        expansion.get_or_insert((*relation, *direction));
+                        hops += 1;
+                        width = width.checked_add(1)?;
+                        if width as usize > MAX_PATTERN_BINDINGS { return None; }
                     }
-                op if predicate(op, if expansion.is_some() { 3 } else { 2 }) => {}
+                op if predicate(op, width) => {}
                 _ => return None,
             }
         }
         let (relation, direction) = expansion?;
+        if slots.is_some_and(|slots| slots != width - 1) { return None; }
         let GlaOperator::ProjectValues { columns } = ops.get(end + 1)? else { return None; };
         // Existential locals never escape the probe frame. Only OPTIONAL
         // exports nullable child bindings to grouping/aggregate arguments.
-        let output_width = if mode == Mode::Optional { 3 } else { 1 };
+        let output_width = if mode == Mode::Optional { width } else { 1 };
         if columns.iter().any(|column| !matches!(column,
             ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. }
                 if slot.ordinal() < output_width)) {
@@ -83,7 +110,7 @@ impl Shape {
             GlaOperator::OrderByValues,
             GlaOperator::Limit { offset: 0, count: None },
         ]) { return None; }
-        Some(Self { mode, relation, direction, start, end })
+        Some(Self { mode, relation, direction, start, end, width })
     }
 
     fn keep_root(
@@ -95,6 +122,35 @@ impl Shape {
     ) -> Result<bool, StandingQueryFailure> {
         grouped::keeps(&query.input_pattern().plan().operators()[1..self.start],
             &[(vid, state)], meter)
+    }
+
+    /// Count a COMPLETE child occurrence. The shared join engine supplies the
+    /// whole binding; edge prefixes are never OPTIONAL/EXISTS witnesses. The
+    /// same routine serves one-hop and multi-hop inputs and preserves ordinary
+    /// GLA predicate order, Boolean UNKNOWN and hidden-property dependencies.
+    pub(super) fn binding_contribution(
+        &self,
+        query: &PreparedGraphAggregate,
+        binding: &[(VId, &VertexState)],
+        sign: i128,
+        counts: &mut BTreeMap<VId, i128>,
+        output: &mut Vec<grouped::Contribution>,
+        meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        if binding.len() != self.width() || binding[0].0 != binding[1].0 {
+            return Err(StandingQueryFailure::InvalidDelta);
+        }
+        let (root, state) = binding[0];
+        if !self.keep_root(query, root, state, meter)? { return Ok(()); }
+        if !grouped::keeps(self.body(query), binding, meter)? { return Ok(()); }
+        change(counts, root, sign, meter)?;
+        // Semi/anti output is determined once per root after the complete
+        // tick. Individual witnesses neither multiply nor retract a root.
+        if self.mode != Mode::Optional { return Ok(()); }
+        grouped::project_contributions(query, |slot| {
+            binding.get(slot as usize).copied().map(Some)
+                .ok_or(StandingQueryFailure::InvalidDelta)
+        }, sign, output, meter)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -115,22 +171,8 @@ impl Shape {
         let source = vertex(vertices, staged, pair.0)?;
         let target = vertex(vertices, staged, pair.1)?;
         let mut visit = |root, root_state, child, child_state| {
-            if !self.keep_root(query, root, root_state, meter)? { return Ok(()); }
             let binding = [(root, root_state), (root, root_state), (child, child_state)];
-            if !grouped::keeps(
-                &query.input_pattern().plan().operators()[self.start + 2..self.end],
-                &binding, meter,
-            )? { return Ok(()); }
-            change(counts, root, sign, meter)?;
-            // Semi/anti output is determined once per root after the complete
-            // tick. Individual witnesses neither multiply nor retract a root.
-            if self.mode != Mode::Optional { return Ok(()); }
-            // Each real edge occurrence contributes once. Qualification count is
-            // independent of nullable payloads and the eventual result projection.
-            grouped::project_contributions(query, |slot| {
-                binding.get(slot as usize).copied().map(Some)
-                    .ok_or(StandingQueryFailure::InvalidDelta)
-            }, sign, output, meter)
+            self.binding_contribution(query, &binding, sign, counts, output, meter)
         };
         match self.direction {
             GlaDirection::Forward => visit(pair.0, source, pair.1, target),
@@ -167,7 +209,7 @@ impl Shape {
         // not test child WHERE or root-copy identities against these nulls.
         grouped::project_contributions(query, |slot| match slot {
             0 => Ok(Some((vid, state))),
-            1 | 2 if self.mode == Mode::Optional => Ok(None),
+            slot if self.mode == Mode::Optional && slot < self.width => Ok(None),
             _ => Err(StandingQueryFailure::InvalidDelta),
         }, sign, output, meter)
     }

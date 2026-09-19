@@ -1,4 +1,4 @@
-//! Fixed-hop positive GLA joins maintained from affected edge occurrences.
+//! Fixed-hop GLA joins maintained from affected edge occurrences.
 //!
 //! ScanEdges followed by Expand forms a tree of binding slots, even when
 //! VertexIdentity closes a graph cycle. Anchor a changed edge at each matching
@@ -7,11 +7,13 @@
 //! self-joins emit it once, not once per changed edge. Old and final inputs are
 //! enumerated separately: their difference includes every delta cross term.
 //!
-//! Only registration/rebuild scans all input edges. Normal ticks inspect the
-//! changed identities, incident edges of changed vertex projections, and join
-//! partners reached from those anchors. All enumeration is budgeted. This is
-//! an in-memory derived arrangement, not graph storage, spill, variable-length
-//! recursion, a durable subscription, or an implementation of scoped joins.
+//! A single correlated OPTIONAL/EXISTS/NOT EXISTS child uses the same anchored
+//! joins. Complete child occurrences feed the shared scope witness derivative;
+//! partial paths never count as witnesses. Only registration/rebuild scans all
+//! input edges/roots. Normal ticks inspect changed identities, incident edges of
+//! changed vertex projections, and indexed join partners reached from anchors.
+//! This is an in-memory derived arrangement, not graph storage, spill,
+//! variable-length recursion, a durable subscription or arbitrary nested scopes.
 
 use super::*;
 use fgdb_gql::algebra::MAX_PATTERN_EDGES;
@@ -29,10 +31,31 @@ pub(super) struct Shape {
     atoms: Vec<Atom>,
     width: usize,
     relations: BTreeSet<RelationId>,
+    scope: Option<scoped::Shape>,
 }
 
 impl Shape {
     pub(super) fn of(query: &PreparedGraphAggregate) -> Option<Self> {
+        if let Some(scope) = scoped::Shape::multi_hop(query) {
+            // The shared scope recognizer validated every operator and the
+            // frame boundary. Slot 0 is the outer root; slot 1 is its copied
+            // child identity. The atoms form a connected tree over slots 1..
+            // and slot 0 aliases slot 1 only when the full binding is emitted.
+            let mut atoms = Vec::new();
+            let mut width = 2;
+            for op in scope.body(query) {
+                if let GlaOperator::Expand { source, relation, direction } = op {
+                    atoms.push(Atom {
+                        left: source.ordinal() as usize, right: width,
+                        relation: *relation, direction: *direction,
+                    });
+                    width += 1;
+                }
+            }
+            if width != scope.width() || atoms.len() < 2 { return None; }
+            let relations = atoms.iter().map(|atom| atom.relation).collect();
+            return Some(Self { atoms, width, relations, scope: Some(scope) });
+        }
         let operators = query.input_pattern().plan().operators();
         let GlaOperator::ScanEdges { relation, direction } = operators.first()? else {
             return None;
@@ -82,7 +105,7 @@ impl Shape {
         }
         if !projected || atoms.len() < 2 { return None; }
         let relations = atoms.iter().map(|atom| atom.relation).collect();
-        Some(Self { atoms, width, relations })
+        Some(Self { atoms, width, relations, scope: None })
     }
 }
 
@@ -138,6 +161,7 @@ impl Arrangement {
 pub(super) struct State {
     shape: Shape,
     input: Arrangement,
+    witnesses: BTreeMap<VId, u64>,
 }
 
 impl core::fmt::Debug for State {
@@ -153,6 +177,7 @@ impl core::fmt::Debug for State {
 pub(super) struct Patch {
     created: Arrangement,
     removed: BTreeSet<EId>,
+    witnesses: BTreeMap<VId, u64>,
 }
 
 // Borrow the prospective graph without cloning the retained arrangement.
@@ -187,9 +212,10 @@ struct Enumeration<'a> {
 }
 
 impl Enumeration<'_> {
-    fn run(&self, output: &mut Vec<grouped::Contribution>, meter: &mut Meter<'_>)
-        -> Result<(), StandingQueryFailure>
-    {
+    fn run(
+        &self, counts: &mut BTreeMap<VId, i128>,
+        output: &mut Vec<grouped::Contribution>, meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
         meter.units(ZSetEvent::ScratchEntry, 2 + self.shape.width + self.shape.atoms.len())?;
         let mut binding = vec![None; self.shape.width];
         let mut selected = vec![None; self.shape.atoms.len()];
@@ -197,12 +223,12 @@ impl Enumeration<'_> {
             meter.charge(ZSetEvent::Work)?;
             if let Some(affected) = self.affected {
                 for &eid in affected {
-                    self.anchor(anchor, eid, &mut binding, &mut selected, output, meter)?;
+                    self.anchor(anchor, eid, &mut binding, &mut selected, counts, output, meter)?;
                 }
             } else {
                 // Bootstrap owns each binding at atom zero, regardless of EId.
                 for &eid in self.graph.base.edges.keys().chain(self.graph.created.edges.keys()) {
-                    self.anchor(anchor, eid, &mut binding, &mut selected, output, meter)?;
+                    self.anchor(anchor, eid, &mut binding, &mut selected, counts, output, meter)?;
                 }
                 break;
             }
@@ -213,8 +239,8 @@ impl Enumeration<'_> {
     #[allow(clippy::too_many_arguments)]
     fn anchor(
         &self, anchor: usize, eid: EId, binding: &mut [Option<VId>],
-        selected: &mut [Option<EId>], output: &mut Vec<grouped::Contribution>,
-        meter: &mut Meter<'_>,
+        selected: &mut [Option<EId>], counts: &mut BTreeMap<VId, i128>,
+        output: &mut Vec<grouped::Contribution>, meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
         let Some(edge) = self.graph.get(eid) else { return Ok(()); };
@@ -225,7 +251,7 @@ impl Enumeration<'_> {
             binding[atom.left] = Some(left);
             binding[atom.right] = Some(right);
             selected[anchor] = Some(eid);
-            self.walk(anchor, binding, selected, output, meter)?;
+            self.walk(anchor, binding, selected, counts, output, meter)?;
             selected[anchor] = None;
             binding[atom.left] = None;
             binding[atom.right] = None;
@@ -233,8 +259,10 @@ impl Enumeration<'_> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         &self, anchor: usize, binding: &mut [Option<VId>], selected: &mut [Option<EId>],
+        counts: &mut BTreeMap<VId, i128>,
         output: &mut Vec<grouped::Contribution>, meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         let mut pending = false;
@@ -262,7 +290,7 @@ impl Enumeration<'_> {
                     if (if known == atom.left { left } else { right }) != vid { continue; }
                     binding[vacant] = Some(if vacant == atom.left { left } else { right });
                     selected[index] = Some(eid);
-                    self.walk(anchor, binding, selected, output, meter)?;
+                    self.walk(anchor, binding, selected, counts, output, meter)?;
                     selected[index] = None;
                     binding[vacant] = None;
                 }
@@ -272,21 +300,32 @@ impl Enumeration<'_> {
         if pending { return Err(StandingQueryFailure::InvalidDelta); }
         meter.units(ZSetEvent::ScratchEntry, 1 + binding.len())?;
         let mut row = Vec::new();
-        for vid in binding.iter() {
+        for (slot, vid) in binding.iter().enumerate() {
             meter.charge(ZSetEvent::Work)?;
-            let vid = (*vid).ok_or(StandingQueryFailure::InvalidDelta)?;
+            // The outer slot is an alias, not another scanned vertex or atom.
+            // Resolve it in this same old OR final source generation.
+            let vid = if slot == 0 && self.shape.scope.is_some() { binding[1] } else { *vid };
+            let vid = vid.ok_or(StandingQueryFailure::InvalidDelta)?;
             row.push((vid, vertex(self.vertices, self.vertex_patch, vid)?));
         }
-        // Reuse the existing typed GLA predicate/projector, including NULL,
-        // binding-dependent comparisons, DISTINCT and exact aggregate inputs.
-        grouped::binding_contributions(self.query, &row, self.sign, output, meter)
+        // Reuse typed GLA predicate/projectors and the scope derivative. NULL
+        // extension and semi/anti presence happen once per root after all paths.
+        match self.shape.scope {
+            Some(scope) => scope.binding_contribution(self.query, &row, self.sign, counts, output, meter),
+            None => grouped::binding_contributions(self.query, &row, self.sign, output, meter),
+        }
     }
 }
 
 impl State {
     pub(super) fn for_definition(query: &PreparedGraphAggregate) -> Option<Self> {
-        Some(Self { shape: Shape::of(query)?, input: Arrangement::default() })
+        Some(Self {
+            shape: Shape::of(query)?, input: Arrangement::default(), witnesses: BTreeMap::new(),
+        })
     }
+
+    #[cfg(test)]
+    pub(super) fn has_scope(&self) -> bool { self.shape.scope.is_some() }
 
     pub(super) fn seed(
         &mut self, row: &fgdb_strata::AdjacencyEntry, vertices: &Vertices, meter: &mut Meter<'_>,
@@ -302,17 +341,38 @@ impl State {
     }
 
     pub(super) fn finish_seed(
-        &self, query: &PreparedGraphAggregate, vertices: &Vertices,
+        &mut self, query: &PreparedGraphAggregate, vertices: &Vertices,
         output: &mut Vec<grouped::Contribution>, meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         let empty = Arrangement::default();
         let removed = BTreeSet::new();
         let vertex_patch = BTreeMap::new();
+        let mut counts = BTreeMap::new();
         Enumeration {
             query, shape: &self.shape,
             graph: Overlay { base: &self.input, created: &empty, removed: &removed },
             vertices, vertex_patch: &vertex_patch, affected: None, sign: 1,
-        }.run(output, meter)
+        }.run(&mut counts, output, meter)?;
+        if let Some(scope) = self.shape.scope {
+            let mut witnesses = BTreeMap::new();
+            for (root, count) in counts {
+                meter.charge(ZSetEvent::Work)?;
+                let count = u64::try_from(count).map_err(|_| StandingQueryFailure::Arithmetic)?;
+                if count != 0 {
+                    meter.charge(ZSetEvent::ScratchEntry)?;
+                    witnesses.insert(root, count);
+                }
+            }
+            // Bootstrap emits each root once; there was no previous NULL or
+            // anti row to retract. Isolated roots are essential here.
+            for (&vid, state) in vertices {
+                scope.root_contribution(query, vid, Some(state),
+                    witnesses.get(&vid).copied().unwrap_or(0), 1, output, meter)?;
+            }
+            (meter.checkpoint)()?;
+            self.witnesses = witnesses;
+        }
+        Ok(())
     }
 
     pub(super) fn prepare(
@@ -396,6 +456,11 @@ impl State {
                 vertex(vertices, staged, edge.dst)?;
             }
         }
+        let mut witness_changes = BTreeMap::new();
+        if self.shape.scope.is_some() {
+            // No-edge roots still create/delete/move OPTIONAL or anti rows.
+            for &vid in staged.keys() { scoped::change(&mut witness_changes, vid, 0, meter)?; }
+        }
         if !affected.is_empty() {
             let empty = Arrangement::default();
             let no_removals = BTreeSet::new();
@@ -404,14 +469,19 @@ impl State {
                 query, shape: &self.shape,
                 graph: Overlay { base: &self.input, created: &empty, removed: &no_removals },
                 vertices, vertex_patch: &old_vertices, affected: Some(&affected), sign: -1,
-            }.run(output, meter)?;
+            }.run(&mut witness_changes, output, meter)?;
             Enumeration {
                 query, shape: &self.shape, graph: final_graph,
                 vertices, vertex_patch: staged, affected: Some(&affected), sign: 1,
-            }.run(output, meter)?;
+            }.run(&mut witness_changes, output, meter)?;
         }
+        let witnesses = match self.shape.scope {
+            Some(scope) => scope.finish_roots(query, &self.witnesses, witness_changes,
+                vertices, staged, output, meter)?,
+            None => BTreeMap::new(),
+        };
         (meter.checkpoint)()?;
-        Ok(Patch { created, removed })
+        Ok(Patch { created, removed, witnesses })
     }
 
     pub(super) fn publish(&mut self, patch: Patch) {
@@ -419,8 +489,15 @@ impl State {
         for (eid, edge) in patch.created.edges {
             if !patch.removed.contains(&eid) { self.input.insert(eid, edge); }
         }
+        for (root, count) in patch.witnesses {
+            if count == 0 { self.witnesses.remove(&root); }
+            else { self.witnesses.insert(root, count); }
+        }
     }
 }
+
+#[cfg(test)]
+mod scoped_tests;
 
 #[cfg(test)]
 mod tests {
@@ -465,7 +542,7 @@ mod tests {
     fn seeded(batches: &[LogicalDeltaBatch]) -> StandingQuery {
         let definition = definition();
         assert!(eligible(&definition));
-        let edges = crate::standing_query::edge::State::for_definition(&definition);
+        let edges = super::super::State::for_definition(&definition);
         let mut query = StandingQuery {
             definition, edges,
             policy: GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),

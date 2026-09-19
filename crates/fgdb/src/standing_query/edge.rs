@@ -3,8 +3,8 @@
 //! These are query-owned input arrangements, never graph storage or recovery
 //! authority. Bootstrap uses the database's ordinary Strata edge read. Later
 //! ticks visit changed EIds and edges incident to changed endpoint projections.
-//! One-hop and scoped inputs retain their specialized maintainer; connected
-//! positive multi-hop plans use affected-binding joins over all input relations.
+//! One-hop inputs retain their specialized maintainer; connected positive joins
+//! and correlated multi-hop scopes share affected-binding joins across relations.
 
 mod multi_hop;
 mod scoped;
@@ -63,13 +63,13 @@ impl State {
     }
 
     pub(super) fn finish_seed(
-        &self,
+        &mut self,
         query: &PreparedGraphAggregate,
         vertices: &Vertices,
         output: &mut Vec<grouped::Contribution>,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        match &self.input {
+        match &mut self.input {
             Input::OneHop(state) => state.finish_seed(query, vertices, output, meter),
             Input::MultiHop(state) => state.finish_seed(query, vertices, output, meter),
         }
@@ -109,7 +109,7 @@ impl State {
     pub(super) fn has_scope(&self) -> bool {
         match &self.input {
             Input::OneHop(state) => state.scope.is_some(),
-            Input::MultiHop(_) => false,
+            Input::MultiHop(state) => state.has_scope(),
         }
     }
 }
@@ -139,8 +139,8 @@ struct OneHopPatch {
     witnesses: BTreeMap<VId, u64>,
 }
 
-/// Additional compiled input shapes beyond the flat scan admission path.
-/// Positive multi-hop joins do not acquire OPTIONAL or probe semantics.
+/// Additional compiled shapes beyond flat scans. Scope semantics are selected
+/// only by validated OPTIONAL/probe boundaries, never inferred from topology.
 pub(super) fn supports_scoped(query: &PreparedGraphAggregate) -> bool {
     scoped::Shape::of(query).is_some() || multi_hop::Shape::of(query).is_some()
 }
