@@ -165,8 +165,10 @@ impl CommitValidator for FirstCommitterWinsValidator {
     }
 }
 
-/// Keep this match identical to `touched_elements` in `lib.rs`: it is the
-/// product write-set definition shared by version advancement and FCW.
+/// Element-level conflicts include every canonical family that mutates an
+/// element, including families not yet exposed by the `WriteBatch` surface.
+/// A counter's algebra profile does not authorize a merge through this FCW
+/// validator; such a merge needs its own validated lane.
 fn touched_elements(row: &DeltaRow, touched: &mut BTreeSet<ElementId>) {
     match row {
         DeltaRow::CreateVertex { vid, .. } => {
@@ -191,10 +193,17 @@ fn touched_elements(row: &DeltaRow, touched: &mut BTreeSet<ElementId>) {
         DeltaRow::LabelMembership { vid, .. } => {
             touched.insert(ElementId::Vertex(*vid));
         }
-        DeltaRow::Property { elem, .. } => {
+        DeltaRow::Property { elem, .. }
+        | DeltaRow::ValidTime { elem, .. }
+        | DeltaRow::Counter { elem, .. } => {
             touched.insert(*elem);
         }
-        _ => {}
+        DeltaRow::Escrow { subject, .. } => {
+            touched.insert(*subject);
+        }
+        // Non-element state has separate validation requirements. Keep this
+        // exhaustive so a new row family cannot silently escape FCW review.
+        DeltaRow::Sketch { .. } | DeltaRow::Schema { .. } | DeltaRow::Constraint { .. } => {}
     }
 }
 
@@ -203,8 +212,11 @@ mod tests {
     use super::*;
     use fgdb_chronicle::{CommitMarker, EffectSource};
     use fgdb_crypto::Digest;
-    use fgdb_delta_types::{CoordinateEntry, LabelId, RelationId, SchemaEpoch};
-    use fgdb_types::{BranchId, EId, GraphId, ObjectId};
+    use fgdb_delta_types::{
+        CoordinateEntry, EscrowDomainId, LabelId, OperationKey, PropertyKeyId, RelationId,
+        SchemaEpoch, ValidTimePeriod,
+    };
+    use fgdb_types::{BranchId, CanonicalScalar, EId, GraphId, ObjectId};
 
     fn rows_template(rows: Vec<DeltaRow>) -> Vec<u8> {
         LogicalDeltaTemplate::build(
@@ -393,5 +405,186 @@ mod tests {
         );
         let mut ensure = validator.with_dependencies([], [VId(1)]);
         assert!(validate(&mut ensure, &template(&[9]), 3).is_err());
+    }
+
+    fn property(elem: ElementId) -> DeltaRow {
+        DeltaRow::Property {
+            elem,
+            property: PropertyKeyId(3),
+            before: Some(CanonicalScalar::Int(10)),
+            after: Some(CanonicalScalar::Int(15)),
+        }
+    }
+
+    // Exercise actual canonical payloads through the production decoder, not
+    // synthetic entries inserted straight into the conflict map.
+    fn typed_element_updates(elem: ElementId) -> [DeltaRow; 4] {
+        [
+            DeltaRow::ValidTime {
+                elem,
+                contract_id: ObjectId([4; 32]),
+                before: None,
+                after: Some(ValidTimePeriod {
+                    start_micros: 10,
+                    end_micros: Some(20),
+                }),
+            },
+            DeltaRow::Counter {
+                operation_key: OperationKey([5; 32]),
+                elem,
+                property: PropertyKeyId(3),
+                algebra_profile: ObjectId([6; 32]),
+                delta: 5,
+                before: 10,
+                after: 15,
+            },
+            DeltaRow::Escrow {
+                domain_id: EscrowDomainId(1),
+                epoch: 1,
+                operation_key: OperationKey([7; 32]),
+                subject: elem,
+                subject_property: Some(PropertyKeyId(3)),
+                delta: -3,
+                before_value: 10,
+                after_value: 7,
+            },
+            DeltaRow::Escrow {
+                domain_id: EscrowDomainId(1),
+                epoch: 1,
+                operation_key: OperationKey([8; 32]),
+                subject: elem,
+                subject_property: None,
+                delta: -3,
+                before_value: 10,
+                after_value: 7,
+            },
+        ]
+    }
+
+    #[test]
+    fn typed_element_updates_conflict_with_property_writes_in_both_orders() {
+        for elem in [ElementId::Vertex(VId(7)), ElementId::Edge(EId(7))] {
+            for row in typed_element_updates(elem) {
+                for (first, second) in [
+                    (row.clone(), property(elem)),
+                    (property(elem), row.clone()),
+                ] {
+                    let mut validator = FirstCommitterWinsValidator::default();
+                    assert_eq!(
+                        validate(&mut validator, &rows_template(vec![first]), 1),
+                        Ok(())
+                    );
+                    let rejection = validate(&mut validator, &rows_template(vec![second]), 2)
+                        .expect_err("all element-changing families must participate in FCW");
+                    assert_eq!(rejection.law, FCW_LAW);
+                    assert_eq!(validator.last_writer.get(&elem), Some(&CommitSeq(1)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_element_updates_conflict_with_each_other() {
+        for elem in [ElementId::Vertex(VId(7)), ElementId::Edge(EId(7))] {
+            for first in typed_element_updates(elem) {
+                for second in typed_element_updates(elem) {
+                    let mut validator = FirstCommitterWinsValidator::default();
+                    assert_eq!(
+                        validate(&mut validator, &rows_template(vec![first.clone()]), 1),
+                        Ok(())
+                    );
+                    let rejection = validate(&mut validator, &rows_template(vec![second]), 2)
+                        .expect_err("typed writes must participate in FCW");
+                    assert_eq!(rejection.law, FCW_LAW);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_element_updates_preserve_disjointness_and_element_kind() {
+        for (left, right) in [
+            (ElementId::Vertex(VId(7)), ElementId::Vertex(VId(8))),
+            (ElementId::Edge(EId(7)), ElementId::Edge(EId(8))),
+            (ElementId::Vertex(VId(7)), ElementId::Edge(EId(7))),
+        ] {
+            for first in typed_element_updates(left) {
+                for second in typed_element_updates(right) {
+                    let mut validator = FirstCommitterWinsValidator::default();
+                    assert_eq!(
+                        validate(&mut validator, &rows_template(vec![first.clone()]), 1),
+                        Ok(())
+                    );
+                    assert_eq!(
+                        validate(&mut validator, &rows_template(vec![second]), 2),
+                        Ok(())
+                    );
+                    assert_eq!(validator.last_writer.get(&left), Some(&CommitSeq(1)));
+                    assert_eq!(validator.last_writer.get(&right), Some(&CommitSeq(2)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_element_updates_invalidate_retained_read_dependencies() {
+        for elem in [ElementId::Vertex(VId(7)), ElementId::Edge(EId(7))] {
+            for row in typed_element_updates(elem) {
+                let mut validator = FirstCommitterWinsValidator::default();
+                assert_eq!(validate(&mut validator, &rows_template(vec![row]), 1), Ok(()));
+                let mut validator = validator.with_dependencies([elem], []);
+                let before = validator.last_writer.clone();
+                let rejection = validate(&mut validator, &template(&[9]), 2)
+                    .expect_err("retained reads must notice post-snapshot typed updates");
+                assert_eq!(rejection.law, FCW_LAW);
+                assert_eq!(validator.last_writer, before);
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_typed_updates_install_neither_disjoint_writes_nor_adjacency() {
+        for elem in [ElementId::Vertex(VId(7)), ElementId::Edge(EId(7))] {
+            for row in typed_element_updates(elem) {
+                let mut validator = FirstCommitterWinsValidator::default();
+                assert_eq!(
+                    validate(&mut validator, &rows_template(vec![property(elem)]), 1),
+                    Ok(())
+                );
+                let writers_before = validator.last_writer.clone();
+                let adjacency_before = validator.adjacency_insertions.clone();
+                let disjoint = property(ElementId::Vertex(VId(9)));
+                let rejection = validate(
+                    &mut validator,
+                    &rows_template(vec![disjoint.clone(), edge(10, 1, 2), row]),
+                    2,
+                )
+                .expect_err("the overlapping typed row rejects the complete draft");
+                assert_eq!(rejection.law, FCW_LAW);
+                assert_eq!(validator.last_writer, writers_before);
+                assert_eq!(validator.adjacency_insertions, adjacency_before);
+                assert_eq!(
+                    validate(&mut validator, &rows_template(vec![disjoint, edge(10, 1, 2)]), 2),
+                    Ok(()),
+                    "a refused draft must not poison later disjoint validation"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_vertex_updates_invalidate_edge_endpoint_dependencies() {
+        for endpoint in [1, 2] {
+            for row in typed_element_updates(ElementId::Vertex(VId(endpoint))) {
+                let mut validator = FirstCommitterWinsValidator::default();
+                assert_eq!(validate(&mut validator, &rows_template(vec![row]), 1), Ok(()));
+                let writers_before = validator.last_writer.clone();
+                let rejection = validate(&mut validator, &rows_template(vec![edge(10, 1, 2)]), 2)
+                    .expect_err("edge endpoints must retain their prepared state");
+                assert_eq!(rejection.law, FCW_LAW);
+                assert_eq!(validator.last_writer, writers_before);
+                assert!(validator.adjacency_insertions.is_empty());
+            }
+        }
     }
 }
