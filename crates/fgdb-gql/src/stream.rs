@@ -483,7 +483,10 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             let Some(row) = row else {
                 continue;
             };
-            if !self.plan.accepts(vid, row, &mut |event| meter.event(event))? {
+            if !self
+                .plan
+                .accepts(vid, row, &mut |event| meter.event(event))?
+            {
                 continue;
             }
             meter.event(VertexScanEvent::Work)?;

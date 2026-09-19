@@ -256,12 +256,19 @@ fn open_pattern_stream<'q>(
     ),
     QueryError,
 > {
-    let cursor = if matches!(query.plan().operators().first(), Some(GlaOperator::ScanEdges { .. })) {
-        ScanCursor::Edge(view.stream_graph_edges_governed_at(cx, query, as_of, policy)
-            .map_err(QueryError::EdgeStream)?)
+    let cursor = if matches!(
+        query.plan().operators().first(),
+        Some(GlaOperator::ScanEdges { .. })
+    ) {
+        ScanCursor::Edge(
+            view.stream_graph_edges_governed_at(cx, query, as_of, policy)
+                .map_err(QueryError::EdgeStream)?,
+        )
     } else {
-        ScanCursor::Vertex(view.stream_graph_values_governed_at(cx, query, as_of, policy)
-            .map_err(QueryError::Stream)?)
+        ScanCursor::Vertex(
+            view.stream_graph_values_governed_at(cx, query, as_of, policy)
+                .map_err(QueryError::Stream)?,
+        )
     };
     Ok((query.columns().to_vec(), cursor))
 }

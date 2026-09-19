@@ -7,10 +7,13 @@
 //! and total for downstream admission. No new log, decoder or commit authority.
 
 use super::{IncrementalTriangles, TriangleError, TriangleQuantifier, TriangleUpdate};
-use crate::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeInputUpdate};
 use crate::zset::committed::snapshot::EdgeSnapshot;
+use crate::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeInputUpdate};
 use crate::zset::event;
-use crate::{LimbLimit, LocalDeltaBatchIndex, LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent, ZWeight};
+use crate::{
+    LimbLimit, LocalDeltaBatchIndex, LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent,
+    ZWeight,
+};
 use fgdb_types::{BranchId, CommitCx, CommitSeq, GraphId, VId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,13 +22,19 @@ pub enum CommittedTrianglesError<E> {
     Triangles(TriangleError<E>),
 }
 impl<E> From<EdgeInputError<E>> for CommittedTrianglesError<E> {
-    fn from(error: EdgeInputError<E>) -> Self { Self::Input(error) }
+    fn from(error: EdgeInputError<E>) -> Self {
+        Self::Input(error)
+    }
 }
 impl<E> From<TriangleError<E>> for CommittedTrianglesError<E> {
-    fn from(error: TriangleError<E>) -> Self { Self::Triangles(error) }
+    fn from(error: TriangleError<E>) -> Self {
+        Self::Triangles(error)
+    }
 }
 impl<E> From<ZSetError<E>> for CommittedTrianglesError<E> {
-    fn from(error: ZSetError<E>) -> Self { Self::Triangles(TriangleError::Delta(error)) }
+    fn from(error: ZSetError<E>) -> Self {
+        Self::Triangles(TriangleError::Delta(error))
+    }
 }
 impl<E: core::fmt::Display> core::fmt::Display for CommittedTrianglesError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -52,17 +61,28 @@ pub struct CommittedTriangles {
     triangles: IncrementalTriangles<VId>,
 }
 impl CommittedTriangles {
-    pub fn new(graph: GraphId, branch: BranchId, relation: RelationId, quantifier: TriangleQuantifier) -> Self {
-        Self { input: CommittedEdgeInput::new(graph, branch), relation,
-            triangles: IncrementalTriangles::new(quantifier) }
+    pub fn new(
+        graph: GraphId,
+        branch: BranchId,
+        relation: RelationId,
+        quantifier: TriangleQuantifier,
+    ) -> Self {
+        Self {
+            input: CommittedEdgeInput::new(graph, branch),
+            relation,
+            triangles: IncrementalTriangles::new(quantifier),
+        }
     }
 
     /// Consume a completed, source-authenticated current topology snapshot.
     /// Historical triangles are not replayed. A failure discards this private
     /// build; a live owner must also admit its sink before swapping generations.
     pub fn from_snapshot<E>(
-        snapshot: EdgeSnapshot, relation: RelationId, quantifier: TriangleQuantifier,
-        limbs: LimbLimit, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+        snapshot: EdgeSnapshot,
+        relation: RelationId,
+        quantifier: TriangleQuantifier,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<Self, CommittedTrianglesError<E>> {
         let EdgeSnapshot { input, delta } = snapshot;
         let edges = project(&delta, relation, limbs, control)?;
@@ -70,18 +90,32 @@ impl CommittedTriangles {
         let pending = triangles.prepare(&edges, limbs, control)?;
         event(control, ZSetEvent::Work)?;
         let _ = pending.commit();
-        Ok(Self { input, relation, triangles })
+        Ok(Self {
+            input,
+            relation,
+            triangles,
+        })
     }
 
-    pub fn frontier(&self) -> CommitSeq { self.input.frontier() }
-    pub fn relation(&self) -> RelationId { self.relation }
-    pub fn quantifier(&self) -> TriangleQuantifier { self.triangles.quantifier() }
+    pub fn frontier(&self) -> CommitSeq {
+        self.input.frontier()
+    }
+    pub fn relation(&self) -> RelationId {
+        self.relation
+    }
+    pub fn quantifier(&self) -> TriangleQuantifier {
+        self.triangles.quantifier()
+    }
     /// Exact count; never narrowed to u64/i128 or recomputed by scanning triples.
-    pub fn total(&self) -> &ZWeight { self.triangles.total() }
+    pub fn total(&self) -> &ZWeight {
+        self.triangles.total()
+    }
 
     /// Explicit audit/new-sink export. Ordinary maintenance does not call this.
     pub fn snapshot<E>(
-        &self, limbs: LimbLimit, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+        &self,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<ZSet<(VId, VId, VId)>, CommittedTrianglesError<E>> {
         self.triangles.snapshot(limbs, control).map_err(Into::into)
     }
@@ -90,10 +124,14 @@ impl CommittedTriangles {
     /// caught-up call validates the anchor. Empty triangle deltas still commit
     /// input identities and advance the frontier: they must not be skipped.
     pub fn prepare_next<E>(
-        &mut self, index: &LocalDeltaBatchIndex, limbs: LimbLimit,
+        &mut self,
+        index: &LocalDeltaBatchIndex,
+        limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<Option<CommittedTrianglesUpdate<'_>>, CommittedTrianglesError<E>> {
-        let Some(input) = self.input.prepare_next(index, limbs, control)? else { return Ok(None); };
+        let Some(input) = self.input.prepare_next(index, limbs, control)? else {
+            return Ok(None);
+        };
         Self::prepare_input(input, &mut self.triangles, self.relation, limbs, control).map(Some)
     }
 
@@ -101,16 +139,23 @@ impl CommittedTriangles {
     /// proves this is the next whole committed batch of the same source. Detached
     /// consumers use prepare_next and its retained-anchor checks instead.
     pub fn prepare_committed_successor<E>(
-        &mut self, cx: &CommitCx, batch: &LogicalDeltaBatch, limbs: LimbLimit,
+        &mut self,
+        cx: &CommitCx,
+        batch: &LogicalDeltaBatch,
+        limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<CommittedTrianglesUpdate<'_>, CommittedTrianglesError<E>> {
-        let input = self.input.prepare_committed_successor(cx, batch, limbs, control)?;
+        let input = self
+            .input
+            .prepare_committed_successor(cx, batch, limbs, control)?;
         Self::prepare_input(input, &mut self.triangles, self.relation, limbs, control)
     }
 
     fn prepare_input<'a, E>(
-        input: EdgeInputUpdate<'a>, triangles: &'a mut IncrementalTriangles<VId>,
-        relation: RelationId, limbs: LimbLimit,
+        input: EdgeInputUpdate<'a>,
+        triangles: &'a mut IncrementalTriangles<VId>,
+        relation: RelationId,
+        limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<CommittedTrianglesUpdate<'a>, CommittedTrianglesError<E>> {
         let edges = project(input.delta(), relation, limbs, control)?;
@@ -121,8 +166,10 @@ impl CommittedTriangles {
 }
 
 fn project<E>(
-    input: &ZSet<crate::zset::committed::EdgeTuple>, relation: RelationId,
-    limbs: LimbLimit, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    input: &ZSet<crate::zset::committed::EdgeTuple>,
+    relation: RelationId,
+    limbs: LimbLimit,
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<ZSet<(VId, VId)>, CommittedTrianglesError<E>> {
     let mut edges = ZSet::new();
     for ((r, a, b), weight) in input.iter() {
@@ -137,8 +184,10 @@ fn project<E>(
 
 impl core::fmt::Debug for CommittedTriangles {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("CommittedTriangles").field("frontier", &self.frontier())
-            .field("data", &"[REDACTED]").finish()
+        f.debug_struct("CommittedTriangles")
+            .field("frontier", &self.frontier())
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -148,9 +197,15 @@ pub struct CommittedTrianglesUpdate<'a> {
     triangles: TriangleUpdate<'a, VId>,
 }
 impl CommittedTrianglesUpdate<'_> {
-    pub fn commit_seq(&self) -> CommitSeq { self.input.commit_seq() }
-    pub fn delta(&self) -> &ZSet<(VId, VId, VId)> { self.triangles.delta() }
-    pub fn total(&self) -> &ZWeight { self.triangles.total() }
+    pub fn commit_seq(&self) -> CommitSeq {
+        self.input.commit_seq()
+    }
+    pub fn delta(&self) -> &ZSet<(VId, VId, VId)> {
+        self.triangles.delta()
+    }
+    pub fn total(&self) -> &ZWeight {
+        self.triangles.total()
+    }
 
     /// Publish only after every downstream participant prepares. There are no
     /// recoverable callbacks between these existing infallible publications;
@@ -164,8 +219,11 @@ impl CommittedTrianglesUpdate<'_> {
 }
 impl core::fmt::Debug for CommittedTrianglesUpdate<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("CommittedTrianglesUpdate").field("commit_seq", &self.commit_seq())
-            .field("delta_support", &self.delta().len()).field("data", &"[REDACTED]").finish()
+        f.debug_struct("CommittedTrianglesUpdate")
+            .field("commit_seq", &self.commit_seq())
+            .field("delta_support", &self.delta().len())
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 

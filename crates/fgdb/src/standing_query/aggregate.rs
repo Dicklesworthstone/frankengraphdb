@@ -446,7 +446,9 @@ impl<V: Vfs + Clone> Database<V> {
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQuery, StandingQueryError> {
-        self.prepare_standing_query_with_output::<super::output::State>(cx, definition, policy, None)
+        self.prepare_standing_query_with_output::<super::output::State>(
+            cx, definition, policy, None,
+        )
     }
 
     pub(super) fn prepare_standing_query_with_output<D: super::sink::GroupSink>(

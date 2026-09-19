@@ -465,10 +465,9 @@ mod tests {
     fn typed_element_updates_conflict_with_property_writes_in_both_orders() {
         for elem in [ElementId::Vertex(VId(7)), ElementId::Edge(EId(7))] {
             for row in typed_element_updates(elem) {
-                for (first, second) in [
-                    (row.clone(), property(elem)),
-                    (property(elem), row.clone()),
-                ] {
+                for (first, second) in
+                    [(row.clone(), property(elem)), (property(elem), row.clone())]
+                {
                     let mut validator = FirstCommitterWinsValidator::default();
                     assert_eq!(
                         validate(&mut validator, &rows_template(vec![first]), 1),
@@ -531,7 +530,10 @@ mod tests {
         for elem in [ElementId::Vertex(VId(7)), ElementId::Edge(EId(7))] {
             for row in typed_element_updates(elem) {
                 let mut validator = FirstCommitterWinsValidator::default();
-                assert_eq!(validate(&mut validator, &rows_template(vec![row]), 1), Ok(()));
+                assert_eq!(
+                    validate(&mut validator, &rows_template(vec![row]), 1),
+                    Ok(())
+                );
                 let mut validator = validator.with_dependencies([elem], []);
                 let before = validator.last_writer.clone();
                 let rejection = validate(&mut validator, &template(&[9]), 2)
@@ -564,7 +566,11 @@ mod tests {
                 assert_eq!(validator.last_writer, writers_before);
                 assert_eq!(validator.adjacency_insertions, adjacency_before);
                 assert_eq!(
-                    validate(&mut validator, &rows_template(vec![disjoint, edge(10, 1, 2)]), 2),
+                    validate(
+                        &mut validator,
+                        &rows_template(vec![disjoint, edge(10, 1, 2)]),
+                        2
+                    ),
                     Ok(()),
                     "a refused draft must not poison later disjoint validation"
                 );
@@ -577,7 +583,10 @@ mod tests {
         for endpoint in [1, 2] {
             for row in typed_element_updates(ElementId::Vertex(VId(endpoint))) {
                 let mut validator = FirstCommitterWinsValidator::default();
-                assert_eq!(validate(&mut validator, &rows_template(vec![row]), 1), Ok(()));
+                assert_eq!(
+                    validate(&mut validator, &rows_template(vec![row]), 1),
+                    Ok(())
+                );
                 let writers_before = validator.last_writer.clone();
                 let rejection = validate(&mut validator, &rows_template(vec![edge(10, 1, 2)]), 2)
                     .expect_err("edge endpoints must retain their prepared state");

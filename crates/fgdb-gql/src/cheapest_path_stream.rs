@@ -2,10 +2,9 @@
 //! The graph is admitted once; result pages are never precomputed or retained.
 
 use crate::{
-    GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded,
-    GqlBudgetDimension, GqlExecutionStats, GqlQueryError, GqlQueryPolicy,
-    GraphCheapestPathCursor, GraphCheapestPathError, GraphCostPath,
-    PreparedGraphCheapestPath,
+    GlaExecutionEvent, GlaExecutionStats, GlaLimitDimension, GlaLimitExceeded, GqlBudgetDimension,
+    GqlExecutionStats, GqlQueryError, GqlQueryPolicy, GraphCheapestPathCursor,
+    GraphCheapestPathError, GraphCostPath, PreparedGraphCheapestPath,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
@@ -65,8 +64,14 @@ impl PreparedGraphCheapestPath {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> StreamResult<GraphCheapestPathStream, E, C> {
         self.stream_governed_with_admission(
-            count, snapshot_records, vertices, edges, property,
-            GlaExecutionStats::default(), policy, checkpoint,
+            count,
+            snapshot_records,
+            vertices,
+            edges,
+            property,
+            GlaExecutionStats::default(),
+            policy,
+            checkpoint,
         )
     }
 
@@ -88,26 +93,43 @@ impl PreparedGraphCheapestPath {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> StreamResult<GraphCheapestPathStream, E, C> {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
-        policy.rows.check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
+        policy
+            .rows
+            .check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
             .map_err(GqlQueryError::Rows)?;
         for (dimension, observed, limit) in [
-            (GlaLimitDimension::WorkUnits, admission.work_units, policy.evaluator.max_work_units),
-            (GlaLimitDimension::ScratchEntries, admission.scratch_entries, policy.evaluator.max_scratch_entries),
+            (
+                GlaLimitDimension::WorkUnits,
+                admission.work_units,
+                policy.evaluator.max_work_units,
+            ),
+            (
+                GlaLimitDimension::ScratchEntries,
+                admission.scratch_entries,
+                policy.evaluator.max_scratch_entries,
+            ),
         ] {
             if observed > limit {
                 return Err(GqlQueryError::Evaluator(GlaLimitExceeded {
-                    dimension, limit, observed: u128::from(observed),
+                    dimension,
+                    limit,
+                    observed: u128::from(observed),
                 }));
             }
         }
         let mut evaluator = admission;
         let mut cursor = flatten(self.cursor_with_control(
-            vertices, edges,
-            |edge, key| property(edge, key)
-                .map_err(|error| GqlQueryError::Source(GraphCheapestPathError::Source(error))),
+            vertices,
+            edges,
+            |edge, key| {
+                property(edge, key)
+                    .map_err(|error| GqlQueryError::Source(GraphCheapestPathError::Source(error)))
+            },
             |event| {
                 checkpoint().map_err(GqlQueryError::Interrupted)?;
-                evaluator.charge_event(policy.evaluator, event).map_err(GqlQueryError::Evaluator)
+                evaluator
+                    .charge_event(policy.evaluator, event)
+                    .map_err(GqlQueryError::Evaluator)
             },
         ))?;
         checkpoint().map_err(GqlQueryError::Interrupted)?;
@@ -118,19 +140,32 @@ impl PreparedGraphCheapestPath {
             GraphCheapestPathStreamState::Open
         };
         Ok(GraphCheapestPathStream {
-            cursor, policy, rows: GqlExecutionStats { snapshot_records, result_rows: 0 },
-            evaluator, count, state,
+            cursor,
+            policy,
+            rows: GqlExecutionStats {
+                snapshot_records,
+                result_rows: 0,
+            },
+            evaluator,
+            count,
+            state,
         })
     }
 }
 
 impl GraphCheapestPathStream {
     #[must_use]
-    pub fn state(&self) -> GraphCheapestPathStreamState { self.state }
+    pub fn state(&self) -> GraphCheapestPathStreamState {
+        self.state
+    }
     #[must_use]
-    pub fn row_stats(&self) -> GqlExecutionStats { self.rows }
+    pub fn row_stats(&self) -> GqlExecutionStats {
+        self.rows
+    }
     #[must_use]
-    pub fn evaluator_stats(&self) -> GlaExecutionStats { self.evaluator }
+    pub fn evaluator_stats(&self) -> GlaExecutionStats {
+        self.evaluator
+    }
 
     /// Closing is idempotent. A completed/failed outcome is never relabeled,
     /// and its counters remain available. No source or search work is driven.
@@ -149,10 +184,16 @@ impl GraphCheapestPathStream {
         &mut self,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> StreamResult<Option<GraphCostPath>, Infallible, C> {
-        if self.state != GraphCheapestPathStreamState::Open { return Ok(None); }
+        if self.state != GraphCheapestPathStreamState::Open {
+            return Ok(None);
+        }
         // Open implies delivered < count <= u64::MAX. No unbounded row counter
         // or usize narrowing occurs, even for the largest legal K.
-        let next_count = self.rows.result_rows.checked_add(1).expect("open bounded K stream");
+        let next_count = self
+            .rows
+            .result_rows
+            .checked_add(1)
+            .expect("open bounded K stream");
         let policy = self.policy;
         let evaluator = &mut self.evaluator;
         let result = (|| {
@@ -160,10 +201,14 @@ impl GraphCheapestPathStream {
             let row = flatten(self.cursor.next_with_control(|event| {
                 checkpoint().map_err(GqlQueryError::Interrupted)?;
                 if event == GlaExecutionEvent::ResultRow {
-                    policy.rows.check(GqlBudgetDimension::ResultRows, next_count)
+                    policy
+                        .rows
+                        .check(GqlBudgetDimension::ResultRows, next_count)
                         .map_err(GqlQueryError::Rows)?;
                 }
-                evaluator.charge_event(policy.evaluator, event).map_err(GqlQueryError::Evaluator)
+                evaluator
+                    .charge_event(policy.evaluator, event)
+                    .map_err(GqlQueryError::Evaluator)
             }))?;
             // This also checks natural EOF; cancellation must not masquerade
             // as exhaustion after a potentially expensive final refinement.
@@ -200,7 +245,9 @@ fn flatten<T, E, C>(
 ) -> StreamResult<T, E, C> {
     result.map_err(|error| match error {
         GraphCheapestPathError::Source(error) => error,
-        GraphCheapestPathError::Cost(error) => GqlQueryError::Source(GraphCheapestPathError::Cost(error)),
+        GraphCheapestPathError::Cost(error) => {
+            GqlQueryError::Source(GraphCheapestPathError::Cost(error))
+        }
     })
 }
 
@@ -218,8 +265,9 @@ impl core::fmt::Debug for GraphCheapestPathStream {
 /// Scoped host driver for a single pull. The host must drive the supplied
 /// stream exactly once, inside its retained execution-purpose restriction.
 /// This is runtime composition, not an authentication or delegation interface.
-type StreamDriver<'scope, C> = dyn FnMut(&mut GraphCheapestPathStream)
-    -> StreamResult<Option<GraphCostPath>, Infallible, C> + Send + 'scope;
+type StreamDriver<'scope, C> = dyn FnMut(&mut GraphCheapestPathStream) -> StreamResult<Option<GraphCostPath>, Infallible, C>
+    + Send
+    + 'scope;
 
 /// A nameable, fused iterator retaining its host's execution scope and exact
 /// source sequence. Database adapters own the scope callback; callers cannot
@@ -238,23 +286,42 @@ impl GraphCheapestPathStream {
     pub fn into_scoped_iterator<'scope, C>(
         self,
         snapshot_seq: CommitSeq,
-        driver: impl FnMut(&mut GraphCheapestPathStream)
-            -> StreamResult<Option<GraphCostPath>, Infallible, C> + Send + 'scope,
+        driver: impl FnMut(
+            &mut GraphCheapestPathStream,
+        ) -> StreamResult<Option<GraphCostPath>, Infallible, C>
+        + Send
+        + 'scope,
     ) -> GraphCheapestPathStreamIterator<'scope, C> {
         let driver: Option<Box<StreamDriver<'scope, C>>> =
-            if self.state == GraphCheapestPathStreamState::Open { Some(Box::new(driver)) } else { None };
-        GraphCheapestPathStreamIterator { stream: self, snapshot_seq, driver }
+            if self.state == GraphCheapestPathStreamState::Open {
+                Some(Box::new(driver))
+            } else {
+                None
+            };
+        GraphCheapestPathStreamIterator {
+            stream: self,
+            snapshot_seq,
+            driver,
+        }
     }
 }
 impl<C> GraphCheapestPathStreamIterator<'_, C> {
     #[must_use]
-    pub fn snapshot_seq(&self) -> CommitSeq { self.snapshot_seq }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.snapshot_seq
+    }
     #[must_use]
-    pub fn state(&self) -> GraphCheapestPathStreamState { self.stream.state() }
+    pub fn state(&self) -> GraphCheapestPathStreamState {
+        self.stream.state()
+    }
     #[must_use]
-    pub fn row_stats(&self) -> GqlExecutionStats { self.stream.row_stats() }
+    pub fn row_stats(&self) -> GqlExecutionStats {
+        self.stream.row_stats()
+    }
     #[must_use]
-    pub fn evaluator_stats(&self) -> GlaExecutionStats { self.stream.evaluator_stats() }
+    pub fn evaluator_stats(&self) -> GlaExecutionStats {
+        self.stream.evaluator_stats()
+    }
     pub fn close(&mut self) {
         self.stream.close();
         self.driver = None;
@@ -281,11 +348,16 @@ impl<C> Iterator for GraphCheapestPathStreamIterator<'_, C> {
                 Some(Err(error))
             }
         };
-        if self.stream.state != GraphCheapestPathStreamState::Open { self.driver = None; }
+        if self.stream.state != GraphCheapestPathStreamState::Open {
+            self.driver = None;
+        }
         item
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, (self.state() != GraphCheapestPathStreamState::Open).then_some(0))
+        (
+            0,
+            (self.state() != GraphCheapestPathStreamState::Open).then_some(0),
+        )
     }
 }
 impl<C> std::iter::FusedIterator for GraphCheapestPathStreamIterator<'_, C> {}

@@ -58,7 +58,10 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
                 // even for the removal of its single terminal edge.
                 for predecessor in self.incoming.get(target).into_iter().flatten() {
                     event(control, ZSetEvent::Work)?;
-                    if removed.get(predecessor).is_some_and(|row| row.contains(target)) {
+                    if removed
+                        .get(predecessor)
+                        .is_some_and(|row| row.contains(target))
+                    {
                         continue;
                     }
                     if predecessor == &source
@@ -74,9 +77,7 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
                 let deleted = removed.get(&vertex);
                 for target in self.outgoing.get(&vertex).into_iter().flatten() {
                     event(control, ZSetEvent::Work)?;
-                    if targets.contains(target)
-                        && deleted.is_none_or(|row| !row.contains(target))
-                    {
+                    if targets.contains(target) && deleted.is_none_or(|row| !row.contains(target)) {
                         enqueue(&mut survived, &mut pending, target, control)?;
                     }
                 }

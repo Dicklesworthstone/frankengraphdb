@@ -93,10 +93,9 @@ impl core::fmt::Display for QueryError {
             Self::Set(e) => e.fmt(f),
             Self::Stream(e) => e.fmt(f),
             Self::EdgeStream(e) => e.fmt(f),
-            Self::StreamingUnsupported { facade } => write!(
-                f,
-                "native {facade:?} read has no supported pull execution"
-            ),
+            Self::StreamingUnsupported { facade } => {
+                write!(f, "native {facade:?} read has no supported pull execution")
+            }
             Self::Transaction(e) => e.fmt(f),
             Self::TemporalTransactionUnsupported { facade } => write!(
                 f,

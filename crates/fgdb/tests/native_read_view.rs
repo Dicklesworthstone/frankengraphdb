@@ -3,8 +3,8 @@
 
 use asupersync::lab::run_async_under_lab;
 use fgdb::{
-    Database, DatabaseKeys, GqlError, NativeReadClass, PreparedNativeRead, QueryError,
-    QueryResult, ReadError, WriteBatch,
+    Database, DatabaseKeys, GqlError, NativeReadClass, PreparedNativeRead, QueryError, QueryResult,
+    ReadError, WriteBatch,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_gql::algebra::GraphValue;
@@ -18,7 +18,11 @@ use std::cell::Cell;
 const PROPERTY: PropertyKeyId = PropertyKeyId(1);
 
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x91; 32], DatabaseSecurityNamespaceId([0x92; 32]), [0x93; 32])
+    DatabaseKeys::new(
+        [0x91; 32],
+        DatabaseSecurityNamespaceId([0x92; 32]),
+        [0x93; 32],
+    )
 }
 
 fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -34,23 +38,38 @@ fn policy() -> GqlQueryPolicy {
 
 fn batch(vid: u128, value: i64) -> WriteBatch {
     let mut batch = WriteBatch::new(RelationId(1));
-    batch.create_vertex(VId(vid), vec![], vec![(PROPERTY, CanonicalScalar::Int(value))]);
+    batch.create_vertex(
+        VId(vid),
+        vec![],
+        vec![(PROPERTY, CanonicalScalar::Int(value))],
+    );
     batch
 }
 
 fn integers(values: &[i64]) -> QueryResult {
     QueryResult::Rows {
         columns: vec!["p".to_owned()],
-        rows: values.iter().map(|value| vec![GraphAggregateValue::Value(
-            GraphValue::Scalar(CanonicalScalar::Int(*value)),
-        )]).collect(),
+        rows: values
+            .iter()
+            .map(|value| {
+                vec![GraphAggregateValue::Value(GraphValue::Scalar(
+                    CanonicalScalar::Int(*value),
+                ))]
+            })
+            .collect(),
     }
 }
 
 fn cases() -> [(&'static str, NativeReadClass); 7] {
     [
-        ("MATCH (n) RETURN n.p AS p ORDER BY p", NativeReadClass::Pattern),
-        ("MATCH (n) RETURN COUNT(*) AS total, SUM(n.p) AS amount", NativeReadClass::Aggregate),
+        (
+            "MATCH (n) RETURN n.p AS p ORDER BY p",
+            NativeReadClass::Pattern,
+        ),
+        (
+            "MATCH (n) RETURN COUNT(*) AS total, SUM(n.p) AS amount",
+            NativeReadClass::Aggregate,
+        ),
         (
             "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total, SUM(p) AS amount",
             NativeReadClass::PipelineAggregate,
@@ -96,8 +115,16 @@ fn all_native_classes_remain_generation_exact_after_writes_and_writer_drop() {
             let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
             assert_eq!(prepared.facade_class(), *class, "{text}");
             let result = db.query(&cx, text, &params, symbols, policy()).unwrap();
-            assert_eq!(view.query(&cx, text, &params, symbols, policy()).unwrap(), result);
-            assert_eq!(prepared.execute_in_view(&clone, &cx, &params, policy()).unwrap(), result);
+            assert_eq!(
+                view.query(&cx, text, &params, symbols, policy()).unwrap(),
+                result
+            );
+            assert_eq!(
+                prepared
+                    .execute_in_view(&clone, &cx, &params, policy())
+                    .unwrap(),
+                result
+            );
             plans.push(prepared);
             expected.push(result);
         }
@@ -109,12 +136,23 @@ fn all_native_classes_remain_generation_exact_after_writes_and_writer_drop() {
         let fresh = db.read_session().unwrap();
         assert!(!view.shares_decoded_state_with(&fresh));
         for (index, (text, _)) in cases.iter().enumerate() {
-            let result = plans[index].execute_in_view(&fresh, &cx, &params, policy()).unwrap();
-            assert_eq!(result, db.query(&cx, text, &params, symbols, policy()).unwrap());
+            let result = plans[index]
+                .execute_in_view(&fresh, &cx, &params, policy())
+                .unwrap();
+            assert_eq!(
+                result,
+                db.query(&cx, text, &params, symbols, policy()).unwrap()
+            );
             if index < 4 {
-                assert_ne!(result, expected[index], "the successor really changes this answer");
+                assert_ne!(
+                    result, expected[index],
+                    "the successor really changes this answer"
+                );
             } else {
-                assert_eq!(result, expected[index], "temporal reads select the older cut");
+                assert_eq!(
+                    result, expected[index],
+                    "temporal reads select the older cut"
+                );
             }
         }
         drop(db);
@@ -126,7 +164,9 @@ fn all_native_classes_remain_generation_exact_after_writes_and_writer_drop() {
                 "{text}",
             );
             assert_eq!(
-                plans[index].execute_in_view(&clone, &cx, &params, policy()).unwrap(),
+                plans[index]
+                    .execute_in_view(&clone, &cx, &params, policy())
+                    .unwrap(),
                 expected[index],
             );
         }
@@ -154,21 +194,36 @@ fn prepared_native_reads_rebind_parameters_without_reopening_or_resolving() {
         let plan = PreparedNativeRead::prepare(text, &low, |kind: GraphSymbolKind, name: &str| {
             calls.set(calls.get() + 1);
             symbols(kind, name)
-        }).unwrap();
+        })
+        .unwrap();
         let prepared_calls = calls.get();
         assert!(prepared_calls > 0);
         db.write(&commit, batch(3, 23)).await.unwrap();
         drop(db);
         for _ in 0..3 {
-            assert_eq!(plan.execute_in_view(&view, &cx, &low, policy()).unwrap(), integers(&[4, 11]));
-            assert_eq!(plan.execute_in_view(&view, &cx, &high, policy()).unwrap(), integers(&[11]));
+            assert_eq!(
+                plan.execute_in_view(&view, &cx, &low, policy()).unwrap(),
+                integers(&[4, 11])
+            );
+            assert_eq!(
+                plan.execute_in_view(&view, &cx, &high, policy()).unwrap(),
+                integers(&[11])
+            );
         }
         assert!(matches!(
-            plan.execute_in_view(&view, &cx, &GqlParameters::new(), GqlQueryPolicy::new(0, 0, 0, 0)),
+            plan.execute_in_view(
+                &view,
+                &cx,
+                &GqlParameters::new(),
+                GqlQueryPolicy::new(0, 0, 0, 0)
+            ),
             Err(QueryError::PatternText(_)),
         ));
         assert_eq!(calls.get(), prepared_calls);
-        assert_eq!(view.query(&cx, text, &low, symbols, policy()).unwrap(), integers(&[4, 11]));
+        assert_eq!(
+            view.query(&cx, text, &low, symbols, policy()).unwrap(),
+            integers(&[4, 11])
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -195,15 +250,23 @@ fn future_history_cannot_escape_the_view_even_with_zero_budget_or_empty_output()
             db.query(&cx, text, &params, symbols, policy()).unwrap();
             let plan = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
             for allowance in [policy(), GqlQueryPolicy::new(0, 0, 0, 0)] {
-                let error = plan.execute_in_view(&view, &cx, &params, allowance).unwrap_err();
+                let error = plan
+                    .execute_in_view(&view, &cx, &params, allowance)
+                    .unwrap_err();
                 let source = match (index, error) {
                     (0, QueryError::Pattern(GqlQueryError::Source(GqlError::Read(error)))) => error,
-                    (1, QueryError::Aggregate(GqlQueryError::Source(GraphAggregateError::Source(
-                        GqlError::Read(error),
-                    )))) => error,
-                    (2, QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Source(
-                        GqlError::Read(error),
-                    )))) => error,
+                    (
+                        1,
+                        QueryError::Aggregate(GqlQueryError::Source(GraphAggregateError::Source(
+                            GqlError::Read(error),
+                        ))),
+                    ) => error,
+                    (
+                        2,
+                        QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Source(
+                            GqlError::Read(error),
+                        ))),
+                    ) => error,
                     (_, error) => panic!("history refusal was masked: {error:?}"),
                 };
                 assert!(matches!(source, ReadError::BeyondFrontier {
@@ -211,7 +274,11 @@ fn future_history_cannot_escape_the_view_even_with_zero_budget_or_empty_output()
                 } if frontier == basis));
             }
         }
-        assert_eq!(view.query(&cx, "MATCH (n) RETURN n.p AS p", &params, symbols, policy()).unwrap(), integers(&[4]));
+        assert_eq!(
+            view.query(&cx, "MATCH (n) RETURN n.p AS p", &params, symbols, policy())
+                .unwrap(),
+            integers(&[4])
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -230,15 +297,24 @@ fn native_output_refusals_leave_the_retained_generation_reusable() {
         let no_output = GqlQueryPolicy::new(10_000, 0, 1_000_000, 1_000_000);
         for (text, _) in cases() {
             let expected = view.query(&cx, text, &params, symbols, policy()).unwrap();
-            let error = view.query(&cx, text, &params, symbols, no_output).unwrap_err();
-            assert!(matches!(error,
+            let error = view
+                .query(&cx, text, &params, symbols, no_output)
+                .unwrap_err();
+            assert!(matches!(
+                error,
                 QueryError::Pattern(GqlQueryError::Rows(_))
                     | QueryError::Aggregate(GqlQueryError::Rows(_))
                     | QueryError::Set(GqlQueryError::Rows(_))
             ));
-            assert_eq!(view.query(&cx, text, &params, symbols, policy()).unwrap(), expected);
+            assert_eq!(
+                view.query(&cx, text, &params, symbols, policy()).unwrap(),
+                expected
+            );
         }
-        assert_eq!((view.frontier(), view.manifest(), view.partition_root()), identity);
+        assert_eq!(
+            (view.frontier(), view.manifest(), view.partition_root()),
+            identity
+        );
         assert_eq!(db.frontier().unwrap(), view.frontier());
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -250,9 +326,16 @@ fn collected_values(
 ) -> QueryResult {
     QueryResult::Rows {
         columns,
-        rows: rows.into_iter().map(|row| {
-            row.values().iter().cloned().map(GraphAggregateValue::Value).collect()
-        }).collect(),
+        rows: rows
+            .into_iter()
+            .map(|row| {
+                row.values()
+                    .iter()
+                    .cloned()
+                    .map(GraphAggregateValue::Value)
+                    .collect()
+            })
+            .collect(),
     }
 }
 
@@ -304,7 +387,10 @@ fn native_pull_queries_match_eager_rows_without_borrowing_the_writer_or_template
             }
             assert_eq!(cursor.state(), VertexScanState::Exhausted);
             assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);
-            assert_eq!(rows.iter().map(projected_property).collect::<Vec<_>>(), expected_properties[index].to_vec());
+            assert_eq!(
+                rows.iter().map(projected_property).collect::<Vec<_>>(),
+                expected_properties[index].to_vec()
+            );
             assert_eq!(collected_values(columns, rows), expected);
         }
 
@@ -341,19 +427,30 @@ fn native_pull_close_limits_and_late_errors_preserve_cumulative_accounting() {
             db.write(&commit, batch(vid, vid as i64)).await.unwrap();
         }
         let params = GqlParameters::new();
-        let prepared = PreparedNativeRead::prepare(
-            "MATCH (n) RETURN n AS id, n.p AS p", &params, symbols,
-        ).unwrap();
+        let prepared =
+            PreparedNativeRead::prepare("MATCH (n) RETURN n AS id, n.p AS p", &params, symbols)
+                .unwrap();
         let view = db.read_session().unwrap();
-        let (_, mut cursor) = prepared.stream_in_view(
-            &view, &cx, &params, GqlQueryPolicy::new(10_000, 1, 1_000_000, 1_000_000),
-        ).unwrap();
+        let (_, mut cursor) = prepared
+            .stream_in_view(
+                &view,
+                &cx,
+                &params,
+                GqlQueryPolicy::new(10_000, 1, 1_000_000, 1_000_000),
+            )
+            .unwrap();
         assert_eq!(projected_property(&cursor.next().unwrap().unwrap()), 1);
         assert_eq!(cursor.row_stats().result_rows, 1);
-        assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Rows(error)))
-            if error.dimension == GqlBudgetDimension::ResultRows));
+        assert!(
+            matches!(cursor.next(), Some(Err(GqlQueryError::Rows(error)))
+            if error.dimension == GqlBudgetDimension::ResultRows)
+        );
         assert_eq!(cursor.state(), VertexScanState::Failed);
-        assert_eq!(cursor.row_stats().result_rows, 1, "failed row never escapes");
+        assert_eq!(
+            cursor.row_stats().result_rows,
+            1,
+            "failed row never escapes"
+        );
         let rows = cursor.row_stats();
         let work = cursor.evaluator_stats();
         cursor.close();
@@ -363,18 +460,27 @@ fn native_pull_close_limits_and_late_errors_preserve_cumulative_accounting() {
         assert_eq!(cursor.evaluator_stats(), work);
         assert_eq!(cursor.state(), VertexScanState::Failed);
 
-        let (_, mut cursor) = prepared.stream_in_view(
-            &view, &cx, &params, GqlQueryPolicy::new(2, 10, 1_000_000, 1_000_000),
-        ).unwrap();
+        let (_, mut cursor) = prepared
+            .stream_in_view(
+                &view,
+                &cx,
+                &params,
+                GqlQueryPolicy::new(2, 10, 1_000_000, 1_000_000),
+            )
+            .unwrap();
         assert!(cursor.next().unwrap().is_ok());
         assert!(cursor.next().unwrap().is_ok());
-        assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Rows(error)))
-            if error.dimension == GqlBudgetDimension::SnapshotRecords));
+        assert!(
+            matches!(cursor.next(), Some(Err(GqlQueryError::Rows(error)))
+            if error.dimension == GqlBudgetDimension::SnapshotRecords)
+        );
         assert_eq!(cursor.row_stats().snapshot_records, 2);
         assert_eq!(cursor.row_stats().result_rows, 2);
         assert_eq!(cursor.state(), VertexScanState::Failed);
 
-        let (_, mut cursor) = prepared.stream_in_view(&view, &cx, &params, policy()).unwrap();
+        let (_, mut cursor) = prepared
+            .stream_in_view(&view, &cx, &params, policy())
+            .unwrap();
         assert!(cursor.next().unwrap().is_ok());
         let rows = cursor.row_stats();
         let work = cursor.evaluator_stats();
@@ -383,23 +489,39 @@ fn native_pull_close_limits_and_late_errors_preserve_cumulative_accounting() {
         assert_eq!(cursor.state(), VertexScanState::Closed);
         assert!(cursor.next().is_none());
         assert_eq!(cursor.row_stats(), rows);
-        assert_eq!(cursor.evaluator_stats(), work, "close cannot drain the suffix");
+        assert_eq!(
+            cursor.evaluator_stats(),
+            work,
+            "close cannot drain the suffix"
+        );
 
         for limit in [0, 1] {
             let text = format!("MATCH (n) RETURN n AS id, n.p AS p LIMIT {limit}");
             let plan = PreparedNativeRead::prepare(&text, &params, symbols).unwrap();
-            let (_, mut cursor) = plan.stream_in_view(
-                &view, &cx, &params, GqlQueryPolicy::new(limit, limit, 1_000_000, 1_000_000),
-            ).unwrap();
-            for _ in 0..limit { assert!(cursor.next().unwrap().is_ok()); }
+            let (_, mut cursor) = plan
+                .stream_in_view(
+                    &view,
+                    &cx,
+                    &params,
+                    GqlQueryPolicy::new(limit, limit, 1_000_000, 1_000_000),
+                )
+                .unwrap();
+            for _ in 0..limit {
+                assert!(cursor.next().unwrap().is_ok());
+            }
             assert!(cursor.next().is_none());
             assert_eq!(cursor.state(), VertexScanState::Exhausted);
             assert_eq!(cursor.row_stats().snapshot_records, limit);
             assert_eq!(cursor.row_stats().result_rows, limit);
         }
         // The original view remains usable after every cursor terminal state.
-        let (_, mut fresh) = prepared.stream_in_view(&view, &cx, &params, policy()).unwrap();
-        assert_eq!(fresh.by_ref().collect::<Result<Vec<_>, _>>().unwrap().len(), 4);
+        let (_, mut fresh) = prepared
+            .stream_in_view(&view, &cx, &params, policy())
+            .unwrap();
+        assert_eq!(
+            fresh.by_ref().collect::<Result<Vec<_>, _>>().unwrap().len(),
+            4
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -417,19 +539,32 @@ fn native_pull_refuses_nonstreamable_classes_and_operators_without_eager_fallbac
         let params = GqlParameters::new();
         for (text, class) in cases() {
             let prepared = PreparedNativeRead::prepare(text, &params, symbols).unwrap();
-            prepared.execute_in_view(&view, &cx, &params, policy()).unwrap();
-            let error = prepared.stream_in_view(&view, &cx, &params, policy()).unwrap_err();
-            if matches!(class, NativeReadClass::Pattern | NativeReadClass::TemporalPattern) {
+            prepared
+                .execute_in_view(&view, &cx, &params, policy())
+                .unwrap();
+            let error = prepared
+                .stream_in_view(&view, &cx, &params, policy())
+                .unwrap_err();
+            if matches!(
+                class,
+                NativeReadClass::Pattern | NativeReadClass::TemporalPattern
+            ) {
                 // These particular cases project only a property: canonical
                 // order requires sorting, which the bounded stream cannot do.
-                assert!(matches!(error, QueryError::Stream(
-                    GqlQueryError::Source(VertexScanError::Plan(_)))));
+                assert!(matches!(
+                    error,
+                    QueryError::Stream(GqlQueryError::Source(VertexScanError::Plan(_)))
+                ));
             } else {
                 assert!(matches!(error, QueryError::StreamingUnsupported { facade }
                     if facade == class));
             }
         }
-        assert_eq!(view.query(&cx, "MATCH (n) RETURN n.p AS p", &params, symbols, policy()).unwrap(), integers(&[4]));
+        assert_eq!(
+            view.query(&cx, "MATCH (n) RETURN n.p AS p", &params, symbols, policy())
+                .unwrap(),
+            integers(&[4])
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -448,9 +583,18 @@ fn native_pull_rebinds_arguments_and_refuses_future_history_before_zero_limits()
         let params = GqlParameters::new();
         let future = PreparedNativeRead::prepare(
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN n AS id, n.p AS p LIMIT 0",
-            &params, symbols,
-        ).unwrap();
-        assert!(future.stream(&db, &cx, &params, policy()).unwrap().1.next().is_none());
+            &params,
+            symbols,
+        )
+        .unwrap();
+        assert!(
+            future
+                .stream(&db, &cx, &params, policy())
+                .unwrap()
+                .1
+                .next()
+                .is_none()
+        );
         assert!(matches!(
             future.stream_in_view(&view, &cx, &params, GqlQueryPolicy::new(0, 0, 0, 0)),
             Err(QueryError::Stream(GqlQueryError::Source(VertexScanError::Source(
@@ -461,15 +605,19 @@ fn native_pull_rebinds_arguments_and_refuses_future_history_before_zero_limits()
         let high = GqlParameters::new().with_int64("floor", 9).unwrap();
         let calls = Cell::new(0);
         let prepared = PreparedNativeRead::prepare(
-            "MATCH (n) WHERE n.p > $floor RETURN n AS id, n.p AS p", &low,
+            "MATCH (n) WHERE n.p > $floor RETURN n AS id, n.p AS p",
+            &low,
             |kind: GraphSymbolKind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             },
-        ).unwrap();
+        )
+        .unwrap();
         let resolved = calls.get();
         let (_, mut lower) = prepared.stream_in_view(&view, &cx, &low, policy()).unwrap();
-        let (_, mut higher) = prepared.stream_in_view(&view, &cx, &high, policy()).unwrap();
+        let (_, mut higher) = prepared
+            .stream_in_view(&view, &cx, &high, policy())
+            .unwrap();
         assert!(matches!(
             prepared.stream_in_view(&view, &cx, &GqlParameters::new(), policy()),
             Err(QueryError::PatternText(_))
@@ -482,7 +630,11 @@ fn native_pull_rebinds_arguments_and_refuses_future_history_before_zero_limits()
         assert_eq!(projected_property(&lower.next().unwrap().unwrap()), 4);
         assert!(lower.next().is_none());
         assert!(higher.next().is_none());
-        assert_eq!(calls.get(), resolved, "pulling cannot re-enter the resolver");
+        assert_eq!(
+            calls.get(),
+            resolved,
+            "pulling cannot re-enter the resolver"
+        );
         assert_eq!(lower.snapshot_seq(), basis);
         assert_eq!(higher.snapshot_seq(), basis);
     });

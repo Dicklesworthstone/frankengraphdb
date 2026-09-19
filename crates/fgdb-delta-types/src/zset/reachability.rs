@@ -398,7 +398,11 @@ impl<V: Ord + Clone> ReachabilityUpdate<'_, V> {
         }
         for (source, row) in inserted {
             for destination in &row {
-                owner.incoming.entry(destination.clone()).or_default().insert(source.clone());
+                owner
+                    .incoming
+                    .entry(destination.clone())
+                    .or_default()
+                    .insert(source.clone());
             }
             owner.outgoing.entry(source).or_default().extend(row);
         }

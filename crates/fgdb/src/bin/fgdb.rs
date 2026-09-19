@@ -286,9 +286,12 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                         .split_once('=')
                         .ok_or_else(|| Failure::usage("expected --param name=value"))?;
                     let target = if command == "transaction" {
-                        &mut steps.last_mut().ok_or_else(|| {
-                            Failure::usage("transaction --param must follow --query or --write")
-                        })?.raw_params
+                        &mut steps
+                            .last_mut()
+                            .ok_or_else(|| {
+                                Failure::usage("transaction --param must follow --query or --write")
+                            })?
+                            .raw_params
                     } else {
                         &mut raw_params
                     };
@@ -351,7 +354,9 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         transaction::validate_input(&steps)?;
     }
     if stream && certify_to.is_some() {
-        return Err(Failure::usage("--stream cannot be combined with --certify-to"));
+        return Err(Failure::usage(
+            "--stream cannot be combined with --certify-to",
+        ));
     }
     Ok(Options {
         db: db.ok_or_else(|| Failure::usage("--db required"))?,

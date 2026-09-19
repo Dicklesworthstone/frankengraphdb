@@ -9,8 +9,8 @@ use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_gql::algebra::{GlaPlan, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{
-    EdgeScanCursor, EdgeScanError, EdgeScanPlan, EdgeScanRow, EdgeScanSource,
-    EdgeScanSourceError, VertexScanRow,
+    EdgeScanCursor, EdgeScanError, EdgeScanPlan, EdgeScanRow, EdgeScanSource, EdgeScanSourceError,
+    VertexScanRow,
 };
 use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy};
 use fgdb_types::{CommitSeq, EId, QueryCx, VId};
@@ -30,7 +30,9 @@ pub struct SnapshotEdgeSource<'q> {
 }
 impl EdgeScanSource for SnapshotEdgeSource<'_> {
     type Error = ReadError;
-    fn snapshot_seq(&self) -> CommitSeq { self.as_of }
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.as_of
+    }
 
     fn next_edge<C>(
         &mut self,
@@ -51,13 +53,18 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
                     node = current.right.0.as_deref();
                 }
             }
-            if let Some(eid) = successor { self.after = Some(eid); }
+            if let Some(eid) = successor {
+                self.after = Some(eid);
+            }
             Ok(successor)
         })
     }
 
     fn next_incident_edge<C>(
-        &self, endpoint: VId, direction: fgdb_gql::algebra::GlaDirection, after: Option<EId>,
+        &self,
+        endpoint: VId,
+        direction: fgdb_gql::algebra::GlaDirection,
+        after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, fgdb_gql::edge_stream::EdgeExpansionSourceError<ReadError, C>> {
         expansion::next(self, endpoint, direction, after, control)
@@ -77,10 +84,15 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
                 match eid.cmp(&current.key) {
                     core::cmp::Ordering::Less => node = current.left.0.as_deref(),
                     core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
-                    core::cmp::Ordering::Equal => { history = Some(&current.value); break; }
+                    core::cmp::Ordering::Equal => {
+                        history = Some(&current.value);
+                        break;
+                    }
                 }
             }
-            let Some(history) = history else { return Ok(None); };
+            let Some(history) = history else {
+                return Ok(None);
+            };
             let mut node = history.0.as_deref();
             let mut winner = None;
             while let Some(current) = node {
@@ -96,10 +108,14 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
                     node = current.left.0.as_deref();
                 }
             }
-            let Some((_, block, row)) = winner else { return Ok(None); };
+            let Some((_, block, row)) = winner else {
+                return Ok(None);
+            };
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
             let entry = &snapshot.blocks[block][row];
-            if !entry.visible_at(self.as_of) { return Ok(None); }
+            if !entry.visible_at(self.as_of) {
+                return Ok(None);
+            }
             Ok(Some(EdgeScanRow {
                 source: entry.src,
                 target: entry.dst,
@@ -117,22 +133,32 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
         self.cx.with_restriction(|| {
             let snapshot = &self.view.snapshot;
             control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            snapshot.property_index.visible_row(&snapshot.patches, vid, self.as_of, &mut |event| {
-                control(match event {
-                    // SnapshotRecords counts candidate EDGE histories once,
-                    // not orientations, endpoint histories or their versions.
-                    SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
-                    SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+            snapshot
+                .property_index
+                .visible_row(&snapshot.patches, vid, self.as_of, &mut |event| {
+                    control(match event {
+                        // SnapshotRecords counts candidate EDGE histories once,
+                        // not orientations, endpoint histories or their versions.
+                        SourceEvent::Work | SourceEvent::SnapshotRecord => GlaExecutionEvent::Work,
+                        SourceEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                    })
                 })
-            }).map(|row| row.map(|row| VertexScanRow { labels: &row.labels, properties: &row.props }))
+                .map(|row| {
+                    row.map(|row| VertexScanRow {
+                        labels: &row.labels,
+                        properties: &row.props,
+                    })
+                })
                 .map_err(EdgeScanSourceError::Control)
         })
     }
 }
 impl core::fmt::Debug for SnapshotEdgeSource<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("SnapshotEdgeSource").field("as_of", &self.as_of)
-            .field("generation_and_position", &"[REDACTED]").finish()
+        f.debug_struct("SnapshotEdgeSource")
+            .field("as_of", &self.as_of)
+            .field("generation_and_position", &"[REDACTED]")
+            .finish()
     }
 }
 fn source_error(error: ReadError) -> StreamError {
@@ -144,13 +170,26 @@ fn open<'q>(
     logical: &GlaPlan<GraphValueRow>,
     as_of: CommitSeq,
     policy: GqlQueryPolicy,
-) -> Result<EdgeScanCursor<SnapshotEdgeSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>, StreamError> {
+) -> Result<
+    EdgeScanCursor<SnapshotEdgeSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>,
+    StreamError,
+> {
     view.snapshot.check_frontier(as_of).map_err(source_error)?;
     let plan = EdgeScanPlan::compile(logical)
         .map_err(|error| GqlQueryError::Source(EdgeScanError::Plan(error)))?;
-    cx.with_restriction(|| cx.checkpoint()).map_err(GqlQueryError::Interrupted)?;
-    Ok(EdgeScanCursor::new(SnapshotEdgeSource { view, cx, as_of, after: None }, plan, policy,
-        move || cx.with_restriction(|| cx.checkpoint())))
+    cx.with_restriction(|| cx.checkpoint())
+        .map_err(GqlQueryError::Interrupted)?;
+    Ok(EdgeScanCursor::new(
+        SnapshotEdgeSource {
+            view,
+            cx,
+            as_of,
+            after: None,
+        },
+        plan,
+        policy,
+        move || cx.with_restriction(|| cx.checkpoint()),
+    ))
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -164,8 +203,17 @@ impl<V: Vfs + Clone> Database<V> {
     /// The pinned decoded generation remains resident: this is not out-of-core
     /// storage, FreeJoin/WCOJ, transaction streaming or a durable token.
     pub fn stream_graph_edges_governed<'q>(
-        &self, cx: &'q QueryCx, pattern: &PreparedGraphPattern<GraphValueRow>, policy: GqlQueryPolicy,
-    ) -> Result<EdgeScanCursor<SnapshotEdgeSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>>, StreamError> {
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        EdgeScanCursor<
+            SnapshotEdgeSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
+        >,
+        StreamError,
+    > {
         let view = self.read_session().map_err(source_error)?;
         let as_of = view.frontier();
         open(view, cx, pattern.plan(), as_of, policy)
@@ -175,23 +223,50 @@ impl<V: Vfs + Clone> Database<V> {
     /// LIMIT 0. SnapshotRecords counts examined candidate histories; unlike the
     /// eager executor it need not count the entire source before the first row.
     pub fn stream_graph_edges_governed_at<'q>(
-        &self, cx: &'q QueryCx, pattern: &PreparedGraphPattern<GraphValueRow>,
-        as_of: CommitSeq, policy: GqlQueryPolicy,
-    ) -> Result<EdgeScanCursor<SnapshotEdgeSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>>, StreamError> {
-        open(self.read_session().map_err(source_error)?, cx, pattern.plan(), as_of, policy)
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        EdgeScanCursor<
+            SnapshotEdgeSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
+        >,
+        StreamError,
+    > {
+        open(
+            self.read_session().map_err(source_error)?,
+            cx,
+            pattern.plan(),
+            as_of,
+            policy,
+        )
     }
 }
 impl EmbeddedReadView {
     pub fn stream_graph_edges_governed<'q>(
-        &self, cx: &'q QueryCx, pattern: &PreparedGraphPattern<GraphValueRow>, policy: GqlQueryPolicy,
-    ) -> Result<EdgeScanCursor<SnapshotEdgeSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>, StreamError> {
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        EdgeScanCursor<SnapshotEdgeSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>,
+        StreamError,
+    > {
         open(self.clone(), cx, pattern.plan(), self.frontier(), policy)
     }
 
     pub fn stream_graph_edges_governed_at<'q>(
-        &self, cx: &'q QueryCx, pattern: &PreparedGraphPattern<GraphValueRow>,
-        as_of: CommitSeq, policy: GqlQueryPolicy,
-    ) -> Result<EdgeScanCursor<SnapshotEdgeSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>, StreamError> {
+        &self,
+        cx: &'q QueryCx,
+        pattern: &PreparedGraphPattern<GraphValueRow>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<
+        EdgeScanCursor<SnapshotEdgeSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>,
+        StreamError,
+    > {
         open(self.clone(), cx, pattern.plan(), as_of, policy)
     }
 }

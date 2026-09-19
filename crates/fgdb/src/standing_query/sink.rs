@@ -13,7 +13,9 @@ pub(super) trait PreparedSink {
 }
 
 pub(super) trait GroupSink {
-    type Prepared<'a>: PreparedSink where Self: 'a;
+    type Prepared<'a>: PreparedSink
+    where
+        Self: 'a;
 
     fn prepare<'a>(
         &'a mut self,
@@ -35,7 +37,9 @@ impl GroupSink for output::State {
 }
 
 impl PreparedSink for output::Update<'_> {
-    fn commit(self) { output::Update::commit(self); }
+    fn commit(self) {
+        output::Update::commit(self);
+    }
 }
 
 impl GroupSink for row::State {
@@ -51,5 +55,7 @@ impl GroupSink for row::State {
 }
 
 impl PreparedSink for row::Update<'_> {
-    fn commit(self) { row::Update::commit(self); }
+    fn commit(self) {
+        row::Update::commit(self);
+    }
 }

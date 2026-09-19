@@ -7,7 +7,10 @@ use fgdb_gql::algebra::GlaDirection;
 use fgdb_gql::edge_stream::EdgeExpansionSourceError;
 
 pub(super) fn next<C>(
-    source: &SnapshotEdgeSource<'_>, endpoint: VId, direction: GlaDirection, after: Option<EId>,
+    source: &SnapshotEdgeSource<'_>,
+    endpoint: VId,
+    direction: GlaDirection,
+    after: Option<EId>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
 ) -> Result<Option<EId>, EdgeExpansionSourceError<ReadError, C>> {
     source.cx.with_restriction(|| {
@@ -20,14 +23,19 @@ pub(super) fn next<C>(
                 let right = successor(&index.incoming, endpoint, after, control)?;
                 // Strict > after on both sides deduplicates the same EId in
                 // both faces (self loops) without suppressing parallel edges.
-                Ok(match (left, right) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) })
+                Ok(match (left, right) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                })
             })(),
         };
         result.map_err(|error| EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(error)))
     })
 }
 fn successor<C>(
-    face: &IndexMap<VId, IndexMap<EId, ()>>, endpoint: VId, after: Option<EId>,
+    face: &IndexMap<VId, IndexMap<EId, ()>>,
+    endpoint: VId,
+    after: Option<EId>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
 ) -> Result<Option<EId>, C> {
     let mut node = face.0.as_deref();
@@ -37,10 +45,15 @@ fn successor<C>(
         match endpoint.cmp(&current.key) {
             core::cmp::Ordering::Less => node = current.left.0.as_deref(),
             core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
-            core::cmp::Ordering::Equal => { incidence = Some(&current.value); break; }
+            core::cmp::Ordering::Equal => {
+                incidence = Some(&current.value);
+                break;
+            }
         }
     }
-    let Some(incidence) = incidence else { return Ok(None); };
+    let Some(incidence) = incidence else {
+        return Ok(None);
+    };
     let mut node = incidence.0.as_deref();
     let mut next = None;
     while let Some(current) = node {
@@ -68,29 +81,63 @@ mod tests {
     fn every_incidence_seek_checkpoint_is_fallible_and_positions_are_caller_owned() {
         let ((), report) = run_async_under_lab(0x6a6f_6904, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
-            let cx = contexts.query(); let commit = contexts.commit();
-            let keys = crate::DatabaseKeys::new([0x12; 32], DatabaseSecurityNamespaceId([0x23; 32]), [0x34; 32]);
+            let cx = contexts.query();
+            let commit = contexts.commit();
+            let keys = crate::DatabaseKeys::new(
+                [0x12; 32],
+                DatabaseSecurityNamespaceId([0x23; 32]),
+                [0x34; 32],
+            );
             let mut db = Database::open_memory(&commit, keys).await.unwrap();
             let mut batch = crate::WriteBatch::new(RelationId(1));
-            for v in 0..8 { batch.create_vertex(VId(v), vec![], vec![]); }
-            for i in 0..32 { batch.add_edge(EId(i), VId(i % 8), VId((i + 1) % 8), vec![]); }
+            for v in 0..8 {
+                batch.create_vertex(VId(v), vec![], vec![]);
+            }
+            for i in 0..32 {
+                batch.add_edge(EId(i), VId(i % 8), VId((i + 1) % 8), vec![]);
+            }
             batch.add_edge(EId(u128::MAX), VId(0), VId(0), vec![]);
             db.write(&commit, batch).await.unwrap();
-            let source = SnapshotEdgeSource { view: db.read_session().unwrap(), cx: &cx, as_of: db.frontier().unwrap(), after: None };
-            for direction in [GlaDirection::Forward, GlaDirection::Reverse, GlaDirection::Undirected] {
+            let source = SnapshotEdgeSource {
+                view: db.read_session().unwrap(),
+                cx: &cx,
+                as_of: db.frontier().unwrap(),
+                after: None,
+            };
+            for direction in [
+                GlaDirection::Forward,
+                GlaDirection::Reverse,
+                GlaDirection::Undirected,
+            ] {
                 for after in [None, Some(EId(0)), Some(EId(31)), Some(EId(u128::MAX))] {
                     let mut total = 0;
-                    let expected = next(&source, VId(0), direction, after, &mut |_| { total += 1; Ok::<_, usize>(()) }).unwrap();
+                    let expected = next(&source, VId(0), direction, after, &mut |_| {
+                        total += 1;
+                        Ok::<_, usize>(())
+                    })
+                    .unwrap();
                     assert!(total > 0);
                     for stop in 1..=total {
                         let mut calls = 0;
                         let result = next(&source, VId(0), direction, after, &mut |_| {
-                            calls += 1; if calls == stop { Err(stop) } else { Ok(()) }
+                            calls += 1;
+                            if calls == stop { Err(stop) } else { Ok(()) }
                         });
-                        assert!(matches!(result, Err(EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(at))) if at == stop));
+                        assert!(
+                            matches!(result, Err(EdgeExpansionSourceError::Read(EdgeScanSourceError::Control(at))) if at == stop)
+                        );
                         assert_eq!(calls, stop);
-                        assert_eq!(next(&source, VId(0), direction, after, &mut |_| Ok::<_, usize>(())).unwrap(), expected);
-                        assert_eq!(source.after, None, "nested seeks cannot advance the root cursor");
+                        assert_eq!(
+                            next(&source, VId(0), direction, after, &mut |_| Ok::<_, usize>(
+                                ()
+                            ))
+                            .unwrap(),
+                            expected
+                        );
+                        assert_eq!(
+                            source.after, None,
+                            "nested seeks cannot advance the root cursor"
+                        );
                     }
                 }
             }

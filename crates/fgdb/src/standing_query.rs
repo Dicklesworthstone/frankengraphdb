@@ -15,8 +15,8 @@ mod sink;
 use crate::{Database, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent};
-use fgdb_gql::{GqlQueryPolicy, GraphAggregateRow, PreparedGraphAggregate};
 use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern};
+use fgdb_gql::{GqlQueryPolicy, GraphAggregateRow, PreparedGraphAggregate};
 use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::sync::Arc;
 
@@ -151,10 +151,9 @@ pub(crate) enum StandingQuery {
 impl StandingQuery {
     fn status(&self) -> (GqlQueryPolicy, CommitSeq, Option<StandingQueryFailure>) {
         match self {
-            Self::Aggregate(query) | Self::ProjectedAggregate { source: query, .. }
-            | Self::Rows { source: query, .. } => {
-                (query.policy, query.frontier, query.failure)
-            }
+            Self::Aggregate(query)
+            | Self::ProjectedAggregate { source: query, .. }
+            | Self::Rows { source: query, .. } => (query.policy, query.frontier, query.failure),
             Self::Reachability(query) => (query.policy, query.frontier, query.failure),
         }
     }
@@ -166,7 +165,8 @@ impl StandingQuery {
         stats: StandingQueryStats,
     ) {
         let (frontier, failure, observed) = match self {
-            Self::Aggregate(query) | Self::ProjectedAggregate { source: query, .. }
+            Self::Aggregate(query)
+            | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
@@ -304,10 +304,16 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<StandingQuery, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
-        let producer = definition.incremental_row_source_definition().ok_or(StandingQueryError::Unsupported)?;
+        let producer = definition
+            .incremental_row_source_definition()
+            .ok_or(StandingQueryError::Unsupported)?;
         let mut output = row::State::new(definition).ok_or(StandingQueryError::Unsupported)?;
-        let source = self.prepare_standing_query_with_output(cx, producer, policy, Some(&mut output))?;
-        Ok(StandingQuery::Rows { source: Box::new(source), output: Box::new(output) })
+        let source =
+            self.prepare_standing_query_with_output(cx, producer, policy, Some(&mut output))?;
+        Ok(StandingQuery::Rows {
+            source: Box::new(source),
+            output: Box::new(output),
+        })
     }
 
     /// Register directed, one-or-more-hop reachability for one relation.
@@ -432,7 +438,9 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::ProjectedAggregate { source, output } => {
                 (source.as_ref(), &output.rows, output.ordered_rows())
             }
-            StandingQuery::Reachability(_) | StandingQuery::Rows { .. } => return Err(StandingQueryError::Unsupported),
+            StandingQuery::Reachability(_) | StandingQuery::Rows { .. } => {
+                return Err(StandingQueryError::Unsupported);
+            }
         };
         Ok(StandingQueryView {
             rows,
@@ -450,11 +458,16 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         handle: &StandingQueryHandle,
     ) -> Result<StandingQueryView<'a, GraphValueRow>, StandingQueryError> {
-        let StandingQuery::Rows { source, output } = self.admitted_standing_query(cx, handle)? else {
+        let StandingQuery::Rows { source, output } = self.admitted_standing_query(cx, handle)?
+        else {
             return Err(StandingQueryError::Unsupported);
         };
-        Ok(StandingQueryView { rows: &output.rows, ordered: Some(&output.ordered),
-            frontier: source.frontier, stats: &source.stats })
+        Ok(StandingQueryView {
+            rows: &output.rows,
+            ordered: Some(&output.ordered),
+            frontier: source.frontier,
+            stats: &source.stats,
+        })
     }
 
     /// Borrow the current recursive pair set, with the same owner, health,

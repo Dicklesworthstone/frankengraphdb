@@ -113,30 +113,40 @@ mod tests {
     use super::*;
 
     const LIMBS: LimbLimit = LimbLimit::new(16);
-    fn allow(_: ZSetEvent) -> Result<(), usize> { Ok(()) }
+    fn allow(_: ZSetEvent) -> Result<(), usize> {
+        Ok(())
+    }
 
     fn z(rows: impl IntoIterator<Item = ((usize, usize), i128)>) -> ZSet<(usize, usize)> {
         ZSet::from_updates(
-            rows.into_iter().map(|(key, weight)| (key, ZWeight::from_i128(weight))),
+            rows.into_iter()
+                .map(|(key, weight)| (key, ZWeight::from_i128(weight))),
             LIMBS,
             &mut allow,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     // Independent finite-domain Floyd-Warshall oracle, including nonempty
     // cycles. No diagonal is initialized merely because a vertex exists.
     fn oracle(edges: &[(usize, usize)], n: usize) -> BTreeSet<(usize, usize)> {
         let mut paths = vec![vec![false; n]; n];
-        for &(a, b) in edges { paths[a][b] = true; }
+        for &(a, b) in edges {
+            paths[a][b] = true;
+        }
         for k in 0..n {
             for a in 0..n {
-                for b in 0..n { paths[a][b] |= paths[a][k] && paths[k][b]; }
+                for b in 0..n {
+                    paths[a][b] |= paths[a][k] && paths[k][b];
+                }
             }
         }
         let mut result = BTreeSet::new();
         for (a, row) in paths.iter().enumerate() {
             for (b, &present) in row.iter().enumerate() {
-                if present { result.insert((a, b)); }
+                if present {
+                    result.insert((a, b));
+                }
             }
         }
         result
@@ -162,21 +172,34 @@ mod tests {
                 code /= 3;
             }
             let mut state = IncrementalReachability::new();
-            state.apply(&z(old.iter().map(|&edge| (edge, 1))), LIMBS, &mut allow).unwrap();
+            state
+                .apply(&z(old.iter().map(|&edge| (edge, 1))), LIMBS, &mut allow)
+                .unwrap();
             let before = oracle(&old, 3);
             assert_eq!(pairs(&state), before);
-            let delta = state.apply(&z(added.iter().map(|&edge| (edge, 1))), LIMBS, &mut allow).unwrap();
+            let delta = state
+                .apply(&z(added.iter().map(|&edge| (edge, 1))), LIMBS, &mut allow)
+                .unwrap();
             old.extend(added);
             let after = oracle(&old, 3);
             assert_eq!(pairs(&state), after);
             let expected: BTreeSet<_> = after.difference(&before).copied().collect();
-            assert_eq!(delta.iter().map(|(key, _)| *key).collect::<BTreeSet<_>>(), expected);
+            assert_eq!(
+                delta.iter().map(|(key, _)| *key).collect::<BTreeSet<_>>(),
+                expected
+            );
             assert!(delta.iter().all(|(_, weight)| weight == &ZWeight::ONE));
             // The reverse dependency arrangement must agree, or future deletion
             // would miss roots even though this tick's forward rows look right.
             for a in 0..3 {
                 for b in 0..3 {
-                    assert_eq!(state.predecessors.get(&b).is_some_and(|row| row.contains(&a)), after.contains(&(a, b)));
+                    assert_eq!(
+                        state
+                            .predecessors
+                            .get(&b)
+                            .is_some_and(|row| row.contains(&a)),
+                        after.contains(&(a, b))
+                    );
                 }
             }
         }
@@ -192,7 +215,12 @@ mod tests {
         reference.apply(&base, LIMBS, &mut allow).unwrap();
         let mut calls = 0;
         {
-            let pending = state.prepare(&change, LIMBS, &mut |_| { calls += 1; Ok::<_, usize>(()) }).unwrap();
+            let pending = state
+                .prepare(&change, LIMBS, &mut |_| {
+                    calls += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
             assert!(!pending.delta().is_empty());
             // Simulates a refusing downstream sink: its tentative derivative is
             // visible only under the guard, then every staged arrangement drops.
@@ -217,20 +245,30 @@ mod tests {
         let mut sink = reference.snapshot(LIMBS, &mut allow).unwrap();
         sink.integrate(&delta, LIMBS, &mut allow).unwrap();
         assert_eq!(sink, state.snapshot(LIMBS, &mut allow).unwrap());
-        assert_eq!(pairs(&state), oracle(&[(0,1),(2,3),(3,4),(1,2),(4,0),(4,5)], 6));
+        assert_eq!(
+            pairs(&state),
+            oracle(&[(0, 1), (2, 3), (3, 4), (1, 2), (4, 0), (4, 5)], 6)
+        );
     }
 
     #[test]
     fn extending_a_chain_visits_new_pairs_not_old_paths() {
         for n in [32, 64, 128] {
             let mut state = IncrementalReachability::new();
-            state.apply(&z((0..n).map(|a| ((a, a + 1), 1))), LIMBS, &mut allow).unwrap();
+            state
+                .apply(&z((0..n).map(|a| ((a, a + 1), 1))), LIMBS, &mut allow)
+                .unwrap();
             let mut work = 0;
             let mut scratch = 0;
-            let delta = state.apply(&z([((n, n + 1), 1)]), LIMBS, &mut |event| {
-                match event { ZSetEvent::Work => work += 1, ZSetEvent::ScratchEntry => scratch += 1 }
-                Ok::<_, usize>(())
-            }).unwrap();
+            let delta = state
+                .apply(&z([((n, n + 1), 1)]), LIMBS, &mut |event| {
+                    match event {
+                        ZSetEvent::Work => work += 1,
+                        ZSetEvent::ScratchEntry => scratch += 1,
+                    }
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
             assert_eq!(delta.len(), n + 1);
             assert!(work < 24 * (n + 1) + 32, "work={work}, n={n}");
             assert!(scratch < 16 * (n + 1) + 32, "scratch={scratch}, n={n}");
@@ -241,18 +279,26 @@ mod tests {
     fn redundant_insertions_keep_physical_support_without_visiting_old_roots() {
         let n = 64;
         let mut state = IncrementalReachability::new();
-        state.apply(&z((0..n).map(|a| ((a, a + 1), 1))), LIMBS, &mut allow).unwrap();
+        state
+            .apply(&z((0..n).map(|a| ((a, a + 1), 1))), LIMBS, &mut allow)
+            .unwrap();
         let before = pairs(&state);
         let mut work = 0;
-        let delta = state.apply(&z([((n / 2, n), 1)]), LIMBS, &mut |event| {
-            if event == ZSetEvent::Work { work += 1; }
-            Ok::<_, usize>(())
-        }).unwrap();
+        let delta = state
+            .apply(&z([((n / 2, n), 1)]), LIMBS, &mut |event| {
+                if event == ZSetEvent::Work {
+                    work += 1;
+                }
+                Ok::<_, usize>(())
+            })
+            .unwrap();
         assert!(delta.is_empty());
         assert!(work < 24, "redundant insertion visited old roots: {work}");
         assert_eq!(pairs(&state), before);
         assert_eq!(state.edge_weight(&(n / 2, n)), Some(&ZWeight::ONE));
-        state.apply(&z([((n - 1, n), -1)]), LIMBS, &mut allow).unwrap();
+        state
+            .apply(&z([((n - 1, n), -1)]), LIMBS, &mut allow)
+            .unwrap();
         let mut expected: Vec<_> = (0..n - 1).map(|a| (a, a + 1)).collect();
         expected.push((n / 2, n));
         assert_eq!(pairs(&state), oracle(&expected, n + 1));
@@ -261,12 +307,27 @@ mod tests {
     #[test]
     fn exact_parallel_counts_and_invalid_retractions_preserve_the_closure() {
         let mut state = IncrementalReachability::new();
-        state.apply(&z([((0, 1), i128::MAX)]), LIMBS, &mut allow).unwrap();
-        assert!(state.apply(&z([((0, 1), 1)]), LIMBS, &mut allow).unwrap().is_empty());
+        state
+            .apply(&z([((0, 1), i128::MAX)]), LIMBS, &mut allow)
+            .unwrap();
+        assert!(
+            state
+                .apply(&z([((0, 1), 1)]), LIMBS, &mut allow)
+                .unwrap()
+                .is_empty()
+        );
         assert!(state.edge_weight(&(0, 1)).unwrap().is_promoted());
-        assert!(state.apply(&z([((0, 1), -i128::MAX)]), LIMBS, &mut allow).unwrap().is_empty());
+        assert!(
+            state
+                .apply(&z([((0, 1), -i128::MAX)]), LIMBS, &mut allow)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(state.edge_weight(&(0, 1)), Some(&ZWeight::ONE));
-        assert!(matches!(state.prepare(&z([((0, 1), -2)]), LIMBS, &mut allow), Err(ReachabilityError::NegativeMultiplicity)));
+        assert!(matches!(
+            state.prepare(&z([((0, 1), -2)]), LIMBS, &mut allow),
+            Err(ReachabilityError::NegativeMultiplicity)
+        ));
         assert_eq!(state.edge_weight(&(0, 1)), Some(&ZWeight::ONE));
         assert!(state.contains(&0, &1));
         state.apply(&z([((0, 1), -1)]), LIMBS, &mut allow).unwrap();
