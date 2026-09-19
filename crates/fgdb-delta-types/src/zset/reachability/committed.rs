@@ -55,8 +55,8 @@ impl<E: core::error::Error + 'static> core::error::Error for CommittedReachabili
 /// pairs. Properties, valid time and labels do not filter this topology view.
 /// Parallel EIds retain independent lifetimes through the existing input.
 ///
-/// Starts at the stream origin; there is deliberately no arbitrary frontier
-/// setter. Rebuild by replaying complete retained history. A fork or missing
+/// Starts at the stream origin or an authoritative [`Self::from_snapshot`]
+/// baseline; there is no arbitrary frontier setter. A fork or missing
 /// anchor refuses instead of serving a falsely advanced view. The exposed
 /// frontier identifies the last published view, which may lag its source.
 #[derive(PartialEq, Eq)]
@@ -73,6 +73,29 @@ impl CommittedReachability {
             relation,
             reachability: IncrementalReachability::new(),
         }
+    }
+
+    /// Build a fresh recursive arrangement from a completed authoritative
+    /// topology snapshot. Only the CURRENT edge bag is evaluated; historical
+    /// cycles and retired inputs never become intermediate recursive states.
+    /// The snapshot builder binds identities, epochs and the committed anchor;
+    /// the source remains responsible for authenticating that snapshot cut.
+    ///
+    /// Failure drops all private input and closure state. An owner rebuilding
+    /// a live view must swap this result only after preparing its result sink.
+    pub fn from_snapshot<E>(
+        snapshot: crate::zset::committed::snapshot::EdgeSnapshot,
+        relation: RelationId,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<Self, CommittedReachabilityError<E>> {
+        let crate::zset::committed::snapshot::EdgeSnapshot { input, delta } = snapshot;
+        let edges = project_relation(&delta, relation, limbs, control)?;
+        let mut reachability = IncrementalReachability::new();
+        let pending = reachability.prepare(&edges, limbs, control)?;
+        event(control, ZSetEvent::Work)?;
+        let _ = pending.commit();
+        Ok(Self { input, relation, reachability })
     }
 
     pub fn frontier(&self) -> CommitSeq {
@@ -141,19 +164,30 @@ impl CommittedReachability {
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<CommittedReachabilityUpdate<'a>, CommittedReachabilityError<E>> {
-        let mut edges = ZSet::new();
-        for ((relation, source, destination), weight) in input.delta().iter() {
-            event(control, ZSetEvent::Work)?;
-            if *relation == selected {
-                let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
-                edges.accumulate((*source, *destination), weight, limbs, control)?;
-            }
-        }
+        let edges = project_relation(input.delta(), selected, limbs, control)?;
         let reachability = state.prepare(&edges, limbs, control)?;
         // One last cancellable boundary while BOTH publications are tentative.
         event(control, ZSetEvent::Work)?;
         Ok(CommittedReachabilityUpdate { input, reachability })
     }
+}
+
+// The same relation projection is used for a baseline and every live tick.
+fn project_relation<E>(
+    input: &ZSet<crate::zset::committed::EdgeTuple>,
+    selected: RelationId,
+    limbs: LimbLimit,
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+) -> Result<ZSet<(VId, VId)>, CommittedReachabilityError<E>> {
+    let mut edges = ZSet::new();
+    for ((relation, source, destination), weight) in input.iter() {
+        event(control, ZSetEvent::Work)?;
+        if *relation == selected {
+            let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
+            edges.accumulate((*source, *destination), weight, limbs, control)?;
+        }
+    }
+    Ok(edges)
 }
 
 impl core::fmt::Debug for CommittedReachability {

@@ -14,12 +14,15 @@
 //! no recoverable callbacks, with the parent Z-set allocation/panic boundary.
 //!
 //! A retained marker AND template digest anchor continuation to the previously
-//! consumed history. No checkpoint import or arbitrary cursor setter exists.
+//! consumed history. Fresh authoritative baselines use [`snapshot`]; no
+//! arbitrary cursor setter or import into an existing input exists.
 //! If retention removes that anchor, rebuilding from an authoritative baseline
 //! is required; this adapter does not invent a retention lease or chain proof.
 //! Marker/digest identity checks are not cryptographic verification of hostile
 //! payloads: authentication and complete cascade/version validation belong to
 //! the source's Chronicle/Strata apply path, not to this projection.
+
+pub mod snapshot;
 
 use super::{ZSet, ZSetError, ZSetEvent, event};
 use crate::{
