@@ -4,8 +4,10 @@
 //! Each pull advances only until the next accepted identity. The source owns
 //! one immutable, admitted generation and yields candidate identities in
 //! strictly increasing order. Historical candidates may have no visible row.
-//! Only existing Select predicates, identity tests, identity or identity-led
-//! property projection, DISTINCT/ALL, canonical order and SKIP/LIMIT are admitted.
+//! Existing Select predicates, vertex-local Boolean programs, identity tests,
+//! identity-led projection, DISTINCT/ALL, canonical order and SKIP/LIMIT are
+//! admitted. Boolean programs use the ordinary three-valued GLA evaluator,
+//! including its eager operands and governed scalar-expression scratch.
 //! Unsupported operators refuse before a source is driven; there is no eager
 //! fallback, AST interpreter, alternate property semantics or storage model.
 //!
@@ -14,7 +16,7 @@
 //! or dropping provides backpressure without scanning the unused suffix. This
 //! does not promise a server lease, restart token, spill, or byte-memory limit.
 
-use crate::algebra::{GlaOperator, GlaPlan, VertexPredicate};
+use crate::algebra::{BoundBooleanExpression, GlaOperator, GlaPlan, VertexPredicate};
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats,
     GqlQueryError, GqlQueryPolicy,
@@ -43,6 +45,7 @@ impl core::error::Error for VertexScanBuildError {}
 enum Test {
     Predicate(VertexPredicate),
     Identity(bool),
+    Boolean(BoundBooleanExpression),
 }
 
 /// Checked physical specialization of an existing GLA definition.
@@ -76,6 +79,20 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                 {
                     tests.push(Test::Identity(*equal));
                 }
+                Some(GlaOperator::SelectBoolean { expression }) => {
+                    // Audit every bound operand while taking the owned copy.
+                    // A captured edge or another slot must never become a
+                    // missing property on the one vertex this cursor owns.
+                    let mut local = !expression.contains_edge_property();
+                    let expression = expression.remap(|slot| {
+                        local &= slot.ordinal() == 0;
+                        slot
+                    });
+                    if !local {
+                        return Err(VertexScanBuildError { operator: at });
+                    }
+                    tests.push(Test::Boolean(expression));
+                }
                 Some(GlaOperator::Project { .. } | GlaOperator::ProjectValues { .. }) => break,
                 _ => return Err(VertexScanBuildError { operator: at }),
             }
@@ -103,6 +120,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
 
     fn accepts<E>(
         &self,
+        vid: VId,
         row: VertexScanRow<'_>,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
@@ -111,6 +129,11 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             match test {
                 Test::Identity(false) => return Ok(false),
                 Test::Identity(true) => {}
+                Test::Boolean(expression) => {
+                    if !accepts_boolean(expression, vid, row, control)? {
+                        return Ok(false);
+                    }
+                }
                 Test::Predicate(predicate) => {
                     for _ in 0..predicate.comparison_work_units() {
                         control(VertexScanEvent::Work)?;
@@ -135,6 +158,37 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         Ok(true)
     }
 }
+
+/// Reuse the bound evaluator rather than interpreting a second expression
+/// language. Both its property callback and its instruction/payload controls
+/// borrow the SAME meter, briefly and sequentially. No RefCell borrow survives
+/// a callback, so a property lookup cannot re-enter a borrowed control.
+fn accepts_boolean<E>(
+    expression: &BoundBooleanExpression,
+    vid: VId,
+    row: VertexScanRow<'_>,
+    control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
+) -> Result<bool, E> {
+    let control = std::cell::RefCell::new(control);
+    expression.evaluate(
+        &[Some(vid)],
+        &mut |_, key| {
+            seek(row.properties, &key, |entry| entry.0, &mut |event| {
+                control.borrow_mut()(event)
+            })
+            .map(|entry| entry.map(|(_, value)| value))
+        },
+        &mut |event| {
+            // Predicates do not release rows. Only Meter::emit, after the
+            // complete projection and SKIP/LIMIT, changes ResultRows.
+            control.borrow_mut()(match event {
+                GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => VertexScanEvent::Work,
+            })
+        },
+    )
+}
+
 impl<Row> core::fmt::Debug for VertexScanPlan<Row> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("VertexScanPlan([REDACTED])")
@@ -339,7 +393,7 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             meter.record()?;
             let row = flatten(source.vertex(vid, &mut |event| meter.event(event)))?;
             let Some(row) = row else { continue; };
-            if !self.plan.accepts(row, &mut |event| meter.event(event))? { continue; }
+            if !self.plan.accepts(vid, row, &mut |event| meter.event(event))? { continue; }
             meter.event(VertexScanEvent::Work)?;
             if self.skip != 0 { self.skip -= 1; continue; }
             // Refuse an exhausted output budget before copying any property
