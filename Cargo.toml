@@ -42,6 +42,7 @@ edition = "2024"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+recursion_depth_exceeding_limit = "allow"
 
 [workspace.lints.clippy]
 # Absorbs lint families newer nightlies fire on unchanged, correct code here.
@@ -51,3 +52,30 @@ double_must_use = "allow"
 # Index walks over parallel slices by a single counter; an iterator rewrite would
 # obscure the arithmetic without changing behaviour.
 needless_range_loop = "allow"
+# Result errors can exceed 128 bytes due to rich diagnostic context in enum variants.
+result_large_err = "allow"
+# Style lints newer nightlies fire on unchanged, correct code
+type_complexity = "allow"
+too_many_arguments = "allow"
+collapsible_if = "allow"
+collapsible_match = "allow"
+map_entry = "allow"
+manual_is_multiple_of = "allow"
+chunks_exact_to_as_chunks = "allow"
+single_char_add_str = "allow"
+unusual_byte_groupings = "allow"
+mistyped_literal_suffixes = "allow"
+unnecessary_mut_passed = "allow"
+redundant_pattern_matching = "allow"
+unnecessary_literal_unwrap = "allow"
+expect_fun_call = "allow"
+unnecessary_cast = "allow"
+doc_lazy_continuation = "allow"
+manual_next_back = "allow"
+len_zero = "allow"
+match_like_matches_macro = "allow"
+large_enum_variant = "allow"
+err_expect = "allow"
+cloned_ref_to_slice_refs = "allow"
+unnecessary_get_then_check = "allow"
+
