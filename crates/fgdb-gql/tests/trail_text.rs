@@ -131,7 +131,7 @@ fn parameters_bind_once_and_unsupported_restrictions_refuse_before_resolution() 
         "MATCH TRAIL (a)-[:R*1]->(b),(c) RETURN b",
         "MATCH ANY SHORTEST TRAIL (a)-[:R*1..3]->(b) RETURN b",
     ] {
-        assert!(PreparedGraphText::prepare(text, |_, _| -> Option<GraphSymbol> {
+        assert!(PreparedGraphText::prepare(text, |_: GraphSymbolKind, _: &str| -> Option<GraphSymbol> {
             panic!("invalid path definition reached catalog: {text}")
         }).is_err(), "{text}");
     }

@@ -87,7 +87,7 @@ fn independent_probes_match_typed_definitions_and_rebind_without_resolution() {
     let text =
         "MATCH (a:Root) WHERE EXISTS { MATCH (f:Flag) WHERE f.p >= $floor } RETURN a LIMIT $take";
     let mut calls = BTreeMap::new();
-    let template = PreparedGraphText::prepare(text, |kind, name| {
+    let template = PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
         *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
         symbols(kind, name)
     })
@@ -472,7 +472,7 @@ fn independent_scopes_keep_names_local_and_preserve_empty_aggregate_semantics() 
     ] {
         let mut calls = 0;
         assert!(
-            PreparedGraphText::prepare(text, |kind, name| {
+            PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
                 calls += 1;
                 symbols(kind, name)
             })

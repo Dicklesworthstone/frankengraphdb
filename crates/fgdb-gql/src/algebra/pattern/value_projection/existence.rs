@@ -369,9 +369,17 @@ impl GraphPatternBuilder {
                     capture: variable as u32,
                     key: *key,
                 },
-                GraphColumn::Path { function, .. } => ValueProjection::Path {
-                    capture: variable as u32,
-                    function: *function,
+                GraphColumn::Path { function, .. } => match function {
+                    GraphPathFunction::Labels => ValueProjection::Labels {
+                        slot: scope_slots[variable],
+                    },
+                    GraphPathFunction::Type => ValueProjection::Type {
+                        capture: variable as u32,
+                    },
+                    _ => ValueProjection::Path {
+                        capture: variable as u32,
+                        function: *function,
+                    },
                 },
             })
             .collect();
@@ -431,15 +439,25 @@ impl GraphPatternBuilder {
             variables.push(match column {
                 GraphColumn::Path {
                     variable, function, ..
-                } => {
-                    let capture = self.path_capture(variable)?;
-                    if (*function == GraphPathFunction::Edge)
-                        != self.path_captures[capture].edge_identity
-                    {
-                        return Err(PatternBuildError::InvalidPathCapture);
+                } => match function {
+                    GraphPathFunction::Labels => self.variable(variable)?,
+                    GraphPathFunction::Type => {
+                        let capture = self.path_capture(variable)?;
+                        if !self.path_captures[capture].edge_identity {
+                            return Err(PatternBuildError::InvalidPathCapture);
+                        }
+                        capture
                     }
-                    capture
-                }
+                    _ => {
+                        let capture = self.path_capture(variable)?;
+                        if (*function == GraphPathFunction::Edge)
+                            != self.path_captures[capture].edge_identity
+                        {
+                            return Err(PatternBuildError::InvalidPathCapture);
+                        }
+                        capture
+                    }
+                },
                 GraphColumn::EdgeProperty { variable, .. } => {
                     let capture = self.path_capture(variable)?;
                     if !self.path_captures[capture].edge_identity {

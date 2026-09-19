@@ -318,7 +318,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(in crate::graph_text) fn read_value_template(
+    fn read_value_template(
         &self,
         operand: Operand,
         at: usize,
@@ -337,7 +337,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(in crate::graph_text) fn read_graph_value(
+    fn read_graph_value(
         &mut self,
         inputs: &mut Vec<Projection<'a>>,
         depth: usize,

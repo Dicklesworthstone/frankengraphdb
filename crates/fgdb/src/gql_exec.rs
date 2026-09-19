@@ -9,9 +9,9 @@ use crate::{
     ReadError, Snapshot, VertexRow,
 };
 use asupersync::fs::Vfs;
-use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{
-    GlaIdentityOutput, GlaOutput, GlaPlan, PreparedGraphPattern, VertexPredicate,
+    GlaIdentityOutput, GlaOutput, GlaPlan, GraphValue, PreparedGraphPattern, VertexPredicate,
 };
 use fgdb_gql::{BoundPlan, GlaExecution, GlaExecutionError, GlaExecutionLimits, RelationBind};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
@@ -268,6 +268,8 @@ pub(crate) struct AdmittedGqlSnapshot<'a, R: ?Sized, Row = VId> {
     vertices: BTreeMap<VId, VertexRow>,
     edges: Vec<EdgeRecord>,
     snapshot_records: u64,
+    cached_labels: BTreeMap<VId, Vec<GraphValue>>,
+    cached_types: BTreeMap<EId, CanonicalScalar>,
 }
 impl<'a, R: GqlSnapshotReader + ?Sized> AdmittedGqlSnapshot<'a, R> {
     pub(crate) fn admit(
@@ -294,7 +296,7 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             // The independently fallible owned-reader seam also supplies real
             // projection values. Never silently return null because it has no
             // private Snapshot. The production path borrows selected endpoints.
-            if logical.projects_properties() {
+            if logical.projects_properties() || logical.projects_labels() {
                 vertices.extend(
                     reader
                         .gql_vertices_at(as_of)?
@@ -321,6 +323,8 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             vertices,
             edges,
             snapshot_records: count,
+            cached_labels: BTreeMap::new(),
+            cached_types: BTreeMap::new(),
         })
     }
     fn materialize<E>(
@@ -440,6 +444,64 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             limits,
         )
     }
+    fn validate_and_cache_catalog_symbols(&mut self) -> Result<(), ReadError> {
+        if self.logical.projects_labels() {
+            let reverse = self.logical.reverse_catalog.as_deref();
+            let check_vertex = |labels: &[LabelId]| -> Result<Vec<GraphValue>, ReadError> {
+                let mut sorted_labels = labels.to_vec();
+                sorted_labels.sort();
+                sorted_labels.dedup();
+                let mut names = Vec::with_capacity(sorted_labels.len());
+                for id in sorted_labels {
+                    let name = reverse
+                        .and_then(|catalog| catalog.labels.get(&id))
+                        .ok_or(ReadError::UnmappedLabel(id))?;
+                    let text = CanonicalScalar::ucs_basic_text(name)
+                        .map_err(|_| ReadError::UnmappedLabel(id))?;
+                    names.push(GraphValue::Scalar(text));
+                }
+                Ok(names)
+            };
+
+            if let Some(tables) = &self.borrowed {
+                for row in &tables.vertices {
+                    let names = check_vertex(&row.labels)?;
+                    self.cached_labels.insert(row.vid, names);
+                }
+            } else {
+                for row in self.vertices.values() {
+                    let names = check_vertex(&row.labels)?;
+                    self.cached_labels.insert(row.vid, names);
+                }
+            }
+        }
+
+        if self.logical.projects_types() {
+            let reverse = self.logical.reverse_catalog.as_deref();
+            let check_edge = |relation: RelationId| -> Result<CanonicalScalar, ReadError> {
+                let name = reverse
+                    .and_then(|catalog| catalog.relations.get(&relation))
+                    .ok_or(ReadError::UnmappedRelation(relation))?;
+                CanonicalScalar::ucs_basic_text(name)
+                    .map_err(|_| ReadError::UnmappedRelation(relation))
+            };
+
+            if let Some(tables) = &self.borrowed {
+                for &((eid, _, relation, _), _) in &tables.edges {
+                    let text = check_edge(relation)?;
+                    self.cached_types.insert(eid, text);
+                }
+            } else {
+                for record in &self.edges {
+                    let text = check_edge(record.entry.relation)?;
+                    self.cached_types.insert(record.entry.eid, text);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn execute_governed<C>(
         mut self,
         policy: fgdb_gql::GqlQueryPolicy,
@@ -450,13 +512,17 @@ impl<'a, R: GqlSnapshotReader + ?Sized, Row: GlaOutput> AdmittedGqlSnapshot<'a, 
             checkpoint().map_err(fgdb_gql::GqlQueryError::Interrupted)?;
             usage.observe::<ReadError, C>(policy, event)
         })?;
-        let result = self.logical.execute_governed_with_element_properties(
+        self.validate_and_cache_catalog_symbols()
+            .map_err(fgdb_gql::GqlQueryError::Source)?;
+        let result = self.logical.execute_governed_with_element_accessors(
             self.snapshot_records,
             self.vertex_ids(),
             self.identified_edges(),
             |vid, predicates| self.matches(vid, predicates),
             |vid, key| Ok(self.property(vid, key)),
             |eid, key| Ok(self.edge_property(eid, key)),
+            |vid| Ok(self.cached_labels.get(&vid).map(|v| v.as_slice())),
+            |eid| Ok(self.cached_types.get(&eid)),
             usage.remaining(policy),
             checkpoint,
         );

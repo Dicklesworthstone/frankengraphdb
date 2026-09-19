@@ -60,9 +60,17 @@ impl GraphPatternBuilder {
                     capture: variable as u32,
                     key: *key,
                 },
-                GraphColumn::Path { function, .. } => ValueProjection::Path {
-                    capture: variable as u32,
-                    function: *function,
+                GraphColumn::Path { function, .. } => match function {
+                    GraphPathFunction::Labels => ValueProjection::Labels {
+                        slot: slots[variable],
+                    },
+                    GraphPathFunction::Type => ValueProjection::Type {
+                        capture: variable as u32,
+                    },
+                    _ => ValueProjection::Path {
+                        capture: variable as u32,
+                        function: *function,
+                    },
                 },
             })
             .collect();

@@ -1050,9 +1050,11 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         test_vertex: impl FnMut(VId, &[VertexPredicate]) -> Result<bool, E>,
         mut property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        mut vertex_labels: impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+        mut edge_type: impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Row>, E> {
-        if !self.requires_identified_edges() {
+        if !self.requires_identified_edges() && !self.projects_labels() && !self.projects_types() {
             return self.execute_with_properties_control(
                 vertices,
                 edges.into_iter().map(|(_, s, r, d)| (s, r, d)),
@@ -1089,6 +1091,8 @@ impl<Row: GlaOutput> GlaPlan<Row> {
                     projected,
                     &mut property,
                     &mut edge_property,
+                    &mut vertex_labels,
+                    &mut edge_type,
                     control,
                 )?;
                 Ok(false)

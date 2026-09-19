@@ -10,8 +10,8 @@
 use crate::algebra::{GraphValueRow, PreparedGraphPattern};
 use crate::{
     GqlParameterSpec, GqlParameterType, GqlParameterValue, GqlParameters, GraphPatternTextError,
-    GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, MAX_GRAPH_TEXT_BYTES,
-    MAX_GRAPH_TEXT_TOKENS, PreparedGraphText,
+    GraphPatternTextErrorKind, GraphSymbolResolver, MAX_GRAPH_TEXT_BYTES, MAX_GRAPH_TEXT_TOKENS,
+    PreparedGraphText,
 };
 use fgdb_types::CommitSeq;
 use std::collections::BTreeSet;
@@ -412,7 +412,7 @@ impl core::fmt::Debug for PreparedTemporalGraphText {
 impl PreparedTemporalGraphText {
     pub fn prepare(
         statement: &str,
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphTemporalTextError> {
         Self::prepare_with_parameter_types(statement, &[], resolve)
     }
@@ -420,7 +420,7 @@ impl PreparedTemporalGraphText {
     pub fn prepare_with_parameter_types(
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphTemporalTextError> {
         let (start, end, selector) = locate_clause(statement)?;
         let mut seen = BTreeSet::new();

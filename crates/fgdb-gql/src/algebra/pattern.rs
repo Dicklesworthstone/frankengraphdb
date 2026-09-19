@@ -179,7 +179,7 @@ impl core::fmt::Debug for GraphPatternBuilder {
 /// the original single-vertex API; tuple preparations carry GraphBindingRow.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedGraphPattern<Row = VId> {
-    logical: GlaPlan<Row>,
+    pub(crate) logical: GlaPlan<Row>,
     variable_count: usize,
     edge_count: usize,
     columns: Vec<String>,

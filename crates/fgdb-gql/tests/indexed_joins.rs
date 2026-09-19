@@ -217,7 +217,7 @@ fn property_pair_selection_is_fallible_before_a_following_existence_clause() {
     let query = PreparedGraphText::prepare(
         "MATCH (a)-[:R]->(b)-[:S]->(c) \
          WHERE c.p = a.p AND EXISTS { MATCH (c)-[:T]->(a) } RETURN a",
-        |kind, name| match (kind, name) {
+        |kind: GraphSymbolKind, name: &str| match (kind, name) {
             (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
             (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
             (GraphSymbolKind::Relation, "T") => Some(GraphSymbol::Relation(RelationId(3))),

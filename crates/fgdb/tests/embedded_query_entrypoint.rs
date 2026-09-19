@@ -412,7 +412,7 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
                     &cx,
                     text,
                     &GqlParameters::new(),
-                    |kind, name| {
+                    |kind: GraphSymbolKind, name: &str| {
                         *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
                         symbols(kind, name)
                     },
@@ -445,7 +445,7 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
                 &cx,
                 text,
                 &GqlParameters::new(),
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
                     symbols(kind, name)
                 },

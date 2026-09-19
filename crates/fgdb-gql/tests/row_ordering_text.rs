@@ -176,7 +176,7 @@ fn text_and_typed_ordering_share_transcripts_and_immutable_rebinding() {
     let calls = Cell::new(0);
     let template = PreparedGraphText::prepare(
         "MATCH (x) RETURN ALL x AS owner,x.score AS rank ORDER BY rank DESC NULLS FIRST,owner ASC SKIP $off LIMIT $take",
-        |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
+        |kind: GraphSymbolKind, name: &str| { calls.set(calls.get() + 1); symbols(kind, name) },
     ).unwrap();
     let args = GqlParameters::new()
         .with_uint64("off", 1)
@@ -248,7 +248,7 @@ fn aliases_star_and_bad_order_references_are_resolved_before_catalog_access() {
         let calls = Cell::new(0);
         let result = PreparedGraphText::prepare(
             &format!("MATCH (x) RETURN x.score AS rank {tail}"),
-            |kind, name| {
+            |kind: GraphSymbolKind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             },
@@ -462,7 +462,7 @@ fn scalar_parameters_and_aggregate_ordering_keep_their_existing_binding_contract
     let template = PreparedGraphText::prepare_with_parameter_types(
         "MATCH (x) WHERE x.payload = $wanted RETURN x,x.score AS rank ORDER BY rank DESC LIMIT $take",
         &[("wanted", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
-        |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
+        |kind: GraphSymbolKind, name: &str| { calls.set(calls.get() + 1); symbols(kind, name) },
     ).unwrap();
     let before = calls.get();
     let arguments = GqlParameters::new()

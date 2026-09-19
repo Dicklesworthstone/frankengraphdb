@@ -456,7 +456,7 @@ fn parameterized_connected_text_feeds_aggregation_without_materializing_matches(
         seed(&mut db, &commit).await;
         let template = PreparedGraphText::prepare(
             "MATCH (a)-[:R]->(b)-[:S]->(c) WHERE c.amount >= $min RETURN ALL a AS owner, c.amount AS amount",
-            |kind, name| match (kind, name) {
+            |kind: GraphSymbolKind, name: &str| match (kind, name) {
                 (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(R)),
                 (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(S)),
                 (GraphSymbolKind::Property, "amount") => Some(GraphSymbol::Property(P)),

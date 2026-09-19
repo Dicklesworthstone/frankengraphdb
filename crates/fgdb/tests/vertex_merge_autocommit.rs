@@ -2,7 +2,7 @@
 //! a create with one marker, and release its private transaction on ambiguity.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{Database, DatabaseKeys, MemVfs, WriteBatch};
+use fgdb::{Database, DatabaseKeys, WriteBatch};
 use fgdb_delta_types::{ElementId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::{GraphInsertVertex, PreparedGraphInsert};
 use fgdb_gql::{

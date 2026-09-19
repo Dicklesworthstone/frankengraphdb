@@ -10,7 +10,8 @@ use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphPath, GraphValue};
 use fgdb_gql::{
     GqlParameterType, GqlParameterValue, GqlParameters, GqlQueryPolicy, GqlScalarParameter,
-    GraphSymbol, GraphSymbolKind, GraphWriteProgramPolicy, PreparedGraphWriteScript,
+    GraphSymbol, GraphSymbolKind, GraphSymbolResolver, GraphWriteProgramPolicy,
+    PreparedGraphWriteScript, ReverseSymbolCatalog,
 };
 use fgdb_types::{
     CanonicalScalar, DatabaseSecurityNamespaceId, EmbeddedTxnCompletion, PurposeContexts,
@@ -151,6 +152,53 @@ impl Options {
                 .get(name)
                 .map(|id| GraphSymbol::Property(PropertyKeyId(u64::from(*id)))),
         }
+    }
+}
+
+impl GraphSymbolResolver for Options {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.resolve(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        let mut catalog = ReverseSymbolCatalog::new();
+        for (name, &id) in &self.labels {
+            catalog.insert_label(LabelId(u64::from(id)), name.clone());
+        }
+        for (name, &id) in &self.relations {
+            catalog.insert_relation(RelationId(u64::from(id)), name.clone());
+        }
+        Some(catalog)
+    }
+
+    fn reverse_label(&self, id: LabelId) -> Option<String> {
+        self.labels
+            .iter()
+            .find_map(|(name, &raw)| (u64::from(raw) == id.0).then(|| name.clone()))
+    }
+
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.relations
+            .iter()
+            .find_map(|(name, &raw)| (u64::from(raw) == id.0).then(|| name.clone()))
+    }
+}
+
+impl GraphSymbolResolver for &Options {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.resolve(kind, name)
+    }
+
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        (*self).reverse_catalog()
+    }
+
+    fn reverse_label(&self, id: LabelId) -> Option<String> {
+        (*self).reverse_label(id)
+    }
+
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        (*self).reverse_relation(id)
     }
 }
 fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
@@ -481,17 +529,17 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     contexts.query().checkpoint().map_err(Failure::io)?;
                     let bytes = asupersync::fs::read(path).await.map_err(Failure::io)?;
                     let certificate = fgdb::NativeResultCertificate::decode(&bytes).map_err(Failure::query)?;
-                    let result = db.replay(&contexts.query(), &certificate, &options.params, |kind, name| options.resolve(kind, name), policy()).map_err(Failure::query)?;
+                    let result = db.replay(&contexts.query(), &certificate, &options.params, &options, policy()).map_err(Failure::query)?;
                     return render(result, certificate.plan.snapshot_seq.0, "replayed", robot, out);
                 }
                 if let Some(path) = &options.certify_to {
-                    let (result, certificate) = db.execute_certified(&contexts.query(), &options.text, &options.params, |kind, name| options.resolve(kind, name), policy()).map_err(execution_failure)?;
+                    let (result, certificate) = db.execute_certified(&contexts.query(), &options.text, &options.params, &options, policy()).map_err(execution_failure)?;
                     render(result, certificate.plan.snapshot_seq.0, "rows", robot, out)?;
                     out.flush().map_err(Failure::io)?;
                     contexts.query().checkpoint().map_err(Failure::io)?;
                     return asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io);
                 }
-                let result = db.query(&contexts.query(), &options.text, &options.params, |kind, name| options.resolve(kind, name), policy()).map_err(execution_failure)?;
+                let result = db.query(&contexts.query(), &options.text, &options.params, &options, policy()).map_err(execution_failure)?;
                 let seq = db.frontier().map_err(Failure::io)?.0;
                 render(result, seq, "rows", robot, out)
             })

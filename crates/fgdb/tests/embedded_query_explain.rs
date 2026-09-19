@@ -140,7 +140,7 @@ fn explain_refuses_writes_and_covers_every_read_class() {
             .unwrap()
             .with_uint64("at", 1)
             .unwrap();
-        for (name, class, statements) in READS {
+        for (_name, class, statements) in READS {
             for (statement_index, text) in statements.into_iter().enumerate() {
                 let (rows, cert) =
                     explain(&db, text, &params, true).expect("read statement must EXPLAIN");
@@ -361,7 +361,7 @@ fn certificates_bind_resolved_symbols_not_query_spelling() {
     let text = "MATCH (n:Person) WHERE n.p >= $floor RETURN n.p AS p";
     let original = fgdb::PreparedNativeRead::prepare(text, &args, symbols).unwrap();
     let certificate = NativeExplainCertificate::new(&original, CommitSeq(1));
-    let changed = fgdb::PreparedNativeRead::prepare(text, &args, |kind, name| {
+    let changed = fgdb::PreparedNativeRead::prepare(text, &args, |kind: GraphSymbolKind, name: &str| {
         if kind == GraphSymbolKind::Property && name == "p" {
             Some(GraphSymbol::Property(PropertyKeyId(2)))
         } else {
@@ -413,7 +413,7 @@ fn every_read_certificate_binds_resolved_symbols_not_formatting() {
             let prepared = fgdb::PreparedNativeRead::prepare(text, &args, symbols).unwrap();
             assert_eq!(prepared.facade_class(), class);
             let certificate = NativeExplainCertificate::new(&prepared, CommitSeq(1));
-            let changed = fgdb::PreparedNativeRead::prepare(text, &args, |kind, name| {
+            let changed = fgdb::PreparedNativeRead::prepare(text, &args, |kind: GraphSymbolKind, name: &str| {
                 if kind == GraphSymbolKind::Property && name == "p" {
                     Some(GraphSymbol::Property(PropertyKeyId(2)))
                 } else {

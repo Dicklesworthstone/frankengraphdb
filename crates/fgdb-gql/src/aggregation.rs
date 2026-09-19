@@ -953,7 +953,10 @@ impl PreparedGraphAggregate {
                             };
                             ValueRef::Scalar(value.unwrap_or(&NULL))
                         }
-                        ValueProjection::Path { .. } | ValueProjection::EdgeProperty { .. } => {
+                        ValueProjection::Path { .. }
+                        | ValueProjection::EdgeProperty { .. }
+                        | ValueProjection::Labels { .. }
+                        | ValueProjection::Type { .. } => {
                             return Err(GqlQueryError::IdentifiedEdgesRequired);
                         }
                     };

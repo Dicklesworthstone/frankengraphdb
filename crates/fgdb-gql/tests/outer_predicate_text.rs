@@ -78,7 +78,7 @@ fn captures(pattern: &PreparedGraphPattern<GraphValueRow>) -> usize {
 fn native_outer_property_join_matches_typed_capture_and_resolves_symbols_once() {
     let text = "MATCH (a) MATCH (b) WHERE b.p=a.p RETURN ALL a,b SKIP $off LIMIT $take";
     let mut names = BTreeSet::new();
-    let template = PreparedGraphText::prepare(text, |kind, name| {
+    let template = PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
         assert!(names.insert((kind, name.to_owned())));
         symbols(kind, name)
     })
@@ -203,7 +203,7 @@ fn existential_outer_only_correlations_keep_local_names_private_and_do_not_multi
     ] {
         let mut calls = 0;
         assert!(
-            PreparedGraphText::prepare(text, |kind, name| {
+            PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
                 calls += 1;
                 symbols(kind, name)
             })
@@ -225,7 +225,7 @@ fn capture_admission_counts_used_names_not_the_temporary_visible_symbol_table() 
     let overflow =
         format!("MATCH (a) WHERE EXISTS {{ MATCH {nodes} WHERE a.p=1 }} RETURN a LIMIT 0");
     let mut calls = 0;
-    let error = PreparedGraphText::prepare(&overflow, |kind, name| {
+    let error = PreparedGraphText::prepare(&overflow, |kind: GraphSymbolKind, name: &str| {
         calls += 1;
         symbols(kind, name)
     })

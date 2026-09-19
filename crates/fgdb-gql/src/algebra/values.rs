@@ -57,6 +57,10 @@ pub enum GraphPathFunction {
     Edges,
     /// Identity of a captured, fixed-length relationship atom.
     Edge,
+    /// Labels of a vertex, returned in canonical LabelId order as GraphValue::List([Text, ...]).
+    Labels,
+    /// Type of an edge, returned as GraphValue::Scalar(CanonicalScalar::Text).
+    Type,
 }
 
 /// Preparation-only column declarations. Names are checked before being owned
@@ -126,6 +130,7 @@ impl<'a> GraphColumn<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) const fn variable(self) -> &'a str {
         match self {
             Self::Vertex { variable, .. }
@@ -161,6 +166,12 @@ pub enum ValueProjection {
     Path {
         capture: u32,
         function: GraphPathFunction,
+    },
+    Labels {
+        slot: BindingSlot,
+    },
+    Type {
+        capture: u32,
     },
 }
 
@@ -639,6 +650,8 @@ pub(super) fn collect_values_with_paths<'a, E>(
         projected,
         property,
         &mut |_, _| panic!("edge properties require an explicit edge property source"),
+        &mut |_| panic!("vertex labels require an explicit label source"),
+        &mut |_| panic!("edge type requires an explicit edge source"),
         control,
     )
 }
@@ -650,6 +663,8 @@ pub(super) fn collect_values_with_element_properties<'a, E>(
     projected: &mut ProjectedRows<GraphValueRow>,
     property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
     edge_property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+    vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [GraphValue]>, E>,
+    edge_type: &mut impl FnMut(EId) -> Result<Option<&'a CanonicalScalar>, E>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     let null = CanonicalScalar::Null;
@@ -684,6 +699,7 @@ pub(super) fn collect_values_with_element_properties<'a, E>(
                 }
                 Some(GraphValue::Edges(path.edges().collect()))
             }
+            GraphPathFunction::Labels | GraphPathFunction::Type => None,
         };
     }
     let mut key = [ValueRef::Scalar(&null); MAX_PATTERN_VERTICES];
@@ -709,6 +725,25 @@ pub(super) fn collect_values_with_element_properties<'a, E>(
                             unreachable!("edge property captures contain exactly one relationship")
                         };
                         edge_property(*edge, *key)?
+                    }
+                    None => None,
+                };
+                ValueRef::Scalar(value.unwrap_or(&null))
+            }
+            ValueProjection::Labels { slot } => match bindings[slot.ordinal() as usize] {
+                Some(vid) => match vertex_labels(vid)? {
+                    Some(labels) => ValueRef::List(labels),
+                    None => ValueRef::List(&[]),
+                },
+                None => ValueRef::Scalar(&null),
+            },
+            ValueProjection::Type { capture } => {
+                let value = match paths.get(*capture as usize).and_then(Option::as_ref) {
+                    Some(path) => {
+                        let [(edge, _)] = path.steps() else {
+                            unreachable!("edge captures contain exactly one relationship")
+                        };
+                        edge_type(*edge)?
                     }
                     None => None,
                 };

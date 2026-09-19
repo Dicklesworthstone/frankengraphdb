@@ -341,6 +341,7 @@ fn resolve_merge_template<'a>(
         distinct: false,
         visible_columns: None,
         return_at: at,
+        reverse_catalog: None,
     };
     Ok(PreparedGraphVertexMergeText {
         selection,

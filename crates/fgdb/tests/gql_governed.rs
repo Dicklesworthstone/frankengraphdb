@@ -612,7 +612,7 @@ fn check_source_history(
     // admission while identity correlation preserves the original results.
     let scan_twin = fgdb_gql::PreparedGraphText::prepare(
         "MATCH (a:L) WHERE a.n>=3 OPTIONAL MATCH (other) WHERE other=a RETURN DISTINCT a",
-        |kind, name| match (kind, name) {
+        |kind: fgdb_gql::GraphSymbolKind, name: &str| match (kind, name) {
             (fgdb_gql::GraphSymbolKind::Label, "L") => Some(fgdb_gql::GraphSymbol::Label(L)),
             (fgdb_gql::GraphSymbolKind::Property, "n") => Some(fgdb_gql::GraphSymbol::Property(N)),
             _ => None,

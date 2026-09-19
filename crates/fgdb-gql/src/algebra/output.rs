@@ -285,6 +285,8 @@ mod sealed {
                 fgdb_types::EId,
                 PropertyKeyId,
             ) -> Result<Option<&'a CanonicalScalar>, E>,
+            _vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+            _edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             Self::collect_properties_with_paths(
@@ -393,6 +395,8 @@ mod sealed {
                 fgdb_types::EId,
                 PropertyKeyId,
             ) -> Result<Option<&'a CanonicalScalar>, E>,
+            vertex_labels: &mut impl FnMut(VId) -> Result<Option<&'a [crate::algebra::GraphValue]>, E>,
+            edge_type: &mut impl FnMut(fgdb_types::EId) -> Result<Option<&'a CanonicalScalar>, E>,
             control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         ) -> Result<(), E> {
             let GlaOperator::ProjectValues { columns } = operator else {
@@ -405,6 +409,8 @@ mod sealed {
                 projected,
                 property,
                 edge_property,
+                vertex_labels,
+                edge_type,
                 control,
             )
         }

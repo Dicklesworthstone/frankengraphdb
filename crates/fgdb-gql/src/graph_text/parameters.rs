@@ -19,7 +19,7 @@ impl PreparedGraphText {
     pub fn prepare_with_parameter_types(
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
-        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+        resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphPatternTextError> {
         let syntax = Parser::new_with_parameter_types(statement, declarations)?.parse()?;
         Self::from_syntax(statement, syntax, resolve)
@@ -88,6 +88,8 @@ impl UnresolvedGraphText<'_> {
             Some(GraphPathFunction::Nodes) => crate::GraphSetColumnType::Vertices,
             Some(GraphPathFunction::Edges) => crate::GraphSetColumnType::Edges,
             Some(GraphPathFunction::Edge) => crate::GraphSetColumnType::Edge,
+            Some(GraphPathFunction::Labels) => crate::GraphSetColumnType::List,
+            Some(GraphPathFunction::Type) => Scalar,
             None if column.property.is_some() => Scalar,
             None => Vertex,
         };
@@ -254,6 +256,7 @@ impl UnresolvedGraphText<'_> {
                 distinct: false,
                 visible_columns: None,
                 return_at: syntax.return_at,
+                reverse_catalog: None,
             }
         };
         Ok(BoundSetTextInput {

@@ -13,7 +13,11 @@ impl Parser<'_> {
             let name = self.name()?;
             let function = if self.take(b'(')? {
                 let function = Self::path_function(name)?;
-                let variable = self.path_variable()?;
+                let variable = match function {
+                    GraphPathFunction::Labels => self.vertex_variable()?,
+                    GraphPathFunction::Type => self.edge_variable()?,
+                    _ => self.path_variable()?,
+                };
                 self.punct(b')', ")")?;
                 Some((variable, function))
             } else {
@@ -49,7 +53,7 @@ impl Parser<'_> {
             };
             let column = if let Some(column) = resolved {
                 column
-            } else if property.is_some() && self.syntax.distinct {
+            } else if self.syntax.distinct {
                 // DISTINCT deduplicates whole evaluation rows; a hidden sort
                 // cell would change which occurrences survive. Refuse typed
                 // instead of silently picking survivors.
@@ -59,6 +63,23 @@ impl Parser<'_> {
                         "projected ORDER BY expression or alias under DISTINCT",
                     ),
                 ));
+            } else if let Some((variable, function)) = function {
+                self.capacity(
+                    self.syntax.columns.len(),
+                    MAX_PATTERN_VERTICES,
+                    crate::algebra::PatternLimitDimension::Columns,
+                )?;
+                let width = self.syntax.columns.len();
+                self.syntax.columns.push(Column {
+                    alias: name,
+                    variable,
+                    property: None,
+                    path: Some(function),
+                });
+                if self.syntax.visible_columns.is_none() {
+                    self.syntax.visible_columns = Some(width);
+                }
+                width
             } else if let Some(property) = property {
                 // Hidden sort key: evaluate the property for ranking without
                 // projecting it publicly. The property symbol is resolved once

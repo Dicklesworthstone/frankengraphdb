@@ -461,6 +461,7 @@ impl PreparedGraphInsertText {
                 distinct: false,
                 visible_columns: None,
                 return_at: at,
+                reverse_catalog: None,
             };
             (InsertTextInput::Match(selection), Some(shape))
         } else {

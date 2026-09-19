@@ -215,7 +215,7 @@ fn replay_refuses_values_plan_class_snapshot_and_result_mismatches() {
                 &cx,
                 &certificate,
                 &params,
-                |kind, name| {
+                |kind: GraphSymbolKind, name: &str| {
                     if kind == GraphSymbolKind::Property {
                         Some(GraphSymbol::Property(PropertyKeyId(2)))
                     } else {
