@@ -1,218 +1,254 @@
-//! Exact occurrence windows over incrementally maintained complete tuples.
+//! Ordinary MATCH result bags, ordered by the original GLA result contract.
 //!
-//! Only changed carriers are decoded. Candidates outside the selected page
-//! remain indexed for deletion/refill; no snapshot evaluator is used here.
+//! The shared graph maintainer supplies complete tuples with positive counts.
+//! Retain one candidate per tuple, threshold for DISTINCT and slice occurrences
+//! only at final output. Deleted winners refill from retained candidates. No
+//! graph is read here and no hidden duplicate count is expanded for OFFSET.
 
-use super::{Meter, StandingQueryFailure, govern, reserve_row, zset_error};
+use super::{Meter, StandingQueryFailure, zset_error};
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetEvent, ZWeight};
-use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern};
-use fgdb_gql::{GraphAggregateRow, GraphAggregateOrder, GraphAggregateColumn, GraphNullPlacement};
+use fgdb_delta_types::zset::ZSetUpdate;
+use fgdb_gql::{GlaExecutionEvent, GraphAggregateOrder, GraphAggregateRow};
+use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::sync::Arc;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Rank {
-    order: Arc<[GraphAggregateOrder]>,
-    source: Arc<GraphAggregateRow>,
-}
-
-fn order_field(order: &GraphAggregateOrder) -> (u8, usize, bool, bool) {
-    let (kind, column) = match order.column {
-        GraphAggregateColumn::GroupKey(column) => (0, column),
-        GraphAggregateColumn::Aggregate(column) => (1, column),
-    };
-    (kind, column, order.descending, order.nulls == GraphNullPlacement::Last)
-}
-
-impl Ord for Rank {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let schema = self.order.iter().map(order_field).cmp(other.order.iter().map(order_field))
-            .then_with(|| (self.source.keys().len(), self.source.values().len())
-                .cmp(&(other.source.keys().len(), other.source.values().len())));
-        if schema != Ordering::Equal { return schema; }
-        match self.source.compare_incremental_order(&other.source, &self.order,
-            &mut |_| Ok::<_, Infallible>(())) {
-            Ok(Some(order)) => order,
-            Ok(None) => self.source.cmp(&other.source),
-            Err(never) => match never {},
-        }
-    }
-}
-impl PartialOrd for Rank {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+    counted: Arc<GraphAggregateRow>,
+    ordering: Arc<[GraphAggregateOrder]>,
 }
 impl PartialEq for Rank {
     fn eq(&self, other: &Self) -> bool { self.cmp(other) == Ordering::Equal }
 }
 impl Eq for Rank {}
+impl PartialOrd for Rank {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for Rank {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Only this immutable query's schema-checked keys inhabit its maps.
+        // As for the existing ZSet/ranked sink, BTree key comparison and
+        // allocator costs are outside the logical entry-event accounting.
+        self.counted.compare_incremental_order(&other.counted, &self.ordering,
+            &mut |_| Ok::<_, core::convert::Infallible>(())).unwrap()
+            .expect("row rank schema and ordering were admitted before insertion")
+    }
+}
 
-#[derive(Clone)]
-struct Candidate {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Tuple {
     row: Arc<GraphValueRow>,
     count: u64,
 }
 
-type Candidates = BTreeMap<Rank, Candidate>;
-type Patch = BTreeMap<Rank, Option<Candidate>>;
+type Candidates = BTreeMap<Rank, Tuple>;
+type Changes = BTreeMap<Rank, Option<Tuple>>;
 
-pub(super) struct State {
-    pub(super) definition: PreparedGraphPattern<GraphValueRow>,
-    order: Arc<[GraphAggregateOrder]>,
+pub(crate) struct State {
+    definition: PreparedGraphPattern<GraphValueRow>,
+    ordering: Arc<[GraphAggregateOrder]>,
     distinct: bool,
     offset: u64,
     count: Option<u64>,
     candidates: Candidates,
     pub(super) rows: ZSet<GraphValueRow>,
-    pub(super) page: Vec<Arc<GraphValueRow>>,
+    pub(super) ordered: Vec<Arc<GraphValueRow>>,
+}
+impl core::fmt::Debug for State {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StandingRows")
+            .field("candidates", &self.candidates.len())
+            .field("selected_occurrences", &self.ordered.len())
+            .field("data", &"[REDACTED]").finish()
+    }
 }
 
-fn copy_value(row: &GraphValueRow, meter: &mut Meter<'_>)
-    -> Result<GraphValueRow, StandingQueryFailure>
-{
-    meter.charge(ZSetEvent::ScratchEntry)?;
-    let mut values = Vec::new();
-    for value in row.values() {
-        values.push(value.copy_with_control(&mut |event| govern(meter, event))?);
+fn govern(meter: &mut Meter<'_>, event: GlaExecutionEvent) -> Result<(), StandingQueryFailure> {
+    meter.charge(ZSetEvent::Work)?;
+    match event {
+        GlaExecutionEvent::Work => Ok(()),
+        GlaExecutionEvent::ScratchEntry => meter.charge(ZSetEvent::ScratchEntry),
+        GlaExecutionEvent::ResultRow => Err(StandingQueryFailure::InvalidDelta),
     }
-    Ok(GraphValueRow::from_owned_values(values))
+}
+
+fn reserve_values(values: &[GraphValue], meter: &mut Meter<'_>) -> Result<(), StandingQueryFailure> {
+    meter.charge(ZSetEvent::ScratchEntry)?;
+    for value in values {
+        meter.charge(ZSetEvent::Work)?;
+        meter.units(ZSetEvent::ScratchEntry, 1 + value.payload_units())?;
+    }
+    Ok(())
 }
 
 impl State {
     pub(super) fn new(definition: PreparedGraphPattern<GraphValueRow>) -> Option<Self> {
         let (distinct, offset, count) = definition.incremental_row_window()?;
-        let order = Arc::from(definition.incremental_row_ordering()?);
-        Some(Self { definition, order, distinct, offset, count, candidates: BTreeMap::new(),
-            rows: ZSet::new(), page: Vec::new() })
+        let ordering = definition.incremental_row_ordering()?.into();
+        Some(Self { definition, ordering, distinct, offset, count,
+            candidates: BTreeMap::new(), rows: ZSet::new(), ordered: Vec::new() })
     }
 
-    pub(super) fn prepare(&mut self, delta: &ZSet<GraphAggregateRow>, meter: &mut Meter<'_>)
-        -> Result<Update<'_>, StandingQueryFailure>
-    {
-        let mut patch = Patch::new();
-        // A source update is a retraction of the previous complete carrier and
-        // an assertion of the next. Never threshold a signed derivative.
+    pub(super) fn definition(&self) -> &PreparedGraphPattern<GraphValueRow> { &self.definition }
+
+    /// Retractions validate full before-images, including counts. A new count
+    /// for an existing tuple requires its old count's retraction in this tick.
+    /// Counts stay compressed until selected occurrences enter the public page.
+    pub(super) fn prepare(
+        &mut self,
+        delta: &ZSet<GraphAggregateRow>,
+        meter: &mut Meter<'_>,
+    ) -> Result<Update<'_>, StandingQueryFailure> {
+        meter.charge(ZSetEvent::Work)?;
+        let mut changes = Changes::new();
         for wanted in [-1, 1] {
-            for (source, weight) in delta.iter() {
+            for (counted, weight) in delta.iter() {
                 meter.charge(ZSetEvent::Work)?;
                 let sign = weight.to_i128().ok_or(StandingQueryFailure::Arithmetic)?;
                 if !matches!(sign, -1 | 1) { return Err(StandingQueryFailure::InvalidDelta); }
                 if sign != wanted { continue; }
-                let (row, count) = self.definition.materialize_incremental_values(source,
+                let (row, count) = self.definition.materialize_incremental_values(counted,
                     &mut |event| govern(meter, event))?.ok_or(StandingQueryFailure::InvalidDelta)?;
-                source.compare_incremental_order(source, &self.order,
-                    &mut |event| govern(meter, event))?.ok_or(StandingQueryFailure::InvalidDelta)?;
-                reserve_row(source, meter)?;
-                meter.units(ZSetEvent::ScratchEntry, 3)?;
-                let rank = Rank { order: Arc::clone(&self.order), source: Arc::new(source.clone()) };
+                reserve_values(counted.keys(), meter)?;
+                meter.units(ZSetEvent::ScratchEntry, 4)?;
+                let rank = Rank { counted: Arc::new(counted.clone()), ordering: Arc::clone(&self.ordering) };
                 let retained = self.candidates.get_key_value(&rank);
                 if sign < 0 {
-                    if retained.is_none_or(|(key, value)| key.source.as_ref() != source
-                        || value.count != count || value.row.as_ref() != &row)
-                        || patch.contains_key(&rank) {
-                        return Err(StandingQueryFailure::InvalidDelta);
-                    }
-                    patch.insert(rank, None);
+                    if retained.is_none_or(|(old, _)| old.counted.as_ref() != counted)
+                        || changes.contains_key(&rank)
+                    { return Err(StandingQueryFailure::InvalidDelta); }
+                    changes.insert(rank, None);
                 } else {
-                    if patch.get(&rank).is_some_and(Option::is_some)
-                        || (retained.is_some() && !matches!(patch.get(&rank), Some(None))) {
-                        return Err(StandingQueryFailure::InvalidDelta);
-                    }
-                    // Replace comparator-equal keys, not just their values:
-                    // a group's canonical representative can change.
-                    patch.remove(&rank);
-                    patch.insert(rank, Some(Candidate { row: Arc::new(row), count }));
+                    if changes.get(&rank).is_some_and(Option::is_some)
+                        || (retained.is_some() && !matches!(changes.get(&rank), Some(None)))
+                    { return Err(StandingQueryFailure::InvalidDelta); }
+                    // BTreeMap::insert retains the old key on equality. Replace
+                    // it explicitly so future before-image checks see NEW count.
+                    changes.remove(&rank);
+                    changes.insert(rank, Some(Tuple { row: Arc::new(row), count }));
                 }
             }
         }
-        let page = select_page(&self.candidates, &patch, self.distinct, self.offset, self.count, meter)?;
-        // The selected page is the bounded publication unit. It is rebuilt
-        // from the rank-index prefix, never from the graph or all candidates.
+        let limbs = LimbLimit::new(4);
         let mut updates = Vec::new();
-        for row in &page {
-            let row = copy_value(row, meter)?;
-            meter.charge(ZSetEvent::ScratchEntry)?;
-            updates.push((row, ZWeight::ONE));
-        }
-        let rows = ZSet::from_updates(updates, LimbLimit::new(4), &mut |event| meter.charge(event))
-            .map_err(zset_error)?;
-        (meter.checkpoint)()?;
-        Ok(Update { state: self, patch, page, rows })
-    }
-}
-
-fn select_page(base: &Candidates, patch: &Patch, distinct: bool, mut offset: u64,
-    count: Option<u64>, meter: &mut Meter<'_>) -> Result<Vec<Arc<GraphValueRow>>, StandingQueryFailure>
-{
-    meter.charge(ZSetEvent::ScratchEntry)?;
-    let mut selected = Vec::new();
-    let mut old = base.iter().peekable();
-    let mut changed = patch.iter().peekable();
-    while count.is_none_or(|limit| (selected.len() as u128) < u128::from(limit)) {
-        let next = match (old.peek(), changed.peek()) {
-            (None, None) => break,
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (Some((a, _)), Some((b, _))) => a.cmp(b),
-        };
-        meter.charge(ZSetEvent::Work)?;
-        let value = match next {
-            Ordering::Less => old.next().map(|(_, value)| value),
-            Ordering::Greater => changed.next().and_then(|(_, value)| value.as_ref()),
-            Ordering::Equal => {
-                old.next();
-                changed.next().and_then(|(_, value)| value.as_ref())
+        let next_page = if changes.is_empty() {
+            // Empty committed ticks advance the source frontier, not scan a
+            // retained page or manufacture result changes.
+            if meter.policy.rows.max_result_rows().is_some_and(|limit| self.ordered.len() as u128 > u128::from(limit)) {
+                return Err(StandingQueryFailure::ResultBudget);
             }
+            None
+        } else {
+            let (page, selected) = self.select(&changes, meter)?;
+            for (row, weight) in self.rows.iter() {
+                meter.charge(ZSetEvent::Work)?;
+                let count = weight.to_i128().ok_or(StandingQueryFailure::Arithmetic)?;
+                if count <= 0 { return Err(StandingQueryFailure::InvalidDelta); }
+                reserve_values(row.values(), meter)?;
+                updates.push((row.clone(), ZWeight::from_i128(-count)));
+            }
+            for (row, count) in selected {
+                reserve_values(row.values(), meter)?;
+                updates.push((row.as_ref().clone(), ZWeight::from_i128(i128::from(count))));
+            }
+            Some(page)
         };
-        let Some(value) = value else { continue; };
-        let occurrences = if distinct { 1 } else { value.count };
-        let skipped = offset.min(occurrences);
-        offset -= skipped;
-        let available = occurrences - skipped;
-        let take = match count {
-            Some(limit) => available.min(limit - u64::try_from(selected.len())
-                .map_err(|_| StandingQueryFailure::ResultBudget)?),
-            None => available,
-        };
-        let next_len = (selected.len() as u128).checked_add(u128::from(take))
-            .ok_or(StandingQueryFailure::Arithmetic)?;
-        if next_len > usize::MAX as u128 || meter.policy.rows.max_result_rows()
-            .is_some_and(|limit| next_len > u128::from(limit)) {
-            return Err(StandingQueryFailure::ResultBudget);
-        }
-        // Skip counts arithmetically, but charge every allocated occurrence.
-        // A huge carrier with LIMIT 1 never expands its unselected duplicates.
-        for _ in 0..take {
-            meter.charge(ZSetEvent::Work)?;
-            meter.charge(ZSetEvent::ScratchEntry)?;
-            selected.push(Arc::clone(&value.row));
-        }
+        let delta = ZSet::from_updates(updates, limbs, &mut |event| meter.charge(event)).map_err(zset_error)?;
+        // prepare_update clones changed keys; reserve those payloads separately.
+        for (row, _) in delta.iter() { reserve_values(row.values(), meter)?; }
+        let sink = self.rows.prepare_update(&delta, limbs, &mut |event| meter.charge(event)).map_err(zset_error)?;
+        (meter.checkpoint)()?;
+        Ok(Update { candidates: &mut self.candidates, ordered: &mut self.ordered,
+            changes, next_page, sink })
     }
-    Ok(selected)
+
+    fn select(
+        &self,
+        changes: &Changes,
+        meter: &mut Meter<'_>,
+    ) -> Result<Selection, StandingQueryFailure> {
+        let mut old = self.candidates.iter().peekable();
+        let mut patch = changes.iter().peekable();
+        let mut skip = self.offset;
+        let mut remaining = self.count.unwrap_or(u64::MAX);
+        let mut selected_count = 0u64;
+        let mut page = Vec::new();
+        let mut selected = Vec::new();
+        meter.units(ZSetEvent::ScratchEntry, 2)?;
+        // Merge only the visited sorted prefix. A replacement shadows the
+        // retained key, including deletion; do not fall through to old support.
+        while self.count.is_none() || remaining != 0 {
+            meter.charge(ZSetEvent::Work)?;
+            let ordering = match (old.peek(), patch.peek()) {
+                (None, None) => break,
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (Some((left, _)), Some((right, _))) => left.cmp(right),
+            };
+            let tuple = match ordering {
+                Ordering::Less => old.next().map(|(_, tuple)| tuple),
+                Ordering::Greater => patch.next().and_then(|(_, tuple)| tuple.as_ref()),
+                Ordering::Equal => {
+                    old.next();
+                    patch.next().and_then(|(_, tuple)| tuple.as_ref())
+                }
+            };
+            let Some(tuple) = tuple else { continue; };
+            let weight = if self.distinct { 1 } else { tuple.count };
+            let skipped = skip.min(weight);
+            skip -= skipped;
+            let take = if self.count.is_some() { (weight - skipped).min(remaining) } else { weight - skipped };
+            if take == 0 { continue; }
+            selected_count = selected_count.checked_add(take).ok_or(StandingQueryFailure::ResultBudget)?;
+            if meter.policy.rows.max_result_rows().is_some_and(|limit| selected_count > limit) {
+                return Err(StandingQueryFailure::ResultBudget);
+            }
+            meter.charge(ZSetEvent::ScratchEntry)?;
+            selected.push((Arc::clone(&tuple.row), take));
+            // Only selected occurrences expand. Each Arc slot is admitted and
+            // interruptible; never preallocate from an unchecked u64 count.
+            for _ in 0..take {
+                meter.charge(ZSetEvent::Work)?;
+                meter.charge(ZSetEvent::ScratchEntry)?;
+                page.push(Arc::clone(&tuple.row));
+            }
+            if self.count.is_some() { remaining -= take; }
+        }
+        Ok((page, selected))
+    }
 }
 
-#[must_use = "dropping a row output update aborts it"]
+type Selection = (Vec<Arc<GraphValueRow>>, Vec<(Arc<GraphValueRow>, u64)>);
+
+#[must_use = "dropping a row-output update aborts it"]
 pub(super) struct Update<'a> {
-    state: &'a mut State,
-    patch: Patch,
-    page: Vec<Arc<GraphValueRow>>,
-    rows: ZSet<GraphValueRow>,
+    candidates: &'a mut Candidates,
+    ordered: &'a mut Vec<Arc<GraphValueRow>>,
+    changes: Changes,
+    next_page: Option<Vec<Arc<GraphValueRow>>>,
+    sink: ZSetUpdate<'a, GraphValueRow>,
 }
-
 impl Update<'_> {
     pub(super) fn commit(self) {
-        for (rank, value) in self.patch {
-            self.state.candidates.remove(&rank);
-            if let Some(value) = value { self.state.candidates.insert(rank, value); }
+        let Self { candidates, ordered, changes, next_page, sink } = self;
+        for (rank, tuple) in changes {
+            candidates.remove(&rank);
+            if let Some(tuple) = tuple { candidates.insert(rank, tuple); }
         }
-        self.state.rows = self.rows;
-        self.state.page = self.page;
+        if let Some(page) = next_page { *ordered = page; }
+        sink.commit();
     }
 }
 
 #[cfg(test)]
-mod tests {
+#[path = "values/tests.rs"]
+mod tests;
+
+// Preserve the focused regressions introduced with the original output stage.
+#[cfg(test)]
+mod occurrence_regressions {
     use super::*;
     use crate::standing_query::StandingQueryStats;
     use fgdb_delta_types::PropertyKeyId;
@@ -227,16 +263,14 @@ mod tests {
             offset, count).unwrap();
         if distinct { pattern } else { pattern.with_duplicates() }
     }
-
     fn delta(definition: &PreparedGraphPattern<GraphValueRow>, rows: &[(i64, u64, i128)]) -> ZSet<GraphAggregateRow> {
         let carrier = definition.incremental_row_source_definition().unwrap();
         ZSet::from_updates(rows.iter().map(|&(key, count, sign)| {
-            let key = fgdb_gql::algebra::GraphValue::Scalar(CanonicalScalar::Int(key));
+            let key = GraphValue::Scalar(CanonicalScalar::Int(key));
             (carrier.materialize_incremental_row(vec![key], vec![GraphAggregateValue::Count(count)]).unwrap(),
                 ZWeight::from_i128(sign))
         }), LimbLimit::new(4), &mut |_| Ok::<_, ()>(())).unwrap()
     }
-
     fn apply(state: &mut State, changes: &[(i64, u64, i128)], limit: u64) -> Result<(), StandingQueryFailure> {
         let delta = delta(&state.definition, changes);
         let mut checkpoint = || Ok(());
@@ -250,10 +284,10 @@ mod tests {
     fn bag_windows_count_occurrences_and_refill_from_retained_candidates() {
         let mut state = State::new(definition(false, 1, Some(3))).unwrap();
         apply(&mut state, &[(1, 3, 1), (2, 2, 1), (3, 1, 1)], 3).unwrap();
-        assert_eq!(state.page.len(), 3);
+        assert_eq!(state.ordered.len(), 3);
         assert_eq!(state.rows.iter().map(|(_, w)| w.to_i128().unwrap()).collect::<Vec<_>>(), [2, 1]);
         apply(&mut state, &[(1, 3, -1), (1, 1, 1)], 3).unwrap();
-        assert_eq!(state.page.len(), 3);
+        assert_eq!(state.ordered.len(), 3);
         assert_eq!(state.rows.iter().map(|(_, w)| w.to_i128().unwrap()).collect::<Vec<_>>(), [2, 1]);
         assert_eq!(state.candidates.len(), 3);
     }
@@ -262,19 +296,19 @@ mod tests {
     fn distinct_thresholds_integrated_count_and_huge_bags_skip_without_expanding() {
         let mut distinct = State::new(definition(true, 0, None)).unwrap();
         apply(&mut distinct, &[(1, u64::MAX, 1), (2, 2, 1)], 2).unwrap();
-        assert_eq!(distinct.page.len(), 2);
+        assert_eq!(distinct.ordered.len(), 2);
         apply(&mut distinct, &[(1, u64::MAX, -1), (1, 1, 1)], 2).unwrap();
         assert!(distinct.rows.iter().all(|(_, weight)| weight.to_i128() == Some(1)));
         let mut bag = State::new(definition(false, u64::MAX - 1, Some(1))).unwrap();
         apply(&mut bag, &[(1, u64::MAX, 1)], 1).unwrap();
-        assert_eq!(bag.page.len(), 1);
+        assert_eq!(bag.ordered.len(), 1);
     }
 
     #[test]
     fn refusal_and_dropped_update_preserve_candidates_and_published_page() {
         let mut state = State::new(definition(false, 0, None)).unwrap();
         apply(&mut state, &[(1, 1, 1)], 1).unwrap();
-        let old = state.rows.clone();
+        let old = state.rows.checked_clone(LimbLimit::new(4), &mut |_| Ok::<_, ()>(())).unwrap();
         assert_eq!(apply(&mut state, &[(1, 1, -1), (1, 2, 1)], 1), Err(StandingQueryFailure::ResultBudget));
         assert_eq!(state.rows, old);
         let change = delta(&state.definition, &[(1, 1, -1), (2, 1, 1)]);

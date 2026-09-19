@@ -183,14 +183,14 @@ impl StandingQuery {
         batch: &LogicalDeltaBatch,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        self.maintain_with_output(batch, meter, None)
+        self.maintain_with_output::<super::output::State>(batch, meter, None)
     }
 
-    pub(super) fn maintain_with_output(
+    pub(super) fn maintain_with_output<D: super::sink::GroupSink>(
         &mut self,
         batch: &LogicalDeltaBatch,
         meter: &mut Meter<'_>,
-        downstream: Option<&mut super::output::State>,
+        downstream: Option<&mut D>,
     ) -> Result<(), StandingQueryFailure> {
         if batch.commit_seq() != self.frontier.checked_successor()
             .map_err(|_| StandingQueryFailure::InvalidDelta)?
@@ -408,15 +408,15 @@ impl<V: Vfs + Clone> Database<V> {
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQuery, StandingQueryError> {
-        self.prepare_standing_query_with_output(cx, definition, policy, None)
+        self.prepare_standing_query_with_output::<super::output::State>(cx, definition, policy, None)
     }
 
-    pub(super) fn prepare_standing_query_with_output(
+    pub(super) fn prepare_standing_query_with_output<D: super::sink::GroupSink>(
         &self,
         cx: &QueryCx,
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
-        downstream: Option<&mut super::output::State>,
+        downstream: Option<&mut D>,
     ) -> Result<StandingQuery, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
