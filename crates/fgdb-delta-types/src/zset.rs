@@ -11,6 +11,7 @@ pub mod aggregate;
 pub mod committed;
 pub mod incremental;
 pub mod reachability;
+pub mod set;
 pub mod triangles;
 
 use crate::{LimbLimit, ZWeight, ZWeightError};
