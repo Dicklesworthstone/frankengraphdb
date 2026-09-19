@@ -1,6 +1,7 @@
 //! Session-local vertex, fixed-hop and scoped aggregates maintained from deltas.
 //! COUNT/SUM/AVG, their DISTINCT forms, and scalar/vertex MIN/MAX share atomic
-//! tick publication. This is not a durable subscription or delivery protocol.
+//! tick publication. HAVING filters completed groups, not retained support.
+//! This is not a durable subscription or delivery protocol.
 
 mod boolean;
 mod grouped;
@@ -51,6 +52,7 @@ pub enum StandingQueryFailure {
     Interrupted,
     Arithmetic,
     NonIntegerSum,
+    NonIntegerHaving,
     InvalidDelta,
 }
 
@@ -187,7 +189,7 @@ fn scalar_units(value: &CanonicalScalar) -> usize {
     1 + bytes.div_ceil(64)
 }
 fn eligible(query: &PreparedGraphAggregate) -> bool {
-    query.supports_incremental_maintenance()
+    query.supports_incremental_maintenance_with_having()
         && aggregate_functions_eligible(query)
         && (eligible_flat_input(query) || edge::supports_scoped(query))
 }
@@ -513,6 +515,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// functions reuse the admitted vertex, fixed-hop and optional/probe shapes.
     /// Boolean WHERE and its scalar programs use ordinary GLA semantics, with
     /// every hidden vertex-property dependency retained for invalidation.
+    /// HAVING evaluates only completed changed groups; filtered-out groups keep
+    /// their full support so later insertions/retractions can re-admit them.
+    /// The result-row budget counts visible groups after HAVING, while work and
+    /// scratch budgets still govern all maintenance, including rejected groups.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,
