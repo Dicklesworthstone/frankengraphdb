@@ -36,6 +36,10 @@ impl GraphPath {
         core::iter::once(self.start).chain(self.steps.iter().map(|(_, vertex)| *vertex))
     }
     #[must_use]
+    pub fn vertices(&self) -> impl Iterator<Item = VId> + '_ {
+        self.nodes()
+    }
+    #[must_use]
     pub fn edges(&self) -> impl ExactSizeIterator<Item = EId> + '_ {
         self.steps.iter().map(|(edge, _)| *edge)
     }
