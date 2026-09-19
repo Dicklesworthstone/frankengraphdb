@@ -5,6 +5,7 @@
 //! Registrations are not durable subscriptions and do not survive reopening.
 
 mod aggregate;
+mod output;
 mod recursive;
 
 use crate::{Database, ReadError};
@@ -46,6 +47,8 @@ pub enum StandingQueryFailure {
     /// Computed input column and value-independent scalar failure. A source
     /// binding identity or payload is never included in the diagnostic.
     InputExpression { column: usize, error: fgdb_gql::GraphIntegerError },
+    /// Post-HAVING output expression failure; no partial result is published.
+    OutputExpression { column: usize, error: fgdb_gql::GraphIntegerError },
     InvalidDelta,
 }
 
@@ -95,19 +98,28 @@ pub struct StandingQueryView<'a, Row: Ord = GraphAggregateRow> {
 }
 impl<Row: Ord> StandingQueryView<'_, Row> {
     pub fn frontier(&self) -> CommitSeq { self.frontier }
+    /// ALL output collisions have positive multiplicities; DISTINCT output
+    /// has weight one per semantic class. This is a bag, not a ranked sequence.
     pub fn rows(&self) -> &ZSet<Row> { self.rows }
     pub fn last_maintenance(&self) -> &StandingQueryStats { self.stats }
 }
 
 pub(crate) enum StandingQuery {
     Aggregate(Box<aggregate::StandingQuery>),
+    /// The same complete-group producer with a prepared downstream projection.
+    ProjectedAggregate {
+        source: Box<aggregate::StandingQuery>,
+        output: Box<output::State>,
+    },
     Reachability(Box<recursive::State>),
 }
 
 impl StandingQuery {
     fn status(&self) -> (GqlQueryPolicy, CommitSeq, Option<StandingQueryFailure>) {
         match self {
-            Self::Aggregate(query) => (query.policy, query.frontier, query.failure),
+            Self::Aggregate(query) | Self::ProjectedAggregate { source: query, .. } => {
+                (query.policy, query.frontier, query.failure)
+            }
             Self::Reachability(query) => (query.policy, query.frontier, query.failure),
         }
     }
@@ -119,7 +131,9 @@ impl StandingQuery {
         stats: StandingQueryStats,
     ) {
         let (frontier, failure, observed) = match self {
-            Self::Aggregate(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Aggregate(query) | Self::ProjectedAggregate { source: query, .. } => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
             Self::Reachability(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
         };
         match result {
@@ -171,17 +185,38 @@ fn zset_error(error: ZSetError<StandingQueryFailure>) -> StandingQueryFailure {
 }
 impl<V: Vfs + Clone> Database<V> {
     /// Register a session-local native aggregate over the current snapshot.
-    /// The existing GQL admission, scalar/Boolean semantics, grouping, HAVING
-    /// and incremental kernels remain authoritative. Later commits maintain
-    /// this result through the same registry as recursive topology views.
+    /// Source expressions, grouping and HAVING remain upstream of final key/
+    /// aggregate projection, scalar output expressions and output DISTINCT.
+    /// Hidden complete groups remain maintained. Result limits count final ALL
+    /// occurrences or DISTINCT classes; work/scratch govern all retained state.
+    /// ORDER BY and pagination remain unsupported by this bag-result API.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
-        let query = self.prepare_standing_query(cx, definition, policy)?;
-        Ok(self.store_standing_query(StandingQuery::Aggregate(Box::new(query))))
+        let query = self.prepare_registered_aggregate(cx, definition, policy)?;
+        Ok(self.store_standing_query(query))
+    }
+
+    fn prepare_registered_aggregate(
+        &self,
+        cx: &QueryCx,
+        definition: PreparedGraphAggregate,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQuery, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        if definition.has_incremental_output_transform() {
+            let producer = definition.incremental_source_definition()
+                .ok_or(StandingQueryError::Unsupported)?;
+            let mut output = output::State::new(definition);
+            let source = self.prepare_standing_query_with_output(cx, producer, policy, Some(&mut output))?;
+            Ok(StandingQuery::ProjectedAggregate { source: Box::new(source), output: Box::new(output) })
+        } else {
+            let query = self.prepare_standing_query(cx, definition, policy)?;
+            Ok(StandingQuery::Aggregate(Box::new(query)))
+        }
     }
 
     /// Register directed, one-or-more-hop reachability for one relation.
@@ -239,9 +274,10 @@ impl<V: Vfs + Clone> Database<V> {
         let current = self.standing_queries.get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
         let replacement = match current {
-            StandingQuery::Aggregate(query) => StandingQuery::Aggregate(Box::new(
-                self.prepare_standing_query(cx, query.definition.clone(), policy)?,
-            )),
+            StandingQuery::Aggregate(query) => self.prepare_registered_aggregate(cx, query.definition.clone(), policy)?,
+            StandingQuery::ProjectedAggregate { output, .. } => {
+                self.prepare_registered_aggregate(cx, output.definition().clone(), policy)?
+            }
             StandingQuery::Reachability(query) => StandingQuery::Reachability(Box::new(
                 self.prepare_standing_reachability(cx, query.relation(), policy)?,
             )),
@@ -283,10 +319,12 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         handle: &StandingQueryHandle,
     ) -> Result<StandingQueryView<'a>, StandingQueryError> {
-        let StandingQuery::Aggregate(query) = self.admitted_standing_query(cx, handle)? else {
-            return Err(StandingQueryError::Unsupported);
+        let (query, rows) = match self.admitted_standing_query(cx, handle)? {
+            StandingQuery::Aggregate(query) => (query.as_ref(), &query.rows),
+            StandingQuery::ProjectedAggregate { source, output } => (source.as_ref(), &output.rows),
+            StandingQuery::Reachability(_) => return Err(StandingQueryError::Unsupported),
         };
-        Ok(StandingQueryView { rows: &query.rows, frontier: query.frontier, stats: &query.stats })
+        Ok(StandingQueryView { rows, frontier: query.frontier, stats: &query.stats })
     }
 
     /// Borrow the current recursive pair set, with the same owner, health,
@@ -313,6 +351,9 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
         let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
         let result = match query {
             StandingQuery::Aggregate(query) => query.maintain(batch, &mut meter),
+            StandingQuery::ProjectedAggregate { source, output } => {
+                source.maintain_with_output(batch, &mut meter, Some(output.as_mut()))
+            }
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);

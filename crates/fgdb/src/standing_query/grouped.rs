@@ -303,6 +303,15 @@ impl StandingQuery {
         updates: Vec<Contribution>,
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
+        self.integrate_with_output(updates, meter, None)
+    }
+
+    pub(super) fn integrate_with_output(
+        &mut self,
+        updates: Vec<Contribution>,
+        meter: &mut Meter<'_>,
+        downstream: Option<&mut crate::standing_query::output::State>,
+    ) -> Result<(), StandingQueryFailure> {
         let limbs = LimbLimit::new(4);
         let mut delta = ZSet::from_updates(updates, limbs, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
@@ -384,20 +393,27 @@ impl StandingQuery {
                 changes.push((row, ZWeight::ONE));
             }
         }
-        // Bound the final VISIBLE group count after HAVING, not retained
-        // support, filtered-out groups, or transient remove/insert ordering.
-        if self.policy.rows.max_result_rows().is_some_and(|limit| result_count > u128::from(limit)) {
+        // With a downstream projection these are private complete groups;
+        // output admission applies after projection and DISTINCT instead.
+        if downstream.is_none()
+            && self.policy.rows.max_result_rows().is_some_and(|limit| result_count > u128::from(limit))
+        {
             return Err(StandingQueryFailure::ResultBudget);
         }
         let changes = ZSet::from_updates(changes, limbs, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
+        let projected = match downstream {
+            Some(output) => Some(output.prepare(&changes, meter)?),
+            None => None,
+        };
         let sink = self.rows.prepare_update(&changes, limbs, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
         (meter.checkpoint)()?;
-        // Support, numeric summaries and output publish together. Nothing
-        // after this boundary can perform recoverably fallible work.
+        // Source support, complete groups, projected multiplicities and DISTINCT
+        // representatives publish together. No recoverably fallible work remains.
         let _ = prepared.commit();
         sink.commit();
+        if let Some(projected) = projected { projected.commit(); }
         Ok(())
     }
 }

@@ -118,7 +118,7 @@ fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
                     return false;
                 }
             }
-            GlaOperator::VertexIdentity { left, right, .. }
+            GlaOperator::VertexIdentity { left, right, equal: _ }
                 if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::CompareProperties { left, right, .. }
                 if left.ordinal() < width && right.ordinal() < width => {}
@@ -182,6 +182,15 @@ impl StandingQuery {
         &mut self,
         batch: &LogicalDeltaBatch,
         meter: &mut Meter<'_>,
+    ) -> Result<(), StandingQueryFailure> {
+        self.maintain_with_output(batch, meter, None)
+    }
+
+    pub(super) fn maintain_with_output(
+        &mut self,
+        batch: &LogicalDeltaBatch,
+        meter: &mut Meter<'_>,
+        downstream: Option<&mut super::output::State>,
     ) -> Result<(), StandingQueryFailure> {
         if batch.commit_seq() != self.frontier.checked_successor()
             .map_err(|_| StandingQueryFailure::InvalidDelta)?
@@ -352,9 +361,12 @@ impl StandingQuery {
             }
             None
         };
-        self.integrate(updates, meter)?;
-        // Aggregate and result publication succeeded; only owned map patches
-        // remain. No fallible callback or arithmetic follows this boundary.
+        match downstream {
+            Some(output) => self.integrate_with_output(updates, meter, Some(output))?,
+            None => self.integrate(updates, meter)?,
+        }
+        // Aggregate and all downstream publication succeeded; only owned map
+        // patches remain. No fallible callback or arithmetic follows here.
         for (vid, state) in staged {
             match state {
                 Some(state) => { self.vertices.insert(vid, state); }
@@ -396,11 +408,22 @@ impl<V: Vfs + Clone> Database<V> {
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQuery, StandingQueryError> {
+        self.prepare_standing_query_with_output(cx, definition, policy, None)
+    }
+
+    pub(super) fn prepare_standing_query_with_output(
+        &self,
+        cx: &QueryCx,
+        definition: PreparedGraphAggregate,
+        policy: GqlQueryPolicy,
+        downstream: Option<&mut super::output::State>,
+    ) -> Result<StandingQuery, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         if !eligible(&definition) {
             return Err(StandingQueryError::Unsupported);
         }
+        let boxes = if downstream.is_some() { 2 } else { 1 };
         cx.with_restriction(|| {
             let mut checkpoint = || {
                 cx.checkpoint()
@@ -480,14 +503,13 @@ impl<V: Vfs + Clone> Database<V> {
                 edges.finish_seed(&query.definition, &query.vertices, &mut updates, &mut meter)
                     .map_err(StandingQueryError::Maintenance)?;
             }
-            query
-                .integrate(updates, &mut meter)
-                .map_err(StandingQueryError::Maintenance)?;
-            // Admit the boxed registry backing before the public owner stores it.
-            meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Maintenance)?;
+            match downstream {
+                Some(output) => query.integrate_with_output(updates, &mut meter, Some(output)),
+                None => query.integrate(updates, &mut meter),
+            }.map_err(StandingQueryError::Maintenance)?;
+            // Both source and output are still private during registration.
+            meter.units(ZSetEvent::ScratchEntry, boxes).map_err(StandingQueryError::Maintenance)?;
             query.stats = meter.stats;
-            // The built query is still private, including its aggregate and
-            // result sink. Refuse cancellation before the public owner swaps.
             (meter.checkpoint)().map_err(StandingQueryError::Maintenance)?;
             Ok(query)
         })

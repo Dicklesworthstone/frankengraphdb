@@ -378,7 +378,7 @@ fn unrelated_hidden_groups_do_not_increase_having_maintenance_work() {
 }
 
 #[test]
-fn having_does_not_silently_admit_unsupported_result_transformations() {
+fn having_preserves_supported_projection_but_still_refuses_ordered_output() {
     let ((), report) = run_async_under_lab(0x6a56, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let commit = contexts.commit();
@@ -389,11 +389,15 @@ fn having_does_not_silently_admit_unsupported_result_transformations() {
             base.clone().with_distinct_output(true),
             base.clone().with_key_output_columns(&[]).unwrap(),
             base.clone().with_aggregate_output_prefix(1).unwrap(),
-            base.with_result_clauses(&[], &[GraphAggregateOrder::descending(Column::Aggregate(0))]).unwrap(),
         ] {
-            assert!(matches!(db.register_standing_query(&query, definition, policy()),
-                Err(StandingQueryError::Unsupported)));
+            let handle = db.register_standing_query(&query, definition.clone(), policy()).unwrap();
+            check(&db, &query, &handle, &definition);
         }
+        let ordered = base.with_result_clauses(&[], &[
+            GraphAggregateOrder::descending(Column::Aggregate(0)),
+        ]).unwrap();
+        assert!(matches!(db.register_standing_query(&query, ordered, policy()),
+            Err(StandingQueryError::Unsupported)));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
