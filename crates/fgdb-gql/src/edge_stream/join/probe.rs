@@ -19,7 +19,7 @@ struct Step {
     predicates: Vec<GlaOperator>,
 }
 
-pub(super) struct Probe {
+pub(crate) struct Probe {
     anti: bool,
     outer_width: usize,
     steps: Vec<Step>,
@@ -29,7 +29,7 @@ impl Probe {
     /// Only positively anchored, fixed-hop bodies are admitted. Independent
     /// scans, nested probes, optional/null-extending joins and variable-length
     /// atoms refuse at compile time, including for an outer LIMIT zero.
-    pub(super) fn compile(
+    pub(crate) fn compile(
         ops: &[GlaOperator], start: usize, outer_width: usize,
     ) -> Result<(Self, usize), EdgeScanBuildError> {
         let GlaOperator::Probe { group, end, anti } = &ops[start] else {
@@ -87,7 +87,7 @@ impl Probe {
         Ok((Self { anti: *anti, outer_width, steps }, end))
     }
 
-    pub(super) fn accepts<S: EdgeScanSource, C>(
+    pub(crate) fn accepts<S: EdgeScanSource, C>(
         &self, outer: &[Option<VId>], source: &S,
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,

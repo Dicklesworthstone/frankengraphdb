@@ -7,6 +7,7 @@ use super::*;
 use crate::algebra::{MAX_PATTERN_BINDINGS, MAX_PATTERN_EDGES};
 
 mod probe;
+pub(crate) use probe::Probe;
 
 enum Instruction {
     Native(GlaOperator),

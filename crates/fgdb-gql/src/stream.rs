@@ -8,6 +8,8 @@
 //! identity tests, identity-led projection, DISTINCT/ALL, canonical order and
 //! SKIP/LIMIT are admitted. Binding predicates use the ordinary GLA evaluator,
 //! including its eager operands and governed scalar-expression scratch.
+//! Correlated fixed-hop EXISTS/NOT EXISTS reuse the indexed edge probe kernel;
+//! their private bindings neither multiply nor change the ordered outer row.
 //! Unsupported operators refuse before a source is driven; there is no eager
 //! fallback, AST interpreter, alternate property semantics or storage model.
 //!
@@ -22,11 +24,12 @@ use crate::{
     GqlQueryPolicy,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId};
-use fgdb_types::{CanonicalScalar, CommitSeq, VId};
+use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use std::iter::FusedIterator;
 use std::sync::Arc;
 
 mod output;
+mod probe;
 pub use output::VertexScanOutput;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +53,7 @@ enum Test {
     Predicate(VertexPredicate),
     Identity(bool),
     Binding(GlaOperator),
+    Probe(Arc<crate::edge_stream::Probe>),
 }
 
 /// Checked physical specialization of an existing GLA definition.
@@ -75,6 +79,12 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         let mut tests = Vec::new();
         loop {
             match operators.get(at) {
+                Some(GlaOperator::Probe { .. }) => {
+                    let (probe, end) = crate::edge_stream::Probe::compile(operators, at, 1)
+                        .map_err(|error| VertexScanBuildError { operator: error.operator })?;
+                    tests.push(Test::Probe(Arc::new(probe)));
+                    at = end;
+                }
                 Some(GlaOperator::Select { slot, predicates }) if slot.ordinal() == 0 => {
                     tests.extend(predicates.iter().cloned().map(Test::Predicate));
                 }
@@ -138,15 +148,22 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         })
     }
 
-    fn accepts<E>(
+    fn accepts<S: VertexScanSource, C>(
         &self,
         vid: VId,
         row: VertexScanRow<'_>,
-        control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
-    ) -> Result<bool, E> {
+        source: &S,
+        control: &mut impl FnMut(VertexScanEvent) -> ScanResult<(), S::Error, C>,
+        record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
+    ) -> ScanResult<bool, S::Error, C> {
         for test in self.tests.iter() {
             control(VertexScanEvent::Work)?;
             match test {
+                Test::Probe(probe) => {
+                    if !self::probe::accepts(probe, vid, source, control, record)? {
+                        return Ok(false);
+                    }
+                }
                 Test::Identity(false) => return Ok(false),
                 Test::Identity(true) => {}
                 Test::Binding(operator) => {
@@ -282,6 +299,34 @@ pub trait VertexScanSource {
         vid: VId,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<Self::Error, C>>;
+
+    /// Optional indexed probe access, at the SAME immutable cut as vertex().
+    /// Return incident EIds strictly after `after`, in increasing order. The
+    /// probe rechecks actual visibility, orientation and relation; historical
+    /// supersets are legal, omissions and duplicates are not. Positions belong
+    /// to the probe, never to the outer vertex scan. No neighbor bag is needed.
+    /// Unsupported lookup MUST refuse, not report an empty neighborhood.
+    fn next_probe_edge<C>(
+        &self,
+        _endpoint: VId,
+        _direction: crate::algebra::GlaDirection,
+        _after: Option<EId>,
+        _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, crate::edge_stream::EdgeExpansionSourceError<Self::Error, C>> {
+        Err(crate::edge_stream::EdgeExpansionSourceError::Unavailable)
+    }
+
+    /// Resolve one probe candidate using the same admitted generation. This
+    /// second optional seam also refuses by default: implementing incidence
+    /// alone cannot turn an unavailable edge reader into NOT EXISTS success.
+    fn probe_edge<'a, C>(
+        &'a self,
+        _eid: EId,
+        _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<crate::edge_stream::EdgeScanRow<'a>>,
+        crate::edge_stream::EdgeExpansionSourceError<Self::Error, C>> {
+        Err(crate::edge_stream::EdgeExpansionSourceError::Unavailable)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,12 +344,16 @@ pub enum VertexScanError<E> {
     /// The source repeated or reversed an identity; no bad row is delivered.
     NonIncreasingIdentity,
     CounterExhausted,
+    /// Structural probe failure. Actual source errors remain Source(E), so
+    /// native I/O classification and interruption handling stay unchanged.
+    Probe(crate::edge_stream::EdgeScanError<E>),
 }
 impl<E: core::fmt::Display> core::fmt::Display for VertexScanError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(error) => error.fmt(f),
             Self::Plan(error) => error.fmt(f),
+            Self::Probe(error) => error.fmt(f),
             Self::NonIncreasingIdentity => {
                 f.write_str("vertex stream source is not strictly increasing")
             }
@@ -317,6 +366,7 @@ impl<E: core::error::Error + 'static> core::error::Error for VertexScanError<E> 
         match self {
             Self::Source(error) => Some(error),
             Self::Plan(error) => Some(error),
+            Self::Probe(error) => Some(error),
             _ => None,
         }
     }
@@ -386,7 +436,8 @@ impl<F> Meter<F> {
 /// A single-owner pull cursor. Source and predicate work share one cumulative
 /// allowance across ALL pulls; collecting another page cannot reset it.
 /// SnapshotRecords counts examined candidate identity histories (even when
-/// invisible at the cut), before their visible fields are resolved. ResultRows
+/// invisible at the cut), plus each examined probe edge history before its
+/// fields are resolved. Repeat probe examinations are charged again. ResultRows
 /// counts emitted rows AFTER predicates and SKIP/LIMIT. This is not the
 /// eager executor's complete-table admission count. Work/scratch are logical
 /// controls, not allocator bytes, source residency, or caller collection space.
@@ -483,10 +534,15 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             let Some(row) = row else {
                 continue;
             };
-            if !self
-                .plan
-                .accepts(vid, row, &mut |event| meter.event(event))?
-            {
+            // Probe work and candidate admission share the original meter.
+            // These callback borrows are sequential; none spans a source call.
+            let accepted = {
+                let metered = std::cell::RefCell::new(&mut *meter);
+                self.plan.accepts(vid, row, &*source,
+                    &mut |event| metered.borrow_mut().event(event),
+                    &mut || metered.borrow_mut().record())?
+            };
+            if !accepted {
                 continue;
             }
             meter.event(VertexScanEvent::Work)?;

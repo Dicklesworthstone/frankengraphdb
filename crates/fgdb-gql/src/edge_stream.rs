@@ -6,6 +6,7 @@
 //! This is a physical specialization of compiler-owned GLA, not a text parser.
 
 mod join;
+pub(crate) use join::Probe;
 
 use crate::algebra::{
     GlaDirection, GlaOperator, GlaOutput, GlaPlan, GraphPath, GraphPathFunction,
