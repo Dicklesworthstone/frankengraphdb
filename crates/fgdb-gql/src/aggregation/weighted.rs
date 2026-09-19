@@ -132,6 +132,18 @@ fn eligible(aggregate: &PreparedGraphAggregate) -> bool {
     })
 }
 
+pub(super) fn needs_original_bindings<R>(plan: &crate::algebra::GlaPlan<R>) -> bool {
+    plan.operators().iter().any(|operator| match operator {
+        GlaOperator::Select { .. }
+        | GlaOperator::CompareProperties { .. }
+        | GlaOperator::SelectBoolean { .. } => true,
+        GlaOperator::ProjectValues { columns } => columns
+            .iter()
+            .any(|column| matches!(column, ValueProjection::Property { .. })),
+        _ => false,
+    })
+}
+
 /// The ordinary edge scan walks a BTreeMap of oriented source identities and
 /// completes every descendant scope before advancing its root. Input edge
 /// order and parallel occurrences do not break that property. Arbitrary node
@@ -142,7 +154,7 @@ pub(super) fn root_groups_are_contiguous(aggregate: &PreparedGraphAggregate) -> 
     matches!(
         aggregate.input.plan().operators().first(),
         Some(GlaOperator::ScanEdges { .. })
-    ) && !eligible(aggregate)
+    ) && (!eligible(aggregate) || needs_original_bindings(aggregate.input.plan()))
 }
 
 fn normalized(
@@ -261,15 +273,7 @@ where
     // observed: topology-only contractions must not remove a predicate/read.
     // Selections still run in the ordinary visitor, BEFORE a complete witness
     // contributes its multiplicity. Rejected paths cannot cause COUNT overflow.
-    let needs_original_bindings = plan.operators().iter().any(|operator| match operator {
-        GlaOperator::Select { .. }
-        | GlaOperator::CompareProperties { .. }
-        | GlaOperator::SelectBoolean { .. } => true,
-        GlaOperator::ProjectValues { columns } => columns
-            .iter()
-            .any(|column| matches!(column, ValueProjection::Property { .. })),
-        _ => false,
-    });
+    let needs_original_bindings = needs_original_bindings(plan);
     if needs_original_bindings {
         return plan.visit_value_bindings(
             vertices,
@@ -450,7 +454,7 @@ mod tests {
             "(a)-[:R]->(c)-[:R]->(b) WHERE c.n=-2",
         ] {
             let prefix = format!(
-                "MATCH {pattern} RETURN a.n,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
+                "MATCH {pattern} RETURN a.n AS root,COUNT(*) AS n,COUNT(b.n) AS c,COUNT(DISTINCT b.n) AS d,MIN(b.n) AS lo,MAX(b.n) AS hi"
             );
             let factored = query(&format!("{prefix} GROUP BY a.n"));
             // A hidden, order-sensitive COLLECT forces ordinary bag visitation.

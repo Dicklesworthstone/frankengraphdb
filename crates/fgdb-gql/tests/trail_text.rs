@@ -112,7 +112,7 @@ fn parameters_bind_once_and_unsupported_restrictions_refuse_before_resolution() 
     let calls = Cell::new(0);
     let prepared = PreparedGraphText::prepare(
         "MATCH TRAIL (a)-[:R*1..3]->(b) WHERE a.p=$source RETURN ALL b SKIP $skip LIMIT $take",
-        |kind, name| { calls.set(calls.get() + 1); symbols(kind, name) },
+        |kind: GraphSymbolKind, name: &str| { calls.set(calls.get() + 1); symbols(kind, name) },
     ).unwrap();
     let resolutions = calls.get();
     let args = GqlParameters::new().with_int64("source", 1).unwrap()

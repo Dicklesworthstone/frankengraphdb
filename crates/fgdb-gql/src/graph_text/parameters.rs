@@ -25,6 +25,15 @@ impl PreparedGraphText {
         Self::from_syntax(statement, syntax, resolve)
     }
 
+    pub fn prepare_with_parameter_types_and_resolver(
+        statement: &str,
+        declarations: &[(&str, GqlParameterType)],
+        resolve: impl GraphSymbolResolver,
+    ) -> Result<Self, GraphPatternTextError> {
+        let syntax = Parser::new_with_parameter_types(statement, declarations)?.parse()?;
+        Self::from_syntax(statement, syntax, resolve)
+    }
+
     /// Give the relational composition parser a view of the SAME lexical
     /// tokens. Admission is for the complete statement, including every arm,
     /// grouping delimiter and final page, before splitting any leaf range.

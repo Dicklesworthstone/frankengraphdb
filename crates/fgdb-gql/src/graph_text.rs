@@ -1245,6 +1245,13 @@ impl PreparedGraphText {
     /// refuse. Numeric arguments use one schema and retain original offsets.
     pub fn prepare(
         statement: &str,
+        resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
+    ) -> Result<Self, GraphPatternTextError> {
+        Self::from_syntax(statement, Parser::new(statement)?.parse()?, resolve)
+    }
+
+    pub fn prepare_with_resolver(
+        statement: &str,
         resolve: impl GraphSymbolResolver,
     ) -> Result<Self, GraphPatternTextError> {
         Self::from_syntax(statement, Parser::new(statement)?.parse()?, resolve)
@@ -1336,7 +1343,14 @@ impl PreparedGraphText {
             syntax.return_at,
             builder.prepare_values_with_clauses(&clauses, &projected, 0, None),
         )?;
-        let reverse_catalog = ReverseSymbolCatalog::from_resolver(&mut resolve, statement);
+        let needs_reverse = columns.iter().any(|c| {
+            matches!(c.path, Some(GraphPathFunction::Labels | GraphPathFunction::Type))
+        });
+        let reverse_catalog = if needs_reverse {
+            Some(std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut resolve, statement)))
+        } else {
+            None
+        };
         Ok(Self {
             statement: statement.to_owned(),
             builder,
@@ -1351,7 +1365,7 @@ impl PreparedGraphText {
             count: syntax.count,
             distinct: syntax.distinct,
             return_at: syntax.return_at,
-            reverse_catalog: Some(std::sync::Arc::new(reverse_catalog)),
+            reverse_catalog,
         })
     }
 
@@ -1621,7 +1635,7 @@ mod tests {
 
     #[test]
     fn element_name_functions_prepare_and_lower_positively() {
-        for (function, expected_col) in [("labels(p)", "labels(p)"), ("type(r)", "type(r)")] {
+        for (function, expected_col) in [("labels(p)", "labels"), ("type(r)", "type")] {
             let text = format!("MATCH (p:L)-[r:R]->(q) RETURN {function}");
             let template = PreparedGraphText::prepare(&text, symbols).expect("positive prepare");
             let pattern = template.bind_parameters(&GqlParameters::new()).expect("bind");

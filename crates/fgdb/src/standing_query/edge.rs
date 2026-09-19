@@ -104,6 +104,14 @@ impl State {
             _ => unreachable!("a prepared standing input cannot change its physical shape"),
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn has_scope(&self) -> bool {
+        match &self.input {
+            Input::OneHop(state) => state.scope.is_some(),
+            Input::MultiHop(_) => false,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq)]

@@ -5,6 +5,8 @@
 //! them. No ephemeral scalar is retained by reference, no synthetic graph is
 //! built, and neither source matching nor aggregate semantics are reimplemented.
 
+mod incremental;
+
 use super::*;
 use crate::{GraphSetProjection, GraphSetQuantifier, PreparedGraphSet};
 use fgdb_types::EId;

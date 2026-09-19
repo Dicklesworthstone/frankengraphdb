@@ -147,7 +147,7 @@ fn unsafe_ambiguous_or_unbounded_quantifiers_refuse_before_any_catalog_call() {
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphText::prepare(text, |kind, name| {
+            PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })

@@ -66,6 +66,8 @@ impl Shape {
                 | GlaOperator::CompareProperties { left, right, .. }
                     if !projected && (left.ordinal() as usize) < width
                         && (right.ordinal() as usize) < width => {}
+                GlaOperator::SelectBoolean { expression }
+                    if !projected && expression.supports_vertex_bindings(width) => {}
                 GlaOperator::ProjectValues { columns } if !projected => {
                     if columns.iter().any(|column| !matches!(column,
                         ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. }

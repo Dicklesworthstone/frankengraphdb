@@ -10,6 +10,7 @@
 pub mod aggregate;
 pub mod committed;
 pub mod incremental;
+pub mod reachability;
 
 use crate::{LimbLimit, ZWeight, ZWeightError};
 use std::collections::{BTreeMap, btree_map::Entry};

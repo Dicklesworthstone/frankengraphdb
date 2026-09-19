@@ -1,5 +1,8 @@
 //! Aggregate, set, and bounded shortest-walk execution over one admitted snapshot source.
 
+mod cheapest_path;
+mod vertex_stream;
+
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};
 use crate::{Database, EmbeddedReadView, GqlError, ReadError, Snapshot};
 use asupersync::fs::Vfs;
@@ -159,10 +162,9 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> SetResult<GqlError> {
         self.ensure_readable()
             .and_then(|()| self.snapshot.check_frontier(as_of))
+            .map_err(GqlError::Read)
             .map_err(|error| {
-                GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(GqlError::Read(
-                    error,
-                )))
+                GqlQueryError::Source(fgdb_gql::GraphSetExecutionError::Source(error))
             })?;
         cx.with_restriction(|| {
             query.execute_governed(
@@ -251,10 +253,7 @@ impl<V: Vfs + Clone> Database<V> {
         bounds: GraphWalkBounds,
         policy: GqlQueryPolicy,
     ) -> ShortestResult {
-        let as_of = self
-            .frontier()
-            .map_err(GqlError::Read)
-            .map_err(GqlQueryError::Source)?;
+        let as_of = self.frontier().map_err(GqlError::Read).map_err(GqlQueryError::Source)?;
         self.execute_all_shortest_walk_governed_at(
             cx, source, relation, direction, bounds, as_of, policy,
         )

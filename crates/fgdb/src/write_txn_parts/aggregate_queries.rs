@@ -75,4 +75,47 @@ impl WriteTxn {
             )
         })
     }
+
+    /// Find one exact cheapest bounded WALK over this transaction's basis and
+    /// canonical staged effects. Costs are borrowed from the same overlay as
+    /// topology, including property edits and cascaded edge retirement.
+    /// Ordinary point/scan witnesses survive cost, output or budget refusal;
+    /// minimizing the answer must not minimize the transaction's dependencies.
+    pub fn execute_graph_cheapest_path_governed<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &fgdb_types::QueryCx,
+        query: &fgdb_gql::PreparedGraphCheapestPath,
+        policy: fgdb_gql::GqlQueryPolicy,
+    ) -> Result<
+        fgdb_gql::GqlQueryExecution<fgdb_gql::GraphCostPath>,
+        fgdb_gql::GqlQueryError<fgdb_gql::GraphCheapestPathError<WriteTxnError>, Box<asupersync::error::Error>>,
+    > {
+        use fgdb_gql::{GraphCheapestPathError, GqlQueryError};
+        cx.with_restriction(|| {
+            let snapshot = self.query_snapshot(database)
+                .map_err(|error| GqlQueryError::Source(GraphCheapestPathError::Source(error)))?;
+            cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+            let mut usage = crate::gql_exec::AdmissionUsage::default();
+            let pattern = query.input_pattern();
+            let source = self.query_source_over_logical(
+                snapshot,
+                pattern.plan().clone(),
+                pattern.required_vertex_label(),
+                &mut |event| {
+                    cx.checkpoint().map_err(GqlQueryError::Interrupted)?;
+                    usage.observe(policy, event)
+                },
+            )?;
+            let result = query.execute_governed_with_edge_properties(
+                source.snapshot_records as u64,
+                source.vertex_ids(),
+                source.identified_edges(),
+                |eid, key| Ok::<_, WriteTxnError>(source.edge_property(eid, key)),
+                usage.remaining(policy),
+                || cx.checkpoint(),
+            );
+            usage.finish(policy, result)
+        })
+    }
 }

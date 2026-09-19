@@ -265,7 +265,7 @@ fn optional_required_and_existence_scopes_preserve_null_and_bag_semantics() {
 fn parameter_binding_and_per_clause_modes_do_not_reparse_or_reresolve() {
     let text = "MATCH ACYCLIC (a)-[:R*1..3]->(b) WHERE a.p=$source MATCH SIMPLE (b)<-[:R*0..2]-(c) RETURN ALL a,c SKIP $skip LIMIT $take";
     let mut calls = BTreeSet::new();
-    let template = PreparedGraphText::prepare(text, |kind, name| {
+    let template = PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
         assert!(calls.insert((kind, name.to_owned())));
         symbols(kind, name)
     })
@@ -311,7 +311,7 @@ fn unsupported_compound_unbounded_and_shortest_restrictions_refuse_before_catalo
         "MATCH ALL SHORTEST SIMPLE (a)-[:R*1..3]->(b) RETURN b",
     ] {
         let result =
-            PreparedGraphText::prepare(text, |_, _| panic!("catalog consulted for {text}"));
+            PreparedGraphText::prepare(text, |_: GraphSymbolKind, _: &str| -> Option<GraphSymbol> { panic!("catalog consulted for {text}") });
         assert!(
             result.is_err(),
             "accepted unsupported path semantics: {text}"

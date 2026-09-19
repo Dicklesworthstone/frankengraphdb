@@ -127,7 +127,7 @@ impl PreparedNativeRead {
                 }
             }
         }
-        match PreparedTemporalGraphText::prepare_with_parameter_types(
+        match PreparedTemporalGraphText::prepare_with_parameter_types_and_resolver(
             text,
             &declarations,
             &mut resolve,
@@ -201,7 +201,7 @@ impl PreparedNativeRead {
                 QueryError::PatternText(error),
             ),
         }
-        match PreparedGraphText::prepare_with_parameter_types(text, &declarations, &mut resolve) {
+        match PreparedGraphText::prepare_with_parameter_types_and_resolver(text, &declarations, &mut resolve) {
             Ok(prepared) => return Ok(Self::Pattern(prepared)),
             Err(error) => consider(
                 error.offset,

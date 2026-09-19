@@ -24,6 +24,9 @@ fn predicate(op: &GlaOperator, width: u32) -> bool {
         | GlaOperator::CompareProperties { left, right, .. } => {
             left.ordinal() < width && right.ordinal() < width
         }
+        GlaOperator::SelectBoolean { expression } => {
+            expression.supports_vertex_bindings(width as usize)
+        }
         _ => false,
     }
 }
@@ -260,7 +263,7 @@ mod tests {
         let definition = definition(mode);
         assert!(eligible(&definition));
         let edges = State::for_definition(&definition);
-        assert!(edges.as_ref().unwrap().scope.is_some());
+        assert!(edges.as_ref().unwrap().has_scope());
         let policy = GqlQueryPolicy::new(100_000, 10_000, 10_000_000, 10_000_000);
         let mut query = StandingQuery {
             definition, policy, edges, vertices: BTreeMap::new(),

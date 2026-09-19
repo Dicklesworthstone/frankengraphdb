@@ -82,7 +82,7 @@ fn scoped_lowering_matches_typed_compilation_and_resolves_names_once() {
         OPTIONAL MATCH (b)-[:S]->(c) WHERE c.n <= $ceiling \
         RETURN ALL a,b,c,c.n AS value SKIP $off LIMIT $take";
     let mut calls = BTreeMap::new();
-    let prepared = PreparedGraphText::prepare(text, |kind, name| {
+    let prepared = PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
         *calls.entry((kind, name.to_owned())).or_insert(0) += 1;
         symbols(kind, name)
     })
@@ -385,7 +385,7 @@ fn malformed_or_out_of_scope_definitions_refuse_before_catalog_access() {
         "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(b) WHERE b.n > $x } RETURN a LIMIT $x",
     ] {
         let mut calls = 0;
-        let result = PreparedGraphText::prepare(text, |kind, name| {
+        let result = PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
             calls += 1;
             symbols(kind, name)
         });

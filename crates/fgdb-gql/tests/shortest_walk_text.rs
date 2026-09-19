@@ -57,7 +57,7 @@ fn native_directions_bind_to_identical_typed_shortest_atoms_without_catalog_reen
             "MATCH ALL SHORTEST WALK {pattern} WHERE a.p=$key RETURN ALL a,b SKIP $off LIMIT $count"
         );
         let mut calls = BTreeSet::new();
-        let template = PreparedGraphText::prepare(&text, |kind, name| {
+        let template = PreparedGraphText::prepare(&text, |kind: GraphSymbolKind, name: &str| {
             assert!(calls.insert((kind, name.to_owned())));
             symbols(kind, name)
         })
@@ -241,7 +241,7 @@ fn unsupported_shortest_shapes_refuse_even_with_limit_zero_and_before_catalog() 
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphText::prepare(text, |kind, name| {
+            PreparedGraphText::prepare(text, |kind: GraphSymbolKind, name: &str| {
                 calls.set(calls.get() + 1);
                 symbols(kind, name)
             })
