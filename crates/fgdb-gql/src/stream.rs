@@ -4,9 +4,9 @@
 //! Each pull advances only until the next accepted identity. The source owns
 //! one immutable, admitted generation and yields candidate identities in
 //! strictly increasing order. Historical candidates may have no visible row.
-//! Existing Select predicates, vertex-local Boolean programs, identity tests,
-//! identity-led projection, DISTINCT/ALL, canonical order and SKIP/LIMIT are
-//! admitted. Boolean programs use the ordinary three-valued GLA evaluator,
+//! Existing Select predicates, vertex-local Boolean/property comparisons,
+//! identity tests, identity-led projection, DISTINCT/ALL, canonical order and
+//! SKIP/LIMIT are admitted. Binding predicates use the ordinary GLA evaluator,
 //! including its eager operands and governed scalar-expression scratch.
 //! Unsupported operators refuse before a source is driven; there is no eager
 //! fallback, AST interpreter, alternate property semantics or storage model.
@@ -16,7 +16,7 @@
 //! or dropping provides backpressure without scanning the unused suffix. This
 //! does not promise a server lease, restart token, spill, or byte-memory limit.
 
-use crate::algebra::{BoundBooleanExpression, GlaOperator, GlaPlan, VertexPredicate};
+use crate::algebra::{GlaOperator, GlaPlan, VertexPredicate};
 use crate::{
     GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats,
     GqlQueryError, GqlQueryPolicy,
@@ -45,7 +45,7 @@ impl core::error::Error for VertexScanBuildError {}
 enum Test {
     Predicate(VertexPredicate),
     Identity(bool),
-    Boolean(BoundBooleanExpression),
+    Binding(GlaOperator),
 }
 
 /// Checked physical specialization of an existing GLA definition.
@@ -91,7 +91,12 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                     if !local {
                         return Err(VertexScanBuildError { operator: at });
                     }
-                    tests.push(Test::Boolean(expression));
+                    tests.push(Test::Binding(GlaOperator::SelectBoolean { expression }));
+                }
+                Some(operator @ GlaOperator::CompareProperties { left, right, .. })
+                    if left.ordinal() == 0 && right.ordinal() == 0 =>
+                {
+                    tests.push(Test::Binding(operator.clone()));
                 }
                 Some(GlaOperator::Project { .. } | GlaOperator::ProjectValues { .. }) => break,
                 _ => return Err(VertexScanBuildError { operator: at }),
@@ -129,8 +134,8 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             match test {
                 Test::Identity(false) => return Ok(false),
                 Test::Identity(true) => {}
-                Test::Boolean(expression) => {
-                    if !accepts_boolean(expression, vid, row, control)? {
+                Test::Binding(operator) => {
+                    if !accepts_binding(operator, vid, row, control)? {
                         return Ok(false);
                     }
                 }
@@ -163,14 +168,15 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
 /// language. Both its property callback and its instruction/payload controls
 /// borrow the SAME meter, briefly and sequentially. No RefCell borrow survives
 /// a callback, so a property lookup cannot re-enter a borrowed control.
-fn accepts_boolean<E>(
-    expression: &BoundBooleanExpression,
+fn accepts_binding<E>(
+    operator: &GlaOperator,
     vid: VId,
     row: VertexScanRow<'_>,
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
 ) -> Result<bool, E> {
     let control = std::cell::RefCell::new(control);
-    expression.evaluate(
+    crate::algebra_exec::compare_properties(
+        operator,
         &[Some(vid)],
         &mut |_, key| {
             seek(row.properties, &key, |entry| entry.0, &mut |event| {
