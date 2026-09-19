@@ -419,3 +419,195 @@ impl State {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use crate::{DatabaseKeys, WriteBatch};
+    use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder, GraphValue};
+    use fgdb_gql::GraphAggregate;
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+
+    fn definition() -> PreparedGraphAggregate {
+        let mut builder = GraphPatternBuilder::new();
+        builder.vertex("a").unwrap().vertex("b").unwrap().vertex("c").unwrap();
+        builder.edge("a", RelationId(1), GlaDirection::Forward, "b").unwrap();
+        builder.edge("b", RelationId(2), GlaDirection::Forward, "c").unwrap();
+        let input = builder.prepare_values(&[
+            GraphColumn::vertex("group", "a"),
+            GraphColumn::property("value", "c", PropertyKeyId(1)),
+            GraphColumn::vertex("endpoint", "c"),
+        ], 0, None).unwrap().with_duplicates();
+        PreparedGraphAggregate::prepare(input, &[0], &[
+            GraphAggregate::min("minimum", 1),
+            GraphAggregate::count_rows("count"),
+            GraphAggregate::sum_int("sum", 1),
+            GraphAggregate::count_distinct("endpoints", 2),
+        ], 0, None).unwrap()
+    }
+
+    fn advance(
+        query: &mut StandingQuery,
+        batch: &LogicalDeltaBatch,
+        checkpoint: &mut dyn FnMut() -> Result<(), StandingQueryFailure>,
+    ) -> Result<StandingQueryStats, StandingQueryFailure> {
+        let mut meter = Meter {
+            policy: query.policy, stats: StandingQueryStats::default(), checkpoint,
+        };
+        query.maintain(batch, &mut meter)?;
+        query.frontier = batch.commit_seq();
+        Ok(meter.stats)
+    }
+
+    fn seeded(batches: &[LogicalDeltaBatch]) -> StandingQuery {
+        let definition = definition();
+        assert!(eligible(&definition));
+        let edges = crate::standing_query::edge::State::for_definition(&definition);
+        let mut query = StandingQuery {
+            definition, edges,
+            policy: GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+            vertices: BTreeMap::new(), aggregate: IncrementalAggregate::new(), rows: ZSet::new(),
+            frontier: CommitSeq::ORIGIN, stats: StandingQueryStats::default(), failure: None,
+        };
+        for batch in batches { advance(&mut query, batch, &mut || Ok(())).unwrap(); }
+        query
+    }
+
+    fn same_state(actual: &StandingQuery, expected: &StandingQuery) {
+        assert_eq!(actual.vertices, expected.vertices);
+        assert_eq!(actual.edges, expected.edges);
+        assert_eq!(actual.aggregate, expected.aggregate);
+        assert_eq!(actual.rows, expected.rows);
+        assert_eq!(actual.frontier, expected.frontier);
+        assert_eq!(actual.failure, expected.failure);
+    }
+
+    #[test]
+    fn every_multi_hop_checkpoint_and_budget_refusal_preserves_all_state_and_retries() {
+        let ((), report) = run_async_under_lab(0x6a34, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let keys = DatabaseKeys::new([1; 32], DatabaseSecurityNamespaceId([2; 32]), [3; 32]);
+            let mut db = Database::open_memory(&commit, keys).await.unwrap();
+            let mut r = WriteBatch::new(RelationId(1));
+            for id in 1..=5 {
+                r.create_vertex(VId(id), vec![], vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))]);
+            }
+            for (eid, src, dst) in [(1,1,2), (2,1,2), (3,2,3), (4,4,2)] {
+                r.add_edge(EId(eid), VId(src), VId(dst), vec![]);
+            }
+            let first = db.write(&commit, r).await.unwrap();
+            let mut s = WriteBatch::new(RelationId(2));
+            for (eid, src, dst) in [(11,2,3), (12,2,3), (13,3,4), (14,4,5)] {
+                s.add_edge(EId(eid), VId(src), VId(dst), vec![]);
+            }
+            let second = db.write(&commit, s).await.unwrap();
+            let batches = [
+                db.delta_index().unwrap().get(first).unwrap().clone(),
+                db.delta_index().unwrap().get(second).unwrap().clone(),
+            ];
+            let mut change = WriteBatch::new(RelationId(1));
+            change.delete_vertex(VId(2));
+            change.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(7)));
+            change.set_vertex_property(VId(4), PropertyKeyId(1), Some(CanonicalScalar::Int(9)));
+            change.add_edge(EId(5), VId(1), VId(3), vec![]);
+            let at = db.write(&commit, change).await.unwrap();
+            let delta = db.delta_index().unwrap().get(at).unwrap().clone();
+            let original = seeded(&batches);
+            let mut complete = seeded(&batches);
+            let mut calls = 0;
+            let stats = advance(&mut complete, &delta, &mut || { calls += 1; Ok(()) }).unwrap();
+            // Only 1 -R-> 3 -S-> 4 survives, despite simultaneous input
+            // creation, cross-relation cascades and two property changes.
+            assert_eq!(complete.rows.len(), 1);
+            let (row, weight) = complete.rows.iter().next().unwrap();
+            assert_eq!(weight, &fgdb_delta_types::ZWeight::ONE);
+            assert_eq!(row.keys(), &[GraphValue::Vertex(VId(1))]);
+            assert_eq!(row.get(0).unwrap().as_value(), Some(&GraphValue::Scalar(CanonicalScalar::Int(9))));
+            assert_eq!(row.get(1).unwrap().as_count(), Some(1));
+            assert_eq!(row.get(2).unwrap().as_integer(), Some(9));
+            assert_eq!(row.get(3).unwrap().as_count(), Some(1));
+
+            for stop in 1..=calls {
+                let mut candidate = seeded(&batches);
+                let mut seen = 0;
+                let result = advance(&mut candidate, &delta, &mut || {
+                    seen += 1;
+                    if seen == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
+                });
+                assert_eq!(result, Err(StandingQueryFailure::Interrupted));
+                assert_eq!(seen, stop);
+                same_state(&candidate, &original);
+                advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+                same_state(&candidate, &complete);
+            }
+            for reason in [StandingQueryFailure::WorkBudget, StandingQueryFailure::ScratchBudget,
+                StandingQueryFailure::ResultBudget]
+            {
+                let mut candidate = seeded(&batches);
+                match reason {
+                    StandingQueryFailure::WorkBudget => {
+                        candidate.policy.evaluator.max_work_units = stats.work_units.checked_sub(1).unwrap();
+                    }
+                    StandingQueryFailure::ScratchBudget => {
+                        candidate.policy.evaluator.max_scratch_entries = stats.scratch_entries.checked_sub(1).unwrap();
+                    }
+                    _ => candidate.policy = GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000),
+                }
+                assert_eq!(advance(&mut candidate, &delta, &mut || Ok(())), Err(reason));
+                same_state(&candidate, &original);
+                candidate.policy = original.policy;
+                advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+                same_state(&candidate, &complete);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn incomplete_cascade_is_rejected_even_without_any_complete_join_binding() {
+        let ((), report) = run_async_under_lab(0x6a35, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let keys = DatabaseKeys::new([1; 32], DatabaseSecurityNamespaceId([2; 32]), [3; 32]);
+            let mut db = Database::open_memory(&commit, keys).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(VId(1), vec![], vec![]);
+            seed.create_vertex(VId(2), vec![], vec![]);
+            seed.add_edge(EId(1), VId(1), VId(2), vec![]);
+            let basis = db.write(&commit, seed).await.unwrap();
+            let batches = [db.delta_index().unwrap().get(basis).unwrap().clone()];
+            let mut deletion = WriteBatch::new(RelationId(1));
+            deletion.delete_vertex(VId(2));
+            let at = db.write(&commit, deletion).await.unwrap();
+            let delta = db.delta_index().unwrap().get(at).unwrap().clone();
+            let mut entries = delta.coordinate_entries().to_vec();
+            let mut cleared = 0;
+            for entry in &mut entries {
+                for row in &mut entry.rows {
+                    if let DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } = row {
+                        cleared += sorted_retired_incident_edges.len();
+                        sorted_retired_incident_edges.clear();
+                    }
+                }
+            }
+            assert_eq!(cleared, 1);
+            let malformed = LogicalDeltaBatch::from_parts_for_test(
+                entries, *delta.source_template_digest(), delta.commit_marker_identity(),
+                delta.commit_seq(), delta.frontier(),
+            );
+            let original = seeded(&batches);
+            assert!(original.rows.is_empty()); // no relation-2 edge ever existed
+            let mut candidate = seeded(&batches);
+            assert_eq!(advance(&mut candidate, &malformed, &mut || Ok(())),
+                Err(StandingQueryFailure::InvalidDelta));
+            same_state(&candidate, &original);
+            advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
+            assert_eq!(candidate.frontier, at);
+            assert!(candidate.rows.is_empty());
+            assert_eq!(candidate.vertices.len(), 1);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
