@@ -11,6 +11,9 @@ enum Binding {
     Expand(Expansion),
 }
 
+#[cfg(test)]
+mod tests;
+
 struct Step {
     binding: Binding,
     predicates: Vec<GlaOperator>,
@@ -182,4 +185,3 @@ impl Probe {
         }
     }
 }
-

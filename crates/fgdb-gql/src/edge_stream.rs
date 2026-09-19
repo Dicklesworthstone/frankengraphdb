@@ -41,8 +41,10 @@ impl core::error::Error for EdgeScanBuildError {}
 /// followed by slot zero's vertex identity. Remaining columns may contain either
 /// endpoint, their properties, edge properties or this one-edge path/functions.
 /// This prefix permits DISTINCT and ALL without storing a seen-set. Other order,
-/// hidden sort columns, optional/probe/variable-length expansions, and catalog-name output
+/// hidden sort columns, optional/variable-length expansions, and catalog-name output
 /// refuse before a source is driven. Boolean filters use the ordinary engine.
+/// Correlated fixed-hop EXISTS/NOT EXISTS use indexed, short-circuit probes;
+/// independent scans and nested/optional probe bodies remain unavailable.
 #[derive(Clone)]
 pub struct EdgeScanPlan {
     relation: RelationId,
@@ -56,7 +58,7 @@ pub struct EdgeScanPlan {
 impl EdgeScanPlan {
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         let ops = plan.operators();
-        if ops.iter().any(|op| matches!(op, GlaOperator::Expand { .. })) {
+        if ops.iter().any(|op| matches!(op, GlaOperator::Expand { .. } | GlaOperator::Probe { .. })) {
             return join::compile(plan);
         }
         let Some(GlaOperator::ScanEdges { relation, direction }) = ops.first() else {
