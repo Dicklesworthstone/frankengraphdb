@@ -12,6 +12,8 @@ type Cancel = Box<asupersync::error::Error>;
 
 #[path = "query_explain.rs"]
 mod explain;
+#[path = "query_view.rs"]
+mod view;
 pub use crate::gql_cert::NativeResultCertificate;
 pub use explain::{NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 
