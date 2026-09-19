@@ -13,6 +13,9 @@
 //! The supplied source must already be authorized. This is neither a security
 //! filter nor an unbounded/weighted GQL text grammar or a spill implementation.
 
+mod ranked;
+pub use ranked::GraphCheapestPathCursor;
+
 use crate::algebra::{
     GlaDirection, GraphColumn, GraphPath, GraphPathFunction, GraphPatternBuilder,
     GraphValueRow, PatternBuildError, PreparedGraphPattern,
@@ -24,6 +27,8 @@ use crate::{
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
 use std::collections::{BTreeMap, BTreeSet};
+
+type WeightedIndex = BTreeMap<VId, BTreeMap<(EId, VId), i64>>;
 
 /// A domain failure contains no source identities, property keys or values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,14 +235,16 @@ impl PreparedGraphCheapestPath {
         })
     }
 
-    fn evaluate<'a, E>(
+    // Single-answer and ranked searches share identical source admission,
+    // cost-domain refusals, orientation rules and logical event ordering.
+    fn admit<'a, E>(
         &self,
         vertices: impl IntoIterator<Item = VId>,
         edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
         property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         failure: impl Fn(GraphPathCostError) -> E,
-    ) -> Result<Option<GraphCostPath>, E> {
+    ) -> Result<(BTreeSet<VId>, WeightedIndex), E> {
         let mut live = BTreeSet::new();
         for vertex in vertices {
             control(GlaExecutionEvent::Work)?;
@@ -275,6 +282,18 @@ impl PreparedGraphCheapestPath {
                 adjacency.entry(from).or_default().insert((edge, to), weight);
             }
         }
+        Ok((live, adjacency))
+    }
+
+    fn evaluate<'a, E>(
+        &self,
+        vertices: impl IntoIterator<Item = VId>,
+        edges: impl IntoIterator<Item = (EId, VId, RelationId, VId)>,
+        property: &mut impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+        failure: impl Fn(GraphPathCostError) -> E,
+    ) -> Result<Option<GraphCostPath>, E> {
+        let (live, adjacency) = self.admit(vertices, edges, property, control, &failure)?;
         // Do not hide malformed weights behind missing anchors or LIMIT-like
         // output policies. The complete selected relation was admitted above.
         if !live.contains(&self.source) || !live.contains(&self.target) { return Ok(None); }

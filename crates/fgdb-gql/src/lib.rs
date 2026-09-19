@@ -45,7 +45,8 @@ mod write_receipt;
 mod write_script;
 
 pub use cheapest_path::{
-    GraphCheapestPathError, GraphCostPath, GraphPathCostError, PreparedGraphCheapestPath,
+    GraphCheapestPathCursor, GraphCheapestPathError, GraphCostPath, GraphPathCostError,
+    PreparedGraphCheapestPath,
 };
 pub use pipeline_aggregate_text::{
     GraphPipelineAggregateTextError, GraphPipelineAggregateTextErrorKind,
