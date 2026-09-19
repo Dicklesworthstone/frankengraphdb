@@ -1,29 +1,17 @@
-//! Session-local vertex, fixed-hop and scoped aggregates maintained from deltas.
-//! COUNT/SUM/AVG, their DISTINCT forms, and scalar/vertex MIN/MAX share atomic
-//! tick publication. HAVING filters completed groups, not retained support.
-//! This is not a durable subscription or delivery protocol.
+//! Database-owned session-local maintained queries.
+//!
+//! Native GQL aggregates and recursive topology views share one owner registry,
+//! commit hook, admission meter, failure fence and explicit rebuild lifecycle.
+//! Registrations are not durable subscriptions and do not survive reopening.
 
-mod boolean;
-mod grouped;
-mod edge;
-use grouped::{AggregateKey, contributions};
+mod aggregate;
+mod recursive;
 
-use crate::{Database, ReadError, VertexRow};
+use crate::{Database, ReadError};
 use asupersync::fs::Vfs;
-use fgdb_delta_types::zset::aggregate::IncrementalAggregate;
-use fgdb_delta_types::{
-    DeltaRow, ElementId, LabelId, LimbLimit, LogicalDeltaBatch, PropertyKeyId, ZSet, ZSetError,
-    ZSetEvent,
-};
-use fgdb_gql::algebra::{
-    GlaOperator, ValueProjection, VertexPredicate,
-};
-use fgdb_gql::{
-    GqlQueryPolicy, GraphAggregateFunction, GraphAggregateRow,
-    PreparedGraphAggregate,
-};
-use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, QueryCx, VId};
-use std::collections::{BTreeMap, BTreeSet};
+use fgdb_delta_types::{LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent};
+use fgdb_gql::{GqlQueryPolicy, GraphAggregateRow, PreparedGraphAggregate};
+use fgdb_types::{CommitCx, CommitSeq, QueryCx, VId};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -38,6 +26,8 @@ pub struct StandingQueryStats {
     pub affected_vertices: u64,
     /// Distinct retained/new edge identities examined for a one-hop tick.
     /// Parallel edges count separately; a self-loop counts once.
+    /// Recursive views currently report work/scratch and delta_rows only;
+    /// their affected_vertices/affected_edges counters remain zero.
     pub affected_edges: u64,
     pub work_units: u64,
     pub scratch_entries: u64,
@@ -78,7 +68,7 @@ impl core::fmt::Display for StandingQueryError {
             Self::ForeignHandle => f.write_str("standing query belongs to another opened database"),
             Self::UnknownHandle => f.write_str("unknown standing query"),
             Self::Unsupported => {
-                f.write_str("standing query is outside the admitted COUNT/SUM/AVG/DISTINCT/MIN/MAX profile")
+                f.write_str("standing query kind or definition is unsupported by this operation")
             }
             Self::Unavailable { frontier, reason } => write!(
                 f,
@@ -94,50 +84,49 @@ impl core::fmt::Display for StandingQueryError {
 }
 impl core::error::Error for StandingQueryError {}
 
+/// Borrowed rows from one healthy, current maintained result. Existing GQL
+/// callers retain GraphAggregateRow as the default. Recursive topology views
+/// carry native (VId, VId) pairs; identities are never narrowed to scalars.
 #[derive(Debug)]
-pub struct StandingQueryView<'a> {
-    query: &'a StandingQuery,
-}
-impl StandingQueryView<'_> {
-    pub fn frontier(&self) -> CommitSeq {
-        self.query.frontier
-    }
-    pub fn rows(&self) -> &ZSet<GraphAggregateRow> {
-        &self.query.rows
-    }
-    pub fn last_maintenance(&self) -> &StandingQueryStats {
-        &self.query.stats
-    }
-}
-
-// Only fields needed by the immutable definition are retained. Nonmatching
-// vertices remain present so a later property/label transition can admit them.
-#[derive(Debug, Default, PartialEq)]
-struct VertexState {
-    labels: BTreeSet<LabelId>,
-    props: BTreeMap<PropertyKeyId, CanonicalScalar>,
-}
-
-pub(crate) struct StandingQuery {
-    definition: PreparedGraphAggregate,
-    policy: GqlQueryPolicy,
-    vertices: BTreeMap<VId, VertexState>,
-    edges: Option<edge::State>,
-    aggregate: IncrementalAggregate<AggregateKey>,
-    rows: ZSet<GraphAggregateRow>,
+pub struct StandingQueryView<'a, Row: Ord = GraphAggregateRow> {
+    rows: &'a ZSet<Row>,
     frontier: CommitSeq,
-    stats: StandingQueryStats,
-    failure: Option<StandingQueryFailure>,
+    stats: &'a StandingQueryStats,
+}
+impl<Row: Ord> StandingQueryView<'_, Row> {
+    pub fn frontier(&self) -> CommitSeq { self.frontier }
+    pub fn rows(&self) -> &ZSet<Row> { self.rows }
+    pub fn last_maintenance(&self) -> &StandingQueryStats { self.stats }
 }
 
-impl core::fmt::Debug for StandingQuery {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("StandingQuery")
-            .field("frontier", &self.frontier)
-            .field("result_groups", &self.rows.len())
-            .field("failure", &self.failure)
-            .field("data", &"[REDACTED]")
-            .finish()
+pub(crate) enum StandingQuery {
+    Aggregate(Box<aggregate::StandingQuery>),
+    Reachability(Box<recursive::State>),
+}
+
+impl StandingQuery {
+    fn status(&self) -> (GqlQueryPolicy, CommitSeq, Option<StandingQueryFailure>) {
+        match self {
+            Self::Aggregate(query) => (query.policy, query.frontier, query.failure),
+            Self::Reachability(query) => (query.policy, query.frontier, query.failure),
+        }
+    }
+
+    fn record(
+        &mut self,
+        at: CommitSeq,
+        result: Result<(), StandingQueryFailure>,
+        stats: StandingQueryStats,
+    ) {
+        let (frontier, failure, observed) = match self {
+            Self::Aggregate(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Reachability(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+        };
+        match result {
+            Ok(()) => *frontier = at,
+            Err(reason) => *failure = Some(reason),
+        }
+        *observed = stats;
     }
 }
 
@@ -180,349 +169,11 @@ fn zset_error(error: ZSetError<StandingQueryFailure>) -> StandingQueryFailure {
         _ => StandingQueryFailure::Arithmetic,
     }
 }
-fn scalar_units(value: &CanonicalScalar) -> usize {
-    let bytes = match value {
-        CanonicalScalar::Bytes(value) => value.as_slice().len(),
-        CanonicalScalar::Text(value) => value
-            .len()
-            .saturating_add(value.canonical_sort_key().map_or(0, <[u8]>::len)),
-        CanonicalScalar::Timestamp(value) => value.zone().map_or(0, |zone| zone.identifier().len()),
-        _ => 0,
-    };
-    1 + bytes.div_ceil(64)
-}
-fn eligible(query: &PreparedGraphAggregate) -> bool {
-    query.supports_incremental_maintenance_with_having()
-        && aggregate_functions_eligible(query)
-        && (eligible_flat_input(query) || edge::supports_scoped(query))
-}
-fn aggregate_functions_eligible(query: &PreparedGraphAggregate) -> bool {
-    query.aggregates().iter().all(|aggregate| match aggregate.function() {
-        GraphAggregateFunction::CountRows => aggregate.argument_column().is_none(),
-        GraphAggregateFunction::Count
-        | GraphAggregateFunction::CountDistinct
-        | GraphAggregateFunction::Min
-        | GraphAggregateFunction::Max => aggregate.argument_column().is_some(),
-        GraphAggregateFunction::SumInt
-        | GraphAggregateFunction::SumIntDistinct
-        | GraphAggregateFunction::AverageInt
-        | GraphAggregateFunction::AverageIntDistinct => {
-            aggregate.argument_column().is_some_and(|column| {
-                query.incremental_input_column_type(column) == Some(fgdb_gql::GraphSetColumnType::Scalar)
-            })
-        }
-        _ => false,
-    })
-}
-fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
-    let operators = query.input_pattern().plan().operators();
-    let width = match operators.first() {
-        Some(GlaOperator::ScanVertices) => 1,
-        Some(GlaOperator::ScanEdges { .. }) => 2,
-        _ => return false,
-    };
-    let mut scans = 0;
-    let mut projections = 0;
-    for (position, op) in operators.iter().enumerate() {
-        match op {
-            GlaOperator::ScanVertices | GlaOperator::ScanEdges { .. } if position == 0 => scans += 1,
-            // Predicates, including Boolean/scalar programs, reuse GLA. Shape
-            // admission still rejects pages and unsupported source operators.
-            GlaOperator::Select { slot, predicates } if slot.ordinal() < width => {
-                if !predicates.iter().all(|predicate| matches!(predicate,
-                    VertexPredicate::HasLabel(_)
-                    | VertexPredicate::IntegerProperty { .. }
-                    | VertexPredicate::ScalarProperty { .. }
-                    | VertexPredicate::PropertyNull { .. })) {
-                    return false;
-                }
-            }
-            GlaOperator::VertexIdentity { left, right, .. }
-                if left.ordinal() < width && right.ordinal() < width => {}
-            GlaOperator::CompareProperties { left, right, .. }
-                if left.ordinal() < width && right.ordinal() < width => {}
-            GlaOperator::SelectBoolean { expression }
-                if expression.supports_vertex_bindings(width as usize) => {}
-            GlaOperator::ProjectValues { columns } => {
-                projections += 1;
-                if columns.iter().any(|column| !matches!(column,
-                    ValueProjection::Property { slot, .. } | ValueProjection::Vertex { slot } if slot.ordinal() < width)) { return false; }
-            }
-            GlaOperator::OrderByValues
-            | GlaOperator::Limit {
-                offset: 0,
-                count: None,
-            } => {}
-            _ => return false,
-        }
-    }
-    scans == 1 && projections == 1
-}
-fn needs_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
-    query.input_pattern().value_columns().iter().any(|column| matches!(column, ValueProjection::Property { key: actual, .. } if *actual == key))
-        || query.input_pattern().plan().operators().iter().any(|op| match op {
-            GlaOperator::Select { predicates, .. } => predicates.iter().any(|p| p.property_key() == Some(key)),
-            // Operands need not be returned or appear in a unary predicate.
-            // Retain and invalidate on BOTH sides of a binding-dependent test.
-            GlaOperator::CompareProperties { left_key, right_key, .. } => *left_key == key || *right_key == key,
-            GlaOperator::SelectBoolean { expression } => expression
-                .referenced_vertex_properties().any(|(_, actual)| actual == key),
-            _ => false,
-        })
-}
-fn needs_label(query: &PreparedGraphAggregate, label: LabelId) -> bool {
-    query.input_pattern().plan().operators().iter().any(|op| matches!(op, GlaOperator::Select { predicates, .. } if predicates.iter().any(|p| matches!(p, VertexPredicate::HasLabel(actual) if *actual == label))))
-}
-fn state_from(
-    query: &PreparedGraphAggregate,
-    row: &VertexRow,
-    meter: &mut Meter<'_>,
-) -> Result<VertexState, StandingQueryFailure> {
-    let mut state = VertexState::default();
-    meter.charge(ZSetEvent::ScratchEntry)?;
-    for label in &row.labels {
-        meter.charge(ZSetEvent::Work)?;
-        if needs_label(query, *label) {
-            meter.charge(ZSetEvent::ScratchEntry)?;
-            state.labels.insert(*label);
-        }
-    }
-    for (key, value) in &row.props {
-        meter.charge(ZSetEvent::Work)?;
-        if needs_property(query, *key) {
-            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
-            state.props.insert(*key, value.clone());
-        }
-    }
-    Ok(state)
-}
-impl StandingQuery {
-    fn maintain(
-        &mut self,
-        batch: &LogicalDeltaBatch,
-        meter: &mut Meter<'_>,
-    ) -> Result<(), StandingQueryFailure> {
-        if batch.commit_seq() != self.frontier.checked_successor()
-            .map_err(|_| StandingQueryFailure::InvalidDelta)?
-            || batch.frontier() != batch.commit_seq()
-            || batch.commit_marker_identity().commit_seq != batch.commit_seq()
-        {
-            return Err(StandingQueryFailure::InvalidDelta);
-        }
-        let mut affected = BTreeSet::new();
-        for entry in batch.coordinate_entries() {
-            meter.charge(ZSetEvent::Work)?;
-            if entry.graph != crate::GRAPH || entry.branch != crate::BRANCH {
-                continue;
-            }
-            if entry.schema_transition.is_some() {
-                return Err(StandingQueryFailure::InvalidDelta);
-            }
-            for row in &entry.rows {
-                meter.charge(ZSetEvent::Work)?;
-                meter.stats.delta_rows = meter.stats.delta_rows.checked_add(1)
-                    .ok_or(StandingQueryFailure::WorkBudget)?;
-                if matches!(row, DeltaRow::Schema { .. } | DeltaRow::Constraint { .. }) {
-                    return Err(StandingQueryFailure::InvalidDelta);
-                }
-                if let Some(vid) = affected_vertex(&self.definition, row) {
-                    if !affected.contains(&vid) {
-                        meter.charge(ZSetEvent::ScratchEntry)?;
-                        affected.insert(vid);
-                    }
-                }
-            }
-        }
-        meter.stats.affected_vertices = affected.len() as u64;
-        let mut updates = Vec::new();
-        let mut staged = BTreeMap::new();
-        for vid in &affected {
-            meter.charge(ZSetEvent::Work)?;
-            let next = if let Some(state) = self.vertices.get(vid) {
-                if self.edges.is_none() {
-                    contributions(&self.definition, *vid, state, -1, &mut updates, meter)?;
-                }
-                let mut next = VertexState::default();
-                meter.charge(ZSetEvent::ScratchEntry)?;
-                for label in &state.labels {
-                    meter.charge(ZSetEvent::Work)?;
-                    meter.charge(ZSetEvent::ScratchEntry)?;
-                    next.labels.insert(*label);
-                }
-                for (key, value) in &state.props {
-                    meter.charge(ZSetEvent::Work)?;
-                    meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
-                    next.props.insert(*key, value.clone());
-                }
-                Some(next)
-            } else {
-                None
-            };
-            meter.charge(ZSetEvent::ScratchEntry)?;
-            staged.insert(*vid, next);
-        }
-        for row in batch
-            .coordinate_entries()
-            .iter()
-            .filter(|entry| entry.graph == crate::GRAPH && entry.branch == crate::BRANCH)
-            .flat_map(|entry| &entry.rows)
-        {
-            meter.charge(ZSetEvent::Work)?;
-            match row {
-                DeltaRow::CreateVertex {
-                    vid,
-                    birth_ordinal,
-                    labels,
-                    props,
-                    ..
-                } => {
-                    let target = staged.get_mut(vid).ok_or(StandingQueryFailure::InvalidDelta)?;
-                    if target.is_some() {
-                        return Err(StandingQueryFailure::InvalidDelta);
-                    }
-                    // Borrow the delta fields directly; no full vertex/source clone.
-                    let mut state = VertexState::default();
-                    meter.charge(ZSetEvent::ScratchEntry)?;
-                    let _ = birth_ordinal;
-                    for label in labels {
-                        meter.charge(ZSetEvent::Work)?;
-                        if needs_label(&self.definition, *label) {
-                            meter.charge(ZSetEvent::ScratchEntry)?;
-                            state.labels.insert(*label);
-                        }
-                    }
-                    for (key, value) in props {
-                        meter.charge(ZSetEvent::Work)?;
-                        if needs_property(&self.definition, *key) {
-                            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
-                            state.props.insert(*key, value.clone());
-                        }
-                    }
-                    *target = Some(state);
-                }
-                DeltaRow::DeleteVertex { vid, .. } => {
-                    staged
-                        .get_mut(vid)
-                        .and_then(Option::take)
-                        .ok_or(StandingQueryFailure::InvalidDelta)?;
-                }
-                DeltaRow::LabelMembership {
-                    vid, label, before, after,
-                } if needs_label(&self.definition, *label) => {
-                    let state = staged
-                        .get_mut(vid)
-                        .and_then(Option::as_mut)
-                        .ok_or(StandingQueryFailure::InvalidDelta)?;
-                    if state.labels.contains(label) != *before {
-                        return Err(StandingQueryFailure::InvalidDelta);
-                    }
-                    if *after {
-                        meter.charge(ZSetEvent::ScratchEntry)?;
-                        state.labels.insert(*label);
-                    } else {
-                        state.labels.remove(label);
-                    }
-                }
-                DeltaRow::Property {
-                    elem: ElementId::Vertex(vid),
-                    property,
-                    before,
-                    after,
-                    ..
-                } if needs_property(&self.definition, *property) => {
-                    let state = staged
-                        .get_mut(vid)
-                        .and_then(Option::as_mut)
-                        .ok_or(StandingQueryFailure::InvalidDelta)?;
-                    if state.props.get(property) != before.as_ref() {
-                        return Err(StandingQueryFailure::InvalidDelta);
-                    }
-                    match after {
-                        Some(value) => {
-                            meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
-                            state.props.insert(*property, value.clone());
-                        }
-                        None => {
-                            state.props.remove(property);
-                        }
-                    }
-                }
-                DeltaRow::Counter {
-                    elem: ElementId::Vertex(_),
-                    ..
-                }
-                | DeltaRow::Escrow {
-                    subject: ElementId::Vertex(_),
-                    ..
-                } => return Err(StandingQueryFailure::InvalidDelta),
-                _ => {}
-            }
-        }
-        let edge_patch = if let Some(edges) = &self.edges {
-            Some(edges.prepare(
-                &self.definition, batch, &self.vertices, &staged, &mut updates, meter,
-            )?)
-        } else {
-            for vid in &affected {
-                meter.charge(ZSetEvent::Work)?;
-                if let Some(state) = staged.get(vid).and_then(Option::as_ref) {
-                    contributions(&self.definition, *vid, state, 1, &mut updates, meter)?;
-                }
-            }
-            None
-        };
-        self.integrate(updates, meter)?;
-        // Aggregate and result publication succeeded; only owned map patches
-        // remain. No fallible callback or arithmetic follows this boundary.
-        for (vid, state) in staged {
-            match state {
-                Some(state) => { self.vertices.insert(vid, state); }
-                None => { self.vertices.remove(&vid); }
-            }
-        }
-        if let (Some(edges), Some(patch)) = (&mut self.edges, edge_patch) {
-            edges.publish(patch);
-        }
-        Ok(())
-    }
-}
-fn affected_vertex(query: &PreparedGraphAggregate, row: &DeltaRow) -> Option<VId> {
-    match row {
-        DeltaRow::CreateVertex { vid, .. }
-        | DeltaRow::DeleteVertex { vid, .. } => Some(*vid),
-        DeltaRow::LabelMembership { vid, label, .. }
-            if needs_label(query, *label) => Some(*vid),
-        DeltaRow::Property {
-            elem: ElementId::Vertex(vid),
-            property,
-            ..
-        } if needs_property(query, *property) => Some(*vid),
-        DeltaRow::Counter {
-            elem: ElementId::Vertex(vid),
-            ..
-        }
-        | DeltaRow::Escrow {
-            subject: ElementId::Vertex(vid),
-            ..
-        } => Some(*vid),
-        _ => None,
-    }
-}
 impl<V: Vfs + Clone> Database<V> {
-    /// Register a session-local maintained result against the current committed
-    /// snapshot. Initialization and later explicit rebuilds share one admitted
-    /// source path; ordinary commit maintenance never scans that source again.
-    /// COUNT/DISTINCT and MIN/MAX admit scalar or vertex arguments; integer
-    /// SUM/AVG and their DISTINCT forms admit scalar input columns, including
-    /// computed ones. Each computed row uses the shared GQL projection evaluator
-    /// before grouping, with checked arithmetic and ordinary lazy scalar branches.
-    /// These functions reuse the admitted vertex, fixed-hop and optional/probe shapes.
-    /// Boolean WHERE and its scalar programs use ordinary GLA semantics, with
-    /// every hidden vertex-property dependency retained for invalidation.
-    /// HAVING evaluates only completed changed groups; filtered-out groups keep
-    /// their full support so later insertions/retractions can re-admit them.
-    /// The result-row budget counts visible groups after HAVING, while work and
-    /// scratch budgets still govern all maintenance, including rejected groups.
+    /// Register a session-local native aggregate over the current snapshot.
+    /// The existing GQL admission, scalar/Boolean semantics, grouping, HAVING
+    /// and incremental kernels remain authoritative. Later commits maintain
+    /// this result through the same registry as recursive topology views.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,
@@ -530,27 +181,50 @@ impl<V: Vfs + Clone> Database<V> {
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
         let query = self.prepare_standing_query(cx, definition, policy)?;
-        let index = self.standing_queries.len();
-        self.standing_queries.push(query);
-        Ok(StandingQueryHandle {
-            owner: Arc::clone(&self.handle_owner),
-            index,
-        })
+        Ok(self.store_standing_query(StandingQuery::Aggregate(Box::new(query))))
     }
 
-    /// Rebuild an existing standing query from the authoritative current
-    /// snapshot, retaining the same handle and immutable prepared definition.
-    /// A maintenance refusal does not roll back the already durable write;
-    /// this method repairs the derived view after the cause is corrected or
-    /// a larger policy is supplied. It is also valid for a healthy view.
+    /// Register directed, one-or-more-hop reachability for one relation.
+    /// Each native (source, destination) pair has weight one. Parallel edges
+    /// retain independent lifetimes; self pairs require a nonempty cycle.
+    /// Labels, properties, valid time and path length do not filter this view.
+    /// This is an explicit topology API, not a new GQL grammar or a substitute
+    /// for bounded WALK/path multiplicity semantics.
     ///
-    /// Preparation is private: any read, cancellation, budget or arithmetic
-    /// refusal preserves the prior result, policy, failure and frontier. On
-    /// success all are replaced together, then later commits resume ordinary
-    /// incremental maintenance. This deliberately rebuilds the full admitted
-    /// snapshot rather than skipping deltas or trusting a partial old state.
-    /// No handle transfer across reopened databases, durable registration,
-    /// delivery replay or automatic retry is implied.
+    /// Initialization replays the complete retained, authenticated delta window
+    /// under one cumulative work/scratch budget. max_snapshot_records bounds
+    /// historical delta rows admitted, not only currently live edges. The
+    /// result-row budget bounds the final closure, not intermediate historical
+    /// peaks; those still consume work and scratch admission. A retired prefix
+    /// refuses. Ordinary maintenance consumes only the newly committed batch.
+    ///
+    /// The database owns catch-up: after each successful write the view is
+    /// current or explicitly unavailable. No caller polling, second commit log,
+    /// durable registration, delivery acknowledgement or spill is introduced.
+    /// The retained closure can require quadratic space.
+    pub fn register_standing_reachability(
+        &mut self,
+        cx: &QueryCx,
+        relation: RelationId,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        let query = self.prepare_standing_reachability(cx, relation, policy)?;
+        Ok(self.store_standing_query(StandingQuery::Reachability(Box::new(query))))
+    }
+
+    fn store_standing_query(&mut self, query: StandingQuery) -> StandingQueryHandle {
+        let index = self.standing_queries.len();
+        self.standing_queries.push(query);
+        StandingQueryHandle { owner: Arc::clone(&self.handle_owner), index }
+    }
+
+    /// Repair either kind of maintained result without changing its handle or
+    /// definition. Native aggregates rebuild from the authoritative snapshot;
+    /// recursive views replay complete retained Chronicle history. Preparation
+    /// is private: any read, cancellation, budget or arithmetic refusal leaves
+    /// the old rows, frontier, policy and failure untouched. Successful repair
+    /// replaces all state together and resumes ordinary commit maintenance.
+    /// An already durable write is never rolled back by a maintenance failure.
     pub fn rebuild_standing_query(
         &mut self,
         cx: &QueryCx,
@@ -562,161 +236,85 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(StandingQueryError::ForeignHandle);
         }
         self.ensure_readable().map_err(StandingQueryError::Read)?;
-        let definition = self.standing_queries
-            .get(handle.index)
-            .ok_or(StandingQueryError::UnknownHandle)?
-            .definition.clone();
-        let replacement = self.prepare_standing_query(cx, definition, policy)?;
-        let frontier = replacement.frontier;
-        // No await, source mutation or fallible callback can interleave the
-        // completed preparation and this one replacement under &mut self.
+        let current = self.standing_queries.get(handle.index)
+            .ok_or(StandingQueryError::UnknownHandle)?;
+        let replacement = match current {
+            StandingQuery::Aggregate(query) => StandingQuery::Aggregate(Box::new(
+                self.prepare_standing_query(cx, query.definition.clone(), policy)?,
+            )),
+            StandingQuery::Reachability(query) => StandingQuery::Reachability(Box::new(
+                self.prepare_standing_reachability(cx, query.relation(), policy)?,
+            )),
+        };
+        let frontier = replacement.status().1;
+        // No source mutation, await or fallible work between preparation and swap.
         self.standing_queries[handle.index] = replacement;
         Ok(frontier)
     }
 
-    fn prepare_standing_query(
+    fn admitted_standing_query(
         &self,
         cx: &QueryCx,
-        definition: PreparedGraphAggregate,
-        policy: GqlQueryPolicy,
-    ) -> Result<StandingQuery, StandingQueryError> {
-        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
-        self.ensure_readable().map_err(StandingQueryError::Read)?;
-        if !eligible(&definition) {
-            return Err(StandingQueryError::Unsupported);
-        }
-        cx.with_restriction(|| {
-            let mut checkpoint = || {
-                cx.checkpoint()
-                    .map_err(|_| StandingQueryFailure::Interrupted)
-            };
-            let mut meter = Meter {
-                policy,
-                stats: StandingQueryStats::default(),
-                checkpoint: &mut checkpoint,
-            };
-            // Registration/rebuild may scan the snapshot. Admit and charge every
-            // physical row/payload before merge_all_vertices can allocate it.
-            let mut records = 0u64;
-            for patch in &self.snapshot.patches {
-                for row in patch.iter() {
-                    records = records
-                        .checked_add(1)
-                        .ok_or(StandingQueryError::Maintenance(
-                            StandingQueryFailure::SnapshotBudget,
-                        ))?;
-                    if policy
-                        .rows
-                        .max_snapshot_records()
-                        .is_some_and(|limit| records > limit)
-                    {
-                        return Err(StandingQueryError::Maintenance(
-                            StandingQueryFailure::SnapshotBudget,
-                        ));
-                    }
-                    meter
-                        .charge(ZSetEvent::Work)
-                        .map_err(StandingQueryError::Maintenance)?;
-                    meter
-                        .units(ZSetEvent::ScratchEntry, 1 + row.labels.len())
-                        .map_err(StandingQueryError::Maintenance)?;
-                    for (_, value) in &row.props {
-                        meter
-                            .units(ZSetEvent::ScratchEntry, scalar_units(value))
-                            .map_err(StandingQueryError::Maintenance)?;
-                    }
-                }
-            }
-            let edges = edge::State::for_definition(&definition);
-            if edges.is_some() {
-                edge::admit_snapshot(&self.snapshot, &mut records, &mut meter)
-                    .map_err(StandingQueryError::Maintenance)?;
-            }
-            let mut query = StandingQuery {
-                definition,
-                policy,
-                vertices: BTreeMap::new(),
-                edges,
-                aggregate: IncrementalAggregate::new(),
-                rows: ZSet::new(),
-                frontier: self.snapshot.frontier,
-                stats: StandingQueryStats::default(),
-                failure: None,
-            };
-            let mut updates = Vec::new();
-            for row in self.vertices().map_err(StandingQueryError::Read)? {
-                let state = state_from(&query.definition, &row, &mut meter)
-                    .map_err(StandingQueryError::Maintenance)?;
-                if query.edges.is_none() {
-                    contributions(&query.definition, row.vid, &state, 1, &mut updates, &mut meter)
-                        .map_err(StandingQueryError::Maintenance)?;
-                }
-                query.vertices.insert(row.vid, state);
-            }
-            if let Some(edges) = &mut query.edges {
-                for row in self.edges().map_err(StandingQueryError::Read)? {
-                    edges.seed(
-                        &query.definition, &row.entry, &query.vertices, &mut updates, &mut meter,
-                    ).map_err(StandingQueryError::Maintenance)?;
-                }
-            }
-            if let Some(edges) = &query.edges {
-                edges.finish_seed(&query.definition, &query.vertices, &mut updates, &mut meter)
-                    .map_err(StandingQueryError::Maintenance)?;
-            }
-            query
-                .integrate(updates, &mut meter)
-                .map_err(StandingQueryError::Maintenance)?;
-            query.stats = meter.stats;
-            // The built query is still private, including its aggregate and
-            // result sink. Refuse cancellation before the public owner swaps.
-            (meter.checkpoint)().map_err(StandingQueryError::Maintenance)?;
-            Ok(query)
-        })
-    }
-
-    pub fn standing_query<'a>(
-        &'a self,
-        cx: &QueryCx,
         handle: &StandingQueryHandle,
-    ) -> Result<StandingQueryView<'a>, StandingQueryError> {
+    ) -> Result<&StandingQuery, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         if !Arc::ptr_eq(&self.handle_owner, &handle.owner) {
             return Err(StandingQueryError::ForeignHandle);
         }
         self.ensure_readable().map_err(StandingQueryError::Read)?;
-        let query = self
-            .standing_queries
-            .get(handle.index)
+        let query = self.standing_queries.get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
-        if let Some(reason) = query.failure {
+        let (_, frontier, failure) = query.status();
+        if let Some(reason) = failure {
+            return Err(StandingQueryError::Unavailable { frontier, reason });
+        }
+        if frontier != self.snapshot.frontier {
             return Err(StandingQueryError::Unavailable {
-                frontier: query.frontier,
-                reason,
+                frontier, reason: StandingQueryFailure::InvalidDelta,
             });
         }
-        Ok(StandingQueryView { query })
+        Ok(query)
+    }
+
+    /// Read a native aggregate result. A reachability handle refuses rather
+    /// than masquerading as aggregate cells or panicking on the wrong row kind.
+    pub fn standing_query<'a>(
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+    ) -> Result<StandingQueryView<'a>, StandingQueryError> {
+        let StandingQuery::Aggregate(query) = self.admitted_standing_query(cx, handle)? else {
+            return Err(StandingQueryError::Unsupported);
+        };
+        Ok(StandingQueryView { rows: &query.rows, frontier: query.frontier, stats: &query.stats })
+    }
+
+    /// Borrow the current recursive pair set, with the same owner, health,
+    /// cancellation and failure checks as ordinary standing-query reads.
+    pub fn standing_reachability<'a>(
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+    ) -> Result<StandingQueryView<'a, (VId, VId)>, StandingQueryError> {
+        let StandingQuery::Reachability(query) = self.admitted_standing_query(cx, handle)? else {
+            return Err(StandingQueryError::Unsupported);
+        };
+        Ok(StandingQueryView { rows: &query.rows, frontier: query.frontier, stats: &query.stats })
     }
 }
 
+/// One publication lifecycle. A failed derived view never rejects a durable
+/// database commit or prevents independently admitted sibling views advancing.
 pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &LogicalDeltaBatch) {
     for query in queries {
-        if query.failure.is_some() {
-            continue;
-        }
-        let mut checkpoint = || {
-            cx.checkpoint()
-                .map_err(|_| StandingQueryFailure::Interrupted)
+        let (policy, _, failure) = query.status();
+        if failure.is_some() { continue; }
+        let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
+        let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+        let result = match query {
+            StandingQuery::Aggregate(query) => query.maintain(batch, &mut meter),
+            StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
         };
-        let mut meter = Meter {
-            policy: query.policy,
-            stats: StandingQueryStats::default(),
-            checkpoint: &mut checkpoint,
-        };
-        match query.maintain(batch, &mut meter) {
-            Ok(()) => query.frontier = batch.commit_seq(),
-            Err(reason) => query.failure = Some(reason),
-        }
-        query.stats = meter.stats;
+        query.record(batch.commit_seq(), result, meter.stats);
     }
 }
