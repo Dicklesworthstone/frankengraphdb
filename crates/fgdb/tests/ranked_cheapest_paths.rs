@@ -221,3 +221,6 @@ fn actual_database_returns_four_of_two_to_the_fortieth_routes_under_one_allowanc
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[path = "ranked_cheapest_paths/modes.rs"]
+mod modes;
