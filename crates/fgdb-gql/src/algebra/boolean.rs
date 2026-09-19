@@ -830,6 +830,83 @@ fn append_operand(operand: &Operand<BindingSlot>, bytes: &mut Vec<u8>) {
     }
 }
 
+impl BoundBooleanExpression {
+    // Borrow all eager input operands, including scalar-program columns that
+    // are not ultimately selected by CASE/COALESCE. No payload is cloned.
+    fn operands(&self) -> impl Iterator<Item = &Operand<BindingSlot>> {
+        self.program.iter().flat_map(|instruction| {
+            let (pair, columns): ([Option<&Operand<BindingSlot>>; 2], &[Operand<BindingSlot>]) =
+                match instruction {
+                    Instruction::Compare { left, right, .. } => ([Some(left), Some(right)], &[]),
+                    Instruction::IsNull { operand, .. } => ([Some(operand), None], &[]),
+                    Instruction::Expression { columns, .. } => ([None, None], columns),
+                    _ => ([None, None], &[]),
+                };
+            pair.into_iter().flatten().chain(columns)
+        })
+    }
+
+    /// Whether a vertex-only binding frame can evaluate this entire program.
+    /// Captured-edge operands are not vertex slots and are never interpreted
+    /// as missing properties. Nullable entries inside the frame are legal.
+    #[must_use]
+    pub fn supports_vertex_bindings(&self, width: usize) -> bool {
+        self.operands().all(|operand| match operand {
+            Operand::Vertex(slot) | Operand::Property { variable: slot, .. } => {
+                (slot.ordinal() as usize) < width
+            }
+            Operand::Literal(_) => true,
+            Operand::EdgeProperty { .. } => false,
+        })
+    }
+
+    /// Every vertex-property read in program order, including repeated keys
+    /// and eager scalar inputs. Incremental consumers must retain/invalidate
+    /// these even when the property is absent from the result projection or
+    /// another Boolean leaf currently determines the answer. This iterator
+    /// allocates nothing and exposes neither literals nor private bytecode.
+    pub fn referenced_vertex_properties(
+        &self,
+    ) -> impl Iterator<Item = (BindingSlot, PropertyKeyId)> + '_ {
+        self.operands().filter_map(|operand| match operand {
+            Operand::Property { variable, key } => Some((*variable, *key)),
+            _ => None,
+        })
+    }
+
+    /// Evaluate a complete caller-owned vertex frame through the SAME engine
+    /// as snapshot GLA. Some(true) means WHERE accepts; Some(false) includes
+    /// SQL FALSE and UNKNOWN. None is a profile refusal (captured-edge input
+    /// or an out-of-frame slot), never SQL NULL. A present None binding is a
+    /// legitimate null extension and is distinguished from a missing slot.
+    ///
+    /// Admission and execution are checkpointed. All source/control errors
+    /// propagate, including reads after true OR/false AND. The definition and
+    /// caller's retained state are never mutated. No source scan is performed.
+    pub fn evaluate_vertex_binding<'a, E>(
+        &self,
+        bindings: &[Option<VId>],
+        property: &mut impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Option<bool>, E> {
+        control(GlaExecutionEvent::Work)?;
+        for operand in self.operands() {
+            control(GlaExecutionEvent::Work)?;
+            let supported = match operand {
+                Operand::Vertex(slot) | Operand::Property { variable: slot, .. } => {
+                    (slot.ordinal() as usize) < bindings.len()
+                }
+                Operand::Literal(_) => true,
+                Operand::EdgeProperty { .. } => false,
+            };
+            if !supported {
+                return Ok(None);
+            }
+        }
+        self.evaluate(bindings, property, control).map(Some)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,5 +1285,102 @@ mod tests {
         // Same template, different slot remapping: different bytes.
         let remapped = first.remap(|slot| BindingSlot(slot.ordinal() + 10));
         assert_ne!(first.template_bytes(), remapped.template_bytes());
+    }
+
+    #[test]
+    fn maintenance_dependencies_include_hidden_and_eager_scalar_inputs() {
+        let scalar = crate::GraphIntegerExpression::prepare_scalar(&[
+            crate::GraphIntegerOp::ScalarColumn(0),
+        ]).unwrap();
+        let columns = [
+            Arg::Property { variable: "a", key: PropertyKeyId(7) },
+            // Not used by scalar bytecode, but the enclosing Boolean operand
+            // loader reads it eagerly. It is still an invalidation dependency.
+            Arg::Property { variable: "b", key: PropertyKeyId(8) },
+        ];
+        let expression = bound(&[
+            Op::Expression { expression: &scalar, columns: &columns },
+            Op::IsNull {
+                operand: Arg::Property { variable: "a", key: PropertyKeyId(9) },
+                is_null: true,
+            },
+            Op::Or,
+        ]);
+        assert_eq!(expression.referenced_vertex_properties()
+            .map(|(slot, key)| (slot.ordinal(), key)).collect::<Vec<_>>(),
+            vec![(0, PropertyKeyId(7)), (1, PropertyKeyId(8)), (0, PropertyKeyId(9))]);
+        assert!(!expression.supports_vertex_bindings(1));
+        assert!(expression.supports_vertex_bindings(2));
+        let moved = expression.remap(|slot| BindingSlot(slot.ordinal() + 3));
+        assert!(!moved.supports_vertex_bindings(4));
+        assert!(moved.supports_vertex_bindings(5));
+    }
+
+    #[test]
+    fn maintained_binding_refusal_is_not_a_null_extension_or_false_result() {
+        let expression = bound(&[Op::IsNull { operand: Arg::Vertex("b"), is_null: true }]);
+        let mut reads = 0;
+        let mut source = |_, _| {
+            reads += 1;
+            Err::<Option<&CanonicalScalar>, _>("unexpected source")
+        };
+        assert_eq!(expression.evaluate_vertex_binding(&[Some(VId(1))], &mut source,
+            &mut |_| Ok(())).unwrap(), None);
+        assert_eq!(expression.evaluate_vertex_binding(&[Some(VId(1)), None], &mut source,
+            &mut |_| Ok(())).unwrap(), Some(true));
+        assert_eq!(expression.evaluate_vertex_binding(&[Some(VId(1)), Some(VId(2))],
+            &mut source, &mut |_| Ok(())).unwrap(), Some(false));
+        let edge = bound(&[Op::IsNull {
+            operand: Arg::EdgeProperty { variable: "a", key: PropertyKeyId(1) },
+            is_null: true,
+        }]);
+        assert!(!edge.supports_vertex_bindings(2));
+        assert_eq!(edge.evaluate_vertex_binding(&[Some(VId(1)), Some(VId(2))],
+            &mut source, &mut |_| Ok(())).unwrap(), None);
+        assert_eq!(reads, 0);
+    }
+
+    #[test]
+    fn maintained_boolean_evaluation_keeps_unknown_eager_errors_and_all_checkpoints() {
+        let value = CanonicalScalar::Int(7);
+        let expression = bound(&[
+            Op::Compare {
+                left: Arg::Property { variable: "a", key: PropertyKeyId(1) },
+                comparison: IntegerComparison::Equal,
+                right: Arg::Literal(&value),
+            },
+            Op::Not,
+        ]);
+        for actual in [None, Some(CanonicalScalar::Null), Some(CanonicalScalar::Bool(true)),
+            Some(CanonicalScalar::Int(7)), Some(CanonicalScalar::Int(8))] {
+            let expected = expression.evaluate(&[Some(VId(1))],
+                &mut |_, _| Ok::<_, ()>(actual.as_ref()), &mut |_| Ok(())).unwrap();
+            assert_eq!(expression.evaluate_vertex_binding(&[Some(VId(1))],
+                &mut |_, _| Ok::<_, ()>(actual.as_ref()), &mut |_| Ok(())).unwrap(), Some(expected));
+        }
+        let eager = bound(&[
+            Op::Truth(Some(true)),
+            Op::IsNull {
+                operand: Arg::Property { variable: "a", key: PropertyKeyId(1) }, is_null: true,
+            },
+            Op::Or,
+        ]);
+        assert_eq!(eager.evaluate_vertex_binding(&[Some(VId(1))],
+            &mut |_, _| Err::<Option<&CanonicalScalar>, _>("source"), &mut |_| Ok(())), Err("source"));
+        let mut calls = 0;
+        let expected = eager.evaluate_vertex_binding(&[Some(VId(1))],
+            &mut |_, _| Ok::<_, usize>(Some(&value)),
+            &mut |_| { calls += 1; Ok(()) }).unwrap();
+        for stop in 1..=calls {
+            let mut seen = 0;
+            assert_eq!(eager.evaluate_vertex_binding(&[Some(VId(1))],
+                &mut |_, _| Ok(Some(&value)), &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }), Err(stop));
+            assert_eq!(seen, stop);
+            assert_eq!(eager.evaluate_vertex_binding(&[Some(VId(1))],
+                &mut |_, _| Ok::<_, usize>(Some(&value)), &mut |_| Ok(())).unwrap(), expected);
+        }
     }
 }
