@@ -2,6 +2,8 @@
 //! Successor/predecessor walks use the existing persistent history indexes;
 //! opening does not collect candidate IDs, visible edges, or projected rows.
 
+mod expansion;
+
 use crate::gql_exec::source::{SourceEvent, edge_properties_at};
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
@@ -52,6 +54,13 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
             if let Some(eid) = successor { self.after = Some(eid); }
             Ok(successor)
         })
+    }
+
+    fn next_incident_edge<C>(
+        &self, endpoint: VId, direction: fgdb_gql::algebra::GlaDirection, after: Option<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, fgdb_gql::edge_stream::EdgeExpansionSourceError<ReadError, C>> {
+        expansion::next(self, endpoint, direction, after, control)
     }
 
     fn edge<'a, C>(
@@ -145,12 +154,15 @@ fn open<'q>(
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Stream one-edge GLA matches ordered by leading edge/source identities.
+    /// Stream connected fixed-edge GLA matches with a complete identity prefix.
+    /// The prefix is root edge, root source, then each expansion's edge in GLA
+    /// order. Chains, branches and identity closures seek indexed incidence;
+    /// arbitrary ordering and unsupported scopes refuse during preparation.
     /// Both vertex and edge predicates/properties use the same pinned image.
     /// Opening checks health, cut and physical shape but scans no candidate.
     /// LIMIT/close/drop provides backpressure without collecting a result bag.
     /// The pinned decoded generation remains resident: this is not out-of-core
-    /// storage, general join streaming, transaction streaming or a durable token.
+    /// storage, FreeJoin/WCOJ, transaction streaming or a durable token.
     pub fn stream_graph_edges_governed<'q>(
         &self, cx: &'q QueryCx, pattern: &PreparedGraphPattern<GraphValueRow>, policy: GqlQueryPolicy,
     ) -> Result<EdgeScanCursor<SnapshotEdgeSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>>, StreamError> {
