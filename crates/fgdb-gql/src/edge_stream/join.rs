@@ -6,12 +6,19 @@
 use super::*;
 use crate::algebra::{MAX_PATTERN_BINDINGS, MAX_PATTERN_EDGES};
 
+mod probe;
+
+enum Instruction {
+    Native(GlaOperator),
+    Probe(probe::Probe),
+}
+
 #[derive(Clone, Copy)]
 struct Expansion { source: usize, relation: RelationId, direction: GlaDirection }
 
 pub(super) struct JoinPlan {
     expansions: Vec<Expansion>,
-    stages: Vec<Vec<GlaOperator>>,
+    stages: Vec<Vec<Instruction>>,
 }
 
 // Private GLA construction is still the logical authority. Audit every operand
@@ -31,6 +38,13 @@ pub(super) fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<EdgeScanPlan, Edg
         let bad = || EdgeScanBuildError { operator: at };
         let Some(op) = ops.get(at) else { return Err(bad()); };
         match op {
+            GlaOperator::Probe { .. } => {
+                let (probe, end) = probe::Probe::compile(ops, at, width)?;
+                stages.last_mut().expect("root stage").push(Instruction::Probe(probe));
+                terminal = true;
+                at = end + 1;
+                continue;
+            }
             GlaOperator::Expand { source, relation, direction }
                 if !terminal && (source.ordinal() as usize) < width
                     && width < MAX_PATTERN_BINDINGS && expansions.len() + 1 < MAX_PATTERN_EDGES => {
@@ -92,7 +106,7 @@ pub(super) fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<EdgeScanPlan, Edg
             }
             _ => return Err(bad()),
         }
-        stages.last_mut().expect("root stage").push(op.clone());
+        stages.last_mut().expect("root stage").push(Instruction::Native(op.clone()));
         at += 1;
     }
     let projection = Arc::new(ops[at].clone());
@@ -203,7 +217,22 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         if depth == 0 { traversal.bindings.push(Some(from)); }
         traversal.choices.push(Choice { eid, target: to });
         traversal.bindings.push(Some(to));
-        let Some(paths) = test_stage(&plan.stages[depth], traversal, source, &mut |event| meter.event(event))? else {
+        // Probe candidates share this very meter, but never count as output.
+        // The two short-lived borrows cannot overlap: source callbacks return
+        // before a candidate record is admitted or the next predicate runs.
+        let paths = {
+            let metered = std::cell::RefCell::new(&mut *meter);
+            test_stage(&plan.stages[depth], traversal, source,
+                &mut |event| metered.borrow_mut().event(event),
+                &mut || {
+                    let mut meter = metered.borrow_mut();
+                    let count = meter.increment(
+                        GqlBudgetDimension::SnapshotRecords, meter.rows.snapshot_records)?;
+                    meter.rows.snapshot_records = count;
+                    Ok(())
+                })?
+        };
+        let Some(paths) = paths else {
             traversal.pop(); continue;
         };
         if depth + 1 < hops {
@@ -238,31 +267,19 @@ fn edge_property<'a, S: EdgeScanSource, C>(source: &'a S, eid: EId, key: Propert
     seek(edge.properties, &key, |entry| entry.0, control).map(|row| row.map(|(_, value)| value))
 }
 
-fn test_stage<S: EdgeScanSource, C>(ops: &[GlaOperator], traversal: &Traversal, source: &S,
+fn test_stage<S: EdgeScanSource, C>(ops: &[Instruction], traversal: &Traversal, source: &S,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+    record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
 ) -> ScanResult<Option<Vec<Option<GraphPath>>>, S::Error, C> {
     let ids = &traversal.bindings;
     let mut paths = Vec::new();
     for op in ops {
         control(GlaExecutionEvent::Work)?;
         match op {
-            GlaOperator::Select { slot, predicates } => {
-                let row = vertex(source, ids[slot.ordinal() as usize].expect("bound vertex"), control)?;
-                for predicate in predicates {
-                    control(GlaExecutionEvent::Work)?;
-                    for _ in 0..predicate.comparison_work_units() { control(GlaExecutionEvent::Work)?; }
-                    let (label, property) = match predicate {
-                        VertexPredicate::HasLabel(key) => (seek(row.labels, key, |id| *id, control)?.copied(), None),
-                        _ => { let key = predicate.property_key().expect("property predicate");
-                            (None, seek(row.properties, &key, |entry| entry.0, control)?.map(|(key, value)| (*key, value))) },
-                    };
-                    if !predicate.matches_borrowed(label, property) { return Ok(None); }
-                }
+            Instruction::Probe(probe) => {
+                if !probe.accepts(ids, source, control, record)? { return Ok(None); }
             }
-            GlaOperator::VertexIdentity { left, right, equal } => {
-                if (ids[left.ordinal() as usize] == ids[right.ordinal() as usize]) != *equal { return Ok(None); }
-            }
-            GlaOperator::CapturePath { start, segments, .. } => {
+            Instruction::Native(GlaOperator::CapturePath { start, segments, .. }) => {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 for _ in segments { control(GlaExecutionEvent::ScratchEntry)?; control(GlaExecutionEvent::ScratchEntry)?; }
                 let steps = segments.iter().map(|slot| {
@@ -271,17 +288,51 @@ fn test_stage<S: EdgeScanSource, C>(ops: &[GlaOperator], traversal: &Traversal, 
                 }).collect::<Vec<_>>();
                 paths.push(Some(GraphPath::new(ids[start.ordinal() as usize].expect("captured start"), steps.into_boxed_slice())));
             }
-            GlaOperator::SelectBoolean { .. } | GlaOperator::CompareProperties { .. } => {
-                let meter = std::cell::RefCell::new(&mut *control);
-                if !compare_element_properties(op, ids, &paths,
-                    &mut |vid, key| property(source, vid, key, &mut **meter.borrow_mut()),
-                    &mut |eid, key| edge_property(source, eid, key, &mut **meter.borrow_mut()),
-                    &mut |event| (**meter.borrow_mut())(event))? { return Ok(None); }
+            Instruction::Native(op) => {
+                if !accepts(op, ids, &paths, source, control)? { return Ok(None); }
             }
-            _ => unreachable!("checked fixed-hop stage"),
         }
     }
     Ok(Some(paths))
+}
+
+// Shared by outer stages and probe-local stages. In particular, NOT EXISTS
+// negates existence of a TRUE witness, not the Boolean value of a nullable
+// property comparison. The canonical three-valued evaluator remains in charge.
+fn accepts<S: EdgeScanSource, C>(op: &GlaOperator, ids: &[Option<VId>],
+    paths: &[Option<GraphPath>], source: &S,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+) -> ScanResult<bool, S::Error, C> {
+    match op {
+        GlaOperator::Select { slot, predicates } => {
+            let Some(vid) = ids[slot.ordinal() as usize] else { return Ok(false); };
+            let row = vertex(source, vid, control)?;
+            for predicate in predicates {
+                control(GlaExecutionEvent::Work)?;
+                for _ in 0..predicate.comparison_work_units() { control(GlaExecutionEvent::Work)?; }
+                let (label, property) = match predicate {
+                    VertexPredicate::HasLabel(key) => (seek(row.labels, key, |id| *id, control)?.copied(), None),
+                    _ => { let key = predicate.property_key().expect("property predicate");
+                        (None, seek(row.properties, &key, |entry| entry.0, control)?.map(|(key, value)| (*key, value))) },
+                };
+                if !predicate.matches_borrowed(label, property) { return Ok(false); }
+            }
+            Ok(true)
+        }
+        GlaOperator::VertexIdentity { left, right, equal } => {
+            let (Some(left), Some(right)) = (ids[left.ordinal() as usize], ids[right.ordinal() as usize])
+                else { return Ok(false); };
+            Ok((left == right) == *equal)
+        }
+        GlaOperator::SelectBoolean { .. } | GlaOperator::CompareProperties { .. } => {
+            let meter = std::cell::RefCell::new(control);
+            compare_element_properties(op, ids, paths,
+                &mut |vid, key| property(source, vid, key, &mut **meter.borrow_mut()),
+                &mut |eid, key| edge_property(source, eid, key, &mut **meter.borrow_mut()),
+                &mut |event| (**meter.borrow_mut())(event))
+        }
+        _ => unreachable!("checked fixed-hop predicate"),
+    }
 }
 fn project<S: EdgeScanSource, C>(projection: &GlaOperator, ids: &[Option<VId>], paths: &[Option<GraphPath>], source: &S,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
