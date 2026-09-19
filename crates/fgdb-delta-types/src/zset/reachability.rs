@@ -3,9 +3,10 @@
 //! Edge multiplicities are integrated exactly and must remain nonnegative.
 //! Positive support, rather than path counts, defines reachability: cycles do
 //! not create infinite weights and parallel edges survive partial retraction.
-//! Only sources preceding a changed edge in the OLD closure need rederivation.
-//! Recomputing those sources on the complete prospective topology handles both
-//! cycles and simultaneous changes without self-supporting deleted paths.
+//! Insertion-only support changes propagate through the retained closure and
+//! new edges, without rescanning old topology or copying unchanged result rows.
+//! Deletions rederive sources preceding a changed edge in the OLD closure on
+//! the complete prospective topology, avoiding self-supporting deleted paths.
 //!
 //! This is an in-memory algebra operator, not durable arrangement storage or a
 //! subscription scheduler. Closure storage can be quadratic. Work/scratch
@@ -13,6 +14,7 @@
 //! comparison, allocation failure and panic have the parent Z-set boundary.
 
 pub mod committed;
+mod insertions;
 
 use super::{ZSet, ZSetError, ZSetEvent, event};
 use crate::{LimbLimit, ZWeight};
@@ -128,7 +130,10 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
     /// an unchanged old prefix, so this union is complete even when several
     /// insertions/deletions cooperate in a single tick. Other sources are not
     /// scanned. Multiplicity changes that preserve positive support need no
-    /// graph traversal at all.
+    /// graph traversal at all. Without support removals, changed destinations
+    /// propagate through OLD closure cones and the inserted-edge arrangement;
+    /// only new result pairs are staged. A redundant transitive insertion does
+    /// not visit its old predecessors, though its edge support is still kept.
     pub fn prepare<E>(
         &mut self,
         delta: &ZSet<(V, V)>,
@@ -139,7 +144,6 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
         let weights = self.edges.prepare_integration(delta, limbs, control)?;
         let mut inserted = Relation::new();
         let mut removed = Relation::new();
-        let mut affected = BTreeSet::new();
         for (edge, next) in &weights {
             let (source, destination) = edge;
             event(control, ZSetEvent::Work)?;
@@ -159,6 +163,24 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
             } else {
                 insert_pair(&mut removed, source, destination, control)?;
             }
+        }
+
+        if removed.is_empty() {
+            let (additions, output) = self.derive_insertions(&inserted, limbs, control)?;
+            event(control, ZSetEvent::Work)?;
+            return Ok(ReachabilityUpdate {
+                owner: self,
+                weights,
+                inserted,
+                removed,
+                replacements: Relation::new(),
+                additions,
+                delta: output,
+            });
+        }
+
+        let mut affected = BTreeSet::new();
+        for source in inserted.keys().chain(removed.keys()) {
             insert_vertex(&mut affected, source, control)?;
             if let Some(predecessors) = self.predecessors.get(source) {
                 for predecessor in predecessors {
@@ -213,6 +235,7 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
             inserted,
             removed,
             replacements,
+            additions: Relation::new(),
             delta: output,
         })
     }
@@ -318,6 +341,7 @@ pub struct ReachabilityUpdate<'a, V: Ord> {
     inserted: Relation<V>,
     removed: Relation<V>,
     replacements: Relation<V>,
+    additions: Relation<V>,
     delta: ZSet<(V, V)>,
 }
 
@@ -337,6 +361,7 @@ impl<V: Ord + Clone> ReachabilityUpdate<'_, V> {
             inserted,
             removed,
             replacements,
+            additions,
             delta,
         } = self;
         owner.edges.publish(weights);
@@ -354,6 +379,9 @@ impl<V: Ord + Clone> ReachabilityUpdate<'_, V> {
             } else {
                 owner.reachable.insert(source, row);
             }
+        }
+        for (source, row) in additions {
+            owner.reachable.entry(source).or_default().extend(row);
         }
         for ((source, destination), weight) in delta.iter() {
             if weight < &ZWeight::ZERO {
