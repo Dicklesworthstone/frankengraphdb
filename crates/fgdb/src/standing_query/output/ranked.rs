@@ -321,3 +321,6 @@ impl Update<'_> {
         sink.commit();
     }
 }
+
+#[cfg(test)]
+mod tests;
