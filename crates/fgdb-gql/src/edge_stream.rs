@@ -1,9 +1,11 @@
-//! Ordered, pull-driven execution of an identified one-edge GLA pattern.
+//! Ordered, pull-driven execution of identified fixed-edge GLA patterns.
 //!
 //! The leading edge identity and source vertex prove whole-row order and
 //! uniqueness, including both orientations of an undirected non-self edge.
 //! No adjacency/result bag, sorting, DISTINCT set or unread suffix is built.
 //! This is a physical specialization of compiler-owned GLA, not a text parser.
+
+mod join;
 
 use crate::algebra::{
     GlaDirection, GlaOperator, GlaOutput, GlaPlan, GraphPath, GraphPathFunction,
@@ -30,11 +32,16 @@ impl core::fmt::Display for EdgeScanBuildError {
 }
 impl core::error::Error for EdgeScanBuildError {}
 
-/// Checked one-edge plan. The output must begin with the captured edge identity
+/// Checked fixed-edge plan. For multiple connected edges, the output prefix
+/// is root edge, root source vertex, then every appended edge in GLA traversal
+/// order. This covers chains, branches and identity-constrained cycle closures;
+/// other output shapes and unsupported operators fail physical preparation.
+///
+/// For one edge: The output must begin with the captured edge identity
 /// followed by slot zero's vertex identity. Remaining columns may contain either
 /// endpoint, their properties, edge properties or this one-edge path/functions.
 /// This prefix permits DISTINCT and ALL without storing a seen-set. Other order,
-/// hidden sort columns, optional/probe/extra expansions, and catalog-name output
+/// hidden sort columns, optional/probe/variable-length expansions, and catalog-name output
 /// refuse before a source is driven. Boolean filters use the ordinary engine.
 #[derive(Clone)]
 pub struct EdgeScanPlan {
@@ -44,10 +51,14 @@ pub struct EdgeScanPlan {
     projection: Arc<GlaOperator>,
     offset: u64,
     count: Option<u64>,
+    joined: Option<Arc<join::JoinPlan>>,
 }
 impl EdgeScanPlan {
     pub fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<Self, EdgeScanBuildError> {
         let ops = plan.operators();
+        if ops.iter().any(|op| matches!(op, GlaOperator::Expand { .. })) {
+            return join::compile(plan);
+        }
         let Some(GlaOperator::ScanEdges { relation, direction }) = ops.first() else {
             return Err(EdgeScanBuildError { operator: 0 });
         };
@@ -108,7 +119,7 @@ impl EdgeScanPlan {
         };
         if at + 1 != ops.len() { return Err(EdgeScanBuildError { operator: at + 1 }); }
         Ok(Self { relation: *relation, direction: *direction, instructions: instructions.into(),
-            projection, offset: *offset, count: *count })
+            projection, offset: *offset, count: *count, joined: None })
     }
 }
 impl core::fmt::Debug for EdgeScanPlan {
@@ -146,6 +157,27 @@ pub trait EdgeScanSource {
         -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<Self::Error, C>>;
     fn vertex<'a, C>(&'a self, vid: VId, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>)
         -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<Self::Error, C>>;
+
+    /// Strict successor in the chosen endpoint's incident EId histories. Each
+    /// invocation resumes from `after`; separate nested bindings have separate
+    /// positions. Historical membership may be a superset: the cursor rechecks
+    /// visible topology/relation at the SAME cut. Never scan unrelated graph
+    /// edges, collect an adjacency vector, or use an identity+1 sentinel here.
+    /// Existing single-edge sources need not implement this optional ability:
+    /// the default explicitly refuses a demanded expansion, never returns EOF.
+    fn next_incident_edge<C>(
+        &self, _endpoint: VId, _direction: GlaDirection, _after: Option<EId>,
+        _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
+        Err(EdgeExpansionSourceError::Unavailable)
+    }
+}
+
+/// An optional adjacency lookup cannot silently become an empty neighborhood.
+#[derive(Debug)]
+pub enum EdgeExpansionSourceError<E, C> {
+    Unavailable,
+    Read(EdgeScanSourceError<E, C>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +190,8 @@ pub enum EdgeScanError<E> {
     /// An admitted visible edge has no visible endpoint; never a null binding.
     DanglingEndpoint,
     CounterExhausted,
+    ExpansionUnavailable,
+    BoundEdgeUnavailable,
 }
 impl<E: core::fmt::Display> core::fmt::Display for EdgeScanError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -167,6 +201,8 @@ impl<E: core::fmt::Display> core::fmt::Display for EdgeScanError<E> {
             Self::NonIncreasingIdentity => f.write_str("edge stream source is not strictly increasing"),
             Self::DanglingEndpoint => f.write_str("edge stream source has a dangling endpoint"),
             Self::CounterExhausted => f.write_str("edge stream counter exhausted"),
+            Self::ExpansionUnavailable => f.write_str("edge source has no indexed expansion capability"),
+            Self::BoundEdgeUnavailable => f.write_str("a bound edge disappeared from the immutable source"),
         }
     }
 }
@@ -208,7 +244,11 @@ impl<F> Meter<F> {
 /// a candidate. Two orientations share one record charge. At most one projected
 /// row is retained; a source may still own a full decoded immutable generation.
 /// Errors are yielded once and fuse/drop the source; close/drop never drain it.
-/// This is not multi-hop joining, spilling, a byte-memory cap or a durable cursor.
+/// Connected fixed-hop joins extend this lane with depth-bounded resumable
+/// adjacency positions, not per-prefix neighbor/result bags. Their record meter
+/// counts candidate examinations at every join level (including re-examinations
+/// under different outer bindings). This is not arbitrary-order joining,
+/// variable-length traversal, spilling, a byte-memory cap or a durable cursor.
 pub struct EdgeScanCursor<S, F> {
     source: Option<S>,
     plan: EdgeScanPlan,
@@ -218,13 +258,14 @@ pub struct EdgeScanCursor<S, F> {
     reverse_pending: Option<EId>,
     skip: u64,
     state: EdgeScanState,
+    traversal: Option<join::Traversal>,
 }
 impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
     /// No candidate scan or checkpoint occurs during construction.
     pub fn new(source: S, plan: EdgeScanPlan, policy: GqlQueryPolicy, checkpoint: F) -> Self {
         Self { seq: source.snapshot_seq(), skip: plan.offset, source: Some(source), plan,
             meter: Meter { checkpoint, policy, rows: GqlExecutionStats { snapshot_records: 0, result_rows: 0 },
-                evaluator: GlaExecutionStats::default() }, last: None, reverse_pending: None, state: EdgeScanState::Open }
+                evaluator: GlaExecutionStats::default() }, last: None, reverse_pending: None, state: EdgeScanState::Open, traversal: None }
     }
     #[must_use] pub fn state(&self) -> EdgeScanState { self.state }
     #[must_use] pub fn snapshot_seq(&self) -> CommitSeq { self.seq }
@@ -234,9 +275,11 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
         if self.state == EdgeScanState::Open { self.state = EdgeScanState::Closed; }
         self.source = None;
         self.reverse_pending = None;
+        self.traversal = None;
     }
     fn advance<C>(&mut self) -> ScanResult<Option<GraphValueRow>, S::Error, C>
     where F: FnMut() -> Result<(), C> {
+        if self.plan.joined.is_some() { return join::advance(self); }
         let meter = &mut self.meter;
         meter.event(GlaExecutionEvent::Work)?;
         if self.plan.count == Some(0) { return Ok(None); }
