@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod load;
+mod stream;
 mod transaction;
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
@@ -25,14 +26,14 @@ use std::{
 };
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns","statement"],"row":["v","event","cells","statement"],"statement":["v","event","index","kind","view","basis","count","statements"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements","basis"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds","transaction"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded","committed","read_closed","rolled_back"],"transaction":{"steps":"Ordered --write/--query; each --param belongs to its preceding step. Statement indexes are one-based. Statement/columns/row records describe intermediate transaction-local workspaces, not durable historical snapshots. Only the final result records completion; unknown completion emits an error, never rolled_back. --rollback discards effects and rows.","optional_fields":"statement on columns/row, basis on result; count only on query statements, statements only on write statements","max_statements":64,"max_query_rows":100000,"max_buffered_output_bytes":16777216,"execution_budgets":"per native read or write program; buffered rows/output limits are transaction-wide, not execution byte-memory bounds"}}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns","statement","stream","seq"],"row":["v","event","cells","statement"],"statement":["v","event","index","kind","view","basis","count","statements"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements","basis","stream"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds","transaction","streaming"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded","committed","read_closed","rolled_back"],"transaction":{"steps":"Ordered --write/--query; each --param belongs to its preceding step. Statement indexes are one-based. Statement/columns/row records describe intermediate transaction-local workspaces, not durable historical snapshots. Only the final result records completion; unknown completion emits an error, never rolled_back. --rollback discards effects and rows.","optional_fields":"statement on columns/row, basis on result; count only on query statements, statements only on write statements","max_statements":64,"max_query_rows":100000,"max_buffered_output_bytes":16777216,"execution_budgets":"per native read or write program; buffered rows/output limits are transaction-wide, not execution byte-memory bounds"},"streaming":{"flag":"query --stream; incompatible with --certify-to","profile":"native single-vertex scan, leading vertex identity, canonical order, supported vertex-local filters and SKIP/LIMIT; temporal cuts supported; no eager fallback or spill","delivery":"columns includes stream=true and the exact selected seq; each row is flushed before pulling another; result with stream=true is emitted only at successful exhaustion; error or EOF without result means an incomplete result, even after rows","memory":"one encoded row, not a collected result; the native source may retain an entire decoded generation","optional_fields":"stream and seq on columns, stream on result; absent on ordinary eager reads"}}"##,
     "\n"
 );
 const HELP: &str = "fgdb - embedded graph database
 Usage: fgdb [--robot] <command>
   create --db <dir> --key-file <file>
   write --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
-  query --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
+  query --db <dir> --key-file <file> [bindings] [--param name=value]... [--stream] <gql>
   transaction --db <dir> --key-file <file> [bindings] --write <gql> --query <gql> ... [--rollback]
   replay --db <dir> --key-file <file> [bindings] [--param name=value]... --certificate <file>
   load --db <dir> --key-file <file> [bindings] --input <file.ndjson> [--rows-per-chunk N] [--checkpoint <file>]
@@ -44,6 +45,11 @@ timestamp:<utc-nanos>,<offset-seconds>,<zone>,<tzdb-oid-hex>.
 Bindings: repeat --label name=u32, --relation name=u32, --property name=u32.
 Supply the same bindings on reopen; no implicit catalog or hashed names.
 query --certify-to <file> saves a portable result certificate after emitting rows.
+query --stream pulls and flushes one native row at a time. Use a single-vertex
+scan with leading vertex identity, canonical order, supported filters and SKIP/LIMIT.
+Unsupported plans refuse; no eager fallback. --stream cannot use --certify-to.
+An error can follow delivered rows; only the terminal result marks a complete stream.
+The stream pins decoded source state, not out-of-core storage or a resumable cursor.
 transaction executes ordered --write/--query steps in one native transaction.
 Each --param belongs to the preceding step; parameter maps do not leak between steps.
 Success commits once; --rollback discards all effects and results. Errors abort before commit.
@@ -145,6 +151,7 @@ struct Options {
     checkpoint: Option<PathBuf>,
     steps: Vec<transaction::Step>,
     rollback: bool,
+    stream: bool,
 }
 impl Options {
     fn resolve(&self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -230,8 +237,16 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut checkpoint = None;
     let mut steps: Vec<transaction::Step> = Vec::new();
     let mut rollback = false;
+    let mut stream = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
+        if arg == "--stream" {
+            if command != "query" || stream {
+                return Err(Failure::usage("--stream is allowed once, only on query"));
+            }
+            stream = true;
+            continue;
+        }
         if command == "transaction" && arg == "--rollback" && !rollback {
             rollback = true;
             continue;
@@ -334,6 +349,9 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     if command == "transaction" {
         transaction::validate_input(&steps)?;
     }
+    if stream && certify_to.is_some() {
+        return Err(Failure::usage("--stream cannot be combined with --certify-to"));
+    }
     Ok(Options {
         db: db.ok_or_else(|| Failure::usage("--db required"))?,
         key: key.ok_or_else(|| Failure::usage("--key-file required"))?,
@@ -356,6 +374,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         checkpoint,
         steps,
         rollback,
+        stream,
     })
 }
 fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
@@ -576,6 +595,9 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                     out.flush().map_err(Failure::io)?;
                     contexts.query().checkpoint().map_err(Failure::io)?;
                     return asupersync::fs::write(path, certificate.canonical_bytes()).await.map_err(Failure::io);
+                }
+                if options.stream {
+                    return stream::run(&db, &contexts.query(), &options, robot, out);
                 }
                 let result = db.query(&contexts.query(), &options.text, &options.params, &options, policy()).map_err(execution_failure)?;
                 let seq = db.frontier().map_err(Failure::io)?.0;
