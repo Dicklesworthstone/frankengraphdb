@@ -4,6 +4,8 @@
 //! the same expression evaluator as snapshot results. DISTINCT consumers retain
 //! complete group keys to select the same canonical representative after deletes.
 
+mod ranking;
+
 use super::*;
 use core::convert::Infallible;
 
