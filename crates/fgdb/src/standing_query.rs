@@ -1,7 +1,8 @@
-//! Session-local vertex and one-hop aggregates maintained from committed deltas.
+//! Session-local vertex, fixed-hop and scoped aggregates maintained from deltas.
 //! COUNT/SUM/AVG, their DISTINCT forms, and scalar/vertex MIN/MAX share atomic
 //! tick publication. This is not a durable subscription or delivery protocol.
 
+mod boolean;
 mod grouped;
 mod edge;
 use grouped::{AggregateKey, contributions};
@@ -221,9 +222,8 @@ fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
     for (position, op) in operators.iter().enumerate() {
         match op {
             GlaOperator::ScanVertices | GlaOperator::ScanEdges { .. } if position == 0 => scans += 1,
-            // Reuse the existing unary predicate semantics, including ranges,
-            // labels and missing/stored NULL. Boolean programs, multi-hop joins, pages,
-            // and row expressions remain separate unsupported operator shapes.
+            // Predicates, including Boolean/scalar programs, reuse GLA. Shape
+            // admission still rejects pages and unsupported source operators.
             GlaOperator::Select { slot, predicates } if slot.ordinal() < width => {
                 if !predicates.iter().all(|predicate| matches!(predicate,
                     VertexPredicate::HasLabel(_)
@@ -237,6 +237,8 @@ fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
                 if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::CompareProperties { left, right, .. }
                 if left.ordinal() < width && right.ordinal() < width => {}
+            GlaOperator::SelectBoolean { expression }
+                if expression.supports_vertex_bindings(width as usize) => {}
             GlaOperator::ProjectValues { columns } => {
                 projections += 1;
                 if columns.iter().any(|column| !matches!(column,
@@ -259,6 +261,8 @@ fn needs_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
             // Operands need not be returned or appear in a unary predicate.
             // Retain and invalidate on BOTH sides of a binding-dependent test.
             GlaOperator::CompareProperties { left_key, right_key, .. } => *left_key == key || *right_key == key,
+            GlaOperator::SelectBoolean { expression } => expression
+                .referenced_vertex_properties().any(|(_, actual)| actual == key),
             _ => false,
         })
 }
@@ -506,7 +510,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// source path; ordinary commit maintenance never scans that source again.
     /// COUNT/DISTINCT and MIN/MAX admit scalar or vertex arguments; integer
     /// SUM/AVG and their DISTINCT forms require property arguments. These
-    /// functions reuse the admitted vertex, one-hop and optional/probe shapes.
+    /// functions reuse the admitted vertex, fixed-hop and optional/probe shapes.
+    /// Boolean WHERE and its scalar programs use ordinary GLA semantics, with
+    /// every hidden vertex-property dependency retained for invalidation.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,

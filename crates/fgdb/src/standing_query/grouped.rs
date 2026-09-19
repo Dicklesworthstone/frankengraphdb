@@ -110,6 +110,11 @@ pub(super) fn keeps(
                 // though it represented a three-valued Boolean expression.
                 if !comparison.accepts_scalar_pair(left, right) { return Ok(false); }
             }
+            GlaOperator::SelectBoolean { expression } => {
+                if !super::boolean::keeps(expression, binding, meter)? {
+                    return Ok(false);
+                }
+            }
             _ => {}
         }
     }

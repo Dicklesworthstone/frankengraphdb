@@ -24,6 +24,9 @@ fn predicate(op: &GlaOperator, width: u32) -> bool {
         | GlaOperator::CompareProperties { left, right, .. } => {
             left.ordinal() < width && right.ordinal() < width
         }
+        GlaOperator::SelectBoolean { expression } => {
+            expression.supports_vertex_bindings(width as usize)
+        }
         _ => false,
     }
 }
