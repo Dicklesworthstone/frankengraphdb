@@ -13,6 +13,8 @@
 //! total unchanged. Memory/work admission is in logical entries, not bytes;
 //! key payload/clone/comparison and standard allocation have the Z-set boundary.
 
+pub mod committed;
+
 use super::{ZSet, ZSetError, ZSetEvent, event};
 use crate::{LimbLimit, ZWeight};
 use std::collections::{BTreeMap, BTreeSet};
