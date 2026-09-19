@@ -11,6 +11,7 @@ impl WriteTxn {
             basis,
             staged: Vec::new(),
             prepared: None,
+            savepoints: Vec::new(),
             program_multi_relation: false,
             read_set: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             match_expansions: std::cell::RefCell::new(std::collections::BTreeSet::new()),

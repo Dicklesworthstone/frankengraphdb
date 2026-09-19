@@ -222,6 +222,7 @@ impl WriteTxn {
     fn discard_terminal_workspace(&mut self) {
         self.staged.clear();
         self.prepared = None;
+        self.savepoints.clear();
         self.read_set.get_mut().clear();
         self.match_expansions.get_mut().clear();
         self.scanned_vertex_labels.get_mut().clear();

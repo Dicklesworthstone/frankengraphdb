@@ -28,6 +28,10 @@ pub enum WriteTxnError {
     /// The supplied database is not the opened handle that began this txn.
     /// Refusal preserves the transaction for use with its actual owner.
     WrongDatabase,
+    /// No live savepoint has the requested name. Names are transaction-local.
+    UnknownSavepoint,
+    /// The bounded embedded workspace has reached its savepoint-count limit.
+    SavepointLimit { limit: usize },
     RelationMismatch {
         expected: RelationId,
         found: RelationId,
@@ -64,6 +68,10 @@ impl core::fmt::Display for WriteTxnError {
             Self::WrongDatabase => {
                 formatter.write_str("write transaction belongs to a different database handle")
             }
+            Self::UnknownSavepoint => formatter.write_str("unknown transaction savepoint"),
+            Self::SavepointLimit { limit } => {
+                write!(formatter, "transaction savepoint limit {limit} reached")
+            }
             Self::RelationMismatch { expected, found } => write!(
                 formatter,
                 "write transaction relation mismatch: expected {expected:?}, found {found:?}"
@@ -99,6 +107,8 @@ impl core::error::Error for WriteTxnError {
             Self::NoPreparedWrite
             | Self::Finished
             | Self::WrongDatabase
+            | Self::UnknownSavepoint
+            | Self::SavepointLimit { .. }
             | Self::RelationMismatch { .. }
             | Self::SnapshotAdvanced { .. }
             | Self::AtomicRelationConflict { .. }
@@ -139,6 +149,7 @@ pub struct WriteTxn {
     basis: CommitSeq,
     staged: Vec<WriteBatch>,
     prepared: Option<PreparedWrite>,
+    savepoints: Vec<EmbeddedSavepoint>,
     /// Enabled only while a mixed write program owns its rollback workspace.
     program_multi_relation: bool,
     read_set: std::cell::RefCell<std::collections::BTreeSet<ElementId>>,
