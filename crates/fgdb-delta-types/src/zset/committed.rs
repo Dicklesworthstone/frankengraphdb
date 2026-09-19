@@ -16,8 +16,9 @@
 //! A retained marker AND template digest anchor continuation to the previously
 //! consumed history. Fresh authoritative baselines use [`snapshot`]; no
 //! arbitrary cursor setter or import into an existing input exists.
-//! If retention removes that anchor, rebuilding from an authoritative baseline
-//! is required; this adapter does not invent a retention lease or chain proof.
+//! Retirement keeps one exact boundary identity, without retaining its rows.
+//! Older cursors still need an authoritative baseline; no retention lease or
+//! cryptographic chain proof is invented here.
 //! Marker/digest identity checks are not cryptographic verification of hostile
 //! payloads: authentication and complete cascade/version validation belong to
 //! the source's Chronicle/Strata apply path, not to this projection.
@@ -161,11 +162,7 @@ impl CommittedEdgeInput {
         // clamp, skip a missing batch, or trust a filtered iterator as a cursor.
         let _suffix = index.since(after)?;
         if let Some(anchor) = self.anchor {
-            if index.get(after).is_none() {
-                return Err(EdgeInputError::AnchorUnavailable { at: after });
-            }
-            let batch = checked_batch(index, after)?;
-            if Anchor::of(batch) != anchor {
+            if checked_anchor(index, after)? != anchor {
                 return Err(EdgeInputError::HistoryChanged { at: after });
             }
         }
@@ -299,6 +296,28 @@ impl CommittedEdgeInput {
         event(control, ZSetEvent::Work)?;
         Ok(EdgeInputUpdate { owner: self, anchor, created, removed, epochs, delta })
     }
+}
+
+/// Retention preserves exactly one boundary identity, not an arbitrary older
+/// checkpoint. `since(after)` still refuses before this when any delta is lost.
+fn checked_anchor<E>(index: &LocalDeltaBatchIndex, at: CommitSeq) -> Result<Anchor, EdgeInputError<E>> {
+    if index.get(at).is_some() {
+        return Ok(Anchor::of(checked_batch(index, at)?));
+    }
+    if at == index.retained_after_commit_seq() {
+        if let Some((format, marker, template)) = index.retired_boundary_identity() {
+            if format != DELTA_FORMAT_V1 {
+                return Err(EdgeInputError::UnsupportedBatchFormat { found: format });
+            }
+            if marker.commit_seq != at {
+                return Err(IndexError::WrongMarker {
+                    batch_commit_seq: at, marker_commit_seq: marker.commit_seq,
+                }.into());
+            }
+            return Ok(Anchor { marker, template });
+        }
+    }
+    Err(EdgeInputError::AnchorUnavailable { at })
 }
 
 fn checked_batch<E>(index: &LocalDeltaBatchIndex, at: CommitSeq) -> Result<&LogicalDeltaBatch, EdgeInputError<E>> {
@@ -514,7 +533,11 @@ mod tests {
         }
         let mut retired = index.clone();
         retired.retire_prefix(CommitSeq(1)).unwrap();
-        assert_eq!(state.prepare_next(&retired, LIMBS, &mut allow).unwrap_err(),
+        // Exact boundary identity survives retirement; a bare decoded floor
+        // remains unanchored and cannot be promoted into evidence by a no-op.
+        assert!(state.prepare_next(&retired, LIMBS, &mut allow).unwrap().is_none());
+        let unanchored = LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(1), CommitSeq(1), vec![]);
+        assert_eq!(state.prepare_next(&unanchored, LIMBS, &mut allow).unwrap_err(),
             EdgeInputError::AnchorUnavailable { at: CommitSeq(1) });
         assert!(matches!(input().prepare_next(&retired, LIMBS, &mut allow),
             Err(EdgeInputError::Index(IndexError::CursorRetired { .. }))));

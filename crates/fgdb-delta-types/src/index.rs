@@ -191,6 +191,11 @@ pub struct LocalDeltaBatchIndex {
     retained_after_commit_seq: CommitSeq,
     frontier: CommitSeq,
     entries: BTreeMap<u64, LogicalDeltaBatch>,
+    // Only the exact boundary identity, not its rows or a prefix commitment.
+    // Set exclusively by retiring a present, envelope-checked batch. This is
+    // process-local continuity evidence within the caller-authenticated index;
+    // it neither authenticates an imported index nor authorizes object GC.
+    retired_boundary: Option<(u16, fgdb_types::MarkerRef, [u8; 32])>,
 }
 
 impl Default for LocalDeltaBatchIndex {
@@ -209,6 +214,7 @@ impl LocalDeltaBatchIndex {
             retained_after_commit_seq: CommitSeq::ORIGIN,
             frontier: CommitSeq::ORIGIN,
             entries: BTreeMap::new(),
+            retired_boundary: None,
         }
     }
 
@@ -234,7 +240,17 @@ impl LocalDeltaBatchIndex {
             retained_after_commit_seq,
             frontier,
             entries,
+            // A decoded/test-shaped floor alone cannot attest a removed batch.
+            retired_boundary: None,
         }
+    }
+
+    /// Exact identity copied by retirement, available only at the boundary.
+    /// The kernel still checks the requested sequence and both identities.
+    pub(crate) fn retired_boundary_identity(
+        &self,
+    ) -> Option<(u16, fgdb_types::MarkerRef, [u8; 32])> {
+        self.retired_boundary
     }
 
     pub fn format(&self) -> u16 {
@@ -397,6 +413,13 @@ impl LocalDeltaBatchIndex {
     /// `retired_prefix_commitment` over exactly them, and it is the only layer
     /// that can hash. Dropping them here would leave that commitment
     /// uncomputable from anything the index still holds.
+    ///
+    /// Keep only the boundary batch's format, marker identity and template
+    /// digest. A consumer already AT that boundary can compare its anchor and
+    /// continue; a consumer behind it still has a retired cursor. This constant
+    /// sized identity is not a retained batch or a retired-prefix commitment.
+    /// No-op retirement preserves it. Imported windows without this evidence
+    /// cannot manufacture it by retiring an already empty interval.
     pub fn retire_prefix(
         &mut self,
         through: CommitSeq,
@@ -408,6 +431,22 @@ impl LocalDeltaBatchIndex {
                 requested: through,
             });
         }
+        let boundary = if through == self.retained_after_commit_seq {
+            self.retired_boundary
+        } else {
+            let batch = self.entries.get(&through.0).ok_or(IndexError::Gapped {
+                expected: through,
+                found: self.frontier,
+            })?;
+            if batch.commit_seq() != through {
+                return Err(IndexError::WrongEntryKey {
+                    stored: through,
+                    batch: batch.commit_seq(),
+                });
+            }
+            Self::validate_batch(batch)?;
+            Some((batch.format(), batch.commit_marker_identity(), *batch.source_template_digest()))
+        };
         let mut retired = Vec::new();
         let keys: Vec<u64> = self
             .entries
@@ -419,6 +458,7 @@ impl LocalDeltaBatchIndex {
                 retired.push(batch);
             }
         }
+        self.retired_boundary = boundary;
         self.retained_after_commit_seq = through;
         Ok(retired)
     }
@@ -436,8 +476,8 @@ impl LocalDeltaBatchIndex {
     /// cannot turn verification of a small decoded value into a vast loop.
     pub fn verify(&self) -> Result<(), IndexError> {
         // The format law is first, the same order the template validate gives
-        // its own format arm (canonical.rs): a decoder-shaped index carrying
-        // an unknown format must not verify clean because every OTHER law
+        // its own format arm (canonical.rs): a decoder-shaped index carrying an
+        // unknown format must not verify clean because every OTHER law
         // happens to hold (fgdb-dzh4 item 1).
         if self.format != INDEX_FORMAT_V1 {
             return Err(IndexError::UnsupportedFormat {
@@ -452,6 +492,14 @@ impl LocalDeltaBatchIndex {
             });
         }
 
+        if let Some((_, marker, _)) = self.retired_boundary {
+            if marker.commit_seq != self.retained_after_commit_seq {
+                return Err(IndexError::WrongMarker {
+                    batch_commit_seq: self.retained_after_commit_seq,
+                    marker_commit_seq: marker.commit_seq,
+                });
+            }
+        }
         let mut previous = self.retained_after_commit_seq.0;
         for (stored_seq, batch) in &self.entries {
             if *stored_seq <= self.retained_after_commit_seq.0 || *stored_seq > self.frontier.0 {
@@ -509,3 +557,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "index/retired_tests.rs"]
+mod retired_tests;

@@ -70,7 +70,7 @@ fn snapshot_baseline_preserves_identity_bags_then_retracts_cross_relation_cascad
 }
 
 #[test]
-fn missing_prefix_is_unneeded_but_a_retired_or_forked_anchor_still_refuses() {
+fn missing_prefix_is_unneeded_and_boundary_identity_survives_but_forks_refuse() {
     let mut index = LocalDeltaBatchIndex::new();
     index.insert(initial()).unwrap();
     let anchor = batch(2, vec![coordinate(R, vec![])]);
@@ -91,7 +91,9 @@ fn missing_prefix_is_unneeded_but_a_retired_or_forked_anchor_still_refuses() {
         assert_eq!(input.snapshot(LIMBS, &mut allow).unwrap(), before);
     }
     index.retire_prefix(CommitSeq(2)).unwrap();
-    assert_eq!(input.prepare_next(&index, LIMBS, &mut allow).unwrap_err(),
+    assert!(input.prepare_next(&index, LIMBS, &mut allow).unwrap().is_none());
+    let unanchored = LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(2), CommitSeq(2), vec![]);
+    assert_eq!(input.prepare_next(&unanchored, LIMBS, &mut allow).unwrap_err(),
         EdgeInputError::AnchorUnavailable { at: CommitSeq(2) });
 }
 
@@ -236,3 +238,6 @@ fn every_recursive_baseline_checkpoint_is_private_and_retryable() {
         assert_eq!(actual, expected);
     }
 }
+
+#[path = "retired_tests.rs"]
+mod retired_tests;

@@ -75,6 +75,38 @@ impl EdgeSnapshotBuilder {
         Ok(Self { input, delta: ZSet::new(), refused: false })
     }
 
+    /// Bind a fresh builder to the CURRENT cut of one caller-authenticated
+    /// delta window. The source must still supply complete topology and schema
+    /// epochs from that same graph/branch snapshot. There is no arbitrary cut
+    /// parameter, synthetic committed batch, or import into an existing input.
+    ///
+    /// A fully retired window can supply its exact retained boundary identity.
+    /// A bare decoded floor, unsupported envelope or missing current anchor
+    /// refuses before a builder escapes. This metadata is continuity evidence,
+    /// not snapshot authentication, a prefix commitment or authority to GC.
+    pub fn from_index<E>(
+        graph: GraphId,
+        branch: BranchId,
+        index: &crate::LocalDeltaBatchIndex,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<Self, SnapshotInputError<E>> {
+        event(control, ZSetEvent::Work)?;
+        if index.format() != crate::INDEX_FORMAT_V1 {
+            return Err(EdgeInputError::Index(crate::IndexError::UnsupportedFormat {
+                format: index.format(),
+            }).into());
+        }
+        let at = index.frontier();
+        let _suffix = index.since(at).map_err(EdgeInputError::from)?;
+        let mut input = CommittedEdgeInput::new(graph, branch);
+        if at == CommitSeq::ORIGIN {
+            if !index.is_empty() { return Err(SnapshotInputError::NonEmptyOrigin); }
+        } else {
+            input.anchor = Some(super::checked_anchor(index, at)?);
+        }
+        Ok(Self { input, delta: ZSet::new(), refused: false })
+    }
+
     fn begin<E>(&mut self) -> Result<(), SnapshotInputError<E>> {
         if self.refused { return Err(SnapshotInputError::Refused); }
         // Set BEFORE any callback, arithmetic or allocation. An early return
