@@ -164,3 +164,5 @@ impl WriteTxn {
         })
     }
 }
+
+include!("weighted_stream.rs");

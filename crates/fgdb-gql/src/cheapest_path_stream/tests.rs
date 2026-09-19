@@ -280,3 +280,47 @@ fn stream_owns_costs_and_full_width_identities_without_debug_disclosure() {
     assert_eq!(row.cost(), i128::from(i64::MIN));
     assert_eq!(row.path().steps(), &[(EId(u128::MAX), target)]);
 }
+
+#[test]
+fn scoped_iterator_runs_entire_pulls_under_one_driver_and_releases_it_on_every_terminal_path() {
+    use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+    struct Lease(Arc<AtomicUsize>);
+    impl Drop for Lease { fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); } }
+    for terminal in ["limit", "close", "error", "drop", "zero", "eof"] {
+        let q = query(GraphCheapestPathMode::Walk, GlaDirection::Forward, VId(2), 0, 3);
+        let k = match terminal { "zero" => 0, "limit" => 1, _ => u64::MAX };
+        let stream = open(&q, k, policy(), || Ok::<_, ()>(())).unwrap();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let lease = Lease(dropped.clone());
+        let inside = Arc::new(AtomicBool::new(false));
+        let checked = inside.clone();
+        let mut cursor = stream.into_scoped_iterator(CommitSeq(17), move |stream| {
+            let _retained = &lease;
+            assert!(!checked.swap(true, Ordering::SeqCst));
+            let result = stream.next_with_checkpoint(|| {
+                assert!(checked.load(Ordering::SeqCst));
+                if terminal == "error" { Err(9) } else { Ok(()) }
+            });
+            checked.store(false, Ordering::SeqCst);
+            result
+        });
+        fn fused(_: &impl std::iter::FusedIterator) {}
+        fused(&cursor);
+        fn send(_: &impl Send) {}
+        send(&cursor);
+        assert_eq!(cursor.snapshot_seq(), CommitSeq(17));
+        match terminal {
+            "zero" => assert!(cursor.next().is_none()),
+            "error" => assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Interrupted(9))))),
+            "eof" => { while let Some(row) = cursor.next() { row.unwrap(); } },
+            _ => { cursor.next().unwrap().unwrap(); }
+        }
+        assert!(!inside.load(Ordering::SeqCst));
+        if terminal == "close" { cursor.close(); cursor.close(); }
+        if terminal == "drop" { drop(cursor); } else {
+            assert!(cursor.next().is_none());
+            assert_eq!(cursor.size_hint(), (0, Some(0)));
+        }
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "driver retained after {terminal}");
+    }
+}

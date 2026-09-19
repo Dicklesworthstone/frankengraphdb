@@ -8,7 +8,7 @@ use crate::{
     PreparedGraphCheapestPath,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{CanonicalScalar, EId, VId};
+use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use std::convert::Infallible;
 
 type StreamResult<T, E, C> = Result<T, GqlQueryError<GraphCheapestPathError<E>, C>>;
@@ -211,6 +211,90 @@ impl core::fmt::Debug for GraphCheapestPathStream {
             .field("rows", &self.rows)
             .field("evaluator", &self.evaluator)
             .field("source_and_definition", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Scoped host driver for a single pull. The host must drive the supplied
+/// stream exactly once, inside its retained execution-purpose restriction.
+/// This is runtime composition, not an authentication or delegation interface.
+type StreamDriver<'scope, C> = dyn FnMut(&mut GraphCheapestPathStream)
+    -> StreamResult<Option<GraphCostPath>, Infallible, C> + Send + 'scope;
+
+/// A nameable, fused iterator retaining its host's execution scope and exact
+/// source sequence. Database adapters own the scope callback; callers cannot
+/// replace it or renew the query allowance between Iterator::next calls.
+/// The source sequence describes the admitted image, not a durable cursor ID.
+pub struct GraphCheapestPathStreamIterator<'scope, C> {
+    stream: GraphCheapestPathStream,
+    snapshot_seq: CommitSeq,
+    driver: Option<Box<StreamDriver<'scope, C>>>,
+}
+impl GraphCheapestPathStream {
+    /// Attach the host's scope to every complete pull, rather than restricting
+    /// only a checkpoint and then running the remaining work outside QueryCx.
+    /// The fixed driver is released on close, failure or exhaustion. Boxing this
+    /// constant-size host adapter is not an allocator-byte memory guarantee.
+    pub fn into_scoped_iterator<'scope, C>(
+        self,
+        snapshot_seq: CommitSeq,
+        driver: impl FnMut(&mut GraphCheapestPathStream)
+            -> StreamResult<Option<GraphCostPath>, Infallible, C> + Send + 'scope,
+    ) -> GraphCheapestPathStreamIterator<'scope, C> {
+        let driver: Option<Box<StreamDriver<'scope, C>>> =
+            if self.state == GraphCheapestPathStreamState::Open { Some(Box::new(driver)) } else { None };
+        GraphCheapestPathStreamIterator { stream: self, snapshot_seq, driver }
+    }
+}
+impl<C> GraphCheapestPathStreamIterator<'_, C> {
+    #[must_use]
+    pub fn snapshot_seq(&self) -> CommitSeq { self.snapshot_seq }
+    #[must_use]
+    pub fn state(&self) -> GraphCheapestPathStreamState { self.stream.state() }
+    #[must_use]
+    pub fn row_stats(&self) -> GqlExecutionStats { self.stream.row_stats() }
+    #[must_use]
+    pub fn evaluator_stats(&self) -> GlaExecutionStats { self.stream.evaluator_stats() }
+    pub fn close(&mut self) {
+        self.stream.close();
+        self.driver = None;
+    }
+}
+impl<C> Iterator for GraphCheapestPathStreamIterator<'_, C> {
+    type Item = StreamResult<GraphCostPath, Infallible, C>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stream.state != GraphCheapestPathStreamState::Open {
+            self.driver = None;
+            return None;
+        }
+        let result = self.driver.as_mut().expect("open stream retains its scope")(&mut self.stream);
+        let item = match result {
+            Ok(Some(row)) => Some(Ok(row)),
+            Ok(None) => {
+                self.stream.state = GraphCheapestPathStreamState::Exhausted;
+                self.stream.cursor.close();
+                None
+            }
+            Err(error) => {
+                self.stream.state = GraphCheapestPathStreamState::Failed;
+                self.stream.cursor.close();
+                Some(Err(error))
+            }
+        };
+        if self.stream.state != GraphCheapestPathStreamState::Open { self.driver = None; }
+        item
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, (self.state() != GraphCheapestPathStreamState::Open).then_some(0))
+    }
+}
+impl<C> std::iter::FusedIterator for GraphCheapestPathStreamIterator<'_, C> {}
+impl<C> core::fmt::Debug for GraphCheapestPathStreamIterator<'_, C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphCheapestPathStreamIterator")
+            .field("snapshot_seq", &self.snapshot_seq)
+            .field("stream", &self.stream)
+            .field("scope", &"[REDACTED]")
             .finish()
     }
 }

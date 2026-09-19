@@ -50,7 +50,9 @@ pub use cheapest_path::{
     GraphCheapestPathCursor, GraphCheapestPathError, GraphCheapestPathMode, GraphCostPath,
     GraphPathCostError, PreparedGraphCheapestPath,
 };
-pub use cheapest_path_stream::{GraphCheapestPathStream, GraphCheapestPathStreamState};
+pub use cheapest_path_stream::{
+    GraphCheapestPathStream, GraphCheapestPathStreamIterator, GraphCheapestPathStreamState,
+};
 pub use cheapest_path_text::{
     BoundGraphCheapestPathQuery, GraphCheapestPathTextError, GraphCheapestPathTextErrorKind,
     PreparedGraphCheapestPathText,

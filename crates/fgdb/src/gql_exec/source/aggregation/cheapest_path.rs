@@ -1,6 +1,7 @@
 //! Weighted path selection over the same admitted source as graph patterns.
 //! Snapshot topology and costs have one generation and one shared allowance.
 
+mod stream;
 mod text;
 
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};
