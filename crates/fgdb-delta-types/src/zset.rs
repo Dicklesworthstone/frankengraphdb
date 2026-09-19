@@ -9,6 +9,7 @@
 
 pub mod aggregate;
 pub mod committed;
+pub mod components;
 pub mod incremental;
 pub mod reachability;
 pub mod set;
