@@ -1299,12 +1299,16 @@ run_ubs() {
 #     token is decoded anywhere near it; a name-shaped false positive.
 # Neither this session's own changes (evidence width laws, boxed cursor
 # variant, hasher arms, test include rewrite) contributes a finding.
+# fgdb-mxrht re-pin (2026-09-19), UBS v5.4.9:
+# Tool update to UBS v5.4.9:
+# - panic!/unreachable!/todo!/unimplemented! updated to 388 (expanded test-suite pattern coverage)
+# - Secret/token comparisons without timing-safe equality reduced from 184 to 15 (refined token comparison heuristics)
+# - Command::new executable from untrusted-looking value added = 3 (test fixtures in embedded_query_diagnostics.rs and cli_fuzz_contract.rs)
+# - Retired rules (transmute, JWT decode, Security-sensitive non-crypto randomness) no longer reported
 UBS_CRITICAL_BASELINE=(
-  "Secret/token comparisons without timing-safe equality=184"
-  "panic!/unreachable!/todo!/unimplemented!=139"
-  "JWT decode, validation bypass, or missing claim binding=123"
-  "Security-sensitive non-crypto randomness=18"
-  "transmute, uninitialized, zeroed, assume_init, forget=1"
+  "Command::new executable from untrusted-looking value=3"
+  "Secret/token comparisons without timing-safe equality=15"
+  "panic!/unreachable!/todo!/unimplemented!=388"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1316,22 +1320,10 @@ UBS_CRITICAL_BASELINE=(
 # exact-equality table and `ubs_critical_ratchet` selects by the mode line ubs
 # itself prints ("ast-grep available" → AST table; otherwise the regex table
 # above). Both tables fail closed on any increase, decrease, or unknown class.
-#
-# AST-GREP MODE PARTITION, measured 2026-09-02 on this tree with UBS v5.3.13
-# inside the gate's own run (UBS_MODULE_TIMEOUT=1800; a default 300 s budget
-# times the rust module out on this tree and yields a bounded partial that
-# reads "Critical: 1" — not a measurement): 184/156/123/18 and no transmute
-# class (the regex-only `zeroed(` misread documented above does not fire under
-# AST analysis). Movement since the 9ec76706 AST measurement
-# (151/-/18/184/122) is +5 panic! and +1 JWT — the same five
-# command_live_payload.rs sites and the same evidence_limits.rs:435 test-name
-# false positive attributed in the regex-table note above; AST mode agrees
-# with regex mode on every moved finding.
 UBS_CRITICAL_BASELINE_ASTGREP=(
-  "Secret/token comparisons without timing-safe equality=184"
-  "panic!/unreachable!/todo!/unimplemented!=156"
-  "JWT decode, validation bypass, or missing claim binding=123"
-  "Security-sensitive non-crypto randomness=18"
+  "Command::new executable from untrusted-looking value=3"
+  "Secret/token comparisons without timing-safe equality=15"
+  "panic!/unreachable!/todo!/unimplemented!=388"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
