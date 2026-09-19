@@ -32,6 +32,7 @@ mod parameters;
 mod parser;
 mod pipeline_aggregate_text;
 mod prepared;
+pub mod scan_stream;
 mod set_ops;
 mod set_text;
 mod shortest_walk;

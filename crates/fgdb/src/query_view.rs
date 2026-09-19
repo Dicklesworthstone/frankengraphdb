@@ -8,8 +8,10 @@
 use super::{Cancel, PreparedNativeRead, QueryError, QueryResult, aggregates, values};
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
-use fgdb_gql::algebra::GraphValueRow;
-use fgdb_gql::stream::{VertexScanCursor, VertexScanError, VertexScanSource};
+use fgdb_gql::algebra::{GlaOperator, GraphValueRow, PreparedGraphPattern};
+use fgdb_gql::edge_stream::EdgeScanSource;
+use fgdb_gql::scan_stream::ScanCursor;
+use fgdb_gql::stream::{VertexScanError, VertexScanSource};
 use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbolResolver};
 use fgdb_types::{CommitSeq, QueryCx};
 
@@ -149,9 +151,11 @@ impl PreparedNativeRead {
     /// over an eagerly collected result. The cursor borrows only `cx`: the
     /// database, template and argument map may change or drop after opening.
     ///
-    /// The admitted profile is a single-vertex pattern with a leading vertex
-    /// identity in the projection, canonical whole-row order, vertex-local
-    /// predicates and SKIP/LIMIT. Temporal patterns use their exact bound cut.
+    /// Admit a single-vertex scan with a leading vertex identity, or a one-edge
+    /// scan with leading edge/source identities. The existing physical compiler
+    /// checks predicates, projections, canonical order and SKIP/LIMIT. The first
+    /// GLA operator selects the lane before source execution; runtime errors do
+    /// not trigger another lane. Temporal patterns use their exact bound cut.
     /// Unsupported classes/operators refuse rather than falling back to eager
     /// execution. The source generation is in memory; this does not add spill.
     ///
@@ -169,10 +173,11 @@ impl PreparedNativeRead {
     ) -> Result<
         (
             Vec<String>,
-            VertexScanCursor<
+            ScanCursor<
                 impl VertexScanSource<Error = ReadError> + 'q + use<'q, V>,
                 impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
-                GraphValueRow,
+                impl EdgeScanSource<Error = ReadError> + 'q + use<'q, V>,
+                impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
             >,
         ),
         QueryError,
@@ -200,10 +205,11 @@ impl PreparedNativeRead {
     ) -> Result<
         (
             Vec<String>,
-            VertexScanCursor<
+            ScanCursor<
                 impl VertexScanSource<Error = ReadError> + 'q + use<'q>,
                 impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
-                GraphValueRow,
+                impl EdgeScanSource<Error = ReadError> + 'q + use<'q>,
+                impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
             >,
         ),
         QueryError,
@@ -213,25 +219,49 @@ impl PreparedNativeRead {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::PatternText)?;
-                let columns = query.columns().to_vec();
-                let cursor = view
-                    .stream_graph_values_governed_at(cx, &query, view.frontier(), policy)
-                    .map_err(QueryError::Stream)?;
-                Ok((columns, cursor))
+                open_pattern_stream(view, cx, &query, view.frontier(), policy)
             }
             Self::TemporalPattern(prepared) => {
                 let query = prepared
                     .bind_parameters(params)
                     .map_err(QueryError::TemporalText)?;
-                let columns = query.pattern().columns().to_vec();
-                let cursor = view
-                    .stream_graph_values_governed_at(cx, query.pattern(), query.as_of(), policy)
-                    .map_err(QueryError::Stream)?;
-                Ok((columns, cursor))
+                open_pattern_stream(view, cx, query.pattern(), query.as_of(), policy)
             }
             _ => Err(QueryError::StreamingUnsupported {
                 facade: self.facade_class(),
             }),
         }
     }
+}
+
+// Structural, deterministic dispatch, not a probe-and-fallback planner. Each
+// existing host opener owns exact-frontier admission, full physical validation
+// and its QueryCx source. Even LIMIT 0 cannot mask an unsupported edge shape.
+#[allow(clippy::type_complexity)]
+fn open_pattern_stream<'q>(
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    query: &PreparedGraphPattern<GraphValueRow>,
+    as_of: CommitSeq,
+    policy: GqlQueryPolicy,
+) -> Result<
+    (
+        Vec<String>,
+        ScanCursor<
+            impl VertexScanSource<Error = ReadError> + 'q + use<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
+            impl EdgeScanSource<Error = ReadError> + 'q + use<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
+        >,
+    ),
+    QueryError,
+> {
+    let cursor = if matches!(query.plan().operators().first(), Some(GlaOperator::ScanEdges { .. })) {
+        ScanCursor::Edge(view.stream_graph_edges_governed_at(cx, query, as_of, policy)
+            .map_err(QueryError::EdgeStream)?)
+    } else {
+        ScanCursor::Vertex(view.stream_graph_values_governed_at(cx, query, as_of, policy)
+            .map_err(QueryError::Stream)?)
+    };
+    Ok((query.columns().to_vec(), cursor))
 }

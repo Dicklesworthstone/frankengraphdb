@@ -57,6 +57,9 @@ pub enum QueryError {
     /// Opening a pull query failed in the existing governed scan compiler or
     /// source. Later pull errors remain the cursor's native typed errors.
     Stream(GqlQueryError<fgdb_gql::stream::VertexScanError<crate::ReadError>, Cancel>),
+    /// Identified-edge stream preparation/source refusal retains its own typed
+    /// error. A failed edge plan is never retried as a vertex or eager query.
+    EdgeStream(GqlQueryError<fgdb_gql::edge_stream::EdgeScanError<crate::ReadError>, Cancel>),
     /// This native class has no pull specialization. Never collect an eager
     /// result and misrepresent its iterator as a streaming execution.
     StreamingUnsupported {
@@ -89,6 +92,7 @@ impl core::fmt::Display for QueryError {
             Self::Aggregate(e) => e.fmt(f),
             Self::Set(e) => e.fmt(f),
             Self::Stream(e) => e.fmt(f),
+            Self::EdgeStream(e) => e.fmt(f),
             Self::StreamingUnsupported { facade } => write!(
                 f,
                 "native {facade:?} read has no supported pull execution"
@@ -109,6 +113,7 @@ impl core::error::Error for QueryError {
         match self {
             Self::Refused { source, .. } => Some(source.as_ref()),
             Self::Stream(error) => Some(error),
+            Self::EdgeStream(error) => Some(error),
             Self::Transaction(error) => Some(error.as_ref()),
             Self::TransactionPattern(error) => Some(error.as_ref()),
             Self::TransactionAggregate(error) => Some(error.as_ref()),
