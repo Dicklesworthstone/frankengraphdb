@@ -3492,17 +3492,23 @@ impl<V: Vfs + Clone> Database<V> {
         // barrier; no receipt escapes before the entire data batch completes.
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishEdgeBlocks);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        let mut publication = self.store.publication_batch(cx, &mut self.receipts, block_store_crash_at.take())
+        let mut publication = self
+            .store
+            .publication_batch(cx, &mut self.receipts, block_store_crash_at.take())
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
             })?;
         for block in &blocks {
-            publication.put_verified(
-                cx,
-                &block.bytes,
-                block.property_patch.as_ref().map(|patch| patch.bytes.as_slice()),
-            )
+            publication
+                .put_verified(
+                    cx,
+                    &block.bytes,
+                    block
+                        .property_patch
+                        .as_ref()
+                        .map(|patch| patch.bytes.as_slice()),
+                )
                 .await
                 .map_err(|error| WriteError::CommittedNeedsRecovery {
                     recovery,
@@ -3521,10 +3527,13 @@ impl<V: Vfs + Clone> Database<V> {
                     source: Box::new(RebuildError::from(error)),
                 })?;
         }
-        publication.finish(cx).await.map_err(|error| WriteError::CommittedNeedsRecovery {
-            recovery,
-            source: Box::new(RebuildError::from(error)),
-        })?;
+        publication
+            .finish(cx)
+            .await
+            .map_err(|error| WriteError::CommittedNeedsRecovery {
+                recovery,
+                source: Box::new(RebuildError::from(error)),
+            })?;
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishPartitionRoot);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         let root_id = self

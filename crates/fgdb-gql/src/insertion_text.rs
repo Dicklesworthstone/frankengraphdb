@@ -66,6 +66,7 @@ pub(crate) struct InsertEdgeTemplate {
 
 /// Unit statements retain their actual argument table, not a forged MATCH or
 /// an invalid PreparedGraphText. Only a matched input owns graph read syntax.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub(crate) enum InsertTextInput {
     Match(PreparedGraphText),

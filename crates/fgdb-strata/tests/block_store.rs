@@ -1158,61 +1158,153 @@ fn batch_publication_matches_standalone_and_defers_receipts() {
     let plain_dir = scratch_dir("batch-plain");
     let batch_dir = scratch_dir("batch-shared");
     under_lab(0x9_110, move |cx| async move {
-        let plain = BlockStore::open(&cx, &plain_dir, K_OID, NAMESPACE).await.expect("plain store");
-        let store = BlockStore::open(&cx, &batch_dir, K_OID, NAMESPACE).await.expect("batch store");
+        let plain = BlockStore::open(&cx, &plain_dir, K_OID, NAMESPACE)
+            .await
+            .expect("plain store");
+        let store = BlockStore::open(&cx, &batch_dir, K_OID, NAMESPACE)
+            .await
+            .expect("batch store");
         let bytes = sample();
         let id = plain.put(&cx, &bytes).await.expect("standalone");
         let mut receipts = PublishReceipts::new();
-        let mut abandoned = store.publication_batch(&cx, &mut receipts, None).expect("batch");
-        assert_eq!(abandoned.put_verified(&cx, &bytes, None).await.expect("staged"), id);
+        let mut abandoned = store
+            .publication_batch(&cx, &mut receipts, None)
+            .expect("batch");
+        assert_eq!(
+            abandoned
+                .put_verified(&cx, &bytes, None)
+                .await
+                .expect("staged"),
+            id
+        );
         drop(abandoned);
-        assert!(!receipts.holds(id), "dropping before finish cannot mint receipts");
-        let mut batch = store.publication_batch(&cx, &mut receipts, None).expect("retry");
-        assert_eq!(batch.put_verified(&cx, &bytes, None).await.expect("restaged"), id);
+        assert!(
+            !receipts.holds(id),
+            "dropping before finish cannot mint receipts"
+        );
+        let mut batch = store
+            .publication_batch(&cx, &mut receipts, None)
+            .expect("retry");
+        assert_eq!(
+            batch
+                .put_verified(&cx, &bytes, None)
+                .await
+                .expect("restaged"),
+            id
+        );
         batch.finish(&cx).await.expect("durable batch");
         assert!(receipts.holds(id));
-        assert_eq!(store.get_bytes(&cx, id).await.expect("batch bytes"), plain.get_bytes(&cx, id).await.expect("plain bytes"));
+        assert_eq!(
+            store.get_bytes(&cx, id).await.expect("batch bytes"),
+            plain.get_bytes(&cx, id).await.expect("plain bytes")
+        );
         let keys = (&K_OID, NAMESPACE);
         let mut writer = BlockWriter::new(GraphId(1), BranchId(1), 0);
         seed_triangle(&mut writer, keys);
-        writer.apply(keys, CommitSeq(2), &DeltaRow::CreateEdge {
-            eid: EId(20), birth_ordinal: 20, src: VId(1), relation: REL, dst: VId(2),
-            canonical_key: None,
-            props: vec![(fgdb_delta_types::PropertyKeyId(7), fgdb_types::CanonicalScalar::Int(42))],
-            valid_time: None,
-        }).expect("propertied edge");
+        writer
+            .apply(
+                keys,
+                CommitSeq(2),
+                &DeltaRow::CreateEdge {
+                    eid: EId(20),
+                    birth_ordinal: 20,
+                    src: VId(1),
+                    relation: REL,
+                    dst: VId(2),
+                    canonical_key: None,
+                    props: vec![(
+                        fgdb_delta_types::PropertyKeyId(7),
+                        fgdb_types::CanonicalScalar::Int(42),
+                    )],
+                    valid_time: None,
+                },
+            )
+            .expect("propertied edge");
         let (root, blocks, patches) = writer.publish(keys, CommitSeq(2)).expect("mixed objects");
         // A new lineage keeps the independent single-block probe above out of
         // this writer's edge-history validator.
         let mut mixed_receipts = PublishReceipts::new();
-        let mut batch = store.publication_batch(&cx, &mut mixed_receipts, None).expect("mixed batch");
+        let mut batch = store
+            .publication_batch(&cx, &mut mixed_receipts, None)
+            .expect("mixed batch");
         assert!(blocks.iter().any(|block| block.property_patch.is_some()));
         assert!(!patches.is_empty());
         for block in &blocks {
             if let Some(patch) = &block.property_patch {
-                plain.put_edge_property_patch(&cx, &patch.bytes).await.expect("plain property");
+                plain
+                    .put_edge_property_patch(&cx, &patch.bytes)
+                    .await
+                    .expect("plain property");
             }
             let expected = plain.put(&cx, &block.bytes).await.expect("plain block");
-            assert_eq!(batch.put_verified(&cx, &block.bytes, block.property_patch.as_ref().map(|patch| patch.bytes.as_slice())).await.expect("batch block"), expected);
+            assert_eq!(
+                batch
+                    .put_verified(
+                        &cx,
+                        &block.bytes,
+                        block
+                            .property_patch
+                            .as_ref()
+                            .map(|patch| patch.bytes.as_slice())
+                    )
+                    .await
+                    .expect("batch block"),
+                expected
+            );
         }
         for patch in &patches {
-            let expected = plain.put_patch(&cx, &patch.bytes).await.expect("plain vertex patch");
-            assert_eq!(batch.put_patch_verified(&cx, &patch.bytes).await.expect("batch vertex patch"), expected);
+            let expected = plain
+                .put_patch(&cx, &patch.bytes)
+                .await
+                .expect("plain vertex patch");
+            assert_eq!(
+                batch
+                    .put_patch_verified(&cx, &patch.bytes)
+                    .await
+                    .expect("batch vertex patch"),
+                expected
+            );
         }
         batch.finish(&cx).await.expect("mixed finish");
         for block in &blocks {
             let id = DeltaBlockVersion(block.block_id);
-            assert_eq!(store.get_bytes(&cx, id).await.expect("batch bytes"), plain.get_bytes(&cx, id).await.expect("plain bytes"));
+            assert_eq!(
+                store.get_bytes(&cx, id).await.expect("batch bytes"),
+                plain.get_bytes(&cx, id).await.expect("plain bytes")
+            );
             if let Some(patch) = &block.property_patch {
-                let id = fgdb_strata::edge_props::property_patch_id(&K_OID, NAMESPACE, &patch.bytes);
-                assert_eq!(store.get_edge_property_patch_bytes(&cx, id).await.expect("batch property bytes"), patch.bytes);
+                let id =
+                    fgdb_strata::edge_props::property_patch_id(&K_OID, NAMESPACE, &patch.bytes);
+                assert_eq!(
+                    store
+                        .get_edge_property_patch_bytes(&cx, id)
+                        .await
+                        .expect("batch property bytes"),
+                    patch.bytes
+                );
             }
         }
         for patch in &patches {
-            let id = fgdb_strata::vertex::VertexPatchVersion(fgdb_strata::vertex::vertex_patch_id(&K_OID, NAMESPACE, &patch.bytes));
-            assert_eq!(store.get_patch_bytes(&cx, id).await.expect("batch vertex bytes"), patch.bytes);
+            let id = fgdb_strata::vertex::VertexPatchVersion(fgdb_strata::vertex::vertex_patch_id(
+                &K_OID,
+                NAMESPACE,
+                &patch.bytes,
+            ));
+            assert_eq!(
+                store
+                    .get_patch_bytes(&cx, id)
+                    .await
+                    .expect("batch vertex bytes"),
+                patch.bytes
+            );
         }
-        assert_eq!(store.put_root_verified(&cx, &root, &mut mixed_receipts).await.expect("batch root"), plain.put_root(&cx, &root).await.expect("plain root"));
+        assert_eq!(
+            store
+                .put_root_verified(&cx, &root, &mut mixed_receipts)
+                .await
+                .expect("batch root"),
+            plain.put_root(&cx, &root).await.expect("plain root")
+        );
     });
 }
 

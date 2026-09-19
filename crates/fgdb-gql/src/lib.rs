@@ -46,8 +46,8 @@ mod write_receipt;
 mod write_script;
 
 pub use cheapest_path::{
-    GraphCheapestPathCursor, GraphCheapestPathError, GraphCheapestPathMode, GraphCostPath, GraphPathCostError,
-    PreparedGraphCheapestPath,
+    GraphCheapestPathCursor, GraphCheapestPathError, GraphCheapestPathMode, GraphCostPath,
+    GraphPathCostError, PreparedGraphCheapestPath,
 };
 pub use cheapest_path_text::{
     BoundGraphCheapestPathQuery, GraphCheapestPathTextError, GraphCheapestPathTextErrorKind,
@@ -164,7 +164,6 @@ pub use set_ops::{
 };
 pub use set_text::{GraphSetTextError, GraphSetTextErrorKind, PreparedGraphSetText};
 pub use shortest_walk::GraphShortestWalkCursor;
-pub use trail::GraphTrailCursor;
 pub use temporal_aggregate_text::{
     BoundTemporalGraphAggregateQuery, PreparedTemporalGraphAggregateText,
 };
@@ -176,6 +175,7 @@ pub use temporal_text::{
     BoundTemporalGraphQuery, GraphTemporalTextError, GraphTemporalTextErrorKind,
     PreparedTemporalGraphText,
 };
+pub use trail::GraphTrailCursor;
 pub use vertex_merge::{
     GraphVertexMergeBuildError, GraphVertexMergeError, GraphVertexMergeOutcome,
     GraphVertexMergePolicy, GraphVertexMergeStats, PreparedGraphVertexMerge,

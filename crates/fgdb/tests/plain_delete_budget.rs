@@ -56,7 +56,7 @@ fn exact_limits_include_edge_scan_and_each_proposal_and_refusal_preserves_prefix
         prefix.set_vertex_property(VId(1), P, Some(CanonicalScalar::Int(-1)));
         txn.write(&mut db, prefix.clone()).unwrap();
         let selection = txn
-            .execute_graph_pattern_governed(&mut db, &query, definition.selection(), policy().query)
+            .execute_graph_pattern_governed(&db, &query, definition.selection(), policy().query)
             .unwrap();
         let proposal = definition
             .execute_governed(
@@ -152,7 +152,7 @@ fn empty_selection_neither_scans_incidence_nor_spends_a_target_allowance() {
                 .unwrap();
         let mut txn = db.begin(&txcx).unwrap();
         let selected = txn
-            .execute_graph_pattern_governed(&mut db, &query, definition.selection(), policy().query)
+            .execute_graph_pattern_governed(&db, &query, definition.selection(), policy().query)
             .unwrap();
         let expected = definition
             .execute_governed(

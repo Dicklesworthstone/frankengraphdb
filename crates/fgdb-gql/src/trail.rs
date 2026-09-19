@@ -95,9 +95,17 @@ impl<'a> GraphTrailCursor<'a> {
                 control(GlaExecutionEvent::ScratchEntry)?;
             }
             let source = self.stack[0].vertex;
-            let steps = self.stack.iter().skip(1).map(|frame| {
-                (frame.incoming.expect("non-root trail frame has an edge"), frame.vertex)
-            }).collect::<Vec<_>>();
+            let steps = self
+                .stack
+                .iter()
+                .skip(1)
+                .map(|frame| {
+                    (
+                        frame.incoming.expect("non-root trail frame has an edge"),
+                        frame.vertex,
+                    )
+                })
+                .collect::<Vec<_>>();
             Ok(Some(GraphPath::new(source, steps.into_boxed_slice())))
         })();
         if result.is_err() || matches!(&result, Ok(None)) {
@@ -177,8 +185,12 @@ mod tests {
     type Index = BTreeMap<VId, Vec<(EId, VId)>>;
     type Route = (VId, Vec<(EId, VId)>);
 
-    fn collect<E>(source: VId, bounds: GraphWalkBounds, index: &Index,
-        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<Vec<Route>, E> {
+    fn collect<E>(
+        source: VId,
+        bounds: GraphWalkBounds,
+        index: &Index,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Vec<Route>, E> {
         let mut cursor = GraphTrailCursor::new(source, bounds, Some(index), control)?;
         let mut result = Vec::new();
         while let Some(path) = cursor.next_with_control(control)? {
@@ -196,14 +208,28 @@ mod tests {
             for direction in 0..3 {
                 let mut index = Index::new();
                 for (at, &(edge, from, to)) in edges.iter().enumerate() {
-                    if mask & (1 << at) == 0 { continue; }
-                    let (from, to) = if direction == 1 { (to, from) } else { (from, to) };
-                    index.entry(VId(from)).or_default().push((EId(edge), VId(to)));
+                    if mask & (1 << at) == 0 {
+                        continue;
+                    }
+                    let (from, to) = if direction == 1 {
+                        (to, from)
+                    } else {
+                        (from, to)
+                    };
+                    index
+                        .entry(VId(from))
+                        .or_default()
+                        .push((EId(edge), VId(to)));
                     if direction == 2 && from != to {
-                        index.entry(VId(to)).or_default().push((EId(edge), VId(from)));
+                        index
+                            .entry(VId(to))
+                            .or_default()
+                            .push((EId(edge), VId(from)));
                     }
                 }
-                for values in index.values_mut() { values.sort(); }
+                for values in index.values_mut() {
+                    values.sort();
+                }
                 for source in [VId(0), VId(1), VId(2)] {
                     for maximum in 0..=3 {
                         for minimum in 0..=maximum {
@@ -212,24 +238,38 @@ mod tests {
                             let mut expected = Vec::new();
                             for depth in 0..=maximum {
                                 if depth >= minimum {
-                                    expected.extend(all.iter().filter(|(_, steps)| {
-                                        steps.iter().map(|step| step.0).collect::<BTreeSet<_>>().len() == steps.len()
-                                    }).cloned());
+                                    expected.extend(
+                                        all.iter()
+                                            .filter(|(_, steps)| {
+                                                steps
+                                                    .iter()
+                                                    .map(|step| step.0)
+                                                    .collect::<BTreeSet<_>>()
+                                                    .len()
+                                                    == steps.len()
+                                            })
+                                            .cloned(),
+                                    );
                                 }
                                 let mut next = Vec::new();
                                 for (start, steps) in all {
                                     let endpoint = steps.last().map_or(start, |step| step.1);
                                     for &step in index.get(&endpoint).into_iter().flatten() {
-                                        let mut child = steps.clone(); child.push(step);
+                                        let mut child = steps.clone();
+                                        child.push(step);
                                         next.push((start, child));
                                     }
                                 }
                                 all = next;
                             }
                             expected.sort();
-                            let mut actual = collect(source, bounds, &index, &mut |_| Ok::<_, ()>(())).unwrap();
+                            let mut actual =
+                                collect(source, bounds, &index, &mut |_| Ok::<_, ()>(())).unwrap();
                             actual.sort();
-                            assert_eq!(actual, expected, "mask={mask} direction={direction} {source:?} {bounds:?}");
+                            assert_eq!(
+                                actual, expected,
+                                "mask={mask} direction={direction} {source:?} {bounds:?}"
+                            );
                         }
                     }
                 }
@@ -243,23 +283,50 @@ mod tests {
             (VId(1), vec![(EId(11), VId(2)), (EId(13), VId(3))]),
             (VId(2), vec![(EId(12), VId(1))]),
         ]);
-        assert_eq!(collect(VId(1), GraphWalkBounds::new(3, 3).unwrap(), &index,
-            &mut |_| Ok::<_, ()>(())).unwrap(),
-            vec![(VId(1), vec![(EId(11), VId(2)), (EId(12), VId(1)), (EId(13), VId(3))])]);
+        assert_eq!(
+            collect(
+                VId(1),
+                GraphWalkBounds::new(3, 3).unwrap(),
+                &index,
+                &mut |_| Ok::<_, ()>(())
+            )
+            .unwrap(),
+            vec![(
+                VId(1),
+                vec![(EId(11), VId(2)), (EId(12), VId(1)), (EId(13), VId(3))]
+            )]
+        );
         let one = Index::from([
             (VId(1), vec![(EId(11), VId(2))]),
             (VId(2), vec![(EId(11), VId(1))]),
         ]);
-        assert!(collect(VId(1), GraphWalkBounds::new(2, 3).unwrap(), &one,
-            &mut |_| Ok::<_, ()>(())).unwrap().is_empty());
+        assert!(
+            collect(
+                VId(1),
+                GraphWalkBounds::new(2, 3).unwrap(),
+                &one,
+                &mut |_| Ok::<_, ()>(())
+            )
+            .unwrap()
+            .is_empty()
+        );
         let parallel = Index::from([
             (VId(1), vec![(EId(11), VId(2)), (EId(12), VId(2))]),
             (VId(2), vec![(EId(11), VId(1)), (EId(12), VId(1))]),
         ]);
-        let paths = collect(VId(1), GraphWalkBounds::new(2, 2).unwrap(), &parallel,
-            &mut |_| Ok::<_, ()>(())).unwrap();
+        let paths = collect(
+            VId(1),
+            GraphWalkBounds::new(2, 2).unwrap(),
+            &parallel,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
         assert_eq!(paths.len(), 2);
-        assert!(paths.iter().all(|(_, path)| path[0].0 != path[1].0 && path[1].1 == VId(1)));
+        assert!(
+            paths
+                .iter()
+                .all(|(_, path)| path[0].0 != path[1].0 && path[1].1 == VId(1))
+        );
     }
 
     #[test]
@@ -268,18 +335,27 @@ mod tests {
         let bounds = GraphWalkBounds::new(0, 3).unwrap();
         let mut path_scratch = 0;
         let paths = collect(VId(1), bounds, &index, &mut |event| {
-            path_scratch += usize::from(event == GlaExecutionEvent::ScratchEntry); Ok::<_, ()>(())
-        }).unwrap();
+            path_scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+            Ok::<_, ()>(())
+        })
+        .unwrap();
         let mut endpoint_scratch = 0;
         let mut control = |event| {
-            endpoint_scratch += usize::from(event == GlaExecutionEvent::ScratchEntry); Ok::<_, ()>(())
+            endpoint_scratch += usize::from(event == GlaExecutionEvent::ScratchEntry);
+            Ok::<_, ()>(())
         };
         let mut cursor = GraphTrailCursor::new(VId(1), bounds, Some(&index), &mut control).unwrap();
         let mut endpoints = Vec::new();
         while let Some(endpoint) = cursor.next_endpoint_with_control(&mut control).unwrap() {
             endpoints.push(endpoint);
         }
-        assert_eq!(endpoints, paths.iter().map(|(start, steps)| steps.last().map_or(*start, |s| s.1)).collect::<Vec<_>>());
+        assert_eq!(
+            endpoints,
+            paths
+                .iter()
+                .map(|(start, steps)| steps.last().map_or(*start, |s| s.1))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(endpoints, vec![VId(1); 5]);
         assert!(endpoint_scratch < path_scratch);
         assert_eq!(cursor.stack.capacity(), 0);
@@ -294,32 +370,68 @@ mod tests {
         let bounds = GraphWalkBounds::new(0, 3).unwrap();
         for endpoint_only in [false, true] {
             let mut total = 0;
-            let mut control = |_| { total += 1; Ok::<_, usize>(()) };
-            let mut cursor = GraphTrailCursor::new(VId(1), bounds, Some(&index), &mut control).unwrap();
+            let mut control = |_| {
+                total += 1;
+                Ok::<_, usize>(())
+            };
+            let mut cursor =
+                GraphTrailCursor::new(VId(1), bounds, Some(&index), &mut control).unwrap();
             loop {
-                let more = if endpoint_only { cursor.next_endpoint_with_control(&mut control).unwrap().is_some() }
-                    else { cursor.next_with_control(&mut control).unwrap().is_some() };
-                if !more { break; }
+                let more = if endpoint_only {
+                    cursor
+                        .next_endpoint_with_control(&mut control)
+                        .unwrap()
+                        .is_some()
+                } else {
+                    cursor.next_with_control(&mut control).unwrap().is_some()
+                };
+                if !more {
+                    break;
+                }
             }
             for stop in 1..=total {
                 let mut calls = 0;
-                let mut control = |_| { calls += 1; if calls == stop { Err(stop) } else { Ok(()) } };
+                let mut control = |_| {
+                    calls += 1;
+                    if calls == stop { Err(stop) } else { Ok(()) }
+                };
                 let result = GraphTrailCursor::new(VId(1), bounds, Some(&index), &mut control);
-                let Ok(mut cursor) = result else { assert_eq!(stop, 1); continue; };
+                let Ok(mut cursor) = result else {
+                    assert_eq!(stop, 1);
+                    continue;
+                };
                 loop {
-                    let result = if endpoint_only { cursor.next_endpoint_with_control(&mut control).map(|v| v.is_some()) }
-                        else { cursor.next_with_control(&mut control).map(|v| v.is_some()) };
-                    if result.is_err() { assert_eq!(result, Err(stop)); break; }
+                    let result = if endpoint_only {
+                        cursor
+                            .next_endpoint_with_control(&mut control)
+                            .map(|v| v.is_some())
+                    } else {
+                        cursor.next_with_control(&mut control).map(|v| v.is_some())
+                    };
+                    if result.is_err() {
+                        assert_eq!(result, Err(stop));
+                        break;
+                    }
                     assert_eq!(result, Ok(true), "must encounter the selected boundary");
                 }
                 assert_eq!(calls, stop);
                 assert_eq!(cursor.stack.capacity(), 0);
-                assert_eq!(cursor.next_endpoint_with_control(&mut |_| -> Result<(), usize> {
-                    panic!("refused cursor resumed")
-                }).unwrap(), None);
-                assert_eq!(cursor.next_with_control(&mut |_| -> Result<(), usize> {
-                    panic!("refused path copy resumed")
-                }).unwrap(), None);
+                assert_eq!(
+                    cursor
+                        .next_endpoint_with_control(&mut |_| -> Result<(), usize> {
+                            panic!("refused cursor resumed")
+                        })
+                        .unwrap(),
+                    None
+                );
+                assert_eq!(
+                    cursor
+                        .next_with_control(&mut |_| -> Result<(), usize> {
+                            panic!("refused path copy resumed")
+                        })
+                        .unwrap(),
+                    None
+                );
             }
         }
     }
@@ -329,20 +441,50 @@ mod tests {
         let maximum = crate::MAX_GRAPH_WALK_HOPS;
         let mut chain = Index::new();
         for at in 0..maximum {
-            chain.insert(VId(u128::from(at)), vec![(EId(u128::from(at)), VId(u128::from(at) + 1))]);
+            chain.insert(
+                VId(u128::from(at)),
+                vec![(EId(u128::from(at)), VId(u128::from(at) + 1))],
+            );
         }
-        let paths = collect(VId(0), GraphWalkBounds::new(maximum, maximum).unwrap(), &chain,
-            &mut |_| Ok::<_, ()>(())).unwrap();
+        let paths = collect(
+            VId(0),
+            GraphWalkBounds::new(maximum, maximum).unwrap(),
+            &chain,
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].1.len(), maximum as usize);
         let looped = Index::from([(VId(1), vec![(EId(7), VId(1))])]);
         let mut calls = 0;
-        assert!(collect(VId(1), GraphWalkBounds::new(maximum, maximum).unwrap(), &looped, &mut |_| {
-            calls += 1; assert!(calls < 20, "must reject repeated prefixes before the hop bound"); Ok::<_, ()>(())
-        }).unwrap().is_empty());
+        assert!(
+            collect(
+                VId(1),
+                GraphWalkBounds::new(maximum, maximum).unwrap(),
+                &looped,
+                &mut |_| {
+                    calls += 1;
+                    assert!(
+                        calls < 20,
+                        "must reject repeated prefixes before the hop bound"
+                    );
+                    Ok::<_, ()>(())
+                }
+            )
+            .unwrap()
+            .is_empty()
+        );
         for source in [VId(0), VId(u128::MAX)] {
-            assert_eq!(collect(source, GraphWalkBounds::new(0, 0).unwrap(), &Index::new(),
-                &mut |_| Ok::<_, ()>(())).unwrap(), vec![(source, vec![])]);
+            assert_eq!(
+                collect(
+                    source,
+                    GraphWalkBounds::new(0, 0).unwrap(),
+                    &Index::new(),
+                    &mut |_| Ok::<_, ()>(())
+                )
+                .unwrap(),
+                vec![(source, vec![])]
+            );
         }
     }
 }

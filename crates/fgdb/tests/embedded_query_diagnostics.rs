@@ -51,16 +51,6 @@ const CASES: &[(&str, NativeReadClass, &str)] = &[
         "since.",
     ),
     (
-        "MATCH (p:Person) RETURN labels(p)",
-        NativeReadClass::Pattern,
-        "labels(p)",
-    ),
-    (
-        "MATCH (a:Person)-[r:R]->(b:Person) RETURN type(r)",
-        NativeReadClass::Pattern,
-        "type(r)",
-    ),
-    (
         "MATCH (p:Person) WHERE EXISTS { (p)-[:R]->() } RETURN p.p",
         NativeReadClass::Pattern,
         "EXISTS { (p)-[:R]->() }",
@@ -167,6 +157,8 @@ fn accepted_statements_still_accept() {
             "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ 1 RETURN n.p",
             "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ 1 RETURN COUNT(*) AS c",
             "MATCH (a:Person) FOR SYSTEM_TIME AS OF SEQ 1 RETURN a.p AS p UNION ALL MATCH (b:Person) RETURN b.p AS p",
+            "MATCH (p:Person) RETURN labels(p)",
+            "MATCH (a:Person)-[r:R]->(b:Person) RETURN type(r)",
         ];
         for (text, column, values) in [
             ("MATCH (a:Person)-[k:R]->(b:Person) RETURN k.since ORDER BY k.since", "since", vec![2, 11]),

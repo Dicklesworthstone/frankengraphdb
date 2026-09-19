@@ -154,7 +154,10 @@ impl MixedMeter {
             GraphMutationProgramDimension::Effects,
             stats.action_effects,
         )?;
-        let targets = self.common.stats.target_edge_visits
+        let targets = self
+            .common
+            .stats
+            .target_edge_visits
             .checked_add(u64::from(stats.action_effects != 0))
             .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?;
         // The total already includes MERGE. Reuse its source/creation validation

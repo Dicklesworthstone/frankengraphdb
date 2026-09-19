@@ -4,9 +4,9 @@
 //! returning a different row order to avoid sorting would change semantics.
 
 use super::{VertexScanEvent, VertexScanRow, seek};
+use crate::GlaExecutionEvent;
 use crate::algebra::{GlaOperator, GlaOutput, GraphValueRow, ValueProjection};
 use crate::algebra_exec::ProjectedRows;
-use crate::GlaExecutionEvent;
 use fgdb_types::VId;
 
 /// Closed pull-output shapes. The compiler proves that source identity order
@@ -35,22 +35,32 @@ mod sealed {
                 && matches!(order, GlaOperator::OrderByVertexId)
         }
         fn project<E>(
-            vid: VId, _row: VertexScanRow<'_>, _projection: &GlaOperator,
+            vid: VId,
+            _row: VertexScanRow<'_>,
+            _projection: &GlaOperator,
             _control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
-        ) -> Result<Self, E> { Ok(vid) }
+        ) -> Result<Self, E> {
+            Ok(vid)
+        }
     }
     impl Projection for GraphValueRow {
         fn accepts_projection(projection: &GlaOperator, order: &GlaOperator) -> bool {
-            let GlaOperator::ProjectValues { columns } = projection else { return false; };
+            let GlaOperator::ProjectValues { columns } = projection else {
+                return false;
+            };
             matches!(order, GlaOperator::OrderByValues)
                 && matches!(columns.first(), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
                 && columns.iter().all(|column| match column {
-                    ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => slot.ordinal() == 0,
+                    ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. } => {
+                        slot.ordinal() == 0
+                    }
                     _ => false,
                 })
         }
         fn project<E>(
-            vid: VId, row: VertexScanRow<'_>, projection: &GlaOperator,
+            vid: VId,
+            row: VertexScanRow<'_>,
+            projection: &GlaOperator,
             control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
         ) -> Result<Self, E> {
             collect_one::<Self, E>(vid, row, projection, control)
@@ -70,19 +80,33 @@ fn collect_one<Row: GlaOutput, E>(
     let control = std::cell::RefCell::new(control);
     let mut projected = ProjectedRows::new(true);
     Row::collect_properties(
-        projection, &[Some(vid)], &mut projected,
+        projection,
+        &[Some(vid)],
+        &mut projected,
         &mut |asked, key| {
             debug_assert_eq!(asked, vid, "the checked projection names only slot zero");
-            seek(row.properties, &key, |entry| entry.0, &mut **control.borrow_mut())
-                .map(|found| found.map(|(_, value)| value))
+            seek(
+                row.properties,
+                &key,
+                |entry| entry.0,
+                &mut **control.borrow_mut(),
+            )
+            .map(|found| found.map(|(_, value)| value))
         },
-        &mut |event| (**control.borrow_mut())(match event {
-            GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
-            GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => VertexScanEvent::Work,
-        }),
+        &mut |event| {
+            (**control.borrow_mut())(match event {
+                GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => VertexScanEvent::Work,
+            })
+        },
     )?;
     let mut rows = projected.into_rows();
-    let value = rows.next().expect("a checked nonempty projection produces one complete row");
-    debug_assert!(rows.next().is_none(), "a row-local projection cannot produce a second row");
+    let value = rows
+        .next()
+        .expect("a checked nonempty projection produces one complete row");
+    debug_assert!(
+        rows.next().is_none(),
+        "a row-local projection cannot produce a second row"
+    );
     Ok(value)
 }

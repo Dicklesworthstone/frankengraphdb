@@ -8,7 +8,9 @@ use super::*;
 
 fn cell(row: &GraphAggregateRow, column: GraphAggregateColumn) -> Option<Cell<'_>> {
     match column {
-        GraphAggregateColumn::GroupKey(at) => row.keys.get(at).map(|value| Cell::Value(value_ref(value))),
+        GraphAggregateColumn::GroupKey(at) => {
+            row.keys.get(at).map(|value| Cell::Value(value_ref(value)))
+        }
         GraphAggregateColumn::Aggregate(at) => row.values.get(at).map(result_cell),
     }
 }
@@ -64,17 +66,26 @@ impl GraphAggregateRow {
             let result = compare_cell(
                 cell(self, order.column).expect("ordering columns checked above"),
                 cell(other, order.column).expect("ordering columns checked above"),
-                order.descending, order.nulls, control,
+                order.descending,
+                order.nulls,
+                control,
             )?;
-            if result != Ordering::Equal { return Ok(Some(result)); }
+            if result != Ordering::Equal {
+                return Ok(Some(result));
+            }
         }
         for (left, right) in self.keys.iter().zip(&other.keys) {
             control(GlaExecutionEvent::Work)?;
-            for _ in 0..value_ref(left).payload_units().max(value_ref(right).payload_units()) {
+            for _ in 0..value_ref(left)
+                .payload_units()
+                .max(value_ref(right).payload_units())
+            {
                 control(GlaExecutionEvent::Work)?;
             }
             let result = left.cmp(right);
-            if result != Ordering::Equal { return Ok(Some(result)); }
+            if result != Ordering::Equal {
+                return Ok(Some(result));
+            }
         }
         Ok(Some(Ordering::Equal))
     }
@@ -105,64 +116,138 @@ mod tests {
         for descending in [false, true] {
             for nulls in [GraphNullPlacement::First, GraphNullPlacement::Last] {
                 let order = [GraphAggregateOrder {
-                    column: GraphAggregateColumn::Aggregate(0), descending, nulls,
+                    column: GraphAggregateColumn::Aggregate(0),
+                    descending,
+                    nulls,
                 }];
                 for (i, a) in values.iter().enumerate() {
                     for (j, b) in values.iter().enumerate() {
                         let expected = match (i == 0, j == 0) {
                             (true, true) => Ordering::Equal,
-                            (true, false) => if nulls == GraphNullPlacement::First { Ordering::Less } else { Ordering::Greater },
-                            (false, true) => if nulls == GraphNullPlacement::First { Ordering::Greater } else { Ordering::Less },
-                            _ => if descending { j.cmp(&i) } else { i.cmp(&j) },
+                            (true, false) => {
+                                if nulls == GraphNullPlacement::First {
+                                    Ordering::Less
+                                } else {
+                                    Ordering::Greater
+                                }
+                            }
+                            (false, true) => {
+                                if nulls == GraphNullPlacement::First {
+                                    Ordering::Greater
+                                } else {
+                                    Ordering::Less
+                                }
+                            }
+                            _ => {
+                                if descending {
+                                    j.cmp(&i)
+                                } else {
+                                    i.cmp(&j)
+                                }
+                            }
                         };
-                        assert_eq!(row(0, a.clone()).compare_incremental_order(
-                            &row(0, b.clone()), &order, &mut |_| Ok::<_, ()>(()),
-                        ).unwrap(), Some(expected));
+                        assert_eq!(
+                            row(0, a.clone())
+                                .compare_incremental_order(
+                                    &row(0, b.clone()),
+                                    &order,
+                                    &mut |_| Ok::<_, ()>(()),
+                                )
+                                .unwrap(),
+                            Some(expected)
+                        );
                     }
                 }
                 // Numeric equality must not fall back to result enum tags;
                 // DESC reverses only sort cells, not the hidden key tiebreak.
-                assert_eq!(row(1, GraphAggregateValue::Count(2)).compare_incremental_order(
-                    &row(2, GraphAggregateValue::Average(GraphExactAverage::new(4, 2).unwrap())),
-                    &order, &mut |_| Ok::<_, ()>(()),
-                ).unwrap(), Some(Ordering::Less));
+                assert_eq!(
+                    row(1, GraphAggregateValue::Count(2))
+                        .compare_incremental_order(
+                            &row(
+                                2,
+                                GraphAggregateValue::Average(GraphExactAverage::new(4, 2).unwrap())
+                            ),
+                            &order,
+                            &mut |_| Ok::<_, ()>(()),
+                        )
+                        .unwrap(),
+                    Some(Ordering::Less)
+                );
             }
         }
-        assert_eq!(row(1, GraphAggregateValue::Count(9)).compare_incremental_order(
-            &row(1, GraphAggregateValue::Count(1)), &[], &mut |_| Ok::<_, ()>(()),
-        ).unwrap(), Some(Ordering::Equal));
+        assert_eq!(
+            row(1, GraphAggregateValue::Count(9))
+                .compare_incremental_order(
+                    &row(1, GraphAggregateValue::Count(1)),
+                    &[],
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap(),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]
     fn rank_schema_refuses_before_decisive_prefix_and_every_checkpoint_retries() {
         let a = row(1, GraphAggregateValue::Count(1));
         let b = row(2, GraphAggregateValue::Count(2));
-        let bad = [GraphAggregateOrder::ascending(GraphAggregateColumn::Aggregate(0)),
-            GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1))];
-        assert_eq!(a.compare_incremental_order(&b, &bad, &mut |_| Ok::<_, ()>(())).unwrap(), None);
-        let malformed = GraphAggregateRow { keys: Box::new([]), values: Box::new([]) };
-        assert_eq!(a.compare_incremental_order(&malformed, &[], &mut |_| Ok::<_, ()>(())).unwrap(), None);
+        let bad = [
+            GraphAggregateOrder::ascending(GraphAggregateColumn::Aggregate(0)),
+            GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(1)),
+        ];
+        assert_eq!(
+            a.compare_incremental_order(&b, &bad, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            None
+        );
+        let malformed = GraphAggregateRow {
+            keys: Box::new([]),
+            values: Box::new([]),
+        };
+        assert_eq!(
+            a.compare_incremental_order(&malformed, &[], &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            None
+        );
         let payload = CanonicalScalar::ucs_basic_text(&"x".repeat(257)).unwrap();
         let mut a = a;
         let mut b = b;
-        a.values = vec![GraphAggregateValue::Value(GraphValue::Scalar(payload.clone()))].into_boxed_slice();
+        a.values = vec![GraphAggregateValue::Value(GraphValue::Scalar(
+            payload.clone(),
+        ))]
+        .into_boxed_slice();
         b.values = a.values.clone();
-        let order = [GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(0))];
+        let order = [GraphAggregateOrder::descending(
+            GraphAggregateColumn::Aggregate(0),
+        )];
         let before = (a.clone(), b.clone());
         let mut calls = 0;
-        assert_eq!(a.compare_incremental_order(&b, &order, &mut |event| {
-            assert_eq!(event, GlaExecutionEvent::Work);
-            calls += 1; Ok::<_, usize>(())
-        }).unwrap(), Some(Ordering::Less));
+        assert_eq!(
+            a.compare_incremental_order(&b, &order, &mut |event| {
+                assert_eq!(event, GlaExecutionEvent::Work);
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap(),
+            Some(Ordering::Less)
+        );
         assert!(calls > 5);
         for stop in 1..=calls {
             let mut seen = 0;
-            assert_eq!(a.compare_incremental_order(&b, &order, &mut |_| {
-                seen += 1; if seen == stop { Err(stop) } else { Ok(()) }
-            }), Err(stop));
+            assert_eq!(
+                a.compare_incremental_order(&b, &order, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(stop)
+            );
             assert_eq!(seen, stop);
             assert_eq!((&a, &b), (&before.0, &before.1));
-            assert_eq!(a.compare_incremental_order(&b, &order, &mut |_| Ok::<_, ()>(())).unwrap(), Some(Ordering::Less));
+            assert_eq!(
+                a.compare_incremental_order(&b, &order, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                Some(Ordering::Less)
+            );
         }
     }
 }

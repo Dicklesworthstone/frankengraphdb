@@ -7,13 +7,13 @@
 //! change its generation. This is not paging an evidence artifact or materialized
 //! graph table, and it does not claim that the pinned generation is out of core.
 
-use crate::{Database, EmbeddedReadView, ReadError};
 use crate::gql_exec::source::SourceEvent;
+use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_gql::algebra::{GlaPlan, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::stream::{
-    VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanPlan,
-    VertexScanRow, VertexScanSource, VertexScanSourceError, VertexScanOutput,
+    VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanOutput, VertexScanPlan,
+    VertexScanRow, VertexScanSource, VertexScanSourceError,
 };
 use fgdb_gql::{GqlQueryError, GqlQueryPolicy, PreparedGqlQuery};
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -33,7 +33,9 @@ pub struct SnapshotVertexSource<'q> {
 }
 impl VertexScanSource for SnapshotVertexSource<'_> {
     type Error = ReadError;
-    fn snapshot_seq(&self) -> CommitSeq { self.as_of }
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.as_of
+    }
 
     fn next_vertex<C>(
         &mut self,
@@ -54,7 +56,9 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                     node = current.right.0.as_deref();
                 }
             }
-            if let Some(vid) = successor { self.after = Some(vid); }
+            if let Some(vid) = successor {
+                self.after = Some(vid);
+            }
             Ok(successor)
         })
     }
@@ -67,14 +71,22 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         self.cx.with_restriction(|| {
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
             let snapshot = &self.view.snapshot;
-            snapshot.property_index.visible_row(&snapshot.patches, vid, self.as_of, &mut |event| {
-                control(match event {
-                    // The cursor charges one candidate history BEFORE this
-                    // lookup. Version work is not a second candidate record.
-                    SourceEvent::Work | SourceEvent::SnapshotRecord => VertexScanEvent::Work,
-                    SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+            snapshot
+                .property_index
+                .visible_row(&snapshot.patches, vid, self.as_of, &mut |event| {
+                    control(match event {
+                        // The cursor charges one candidate history BEFORE this
+                        // lookup. Version work is not a second candidate record.
+                        SourceEvent::Work | SourceEvent::SnapshotRecord => VertexScanEvent::Work,
+                        SourceEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+                    })
                 })
-            }).map(|row| row.map(|row| VertexScanRow { labels: &row.labels, properties: &row.props }))
+                .map(|row| {
+                    row.map(|row| VertexScanRow {
+                        labels: &row.labels,
+                        properties: &row.props,
+                    })
+                })
                 .map_err(VertexScanSourceError::Control)
         })
     }
@@ -83,7 +95,8 @@ impl core::fmt::Debug for SnapshotVertexSource<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SnapshotVertexSource")
             .field("as_of", &self.as_of)
-            .field("generation_and_position", &"[REDACTED]").finish()
+            .field("generation_and_position", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -97,15 +110,27 @@ fn open<'q, Row: VertexScanOutput>(
     as_of: CommitSeq,
     policy: GqlQueryPolicy,
 ) -> Result<
-    VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, Row>, Row>,
+    VertexScanCursor<
+        SnapshotVertexSource<'q>,
+        impl FnMut() -> Result<(), Cancel> + 'q + use<'q, Row>,
+        Row,
+    >,
     StreamError,
 > {
     view.snapshot.check_frontier(as_of).map_err(source_error)?;
     let plan = VertexScanPlan::compile(logical)
         .map_err(|error| GqlQueryError::Source(VertexScanError::Plan(error)))?;
-    cx.with_restriction(|| cx.checkpoint()).map_err(GqlQueryError::Interrupted)?;
-    let source = SnapshotVertexSource { view, cx, as_of, after: None };
-    Ok(VertexScanCursor::new(source, plan, policy, move || cx.with_restriction(|| cx.checkpoint())))
+    cx.with_restriction(|| cx.checkpoint())
+        .map_err(GqlQueryError::Interrupted)?;
+    let source = SnapshotVertexSource {
+        view,
+        cx,
+        as_of,
+        after: None,
+    };
+    Ok(VertexScanCursor::new(source, plan, policy, move || {
+        cx.with_restriction(|| cx.checkpoint())
+    }))
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -120,7 +145,11 @@ impl<V: Vfs + Clone> Database<V> {
         pattern: &PreparedGraphPattern<GraphValueRow>,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>, GraphValueRow>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
+            GraphValueRow,
+        >,
         StreamError,
     > {
         let view = self.read_session().map_err(source_error)?;
@@ -135,10 +164,20 @@ impl<V: Vfs + Clone> Database<V> {
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>, GraphValueRow>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
+            GraphValueRow,
+        >,
         StreamError,
     > {
-        open(self.read_session().map_err(source_error)?, cx, pattern.plan(), as_of, policy)
+        open(
+            self.read_session().map_err(source_error)?,
+            cx,
+            pattern.plan(),
+            as_of,
+            policy,
+        )
     }
 
     /// Stream the supported single-vertex identity GLA profile. Opening pins
@@ -152,7 +191,10 @@ impl<V: Vfs + Clone> Database<V> {
         pattern: &PreparedGraphPattern,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
+        >,
         StreamError,
     > {
         let view = self.read_session().map_err(source_error)?;
@@ -169,10 +211,19 @@ impl<V: Vfs + Clone> Database<V> {
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
+        >,
         StreamError,
     > {
-        open(self.read_session().map_err(source_error)?, cx, pattern.plan(), as_of, policy)
+        open(
+            self.read_session().map_err(source_error)?,
+            cx,
+            pattern.plan(),
+            as_of,
+            policy,
+        )
     }
 
     /// Owned legacy preparation enters the same GLA scan compiler. There is
@@ -183,7 +234,10 @@ impl<V: Vfs + Clone> Database<V> {
         query: &PreparedGqlQuery,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
+        >,
         StreamError,
     > {
         let view = self.read_session().map_err(source_error)?;
@@ -198,7 +252,10 @@ impl<V: Vfs + Clone> Database<V> {
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q, V>,
+        >,
         StreamError,
     > {
         let view = self.read_session().map_err(source_error)?;
@@ -214,7 +271,11 @@ impl EmbeddedReadView {
         pattern: &PreparedGraphPattern<GraphValueRow>,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>, GraphValueRow>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
+            GraphValueRow,
+        >,
         StreamError,
     > {
         open(self.clone(), cx, pattern.plan(), self.frontier(), policy)
@@ -227,7 +288,11 @@ impl EmbeddedReadView {
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>, GraphValueRow>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
+            GraphValueRow,
+        >,
         StreamError,
     > {
         open(self.clone(), cx, pattern.plan(), as_of, policy)
@@ -239,7 +304,10 @@ impl EmbeddedReadView {
         pattern: &PreparedGraphPattern,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
+        >,
         StreamError,
     > {
         open(self.clone(), cx, pattern.plan(), self.frontier(), policy)
@@ -252,7 +320,10 @@ impl EmbeddedReadView {
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
+        >,
         StreamError,
     > {
         open(self.clone(), cx, pattern.plan(), as_of, policy)
@@ -264,10 +335,19 @@ impl EmbeddedReadView {
         query: &PreparedGqlQuery,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
+        >,
         StreamError,
     > {
-        open(self.clone(), cx, &GlaPlan::lower(query.plan()), self.frontier(), policy)
+        open(
+            self.clone(),
+            cx,
+            &GlaPlan::lower(query.plan()),
+            self.frontier(),
+            policy,
+        )
     }
 
     pub fn stream_prepared_query_governed_at<'q>(
@@ -277,11 +357,20 @@ impl EmbeddedReadView {
         as_of: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<
-        VertexScanCursor<SnapshotVertexSource<'q>, impl FnMut() -> Result<(), Cancel> + 'q + use<'q>>,
+        VertexScanCursor<
+            SnapshotVertexSource<'q>,
+            impl FnMut() -> Result<(), Cancel> + 'q + use<'q>,
+        >,
         StreamError,
     > {
         self.snapshot.check_frontier(as_of).map_err(source_error)?;
-        open(self.clone(), cx, &GlaPlan::lower(query.plan()), as_of, policy)
+        open(
+            self.clone(),
+            cx,
+            &GlaPlan::lower(query.plan()),
+            as_of,
+            policy,
+        )
     }
 }
 

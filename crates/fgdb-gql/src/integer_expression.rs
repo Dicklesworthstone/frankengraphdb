@@ -83,30 +83,44 @@ impl GraphIntegerOp {
                     bytes.extend_from_slice(&value.to_be_bytes());
                 }
             }
-            Self::Unary(op) => bytes.extend_from_slice(&[2, match op {
-                GraphIntegerUnary::Plus => 0,
-                GraphIntegerUnary::Negate => 1,
-                GraphIntegerUnary::Abs => 2,
-            }]),
-            Self::Binary(op) => bytes.extend_from_slice(&[3, match op {
-                GraphIntegerBinary::Add => 0,
-                GraphIntegerBinary::Subtract => 1,
-                GraphIntegerBinary::Multiply => 2,
-                GraphIntegerBinary::Divide => 3,
-                GraphIntegerBinary::Remainder => 4,
-                GraphIntegerBinary::NullIf => 5,
-            }]),
-            Self::Truth(value) => bytes.extend_from_slice(&[5, match value {
-                None => 0, Some(false) => 1, Some(true) => 2,
-            }]),
-            Self::Compare(comparison) => bytes.extend_from_slice(&[6, match comparison {
-                IntegerComparison::Equal => 0,
-                IntegerComparison::NotEqual => 1,
-                IntegerComparison::Less => 2,
-                IntegerComparison::LessOrEqual => 3,
-                IntegerComparison::Greater => 4,
-                IntegerComparison::GreaterOrEqual => 5,
-            }]),
+            Self::Unary(op) => bytes.extend_from_slice(&[
+                2,
+                match op {
+                    GraphIntegerUnary::Plus => 0,
+                    GraphIntegerUnary::Negate => 1,
+                    GraphIntegerUnary::Abs => 2,
+                },
+            ]),
+            Self::Binary(op) => bytes.extend_from_slice(&[
+                3,
+                match op {
+                    GraphIntegerBinary::Add => 0,
+                    GraphIntegerBinary::Subtract => 1,
+                    GraphIntegerBinary::Multiply => 2,
+                    GraphIntegerBinary::Divide => 3,
+                    GraphIntegerBinary::Remainder => 4,
+                    GraphIntegerBinary::NullIf => 5,
+                },
+            ]),
+            Self::Truth(value) => bytes.extend_from_slice(&[
+                5,
+                match value {
+                    None => 0,
+                    Some(false) => 1,
+                    Some(true) => 2,
+                },
+            ]),
+            Self::Compare(comparison) => bytes.extend_from_slice(&[
+                6,
+                match comparison {
+                    IntegerComparison::Equal => 0,
+                    IntegerComparison::NotEqual => 1,
+                    IntegerComparison::Less => 2,
+                    IntegerComparison::LessOrEqual => 3,
+                    IntegerComparison::Greater => 4,
+                    IntegerComparison::GreaterOrEqual => 5,
+                },
+            ]),
             Self::IsNull(is_null) => bytes.extend_from_slice(&[7, u8::from(*is_null)]),
             Self::Not => bytes.push(8),
             Self::And => bytes.push(9),
@@ -290,15 +304,15 @@ impl ExpressionCell<'_> {
                         | CanonicalScalar::Int(_)
                         | CanonicalScalar::Bool(_)
                         | CanonicalScalar::Text(_)
-                ) => Err(GraphIntegerErrorKind::NonScalar),
+                ) =>
+            {
+                Err(GraphIntegerErrorKind::NonScalar)
+            }
             _ => Ok(()),
         }
     }
 
-    fn from_integer(
-        value: Option<i128>,
-        exact: bool,
-    ) -> Result<Self, GraphIntegerErrorKind> {
+    fn from_integer(value: Option<i128>, exact: bool) -> Result<Self, GraphIntegerErrorKind> {
         match value {
             None => Ok(CanonicalScalar::Null.into()),
             Some(value) if exact => Ok(Self::Integer(value)),
@@ -379,12 +393,14 @@ impl GraphIntegerExpression {
     /// have become admitted scalar literals. Computed and nested forms stay out.
     pub(crate) fn starts_with_literal(&self) -> Option<(usize, &str)> {
         match self.code.as_ref() {
-            [Instruction::ScalarColumn(column), Instruction::Scalar(value), Instruction::StartsWith] => {
-                match value.value() {
-                    CanonicalScalar::Text(text) => Some((*column, text.as_str())),
-                    _ => None,
-                }
-            }
+            [
+                Instruction::ScalarColumn(column),
+                Instruction::Scalar(value),
+                Instruction::StartsWith,
+            ] => match value.value() {
+                CanonicalScalar::Text(text) => Some((*column, text.as_str())),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -464,13 +480,15 @@ impl GraphIntegerExpression {
             match op {
                 Instruction::Column(column) | Instruction::ScalarColumn(column) => {
                     let value = load(*column).map_err(|kind| {
-                        failure(if matches!(op, Instruction::Column(_))
-                            && kind == GraphIntegerErrorKind::NonScalar
-                        {
-                            GraphIntegerErrorKind::NonInteger
-                        } else {
-                            kind
-                        })
+                        failure(
+                            if matches!(op, Instruction::Column(_))
+                                && kind == GraphIntegerErrorKind::NonScalar
+                            {
+                                GraphIntegerErrorKind::NonInteger
+                            } else {
+                                kind
+                            },
+                        )
                     })?;
                     if matches!(op, Instruction::Column(_)) {
                         value.integer().map_err(failure)?;
@@ -940,16 +958,22 @@ fn compare_cells<E>(
     let order = match (left, right) {
         (ExpressionCell::Average(left), ExpressionCell::Average(right)) => left.cmp(right),
         (ExpressionCell::Average(left), right) => left.compare_integer(
-            right.integer().map_err(incompatible)?.expect("nonnull integer operand"),
+            right
+                .integer()
+                .map_err(incompatible)?
+                .expect("nonnull integer operand"),
         ),
         (left, ExpressionCell::Average(right)) => right
             .compare_integer(
-                left.integer().map_err(incompatible)?.expect("nonnull integer operand"),
+                left.integer()
+                    .map_err(incompatible)?
+                    .expect("nonnull integer operand"),
             )
             .reverse(),
-        (left, right) => left.integer().map_err(incompatible)?.cmp(
-            &right.integer().map_err(incompatible)?,
-        ),
+        (left, right) => left
+            .integer()
+            .map_err(incompatible)?
+            .cmp(&right.integer().map_err(incompatible)?),
     };
     Ok(Some(match comparison {
         IntegerComparison::Equal => order == Ordering::Equal,
@@ -1056,13 +1080,24 @@ mod tests {
             }
             bytes
         }
-        let addition = [Literal(Some(8)), Literal(Some(2)), Binary(GraphIntegerBinary::Add)];
-        let subtraction = [Literal(Some(8)), Literal(Some(2)), Binary(GraphIntegerBinary::Subtract)];
+        let addition = [
+            Literal(Some(8)),
+            Literal(Some(2)),
+            Binary(GraphIntegerBinary::Add),
+        ];
+        let subtraction = [
+            Literal(Some(8)),
+            Literal(Some(2)),
+            Binary(GraphIntegerBinary::Subtract),
+        ];
         assert_eq!(evaluate(&addition, &[]), Ok(Some(10)));
         assert_eq!(evaluate(&subtraction, &[]), Ok(Some(6)));
         assert_eq!(transcript(&addition), transcript(&addition.clone()));
         assert_ne!(transcript(&addition), transcript(&subtraction));
-        assert_ne!(transcript(&[Literal(None)]), transcript(&[Literal(Some(0))]));
+        assert_ne!(
+            transcript(&[Literal(None)]),
+            transcript(&[Literal(Some(0))])
+        );
         assert_ne!(transcript(&[Column(0)]), transcript(&[Column(1)]));
         assert_ne!(transcript(&[GraphIntegerOp::Case]), transcript(&[Coalesce]));
         assert_ne!(

@@ -3,14 +3,20 @@
 //! for a complete OPTIONAL/EXISTS/NOT EXISTS witness.
 
 use super::*;
-use asupersync::lab::run_async_under_lab;
 use crate::{DatabaseKeys, WriteBatch};
-use fgdb_gql::algebra::{GraphColumn, GraphMatchClause, GraphPatternBuilder, GraphValue, IntegerComparison};
+use asupersync::lab::run_async_under_lab;
 use fgdb_gql::GraphAggregate;
+use fgdb_gql::algebra::{
+    GraphColumn, GraphMatchClause, GraphPatternBuilder, GraphValue, IntegerComparison,
+};
 use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 
 #[derive(Clone, Copy)]
-enum Mode { Optional, Exists, Anti }
+enum Mode {
+    Optional,
+    Exists,
+    Anti,
+}
 
 fn policy() -> GqlQueryPolicy {
     GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000)
@@ -24,33 +30,79 @@ fn definition(mode: Mode) -> PreparedGraphAggregate {
     let mut root = GraphPatternBuilder::new();
     root.vertex("a").unwrap();
     let mut child = GraphPatternBuilder::new();
-    child.vertex("a").unwrap().vertex("b").unwrap().vertex("c").unwrap();
-    child.edge("a", RelationId(1), GlaDirection::Forward, "b").unwrap();
-    child.edge("b", RelationId(2), GlaDirection::Forward, "c").unwrap();
-    child.compare_properties("a", PropertyKeyId(1), IntegerComparison::LessOrEqual,
-        "c", PropertyKeyId(1)).unwrap();
+    child
+        .vertex("a")
+        .unwrap()
+        .vertex("b")
+        .unwrap()
+        .vertex("c")
+        .unwrap();
+    child
+        .edge("a", RelationId(1), GlaDirection::Forward, "b")
+        .unwrap();
+    child
+        .edge("b", RelationId(2), GlaDirection::Forward, "c")
+        .unwrap();
+    child
+        .compare_properties(
+            "a",
+            PropertyKeyId(1),
+            IntegerComparison::LessOrEqual,
+            "c",
+            PropertyKeyId(1),
+        )
+        .unwrap();
     let clause = match mode {
         Mode::Optional => GraphMatchClause::optional(&child),
         Mode::Exists => GraphMatchClause::exists(&child),
         Mode::Anti => GraphMatchClause::not_exists(&child),
     };
-    let (middle, end) = if matches!(mode, Mode::Optional) { ("b", "c") } else { ("a", "a") };
-    let input = root.prepare_values_with_clauses(&[clause], &[
-        GraphColumn::vertex("root", "a"), GraphColumn::vertex("middle", middle),
-        GraphColumn::vertex("endpoint", end), GraphColumn::property("amount", end, PropertyKeyId(1)),
-    ], 0, None).unwrap().with_duplicates();
-    PreparedGraphAggregate::prepare(input, &[0], &[
-        GraphAggregate::count_rows("rows"), GraphAggregate::count("middles", 1),
-        GraphAggregate::count("endpoints", 2), GraphAggregate::sum_int("sum", 3),
-        GraphAggregate::count_distinct("distinct_endpoints", 2), GraphAggregate::min("minimum", 3),
-    ], 0, None).unwrap()
+    let (middle, end) = if matches!(mode, Mode::Optional) {
+        ("b", "c")
+    } else {
+        ("a", "a")
+    };
+    let input = root
+        .prepare_values_with_clauses(
+            &[clause],
+            &[
+                GraphColumn::vertex("root", "a"),
+                GraphColumn::vertex("middle", middle),
+                GraphColumn::vertex("endpoint", end),
+                GraphColumn::property("amount", end, PropertyKeyId(1)),
+            ],
+            0,
+            None,
+        )
+        .unwrap()
+        .with_duplicates();
+    PreparedGraphAggregate::prepare(
+        input,
+        &[0],
+        &[
+            GraphAggregate::count_rows("rows"),
+            GraphAggregate::count("middles", 1),
+            GraphAggregate::count("endpoints", 2),
+            GraphAggregate::sum_int("sum", 3),
+            GraphAggregate::count_distinct("distinct_endpoints", 2),
+            GraphAggregate::min("minimum", 3),
+        ],
+        0,
+        None,
+    )
+    .unwrap()
 }
 
 fn advance(
-    query: &mut StandingQuery, batch: &LogicalDeltaBatch,
+    query: &mut StandingQuery,
+    batch: &LogicalDeltaBatch,
     checkpoint: &mut dyn FnMut() -> Result<(), StandingQueryFailure>,
 ) -> Result<StandingQueryStats, StandingQueryFailure> {
-    let mut meter = Meter { policy: query.policy, stats: StandingQueryStats::default(), checkpoint };
+    let mut meter = Meter {
+        policy: query.policy,
+        stats: StandingQueryStats::default(),
+        checkpoint,
+    };
     query.maintain(batch, &mut meter)?;
     query.frontier = batch.commit_seq();
     Ok(meter.stats)
@@ -67,11 +119,19 @@ fn seeded(batches: &[LogicalDeltaBatch], mode: Mode) -> StandingQuery {
     let edges = super::super::State::for_definition(&definition);
     assert!(edges.as_ref().unwrap().has_scope());
     let mut query = StandingQuery {
-        definition, policy: policy(), edges, vertices: BTreeMap::new(),
-        aggregate: IncrementalAggregate::new(), rows: ZSet::new(),
-        frontier: CommitSeq::ORIGIN, stats: StandingQueryStats::default(), failure: None,
+        definition,
+        policy: policy(),
+        edges,
+        vertices: BTreeMap::new(),
+        aggregate: IncrementalAggregate::new(),
+        rows: ZSet::new(),
+        frontier: CommitSeq::ORIGIN,
+        stats: StandingQueryStats::default(),
+        failure: None,
     };
-    for batch in batches { advance(&mut query, batch, &mut || Ok(())).unwrap(); }
+    for batch in batches {
+        advance(&mut query, batch, &mut || Ok(())).unwrap();
+    }
     query
 }
 
@@ -99,7 +159,11 @@ fn only_complete_paths_suppress_null_rows_and_bootstrap_matches_committed_witnes
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut first = WriteBatch::new(RelationId(1));
         for id in 1..=4 {
-            first.create_vertex(VId(id), vec![], vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))]);
+            first.create_vertex(
+                VId(id),
+                vec![],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+            );
         }
         first.add_edge(EId(1), VId(1), VId(2), vec![]);
         first.add_edge(EId(2), VId(1), VId(2), vec![]);
@@ -146,7 +210,9 @@ fn only_complete_paths_suppress_null_rows_and_bootstrap_matches_committed_witnes
                 assert_eq!(root.get(0).unwrap().as_count(), Some(2));
                 assert_eq!(root.get(3).unwrap().as_integer(), Some(8));
             }
-            let rebuilt = db.prepare_standing_query(&query, definition(mode), policy()).unwrap();
+            let rebuilt = db
+                .prepare_standing_query(&query, definition(mode), policy())
+                .unwrap();
             same(&state, &rebuilt);
         }
     });
@@ -162,7 +228,11 @@ fn every_multi_hop_scope_checkpoint_and_budget_refusal_preserves_all_state() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut r = WriteBatch::new(RelationId(1));
         for id in 1..=5 {
-            r.create_vertex(VId(id), vec![], vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))]);
+            r.create_vertex(
+                VId(id),
+                vec![],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+            );
         }
         r.add_edge(EId(1), VId(1), VId(2), vec![]);
         r.add_edge(EId(2), VId(1), VId(2), vec![]);
@@ -185,27 +255,48 @@ fn every_multi_hop_scope_checkpoint_and_budget_refusal_preserves_all_state() {
             let before = make();
             let mut successful = make();
             let mut calls = 0;
-            let stats = advance(&mut successful, &delta, &mut || { calls += 1; Ok(()) }).unwrap();
-            same(&successful, &db.prepare_standing_query(&query, definition(mode), policy()).unwrap());
+            let stats = advance(&mut successful, &delta, &mut || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+            same(
+                &successful,
+                &db.prepare_standing_query(&query, definition(mode), policy())
+                    .unwrap(),
+            );
             for stop in 1..=calls {
                 let mut candidate = make();
                 let mut seen = 0;
-                assert_eq!(advance(&mut candidate, &delta, &mut || {
-                    seen += 1;
-                    if seen == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
-                }), Err(StandingQueryFailure::Interrupted));
+                assert_eq!(
+                    advance(&mut candidate, &delta, &mut || {
+                        seen += 1;
+                        if seen == stop {
+                            Err(StandingQueryFailure::Interrupted)
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(StandingQueryFailure::Interrupted)
+                );
                 assert_eq!(seen, stop);
                 same(&candidate, &before);
                 advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
                 same(&candidate, &successful);
             }
-            for reason in [StandingQueryFailure::WorkBudget, StandingQueryFailure::ScratchBudget,
-                StandingQueryFailure::ResultBudget]
-            {
+            for reason in [
+                StandingQueryFailure::WorkBudget,
+                StandingQueryFailure::ScratchBudget,
+                StandingQueryFailure::ResultBudget,
+            ] {
                 let mut candidate = make();
                 match reason {
-                    StandingQueryFailure::WorkBudget => candidate.policy.evaluator.max_work_units = stats.work_units - 1,
-                    StandingQueryFailure::ScratchBudget => candidate.policy.evaluator.max_scratch_entries = stats.scratch_entries - 1,
+                    StandingQueryFailure::WorkBudget => {
+                        candidate.policy.evaluator.max_work_units = stats.work_units - 1
+                    }
+                    StandingQueryFailure::ScratchBudget => {
+                        candidate.policy.evaluator.max_scratch_entries = stats.scratch_entries - 1
+                    }
                     _ => candidate.policy = GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000),
                 }
                 assert_eq!(advance(&mut candidate, &delta, &mut || Ok(())), Err(reason));
@@ -226,7 +317,9 @@ fn incomplete_cascade_refuses_even_when_every_child_has_only_a_partial_path() {
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut seed = WriteBatch::new(RelationId(1));
-        for id in 1..=2 { seed.create_vertex(VId(id), vec![], vec![]); }
+        for id in 1..=2 {
+            seed.create_vertex(VId(id), vec![], vec![]);
+        }
         seed.add_edge(EId(1), VId(1), VId(2), vec![]);
         let at = db.write(&commit, seed).await.unwrap();
         let initial = db.delta_index().unwrap().get(at).unwrap().clone();
@@ -238,19 +331,31 @@ fn incomplete_cascade_refuses_even_when_every_child_has_only_a_partial_path() {
         let mut removed = 0;
         for entry in &mut entries {
             for row in &mut entry.rows {
-                if let DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } = row {
+                if let DeltaRow::DeleteVertex {
+                    sorted_retired_incident_edges,
+                    ..
+                } = row
+                {
                     removed += sorted_retired_incident_edges.len();
                     sorted_retired_incident_edges.clear();
                 }
             }
         }
         assert_eq!(removed, 1);
-        let bad = LogicalDeltaBatch::from_parts_for_test(entries, *delta.source_template_digest(),
-            delta.commit_marker_identity(), delta.commit_seq(), delta.frontier());
+        let bad = LogicalDeltaBatch::from_parts_for_test(
+            entries,
+            *delta.source_template_digest(),
+            delta.commit_marker_identity(),
+            delta.commit_seq(),
+            delta.frontier(),
+        );
         for mode in [Mode::Optional, Mode::Exists, Mode::Anti] {
             let before = seeded(core::slice::from_ref(&initial), mode);
             let mut candidate = seeded(core::slice::from_ref(&initial), mode);
-            assert_eq!(advance(&mut candidate, &bad, &mut || Ok(())), Err(StandingQueryFailure::InvalidDelta));
+            assert_eq!(
+                advance(&mut candidate, &bad, &mut || Ok(())),
+                Err(StandingQueryFailure::InvalidDelta)
+            );
             same(&candidate, &before);
             advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
             assert_eq!(candidate.vertices.len(), 1);

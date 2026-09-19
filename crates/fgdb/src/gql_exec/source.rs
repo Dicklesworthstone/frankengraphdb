@@ -724,14 +724,20 @@ fn prefix_successor(prefix: &str) -> Option<String> {
 }
 
 fn prefix_range(key: PropertyKeyId, prefix: &str) -> Option<PropertyRange> {
-    let lower = CanonicalScalar::ucs_basic_text(prefix).ok()?.encode().ok()?;
+    let lower = CanonicalScalar::ucs_basic_text(prefix)
+        .ok()?
+        .encode()
+        .ok()?;
     let mut range = PropertyRange::new(key, &lower);
     // Restrict even the empty and all-maximal prefix to UCS_BASIC, not other
     // collations: STARTS WITH evaluates spelling, never a collation sort key.
     range.upper = vec![lower[0], lower[1] + 1];
     range.lower = lower;
     if let Some(successor) = prefix_successor(prefix) {
-        range.upper = CanonicalScalar::ucs_basic_text(&successor).ok()?.encode().ok()?;
+        range.upper = CanonicalScalar::ucs_basic_text(&successor)
+            .ok()?
+            .encode()
+            .ok()?;
     }
     Some(range)
 }
@@ -806,7 +812,11 @@ fn bound_vertices<'a, E, Row>(
         for vid in &candidates {
             control(SourceEvent::Work)?;
             control(SourceEvent::SnapshotRecord)?;
-            if let Some(row) = snapshot.property_index.visible_row(&snapshot.patches, *vid, as_of, control)? {
+            if let Some(row) =
+                snapshot
+                    .property_index
+                    .visible_row(&snapshot.patches, *vid, as_of, control)?
+            {
                 // Historical membership is only a candidate superset. Recheck
                 // spelling on the visible row; retain all original GLA filters.
                 if row.props.iter().any(|(property, value)| {

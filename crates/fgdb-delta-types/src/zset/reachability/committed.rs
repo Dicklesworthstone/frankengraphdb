@@ -16,7 +16,9 @@
 use super::{IncrementalReachability, ReachabilityError, ReachabilityUpdate};
 use crate::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeInputUpdate};
 use crate::zset::event;
-use crate::{LimbLimit, LocalDeltaBatchIndex, LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent};
+use crate::{
+    LimbLimit, LocalDeltaBatchIndex, LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent,
+};
 use fgdb_types::{BranchId, CommitCx, CommitSeq, GraphId, VId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,7 +97,11 @@ impl CommittedReachability {
         let pending = reachability.prepare(&edges, limbs, control)?;
         event(control, ZSetEvent::Work)?;
         let _ = pending.commit();
-        Ok(Self { input, relation, reachability })
+        Ok(Self {
+            input,
+            relation,
+            reachability,
+        })
     }
 
     pub fn frontier(&self) -> CommitSeq {
@@ -112,7 +118,9 @@ impl CommittedReachability {
 
     /// Borrowed, canonical pair export; does not materialize another closure.
     pub fn pairs(&self) -> impl Iterator<Item = (VId, VId)> + '_ {
-        self.reachability.pairs().map(|(source, destination)| (*source, *destination))
+        self.reachability
+            .pairs()
+            .map(|(source, destination)| (*source, *destination))
     }
 
     pub fn snapshot<E>(
@@ -120,7 +128,9 @@ impl CommittedReachability {
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<ZSet<(VId, VId)>, CommittedReachabilityError<E>> {
-        self.reachability.snapshot(limbs, control).map_err(Into::into)
+        self.reachability
+            .snapshot(limbs, control)
+            .map_err(Into::into)
     }
 
     /// Prepare exactly the next global batch, or `None` when caught up after
@@ -153,7 +163,9 @@ impl CommittedReachability {
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<CommittedReachabilityUpdate<'_>, CommittedReachabilityError<E>> {
-        let input = self.input.prepare_committed_successor(cx, batch, limbs, control)?;
+        let input = self
+            .input
+            .prepare_committed_successor(cx, batch, limbs, control)?;
         Self::prepare_input(input, &mut self.reachability, self.relation, limbs, control)
     }
 
@@ -168,7 +180,10 @@ impl CommittedReachability {
         let reachability = state.prepare(&edges, limbs, control)?;
         // One last cancellable boundary while BOTH publications are tentative.
         event(control, ZSetEvent::Work)?;
-        Ok(CommittedReachabilityUpdate { input, reachability })
+        Ok(CommittedReachabilityUpdate {
+            input,
+            reachability,
+        })
     }
 }
 
@@ -217,7 +232,10 @@ impl CommittedReachabilityUpdate<'_> {
     /// Call after all downstream preparation succeeds. No recoverable work
     /// occurs between publishing the closure and acknowledging its input.
     pub fn commit(self) -> ZSet<(VId, VId)> {
-        let Self { input, reachability } = self;
+        let Self {
+            input,
+            reachability,
+        } = self;
         let delta = reachability.commit();
         let _input_delta = input.commit();
         delta

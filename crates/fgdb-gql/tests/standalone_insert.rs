@@ -124,10 +124,11 @@ fn unit_creates_exactly_one_structure_without_observing_any_graph_source() {
 
 #[test]
 fn empty_match_and_unit_have_different_cardinality_and_definition_identity() {
-    let selection = PreparedGraphText::prepare("MATCH (n) RETURN n", |_: GraphSymbolKind, _: &str| None)
-        .unwrap()
-        .bind_parameters(&GqlParameters::new())
-        .unwrap();
+    let selection =
+        PreparedGraphText::prepare("MATCH (n) RETURN n", |_: GraphSymbolKind, _: &str| None)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap();
     let (vertices, edges) = declarations();
     let matched = PreparedGraphInsert::prepare(selection, R, vertices, edges).unwrap();
     assert!(matched.selection().is_some());

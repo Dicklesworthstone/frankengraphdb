@@ -28,18 +28,16 @@
 //! one core. Lower it for a quick local smoke.
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_strata::edge_props::{
-    EdgePropertyPatchError, EdgePropertyRow, decode_property_patch, encode_property_patch,
-};
+use fgdb_strata::edge_props::{EdgePropertyRow, decode_property_patch, encode_property_patch};
 use fgdb_strata::manifest::{ManifestError, ManifestRecord, decode_manifest, encode_manifest};
 use fgdb_strata::root::{BlockRef, PartitionRoot, RootError, decode_root, encode_root, span_of};
-use fgdb_strata::vertex::{VertexPatchError, VertexRow, decode_patch, encode_patch};
+use fgdb_strata::vertex::{VertexRow, decode_patch, encode_patch};
 use fgdb_strata::{
-    AdjacencyEntry, BlockError, PartitionRootVersion, block_id, decode_block,
-    decode_block_with_properties, encode_block, encode_block_with_properties,
+    AdjacencyEntry, PartitionRootVersion, block_id, decode_block, decode_block_with_properties,
+    encode_block, encode_block_with_properties,
 };
 use fgdb_types::ids::{BranchId, DatabaseSecurityNamespaceId, GraphId, ObjectId};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
+use fgdb_types::{CanonicalScalar, CommitSeq, EId};
 use std::time::{Duration, Instant};
 
 const K_OID: [u8; 32] = [0x5a; 32];
@@ -313,9 +311,6 @@ fn families(s: &Seeds) -> [(usize, &'static str, &Vec<u8>); 6] {
 /// structural refusal is anything except a magic/version refusal: this is
 /// the proof a mutation reached past the header checks.
 fn decode_own(family: usize, bytes: &[u8]) -> Result<usize, String> {
-    fn shape<R, E: core::fmt::Debug>(result: Result<R, E>, ok_value: usize) -> Result<usize, String> {
-        result.map(|_| ok_value).map_err(|err| format!("{err:?}"))
-    }
     match family {
         0 => decode_block_with_properties(bytes)
             .map(|(entries, _)| entries.len())
@@ -336,13 +331,6 @@ fn decode_own(family: usize, bytes: &[u8]) -> Result<usize, String> {
             .map(|entries| entries.len())
             .map_err(|err| format!("{err:?}")),
     }
-    .map_err(|err| err) // keep the typed shape as a string for classification
-    .map_err(|err: String| err)
-    .map_err(drop_err_placeholder)
-}
-
-fn drop_err_placeholder(err: String) -> String {
-    err
 }
 
 fn is_header_refusal(debug: &str) -> bool {
@@ -481,7 +469,10 @@ fn tiny_inputs_are_typed_refusals_seen_by_every_decoder() {
         }
     }
     for (index, outcome) in outcomes.iter().enumerate() {
-        assert!(outcome.calls >= 18, "decoder {index} under-fed: {outcome:?}");
+        assert!(
+            outcome.calls >= 18,
+            "decoder {index} under-fed: {outcome:?}"
+        );
         assert!(
             outcome.err >= 18,
             "decoder {index} admitted a tiny input; header checks are load-bearing: {outcome:?}"
@@ -511,7 +502,7 @@ fn every_strict_prefix_is_a_typed_refusal_and_one_reaches_the_structure() {
                 outcome.is_err(),
                 "{name}: a strict prefix decoded Ok at cut {cut}"
             );
-            if cut > 8 && !is_header_refusal(outcome.as_ref().err().expect("checked err")) {
+            if cut > 8 && !is_header_refusal(outcome.as_ref().expect_err("checked err")) {
                 structural += 1;
             }
         }
@@ -582,7 +573,10 @@ fn mutated_seeds_never_panic_any_decoder() {
             // own real-encoder seed (Ok evidence for the anti-vacuity check).
             let started = Instant::now();
             let pristine = decode_own(family, seed);
-            assert!(pristine.is_ok(), "{name}: the real-encoder seed must decode");
+            assert!(
+                pristine.is_ok(),
+                "{name}: the real-encoder seed must decode"
+            );
             assert!(
                 started.elapsed() <= PER_INPUT_BOUND,
                 "{name}: seed decode exceeded the bound"

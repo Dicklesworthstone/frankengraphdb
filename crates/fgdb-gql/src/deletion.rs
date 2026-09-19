@@ -149,7 +149,16 @@ impl PreparedGraphDelete {
         let columns = selection.value_columns();
         let mut seen = BTreeSet::new();
         for (at, &column) in targets.iter().enumerate() {
-            if !matches!(columns.get(column), Some(ValueProjection::Vertex { .. } | ValueProjection::Path { function: GraphPathFunction::Edge, .. })) {
+            if !matches!(
+                columns.get(column),
+                Some(
+                    ValueProjection::Vertex { .. }
+                        | ValueProjection::Path {
+                            function: GraphPathFunction::Edge,
+                            ..
+                        }
+                )
+            ) {
                 return Err(GraphDeleteBuildError::TargetColumn { target: at, column });
             }
             if !seen.insert(column) {
@@ -280,7 +289,13 @@ impl PreparedGraphDelete {
                 if value.is_null() {
                     continue;
                 }
-                let edge_column = matches!(columns[column], ValueProjection::Path { function: GraphPathFunction::Edge, .. });
+                let edge_column = matches!(
+                    columns[column],
+                    ValueProjection::Path {
+                        function: GraphPathFunction::Edge,
+                        ..
+                    }
+                );
                 let vertex = if edge_column { None } else { value.as_vertex() };
                 let edge = if edge_column { value.as_edge() } else { None };
                 if vertex.is_none() && edge.is_none() {
@@ -290,7 +305,8 @@ impl PreparedGraphDelete {
                     }));
                 }
                 if vertex.is_some_and(|vertex| targets.contains(&vertex))
-                    || edge.is_some_and(|edge| edge_targets.contains(&edge)) {
+                    || edge.is_some_and(|edge| edge_targets.contains(&edge))
+                {
                     continue;
                 }
                 let observed = targets.len() as u128 + edge_targets.len() as u128 + 1;
@@ -318,7 +334,11 @@ impl PreparedGraphDelete {
             target_vertices: targets.len() as u64,
             target_edges: edge_targets.len() as u64,
         };
-        Ok(GraphDeleteProposal { targets, edge_targets, stats })
+        Ok(GraphDeleteProposal {
+            targets,
+            edge_targets,
+            stats,
+        })
     }
 
     #[must_use]

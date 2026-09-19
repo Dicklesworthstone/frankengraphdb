@@ -1290,26 +1290,48 @@ mod tests {
 
     #[test]
     fn maintenance_dependencies_include_hidden_and_eager_scalar_inputs() {
-        let scalar = crate::GraphIntegerExpression::prepare_scalar(&[
-            crate::GraphIntegerOp::ScalarColumn(0),
-        ]).unwrap();
+        let scalar =
+            crate::GraphIntegerExpression::prepare_scalar(&[crate::GraphIntegerOp::ScalarColumn(
+                0,
+            )])
+            .unwrap();
         let columns = [
-            Arg::Property { variable: "a", key: PropertyKeyId(7) },
+            Arg::Property {
+                variable: "a",
+                key: PropertyKeyId(7),
+            },
             // Not used by scalar bytecode, but the enclosing Boolean operand
             // loader reads it eagerly. It is still an invalidation dependency.
-            Arg::Property { variable: "b", key: PropertyKeyId(8) },
+            Arg::Property {
+                variable: "b",
+                key: PropertyKeyId(8),
+            },
         ];
         let expression = bound(&[
-            Op::Expression { expression: &scalar, columns: &columns },
+            Op::Expression {
+                expression: &scalar,
+                columns: &columns,
+            },
             Op::IsNull {
-                operand: Arg::Property { variable: "a", key: PropertyKeyId(9) },
+                operand: Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(9),
+                },
                 is_null: true,
             },
             Op::Or,
         ]);
-        assert_eq!(expression.referenced_vertex_properties()
-            .map(|(slot, key)| (slot.ordinal(), key)).collect::<Vec<_>>(),
-            vec![(0, PropertyKeyId(7)), (1, PropertyKeyId(8)), (0, PropertyKeyId(9))]);
+        assert_eq!(
+            expression
+                .referenced_vertex_properties()
+                .map(|(slot, key)| (slot.ordinal(), key))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, PropertyKeyId(7)),
+                (1, PropertyKeyId(8)),
+                (0, PropertyKeyId(9))
+            ]
+        );
         assert!(!expression.supports_vertex_bindings(1));
         assert!(expression.supports_vertex_bindings(2));
         let moved = expression.remap(|slot| BindingSlot(slot.ordinal() + 3));
@@ -1319,25 +1341,52 @@ mod tests {
 
     #[test]
     fn maintained_binding_refusal_is_not_a_null_extension_or_false_result() {
-        let expression = bound(&[Op::IsNull { operand: Arg::Vertex("b"), is_null: true }]);
+        let expression = bound(&[Op::IsNull {
+            operand: Arg::Vertex("b"),
+            is_null: true,
+        }]);
         let mut reads = 0;
         let mut source = |_, _| {
             reads += 1;
             Err::<Option<&CanonicalScalar>, _>("unexpected source")
         };
-        assert_eq!(expression.evaluate_vertex_binding(&[Some(VId(1))], &mut source,
-            &mut |_| Ok(())).unwrap(), None);
-        assert_eq!(expression.evaluate_vertex_binding(&[Some(VId(1)), None], &mut source,
-            &mut |_| Ok(())).unwrap(), Some(true));
-        assert_eq!(expression.evaluate_vertex_binding(&[Some(VId(1)), Some(VId(2))],
-            &mut source, &mut |_| Ok(())).unwrap(), Some(false));
+        assert_eq!(
+            expression
+                .evaluate_vertex_binding(&[Some(VId(1))], &mut source, &mut |_| Ok(()))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            expression
+                .evaluate_vertex_binding(&[Some(VId(1)), None], &mut source, &mut |_| Ok(()))
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            expression
+                .evaluate_vertex_binding(
+                    &[Some(VId(1)), Some(VId(2))],
+                    &mut source,
+                    &mut |_| Ok(())
+                )
+                .unwrap(),
+            Some(false)
+        );
         let edge = bound(&[Op::IsNull {
-            operand: Arg::EdgeProperty { variable: "a", key: PropertyKeyId(1) },
+            operand: Arg::EdgeProperty {
+                variable: "a",
+                key: PropertyKeyId(1),
+            },
             is_null: true,
         }]);
         assert!(!edge.supports_vertex_bindings(2));
-        assert_eq!(edge.evaluate_vertex_binding(&[Some(VId(1)), Some(VId(2))],
-            &mut source, &mut |_| Ok(())).unwrap(), None);
+        assert_eq!(
+            edge.evaluate_vertex_binding(&[Some(VId(1)), Some(VId(2))], &mut source, &mut |_| Ok(
+                ()
+            ))
+            .unwrap(),
+            None
+        );
         assert_eq!(reads, 0);
     }
 
@@ -1346,42 +1395,94 @@ mod tests {
         let value = CanonicalScalar::Int(7);
         let expression = bound(&[
             Op::Compare {
-                left: Arg::Property { variable: "a", key: PropertyKeyId(1) },
+                left: Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(1),
+                },
                 comparison: IntegerComparison::Equal,
                 right: Arg::Literal(&value),
             },
             Op::Not,
         ]);
-        for actual in [None, Some(CanonicalScalar::Null), Some(CanonicalScalar::Bool(true)),
-            Some(CanonicalScalar::Int(7)), Some(CanonicalScalar::Int(8))] {
-            let expected = expression.evaluate(&[Some(VId(1))],
-                &mut |_, _| Ok::<_, ()>(actual.as_ref()), &mut |_| Ok(())).unwrap();
-            assert_eq!(expression.evaluate_vertex_binding(&[Some(VId(1))],
-                &mut |_, _| Ok::<_, ()>(actual.as_ref()), &mut |_| Ok(())).unwrap(), Some(expected));
+        for actual in [
+            None,
+            Some(CanonicalScalar::Null),
+            Some(CanonicalScalar::Bool(true)),
+            Some(CanonicalScalar::Int(7)),
+            Some(CanonicalScalar::Int(8)),
+        ] {
+            let expected = expression
+                .evaluate(
+                    &[Some(VId(1))],
+                    &mut |_, _| Ok::<_, ()>(actual.as_ref()),
+                    &mut |_| Ok(()),
+                )
+                .unwrap();
+            assert_eq!(
+                expression
+                    .evaluate_vertex_binding(
+                        &[Some(VId(1))],
+                        &mut |_, _| Ok::<_, ()>(actual.as_ref()),
+                        &mut |_| Ok(())
+                    )
+                    .unwrap(),
+                Some(expected)
+            );
         }
         let eager = bound(&[
             Op::Truth(Some(true)),
             Op::IsNull {
-                operand: Arg::Property { variable: "a", key: PropertyKeyId(1) }, is_null: true,
+                operand: Arg::Property {
+                    variable: "a",
+                    key: PropertyKeyId(1),
+                },
+                is_null: true,
             },
             Op::Or,
         ]);
-        assert_eq!(eager.evaluate_vertex_binding(&[Some(VId(1))],
-            &mut |_, _| Err::<Option<&CanonicalScalar>, _>("source"), &mut |_| Ok(())), Err("source"));
+        assert_eq!(
+            eager.evaluate_vertex_binding(
+                &[Some(VId(1))],
+                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("source"),
+                &mut |_| Ok(())
+            ),
+            Err("source")
+        );
         let mut calls = 0;
-        let expected = eager.evaluate_vertex_binding(&[Some(VId(1))],
-            &mut |_, _| Ok::<_, usize>(Some(&value)),
-            &mut |_| { calls += 1; Ok(()) }).unwrap();
+        let expected = eager
+            .evaluate_vertex_binding(
+                &[Some(VId(1))],
+                &mut |_, _| Ok::<_, usize>(Some(&value)),
+                &mut |_| {
+                    calls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
         for stop in 1..=calls {
             let mut seen = 0;
-            assert_eq!(eager.evaluate_vertex_binding(&[Some(VId(1))],
-                &mut |_, _| Ok(Some(&value)), &mut |_| {
-                    seen += 1;
-                    if seen == stop { Err(stop) } else { Ok(()) }
-                }), Err(stop));
+            assert_eq!(
+                eager.evaluate_vertex_binding(
+                    &[Some(VId(1))],
+                    &mut |_, _| Ok(Some(&value)),
+                    &mut |_| {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    }
+                ),
+                Err(stop)
+            );
             assert_eq!(seen, stop);
-            assert_eq!(eager.evaluate_vertex_binding(&[Some(VId(1))],
-                &mut |_, _| Ok::<_, usize>(Some(&value)), &mut |_| Ok(())).unwrap(), expected);
+            assert_eq!(
+                eager
+                    .evaluate_vertex_binding(
+                        &[Some(VId(1))],
+                        &mut |_, _| Ok::<_, usize>(Some(&value)),
+                        &mut |_| Ok(())
+                    )
+                    .unwrap(),
+                expected
+            );
         }
     }
 }

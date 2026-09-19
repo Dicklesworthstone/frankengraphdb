@@ -3,9 +3,9 @@
 use super::*;
 use crate::edge_upsert_text::{EdgeUpsertActionTemplate, EdgeUpsertValueTemplate};
 use crate::{
-    GraphEdgeMergeTextError, GraphEdgeUpsertAction,
-    GraphEdgeUpsertBranch, GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind,
-    PreparedGraphEdgeMergeText, PreparedGraphEdgeUpsert, PreparedGraphEdgeUpsertText,
+    GraphEdgeMergeTextError, GraphEdgeUpsertAction, GraphEdgeUpsertBranch,
+    GraphEdgeUpsertTextError, GraphEdgeUpsertTextErrorKind, PreparedGraphEdgeMergeText,
+    PreparedGraphEdgeUpsert, PreparedGraphEdgeUpsertText,
 };
 
 struct ParsedEdgeUpsert<'a> {

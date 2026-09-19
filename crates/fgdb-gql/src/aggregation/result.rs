@@ -7,8 +7,8 @@
 
 mod distinct;
 mod having;
-mod streaming;
 mod projection;
+mod streaming;
 pub use having::{
     GraphHavingError, GraphHavingExpression, GraphHavingOp, GraphHavingOperand,
     MAX_HAVING_INSTRUCTIONS,
@@ -228,32 +228,55 @@ impl PreparedGraphAggregate {
         mut self,
         projection: Vec<crate::GraphSetProjection>,
     ) -> Result<Self, GraphAggregateBuildError> {
-        use crate::{GraphSetColumnType as Kind, GraphSetProjection as Projection, GraphSetProjectionError as Error};
+        use crate::{
+            GraphSetColumnType as Kind, GraphSetProjection as Projection,
+            GraphSetProjectionError as Error,
+        };
         let failure = GraphAggregateBuildError::OutputProjection;
         if projection.is_empty() {
             return Err(failure(Error::Empty));
         }
         if projection.len() > MAX_PATTERN_VERTICES {
-            return Err(failure(Error::TooManyColumns { limit: MAX_PATTERN_VERTICES, observed: projection.len() }));
+            return Err(failure(Error::TooManyColumns {
+                limit: MAX_PATTERN_VERTICES,
+                observed: projection.len(),
+            }));
         }
         let source_types = if let Some(relation) = &self.relational_input {
             relation.column_types().to_vec()
         } else {
             let source = crate::PreparedGraphSet::from(self.input.clone());
             if let Some(input) = &self.computed_input {
-                input.iter().enumerate().map(|(at, value)| {
-                    Projection::admit_output(value.value(), source.column_types(), at)
-                }).collect::<Result<Vec<_>, _>>().map_err(failure)?
+                input
+                    .iter()
+                    .enumerate()
+                    .map(|(at, value)| {
+                        Projection::admit_output(value.value(), source.column_types(), at)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(failure)?
             } else {
                 source.column_types().to_vec()
             }
         };
-        let mut types: Vec<_> = self.keys.iter().map(|column| source_types[*column]).collect();
-        types.extend(self.aggregates.iter().map(|aggregate| match aggregate.function {
-            GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => Kind::List,
-            GraphAggregateFunction::Min | GraphAggregateFunction::Max => source_types[aggregate.column.expect("extremum has an input")],
-            _ => Kind::Scalar,
-        }));
+        let mut types: Vec<_> = self
+            .keys
+            .iter()
+            .map(|column| source_types[*column])
+            .collect();
+        types.extend(
+            self.aggregates
+                .iter()
+                .map(|aggregate| match aggregate.function {
+                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => {
+                        Kind::List
+                    }
+                    GraphAggregateFunction::Min | GraphAggregateFunction::Max => {
+                        source_types[aggregate.column.expect("extremum has an input")]
+                    }
+                    _ => Kind::Scalar,
+                }),
+        );
         let mut names = BTreeSet::new();
         for (column, value) in projection.iter().enumerate() {
             Projection::validate_output_name(value.name(), column).map_err(failure)?;
@@ -262,7 +285,10 @@ impl PreparedGraphAggregate {
             }
             Projection::admit_output(value.value(), &types, column).map_err(failure)?;
         }
-        self.output_names = projection.iter().map(|value| value.name().to_owned()).collect();
+        self.output_names = projection
+            .iter()
+            .map(|value| value.name().to_owned())
+            .collect();
         self.output_projection = Some(projection);
         Ok(self)
     }

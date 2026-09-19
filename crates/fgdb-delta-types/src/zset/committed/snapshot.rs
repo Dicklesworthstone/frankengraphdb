@@ -13,7 +13,9 @@
 
 use super::{Anchor, CommittedEdgeInput, EdgeInputError, EdgeTuple, validate_batch};
 use crate::zset::event;
-use crate::{LimbLimit, LogicalDeltaBatch, RelationId, SchemaEpoch, ZSet, ZSetError, ZSetEvent, ZWeight};
+use crate::{
+    LimbLimit, LogicalDeltaBatch, RelationId, SchemaEpoch, ZSet, ZSetError, ZSetEvent, ZWeight,
+};
 use fgdb_types::{BranchId, CommitSeq, EId, GraphId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,10 +29,14 @@ pub enum SnapshotInputError<E> {
     Refused,
 }
 impl<E> From<EdgeInputError<E>> for SnapshotInputError<E> {
-    fn from(error: EdgeInputError<E>) -> Self { Self::Input(error) }
+    fn from(error: EdgeInputError<E>) -> Self {
+        Self::Input(error)
+    }
 }
 impl<E> From<ZSetError<E>> for SnapshotInputError<E> {
-    fn from(error: ZSetError<E>) -> Self { Self::Input(EdgeInputError::Delta(error)) }
+    fn from(error: ZSetError<E>) -> Self {
+        Self::Input(EdgeInputError::Delta(error))
+    }
 }
 impl<E: core::fmt::Display> core::fmt::Display for SnapshotInputError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -72,7 +78,11 @@ impl EdgeSnapshotBuilder {
             validate_batch(batch, batch.commit_seq())?;
             input.anchor = Some(Anchor::of(batch));
         }
-        Ok(Self { input, delta: ZSet::new(), refused: false })
+        Ok(Self {
+            input,
+            delta: ZSet::new(),
+            refused: false,
+        })
     }
 
     /// Bind a fresh builder to the CURRENT cut of one caller-authenticated
@@ -94,21 +104,30 @@ impl EdgeSnapshotBuilder {
         if index.format() != crate::INDEX_FORMAT_V1 {
             return Err(EdgeInputError::Index(crate::IndexError::UnsupportedFormat {
                 format: index.format(),
-            }).into());
+            })
+            .into());
         }
         let at = index.frontier();
         let _suffix = index.since(at).map_err(EdgeInputError::from)?;
         let mut input = CommittedEdgeInput::new(graph, branch);
         if at == CommitSeq::ORIGIN {
-            if !index.is_empty() { return Err(SnapshotInputError::NonEmptyOrigin); }
+            if !index.is_empty() {
+                return Err(SnapshotInputError::NonEmptyOrigin);
+            }
         } else {
             input.anchor = Some(super::checked_anchor(index, at)?);
         }
-        Ok(Self { input, delta: ZSet::new(), refused: false })
+        Ok(Self {
+            input,
+            delta: ZSet::new(),
+            refused: false,
+        })
     }
 
     fn begin<E>(&mut self) -> Result<(), SnapshotInputError<E>> {
-        if self.refused { return Err(SnapshotInputError::Refused); }
+        if self.refused {
+            return Err(SnapshotInputError::Refused);
+        }
         // Set BEFORE any callback, arithmetic or allocation. An early return
         // cannot leave a recoverably incomplete builder looking usable.
         self.refused = true;
@@ -160,8 +179,12 @@ impl EdgeSnapshotBuilder {
     ) -> Result<(), SnapshotInputError<E>> {
         self.begin()?;
         event(control, ZSetEvent::Work)?;
-        if self.input.anchor.is_none() { return Err(SnapshotInputError::NonEmptyOrigin); }
-        if self.input.edges.contains_key(&eid) { return Err(EdgeInputError::DuplicateEdge.into()); }
+        if self.input.anchor.is_none() {
+            return Err(SnapshotInputError::NonEmptyOrigin);
+        }
+        if self.input.edges.contains_key(&eid) {
+            return Err(EdgeInputError::DuplicateEdge.into());
+        }
         self.epoch(tuple.0, epoch, control)?;
         event(control, ZSetEvent::ScratchEntry)?;
         self.delta.accumulate(tuple, ZWeight::ONE, limbs, control)?;
@@ -176,16 +199,22 @@ impl EdgeSnapshotBuilder {
         self,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<EdgeSnapshot, SnapshotInputError<E>> {
-        if self.refused { return Err(SnapshotInputError::Refused); }
+        if self.refused {
+            return Err(SnapshotInputError::Refused);
+        }
         event(control, ZSetEvent::Work)?;
-        Ok(EdgeSnapshot { input: self.input, delta: self.delta })
+        Ok(EdgeSnapshot {
+            input: self.input,
+            delta: self.delta,
+        })
     }
 }
 impl core::fmt::Debug for EdgeSnapshotBuilder {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("EdgeSnapshotBuilder")
             .field("refused", &self.refused)
-            .field("data", &"[REDACTED]").finish()
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -197,17 +226,24 @@ pub struct EdgeSnapshot {
     pub(crate) delta: ZSet<EdgeTuple>,
 }
 impl EdgeSnapshot {
-    pub fn frontier(&self) -> CommitSeq { self.input.frontier() }
-    pub fn rows(&self) -> &ZSet<EdgeTuple> { &self.delta }
+    pub fn frontier(&self) -> CommitSeq {
+        self.input.frontier()
+    }
+    pub fn rows(&self) -> &ZSet<EdgeTuple> {
+        &self.delta
+    }
     /// Consume after downstream snapshot preparation succeeds. This is a NEW
     /// input; existing state must be replaced atomically by its owner.
-    pub fn into_input(self) -> CommittedEdgeInput { self.input }
+    pub fn into_input(self) -> CommittedEdgeInput {
+        self.input
+    }
 }
 impl core::fmt::Debug for EdgeSnapshot {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("EdgeSnapshot")
             .field("frontier", &self.frontier())
-            .field("data", &"[REDACTED]").finish()
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 

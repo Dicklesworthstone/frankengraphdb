@@ -239,28 +239,54 @@ impl RelationBind {
 }
 
 impl crate::graph_text::GraphSymbolResolver for RelationBind {
-    fn resolve_symbol(&mut self, kind: crate::GraphSymbolKind, name: &str) -> Option<crate::GraphSymbol> {
+    fn resolve_symbol(
+        &mut self,
+        kind: crate::GraphSymbolKind,
+        name: &str,
+    ) -> Option<crate::GraphSymbol> {
         match kind {
-            crate::GraphSymbolKind::Label => self.labels.get(name).map(|&id| crate::GraphSymbol::Label(id)),
-            crate::GraphSymbolKind::Relation => self.relations.get(name).map(|&id| crate::GraphSymbol::Relation(id)),
-            crate::GraphSymbolKind::Property => self.properties.get(name).map(|&id| crate::GraphSymbol::Property(id)),
+            crate::GraphSymbolKind::Label => self
+                .labels
+                .get(name)
+                .map(|&id| crate::GraphSymbol::Label(id)),
+            crate::GraphSymbolKind::Relation => self
+                .relations
+                .get(name)
+                .map(|&id| crate::GraphSymbol::Relation(id)),
+            crate::GraphSymbolKind::Property => self
+                .properties
+                .get(name)
+                .map(|&id| crate::GraphSymbol::Property(id)),
         }
     }
     fn reverse_catalog(&self) -> Option<crate::graph_text::ReverseSymbolCatalog> {
-        let labels = self.labels.iter().map(|(name, &id)| (id, name.clone())).collect();
-        let relations = self.relations.iter().map(|(name, &id)| (id, name.clone())).collect();
+        let labels = self
+            .labels
+            .iter()
+            .map(|(name, &id)| (id, name.clone()))
+            .collect();
+        let relations = self
+            .relations
+            .iter()
+            .map(|(name, &id)| (id, name.clone()))
+            .collect();
         Some(crate::graph_text::ReverseSymbolCatalog { labels, relations })
     }
     fn reverse_label(&self, id: LabelId) -> Option<String> {
-        self.labels.iter().find(|(_, v)| **v == id).map(|(k, _)| k.clone())
+        self.labels
+            .iter()
+            .find(|(_, v)| **v == id)
+            .map(|(k, _)| k.clone())
     }
     fn reverse_relation(&self, id: RelationId) -> Option<String> {
-        self.relations.iter().find(|(_, v)| **v == id).map(|(k, _)| k.clone())
+        self.relations
+            .iter()
+            .find(|(_, v)| **v == id)
+            .map(|(k, _)| k.clone())
     }
 }
 
 impl RelationBind {
-
     /// Parse and bind one statement without exposing the internal AST.
     pub fn bind(&self, statement: &str) -> Result<BoundPlan, BindError> {
         let ast = Parser::new(statement).parse()?;

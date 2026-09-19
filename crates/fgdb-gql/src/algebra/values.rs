@@ -660,6 +660,7 @@ pub(super) fn collect_values_with_paths<'a, E>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_values_with_element_properties<'a, E>(
     columns: &[ValueProjection],
     bindings: &[Option<VId>],

@@ -86,9 +86,13 @@ fn exponential_shortest_witnesses_use_pinned_historical_and_staged_topology() {
         let frozen = exists.canonical_bytes();
         for (plan, expected) in [(&exists, vec![VId(7)]), (&absent, vec![VId(8)])] {
             for result in [
-                db.execute_graph_pattern_governed(&query, plan, policy()).unwrap(),
-                db.execute_graph_pattern_governed_at(&query, plan, basis, policy()).unwrap(),
-                pinned.execute_graph_pattern_governed(&query, plan, policy()).unwrap(),
+                db.execute_graph_pattern_governed(&query, plan, policy())
+                    .unwrap(),
+                db.execute_graph_pattern_governed_at(&query, plan, basis, policy())
+                    .unwrap(),
+                pinned
+                    .execute_graph_pattern_governed(&query, plan, policy())
+                    .unwrap(),
                 pinned
                     .execute_graph_pattern_governed_at(&query, plan, basis, policy())
                     .unwrap(),
@@ -116,7 +120,10 @@ fn exponential_shortest_witnesses_use_pinned_historical_and_staged_topology() {
             );
         }
         assert_eq!(
-            ids(&db.execute_graph_pattern_governed(&query, &exists, policy()).unwrap().value),
+            ids(&db
+                .execute_graph_pattern_governed(&query, &exists, policy())
+                .unwrap()
+                .value),
             vec![VId(7)],
             "staged deletion escaped its overlay"
         );
@@ -146,7 +153,10 @@ fn exponential_shortest_witnesses_use_pinned_historical_and_staged_topology() {
                 old
             );
             assert_eq!(
-                ids(&pinned.execute_graph_pattern_governed(&query, plan, policy()).unwrap().value),
+                ids(&pinned
+                    .execute_graph_pattern_governed(&query, plan, policy())
+                    .unwrap()
+                    .value),
                 old
             );
         }
@@ -170,15 +180,18 @@ fn shared_layers_preserve_all_occurrences_in_the_public_value_row_pipeline() {
             ));
             // No result: endpoint filtering must not invent a longer shortest
             // path, and the private traversal never changes the bound source.
-            assert!(db
-                .execute_graph_pattern_governed(&query, &plan, policy())
-                .unwrap()
-                .value
-                .is_empty());
+            assert!(
+                db.execute_graph_pattern_governed(&query, &plan, policy())
+                    .unwrap()
+                    .value
+                    .is_empty()
+            );
             let plan = prepare(&format!(
                 "MATCH ALL SHORTEST WALK (a)-[:R*{minimum}..{maximum}]->(b) RETURN ALL b"
             ));
-            let result = db.execute_graph_pattern_governed(&query, &plan, policy()).unwrap();
+            let result = db
+                .execute_graph_pattern_governed(&query, &plan, policy())
+                .unwrap();
             let mut expected_rows = vec![VId(7); expected];
             if minimum == 0 {
                 // The isolated vertex has its own zero-hop shortest walk.

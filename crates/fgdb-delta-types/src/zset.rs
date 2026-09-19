@@ -27,7 +27,10 @@ pub enum ZSetEvent {
 pub enum ZSetError<E> {
     Arithmetic(ZWeightError),
     /// A transferred input already contains a promoted weight above admission.
-    WeightAdmission { required_limbs: usize, limit: usize },
+    WeightAdmission {
+        required_limbs: usize,
+        limit: usize,
+    },
     Control(E),
     Callback(E),
 }
@@ -36,8 +39,14 @@ impl<E: core::fmt::Display> core::fmt::Display for ZSetError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Arithmetic(error) => error.fmt(f),
-            Self::WeightAdmission { required_limbs, limit } => {
-                write!(f, "Z-set weight requires {required_limbs} limbs, limit {limit}")
+            Self::WeightAdmission {
+                required_limbs,
+                limit,
+            } => {
+                write!(
+                    f,
+                    "Z-set weight requires {required_limbs} limbs, limit {limit}"
+                )
             }
             Self::Control(error) => write!(f, "Z-set control: {error}"),
             Self::Callback(error) => write!(f, "Z-set callback: {error}"),
@@ -202,9 +211,7 @@ impl<T: Ord> ZSet<T> {
         for (key, weight) in &self.entries {
             event(control, ZSetEvent::Work)?;
             let projected = project(key).map_err(ZSetError::Callback)?;
-            let weight = weight
-                .checked_clone(limbs)
-                .map_err(ZSetError::Arithmetic)?;
+            let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
             result.accumulate(projected, weight, limbs, control)?;
         }
         Ok(result)
@@ -230,9 +237,7 @@ impl<T: Ord + Clone> ZSet<T> {
         for (key, weight) in &self.entries {
             event(control, ZSetEvent::Work)?;
             if predicate(key).map_err(ZSetError::Callback)? {
-                let weight = weight
-                    .checked_clone(limbs)
-                    .map_err(ZSetError::Arithmetic)?;
+                let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
                 result.accumulate(key.clone(), weight, limbs, control)?;
             }
         }
@@ -301,7 +306,10 @@ impl<T: Ord + Clone> ZSet<T> {
     ) -> Result<ZSetUpdate<'_, T>, ZSetError<E>> {
         let replacements = self.prepare_integration(delta, limbs, control)?;
         event(control, ZSetEvent::Work)?;
-        Ok(ZSetUpdate { owner: self, replacements })
+        Ok(ZSetUpdate {
+            owner: self,
+            replacements,
+        })
     }
 
     pub(crate) fn prepare_integration<E>(
@@ -409,7 +417,10 @@ mod tests {
         let input = z(&[(1, 2), (2, -3), (3, 1)]);
         let projected = input.map(|key| Ok(key % 2), LIMBS, &mut allow).unwrap();
         assert_eq!(plain(&projected), vec![(0, -3), (1, 3)]);
-        assert_eq!(input.total_weight(LIMBS, &mut allow).unwrap(), ZWeight::ZERO);
+        assert_eq!(
+            input.total_weight(LIMBS, &mut allow).unwrap(),
+            ZWeight::ZERO
+        );
         let selected = input.filter(|key| Ok(*key > 1), LIMBS, &mut allow).unwrap();
         assert_eq!(plain(&selected), vec![(2, -3), (3, 1)]);
     }
@@ -424,13 +435,9 @@ mod tests {
                 assert_eq!(sum, right.plus(&left, LIMBS, &mut allow).unwrap());
                 assert_eq!(sum.minus(&right, LIMBS, &mut allow).unwrap(), left);
                 assert!(
-                    left.plus(
-                        &left.negated(LIMBS, &mut allow).unwrap(),
-                        LIMBS,
-                        &mut allow,
-                    )
-                    .unwrap()
-                    .is_empty()
+                    left.plus(&left.negated(LIMBS, &mut allow).unwrap(), LIMBS, &mut allow,)
+                        .unwrap()
+                        .is_empty()
                 );
                 let delta = right.minus(&left, LIMBS, &mut allow).unwrap();
                 let mut integrated = left.checked_clone(LIMBS, &mut allow).unwrap();

@@ -62,15 +62,19 @@ impl<K: Ord, L: Ord, R: Ord> IncrementalJoin<K, L, R> {
 
     /// Explicit input export in canonical key/value order.
     pub fn left_rows(&self) -> impl Iterator<Item = (&K, &L, &ZWeight)> {
-        self.left
-            .iter()
-            .flat_map(|(key, group)| group.iter().map(move |(value, weight)| (key, value, weight)))
+        self.left.iter().flat_map(|(key, group)| {
+            group
+                .iter()
+                .map(move |(value, weight)| (key, value, weight))
+        })
     }
 
     pub fn right_rows(&self) -> impl Iterator<Item = (&K, &R, &ZWeight)> {
-        self.right
-            .iter()
-            .flat_map(|(key, group)| group.iter().map(move |(value, weight)| (key, value, weight)))
+        self.right.iter().flat_map(|(key, group)| {
+            group
+                .iter()
+                .map(move |(value, weight)| (key, value, weight))
+        })
     }
 }
 
@@ -138,7 +142,9 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalJoin<K, L, R> {
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<ZSet<(K, L, R)>, ZSetError<E>> {
-        Ok(self.prepare(delta_left, delta_right, limbs, control)?.commit())
+        Ok(self
+            .prepare(delta_left, delta_right, limbs, control)?
+            .commit())
     }
 
     /// Recompute the current result, useful for explicit snapshots and audits.
@@ -182,7 +188,12 @@ impl<K: Ord, L: Ord, R: Ord> JoinUpdate<'_, K, L, R> {
 
 impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> JoinUpdate<'_, K, L, R> {
     pub fn commit(self) -> ZSet<(K, L, R)> {
-        let Self { owner, left, right, delta } = self;
+        let Self {
+            owner,
+            left,
+            right,
+            delta,
+        } = self;
         publish_changes(&mut owner.left, left);
         publish_changes(&mut owner.right, right);
         delta
@@ -229,8 +240,16 @@ fn add_product<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone, E>(
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<(), ZSetError<E>> {
     event(control, ZSetEvent::Work)?;
-    let weight = left.1.checked_mul(right.1, limbs).map_err(ZSetError::Arithmetic)?;
-    output.accumulate((key.clone(), left.0.clone(), right.0.clone()), weight, limbs, control)
+    let weight = left
+        .1
+        .checked_mul(right.1, limbs)
+        .map_err(ZSetError::Arithmetic)?;
+    output.accumulate(
+        (key.clone(), left.0.clone(), right.0.clone()),
+        weight,
+        limbs,
+        control,
+    )
 }
 
 fn prepare_changes<K: Ord + Clone, V: Ord + Clone, E>(
@@ -304,13 +323,17 @@ impl<T: Ord> Default for IncrementalDistinct<T> {
 
 impl<T: Ord> IncrementalDistinct<T> {
     pub fn new() -> Self {
-        Self { counts: ZSet::new() }
+        Self {
+            counts: ZSet::new(),
+        }
     }
     pub fn counts(&self) -> &ZSet<T> {
         &self.counts
     }
     pub fn contains(&self, key: &T) -> bool {
-        self.counts.weight(key).is_some_and(|weight| weight > &ZWeight::ZERO)
+        self.counts
+            .weight(key)
+            .is_some_and(|weight| weight > &ZWeight::ZERO)
     }
 }
 
@@ -346,7 +369,11 @@ impl<T: Ord + Clone> IncrementalDistinct<T> {
             }
         }
         event(control, ZSetEvent::Work)?;
-        Ok(DistinctUpdate { owner: self, replacements, delta: output })
+        Ok(DistinctUpdate {
+            owner: self,
+            replacements,
+            delta: output,
+        })
     }
 
     pub fn apply<E>(
@@ -374,7 +401,11 @@ impl<T: Ord> DistinctUpdate<'_, T> {
 
 impl<T: Ord + Clone> DistinctUpdate<'_, T> {
     pub fn commit(self) -> ZSet<T> {
-        let Self { owner, replacements, delta } = self;
+        let Self {
+            owner,
+            replacements,
+            delta,
+        } = self;
         owner.counts.publish(replacements);
         delta
     }
@@ -398,18 +429,25 @@ mod tests {
     type Input = BTreeMap<(i32, i32), i128>;
     type Output = BTreeMap<(i32, i32, i32), i128>;
 
-    fn allow(_: ZSetEvent) -> Result<(), usize> { Ok(()) }
+    fn allow(_: ZSetEvent) -> Result<(), usize> {
+        Ok(())
+    }
 
     fn z<T: Ord + Clone>(rows: &[(T, i128)]) -> ZSet<T> {
         ZSet::from_updates(
-            rows.iter().map(|(key, weight)| (key.clone(), ZWeight::from_i128(*weight))),
+            rows.iter()
+                .map(|(key, weight)| (key.clone(), ZWeight::from_i128(*weight))),
             LIMBS,
             &mut allow,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn plain<T: Ord + Clone>(value: &ZSet<T>) -> BTreeMap<T, i128> {
-        value.iter().map(|(key, weight)| (key.clone(), weight.to_i128().unwrap())).collect()
+        value
+            .iter()
+            .map(|(key, weight)| (key.clone(), weight.to_i128().unwrap()))
+            .collect()
     }
 
     // Independent full nested-loop oracle using primitive signed integers,
@@ -433,7 +471,8 @@ mod tests {
             &z(&[((1, 4), 3), ((3, 5), 1)]),
             LIMBS,
             &mut allow,
-        ).unwrap();
+        )
+        .unwrap();
         join
     }
 
@@ -469,14 +508,18 @@ mod tests {
         let left = z(&[((1, 2), 2)]);
         let right = z(&[((1, 3), 3)]);
         let mut state = TestJoin::new();
-        assert_eq!(plain(&state.apply(&left, &right, LIMBS, &mut allow).unwrap()),
-            BTreeMap::from([((1, 2, 3), 6)]));
-        let delta = state.apply(
-            &left.negated(LIMBS, &mut allow).unwrap(),
-            &right.negated(LIMBS, &mut allow).unwrap(),
-            LIMBS,
-            &mut allow,
-        ).unwrap();
+        assert_eq!(
+            plain(&state.apply(&left, &right, LIMBS, &mut allow).unwrap()),
+            BTreeMap::from([((1, 2, 3), 6)])
+        );
+        let delta = state
+            .apply(
+                &left.negated(LIMBS, &mut allow).unwrap(),
+                &right.negated(LIMBS, &mut allow).unwrap(),
+                LIMBS,
+                &mut allow,
+            )
+            .unwrap();
         assert_eq!(plain(&delta), BTreeMap::from([((1, 2, 3), -6)]));
         assert_eq!(state, TestJoin::new());
     }
@@ -487,10 +530,12 @@ mod tests {
         let dr = z(&[((1, 4), -3), ((4, 7), 1)]);
         let mut success = seeded();
         let mut calls = 0;
-        let wanted = success.apply(&dl, &dr, LIMBS, &mut |_| {
-            calls += 1;
-            Ok::<_, usize>(())
-        }).unwrap();
+        let wanted = success
+            .apply(&dl, &dr, LIMBS, &mut |_| {
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
         for stop in 1..=calls {
             let mut state = seeded();
             let mut seen = 0;
@@ -524,9 +569,14 @@ mod tests {
         assert_eq!(state, TestJoin::new());
         let output = state.apply(&left, &right, LIMBS, &mut allow).unwrap();
         assert!(output.weight(&(1, 2, 3)).unwrap().is_promoted());
-        let removed = state.apply(
-            &left.negated(LIMBS, &mut allow).unwrap(), &ZSet::new(), LIMBS, &mut allow,
-        ).unwrap();
+        let removed = state
+            .apply(
+                &left.negated(LIMBS, &mut allow).unwrap(),
+                &ZSet::new(),
+                LIMBS,
+                &mut allow,
+            )
+            .unwrap();
         assert!(output.plus(&removed, LIMBS, &mut allow).unwrap().is_empty());
     }
 
@@ -536,14 +586,18 @@ mod tests {
         let mut small = seeded();
         let mut large = seeded();
         let unrelated: Vec<_> = (100..1100).map(|key| ((key, 9), 1)).collect();
-        large.apply(&z(&unrelated), &z(&unrelated), LIMBS, &mut allow).unwrap();
+        large
+            .apply(&z(&unrelated), &z(&unrelated), LIMBS, &mut allow)
+            .unwrap();
         let mut measured = Vec::new();
         for state in [&mut small, &mut large] {
             let mut events = Vec::new();
-            let output = state.apply(&dl, &ZSet::new(), LIMBS, &mut |event| {
-                events.push(event);
-                Ok::<_, usize>(())
-            }).unwrap();
+            let output = state
+                .apply(&dl, &ZSet::new(), LIMBS, &mut |event| {
+                    events.push(event);
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
             measured.push((output, events));
         }
         assert_eq!(measured[0], measured[1]);
@@ -571,19 +625,24 @@ mod tests {
         let mut success = IncrementalDistinct::new();
         success.apply(&seed, LIMBS, &mut allow).unwrap();
         let mut calls = 0;
-        let expected = success.apply(&delta, LIMBS, &mut |_| {
-            calls += 1;
-            Ok::<_, usize>(())
-        }).unwrap();
+        let expected = success
+            .apply(&delta, LIMBS, &mut |_| {
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
         assert_eq!(expected, z(&[(2, -1), (3, 1)]));
         for stop in 1..=calls {
             let mut state = IncrementalDistinct::new();
             state.apply(&seed, LIMBS, &mut allow).unwrap();
             let mut seen = 0;
-            assert_eq!(state.apply(&delta, LIMBS, &mut |_| {
-                seen += 1;
-                if seen == stop { Err(stop) } else { Ok(()) }
-            }), Err(ZSetError::Control(stop)));
+            assert_eq!(
+                state.apply(&delta, LIMBS, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(ZSetError::Control(stop))
+            );
             assert_eq!(state.counts(), &seed);
             assert_eq!(state.apply(&delta, LIMBS, &mut allow).unwrap(), expected);
             assert_eq!(state, success);

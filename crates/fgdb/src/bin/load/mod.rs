@@ -188,26 +188,19 @@ pub(super) async fn run<V: Vfs + Clone>(
         resume: Some(checkpoint),
     };
     let result = db
-        .bulk_load_with_checkpoint(
-            &cx,
-            &contexts.commit(),
-            rows.into_iter(),
-            policy,
-            crash,
-            |cp| {
-                save(cp)?;
-                if robot {
-                    writeln!(
-                        out,
-                        "{{\"v\":1,\"event\":\"progress\",\"rows\":{},\"seq\":{}}}",
-                        cp.next_row, cp.frontier.0
-                    )?;
-                } else {
-                    writeln!(out, "loaded {} rows (seq {})", cp.next_row, cp.frontier.0)?;
-                }
-                out.flush()
-            },
-        )
+        .bulk_load_with_checkpoint(&cx, &contexts.commit(), rows, policy, crash, |cp| {
+            save(cp)?;
+            if robot {
+                writeln!(
+                    out,
+                    "{{\"v\":1,\"event\":\"progress\",\"rows\":{},\"seq\":{}}}",
+                    cp.next_row, cp.frontier.0
+                )?;
+            } else {
+                writeln!(out, "loaded {} rows (seq {})", cp.next_row, cp.frontier.0)?;
+            }
+            out.flush()
+        })
         .await
         .map_err(|e| match e.kind {
             BulkLoadErrorKind::Checkpoint(error) => Failure::io(error),

@@ -309,6 +309,7 @@ fn encoder_seeds_roundtrip_all_value_kinds_and_resolver_policies() {
         let bytes = value.encode();
         // ubs:ignore -- exact false match is `CanonicalDecimal::decode`, not a JWT decoder.
         let decoded = CanonicalDecimal::decode(&bytes).expect("decimal decode");
+        assert_eq!(decoded, value);
     }
     for value in timestamps() {
         let bytes = value.encode().expect("timestamp encode");

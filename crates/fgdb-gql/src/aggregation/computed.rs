@@ -60,10 +60,17 @@ impl PreparedGraphAggregate {
         property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
         self.execute_governed_with_element_properties(
-            snapshot_records, vertices, edges, test_vertex, property, |_, _| Ok(None),
-            policy, checkpoint,
+            snapshot_records,
+            vertices,
+            edges,
+            test_vertex,
+            property,
+            |_, _| Ok(None),
+            policy,
+            checkpoint,
         )
     }
 
@@ -93,11 +100,17 @@ impl PreparedGraphAggregate {
         mut edge_property: impl FnMut(EId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
         if !self.input.plan().requires_identified_edges() {
             return self.execute_governed(
-                snapshot_records, vertices, edges.into_iter().map(|(_, s, r, d)| (s, r, d)),
-                test_vertex, property, policy, checkpoint,
+                snapshot_records,
+                vertices,
+                edges.into_iter().map(|(_, s, r, d)| (s, r, d)),
+                test_vertex,
+                property,
+                policy,
+                checkpoint,
             );
         }
         if self.relational_input.is_some() {
@@ -108,11 +121,18 @@ impl PreparedGraphAggregate {
             return self.execute_relational_with_source(
                 policy,
                 |pattern, remaining| {
-                    let (vertices, edges) = admitted.take()
+                    let (vertices, edges) = admitted
+                        .take()
                         .expect("single-source aggregate preparation admits exactly one leaf");
                     pattern.plan().execute_governed_with_element_properties(
-                        snapshot_records, vertices, edges, &mut test_vertex, &mut property,
-                        &mut edge_property, remaining, || (*checkpoint.borrow_mut())(),
+                        snapshot_records,
+                        vertices,
+                        edges,
+                        &mut test_vertex,
+                        &mut property,
+                        &mut edge_property,
+                        remaining,
+                        || (*checkpoint.borrow_mut())(),
                     )
                 },
                 || (*checkpoint.borrow_mut())(),
@@ -124,10 +144,20 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let source = self.input.plan().execute_governed_with_element_properties(
-            snapshot_records, vertices, edges, test_vertex, property, edge_property,
-            source_policy, &mut checkpoint,
-        ).map_err(|error| error.map_source(GraphAggregateError::Source))?;
+        let source = self
+            .input
+            .plan()
+            .execute_governed_with_element_properties(
+                snapshot_records,
+                vertices,
+                edges,
+                test_vertex,
+                property,
+                edge_property,
+                source_policy,
+                &mut checkpoint,
+            )
+            .map_err(|error| error.map_source(GraphAggregateError::Source))?;
         self.finish_materialized_governed(source, policy, checkpoint)
     }
 
@@ -141,7 +171,8 @@ impl PreparedGraphAggregate {
         property: impl FnMut(VId, PropertyKeyId) -> Result<Option<&'a CanonicalScalar>, E>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
         // MATCH rows are private aggregate input, not public result rows. They
         // still pay every ordinary GLA instruction and allocation. Source
         // admission is counted once, not once again for the computed relation.
@@ -151,10 +182,19 @@ impl PreparedGraphAggregate {
             ),
             evaluator: policy.evaluator,
         };
-        let source = self.input.plan().execute_governed_with_properties(
-            snapshot_records, vertices, edges, test_vertex, property,
-            source_policy, &mut checkpoint,
-        ).map_err(|error| error.map_source(GraphAggregateError::Source))?;
+        let source = self
+            .input
+            .plan()
+            .execute_governed_with_properties(
+                snapshot_records,
+                vertices,
+                edges,
+                test_vertex,
+                property,
+                source_policy,
+                &mut checkpoint,
+            )
+            .map_err(|error| error.map_source(GraphAggregateError::Source))?;
         self.finish_materialized_governed(source, policy, checkpoint)
     }
 
@@ -166,7 +206,8 @@ impl PreparedGraphAggregate {
         source: GqlQueryExecution<GraphValueRow>,
         policy: GqlQueryPolicy,
         mut checkpoint: impl FnMut() -> Result<(), C>,
-    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>> {
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
         let mut evaluator = source.evaluator;
         let mut rows = GqlExecutionStats {
             snapshot_records: source.rows.snapshot_records,
@@ -202,10 +243,16 @@ impl PreparedGraphAggregate {
                 // frozen column references and lazy scalar branches. Source reads
                 // above remain eager and source errors remain typed errors.
                 let value = GraphSetProjection::evaluate_row_with_control(
-                    &input, projection, &mut control,
-                    |column, error| GqlQueryError::Source(GraphAggregateError::InputExpression {
-                        row, column, error,
-                    }),
+                    &input,
+                    projection,
+                    &mut control,
+                    |column, error| {
+                        GqlQueryError::Source(GraphAggregateError::InputExpression {
+                            row,
+                            column,
+                            error,
+                        })
+                    },
                 )?;
                 computed.push(value);
             }

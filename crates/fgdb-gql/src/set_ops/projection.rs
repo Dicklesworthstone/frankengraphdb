@@ -60,7 +60,10 @@ impl GraphSetProjection {
         value_type(value, types, column)
     }
 
-    pub(crate) fn validate_output_name(name: &str, column: usize) -> Result<(), GraphSetProjectionError> {
+    pub(crate) fn validate_output_name(
+        name: &str,
+        column: usize,
+    ) -> Result<(), GraphSetProjectionError> {
         validate_name(name, column)
     }
 

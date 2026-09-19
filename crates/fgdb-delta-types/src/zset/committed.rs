@@ -61,20 +61,28 @@ impl<E: core::fmt::Display> core::fmt::Display for EdgeInputError<E> {
             Self::UnsupportedBatchFormat { found } => write!(f, "unsupported delta format {found}"),
             Self::AnchorUnavailable { at } => write!(f, "delta anchor unavailable at {at:?}"),
             Self::HistoryChanged { at } => write!(f, "delta history changed at {at:?}"),
-            Self::SchemaChanged => f.write_str("edge input requires rebaseline after schema change"),
+            Self::SchemaChanged => {
+                f.write_str("edge input requires rebaseline after schema change")
+            }
             Self::DuplicateEdge => f.write_str("duplicate edge in committed input"),
             Self::UnknownEdge => f.write_str("unknown edge in committed deletion"),
             Self::WrongRelation => f.write_str("edge and coordinate relations disagree"),
-            Self::NonIncidentCascade => f.write_str("cascade edge is not incident to deleted vertex"),
+            Self::NonIncidentCascade => {
+                f.write_str("cascade edge is not incident to deleted vertex")
+            }
         }
     }
 }
 impl<E: core::error::Error + 'static> core::error::Error for EdgeInputError<E> {}
 impl<E> From<ZSetError<E>> for EdgeInputError<E> {
-    fn from(error: ZSetError<E>) -> Self { Self::Delta(error) }
+    fn from(error: ZSetError<E>) -> Self {
+        Self::Delta(error)
+    }
 }
 impl<E> From<IndexError> for EdgeInputError<E> {
-    fn from(error: IndexError) -> Self { Self::Index(error) }
+    fn from(error: IndexError) -> Self {
+        Self::Index(error)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -115,14 +123,23 @@ impl core::fmt::Debug for CommittedEdgeInput {
 
 impl CommittedEdgeInput {
     pub fn new(graph: GraphId, branch: BranchId) -> Self {
-        Self { graph, branch, anchor: None, edges: BTreeMap::new(), epochs: BTreeMap::new() }
+        Self {
+            graph,
+            branch,
+            anchor: None,
+            edges: BTreeMap::new(),
+            epochs: BTreeMap::new(),
+        }
     }
 
     pub fn frontier(&self) -> CommitSeq {
-        self.anchor.map_or(CommitSeq::ORIGIN, |anchor| anchor.marker.commit_seq)
+        self.anchor
+            .map_or(CommitSeq::ORIGIN, |anchor| anchor.marker.commit_seq)
     }
 
-    pub fn edge_count(&self) -> usize { self.edges.len() }
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
 
     /// Explicit arrangement export for a snapshot/audit. Normal ticks never
     /// call it. The caller's logical work/scratch and promoted-weight limits
@@ -156,17 +173,22 @@ impl CommittedEdgeInput {
         event(control, ZSetEvent::Work)?;
         let after = self.frontier();
         if index.format() != INDEX_FORMAT_V1 {
-            return Err(IndexError::UnsupportedFormat { format: index.format() }.into());
+            return Err(IndexError::UnsupportedFormat {
+                format: index.format(),
+            }
+            .into());
         }
         // The window's own API owns future/retired cursor semantics. Do not
         // clamp, skip a missing batch, or trust a filtered iterator as a cursor.
         let _suffix = index.since(after)?;
-        if let Some(anchor) = self.anchor {
-            if checked_anchor(index, after)? != anchor {
-                return Err(EdgeInputError::HistoryChanged { at: after });
-            }
+        if let Some(anchor) = self.anchor
+            && checked_anchor(index, after)? != anchor
+        {
+            return Err(EdgeInputError::HistoryChanged { at: after });
         }
-        if after == index.frontier() { return Ok(None); }
+        if after == index.frontier() {
+            return Ok(None);
+        }
         let next = after.checked_successor().map_err(IndexError::from)?;
         let batch = checked_batch(index, next)?;
         self.prepare_batch(batch, limbs, control).map(Some)
@@ -204,7 +226,10 @@ impl CommittedEdgeInput {
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<EdgeInputUpdate<'_>, EdgeInputError<E>> {
         event(control, ZSetEvent::Work)?;
-        let next = self.frontier().checked_successor().map_err(IndexError::from)?;
+        let next = self
+            .frontier()
+            .checked_successor()
+            .map_err(IndexError::from)?;
         validate_batch(batch, next)?;
         self.prepare_batch(batch, limbs, control)
     }
@@ -226,11 +251,19 @@ impl CommittedEdgeInput {
         // cross-relation cascade may name an edge created later in that order.
         for coordinate in batch.coordinate_entries() {
             event(control, ZSetEvent::Work)?;
-            if coordinate.graph != self.graph || coordinate.branch != self.branch { continue; }
-            if coordinate.schema_transition.is_some() { return Err(EdgeInputError::SchemaChanged); }
-            let known = epochs.get(&coordinate.relation).or_else(|| self.epochs.get(&coordinate.relation));
+            if coordinate.graph != self.graph || coordinate.branch != self.branch {
+                continue;
+            }
+            if coordinate.schema_transition.is_some() {
+                return Err(EdgeInputError::SchemaChanged);
+            }
+            let known = epochs
+                .get(&coordinate.relation)
+                .or_else(|| self.epochs.get(&coordinate.relation));
             match known {
-                Some(epoch) if *epoch != coordinate.schema_epoch => return Err(EdgeInputError::SchemaChanged),
+                Some(epoch) if *epoch != coordinate.schema_epoch => {
+                    return Err(EdgeInputError::SchemaChanged);
+                }
                 Some(_) => {}
                 None => {
                     event(control, ZSetEvent::ScratchEntry)?;
@@ -241,8 +274,16 @@ impl CommittedEdgeInput {
             for row in &coordinate.rows {
                 event(control, ZSetEvent::Work)?;
                 match row {
-                    DeltaRow::CreateEdge { eid, src, relation, dst, .. } => {
-                        if *relation != coordinate.relation { return Err(EdgeInputError::WrongRelation); }
+                    DeltaRow::CreateEdge {
+                        eid,
+                        src,
+                        relation,
+                        dst,
+                        ..
+                    } => {
+                        if *relation != coordinate.relation {
+                            return Err(EdgeInputError::WrongRelation);
+                        }
                         if self.edges.contains_key(eid) || created.contains_key(eid) {
                             return Err(EdgeInputError::DuplicateEdge);
                         }
@@ -254,34 +295,52 @@ impl CommittedEdgeInput {
                         created.insert(*eid, tuple);
                         delta.accumulate(tuple, ZWeight::ONE, limbs, control)?;
                     }
-                    DeltaRow::Schema { .. } | DeltaRow::Constraint { .. } => return Err(EdgeInputError::SchemaChanged),
-                    DeltaRow::CreateVertex { .. } | DeltaRow::DeleteVertex { .. }
-                    | DeltaRow::DeleteEdge { .. } | DeltaRow::LabelMembership { .. }
-                    | DeltaRow::Property { .. } | DeltaRow::ValidTime { .. }
-                    | DeltaRow::Counter { .. } | DeltaRow::Escrow { .. }
+                    DeltaRow::Schema { .. } | DeltaRow::Constraint { .. } => {
+                        return Err(EdgeInputError::SchemaChanged);
+                    }
+                    DeltaRow::CreateVertex { .. }
+                    | DeltaRow::DeleteVertex { .. }
+                    | DeltaRow::DeleteEdge { .. }
+                    | DeltaRow::LabelMembership { .. }
+                    | DeltaRow::Property { .. }
+                    | DeltaRow::ValidTime { .. }
+                    | DeltaRow::Counter { .. }
+                    | DeltaRow::Escrow { .. }
                     | DeltaRow::Sketch { .. } => {}
                 }
             }
         }
         for coordinate in batch.coordinate_entries() {
             event(control, ZSetEvent::Work)?;
-            if coordinate.graph != self.graph || coordinate.branch != self.branch { continue; }
+            if coordinate.graph != self.graph || coordinate.branch != self.branch {
+                continue;
+            }
             for row in &coordinate.rows {
                 event(control, ZSetEvent::Work)?;
                 match row {
                     DeltaRow::DeleteEdge { eid, .. } => {
-                        let tuple = created.get(eid).or_else(|| self.edges.get(eid))
+                        let tuple = created
+                            .get(eid)
+                            .or_else(|| self.edges.get(eid))
                             .ok_or(EdgeInputError::UnknownEdge)?;
-                        if tuple.0 != coordinate.relation { return Err(EdgeInputError::WrongRelation); }
+                        if tuple.0 != coordinate.relation {
+                            return Err(EdgeInputError::WrongRelation);
+                        }
                         remove_once(*eid, *tuple, &mut removed, &mut delta, limbs, control)?;
                     }
-                    DeltaRow::DeleteVertex { vid, sorted_retired_incident_edges, .. } => {
+                    DeltaRow::DeleteVertex {
+                        vid,
+                        sorted_retired_incident_edges,
+                        ..
+                    } => {
                         // Cascade before-images can cross relation coordinates.
                         // An explicit deletion or another endpoint's cascade can
                         // name the same EId: its occurrence retracts only once.
                         for eid in sorted_retired_incident_edges {
                             event(control, ZSetEvent::Work)?;
-                            let tuple = created.get(eid).or_else(|| self.edges.get(eid))
+                            let tuple = created
+                                .get(eid)
+                                .or_else(|| self.edges.get(eid))
                                 .ok_or(EdgeInputError::UnknownEdge)?;
                             if tuple.1 != *vid && tuple.2 != *vid {
                                 return Err(EdgeInputError::NonIncidentCascade);
@@ -294,33 +353,48 @@ impl CommittedEdgeInput {
             }
         }
         event(control, ZSetEvent::Work)?;
-        Ok(EdgeInputUpdate { owner: self, anchor, created, removed, epochs, delta })
+        Ok(EdgeInputUpdate {
+            owner: self,
+            anchor,
+            created,
+            removed,
+            epochs,
+            delta,
+        })
     }
 }
 
 /// Retention preserves exactly one boundary identity, not an arbitrary older
 /// checkpoint. `since(after)` still refuses before this when any delta is lost.
-fn checked_anchor<E>(index: &LocalDeltaBatchIndex, at: CommitSeq) -> Result<Anchor, EdgeInputError<E>> {
+fn checked_anchor<E>(
+    index: &LocalDeltaBatchIndex,
+    at: CommitSeq,
+) -> Result<Anchor, EdgeInputError<E>> {
     if index.get(at).is_some() {
         return Ok(Anchor::of(checked_batch(index, at)?));
     }
-    if at == index.retained_after_commit_seq() {
-        if let Some((format, marker, template)) = index.retired_boundary_identity() {
-            if format != DELTA_FORMAT_V1 {
-                return Err(EdgeInputError::UnsupportedBatchFormat { found: format });
-            }
-            if marker.commit_seq != at {
-                return Err(IndexError::WrongMarker {
-                    batch_commit_seq: at, marker_commit_seq: marker.commit_seq,
-                }.into());
-            }
-            return Ok(Anchor { marker, template });
+    if at == index.retained_after_commit_seq()
+        && let Some((format, marker, template)) = index.retired_boundary_identity()
+    {
+        if format != DELTA_FORMAT_V1 {
+            return Err(EdgeInputError::UnsupportedBatchFormat { found: format });
         }
+        if marker.commit_seq != at {
+            return Err(IndexError::WrongMarker {
+                batch_commit_seq: at,
+                marker_commit_seq: marker.commit_seq,
+            }
+            .into());
+        }
+        return Ok(Anchor { marker, template });
     }
     Err(EdgeInputError::AnchorUnavailable { at })
 }
 
-fn checked_batch<E>(index: &LocalDeltaBatchIndex, at: CommitSeq) -> Result<&LogicalDeltaBatch, EdgeInputError<E>> {
+fn checked_batch<E>(
+    index: &LocalDeltaBatchIndex,
+    at: CommitSeq,
+) -> Result<&LogicalDeltaBatch, EdgeInputError<E>> {
     let batch = index.get(at).ok_or(EdgeInputError::MissingBatch { at })?;
     validate_batch(batch, at)?;
     Ok(batch)
@@ -328,16 +402,30 @@ fn checked_batch<E>(index: &LocalDeltaBatchIndex, at: CommitSeq) -> Result<&Logi
 
 fn validate_batch<E>(batch: &LogicalDeltaBatch, at: CommitSeq) -> Result<(), EdgeInputError<E>> {
     if batch.format() != DELTA_FORMAT_V1 {
-        return Err(EdgeInputError::UnsupportedBatchFormat { found: batch.format() });
+        return Err(EdgeInputError::UnsupportedBatchFormat {
+            found: batch.format(),
+        });
     }
     if batch.commit_seq() != at {
-        return Err(IndexError::WrongEntryKey { stored: at, batch: batch.commit_seq() }.into());
+        return Err(IndexError::WrongEntryKey {
+            stored: at,
+            batch: batch.commit_seq(),
+        }
+        .into());
     }
     if batch.commit_marker_identity().commit_seq != at {
-        return Err(IndexError::WrongMarker { batch_commit_seq: at, marker_commit_seq: batch.commit_marker_identity().commit_seq }.into());
+        return Err(IndexError::WrongMarker {
+            batch_commit_seq: at,
+            marker_commit_seq: batch.commit_marker_identity().commit_seq,
+        }
+        .into());
     }
     if batch.frontier() != at {
-        return Err(IndexError::WrongFrontier { commit_seq: at, frontier: batch.frontier() }.into());
+        return Err(IndexError::WrongFrontier {
+            commit_seq: at,
+            frontier: batch.frontier(),
+        }
+        .into());
     }
     Ok(())
 }
@@ -370,15 +458,30 @@ pub struct EdgeInputUpdate<'a> {
     delta: ZSet<EdgeTuple>,
 }
 impl EdgeInputUpdate<'_> {
-    pub fn delta(&self) -> &ZSet<EdgeTuple> { &self.delta }
-    pub fn commit_seq(&self) -> CommitSeq { self.anchor.marker.commit_seq }
+    pub fn delta(&self) -> &ZSet<EdgeTuple> {
+        &self.delta
+    }
+    pub fn commit_seq(&self) -> CommitSeq {
+        self.anchor.marker.commit_seq
+    }
 
     pub fn commit(self) -> ZSet<EdgeTuple> {
-        let Self { owner, anchor, created, removed, epochs, delta } = self;
+        let Self {
+            owner,
+            anchor,
+            created,
+            removed,
+            epochs,
+            delta,
+        } = self;
         for (eid, tuple) in created {
-            if !removed.contains_key(&eid) { owner.edges.insert(eid, tuple); }
+            if !removed.contains_key(&eid) {
+                owner.edges.insert(eid, tuple);
+            }
         }
-        for eid in removed.keys() { owner.edges.remove(eid); }
+        for eid in removed.keys() {
+            owner.edges.remove(eid);
+        }
         owner.epochs.extend(epochs);
         owner.anchor = Some(anchor);
         delta
@@ -403,46 +506,90 @@ mod tests {
     use fgdb_types::ObjectId;
 
     const LIMBS: LimbLimit = LimbLimit::new(16);
-    fn allow(_: ZSetEvent) -> Result<(), usize> { Ok(()) }
-    fn input() -> CommittedEdgeInput { CommittedEdgeInput::new(GraphId(1), BranchId(1)) }
+    fn allow(_: ZSetEvent) -> Result<(), usize> {
+        Ok(())
+    }
+    fn input() -> CommittedEdgeInput {
+        CommittedEdgeInput::new(GraphId(1), BranchId(1))
+    }
     fn create(eid: u128, relation: u64, source: u128, target: u128) -> DeltaRow {
-        DeltaRow::CreateEdge { eid: EId(eid), birth_ordinal: eid as u64,
-            src: VId(source), relation: RelationId(relation), dst: VId(target),
-            canonical_key: None, props: vec![], valid_time: None }
+        DeltaRow::CreateEdge {
+            eid: EId(eid),
+            birth_ordinal: eid as u64,
+            src: VId(source),
+            relation: RelationId(relation),
+            dst: VId(target),
+            canonical_key: None,
+            props: vec![],
+            valid_time: None,
+        }
     }
     fn delete(eid: u128) -> DeltaRow {
-        DeltaRow::DeleteEdge { eid: EId(eid), before_version: ObjectId([8; 32]) }
+        DeltaRow::DeleteEdge {
+            eid: EId(eid),
+            before_version: ObjectId([8; 32]),
+        }
     }
     fn cascade(vid: u128, edges: &[u128]) -> DeltaRow {
-        DeltaRow::DeleteVertex { vid: VId(vid), before_version: ObjectId([8; 32]),
-            sorted_retired_incident_edges: edges.iter().copied().map(EId).collect() }
+        DeltaRow::DeleteVertex {
+            vid: VId(vid),
+            before_version: ObjectId([8; 32]),
+            sorted_retired_incident_edges: edges.iter().copied().map(EId).collect(),
+        }
     }
     fn coordinate(relation: u64, rows: Vec<DeltaRow>) -> CoordinateEntry {
-        CoordinateEntry { graph: GraphId(1), branch: BranchId(1), relation: RelationId(relation),
-            schema_epoch: SchemaEpoch(0), schema_transition: None, rows }
+        CoordinateEntry {
+            graph: GraphId(1),
+            branch: BranchId(1),
+            relation: RelationId(relation),
+            schema_epoch: SchemaEpoch(0),
+            schema_transition: None,
+            rows,
+        }
     }
     // Deliberately decoded/test-shaped batches exercise envelope checks without
     // manufacturing commit-purpose authority. Real attestation is exercised by
     // the database integration tests using its actual committed delta index.
     fn batch(seq: u64, entries: Vec<CoordinateEntry>) -> LogicalDeltaBatch {
         let template = LogicalDeltaTemplate::build(ObjectId([1; 32]), [2; 32], entries).unwrap();
-        LogicalDeltaBatch::from_parts_for_test(template.coordinate_entries().to_vec(),
-            [seq as u8; 32], MarkerRef { marker_oid: ObjectId([seq as u8; 32]),
-            commit_seq: CommitSeq(seq) }, CommitSeq(seq), CommitSeq(seq))
+        LogicalDeltaBatch::from_parts_for_test(
+            template.coordinate_entries().to_vec(),
+            [seq as u8; 32],
+            MarkerRef {
+                marker_oid: ObjectId([seq as u8; 32]),
+                commit_seq: CommitSeq(seq),
+            },
+            CommitSeq(seq),
+            CommitSeq(seq),
+        )
     }
     fn advance(state: &mut CommittedEdgeInput, index: &LocalDeltaBatchIndex) -> ZSet<EdgeTuple> {
-        state.prepare_next(index, LIMBS, &mut allow).unwrap().unwrap().commit()
+        state
+            .prepare_next(index, LIMBS, &mut allow)
+            .unwrap()
+            .unwrap()
+            .commit()
     }
     fn seed() -> (CommittedEdgeInput, LocalDeltaBatchIndex) {
         let mut index = LocalDeltaBatchIndex::new();
-        index.insert(batch(1, vec![coordinate(1, vec![create(1, 1, 1, 2), create(2, 1, 1, 2)]),
-            coordinate(2, vec![create(3, 2, 2, 3)])])).unwrap();
+        index
+            .insert(batch(
+                1,
+                vec![
+                    coordinate(1, vec![create(1, 1, 1, 2), create(2, 1, 1, 2)]),
+                    coordinate(2, vec![create(3, 2, 2, 3)]),
+                ],
+            ))
+            .unwrap();
         let mut state = input();
         advance(&mut state, &index);
         (state, index)
     }
     fn plain(value: &ZSet<EdgeTuple>) -> BTreeMap<EdgeTuple, i128> {
-        value.iter().map(|(tuple, weight)| (*tuple, weight.to_i128().unwrap())).collect()
+        value
+            .iter()
+            .map(|(tuple, weight)| (*tuple, weight.to_i128().unwrap()))
+            .collect()
     }
 
     #[test]
@@ -451,24 +598,44 @@ mod tests {
         let initial = state.snapshot(LIMBS, &mut allow).unwrap();
         // A later coordinate creates edge 4; the earlier coordinate's cascade
         // names it. Two endpoint cascades and an explicit delete overlap.
-        index.insert(batch(2, vec![
-            coordinate(1, vec![cascade(1, &[1, 2]), cascade(2, &[1, 2, 3, 4]), delete(1)]),
-            coordinate(2, vec![create(4, 2, 2, 9)]),
-        ])).unwrap();
+        index
+            .insert(batch(
+                2,
+                vec![
+                    coordinate(
+                        1,
+                        vec![cascade(1, &[1, 2]), cascade(2, &[1, 2, 3, 4]), delete(1)],
+                    ),
+                    coordinate(2, vec![create(4, 2, 2, 9)]),
+                ],
+            ))
+            .unwrap();
         let delta = advance(&mut state, &index);
         assert!(initial.plus(&delta, LIMBS, &mut allow).unwrap().is_empty());
         assert_eq!(state.edge_count(), 0);
         assert_eq!(state.frontier(), CommitSeq(2));
-        assert!(state.prepare_next(&index, LIMBS, &mut allow).unwrap().is_none());
+        assert!(
+            state
+                .prepare_next(&index, LIMBS, &mut allow)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn silent_identity_replacement_and_unrelated_commits_still_advance() {
         let mut state = input();
         let mut index = LocalDeltaBatchIndex::new();
-        index.insert(batch(1, vec![coordinate(1, vec![create(1, 1, 2, 3)])])).unwrap();
+        index
+            .insert(batch(1, vec![coordinate(1, vec![create(1, 1, 2, 3)])]))
+            .unwrap();
         advance(&mut state, &index);
-        index.insert(batch(2, vec![coordinate(1, vec![delete(1), create(2, 1, 2, 3)])])).unwrap();
+        index
+            .insert(batch(
+                2,
+                vec![coordinate(1, vec![delete(1), create(2, 1, 2, 3)])],
+            ))
+            .unwrap();
         assert!(advance(&mut state, &index).is_empty());
         assert!(!state.edges.contains_key(&EId(1)));
         assert!(state.edges.contains_key(&EId(2)));
@@ -476,37 +643,64 @@ mod tests {
         foreign_graph.graph = GraphId(2);
         let mut foreign_branch = coordinate(1, vec![create(4, 1, 2, 3)]);
         foreign_branch.branch = BranchId(2);
-        index.insert(batch(3, vec![foreign_graph, foreign_branch])).unwrap();
+        index
+            .insert(batch(3, vec![foreign_graph, foreign_branch]))
+            .unwrap();
         assert!(advance(&mut state, &index).is_empty());
         assert_eq!(state.frontier(), CommitSeq(3));
-        index.insert(batch(4, vec![coordinate(1, vec![delete(2)])])).unwrap();
-        assert_eq!(plain(&advance(&mut state, &index)),
-            BTreeMap::from([((RelationId(1), VId(2), VId(3)), -1)]));
+        index
+            .insert(batch(4, vec![coordinate(1, vec![delete(2)])]))
+            .unwrap();
+        assert_eq!(
+            plain(&advance(&mut state, &index)),
+            BTreeMap::from([((RelationId(1), VId(2), VId(3)), -1)])
+        );
         assert_eq!(state.edge_count(), 0);
     }
 
     #[test]
     fn every_tick_boundary_and_dropped_downstream_preparation_is_retryable() {
         let (mut success, mut index) = seed();
-        index.insert(batch(2, vec![coordinate(1, vec![delete(1), create(4, 1, 3, 4)]),
-            coordinate(2, vec![cascade(2, &[2, 3])])])).unwrap();
+        index
+            .insert(batch(
+                2,
+                vec![
+                    coordinate(1, vec![delete(1), create(4, 1, 3, 4)]),
+                    coordinate(2, vec![cascade(2, &[2, 3])]),
+                ],
+            ))
+            .unwrap();
         let mut events = Vec::new();
-        let wanted = success.prepare_next(&index, LIMBS, &mut |event| {
-            events.push(event); Ok::<_, usize>(())
-        }).unwrap().unwrap().commit();
+        let wanted = success
+            .prepare_next(&index, LIMBS, &mut |event| {
+                events.push(event);
+                Ok::<_, usize>(())
+            })
+            .unwrap()
+            .unwrap()
+            .commit();
         for stop in 1..=events.len() {
             let (mut state, _) = seed();
             let mut seen = 0;
-            assert_eq!(state.prepare_next(&index, LIMBS, &mut |_| {
-                seen += 1; if seen == stop { Err(stop) } else { Ok(()) }
-            }).unwrap_err(), EdgeInputError::Delta(ZSetError::Control(stop)));
+            assert_eq!(
+                state
+                    .prepare_next(&index, LIMBS, &mut |_| {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    })
+                    .unwrap_err(),
+                EdgeInputError::Delta(ZSetError::Control(stop))
+            );
             assert_eq!(seen, stop);
             assert_eq!(state, seed().0);
             assert_eq!(advance(&mut state, &index), wanted);
             assert_eq!(state, success);
         }
         let (mut state, _) = seed();
-        let pending = state.prepare_next(&index, LIMBS, &mut allow).unwrap().unwrap();
+        let pending = state
+            .prepare_next(&index, LIMBS, &mut allow)
+            .unwrap()
+            .unwrap();
         assert_eq!(pending.delta(), &wanted);
         assert_eq!(pending.commit_seq(), CommitSeq(2));
         drop(pending);
@@ -521,46 +715,104 @@ mod tests {
         for change_marker in [false, true] {
             let changed = LogicalDeltaBatch::from_parts_for_test(
                 original.coordinate_entries().to_vec(),
-                if change_marker { *original.source_template_digest() } else { [99; 32] },
-                MarkerRef { marker_oid: if change_marker { ObjectId([99; 32]) }
-                    else { original.commit_marker_identity().marker_oid }, commit_seq: CommitSeq(1) },
-                CommitSeq(1), CommitSeq(1));
-            let fork = LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(0), CommitSeq(1),
-                vec![(CommitSeq(1), changed)]);
-            assert_eq!(state.prepare_next(&fork, LIMBS, &mut allow).unwrap_err(),
-                EdgeInputError::HistoryChanged { at: CommitSeq(1) });
+                if change_marker {
+                    *original.source_template_digest()
+                } else {
+                    [99; 32]
+                },
+                MarkerRef {
+                    marker_oid: if change_marker {
+                        ObjectId([99; 32])
+                    } else {
+                        original.commit_marker_identity().marker_oid
+                    },
+                    commit_seq: CommitSeq(1),
+                },
+                CommitSeq(1),
+                CommitSeq(1),
+            );
+            let fork = LocalDeltaBatchIndex::from_parts_for_test(
+                CommitSeq(0),
+                CommitSeq(1),
+                vec![(CommitSeq(1), changed)],
+            );
+            assert_eq!(
+                state.prepare_next(&fork, LIMBS, &mut allow).unwrap_err(),
+                EdgeInputError::HistoryChanged { at: CommitSeq(1) }
+            );
             assert_eq!(state, seed().0);
         }
         let mut retired = index.clone();
         retired.retire_prefix(CommitSeq(1)).unwrap();
         // Exact boundary identity survives retirement; a bare decoded floor
         // remains unanchored and cannot be promoted into evidence by a no-op.
-        assert!(state.prepare_next(&retired, LIMBS, &mut allow).unwrap().is_none());
-        let unanchored = LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(1), CommitSeq(1), vec![]);
-        assert_eq!(state.prepare_next(&unanchored, LIMBS, &mut allow).unwrap_err(),
-            EdgeInputError::AnchorUnavailable { at: CommitSeq(1) });
-        assert!(matches!(input().prepare_next(&retired, LIMBS, &mut allow),
-            Err(EdgeInputError::Index(IndexError::CursorRetired { .. }))));
-        assert!(matches!(state.prepare_next(&LocalDeltaBatchIndex::new(), LIMBS, &mut allow),
-            Err(EdgeInputError::Index(IndexError::BeyondFrontier { .. }))));
+        assert!(
+            state
+                .prepare_next(&retired, LIMBS, &mut allow)
+                .unwrap()
+                .is_none()
+        );
+        let unanchored =
+            LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(1), CommitSeq(1), vec![]);
+        assert_eq!(
+            state
+                .prepare_next(&unanchored, LIMBS, &mut allow)
+                .unwrap_err(),
+            EdgeInputError::AnchorUnavailable { at: CommitSeq(1) }
+        );
+        assert!(matches!(
+            input().prepare_next(&retired, LIMBS, &mut allow),
+            Err(EdgeInputError::Index(IndexError::CursorRetired { .. }))
+        ));
+        assert!(matches!(
+            state.prepare_next(&LocalDeltaBatchIndex::new(), LIMBS, &mut allow),
+            Err(EdgeInputError::Index(IndexError::BeyondFrontier { .. }))
+        ));
         let two = batch(2, vec![coordinate(1, vec![])]);
-        let missing = LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(0), CommitSeq(2),
-            vec![(CommitSeq(2), two.clone())]);
-        assert_eq!(input().prepare_next(&missing, LIMBS, &mut allow).unwrap_err(),
-            EdgeInputError::MissingBatch { at: CommitSeq(1) });
-        let wrong_key = LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(0), CommitSeq(1),
-            vec![(CommitSeq(1), two)]);
-        assert!(matches!(input().prepare_next(&wrong_key, LIMBS, &mut allow),
-            Err(EdgeInputError::Index(IndexError::WrongEntryKey { .. }))));
+        let missing = LocalDeltaBatchIndex::from_parts_for_test(
+            CommitSeq(0),
+            CommitSeq(2),
+            vec![(CommitSeq(2), two.clone())],
+        );
+        assert_eq!(
+            input()
+                .prepare_next(&missing, LIMBS, &mut allow)
+                .unwrap_err(),
+            EdgeInputError::MissingBatch { at: CommitSeq(1) }
+        );
+        let wrong_key = LocalDeltaBatchIndex::from_parts_for_test(
+            CommitSeq(0),
+            CommitSeq(1),
+            vec![(CommitSeq(1), two)],
+        );
+        assert!(matches!(
+            input().prepare_next(&wrong_key, LIMBS, &mut allow),
+            Err(EdgeInputError::Index(IndexError::WrongEntryKey { .. }))
+        ));
         for wrong_marker in [false, true] {
-            let bad = LogicalDeltaBatch::from_parts_for_test(vec![], [0; 32],
-                MarkerRef { marker_oid: ObjectId([0; 32]), commit_seq: CommitSeq(if wrong_marker { 2 } else { 1 }) },
-                CommitSeq(1), CommitSeq(if wrong_marker { 1 } else { 2 }));
-            let corrupt = LocalDeltaBatchIndex::from_parts_for_test(CommitSeq(0), CommitSeq(1),
-                vec![(CommitSeq(1), bad)]);
-            let failure = input().prepare_next(&corrupt, LIMBS, &mut allow).unwrap_err();
-            assert!(matches!(failure, EdgeInputError::Index(IndexError::WrongMarker { .. })
-                | EdgeInputError::Index(IndexError::WrongFrontier { .. })));
+            let bad = LogicalDeltaBatch::from_parts_for_test(
+                vec![],
+                [0; 32],
+                MarkerRef {
+                    marker_oid: ObjectId([0; 32]),
+                    commit_seq: CommitSeq(if wrong_marker { 2 } else { 1 }),
+                },
+                CommitSeq(1),
+                CommitSeq(if wrong_marker { 1 } else { 2 }),
+            );
+            let corrupt = LocalDeltaBatchIndex::from_parts_for_test(
+                CommitSeq(0),
+                CommitSeq(1),
+                vec![(CommitSeq(1), bad)],
+            );
+            let failure = input()
+                .prepare_next(&corrupt, LIMBS, &mut allow)
+                .unwrap_err();
+            assert!(matches!(
+                failure,
+                EdgeInputError::Index(IndexError::WrongMarker { .. })
+                    | EdgeInputError::Index(IndexError::WrongFrontier { .. })
+            ));
         }
     }
 
@@ -571,21 +823,41 @@ mod tests {
             (delete(99), EdgeInputError::UnknownEdge),
             (delete(3), EdgeInputError::WrongRelation),
             (cascade(99, &[1]), EdgeInputError::NonIncidentCascade),
-            (DeltaRow::Schema { transition_oid: ObjectId([1; 32]), before_epoch: SchemaEpoch(0),
-                after_epoch: SchemaEpoch(1) }, EdgeInputError::SchemaChanged),
+            (
+                DeltaRow::Schema {
+                    transition_oid: ObjectId([1; 32]),
+                    before_epoch: SchemaEpoch(0),
+                    after_epoch: SchemaEpoch(1),
+                },
+                EdgeInputError::SchemaChanged,
+            ),
         ] {
             let (mut state, mut index) = seed();
-            index.insert(batch(2, vec![coordinate(1, vec![create(88, 1, 8, 8), row])])).unwrap();
-            assert_eq!(state.prepare_next(&index, LIMBS, &mut allow).unwrap_err(), wanted);
+            index
+                .insert(batch(
+                    2,
+                    vec![coordinate(1, vec![create(88, 1, 8, 8), row])],
+                ))
+                .unwrap();
+            assert_eq!(
+                state.prepare_next(&index, LIMBS, &mut allow).unwrap_err(),
+                wanted
+            );
             assert_eq!(state, seed().0);
         }
         for explicit_transition in [false, true] {
             let (mut state, mut index) = seed();
             let mut changed = coordinate(1, vec![create(4, 1, 4, 4)]);
-            if explicit_transition { changed.schema_transition = Some(ObjectId([2; 32])); }
-            else { changed.schema_epoch = SchemaEpoch(1); }
+            if explicit_transition {
+                changed.schema_transition = Some(ObjectId([2; 32]));
+            } else {
+                changed.schema_epoch = SchemaEpoch(1);
+            }
             index.insert(batch(2, vec![changed])).unwrap();
-            assert_eq!(state.prepare_next(&index, LIMBS, &mut allow).unwrap_err(), EdgeInputError::SchemaChanged);
+            assert_eq!(
+                state.prepare_next(&index, LIMBS, &mut allow).unwrap_err(),
+                EdgeInputError::SchemaChanged
+            );
             assert_eq!(state, seed().0);
         }
     }
@@ -595,15 +867,24 @@ mod tests {
         let mut measurements = Vec::new();
         for unrelated in [0, 1000] {
             let mut index = LocalDeltaBatchIndex::new();
-            let rows = (1..=unrelated + 1).map(|id| create(id, 1, id, id + 1)).collect();
+            let rows = (1..=unrelated + 1)
+                .map(|id| create(id, 1, id, id + 1))
+                .collect();
             index.insert(batch(1, vec![coordinate(1, rows)])).unwrap();
             let mut state = input();
             advance(&mut state, &index);
-            index.insert(batch(2, vec![coordinate(1, vec![delete(1)])])).unwrap();
+            index
+                .insert(batch(2, vec![coordinate(1, vec![delete(1)])]))
+                .unwrap();
             let mut events = Vec::new();
-            let delta = state.prepare_next(&index, LIMBS, &mut |event| {
-                events.push(event); Ok::<_, usize>(())
-            }).unwrap().unwrap().commit();
+            let delta = state
+                .prepare_next(&index, LIMBS, &mut |event| {
+                    events.push(event);
+                    Ok::<_, usize>(())
+                })
+                .unwrap()
+                .unwrap()
+                .commit();
             measurements.push((delta, events));
         }
         assert_eq!(measurements[0], measurements[1]);
@@ -628,17 +909,33 @@ mod tests {
                     rows.entry(relation).or_default().push(delete(eid));
                 } else {
                     fresh += 1;
-                    let (relation, source, target) = (1 + random % 2,
-                        u128::from((random >> 8) % 5), u128::from((random >> 16) % 5));
+                    let (relation, source, target) = (
+                        1 + random % 2,
+                        u128::from((random >> 8) % 5),
+                        u128::from((random >> 16) % 5),
+                    );
                     identities.insert(fresh, (relation, source, target));
-                    rows.entry(relation).or_default().push(create(fresh, relation, source, target));
+                    rows.entry(relation)
+                        .or_default()
+                        .push(create(fresh, relation, source, target));
                 }
             }
-            index.insert(batch(seq, rows.into_iter().map(|(relation, rows)| coordinate(relation, rows)).collect())).unwrap();
-            integrated.integrate(&advance(&mut state, &index), LIMBS, &mut allow).unwrap();
+            index
+                .insert(batch(
+                    seq,
+                    rows.into_iter()
+                        .map(|(relation, rows)| coordinate(relation, rows))
+                        .collect(),
+                ))
+                .unwrap();
+            integrated
+                .integrate(&advance(&mut state, &index), LIMBS, &mut allow)
+                .unwrap();
             let mut expected = BTreeMap::<EdgeTuple, i128>::new();
             for &(relation, source, target) in identities.values() {
-                *expected.entry((RelationId(relation), VId(source), VId(target))).or_default() += 1;
+                *expected
+                    .entry((RelationId(relation), VId(source), VId(target)))
+                    .or_default() += 1;
             }
             assert_eq!(plain(&integrated), expected, "sequence {seq}");
             assert_eq!(plain(&state.snapshot(LIMBS, &mut allow).unwrap()), expected);

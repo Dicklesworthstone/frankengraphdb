@@ -275,6 +275,7 @@ mod sealed {
         ) -> Result<(), E> {
             Self::collect_properties(operator, bindings, projected, property, control)
         }
+        #[allow(clippy::too_many_arguments)]
         fn collect_element_properties<'a, E>(
             operator: &GlaOperator,
             bindings: &[Option<VId>],

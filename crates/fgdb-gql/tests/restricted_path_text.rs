@@ -310,8 +310,12 @@ fn unsupported_compound_unbounded_and_shortest_restrictions_refuse_before_catalo
         "MATCH ANY SHORTEST ACYCLIC (a)-[:R*1..3]->(b) RETURN b",
         "MATCH ALL SHORTEST SIMPLE (a)-[:R*1..3]->(b) RETURN b",
     ] {
-        let result =
-            PreparedGraphText::prepare(text, |_: GraphSymbolKind, _: &str| -> Option<GraphSymbol> { panic!("catalog consulted for {text}") });
+        let result = PreparedGraphText::prepare(
+            text,
+            |_: GraphSymbolKind, _: &str| -> Option<GraphSymbol> {
+                panic!("catalog consulted for {text}")
+            },
+        );
         assert!(
             result.is_err(),
             "accepted unsupported path semantics: {text}"

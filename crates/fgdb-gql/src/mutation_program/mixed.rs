@@ -642,7 +642,9 @@ impl MixedMeter {
         // Distinct targets each owe exactly one deletion intent. The common
         // meter checks target bounds, all cumulative dimensions and overflow.
         // Host stats already include incidence records/work: never add twice.
-        let targets = stats.target_vertices.checked_add(stats.target_edges)
+        let targets = stats
+            .target_vertices
+            .checked_add(stats.target_edges)
             .ok_or(GraphMutationProgramError::InvalidStatistics { statement })?;
         self.common.absorb(
             statement,

@@ -36,7 +36,13 @@ fn engine_keys() -> DatabaseKeys {
 }
 
 fn oracle_keys() -> CapsuleKeys {
-    CapsuleKeys::new(K_OID, NAMESPACE, DEK, CAPSULE_OBJECT_KIND, CapsuleProfile::balanced())
+    CapsuleKeys::new(
+        K_OID,
+        NAMESPACE,
+        DEK,
+        CAPSULE_OBJECT_KIND,
+        CapsuleProfile::balanced(),
+    )
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -71,21 +77,36 @@ fn four_batches() -> [WriteBatch; COMMITS] {
 
 async fn commit_four<V: Vfs + Clone>(database: &mut Database<V>, cx: &CommitCx) {
     for batch in four_batches() {
-        database.write(cx, batch).await.expect("commit distinct capsule");
+        database
+            .write(cx, batch)
+            .await
+            .expect("commit distinct capsule");
     }
-    assert_eq!(database.frontier().expect("frontier"), CommitSeq(COMMITS as u64));
+    assert_eq!(
+        database.frontier().expect("frontier"),
+        CommitSeq(COMMITS as u64)
+    );
 }
 
 async fn committed_ids(cx: &CommitCx, dir: &Path) -> Vec<ObjectId> {
     // The expected inventory comes from durable markers, not scrub's output.
-    let oracle = CommitCoordinator::open(cx, dir, oracle_keys()).await.expect("marker oracle");
-    let ids: Vec<_> = oracle.chain().entries().iter().map(|entry| {
-        match &entry.marker.effect_source {
+    let oracle = CommitCoordinator::open(cx, dir, oracle_keys())
+        .await
+        .expect("marker oracle");
+    let ids: Vec<_> = oracle
+        .chain()
+        .entries()
+        .iter()
+        .map(|entry| match &entry.marker.effect_source {
             EffectSource::Local { capsule_ref, .. } => *capsule_ref,
-        }
-    }).collect();
+        })
+        .collect();
     assert_eq!(ids.len(), COMMITS);
-    assert_eq!(id_set(&ids).len(), COMMITS, "all four commits have distinct objects");
+    assert_eq!(
+        id_set(&ids).len(),
+        COMMITS,
+        "all four commits have distinct objects"
+    );
     ids
 }
 
@@ -110,39 +131,81 @@ struct Answers {
 }
 
 fn answers<V: Vfs + Clone>(database: &Database<V>) -> Vec<Answers> {
-    (0..=COMMITS as u64).map(|seq| {
-        let at = CommitSeq(seq);
-        let vertices = database.vertices_at(at).expect("native vertices at retained snapshot");
-        let edges = database.edges_at(at).expect("native edges at retained snapshot");
-        // Pin the fixture independently too: a shared before/after omission is not an oracle.
-        assert_eq!(vertices.len(), if seq == 0 { 0 } else { seq as usize + 1 });
-        assert_eq!(edges.len(), seq as usize);
-        for row in &edges {
-            assert_eq!(database.edge_at(row.entry.eid, at).expect("native edge"), Some(row.clone()));
-        }
-        Answers {
-            at,
-            gql: database.execute_gql_at(PINNED, &bind_r(), at).expect("GQL at retained snapshot"),
-            vertices,
-            edges,
-            outgoing: (1..=5).map(|vid| database.neighbours_at(VId(vid), R, at).expect("native outgoing")).collect(),
-            incoming: (1..=5).map(|vid| database.in_neighbours_at(VId(vid), R, at).expect("native incoming")).collect(),
-        }
-    }).collect()
+    (0..=COMMITS as u64)
+        .map(|seq| {
+            let at = CommitSeq(seq);
+            let vertices = database
+                .vertices_at(at)
+                .expect("native vertices at retained snapshot");
+            let edges = database
+                .edges_at(at)
+                .expect("native edges at retained snapshot");
+            // Pin the fixture independently too: a shared before/after omission is not an oracle.
+            assert_eq!(vertices.len(), if seq == 0 { 0 } else { seq as usize + 1 });
+            assert_eq!(edges.len(), seq as usize);
+            for row in &edges {
+                assert_eq!(
+                    database.edge_at(row.entry.eid, at).expect("native edge"),
+                    Some(row.clone())
+                );
+            }
+            Answers {
+                at,
+                gql: database
+                    .execute_gql_at(PINNED, &bind_r(), at)
+                    .expect("GQL at retained snapshot"),
+                vertices,
+                edges,
+                outgoing: (1..=5)
+                    .map(|vid| {
+                        database
+                            .neighbours_at(VId(vid), R, at)
+                            .expect("native outgoing")
+                    })
+                    .collect(),
+                incoming: (1..=5)
+                    .map(|vid| {
+                        database
+                            .in_neighbours_at(VId(vid), R, at)
+                            .expect("native incoming")
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
 }
 
 fn id_set(ids: &[ObjectId]) -> BTreeSet<ObjectId> {
     ids.iter().copied().collect()
 }
 
-fn assert_summary(summary: &ScrubSummary, clean: &[ObjectId], repaired: &[ObjectId], lost: &[ObjectId]) {
-    assert_eq!(summary.objects, COMMITS, "every marker-reachable object is enumerated");
+fn assert_summary(
+    summary: &ScrubSummary,
+    clean: &[ObjectId],
+    repaired: &[ObjectId],
+    lost: &[ObjectId],
+) {
+    assert_eq!(
+        summary.objects, COMMITS,
+        "every marker-reachable object is enumerated"
+    );
     assert_eq!(summary.clean.len(), clean.len(), "clean multiplicity");
-    assert_eq!(summary.repaired.len(), repaired.len(), "repair multiplicity");
+    assert_eq!(
+        summary.repaired.len(),
+        repaired.len(),
+        "repair multiplicity"
+    );
     assert_eq!(summary.lost.len(), lost.len(), "lost multiplicity");
     assert_eq!(id_set(&summary.clean), id_set(clean));
     assert_eq!(id_set(&summary.repaired), id_set(repaired));
-    assert_eq!(summary.lost.iter().map(|item| item.object_id).collect::<BTreeSet<_>>(), id_set(lost));
+    assert_eq!(
+        summary
+            .lost
+            .iter()
+            .map(|item| item.object_id)
+            .collect::<BTreeSet<_>>(),
+        id_set(lost)
+    );
 }
 
 fn flip_distinct_symbols(original: &[u8], oid: ObjectId, count: usize, mut seed: u64) -> Vec<u8> {
@@ -150,16 +213,26 @@ fn flip_distinct_symbols(original: &[u8], oid: ObjectId, count: usize, mut seed:
     assert!(count <= symbols.len());
     let mut indices: Vec<_> = (0..symbols.len()).collect();
     for nth in 0..count {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let pick = nth + (seed as usize % (indices.len() - nth));
         indices.swap(nth, pick);
         let symbol = &mut symbols[indices[nth]];
         // Alter payload, preserving the descriptor, framing, symbol ID and old MAC.
-        let payload_at = usize::from(HEADER_LEN_V1) + (seed as usize % usize::from(descriptor.symbol_size));
+        let payload_at =
+            usize::from(HEADER_LEN_V1) + (seed as usize % usize::from(descriptor.symbol_size));
         symbol[payload_at] ^= 1 << ((seed >> 32) % 8);
     }
-    let damaged = encode_container(&SealedCapsule { object_id: oid, descriptor, symbols });
-    assert_ne!(damaged, original, "the control really damages distinct authenticated symbols");
+    let damaged = encode_container(&SealedCapsule {
+        object_id: oid,
+        descriptor,
+        symbols,
+    });
+    assert_ne!(
+        damaged, original,
+        "the control really damages distinct authenticated symbols"
+    );
     damaged
 }
 
@@ -169,25 +242,50 @@ fn scrub_enumerates_every_committed_capsule_and_repairs_within_budget() {
     let ((), report) = run_async_under_lab(0xbe01, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.commit();
-        let mut database = Database::create(&cx, &dir, engine_keys()).await.expect("create");
+        let mut database = Database::create(&cx, &dir, engine_keys())
+            .await
+            .expect("create");
         commit_four(&mut database, &cx).await;
         let before = answers(&database);
         drop(database);
         let ids = committed_ids(&cx, &dir).await;
-        let mut database = Database::open(&cx, &dir, engine_keys()).await.expect("reopen after inventory oracle releases writer lease");
-        assert_summary(&database.scrub(&cx).await.expect("clean scrub"), &ids, &[], &[]);
+        let mut database = Database::open(&cx, &dir, engine_keys())
+            .await
+            .expect("reopen after inventory oracle releases writer lease");
+        assert_summary(
+            &database.scrub(&cx).await.expect("clean scrub"),
+            &ids,
+            &[],
+            &[],
+        );
         let target = capsule_disk_path(&dir, ids[1]);
         let original = std::fs::read(&target).expect("original capsule");
         let damaged = flip_distinct_symbols(&original, ids[1], 1, 0xbe01);
         std::fs::write(&target, damaged).expect("plant payload corruption while handle is open");
         let clean = [ids[0], ids[2], ids[3]];
-        assert_summary(&database.scrub(&cx).await.expect("repair scrub"), &clean, &[ids[1]], &[]);
+        assert_summary(
+            &database.scrub(&cx).await.expect("repair scrub"),
+            &clean,
+            &[ids[1]],
+            &[],
+        );
         // Negative-control insertion target: resealing under any different nonce must fail here.
-        assert_eq!(std::fs::read(&target).expect("repaired capsule"), original, "canonical container byte identity, not just recovered plaintext");
-        assert_summary(&database.scrub(&cx).await.expect("second scrub"), &ids, &[], &[]);
+        assert_eq!(
+            std::fs::read(&target).expect("repaired capsule"),
+            original,
+            "canonical container byte identity, not just recovered plaintext"
+        );
+        assert_summary(
+            &database.scrub(&cx).await.expect("second scrub"),
+            &ids,
+            &[],
+            &[],
+        );
         assert_eq!(answers(&database), before);
         drop(database);
-        let reopened = Database::open(&cx, &dir, engine_keys()).await.expect("cold reopen");
+        let reopened = Database::open(&cx, &dir, engine_keys())
+            .await
+            .expect("cold reopen");
         assert_eq!(answers(&reopened), before);
     });
     assert!(report.lab_test_passed(), "lab failed: {report:?}");
@@ -199,39 +297,73 @@ fn scrub_repairs_missing_repair_symbol_inventory_after_truncation() {
     let ((), report) = run_async_under_lab(0xbe02, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.commit();
-        let mut database = Database::create(&cx, &dir, engine_keys()).await.expect("create");
+        let mut database = Database::create(&cx, &dir, engine_keys())
+            .await
+            .expect("create");
         commit_four(&mut database, &cx).await;
         let before = answers(&database);
         drop(database);
         let ids = committed_ids(&cx, &dir).await;
-        let mut database = Database::open(&cx, &dir, engine_keys()).await.expect("reopen before planting truncation");
+        let mut database = Database::open(&cx, &dir, engine_keys())
+            .await
+            .expect("reopen before planting truncation");
         let target = capsule_disk_path(&dir, ids[2]);
         let original = std::fs::read(&target).expect("original capsule");
         let (descriptor, symbols) = decode_container(&original).expect("decode original");
         let missing = CapsuleProfile::balanced().erasure_budget();
         assert_eq!(missing, descriptor.repair_symbols as usize);
         let retained = symbols.len() - missing;
-        let end = CAPSULE_HEADER_BYTES_V1 + symbols[..retained].iter().map(|symbol| 4 + symbol.len()).sum::<usize>();
+        let end = CAPSULE_HEADER_BYTES_V1
+            + symbols[..retained]
+                .iter()
+                .map(|symbol| 4 + symbol.len())
+                .sum::<usize>();
         let truncated = &original[..end];
-        assert_eq!(decode_container(truncated).expect("truncated inventory remains parseable").1.len(), retained);
-        std::fs::write(&target, truncated).expect("drop all repair symbols but retain original declared inventory");
-        assert_summary(&database.scrub(&cx).await.expect("repair missing symbols"), &[ids[0], ids[1], ids[3]], &[ids[2]], &[]);
-        assert_eq!(std::fs::read(&target).expect("restored inventory"), original);
-        assert_summary(&database.scrub(&cx).await.expect("second scrub"), &ids, &[], &[]);
+        assert_eq!(
+            decode_container(truncated)
+                .expect("truncated inventory remains parseable")
+                .1
+                .len(),
+            retained
+        );
+        std::fs::write(&target, truncated)
+            .expect("drop all repair symbols but retain original declared inventory");
+        assert_summary(
+            &database.scrub(&cx).await.expect("repair missing symbols"),
+            &[ids[0], ids[1], ids[3]],
+            &[ids[2]],
+            &[],
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("restored inventory"),
+            original
+        );
+        assert_summary(
+            &database.scrub(&cx).await.expect("second scrub"),
+            &ids,
+            &[],
+            &[],
+        );
         drop(database);
-        let reopened = Database::open(&cx, &dir, engine_keys()).await.expect("cold reopen");
+        let reopened = Database::open(&cx, &dir, engine_keys())
+            .await
+            .expect("cold reopen");
         assert_eq!(answers(&reopened), before);
     });
     assert!(report.lab_test_passed(), "lab failed: {report:?}");
 }
 
 async fn lost_control(cx: &CommitCx, dir: &Path, missing_file: bool) {
-    let mut database = Database::create(cx, dir, engine_keys()).await.expect("create");
+    let mut database = Database::create(cx, dir, engine_keys())
+        .await
+        .expect("create");
     commit_four(&mut database, cx).await;
     let before = answers(&database);
     drop(database);
     let ids = committed_ids(cx, dir).await;
-    let mut database = Database::open(cx, dir, engine_keys()).await.expect("reopen before planting loss");
+    let mut database = Database::open(cx, dir, engine_keys())
+        .await
+        .expect("reopen before planting loss");
     let target = capsule_disk_path(dir, ids[3]);
     let original = std::fs::read(&target).expect("original capsule");
     let ruined = if missing_file {
@@ -245,22 +377,53 @@ async fn lost_control(cx: &CommitCx, dir: &Path, missing_file: bool) {
         Some(bytes)
     };
     // Do not reopen before scrub: open already reads every capsule to rebuild the delta index.
-    let summary = database.scrub(cx).await.expect("loss is a typed verdict, not a scrub I/O refusal");
+    let summary = database
+        .scrub(cx)
+        .await
+        .expect("loss is a typed verdict, not a scrub I/O refusal");
     assert_summary(&summary, &ids[..3], &[], &[ids[3]]);
     assert_eq!(summary.lost[0].reason, LostReason::InsufficientSymbols);
     if let Some(bytes) = &ruined {
-        assert_eq!(&std::fs::read(&target).expect("lost bytes retained"), bytes, "never rewrite beyond-budget evidence");
+        assert_eq!(
+            &std::fs::read(&target).expect("lost bytes retained"),
+            bytes,
+            "never rewrite beyond-budget evidence"
+        );
     } else {
-        assert!(!target.exists(), "scrub must not recreate a missing object from invented data");
+        assert!(
+            !target.exists(),
+            "scrub must not recreate a missing object from invented data"
+        );
     }
     for snapshot in &before {
-        assert!(matches!(database.edges_at(snapshot.at), Err(ReadError::RecoveryRequired(_))), "native reads fail closed at every retained snapshot");
-        assert!(matches!(database.execute_gql_at(PINNED, &bind_r(), snapshot.at), Err(GqlError::Read(ReadError::RecoveryRequired(_)))), "GQL must not return cached partial rows");
+        assert!(
+            matches!(
+                database.edges_at(snapshot.at),
+                Err(ReadError::RecoveryRequired(_))
+            ),
+            "native reads fail closed at every retained snapshot"
+        );
+        assert!(
+            matches!(
+                database.execute_gql_at(PINNED, &bind_r(), snapshot.at),
+                Err(GqlError::Read(ReadError::RecoveryRequired(_)))
+            ),
+            "GQL must not return cached partial rows"
+        );
     }
     drop(database);
-    assert!(matches!(Database::open(cx, dir, engine_keys()).await, Err(OpenError::Rebuild(_))), "cold open refuses the unrecoverable committed capsule with a typed rebuild error");
+    assert!(
+        matches!(
+            Database::open(cx, dir, engine_keys()).await,
+            Err(OpenError::Rebuild(_))
+        ),
+        "cold open refuses the unrecoverable committed capsule with a typed rebuild error"
+    );
     if let Some(bytes) = ruined {
-        assert_eq!(std::fs::read(target).expect("evidence after refusal"), bytes);
+        assert_eq!(
+            std::fs::read(target).expect("evidence after refusal"),
+            bytes
+        );
     } else {
         assert!(!target.exists());
     }
@@ -293,34 +456,65 @@ fn seeded_fault_matrix_repairs_every_commit_and_preserves_all_retained_answers()
         let ((), report) = run_async_under_lab(seed, move |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let cx = contexts.commit();
-            let vfs = FaultVfs::unix(FaultPlan { seed, ..FaultPlan::faultless() });
-            let mut database = Database::create_with_vfs(&cx, vfs.clone(), &dir, engine_keys()).await.expect("create through FaultVfs");
+            let vfs = FaultVfs::unix(FaultPlan {
+                seed,
+                ..FaultPlan::faultless()
+            });
+            let mut database = Database::create_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+                .await
+                .expect("create through FaultVfs");
             commit_four(&mut database, &cx).await;
             let before = answers(&database);
             drop(database);
             let ids = committed_ids(&cx, &dir).await;
-            let mut database = Database::open_with_vfs(&cx, vfs.clone(), &dir, engine_keys()).await.expect("reopen same fault model after inventory oracle");
+            let mut database = Database::open_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+                .await
+                .expect("reopen same fault model after inventory oracle");
             assert!(count <= CapsuleProfile::balanced().erasure_budget());
             let mut originals = Vec::new();
             for (index, oid) in ids.iter().copied().enumerate() {
                 let path = capsule_disk_path(&dir, oid);
                 let original = std::fs::read(&path).expect("original capsule");
                 let damaged = flip_distinct_symbols(&original, oid, count, seed + index as u64);
-                vfs.write(&path, &damaged).await.expect("seeded distinct-symbol corruption across all commits");
+                vfs.write(&path, &damaged)
+                    .await
+                    .expect("seeded distinct-symbol corruption across all commits");
                 originals.push((path, original));
             }
-            assert_summary(&database.scrub(&cx).await.expect("scrub through FaultVfs"), &[], &ids, &[]);
+            assert_summary(
+                &database.scrub(&cx).await.expect("scrub through FaultVfs"),
+                &[],
+                &ids,
+                &[],
+            );
             for (path, original) in &originals {
-                assert_eq!(&std::fs::read(path).expect("canonical repaired container"), original);
+                assert_eq!(
+                    &std::fs::read(path).expect("canonical repaired container"),
+                    original
+                );
             }
-            assert_summary(&database.scrub(&cx).await.expect("second scrub"), &ids, &[], &[]);
+            assert_summary(
+                &database.scrub(&cx).await.expect("second scrub"),
+                &ids,
+                &[],
+                &[],
+            );
             assert_eq!(answers(&database), before);
             drop(database);
             vfs.crash().await.expect("discard every volatile handle");
-            let reopened = Database::open(&cx, &dir, engine_keys()).await.expect("cold reopen after modeled process loss");
-            assert_eq!(answers(&reopened), before, "seed {seed:x}: all retained GQL/native answers");
+            let reopened = Database::open(&cx, &dir, engine_keys())
+                .await
+                .expect("cold reopen after modeled process loss");
+            assert_eq!(
+                answers(&reopened),
+                before,
+                "seed {seed:x}: all retained GQL/native answers"
+            );
         });
-        assert!(report.lab_test_passed(), "seed {seed:x}: lab failed: {report:?}");
+        assert!(
+            report.lab_test_passed(),
+            "seed {seed:x}: lab failed: {report:?}"
+        );
     }
 }
 
@@ -343,46 +537,88 @@ fn every_repair_io_crash_preserves_recoverable_old_or_identical_repaired_contain
             let ((), report) = run_async_under_lab(seed, move |root| async move {
                 let contexts = PurposeContexts::narrow_runtime_root(&root);
                 let cx = contexts.commit();
-                let vfs = FaultVfs::unix(FaultPlan { seed, dirent_loss, ..FaultPlan::faultless() });
-                let mut database = Database::create_with_vfs(&cx, vfs.clone(), &dir, engine_keys()).await.expect("create through crash model");
+                let vfs = FaultVfs::unix(FaultPlan {
+                    seed,
+                    dirent_loss,
+                    ..FaultPlan::faultless()
+                });
+                let mut database = Database::create_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+                    .await
+                    .expect("create through crash model");
                 commit_four(&mut database, &cx).await;
                 let before = answers(&database);
                 drop(database);
                 let ids = committed_ids(&cx, &dir).await;
-                let mut database = Database::open_with_vfs(&cx, vfs.clone(), &dir, engine_keys()).await.expect("reopen same crash model before planting damage");
-                let originals: Vec<_> = ids.iter().copied().map(|oid| {
-                    let path = capsule_disk_path(&dir, oid);
-                    let bytes = std::fs::read(&path).expect("original capsule");
-                    (path, bytes)
-                }).collect();
+                let mut database = Database::open_with_vfs(&cx, vfs.clone(), &dir, engine_keys())
+                    .await
+                    .expect("reopen same crash model before planting damage");
+                let originals: Vec<_> = ids
+                    .iter()
+                    .copied()
+                    .map(|oid| {
+                        let path = capsule_disk_path(&dir, oid);
+                        let bytes = std::fs::read(&path).expect("original capsule");
+                        (path, bytes)
+                    })
+                    .collect();
                 let (target, original) = &originals[1];
                 let damaged = flip_distinct_symbols(original, ids[1], 2, seed);
-                vfs.write(target, &damaged).await.expect("plant durable recoverable old image through the inode cache");
+                vfs.write(target, &damaged)
+                    .await
+                    .expect("plant durable recoverable old image through the inode cache");
                 let result = database.scrub_with_crash(&cx, Some(point)).await;
-                assert!(matches!(&result, Err(CommitError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted), "production repair must reach {point:?}: {result:?}");
+                assert!(
+                    matches!(&result, Err(CommitError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted),
+                    "production repair must reach {point:?}: {result:?}"
+                );
                 drop(database);
-                vfs.crash().await.expect("real modeled crash at repair boundary");
+                vfs.crash()
+                    .await
+                    .expect("real modeled crash at repair boundary");
                 let survived = std::fs::read(target).expect("committed capsule name survives");
                 // Negative-control insertion target: remove temp sync before rename.
                 // AfterRename + dirent_loss Never then leaves neither legal image.
-                assert!(survived == damaged || survived == *original, "{point:?}, loss={dirent_loss:?}: neither old recoverable nor exact canonical bytes survived");
+                assert!(
+                    survived == damaged || survived == *original,
+                    "{point:?}, loss={dirent_loss:?}: neither old recoverable nor exact canonical bytes survived"
+                );
                 for (index, (path, bytes)) in originals.iter().enumerate() {
                     if index != 1 {
                         assert_eq!(&std::fs::read(path).expect("untouched capsule"), bytes);
                     }
                 }
-                let mut reopened = Database::open(&cx, &dir, engine_keys()).await.expect("cold reopen must decode whichever image survived");
-                assert_eq!(answers(&reopened), before, "all retained answers after {point:?}");
-                let summary = reopened.scrub(&cx).await.expect("resume repair after crash");
+                let mut reopened = Database::open(&cx, &dir, engine_keys())
+                    .await
+                    .expect("cold reopen must decode whichever image survived");
+                assert_eq!(
+                    answers(&reopened),
+                    before,
+                    "all retained answers after {point:?}"
+                );
+                let summary = reopened
+                    .scrub(&cx)
+                    .await
+                    .expect("resume repair after crash");
                 if survived == damaged {
                     assert_summary(&summary, &[ids[0], ids[2], ids[3]], &[ids[1]], &[]);
                 } else {
                     assert_summary(&summary, &ids, &[], &[]);
                 }
-                assert_eq!(&std::fs::read(target).expect("canonical after resumed repair"), original);
-                assert_summary(&reopened.scrub(&cx).await.expect("resumed second scrub"), &ids, &[], &[]);
+                assert_eq!(
+                    &std::fs::read(target).expect("canonical after resumed repair"),
+                    original
+                );
+                assert_summary(
+                    &reopened.scrub(&cx).await.expect("resumed second scrub"),
+                    &ids,
+                    &[],
+                    &[],
+                );
             });
-            assert!(report.lab_test_passed(), "{point:?}, loss={dirent_loss:?}: lab failed: {report:?}");
+            assert!(
+                report.lab_test_passed(),
+                "{point:?}, loss={dirent_loss:?}: lab failed: {report:?}"
+            );
         }
     }
 }

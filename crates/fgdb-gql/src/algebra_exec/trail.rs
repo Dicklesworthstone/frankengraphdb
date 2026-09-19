@@ -35,8 +35,10 @@ impl<'a> IdentifiedExpansion<'a> {
             GraphWalkSearch::AnyShortest => {
                 // ANY already coalesces equal-depth endpoint prefixes. Keep
                 // its deterministic one-path-per-endpoint selection.
-                return crate::walk::GraphPathCursor::new(source, bounds, search, adjacency, control)
-                    .map(Self::Path);
+                return crate::walk::GraphPathCursor::new(
+                    source, bounds, search, adjacency, control,
+                )
+                .map(Self::Path);
             }
             GraphWalkSearch::All => CaptureMode::All,
             GraphWalkSearch::AllShortest => CaptureMode::AllShortest,

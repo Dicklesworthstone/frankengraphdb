@@ -46,9 +46,15 @@ pub enum StandingQueryFailure {
     NonIntegerHaving,
     /// Computed input column and value-independent scalar failure. A source
     /// binding identity or payload is never included in the diagnostic.
-    InputExpression { column: usize, error: fgdb_gql::GraphIntegerError },
+    InputExpression {
+        column: usize,
+        error: fgdb_gql::GraphIntegerError,
+    },
     /// Post-HAVING output expression failure; no partial result is published.
-    OutputExpression { column: usize, error: fgdb_gql::GraphIntegerError },
+    OutputExpression {
+        column: usize,
+        error: fgdb_gql::GraphIntegerError,
+    },
     InvalidDelta,
 }
 
@@ -98,19 +104,27 @@ pub struct StandingQueryView<'a, Row: Ord = GraphAggregateRow> {
     stats: &'a StandingQueryStats,
 }
 impl<Row: Ord> StandingQueryView<'_, Row> {
-    pub fn frontier(&self) -> CommitSeq { self.frontier }
+    pub fn frontier(&self) -> CommitSeq {
+        self.frontier
+    }
     /// The final selected result bag, including the output window when present.
     /// ALL collisions have positive multiplicities; DISTINCT has weight one
     /// per selected class. Z-set key order is NOT the query's ORDER BY.
-    pub fn rows(&self) -> &ZSet<Row> { self.rows }
+    pub fn rows(&self) -> &ZSet<Row> {
+        self.rows
+    }
     /// Query-order occurrences for definitions with ORDER BY, OFFSET or LIMIT.
     /// Includes duplicate ALL occurrences. Some(empty) is a valid empty page;
     /// None means this view has no ranked result stage (including reachability).
     /// Iteration borrows the same published generation as rows() and frontier().
-    pub fn ordered_rows(&self) -> Option<impl DoubleEndedIterator<Item = &Row> + ExactSizeIterator + '_> {
+    pub fn ordered_rows(
+        &self,
+    ) -> Option<impl DoubleEndedIterator<Item = &Row> + ExactSizeIterator + '_> {
         self.ordered.map(|rows| rows.iter().map(Arc::as_ref))
     }
-    pub fn last_maintenance(&self) -> &StandingQueryStats { self.stats }
+    pub fn last_maintenance(&self) -> &StandingQueryStats {
+        self.stats
+    }
 }
 
 pub(crate) enum StandingQuery {
@@ -143,7 +157,9 @@ impl StandingQuery {
             Self::Aggregate(query) | Self::ProjectedAggregate { source: query, .. } => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
-            Self::Reachability(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Reachability(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
         };
         match result {
             Ok(()) => *frontier = at,
@@ -223,11 +239,16 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<StandingQuery, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         if definition.has_incremental_output_transform() {
-            let producer = definition.incremental_source_definition()
+            let producer = definition
+                .incremental_source_definition()
                 .ok_or(StandingQueryError::Unsupported)?;
             let mut output = output::State::new(definition);
-            let source = self.prepare_standing_query_with_output(cx, producer, policy, Some(&mut output))?;
-            Ok(StandingQuery::ProjectedAggregate { source: Box::new(source), output: Box::new(output) })
+            let source =
+                self.prepare_standing_query_with_output(cx, producer, policy, Some(&mut output))?;
+            Ok(StandingQuery::ProjectedAggregate {
+                source: Box::new(source),
+                output: Box::new(output),
+            })
         } else {
             let query = self.prepare_standing_query(cx, definition, policy)?;
             Ok(StandingQuery::Aggregate(Box::new(query)))
@@ -268,7 +289,10 @@ impl<V: Vfs + Clone> Database<V> {
     fn store_standing_query(&mut self, query: StandingQuery) -> StandingQueryHandle {
         let index = self.standing_queries.len();
         self.standing_queries.push(query);
-        StandingQueryHandle { owner: Arc::clone(&self.handle_owner), index }
+        StandingQueryHandle {
+            owner: Arc::clone(&self.handle_owner),
+            index,
+        }
     }
 
     /// Repair either kind of maintained result without changing its handle or
@@ -289,10 +313,14 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(StandingQueryError::ForeignHandle);
         }
         self.ensure_readable().map_err(StandingQueryError::Read)?;
-        let current = self.standing_queries.get(handle.index)
+        let current = self
+            .standing_queries
+            .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
         let replacement = match current {
-            StandingQuery::Aggregate(query) => self.prepare_registered_aggregate(cx, query.definition.clone(), policy)?,
+            StandingQuery::Aggregate(query) => {
+                self.prepare_registered_aggregate(cx, query.definition.clone(), policy)?
+            }
             StandingQuery::ProjectedAggregate { output, .. } => {
                 self.prepare_registered_aggregate(cx, output.definition().clone(), policy)?
             }
@@ -316,7 +344,9 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(StandingQueryError::ForeignHandle);
         }
         self.ensure_readable().map_err(StandingQueryError::Read)?;
-        let query = self.standing_queries.get(handle.index)
+        let query = self
+            .standing_queries
+            .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
         let (_, frontier, failure) = query.status();
         if let Some(reason) = failure {
@@ -324,7 +354,8 @@ impl<V: Vfs + Clone> Database<V> {
         }
         if frontier != self.snapshot.frontier {
             return Err(StandingQueryError::Unavailable {
-                frontier, reason: StandingQueryFailure::InvalidDelta,
+                frontier,
+                reason: StandingQueryFailure::InvalidDelta,
             });
         }
         Ok(query)
@@ -345,7 +376,12 @@ impl<V: Vfs + Clone> Database<V> {
             }
             StandingQuery::Reachability(_) => return Err(StandingQueryError::Unsupported),
         };
-        Ok(StandingQueryView { rows, ordered, frontier: query.frontier, stats: &query.stats })
+        Ok(StandingQueryView {
+            rows,
+            ordered,
+            frontier: query.frontier,
+            stats: &query.stats,
+        })
     }
 
     /// Borrow the current recursive pair set, with the same owner, health,
@@ -358,7 +394,12 @@ impl<V: Vfs + Clone> Database<V> {
         let StandingQuery::Reachability(query) = self.admitted_standing_query(cx, handle)? else {
             return Err(StandingQueryError::Unsupported);
         };
-        Ok(StandingQueryView { rows: &query.rows, ordered: None, frontier: query.frontier, stats: &query.stats })
+        Ok(StandingQueryView {
+            rows: &query.rows,
+            ordered: None,
+            frontier: query.frontier,
+            stats: &query.stats,
+        })
     }
 }
 
@@ -367,9 +408,18 @@ impl<V: Vfs + Clone> Database<V> {
 pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &LogicalDeltaBatch) {
     for query in queries {
         let (policy, _, failure) = query.status();
-        if failure.is_some() { continue; }
-        let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-        let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+        if failure.is_some() {
+            continue;
+        }
+        let mut checkpoint = || {
+            cx.checkpoint()
+                .map_err(|_| StandingQueryFailure::Interrupted)
+        };
+        let mut meter = Meter {
+            policy,
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
         let result = match query {
             StandingQuery::Aggregate(query) => query.maintain(batch, &mut meter),
             StandingQuery::ProjectedAggregate { source, output } => {

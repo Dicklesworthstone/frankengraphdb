@@ -33,7 +33,9 @@ impl PreparedGraphAggregate {
         };
         match projection.get(column)?.value() {
             GraphSetValue::Column(source) => self.incremental_source_column_type(*source),
-            GraphSetValue::Literal(_) | GraphSetValue::Integer(_) => Some(GraphSetColumnType::Scalar),
+            GraphSetValue::Literal(_) | GraphSetValue::Integer(_) => {
+                Some(GraphSetColumnType::Scalar)
+            }
             GraphSetValue::Value(GraphValue::Scalar(_)) => Some(GraphSetColumnType::Scalar),
             GraphSetValue::Value(GraphValue::Vertex(_)) => Some(GraphSetColumnType::Vertex),
             _ => None,
@@ -52,7 +54,9 @@ impl PreparedGraphAggregate {
         {
             return false;
         }
-        let width = self.computed_input.as_ref()
+        let width = self
+            .computed_input
+            .as_ref()
             .map_or(self.input.value_columns().len(), Vec::len);
         (0..width).all(|column| self.incremental_input_column_type(column).is_some())
     }
@@ -78,7 +82,8 @@ impl PreparedGraphAggregate {
         govern(GlaExecutionEvent::Work)?;
         // Validate bounded widths before any per-cell loop or row construction.
         if values.len() != self.input.value_columns().len()
-            || values.is_empty() || values.len() > MAX_PATTERN_VERTICES
+            || values.is_empty()
+            || values.len() > MAX_PATTERN_VERTICES
         {
             return Ok(None);
         }
@@ -86,23 +91,37 @@ impl PreparedGraphAggregate {
             govern(GlaExecutionEvent::Work)?;
             let accepts = match self.incremental_source_column_type(column) {
                 Some(GraphSetColumnType::Scalar) => matches!(value, GraphValue::Scalar(_)),
-                Some(GraphSetColumnType::Vertex) => matches!(value, GraphValue::Vertex(_)) || value.is_null(),
+                Some(GraphSetColumnType::Vertex) => {
+                    matches!(value, GraphValue::Vertex(_)) || value.is_null()
+                }
                 _ => false,
             };
-            if !accepts { return Ok(None); }
+            if !accepts {
+                return Ok(None);
+            }
         }
         if let Some(projection) = &self.computed_input {
-            for _ in projection { govern(GlaExecutionEvent::Work)?; }
+            for _ in projection {
+                govern(GlaExecutionEvent::Work)?;
+            }
         }
-        if !self.supports_incremental_input() { return Ok(None); }
+        if !self.supports_incremental_input() {
+            return Ok(None);
+        }
         govern(GlaExecutionEvent::ScratchEntry)?;
         let source = GraphValueRow::from_owned_values(values);
         let result = if let Some(projection) = &self.computed_input {
             GraphSetProjection::evaluate_row_with_control(
-                &source, projection, &mut govern,
-                |column, error| GqlQueryError::Source(GraphAggregateError::InputExpression {
-                    row: 0, column, error,
-                }),
+                &source,
+                projection,
+                &mut govern,
+                |column, error| {
+                    GqlQueryError::Source(GraphAggregateError::InputExpression {
+                        row: 0,
+                        column,
+                        error,
+                    })
+                },
             )?
         } else {
             source
@@ -116,60 +135,106 @@ impl PreparedGraphAggregate {
 mod tests {
     use super::*;
     use crate::algebra::{GraphColumn, GraphPatternBuilder};
-    use crate::{GraphIntegerBinary, GraphIntegerErrorKind, GraphIntegerExpression, GraphIntegerOp};
+    use crate::{
+        GraphIntegerBinary, GraphIntegerErrorKind, GraphIntegerExpression, GraphIntegerOp,
+    };
 
     fn input() -> PreparedGraphPattern<GraphValueRow> {
         let mut source = GraphPatternBuilder::new();
         source.vertex("n").unwrap();
-        source.prepare_values(&[
-            GraphColumn::vertex("id", "n"),
-            GraphColumn::property("quantity", "n", PropertyKeyId(1)),
-            GraphColumn::property("price", "n", PropertyKeyId(2)),
-            GraphColumn::property("category", "n", PropertyKeyId(3)),
-        ], 0, None).unwrap().with_duplicates()
+        source
+            .prepare_values(
+                &[
+                    GraphColumn::vertex("id", "n"),
+                    GraphColumn::property("quantity", "n", PropertyKeyId(1)),
+                    GraphColumn::property("price", "n", PropertyKeyId(2)),
+                    GraphColumn::property("category", "n", PropertyKeyId(3)),
+                ],
+                0,
+                None,
+            )
+            .unwrap()
+            .with_duplicates()
     }
 
     fn definition() -> PreparedGraphAggregate {
         let product = GraphIntegerExpression::prepare(&[
-            GraphIntegerOp::Column(1), GraphIntegerOp::Column(2),
+            GraphIntegerOp::Column(1),
+            GraphIntegerOp::Column(2),
             GraphIntegerOp::Binary(GraphIntegerBinary::Multiply),
-        ]).unwrap();
+        ])
+        .unwrap();
         let lower = GraphIntegerExpression::prepare_scalar(&[
-            GraphIntegerOp::ScalarColumn(3), GraphIntegerOp::Lower,
-        ]).unwrap();
-        PreparedGraphAggregate::prepare_projected(input(), vec![
-            GraphSetProjection::new("cost", GraphSetValue::Integer(product)),
-            GraphSetProjection::new("bucket", GraphSetValue::Integer(lower)),
-            GraphSetProjection::new("owner", GraphSetValue::Column(0)),
-        ], &[1], &[
-            GraphAggregate::sum_int("sum", 0), GraphAggregate::min("first", 2),
-        ], 0, None).unwrap()
+            GraphIntegerOp::ScalarColumn(3),
+            GraphIntegerOp::Lower,
+        ])
+        .unwrap();
+        PreparedGraphAggregate::prepare_projected(
+            input(),
+            vec![
+                GraphSetProjection::new("cost", GraphSetValue::Integer(product)),
+                GraphSetProjection::new("bucket", GraphSetValue::Integer(lower)),
+                GraphSetProjection::new("owner", GraphSetValue::Column(0)),
+            ],
+            &[1],
+            &[
+                GraphAggregate::sum_int("sum", 0),
+                GraphAggregate::min("first", 2),
+            ],
+            0,
+            None,
+        )
+        .unwrap()
     }
 
     fn source() -> Vec<GraphValue> {
-        vec![GraphValue::Vertex(VId(u128::MAX)),
+        vec![
+            GraphValue::Vertex(VId(u128::MAX)),
             GraphValue::Scalar(CanonicalScalar::Int(3)),
             GraphValue::Scalar(CanonicalScalar::Int(7)),
-            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("BOOKS").unwrap())]
+            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("BOOKS").unwrap()),
+        ]
     }
 
     #[test]
     fn projected_schema_and_row_use_output_positions_not_source_positions() {
         let query = definition();
         assert!(query.supports_incremental_input());
-        assert_eq!(query.incremental_input_column_type(0), Some(GraphSetColumnType::Scalar));
-        assert_eq!(query.incremental_input_column_type(2), Some(GraphSetColumnType::Vertex));
+        assert_eq!(
+            query.incremental_input_column_type(0),
+            Some(GraphSetColumnType::Scalar)
+        );
+        assert_eq!(
+            query.incremental_input_column_type(2),
+            Some(GraphSetColumnType::Vertex)
+        );
         assert_eq!(query.incremental_input_column_type(3), None);
-        let row = query.evaluate_incremental_input(source(), &mut |_| Ok::<_, ()>(())).unwrap().unwrap();
-        assert_eq!(row.values(), &[
-            GraphValue::Scalar(CanonicalScalar::Int(21)),
-            GraphValue::Scalar(CanonicalScalar::ucs_basic_text("books").unwrap()),
-            GraphValue::Vertex(VId(u128::MAX)),
-        ]);
-        assert!(query.evaluate_incremental_input(vec![], &mut |_| Ok::<_, ()>(())).unwrap().is_none());
+        let row = query
+            .evaluate_incremental_input(source(), &mut |_| Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.values(),
+            &[
+                GraphValue::Scalar(CanonicalScalar::Int(21)),
+                GraphValue::Scalar(CanonicalScalar::ucs_basic_text("books").unwrap()),
+                GraphValue::Vertex(VId(u128::MAX)),
+            ]
+        );
+        assert!(
+            query
+                .evaluate_incremental_input(vec![], &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
         let mut wrong = source();
         wrong[0] = GraphValue::Scalar(CanonicalScalar::Int(1));
-        assert!(query.evaluate_incremental_input(wrong, &mut |_| Ok::<_, ()>(())).unwrap().is_none());
+        assert!(
+            query
+                .evaluate_incremental_input(wrong, &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -177,9 +242,13 @@ mod tests {
         let query = definition();
         let before = query.canonical_bytes();
         let mut calls = 0;
-        let expected = query.evaluate_incremental_input(source(), &mut |_| {
-            calls += 1; Ok::<_, usize>(())
-        }).unwrap().unwrap();
+        let expected = query
+            .evaluate_incremental_input(source(), &mut |_| {
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap()
+            .unwrap();
         for stop in 1..=calls {
             let mut seen = 0;
             let result = query.evaluate_incremental_input(source(), &mut |_| {
@@ -189,36 +258,74 @@ mod tests {
             assert!(matches!(result, Err(GqlQueryError::Interrupted(at)) if at == stop));
             assert_eq!(seen, stop);
             assert_eq!(query.canonical_bytes(), before);
-            assert_eq!(query.evaluate_incremental_input(source(), &mut |_| Ok::<_, ()>(()))
-                .unwrap().unwrap(), expected);
+            assert_eq!(
+                query
+                    .evaluate_incremental_input(source(), &mut |_| Ok::<_, ()>(()))
+                    .unwrap()
+                    .unwrap(),
+                expected
+            );
         }
     }
 
     #[test]
     fn hidden_computed_errors_are_eager_but_coalesce_branches_remain_lazy() {
         let fallback = GraphIntegerExpression::prepare(&[
-            GraphIntegerOp::Column(1), GraphIntegerOp::Literal(Some(1)),
-            GraphIntegerOp::Literal(Some(0)), GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+            GraphIntegerOp::Column(1),
+            GraphIntegerOp::Literal(Some(1)),
+            GraphIntegerOp::Literal(Some(0)),
+            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
             GraphIntegerOp::Coalesce,
-        ]).unwrap();
-        let query = PreparedGraphAggregate::prepare_projected(input(), vec![
-            GraphSetProjection::new("unused", GraphSetValue::Integer(fallback)),
-        ], &[], &[GraphAggregate::count_rows("count")], 0, None).unwrap();
-        assert!(query.evaluate_incremental_input(source(), &mut |_| Ok::<_, ()>(())).unwrap().is_some());
+        ])
+        .unwrap();
+        let query = PreparedGraphAggregate::prepare_projected(
+            input(),
+            vec![GraphSetProjection::new(
+                "unused",
+                GraphSetValue::Integer(fallback),
+            )],
+            &[],
+            &[GraphAggregate::count_rows("count")],
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(
+            query
+                .evaluate_incremental_input(source(), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_some()
+        );
         let mut null = source();
         null[1] = GraphValue::Scalar(CanonicalScalar::Null);
         let error = query.evaluate_incremental_input(null, &mut |_| Ok::<_, ()>(()));
-        assert!(matches!(error, Err(GqlQueryError::Source(GraphAggregateError::InputExpression {
+        assert!(
+            matches!(error, Err(GqlQueryError::Source(GraphAggregateError::InputExpression {
             row: 0, column: 0, error,
-        })) if error.kind == GraphIntegerErrorKind::DivisionByZero));
+        })) if error.kind == GraphIntegerErrorKind::DivisionByZero)
+        );
     }
 
     #[test]
     fn unsupported_collection_inputs_fail_closed_even_when_only_counting_rows() {
-        let query = PreparedGraphAggregate::prepare_projected(input(), vec![
-            GraphSetProjection::new("unused", GraphSetValue::List(vec![GraphSetValue::Column(1)])),
-        ], &[], &[GraphAggregate::count_rows("count")], 0, None).unwrap();
+        let query = PreparedGraphAggregate::prepare_projected(
+            input(),
+            vec![GraphSetProjection::new(
+                "unused",
+                GraphSetValue::List(vec![GraphSetValue::Column(1)]),
+            )],
+            &[],
+            &[GraphAggregate::count_rows("count")],
+            0,
+            None,
+        )
+        .unwrap();
         assert!(!query.supports_incremental_input());
-        assert!(query.evaluate_incremental_input(source(), &mut |_| Ok::<_, ()>(())).unwrap().is_none());
+        assert!(
+            query
+                .evaluate_incremental_input(source(), &mut |_| Ok::<_, ()>(()))
+                .unwrap()
+                .is_none()
+        );
     }
 }

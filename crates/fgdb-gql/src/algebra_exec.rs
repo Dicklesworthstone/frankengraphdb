@@ -325,24 +325,34 @@ fn build_identified_index<E>(
 ) -> Result<IdentifiedIndex, E> {
     let mut index = IdentifiedIndex::new();
     for operator in operators {
-        if let GlaOperator::ScanEdges {
-            relation,
-            direction,
-        }
-        | GlaOperator::Expand {
-            relation,
-            direction,
-            ..
-        }
-        | GlaOperator::VarLengthExpand {
-            relation,
-            direction,
-            ..
-        } = operator
-        {
-            if !index.contains_key(&(*relation, *direction)) {
+        if matches!(
+            operator,
+            GlaOperator::ScanEdges { .. }
+                | GlaOperator::Expand { .. }
+                | GlaOperator::VarLengthExpand { .. }
+        ) {
+            let (relation, direction) = match operator {
+                GlaOperator::ScanEdges {
+                    relation,
+                    direction,
+                }
+                | GlaOperator::Expand {
+                    relation,
+                    direction,
+                    ..
+                }
+                | GlaOperator::VarLengthExpand {
+                    relation,
+                    direction,
+                    ..
+                } => (*relation, *direction),
+                _ => unreachable!(),
+            };
+            if let std::collections::btree_map::Entry::Vacant(e) =
+                index.entry((relation, direction))
+            {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                index.insert((*relation, *direction), BTreeMap::new());
+                e.insert(BTreeMap::new());
             }
         }
     }

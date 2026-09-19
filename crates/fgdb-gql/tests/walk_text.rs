@@ -51,11 +51,12 @@ fn quantified_text_has_the_same_plan_as_typed_walks_and_rebinds_without_resolvin
                 WHERE b.n >= $floor RETURN a,b.n AS score SKIP $off LIMIT $take"
             );
             let calls = Cell::new(0);
-            let template = PreparedGraphText::prepare(&text, |kind: GraphSymbolKind, name: &str| {
-                calls.set(calls.get() + 1);
-                symbols(kind, name)
-            })
-            .unwrap();
+            let template =
+                PreparedGraphText::prepare(&text, |kind: GraphSymbolKind, name: &str| {
+                    calls.set(calls.get() + 1);
+                    symbols(kind, name)
+                })
+                .unwrap();
             assert_eq!(calls.get(), 3, "each unique graph symbol resolves once");
             let arguments = GqlParameters::new()
                 .with_int64("floor", 5)
@@ -163,9 +164,10 @@ fn unsafe_ambiguous_or_unbounded_quantifiers_refuse_before_any_catalog_call() {
         GraphPatternTextErrorKind::UnknownSymbol(GraphSymbolKind::Relation)
     );
     assert!(!format!("{unknown:?}").contains("Unknown*0"));
-    let wrong = PreparedGraphText::prepare("MATCH WALK (a)-[:R*0]->(b) RETURN a", |_: GraphSymbolKind, _: &str| {
-        Some(GraphSymbol::Property(PropertyKeyId(1)))
-    })
+    let wrong = PreparedGraphText::prepare(
+        "MATCH WALK (a)-[:R*0]->(b) RETURN a",
+        |_: GraphSymbolKind, _: &str| Some(GraphSymbol::Property(PropertyKeyId(1))),
+    )
     .unwrap_err();
     assert!(matches!(
         wrong.kind,

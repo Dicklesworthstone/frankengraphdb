@@ -6,7 +6,9 @@
 //! One-hop inputs retain their specialized maintainer; connected positive joins
 //! and correlated multi-hop scopes share affected-binding joins across relations.
 
+#[path = "edge/multi_hop.rs"]
 mod multi_hop;
+#[path = "edge/scoped.rs"]
 mod scoped;
 
 use super::*;
@@ -85,12 +87,12 @@ impl State {
         meter: &mut Meter<'_>,
     ) -> Result<Patch, StandingQueryFailure> {
         let input = match &self.input {
-            Input::OneHop(state) => InputPatch::OneHop(
-                state.prepare(query, batch, vertices, staged, output, meter)?,
-            ),
-            Input::MultiHop(state) => InputPatch::MultiHop(
-                state.prepare(query, batch, vertices, staged, output, meter)?,
-            ),
+            Input::OneHop(state) => {
+                InputPatch::OneHop(state.prepare(query, batch, vertices, staged, output, meter)?)
+            }
+            Input::MultiHop(state) => {
+                InputPatch::MultiHop(state.prepare(query, batch, vertices, staged, output, meter)?)
+            }
         };
         Ok(Patch { input })
     }
@@ -162,7 +164,10 @@ fn reserve_edge(pair: Endpoints, meter: &mut Meter<'_>) -> Result<(), StandingQu
     // Conservative logical reservations: one identity, plus an incident-group
     // key and set member per distinct endpoint. Existing groups may reuse the
     // reservation. Every allocation at publication was admitted beforehand.
-    meter.units(ZSetEvent::ScratchEntry, if pair.0 == pair.1 { 3 } else { 5 })
+    meter.units(
+        ZSetEvent::ScratchEntry,
+        if pair.0 == pair.1 { 3 } else { 5 },
+    )
 }
 
 fn vertex<'a>(
@@ -174,22 +179,30 @@ fn vertex<'a>(
     match patch.get(&vid) {
         Some(state) => state.as_ref(),
         None => vertices.get(&vid),
-    }.ok_or(StandingQueryFailure::InvalidDelta)
+    }
+    .ok_or(StandingQueryFailure::InvalidDelta)
 }
 
 impl OneHopState {
     fn for_definition(query: &PreparedGraphAggregate) -> Option<Self> {
         let scope = scoped::Shape::of(query);
         let (relation, direction) = match query.input_pattern().plan().operators().first()? {
-            GlaOperator::ScanEdges { relation, direction } => (*relation, *direction),
+            GlaOperator::ScanEdges {
+                relation,
+                direction,
+            } => (*relation, *direction),
             _ => {
                 let scope = scope?;
                 (scope.relation, scope.direction)
             }
         };
         Some(Self {
-            relation, direction, scope, witnesses: BTreeMap::new(),
-            edges: BTreeMap::new(), incident: BTreeMap::new(),
+            relation,
+            direction,
+            scope,
+            witnesses: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            incident: BTreeMap::new(),
         })
     }
 
@@ -203,8 +216,15 @@ impl OneHopState {
         if let Some(scope) = self.scope {
             for (&vid, state) in vertices {
                 meter.charge(ZSetEvent::Work)?;
-                scope.root_contribution(query, vid, Some(state),
-                    self.witnesses.get(&vid).copied().unwrap_or(0), 1, output, meter)?;
+                scope.root_contribution(
+                    query,
+                    vid,
+                    Some(state),
+                    self.witnesses.get(&vid).copied().unwrap_or(0),
+                    1,
+                    output,
+                    meter,
+                )?;
             }
         }
         Ok(())
@@ -228,8 +248,12 @@ impl OneHopState {
         let forward = [(src, source), (dst, target)];
         let reverse = [(dst, target), (src, source)];
         match self.direction {
-            GlaDirection::Forward => grouped::binding_contributions(query, &forward, sign, output, meter),
-            GlaDirection::Reverse => grouped::binding_contributions(query, &reverse, sign, output, meter),
+            GlaDirection::Forward => {
+                grouped::binding_contributions(query, &forward, sign, output, meter)
+            }
+            GlaDirection::Reverse => {
+                grouped::binding_contributions(query, &reverse, sign, output, meter)
+            }
             GlaDirection::Undirected => {
                 grouped::binding_contributions(query, &forward, sign, output, meter)?;
                 // One undirected self-loop is one edge occurrence, not two.
@@ -258,16 +282,30 @@ impl OneHopState {
         meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
-        if row.relation != self.relation { return Ok(()); }
-        if self.edges.contains_key(&row.eid) { return Err(StandingQueryFailure::InvalidDelta); }
+        if row.relation != self.relation {
+            return Ok(());
+        }
+        if self.edges.contains_key(&row.eid) {
+            return Err(StandingQueryFailure::InvalidDelta);
+        }
         let pair = (row.src, row.dst);
         reserve_edge(pair, meter)?;
         if let Some(scope) = self.scope {
             let mut changes = BTreeMap::new();
-            scope.contribute(query, pair, vertices, &BTreeMap::new(), 1, &mut changes, output, meter)?;
+            scope.contribute(
+                query,
+                pair,
+                vertices,
+                &BTreeMap::new(),
+                1,
+                &mut changes,
+                output,
+                meter,
+            )?;
             for (vid, change) in changes {
                 let count = i128::from(self.witnesses.get(&vid).copied().unwrap_or(0))
-                    .checked_add(change).and_then(|n| u64::try_from(n).ok())
+                    .checked_add(change)
+                    .and_then(|n| u64::try_from(n).ok())
                     .ok_or(StandingQueryFailure::InvalidDelta)?;
                 if !self.witnesses.contains_key(&vid) {
                     meter.charge(ZSetEvent::ScratchEntry)?;
@@ -294,7 +332,9 @@ impl OneHopState {
         for vid in staged.keys() {
             meter.charge(ZSetEvent::Work)?;
             if let Some(edges) = self.incident.get(vid) {
-                for &eid in edges { touch(&mut affected, eid, meter)?; }
+                for &eid in edges {
+                    touch(&mut affected, eid, meter)?;
+                }
             }
         }
         let mut created = BTreeMap::new();
@@ -304,12 +344,25 @@ impl OneHopState {
         // every relevant creation before inspecting deletions.
         for entry in batch.coordinate_entries() {
             meter.charge(ZSetEvent::Work)?;
-            if entry.graph != crate::GRAPH || entry.branch != crate::BRANCH { continue; }
+            if entry.graph != crate::GRAPH || entry.branch != crate::BRANCH {
+                continue;
+            }
             for row in &entry.rows {
                 meter.charge(ZSetEvent::Work)?;
-                if let DeltaRow::CreateEdge { eid, src, relation, dst, .. } = row {
-                    if *relation != entry.relation { return Err(StandingQueryFailure::InvalidDelta); }
-                    if *relation != self.relation { continue; }
+                if let DeltaRow::CreateEdge {
+                    eid,
+                    src,
+                    relation,
+                    dst,
+                    ..
+                } = row
+                {
+                    if *relation != entry.relation {
+                        return Err(StandingQueryFailure::InvalidDelta);
+                    }
+                    if *relation != self.relation {
+                        continue;
+                    }
                     if self.edges.contains_key(eid) || created.contains_key(eid) {
                         return Err(StandingQueryFailure::InvalidDelta);
                     }
@@ -323,21 +376,31 @@ impl OneHopState {
         }
         for entry in batch.coordinate_entries() {
             meter.charge(ZSetEvent::Work)?;
-            if entry.graph != crate::GRAPH || entry.branch != crate::BRANCH { continue; }
+            if entry.graph != crate::GRAPH || entry.branch != crate::BRANCH {
+                continue;
+            }
             for row in &entry.rows {
                 meter.charge(ZSetEvent::Work)?;
                 match row {
                     DeltaRow::DeleteEdge { eid, .. } => {
                         let known = created.contains_key(eid) || self.edges.contains_key(eid);
                         if entry.relation != self.relation {
-                            if known { return Err(StandingQueryFailure::InvalidDelta); }
+                            if known {
+                                return Err(StandingQueryFailure::InvalidDelta);
+                            }
                             continue;
                         }
-                        if !known { return Err(StandingQueryFailure::InvalidDelta); }
+                        if !known {
+                            return Err(StandingQueryFailure::InvalidDelta);
+                        }
                         touch(&mut removed, *eid, meter)?;
                         touch(&mut affected, *eid, meter)?;
                     }
-                    DeltaRow::DeleteVertex { vid, sorted_retired_incident_edges, .. } => {
+                    DeltaRow::DeleteVertex {
+                        vid,
+                        sorted_retired_incident_edges,
+                        ..
+                    } => {
                         for &eid in sorted_retired_incident_edges {
                             meter.charge(ZSetEvent::Work)?;
                             let pair = created.get(&eid).or_else(|| self.edges.get(&eid));
@@ -356,8 +419,8 @@ impl OneHopState {
                 }
             }
         }
-        meter.stats.affected_edges = u64::try_from(affected.len())
-            .map_err(|_| StandingQueryFailure::WorkBudget)?;
+        meter.stats.affected_edges =
+            u64::try_from(affected.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
         let empty = BTreeMap::new();
         let mut witness_changes = BTreeMap::new();
         if self.scope.is_some() {
@@ -370,51 +433,94 @@ impl OneHopState {
             meter.charge(ZSetEvent::Work)?;
             if let Some(&pair) = self.edges.get(&eid) {
                 if let Some(scope) = self.scope {
-                    scope.contribute(query, pair, vertices, &empty, -1, &mut witness_changes, output, meter)?;
+                    scope.contribute(
+                        query,
+                        pair,
+                        vertices,
+                        &empty,
+                        -1,
+                        &mut witness_changes,
+                        output,
+                        meter,
+                    )?;
                 } else {
                     self.contribute(query, pair, vertices, &empty, -1, output, meter)?;
                 }
             }
             if !removed.contains(&eid) {
-                let pair = created.get(&eid).or_else(|| self.edges.get(&eid))
-                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
+                let pair = created
+                    .get(&eid)
+                    .or_else(|| self.edges.get(&eid))
+                    .copied()
+                    .ok_or(StandingQueryFailure::InvalidDelta)?;
                 // Also refuses incomplete cascades: every old incident edge is
                 // in `affected`, and no surviving edge can reference a staged
                 // deletion. New edges must resolve both final endpoints too.
                 if let Some(scope) = self.scope {
-                    scope.contribute(query, pair, vertices, staged, 1, &mut witness_changes, output, meter)?;
+                    scope.contribute(
+                        query,
+                        pair,
+                        vertices,
+                        staged,
+                        1,
+                        &mut witness_changes,
+                        output,
+                        meter,
+                    )?;
                 } else {
                     self.contribute(query, pair, vertices, staged, 1, output, meter)?;
                 }
             }
         }
         let witnesses = match self.scope {
-            Some(scope) => scope.finish_roots(query, &self.witnesses, witness_changes,
-                vertices, staged, output, meter)?,
+            Some(scope) => scope.finish_roots(
+                query,
+                &self.witnesses,
+                witness_changes,
+                vertices,
+                staged,
+                output,
+                meter,
+            )?,
             None => BTreeMap::new(),
         };
         (meter.checkpoint)()?;
-        Ok(OneHopPatch { created, removed, witnesses })
+        Ok(OneHopPatch {
+            created,
+            removed,
+            witnesses,
+        })
     }
 
     fn publish(&mut self, patch: OneHopPatch) {
         for (vid, count) in patch.witnesses {
-            if count == 0 { self.witnesses.remove(&vid); }
-            else { self.witnesses.insert(vid, count); }
+            if count == 0 {
+                self.witnesses.remove(&vid);
+            } else {
+                self.witnesses.insert(vid, count);
+            }
         }
         for &eid in &patch.removed {
             if let Some((src, dst)) = self.edges.remove(&eid) {
                 for vid in [src, dst] {
-                    if let std::collections::btree_map::Entry::Occupied(mut entry) = self.incident.entry(vid) {
+                    if let std::collections::btree_map::Entry::Occupied(mut entry) =
+                        self.incident.entry(vid)
+                    {
                         entry.get_mut().remove(&eid);
-                        if entry.get().is_empty() { entry.remove(); }
+                        if entry.get().is_empty() {
+                            entry.remove();
+                        }
                     }
-                    if src == dst { break; }
+                    if src == dst {
+                        break;
+                    }
                 }
             }
         }
         for (eid, pair) in patch.created {
-            if !patch.removed.contains(&eid) { self.insert(eid, pair); }
+            if !patch.removed.contains(&eid) {
+                self.insert(eid, pair);
+            }
         }
     }
 }
@@ -430,8 +536,15 @@ pub(super) fn admit_snapshot(
 ) -> Result<(), StandingQueryFailure> {
     for block in &snapshot.blocks {
         for _ in block {
-            *records = records.checked_add(1).ok_or(StandingQueryFailure::SnapshotBudget)?;
-            if meter.policy.rows.max_snapshot_records().is_some_and(|limit| *records > limit) {
+            *records = records
+                .checked_add(1)
+                .ok_or(StandingQueryFailure::SnapshotBudget)?;
+            if meter
+                .policy
+                .rows
+                .max_snapshot_records()
+                .is_some_and(|limit| *records > limit)
+            {
                 return Err(StandingQueryFailure::SnapshotBudget);
             }
             meter.charge(ZSetEvent::Work)?;
@@ -453,25 +566,49 @@ pub(super) fn admit_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asupersync::lab::run_async_under_lab;
     use crate::{DatabaseKeys, WriteBatch};
-    use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder};
+    use asupersync::lab::run_async_under_lab;
     use fgdb_gql::GraphAggregate;
+    use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder};
     use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 
     fn definition() -> PreparedGraphAggregate {
         let mut builder = GraphPatternBuilder::new();
         builder.vertex("a").unwrap().vertex("b").unwrap();
-        builder.edge("a", RelationId(1), GlaDirection::Undirected, "b").unwrap();
-        builder.compare_properties("a", PropertyKeyId(1),
-            fgdb_gql::algebra::IntegerComparison::LessOrEqual, "b", PropertyKeyId(1)).unwrap();
-        let input = builder.prepare_values(&[
-            GraphColumn::vertex("group", "a"),
-            GraphColumn::property("amount", "b", PropertyKeyId(1)),
-        ], 0, None).unwrap().with_duplicates();
-        PreparedGraphAggregate::prepare(input, &[0], &[
-            GraphAggregate::count_rows("count"), GraphAggregate::sum_int("sum", 1),
-        ], 0, None).unwrap()
+        builder
+            .edge("a", RelationId(1), GlaDirection::Undirected, "b")
+            .unwrap();
+        builder
+            .compare_properties(
+                "a",
+                PropertyKeyId(1),
+                fgdb_gql::algebra::IntegerComparison::LessOrEqual,
+                "b",
+                PropertyKeyId(1),
+            )
+            .unwrap();
+        let input = builder
+            .prepare_values(
+                &[
+                    GraphColumn::vertex("group", "a"),
+                    GraphColumn::property("amount", "b", PropertyKeyId(1)),
+                ],
+                0,
+                None,
+            )
+            .unwrap()
+            .with_duplicates();
+        PreparedGraphAggregate::prepare(
+            input,
+            &[0],
+            &[
+                GraphAggregate::count_rows("count"),
+                GraphAggregate::sum_int("sum", 1),
+            ],
+            0,
+            None,
+        )
+        .unwrap()
     }
 
     fn seeded(batch: &LogicalDeltaBatch) -> StandingQuery {
@@ -479,12 +616,22 @@ mod tests {
         let edges = State::for_definition(&definition);
         let policy = GqlQueryPolicy::new(100_000, 10_000, 10_000_000, 10_000_000);
         let mut query = StandingQuery {
-            definition, edges, policy, vertices: BTreeMap::new(),
-            aggregate: IncrementalAggregate::new(), rows: ZSet::new(),
-            frontier: CommitSeq::ORIGIN, stats: StandingQueryStats::default(), failure: None,
+            definition,
+            edges,
+            policy,
+            vertices: BTreeMap::new(),
+            aggregate: IncrementalAggregate::new(),
+            rows: ZSet::new(),
+            frontier: CommitSeq::ORIGIN,
+            stats: StandingQueryStats::default(),
+            failure: None,
         };
         let mut checkpoint = || Ok(());
-        let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+        let mut meter = Meter {
+            policy,
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
         query.maintain(batch, &mut meter).unwrap();
         query.frontier = batch.commit_seq();
         query
@@ -507,7 +654,11 @@ mod tests {
             let mut db = Database::open_memory(&cx, keys).await.unwrap();
             let mut batch = WriteBatch::new(RelationId(1));
             for id in 1..=3 {
-                batch.create_vertex(VId(id), vec![], vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))]);
+                batch.create_vertex(
+                    VId(id),
+                    vec![],
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(id as i64))],
+                );
             }
             for (eid, src, dst) in [(1, 1, 2), (2, 1, 2), (3, 2, 2), (4, 2, 3)] {
                 batch.add_edge(EId(eid), VId(src), VId(dst), vec![]);
@@ -526,8 +677,15 @@ mod tests {
             let policy = successful.policy;
             let mut checkpoints = 0;
             {
-                let mut checkpoint = || { checkpoints += 1; Ok(()) };
-                let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+                let mut checkpoint = || {
+                    checkpoints += 1;
+                    Ok(())
+                };
+                let mut meter = Meter {
+                    policy,
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
                 successful.maintain(&delta, &mut meter).unwrap();
                 assert_eq!(meter.stats.affected_edges, 5);
             }
@@ -537,15 +695,30 @@ mod tests {
                 {
                     let mut checkpoint = || {
                         seen += 1;
-                        if seen == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
+                        if seen == stop {
+                            Err(StandingQueryFailure::Interrupted)
+                        } else {
+                            Ok(())
+                        }
                     };
-                    let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-                    assert_eq!(candidate.maintain(&delta, &mut meter), Err(StandingQueryFailure::Interrupted));
+                    let mut meter = Meter {
+                        policy,
+                        stats: StandingQueryStats::default(),
+                        checkpoint: &mut checkpoint,
+                    };
+                    assert_eq!(
+                        candidate.maintain(&delta, &mut meter),
+                        Err(StandingQueryFailure::Interrupted)
+                    );
                 }
                 assert_eq!(seen, stop);
                 assert_unchanged(&candidate, &before);
                 let mut checkpoint = || Ok(());
-                let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+                let mut meter = Meter {
+                    policy,
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
                 candidate.maintain(&delta, &mut meter).unwrap();
                 assert_unchanged(&candidate, &successful);
             }
@@ -555,19 +728,33 @@ mod tests {
             let mut entries = delta.coordinate_entries().to_vec();
             for entry in &mut entries {
                 for row in &mut entry.rows {
-                    if let DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } = row {
+                    if let DeltaRow::DeleteVertex {
+                        sorted_retired_incident_edges,
+                        ..
+                    } = row
+                    {
                         sorted_retired_incident_edges.clear();
                     }
                 }
             }
             let malformed = LogicalDeltaBatch::from_parts_for_test(
-                entries, *delta.source_template_digest(), delta.commit_marker_identity(),
-                delta.commit_seq(), delta.frontier(),
+                entries,
+                *delta.source_template_digest(),
+                delta.commit_marker_identity(),
+                delta.commit_seq(),
+                delta.frontier(),
             );
             let mut candidate = seeded(&initial);
             let mut checkpoint = || Ok(());
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-            assert_eq!(candidate.maintain(&malformed, &mut meter), Err(StandingQueryFailure::InvalidDelta));
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            assert_eq!(
+                candidate.maintain(&malformed, &mut meter),
+                Err(StandingQueryFailure::InvalidDelta)
+            );
             assert_unchanged(&candidate, &before);
         });
         assert!(report.lab_test_passed(), "{report:?}");

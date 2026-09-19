@@ -1754,3 +1754,23 @@ fn cli_pinned_timestamp_round_trips_through_subprocess_recovery() {
         }
     }
 }
+
+#[test]
+fn labels_and_type_output_in_robot_mode() {
+    let db = TestDb::new("labels-and-type");
+    db.create();
+    db.write(&["INSERT (a:Person {name:'Ada'}), (b {name:'Bare'}), (a)-[:KNOWS]->(b)"]);
+    let output = db.command(
+        "query",
+        &["MATCH (p) RETURN p.name AS name, labels(p) AS lbls ORDER BY name"],
+    );
+    assert_rows(
+        &output,
+        r#"[[{"type":"text","value":"Ada"},{"type":"list","value":[{"type":"text","value":"Person"}]}],[{"type":"text","value":"Bare"},{"type":"list","value":[]}]]"#,
+    );
+    let edge_output = db.command(
+        "query",
+        &["MATCH (a:Person)-[r:KNOWS]->(b) RETURN type(r) AS t"],
+    );
+    assert_rows(&edge_output, r#"[[{"type":"text","value":"KNOWS"}]]"#);
+}

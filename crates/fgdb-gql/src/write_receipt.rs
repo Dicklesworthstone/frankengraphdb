@@ -366,7 +366,10 @@ mod tests {
             assert_eq!(step.merged_vertex(), None);
             assert_eq!(step.merged_edge(), None);
             assert!(!format!("{step:?}").contains(&u128::MAX.to_string()));
-            let mutation = GraphWriteStepReceipt::Mutation { targets, edges: Vec::new() };
+            let mutation = GraphWriteStepReceipt::Mutation {
+                targets,
+                edges: Vec::new(),
+            };
             assert_ne!(step, mutation);
             assert_eq!(mutation.deleted_vertices(), None);
         }

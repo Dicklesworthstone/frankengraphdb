@@ -456,7 +456,10 @@ fn preflight_fences_win_over_zero_quotas_and_allocator_side_effects() {
         // A refused program must not leave its mixed-relation permission enabled.
         assert!(matches!(
             txn.write(&mut db, prefix()),
-            Err(WriteTxnError::RelationMismatch { expected: RelationId(2), found: R })
+            Err(WriteTxnError::RelationMismatch {
+                expected: RelationId(2),
+                found: R
+            })
         ));
         let basis = db.frontier().unwrap();
         let stats = txn
@@ -464,7 +467,10 @@ fn preflight_fences_win_over_zero_quotas_and_allocator_side_effects() {
             .unwrap();
         assert_eq!(stats.created_vertices, 1);
         assert!(txn.vertex(&db, VId(99)).unwrap().is_some());
-        assert_eq!(txn.vertex(&db, VId(1000)).unwrap().unwrap().labels, vec![NEW]);
+        assert_eq!(
+            txn.vertex(&db, VId(1000)).unwrap().unwrap().labels,
+            vec![NEW]
+        );
         assert_eq!(db.frontier().unwrap(), basis);
         assert!(db.vertex(VId(99)).unwrap().is_none());
         assert!(db.vertex(VId(1000)).unwrap().is_none());

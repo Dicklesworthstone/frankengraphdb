@@ -669,7 +669,10 @@ mod tests {
             for source in 0..3_u128 {
                 for destination in 0..3_u128 {
                     if mask & (1 << (3 * source + destination)) != 0 {
-                        adjacency.entry(VId(source)).or_default().push(VId(destination));
+                        adjacency
+                            .entry(VId(source))
+                            .or_default()
+                            .push(VId(destination));
                     }
                 }
             }
@@ -754,7 +757,10 @@ mod tests {
         assert_eq!(cursor.all.layers.capacity(), 0);
         assert_eq!(cursor.all.viable.capacity(), 0);
         assert_eq!(cursor.all.frames.capacity(), 0);
-        assert_eq!(cursor.next_with_control(&mut |_| Err::<(), _>("resumed")), Ok(None));
+        assert_eq!(
+            cursor.next_with_control(&mut |_| Err::<(), _>("resumed")),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -806,7 +812,11 @@ mod tests {
                 let result = collect(VId(1), bounds, Some(&adjacency), &mut |event| {
                     let at = usize::from(event == GlaExecutionEvent::ScratchEntry);
                     seen[at] += 1;
-                    if seen[at] > limits[at] { Err(at) } else { Ok(()) }
+                    if seen[at] > limits[at] {
+                        Err(at)
+                    } else {
+                        Ok(())
+                    }
                 });
                 if short {
                     assert_eq!(result, Err(dimension));

@@ -448,10 +448,12 @@ impl PreparedGraphAggregate {
         &self,
         row: &GraphAggregateRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<bool>, GqlQueryError<GraphAggregateError<core::convert::Infallible>, C>> {
-        let mut govern = |event| -> Result<_, GqlQueryError<GraphAggregateError<core::convert::Infallible>, C>> {
-            control(event).map_err(GqlQueryError::Interrupted)
-        };
+    ) -> Result<Option<bool>, GqlQueryError<GraphAggregateError<core::convert::Infallible>, C>>
+    {
+        let mut govern = |event| -> Result<
+            _,
+            GqlQueryError<GraphAggregateError<core::convert::Infallible>, C>,
+        > { control(event).map_err(GqlQueryError::Interrupted) };
         govern(GlaExecutionEvent::Work)?;
         if !self.supports_incremental_maintenance_with_having() {
             return Ok(None);
@@ -477,8 +479,13 @@ impl PreparedGraphAggregate {
                     GraphAggregateTest::IsNull => cell.is_null(),
                     GraphAggregateTest::IsNotNull => !cell.is_null(),
                     GraphAggregateTest::Integer { comparison, value } => {
-                        compare(cell, Cell::Integer(value), comparison, predicate, &mut govern)?
-                            == Some(true)
+                        compare(
+                            cell,
+                            Cell::Integer(value),
+                            comparison,
+                            predicate,
+                            &mut govern,
+                        )? == Some(true)
                     }
                 };
                 keep &= accepted;
@@ -945,57 +952,118 @@ mod tests {
     fn maintained_having_uses_exact_averages_and_checks_complete_row_schema() {
         let mut builder = GraphPatternBuilder::new();
         builder.vertex("n").unwrap();
-        let input = builder.prepare_values(&[
-            GraphColumn::property("value", "n", PropertyKeyId(1)),
-        ], 0, None).unwrap().with_duplicates();
-        let base = PreparedGraphAggregate::prepare(input, &[], &[
-            GraphAggregate::average_int("average", 0),
-            GraphAggregate::count_rows("count"),
-        ], 0, None).unwrap();
+        let input = builder
+            .prepare_values(
+                &[GraphColumn::property("value", "n", PropertyKeyId(1))],
+                0,
+                None,
+            )
+            .unwrap()
+            .with_duplicates();
+        let base = PreparedGraphAggregate::prepare(
+            input,
+            &[],
+            &[
+                GraphAggregate::average_int("average", 0),
+                GraphAggregate::count_rows("count"),
+            ],
+            0,
+            None,
+        )
+        .unwrap();
         for numerator in [i128::MIN, -7, 0, 7, i128::MAX] {
             for denominator in [1, 2, u64::MAX] {
                 let average = GraphExactAverage::new(numerator, denominator).unwrap();
                 for threshold in [i128::MIN, -2, 0, 2, i128::MAX] {
-                    let filter = GraphAggregateFilter { column: A(0), test: GraphAggregateTest::Integer {
-                        comparison: IntegerComparison::Greater, value: threshold,
-                    }};
+                    let filter = GraphAggregateFilter {
+                        column: A(0),
+                        test: GraphAggregateTest::Integer {
+                            comparison: IntegerComparison::Greater,
+                            value: threshold,
+                        },
+                    };
                     let ordinary = base.clone().with_result_clauses(&[filter], &[]).unwrap();
-                    let boolean = base.clone().with_having_expression(&expression(&[
-                        cmp(Arg::Column(A(0)), IntegerComparison::Greater, Arg::Integer(threshold)),
-                    ])).unwrap();
+                    let boolean = base
+                        .clone()
+                        .with_having_expression(&expression(&[cmp(
+                            Arg::Column(A(0)),
+                            IntegerComparison::Greater,
+                            Arg::Integer(threshold),
+                        )]))
+                        .unwrap();
                     for query in [ordinary, boolean] {
                         assert!(!query.supports_incremental_maintenance());
                         assert!(query.supports_incremental_maintenance_with_having());
-                        let row = query.materialize_incremental_row(vec![], vec![
-                            GraphAggregateValue::Average(average), GraphAggregateValue::Count(u64::MAX),
-                        ]).unwrap();
-                        assert_eq!(query.evaluate_incremental_having(&row, &mut |_| Ok::<_, ()>(())).unwrap(),
-                            Some(average.compare_integer(threshold) == Ordering::Greater));
+                        let row = query
+                            .materialize_incremental_row(
+                                vec![],
+                                vec![
+                                    GraphAggregateValue::Average(average),
+                                    GraphAggregateValue::Count(u64::MAX),
+                                ],
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            query
+                                .evaluate_incremental_having(&row, &mut |_| Ok::<_, ()>(()))
+                                .unwrap(),
+                            Some(average.compare_integer(threshold) == Ordering::Greater)
+                        );
                         let malformed = GraphAggregateRow {
-                            keys: Box::new([]), values: vec![GraphAggregateValue::Integer(1),
-                                GraphAggregateValue::Count(1)].into_boxed_slice(),
+                            keys: Box::new([]),
+                            values: vec![
+                                GraphAggregateValue::Integer(1),
+                                GraphAggregateValue::Count(1),
+                            ]
+                            .into_boxed_slice(),
                         };
-                        assert_eq!(query.evaluate_incremental_having(&malformed, &mut |_| Ok::<_, ()>(())).unwrap(), None);
+                        assert_eq!(
+                            query
+                                .evaluate_incremental_having(&malformed, &mut |_| Ok::<_, ()>(()))
+                                .unwrap(),
+                            None
+                        );
                     }
                 }
             }
         }
-        let row = base.materialize_incremental_row(vec![], vec![
-            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
-            GraphAggregateValue::Count(0),
-        ]).unwrap();
-        let filtered = base.clone().with_having_expression(&expression(&[
-            cmp(Arg::Column(A(0)), IntegerComparison::Equal, Arg::Integer(0)), Op::Not,
-        ])).unwrap();
-        assert_eq!(filtered.evaluate_incremental_having(&row, &mut |_| Ok::<_, ()>(())).unwrap(), Some(false));
+        let row = base
+            .materialize_incremental_row(
+                vec![],
+                vec![
+                    GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                    GraphAggregateValue::Count(0),
+                ],
+            )
+            .unwrap();
+        let filtered = base
+            .clone()
+            .with_having_expression(&expression(&[
+                cmp(Arg::Column(A(0)), IntegerComparison::Equal, Arg::Integer(0)),
+                Op::Not,
+            ]))
+            .unwrap();
+        assert_eq!(
+            filtered
+                .evaluate_incremental_having(&row, &mut |_| Ok::<_, ()>(()))
+                .unwrap(),
+            Some(false)
+        );
         for query in [
             base.clone().with_distinct_output(true),
             base.clone().with_aggregate_output_prefix(1).unwrap(),
-            base.with_result_clauses(&[], &[GraphAggregateOrder::ascending(A(0))]).unwrap(),
-            definition(1, None), definition(0, Some(0)),
+            base.with_result_clauses(&[], &[GraphAggregateOrder::ascending(A(0))])
+                .unwrap(),
+            definition(1, None),
+            definition(0, Some(0)),
         ] {
             assert!(!query.supports_incremental_maintenance_with_having());
-            assert_eq!(query.evaluate_incremental_having(&row, &mut |_| Ok::<_, ()>(())).unwrap(), None);
+            assert_eq!(
+                query
+                    .evaluate_incremental_having(&row, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                None
+            );
         }
     }
 
@@ -1003,26 +1071,50 @@ mod tests {
     fn maintained_having_borrows_payloads_and_every_checkpoint_is_retryable() {
         let mut builder = GraphPatternBuilder::new();
         builder.vertex("n").unwrap();
-        let input = builder.prepare_values(&[
-            GraphColumn::property("group", "n", PropertyKeyId(1)),
-        ], 0, None).unwrap().with_duplicates();
-        let base = PreparedGraphAggregate::prepare(input, &[0], &[
-            GraphAggregate::count_rows("count"),
-        ], 0, None).unwrap();
+        let input = builder
+            .prepare_values(
+                &[GraphColumn::property("group", "n", PropertyKeyId(1))],
+                0,
+                None,
+            )
+            .unwrap()
+            .with_duplicates();
+        let base = PreparedGraphAggregate::prepare(
+            input,
+            &[0],
+            &[GraphAggregate::count_rows("count")],
+            0,
+            None,
+        )
+        .unwrap();
         let payload = CanonicalScalar::bytes(vec![7; 8192]).unwrap();
         let wanted = ScalarPredicate::new(payload.clone(), IntegerComparison::Equal).unwrap();
-        let query = base.clone().with_having_expression(&expression(&[
-            cmp(Arg::Column(K(0)), IntegerComparison::Equal, Arg::Scalar(wanted)),
-        ])).unwrap();
-        let row = query.materialize_incremental_row(vec![GraphValue::Scalar(payload)],
-            vec![GraphAggregateValue::Count(2)]).unwrap();
+        let query = base
+            .clone()
+            .with_having_expression(&expression(&[cmp(
+                Arg::Column(K(0)),
+                IntegerComparison::Equal,
+                Arg::Scalar(wanted),
+            )]))
+            .unwrap();
+        let row = query
+            .materialize_incremental_row(
+                vec![GraphValue::Scalar(payload)],
+                vec![GraphAggregateValue::Count(2)],
+            )
+            .unwrap();
         let before = query.canonical_bytes();
         let mut calls = 0;
-        assert_eq!(query.evaluate_incremental_having(&row, &mut |event| {
-            assert_eq!(event, GlaExecutionEvent::Work);
-            calls += 1;
-            Ok::<_, usize>(())
-        }).unwrap(), Some(true));
+        assert_eq!(
+            query
+                .evaluate_incremental_having(&row, &mut |event| {
+                    assert_eq!(event, GlaExecutionEvent::Work);
+                    calls += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap(),
+            Some(true)
+        );
         assert!(calls >= 2 * 8192 / GRAPH_VALUE_PAYLOAD_UNIT_BYTES);
         for stop in 1..=calls {
             let mut seen = 0;
@@ -1032,27 +1124,61 @@ mod tests {
             }), Err(GqlQueryError::Interrupted(at)) if at == stop));
             assert_eq!(seen, stop);
             assert_eq!(query.canonical_bytes(), before);
-            assert_eq!(query.evaluate_incremental_having(&row, &mut |_| Ok::<_, ()>(())).unwrap(), Some(true));
+            assert_eq!(
+                query
+                    .evaluate_incremental_having(&row, &mut |_| Ok::<_, ()>(()))
+                    .unwrap(),
+                Some(true)
+            );
         }
-        let boolean = base.materialize_incremental_row(vec![GraphValue::Scalar(CanonicalScalar::Bool(true))],
-            vec![GraphAggregateValue::Count(1)]).unwrap();
+        let boolean = base
+            .materialize_incremental_row(
+                vec![GraphValue::Scalar(CanonicalScalar::Bool(true))],
+                vec![GraphAggregateValue::Count(1)],
+            )
+            .unwrap();
         for (truth, op) in [(true, Op::Or), (false, Op::And)] {
-            let invalid = query.clone().with_having_expression(&expression(&[
-                Op::Truth(Some(truth)),
-                cmp(Arg::Column(K(0)), IntegerComparison::Equal, Arg::Integer(1)), op,
-            ])).unwrap();
-            assert!(matches!(invalid.evaluate_incremental_having(&boolean, &mut |_| Ok::<_, ()>(())),
-                Err(GqlQueryError::Source(GraphAggregateError::NonIntegerHaving { predicate: 1 }))));
+            let invalid = query
+                .clone()
+                .with_having_expression(&expression(&[
+                    Op::Truth(Some(truth)),
+                    cmp(Arg::Column(K(0)), IntegerComparison::Equal, Arg::Integer(1)),
+                    op,
+                ]))
+                .unwrap();
+            assert!(matches!(
+                invalid.evaluate_incremental_having(&boolean, &mut |_| Ok::<_, ()>(())),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::NonIntegerHaving { predicate: 1 }
+                ))
+            ));
         }
-        let invalid = query.with_result_clauses(&[
-            GraphAggregateFilter { column: A(0), test: GraphAggregateTest::Integer {
-                comparison: IntegerComparison::Less, value: 0,
-            }},
-            GraphAggregateFilter { column: K(0), test: GraphAggregateTest::Integer {
-                comparison: IntegerComparison::Equal, value: 1,
-            }},
-        ], &[]).unwrap();
-        assert!(matches!(invalid.evaluate_incremental_having(&boolean, &mut |_| Ok::<_, ()>(())),
-            Err(GqlQueryError::Source(GraphAggregateError::NonIntegerHaving { predicate: 1 }))));
+        let invalid = query
+            .with_result_clauses(
+                &[
+                    GraphAggregateFilter {
+                        column: A(0),
+                        test: GraphAggregateTest::Integer {
+                            comparison: IntegerComparison::Less,
+                            value: 0,
+                        },
+                    },
+                    GraphAggregateFilter {
+                        column: K(0),
+                        test: GraphAggregateTest::Integer {
+                            comparison: IntegerComparison::Equal,
+                            value: 1,
+                        },
+                    },
+                ],
+                &[],
+            )
+            .unwrap();
+        assert!(matches!(
+            invalid.evaluate_incremental_having(&boolean, &mut |_| Ok::<_, ()>(())),
+            Err(GqlQueryError::Source(
+                GraphAggregateError::NonIntegerHaving { predicate: 1 }
+            ))
+        ));
     }
 }

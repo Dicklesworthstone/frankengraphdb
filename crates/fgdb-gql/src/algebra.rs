@@ -513,30 +513,26 @@ impl<Row> GlaPlan<Row> {
                 op,
                 GlaOperator::VarLengthExpand { .. } | GlaOperator::ScanVertices
             )
-        }) {
-            if let Some(GlaOperator::ScanEdges {
-                relation,
-                direction,
-            }) = operators.first().cloned()
-            {
-                operators[0] = GlaOperator::ScanVertices;
-                operators.insert(
-                    1,
-                    GlaOperator::Expand {
-                        source: BindingSlot(0),
-                        relation,
-                        direction,
-                    },
-                );
-                // Every scope is after the root. Keep compiler-owned jump
-                // targets aligned with the one newly inserted instruction.
-                for op in &mut operators {
-                    match op {
-                        GlaOperator::Probe { end, .. } | GlaOperator::Optional { end, .. } => {
-                            *end += 1
-                        }
-                        _ => {}
-                    }
+        }) && let Some(GlaOperator::ScanEdges {
+            relation,
+            direction,
+        }) = operators.first().cloned()
+        {
+            operators[0] = GlaOperator::ScanVertices;
+            operators.insert(
+                1,
+                GlaOperator::Expand {
+                    source: BindingSlot(0),
+                    relation,
+                    direction,
+                },
+            );
+            // Every scope is after the root. Keep compiler-owned jump
+            // targets aligned with the one newly inserted instruction.
+            for op in &mut operators {
+                match op {
+                    GlaOperator::Probe { end, .. } | GlaOperator::Optional { end, .. } => *end += 1,
+                    _ => {}
                 }
             }
         }

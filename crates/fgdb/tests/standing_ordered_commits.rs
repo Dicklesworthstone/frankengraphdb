@@ -10,7 +10,7 @@ use fgdb::{
 };
 use fgdb_delta_types::{LimbLimit, PropertyKeyId, RelationId, ZSet, ZWeight};
 use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder};
-use fgdb_gql::{GraphAggregate, GraphAggregateRow, GqlQueryPolicy, PreparedGraphAggregate};
+use fgdb_gql::{GqlQueryPolicy, GraphAggregate, GraphAggregateRow, PreparedGraphAggregate};
 use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, VId};
 use std::collections::BTreeMap;
 
@@ -115,7 +115,12 @@ fn registered_ordered_views_follow_commits_and_match_snapshot_evaluation() {
         let global = db
             .register_standing_query(&query, global_definition.clone(), policy())
             .unwrap();
-        assert!(db.standing_query(&query, &grouped).unwrap().rows().is_empty());
+        assert!(
+            db.standing_query(&query, &grouped)
+                .unwrap()
+                .rows()
+                .is_empty()
+        );
         assert_eq!(
             db.standing_query(&query, &global).unwrap().rows(),
             &recomputed(&global_definition, &[]),
@@ -138,7 +143,9 @@ fn registered_ordered_views_follow_commits_and_match_snapshot_evaluation() {
         batches.push(initial);
         let mut replace_duplicate = WriteBatch::new(RelationId(1));
         replace_duplicate.set_vertex_property(
-            VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(5)),
+            VId(1),
+            PropertyKeyId(2),
+            Some(CanonicalScalar::Int(5)),
         );
         batches.push(replace_duplicate);
         let mut remove_extrema = WriteBatch::new(RelationId(1));
@@ -147,19 +154,23 @@ fn registered_ordered_views_follow_commits_and_match_snapshot_evaluation() {
         batches.push(remove_extrema);
         let mut move_and_change_kind = WriteBatch::new(RelationId(1));
         move_and_change_kind.set_vertex_property(
-            VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(20)),
+            VId(1),
+            PropertyKeyId(1),
+            Some(CanonicalScalar::Int(20)),
         );
         move_and_change_kind.set_vertex_property(
-            VId(1), PropertyKeyId(2), Some(CanonicalScalar::Bool(true)),
+            VId(1),
+            PropertyKeyId(2),
+            Some(CanonicalScalar::Bool(true)),
         );
         move_and_change_kind.set_vertex_property(
-            VId(4), PropertyKeyId(2), Some(CanonicalScalar::Int(5)),
+            VId(4),
+            PropertyKeyId(2),
+            Some(CanonicalScalar::Int(5)),
         );
         batches.push(move_and_change_kind);
         let mut stored_null = WriteBatch::new(RelationId(1));
-        stored_null.set_vertex_property(
-            VId(1), PropertyKeyId(2), Some(CanonicalScalar::Null),
-        );
+        stored_null.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Null));
         stored_null.set_vertex_property(VId(4), PropertyKeyId(2), None);
         batches.push(stored_null);
         let mut delete_all = WriteBatch::new(RelationId(1));
@@ -190,7 +201,12 @@ fn registered_ordered_views_follow_commits_and_match_snapshot_evaluation() {
             assert_eq!(view.frontier(), at);
             assert_eq!(view.rows(), &expected_global, "commit step {step}");
         }
-        assert!(db.standing_query(&query, &grouped).unwrap().rows().is_empty());
+        assert!(
+            db.standing_query(&query, &grouped)
+                .unwrap()
+                .rows()
+                .is_empty()
+        );
         assert_eq!(db.standing_query(&query, &global).unwrap().rows().len(), 1);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -252,7 +268,9 @@ fn ordered_result_refusal_preserves_durable_write_and_rebuild_resumes_maintenanc
         ));
         assert!(matches!(
             db.rebuild_standing_query(&query, &handle, bounded),
-            Err(StandingQueryError::Maintenance(StandingQueryFailure::ResultBudget))
+            Err(StandingQueryError::Maintenance(
+                StandingQueryFailure::ResultBudget
+            ))
         ));
         // A refused rebuild must preserve the failed generation and its
         // frontier rather than expose a partially rebuilt current result.
@@ -263,10 +281,17 @@ fn ordered_result_refusal_preserves_durable_write_and_rebuild_resumes_maintenanc
                 reason: StandingQueryFailure::ResultBudget,
             }) if frontier == basis
         ));
-        assert_eq!(db.rebuild_standing_query(&query, &handle, policy()).unwrap(), at);
+        assert_eq!(
+            db.rebuild_standing_query(&query, &handle, policy())
+                .unwrap(),
+            at
+        );
         let view = db.standing_query(&query, &handle).unwrap();
         assert_eq!(view.frontier(), at);
-        assert_eq!(view.rows(), &recomputed(&definition, &db.vertices().unwrap()));
+        assert_eq!(
+            view.rows(),
+            &recomputed(&definition, &db.vertices().unwrap())
+        );
 
         let mut resumed = WriteBatch::new(RelationId(1));
         resumed.delete_vertex(VId(1));
@@ -282,7 +307,10 @@ fn ordered_result_refusal_preserves_durable_write_and_rebuild_resumes_maintenanc
         let resumed_at = db.write(&commit, resumed).await.unwrap();
         let view = db.standing_query(&query, &handle).unwrap();
         assert_eq!(view.frontier(), resumed_at);
-        assert_eq!(view.rows(), &recomputed(&definition, &db.vertices().unwrap()));
+        assert_eq!(
+            view.rows(),
+            &recomputed(&definition, &db.vertices().unwrap())
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

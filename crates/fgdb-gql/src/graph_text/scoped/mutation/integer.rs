@@ -90,6 +90,7 @@ impl<'a> Parser<'a> {
             .map_err(|source| error(source.offset, GraphPatternTextErrorKind::BooleanExpression))
     }
 
+    #[allow(clippy::type_complexity)]
     pub(in crate::graph_text) fn boolean_scalar_expression(
         &mut self,
     ) -> Result<(Vec<(Name<'a>, Name<'a>)>, Vec<MutationIntegerTemplateOp>), GraphPatternTextError>

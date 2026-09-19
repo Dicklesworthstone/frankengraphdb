@@ -12,9 +12,17 @@ type Left = ZSet<(i32, i32)>;
 type Right = ZSet<(i32, Option<i128>)>;
 type Summary = (i32, i128, i128, Option<i128>, Option<i128>, Option<i128>);
 
-fn allow(_: ZSetEvent) -> Result<(), usize> { Ok(()) }
+fn allow(_: ZSetEvent) -> Result<(), usize> {
+    Ok(())
+}
 fn z<T: Ord>(rows: impl IntoIterator<Item = (T, i128)>) -> ZSet<T> {
-    ZSet::from_updates(rows.into_iter().map(|(key, w)| (key, ZWeight::from_i128(w))), LIMBS, &mut allow).unwrap()
+    ZSet::from_updates(
+        rows.into_iter()
+            .map(|(key, w)| (key, ZWeight::from_i128(w))),
+        LIMBS,
+        &mut allow,
+    )
+    .unwrap()
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -34,9 +42,14 @@ impl Circuit {
     ) -> Result<AggregateDelta<i32>, AggregateError<usize>> {
         let join = self.join.prepare(left, right, LIMBS, control)?;
         let distinct = self.distinct.prepare(join.delta(), LIMBS, control)?;
-        let projected = distinct.delta().map(|&(key, _, value)| Ok((key, value)), LIMBS, control)?;
+        let projected =
+            distinct
+                .delta()
+                .map(|&(key, _, value)| Ok((key, value)), LIMBS, control)?;
         let aggregate = self.aggregate.prepare(&projected, LIMBS, control)?;
-        let view = self.view.prepare_update(aggregate.delta(), LIMBS, control)?;
+        let view = self
+            .view
+            .prepare_update(aggregate.delta(), LIMBS, control)?;
         // A final cancellation check AFTER every participant has prepared is
         // safe. There must be no fallible work between the following commits.
         control(ZSetEvent::Work).map_err(ZSetError::Control)?;
@@ -61,11 +74,19 @@ fn seeded() -> Circuit {
     state
 }
 fn plain(view: &AggregateDelta<i32>) -> Vec<Summary> {
-    view.iter().map(|((key, row), weight)| {
-        assert_eq!(weight, &ZWeight::ONE);
-        (*key, row.count_rows().to_i128().unwrap(), row.count_values().to_i128().unwrap(),
-         row.sum().map(|sum| sum.to_i128().unwrap()), row.minimum(), row.maximum())
-    }).collect()
+    view.iter()
+        .map(|((key, row), weight)| {
+            assert_eq!(weight, &ZWeight::ONE);
+            (
+                *key,
+                row.count_rows().to_i128().unwrap(),
+                row.count_values().to_i128().unwrap(),
+                row.sum().map(|sum| sum.to_i128().unwrap()),
+                row.minimum(),
+                row.maximum(),
+            )
+        })
+        .collect()
 }
 
 // Independent full cross-product, set conversion and row aggregation. No
@@ -83,25 +104,42 @@ fn oracle(left: &Left, right: &Right) -> Vec<Summary> {
     for (key, _, value) in unique {
         groups.entry(key).or_default().push(value);
     }
-    groups.into_iter().map(|(key, rows)| {
-        let values: Vec<_> = rows.iter().filter_map(|v| *v).collect();
-        (key, rows.len() as i128, values.len() as i128,
-         (!values.is_empty()).then(|| values.iter().sum()),
-         values.iter().copied().min(), values.iter().copied().max())
-    }).collect()
+    groups
+        .into_iter()
+        .map(|(key, rows)| {
+            let values: Vec<_> = rows.iter().filter_map(|v| *v).collect();
+            (
+                key,
+                rows.len() as i128,
+                values.len() as i128,
+                (!values.is_empty()).then(|| values.iter().sum()),
+                values.iter().copied().min(),
+                values.iter().copied().max(),
+            )
+        })
+        .collect()
 }
 
 #[test]
 fn simultaneous_changes_and_summary_neutral_ticks_reach_one_coherent_materialized_view() {
     let (mut left, mut right) = seed_inputs();
     let mut state = seeded();
-    assert_eq!(plain(&state.view), vec![(1, 4, 2, Some(6), Some(3), Some(3)), (2, 1, 1, Some(7), Some(7), Some(7))]);
+    assert_eq!(
+        plain(&state.view),
+        vec![
+            (1, 4, 2, Some(6), Some(3), Some(3)),
+            (2, 1, 1, Some(7), Some(7), Some(7))
+        ]
+    );
     let dl = z([((1, 10), 1)]);
     let dr = z([((1, Some(3)), 1)]);
     assert!(state.tick(&dl, &dr, &mut allow).unwrap().is_empty());
     left.integrate(&dl, LIMBS, &mut allow).unwrap();
     right.integrate(&dr, LIMBS, &mut allow).unwrap();
-    assert_eq!(state.distinct.counts().weight(&(1, 10, Some(3))), Some(&ZWeight::from_i128(9)));
+    assert_eq!(
+        state.distinct.counts().weight(&(1, 10, Some(3))),
+        Some(&ZWeight::from_i128(9))
+    );
     let frozen = state.view.checked_clone(LIMBS, &mut allow).unwrap();
 
     // Both sides retract on the SAME tick. The cross term and retained counts
@@ -119,7 +157,12 @@ fn simultaneous_changes_and_summary_neutral_ticks_reach_one_coherent_materialize
     assert!(state.view.is_empty());
     assert_eq!(state.aggregate.group_count(), 0);
     assert!(state.distinct.counts().is_empty());
-    assert!(state.tick(&Left::new(), &Right::new(), &mut allow).unwrap().is_empty());
+    assert!(
+        state
+            .tick(&Left::new(), &Right::new(), &mut allow)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -128,17 +171,22 @@ fn every_pipeline_refusal_including_final_sink_admission_rolls_back_and_can_retr
     let dr = z([((1, Some(3)), -1), ((1, Some(5)), 1), ((2, None), 1)]);
     let mut expected = seeded();
     let mut total = 0;
-    let output = expected.tick(&dl, &dr, &mut |_| {
-        total += 1;
-        Ok::<_, usize>(())
-    }).unwrap();
+    let output = expected
+        .tick(&dl, &dr, &mut |_| {
+            total += 1;
+            Ok::<_, usize>(())
+        })
+        .unwrap();
     for stop in 1..=total {
         let mut state = seeded();
         let mut seen = 0;
-        assert_eq!(state.tick(&dl, &dr, &mut |_| {
-            seen += 1;
-            if seen == stop { Err(stop) } else { Ok(()) }
-        }), Err(AggregateError::ZSet(ZSetError::Control(stop))));
+        assert_eq!(
+            state.tick(&dl, &dr, &mut |_| {
+                seen += 1;
+                if seen == stop { Err(stop) } else { Ok(()) }
+            }),
+            Err(AggregateError::ZSet(ZSetError::Control(stop)))
+        );
         assert_eq!(seen, stop);
         assert_eq!(state, seeded());
         assert_eq!(state.tick(&dl, &dr, &mut allow).unwrap(), output);
@@ -159,8 +207,12 @@ fn hundreds_of_pipeline_ticks_match_independent_full_relational_recomputation() 
         let mut l = Vec::new();
         let mut r = Vec::new();
         for key in 0..3 {
-            for source in 0..2 { l.push(((key, source), next())); }
-            for value in [None, Some(-2), Some(5)] { r.push(((key, value), next())); }
+            for source in 0..2 {
+                l.push(((key, source), next()));
+            }
+            for value in [None, Some(-2), Some(5)] {
+                r.push(((key, value), next()));
+            }
         }
         let (new_left, new_right) = (z(l), z(r));
         let dl = new_left.minus(&left, LIMBS, &mut allow).unwrap();
@@ -170,11 +222,32 @@ fn hundreds_of_pipeline_ticks_match_independent_full_relational_recomputation() 
         integrated.integrate(&output, LIMBS, &mut allow).unwrap();
         assert_eq!(integrated, state.view);
         assert_eq!(plain(&state.view), oracle(&new_left, &new_right));
-        assert_eq!(state.aggregate.snapshot(LIMBS, &mut allow).unwrap(), state.view);
-        assert_eq!(state.join.left_rows().map(|(k,v,w)| ((*k,*v),w.to_i128().unwrap())).collect::<Vec<_>>(),
-            new_left.iter().map(|(kv,w)| (*kv,w.to_i128().unwrap())).collect::<Vec<_>>());
-        assert_eq!(state.join.right_rows().map(|(k,v,w)| ((*k,*v),w.to_i128().unwrap())).collect::<Vec<_>>(),
-            new_right.iter().map(|(kv,w)| (*kv,w.to_i128().unwrap())).collect::<Vec<_>>());
+        assert_eq!(
+            state.aggregate.snapshot(LIMBS, &mut allow).unwrap(),
+            state.view
+        );
+        assert_eq!(
+            state
+                .join
+                .left_rows()
+                .map(|(k, v, w)| ((*k, *v), w.to_i128().unwrap()))
+                .collect::<Vec<_>>(),
+            new_left
+                .iter()
+                .map(|(kv, w)| (*kv, w.to_i128().unwrap()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state
+                .join
+                .right_rows()
+                .map(|(k, v, w)| ((*k, *v), w.to_i128().unwrap()))
+                .collect::<Vec<_>>(),
+            new_right
+                .iter()
+                .map(|(kv, w)| (*kv, w.to_i128().unwrap()))
+                .collect::<Vec<_>>()
+        );
         left = new_left;
         right = new_right;
     }
@@ -194,7 +267,9 @@ fn prospective_sink_reads_handle_removal_without_falling_back_and_drop_aborts() 
         assert!(pending.weight(&5).is_none());
     }
     assert_eq!(sink, before);
-    sink.prepare_update(&delta, LIMBS, &mut allow).unwrap().commit();
+    sink.prepare_update(&delta, LIMBS, &mut allow)
+        .unwrap()
+        .commit();
     assert_eq!(sink, z([(2, 4), (3, 4), (4, -7)]));
 }
 
@@ -229,10 +304,20 @@ fn prepared_and_immediate_sink_paths_share_controls_and_redact_payloads() {
     let delta = z([("secret-key", 919191)]);
     let mut immediate = ZSet::new();
     let mut first_events = Vec::new();
-    immediate.integrate(&delta, LIMBS, &mut |e| { first_events.push(e); Ok::<_, usize>(()) }).unwrap();
+    immediate
+        .integrate(&delta, LIMBS, &mut |e| {
+            first_events.push(e);
+            Ok::<_, usize>(())
+        })
+        .unwrap();
     let mut prepared = ZSet::new();
     let mut second_events = Vec::new();
-    let update = prepared.prepare_update(&delta, LIMBS, &mut |e| { second_events.push(e); Ok::<_, usize>(()) }).unwrap();
+    let update = prepared
+        .prepare_update(&delta, LIMBS, &mut |e| {
+            second_events.push(e);
+            Ok::<_, usize>(())
+        })
+        .unwrap();
     let debug = format!("{update:?}");
     assert!(!debug.contains("secret-key") && !debug.contains("919191"));
     update.commit();

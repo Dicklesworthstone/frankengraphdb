@@ -431,18 +431,14 @@ impl GraphPatternBuilder {
                 "Expand"
             });
         }
-        for _ in &self.identities {
-            operators.push("VertexIdentity");
-        }
+        operators.extend(std::iter::repeat_n("VertexIdentity", self.identities.len()));
         for comparison in &self.property_comparisons {
             operators.push(match comparison {
                 PropertyComparison::Properties { .. } => "CompareProperties",
                 PropertyComparison::Boolean(_) => "SelectBoolean",
             });
         }
-        for _ in &self.path_captures {
-            operators.push("CapturePath");
-        }
+        operators.extend(std::iter::repeat_n("CapturePath", self.path_captures.len()));
         for predicate in &self.path_predicates {
             operators.push(match predicate {
                 PathPredicate::Length { .. } => "SelectPathLength",

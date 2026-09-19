@@ -445,7 +445,11 @@ impl LocalDeltaBatchIndex {
                 });
             }
             Self::validate_batch(batch)?;
-            Some((batch.format(), batch.commit_marker_identity(), *batch.source_template_digest()))
+            Some((
+                batch.format(),
+                batch.commit_marker_identity(),
+                *batch.source_template_digest(),
+            ))
         };
         let mut retired = Vec::new();
         let keys: Vec<u64> = self
@@ -492,13 +496,13 @@ impl LocalDeltaBatchIndex {
             });
         }
 
-        if let Some((_, marker, _)) = self.retired_boundary {
-            if marker.commit_seq != self.retained_after_commit_seq {
-                return Err(IndexError::WrongMarker {
-                    batch_commit_seq: self.retained_after_commit_seq,
-                    marker_commit_seq: marker.commit_seq,
-                });
-            }
+        if let Some((_, marker, _)) = self.retired_boundary
+            && marker.commit_seq != self.retained_after_commit_seq
+        {
+            return Err(IndexError::WrongMarker {
+                batch_commit_seq: self.retained_after_commit_seq,
+                marker_commit_seq: marker.commit_seq,
+            });
         }
         let mut previous = self.retained_after_commit_seq.0;
         for (stored_seq, batch) in &self.entries {

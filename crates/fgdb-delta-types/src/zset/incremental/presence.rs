@@ -42,7 +42,9 @@ pub enum BagInput {
 pub enum BagJoinError<E> {
     ZSet(ZSetError<E>),
     /// Diagnostics reveal the input side, never the key, payload or count.
-    NegativeMultiplicity { input: BagInput },
+    NegativeMultiplicity {
+        input: BagInput,
+    },
 }
 
 impl<E> From<ZSetError<E>> for BagJoinError<E> {
@@ -91,9 +93,11 @@ impl<K: Ord, L: Ord> IncrementalPresence<K, L> {
         &self.witnesses
     }
     pub fn left_rows(&self) -> impl Iterator<Item = (&K, &L, &ZWeight)> {
-        self.left
-            .iter()
-            .flat_map(|(key, group)| group.iter().map(move |(value, weight)| (key, value, weight)))
+        self.left.iter().flat_map(|(key, group)| {
+            group
+                .iter()
+                .map(move |(value, weight)| (key, value, weight))
+        })
     }
 }
 
@@ -122,10 +126,21 @@ impl<K: Ord + Clone, L: Ord + Clone> IncrementalPresence<K, L> {
         validate_changes(&left, BagInput::Left, control)?;
         let witnesses = prepare_witnesses(&self.witnesses, delta_witnesses, limbs, control)?;
         let delta = presence_delta(
-            &self.left, &self.witnesses, &witnesses, delta_left, self.mode, limbs, control,
+            &self.left,
+            &self.witnesses,
+            &witnesses,
+            delta_left,
+            self.mode,
+            limbs,
+            control,
         )?;
         event(control, ZSetEvent::Work)?;
-        Ok(PresenceUpdate { owner: self, left, witnesses, delta })
+        Ok(PresenceUpdate {
+            owner: self,
+            left,
+            witnesses,
+            delta,
+        })
     }
 
     pub fn apply<E>(
@@ -135,7 +150,9 @@ impl<K: Ord + Clone, L: Ord + Clone> IncrementalPresence<K, L> {
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<ZSet<(K, L)>, BagJoinError<E>> {
-        Ok(self.prepare(delta_left, delta_witnesses, limbs, control)?.commit())
+        Ok(self
+            .prepare(delta_left, delta_witnesses, limbs, control)?
+            .commit())
     }
 
     /// Explicit recomputation for snapshots/audits, not part of a normal tick.
@@ -178,7 +195,12 @@ impl<K: Ord + Clone, L: Ord + Clone> PresenceUpdate<'_, K, L> {
     /// arithmetic or callback remains. As in the parent API, panics in generic
     /// key code and standard collection allocation are outside this contract.
     pub fn commit(self) -> ZSet<(K, L)> {
-        let Self { owner, left, witnesses, delta } = self;
+        let Self {
+            owner,
+            left,
+            witnesses,
+            delta,
+        } = self;
         publish_changes(&mut owner.left, left);
         owner.witnesses.publish(witnesses);
         delta
@@ -220,7 +242,9 @@ pub(super) fn prepare_witnesses<K: Ord + Clone, E>(
     for (key, next) in &replacements {
         event(control, ZSetEvent::Work)?;
         if next < &ZWeight::ZERO {
-            return Err(BagJoinError::NegativeMultiplicity { input: BagInput::Right });
+            return Err(BagJoinError::NegativeMultiplicity {
+                input: BagInput::Right,
+            });
         }
         if before.weight(key).is_none() && !next.is_zero() {
             // Reserve the future retained count as well as the staged entry.
@@ -300,7 +324,10 @@ impl<K: Ord, L: Ord, R: Ord> Default for IncrementalLeftJoin<K, L, R> {
 }
 impl<K: Ord, L: Ord, R: Ord> IncrementalLeftJoin<K, L, R> {
     pub fn new() -> Self {
-        Self { joined: IncrementalJoin::new(), witnesses: ZSet::new() }
+        Self {
+            joined: IncrementalJoin::new(),
+            witnesses: ZSet::new(),
+        }
     }
     pub fn left_weight(&self, key: &K, value: &L) -> Option<&ZWeight> {
         self.joined.left_weight(key, value)
@@ -337,12 +364,19 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalLeftJoin<K, L, R
         event(control, ZSetEvent::Work)?;
         let delta_counts = delta_right.map(|(key, _)| Ok(key.clone()), limbs, control)?;
         let replacements = prepare_witnesses(&self.witnesses, &delta_counts, limbs, control)?;
-        let mut joined = self.joined.prepare(delta_left, delta_right, limbs, control)?;
+        let mut joined = self
+            .joined
+            .prepare(delta_left, delta_right, limbs, control)?;
         validate_changes(&joined.left, BagInput::Left, control)?;
         validate_changes(&joined.right, BagInput::Right, control)?;
         let unmatched = presence_delta(
-            &joined.owner.left, &self.witnesses, &replacements, delta_left,
-            PresenceMode::NotExists, limbs, control,
+            &joined.owner.left,
+            &self.witnesses,
+            &replacements,
+            delta_left,
+            PresenceMode::NotExists,
+            limbs,
+            control,
         )?;
         // Transfer the matched delta into its nullable shape rather than
         // retaining another clone of its keys and potentially promoted weights.
@@ -352,7 +386,12 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalLeftJoin<K, L, R
             delta.accumulate((key, left, None), weight, limbs, control)?;
         }
         event(control, ZSetEvent::Work)?;
-        Ok(LeftJoinUpdate { joined, witnesses: &mut self.witnesses, replacements, delta })
+        Ok(LeftJoinUpdate {
+            joined,
+            witnesses: &mut self.witnesses,
+            replacements,
+            delta,
+        })
     }
 
     pub fn apply<E>(
@@ -362,7 +401,9 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalLeftJoin<K, L, R
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<LeftJoinDelta<K, L, R>, BagJoinError<E>> {
-        Ok(self.prepare(delta_left, delta_right, limbs, control)?.commit())
+        Ok(self
+            .prepare(delta_left, delta_right, limbs, control)?
+            .commit())
     }
 
     /// Explicit output snapshot. Incremental ticks never invoke this full scan.
@@ -418,7 +459,12 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> LeftJoinUpdate<'_, K, L, R>
     /// All participants must prepare before any commit. The same no-recoverable-
     /// failure boundary as the underlying join/Z-set guards applies here.
     pub fn commit(self) -> LeftJoinDelta<K, L, R> {
-        let Self { joined, witnesses, replacements, delta } = self;
+        let Self {
+            joined,
+            witnesses,
+            replacements,
+            delta,
+        } = self;
         let _ = joined.commit();
         witnesses.publish(replacements);
         delta
@@ -440,17 +486,28 @@ mod tests {
     const LIMBS: LimbLimit = LimbLimit::new(16);
     type Operator = IncrementalPresence<i32, i32>;
 
-    fn allow(_: ZSetEvent) -> Result<(), usize> { Ok(()) }
+    fn allow(_: ZSetEvent) -> Result<(), usize> {
+        Ok(())
+    }
     fn z<T: Ord + Clone>(rows: &[(T, i128)]) -> ZSet<T> {
         ZSet::from_updates(
-            rows.iter().map(|(key, count)| (key.clone(), ZWeight::from_i128(*count))),
-            LIMBS, &mut allow,
-        ).unwrap()
+            rows.iter()
+                .map(|(key, count)| (key.clone(), ZWeight::from_i128(*count))),
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap()
     }
     fn seed(mode: PresenceMode) -> Operator {
         let mut state = Operator::new(mode);
-        state.apply(&z(&[((1, 10), 2), ((1, 11), 1), ((2, 20), 3)]),
-            &z(&[(1, 2)]), LIMBS, &mut allow).unwrap();
+        state
+            .apply(
+                &z(&[((1, 10), 2), ((1, 11), 1), ((2, 20), 3)]),
+                &z(&[(1, 2)]),
+                LIMBS,
+                &mut allow,
+            )
+            .unwrap();
         state
     }
 
@@ -460,20 +517,33 @@ mod tests {
             for new in 0..27 {
                 let (a, b, r) = (old % 3, old / 3 % 3, old / 9);
                 let (na, nb, nr) = (new % 3, new / 3 % 3, new / 9);
-                let dl = z(&[((1, 10), na-a), ((1, 11), nb-b)]);
+                let dl = z(&[((1, 10), na - a), ((1, 11), nb - b)]);
                 let mut partition = ZSet::new();
                 for mode in [PresenceMode::Exists, PresenceMode::NotExists] {
                     let mut state = Operator::new(mode);
-                    state.apply(&z(&[((1, 10), a), ((1, 11), b)]),
-                        &z(&[(1, r)]), LIMBS, &mut allow).unwrap();
-                    let delta = state.apply(&dl, &z(&[(1, nr-r)]), LIMBS, &mut allow).unwrap();
+                    state
+                        .apply(
+                            &z(&[((1, 10), a), ((1, 11), b)]),
+                            &z(&[(1, r)]),
+                            LIMBS,
+                            &mut allow,
+                        )
+                        .unwrap();
+                    let delta = state
+                        .apply(&dl, &z(&[(1, nr - r)]), LIMBS, &mut allow)
+                        .unwrap();
                     let selected = |w| i128::from((w > 0) == (mode == PresenceMode::Exists));
-                    assert_eq!(delta, z(&[
-                        ((1, 10), na*selected(nr)-a*selected(r)),
-                        ((1, 11), nb*selected(nr)-b*selected(r)),
-                    ]));
-                    assert_eq!(state.snapshot(LIMBS, &mut allow).unwrap(),
-                        z(&[((1, 10), na*selected(nr)), ((1, 11), nb*selected(nr))]));
+                    assert_eq!(
+                        delta,
+                        z(&[
+                            ((1, 10), na * selected(nr) - a * selected(r)),
+                            ((1, 11), nb * selected(nr) - b * selected(r)),
+                        ])
+                    );
+                    assert_eq!(
+                        state.snapshot(LIMBS, &mut allow).unwrap(),
+                        z(&[((1, 10), na * selected(nr)), ((1, 11), nb * selected(nr))])
+                    );
                     assert_eq!(state.witness_counts(), &z(&[(1, nr)]));
                     partition.integrate(&delta, LIMBS, &mut allow).unwrap();
                 }
@@ -486,12 +556,30 @@ mod tests {
     fn silent_witness_and_left_updates_are_retained_until_the_last_witness_leaves() {
         for mode in [PresenceMode::Exists, PresenceMode::NotExists] {
             let mut state = seed(mode);
-            assert!(state.apply(&ZSet::new(), &z(&[(1, -1)]), LIMBS, &mut allow).unwrap().is_empty());
-            let changed = state.apply(&z(&[((1, 10), -1)]), &ZSet::new(), LIMBS, &mut allow).unwrap();
+            assert!(
+                state
+                    .apply(&ZSet::new(), &z(&[(1, -1)]), LIMBS, &mut allow)
+                    .unwrap()
+                    .is_empty()
+            );
+            let changed = state
+                .apply(&z(&[((1, 10), -1)]), &ZSet::new(), LIMBS, &mut allow)
+                .unwrap();
             let sign = if mode == PresenceMode::Exists { -1 } else { 1 };
-            assert_eq!(changed, if mode == PresenceMode::Exists { z(&[((1, 10), -1)]) } else { ZSet::new() });
-            assert_eq!(state.apply(&ZSet::new(), &z(&[(1, -1)]), LIMBS, &mut allow).unwrap(),
-                z(&[((1, 10), sign), ((1, 11), sign)]));
+            assert_eq!(
+                changed,
+                if mode == PresenceMode::Exists {
+                    z(&[((1, 10), -1)])
+                } else {
+                    ZSet::new()
+                }
+            );
+            assert_eq!(
+                state
+                    .apply(&ZSet::new(), &z(&[(1, -1)]), LIMBS, &mut allow)
+                    .unwrap(),
+                z(&[((1, 10), sign), ((1, 11), sign)])
+            );
             assert!(state.witness_counts().is_empty());
         }
     }
@@ -503,15 +591,22 @@ mod tests {
         for mode in [PresenceMode::Exists, PresenceMode::NotExists] {
             let mut success = seed(mode);
             let mut calls = 0;
-            let expected = success.apply(&dl, &dr, LIMBS, &mut |_| {
-                calls += 1; Ok::<_, usize>(())
-            }).unwrap();
+            let expected = success
+                .apply(&dl, &dr, LIMBS, &mut |_| {
+                    calls += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
             for stop in 1..=calls {
                 let mut state = seed(mode);
                 let mut seen = 0;
-                assert_eq!(state.apply(&dl, &dr, LIMBS, &mut |_| {
-                    seen += 1; if seen == stop { Err(stop) } else { Ok(()) }
-                }), Err(BagJoinError::ZSet(ZSetError::Control(stop))));
+                assert_eq!(
+                    state.apply(&dl, &dr, LIMBS, &mut |_| {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    }),
+                    Err(BagJoinError::ZSet(ZSetError::Control(stop)))
+                );
                 assert_eq!(seen, stop);
                 assert_eq!(state, seed(mode));
                 assert_eq!(state.apply(&dl, &dr, LIMBS, &mut allow).unwrap(), expected);
@@ -523,7 +618,9 @@ mod tests {
             {
                 let pending = state.prepare(&dl, &dr, LIMBS, &mut allow).unwrap();
                 assert_eq!(pending.delta(), &expected);
-                let _sink_update = sink.prepare_update(pending.delta(), LIMBS, &mut allow).unwrap();
+                let _sink_update = sink
+                    .prepare_update(pending.delta(), LIMBS, &mut allow)
+                    .unwrap();
                 // Failure in a later operator drops both preparations.
             }
             assert_eq!(state, seed(mode));
@@ -535,13 +632,19 @@ mod tests {
     fn invalid_bags_refuse_even_when_the_bad_input_would_not_be_visible() {
         for mode in [PresenceMode::Exists, PresenceMode::NotExists] {
             for (dl, dr, input) in [
-                (z(&[((99, 10), -1), ((2, 21), 1)]), z(&[(2, 1)]), BagInput::Left),
+                (
+                    z(&[((99, 10), -1), ((2, 21), 1)]),
+                    z(&[(2, 1)]),
+                    BagInput::Left,
+                ),
                 (z(&[((1, 10), -3)]), ZSet::new(), BagInput::Left),
                 (z(&[((2, 21), 1)]), z(&[(1, -3), (2, 1)]), BagInput::Right),
             ] {
                 let mut state = seed(mode);
-                assert_eq!(state.apply(&dl, &dr, LIMBS, &mut allow),
-                    Err(BagJoinError::NegativeMultiplicity { input }));
+                assert_eq!(
+                    state.apply(&dl, &dr, LIMBS, &mut allow),
+                    Err(BagJoinError::NegativeMultiplicity { input })
+                );
                 assert_eq!(state, seed(mode));
             }
         }
@@ -553,14 +656,20 @@ mod tests {
             let mut small = seed(mode);
             let mut large = seed(mode);
             let extras: Vec<_> = (100..1100)
-                .flat_map(|value| [((1, value), 1), ((value, 10), 1)]).collect();
-            large.apply(&z(&extras), &ZSet::new(), LIMBS, &mut allow).unwrap();
+                .flat_map(|value| [((1, value), 1), ((value, 10), 1)])
+                .collect();
+            large
+                .apply(&z(&extras), &ZSet::new(), LIMBS, &mut allow)
+                .unwrap();
             let mut measured = Vec::new();
             for state in [&mut small, &mut large] {
                 let mut events = Vec::new();
-                let delta = state.apply(&ZSet::new(), &z(&[(1, 1)]), LIMBS, &mut |event| {
-                    events.push(event); Ok::<_, usize>(())
-                }).unwrap();
+                let delta = state
+                    .apply(&ZSet::new(), &z(&[(1, 1)]), LIMBS, &mut |event| {
+                        events.push(event);
+                        Ok::<_, usize>(())
+                    })
+                    .unwrap();
                 measured.push((delta, events));
             }
             assert_eq!(measured[0], measured[1]);
@@ -571,16 +680,39 @@ mod tests {
     #[test]
     fn bigint_witness_promotion_refusal_and_demotion_do_not_change_presence_early() {
         let mut state = Operator::new(PresenceMode::Exists);
-        state.apply(&z(&[((1, 10), i128::MAX)]), &z(&[(1, i128::MAX)]), LIMBS, &mut allow).unwrap();
-        assert!(matches!(state.apply(&ZSet::new(), &z(&[(1, 1)]), LimbLimit::new(0), &mut allow),
-            Err(BagJoinError::ZSet(ZSetError::Arithmetic(_)))));
+        state
+            .apply(
+                &z(&[((1, 10), i128::MAX)]),
+                &z(&[(1, i128::MAX)]),
+                LIMBS,
+                &mut allow,
+            )
+            .unwrap();
+        assert!(matches!(
+            state.apply(&ZSet::new(), &z(&[(1, 1)]), LimbLimit::new(0), &mut allow),
+            Err(BagJoinError::ZSet(ZSetError::Arithmetic(_)))
+        ));
         assert_eq!(state.witness_counts(), &z(&[(1, i128::MAX)]));
-        assert!(state.apply(&ZSet::new(), &z(&[(1, 1)]), LIMBS, &mut allow).unwrap().is_empty());
+        assert!(
+            state
+                .apply(&ZSet::new(), &z(&[(1, 1)]), LIMBS, &mut allow)
+                .unwrap()
+                .is_empty()
+        );
         assert!(state.witness_counts().weight(&1).unwrap().is_promoted());
-        assert!(state.apply(&ZSet::new(), &z(&[(1, -1)]), LIMBS, &mut allow).unwrap().is_empty());
+        assert!(
+            state
+                .apply(&ZSet::new(), &z(&[(1, -1)]), LIMBS, &mut allow)
+                .unwrap()
+                .is_empty()
+        );
         assert!(!state.witness_counts().weight(&1).unwrap().is_promoted());
-        assert_eq!(state.apply(&ZSet::new(), &z(&[(1, -i128::MAX)]), LIMBS, &mut allow).unwrap(),
-            z(&[((1, 10), -i128::MAX)]));
+        assert_eq!(
+            state
+                .apply(&ZSet::new(), &z(&[(1, -i128::MAX)]), LIMBS, &mut allow)
+                .unwrap(),
+            z(&[((1, 10), -i128::MAX)])
+        );
     }
 
     #[test]
@@ -589,16 +721,24 @@ mod tests {
         let dr = z(&[(1, -2), (2, 1)]);
         let mut measured = seed(PresenceMode::NotExists);
         let (mut work, mut scratch) = (0, 0);
-        let expected = measured.apply(&dl, &dr, LIMBS, &mut |event| {
-            work += 1; scratch += usize::from(event == ZSetEvent::ScratchEntry);
-            Ok::<_, usize>(())
-        }).unwrap();
-        for (max_work, max_scratch) in [(work, scratch), (work-1, scratch), (work, scratch-1)] {
+        let expected = measured
+            .apply(&dl, &dr, LIMBS, &mut |event| {
+                work += 1;
+                scratch += usize::from(event == ZSetEvent::ScratchEntry);
+                Ok::<_, usize>(())
+            })
+            .unwrap();
+        for (max_work, max_scratch) in [(work, scratch), (work - 1, scratch), (work, scratch - 1)] {
             let mut state = seed(PresenceMode::NotExists);
             let (mut used, mut grown) = (0, 0);
             let result = state.apply(&dl, &dr, LIMBS, &mut |event| {
-                used += 1; grown += usize::from(event == ZSetEvent::ScratchEntry);
-                if used > max_work || grown > max_scratch { Err(17) } else { Ok(()) }
+                used += 1;
+                grown += usize::from(event == ZSetEvent::ScratchEntry);
+                if used > max_work || grown > max_scratch {
+                    Err(17)
+                } else {
+                    Ok(())
+                }
             });
             if max_work == work && max_scratch == scratch {
                 assert_eq!(result.unwrap(), expected);
@@ -619,13 +759,22 @@ mod outer_tests {
     type Operator = IncrementalLeftJoin<i32, i32, i32>;
     type Input = BTreeMap<(i32, i32), i128>;
     type Output = BTreeMap<(i32, i32, Option<i32>), i128>;
-    fn allow(_: ZSetEvent) -> Result<(), usize> { Ok(()) }
+    fn allow(_: ZSetEvent) -> Result<(), usize> {
+        Ok(())
+    }
     fn z<T: Ord + Clone>(rows: &[(T, i128)]) -> ZSet<T> {
-        ZSet::from_updates(rows.iter().map(|(k, w)| (k.clone(), ZWeight::from_i128(*w))),
-            LIMBS, &mut allow).unwrap()
+        ZSet::from_updates(
+            rows.iter()
+                .map(|(k, w)| (k.clone(), ZWeight::from_i128(*w))),
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap()
     }
     fn plain<T: Ord + Clone>(rows: &ZSet<T>) -> BTreeMap<T, i128> {
-        rows.iter().map(|(key, weight)| (key.clone(), weight.to_i128().unwrap())).collect()
+        rows.iter()
+            .map(|(key, weight)| (key.clone(), weight.to_i128().unwrap()))
+            .collect()
     }
     // Independent whole-bag nested-loop definition, with no witness totals or
     // three-term derivative. None appears exactly when this left row has no match.
@@ -639,14 +788,22 @@ mod outer_tests {
                     found = true;
                 }
             }
-            if !found { out.insert((key, l, None), lw); }
+            if !found {
+                out.insert((key, l, None), lw);
+            }
         }
         out
     }
     fn seed() -> Operator {
         let mut state = Operator::new();
-        state.apply(&z(&[((1, 10), 2), ((2, 20), 3)]),
-            &z(&[((1, 30), 2)]), LIMBS, &mut allow).unwrap();
+        state
+            .apply(
+                &z(&[((1, 10), 2), ((2, 20), 3)]),
+                &z(&[((1, 30), 2)]),
+                LIMBS,
+                &mut allow,
+            )
+            .unwrap();
         state
     }
 
@@ -654,15 +811,21 @@ mod outer_tests {
     fn all_small_simultaneous_changes_equal_the_difference_of_full_outer_joins() {
         for old in 0..81_i128 {
             for new in 0..81_i128 {
-                let left = z(&[((1, 10), old%3), ((1, 11), old/3%3)]);
-                let right = z(&[((1, 30), old/9%3), ((1, 31), old/27)]);
-                let next_left = z(&[((1, 10), new%3), ((1, 11), new/3%3)]);
-                let next_right = z(&[((1, 30), new/9%3), ((1, 31), new/27)]);
+                let left = z(&[((1, 10), old % 3), ((1, 11), old / 3 % 3)]);
+                let right = z(&[((1, 30), old / 9 % 3), ((1, 31), old / 27)]);
+                let next_left = z(&[((1, 10), new % 3), ((1, 11), new / 3 % 3)]);
+                let next_right = z(&[((1, 30), new / 9 % 3), ((1, 31), new / 27)]);
                 let mut state = Operator::new();
                 let mut materialized = state.apply(&left, &right, LIMBS, &mut allow).unwrap();
                 assert_eq!(plain(&materialized), oracle(&plain(&left), &plain(&right)));
-                let delta = state.apply(&next_left.minus(&left, LIMBS, &mut allow).unwrap(),
-                    &next_right.minus(&right, LIMBS, &mut allow).unwrap(), LIMBS, &mut allow).unwrap();
+                let delta = state
+                    .apply(
+                        &next_left.minus(&left, LIMBS, &mut allow).unwrap(),
+                        &next_right.minus(&right, LIMBS, &mut allow).unwrap(),
+                        LIMBS,
+                        &mut allow,
+                    )
+                    .unwrap();
                 materialized.integrate(&delta, LIMBS, &mut allow).unwrap();
                 let expected = oracle(&plain(&next_left), &plain(&next_right));
                 assert_eq!(plain(&materialized), expected, "old={old}, new={new}");
@@ -674,14 +837,31 @@ mod outer_tests {
     #[test]
     fn replacing_witnesses_or_deleting_both_inputs_does_not_invent_a_null_row() {
         let mut state = seed();
-        let delta = state.apply(&ZSet::new(), &z(&[((1, 30), -2), ((1, 31), 2)]),
-            LIMBS, &mut allow).unwrap();
+        let delta = state
+            .apply(
+                &ZSet::new(),
+                &z(&[((1, 30), -2), ((1, 31), 2)]),
+                LIMBS,
+                &mut allow,
+            )
+            .unwrap();
         assert_eq!(delta, z(&[((1, 10, Some(30)), -4), ((1, 10, Some(31)), 4)]));
-        let removed = state.apply(&z(&[((1, 10), -2)]), &z(&[((1, 31), -2)]),
-            LIMBS, &mut allow).unwrap();
+        let removed = state
+            .apply(
+                &z(&[((1, 10), -2)]),
+                &z(&[((1, 31), -2)]),
+                LIMBS,
+                &mut allow,
+            )
+            .unwrap();
         assert_eq!(removed, z(&[((1, 10, Some(31)), -4)]));
-        assert_eq!(state.snapshot(LIMBS, &mut allow).unwrap(), z(&[((2, 20, None), 3)]));
-        state.apply(&z(&[((2, 20), -3)]), &ZSet::new(), LIMBS, &mut allow).unwrap();
+        assert_eq!(
+            state.snapshot(LIMBS, &mut allow).unwrap(),
+            z(&[((2, 20, None), 3)])
+        );
+        state
+            .apply(&z(&[((2, 20), -3)]), &ZSet::new(), LIMBS, &mut allow)
+            .unwrap();
         assert_eq!(state, Operator::new());
     }
 
@@ -690,22 +870,40 @@ mod outer_tests {
         let mut state = IncrementalLeftJoin::<i32, i32, Option<i32>>::new();
         let left = z(&[((1, 10), 2)]);
         let right = z(&[((1, None), 3)]);
-        assert_eq!(state.apply(&left, &right, LIMBS, &mut allow).unwrap(),
-            z(&[((1, 10, Some(None)), 6)]));
-        let delta = state.apply(&ZSet::new(), &right.negated(LIMBS, &mut allow).unwrap(),
-            LIMBS, &mut allow).unwrap();
+        assert_eq!(
+            state.apply(&left, &right, LIMBS, &mut allow).unwrap(),
+            z(&[((1, 10, Some(None)), 6)])
+        );
+        let delta = state
+            .apply(
+                &ZSet::new(),
+                &right.negated(LIMBS, &mut allow).unwrap(),
+                LIMBS,
+                &mut allow,
+            )
+            .unwrap();
         assert_eq!(delta, z(&[((1, 10, Some(None)), -6), ((1, 10, None), 2)]));
     }
 
     #[test]
     fn invalid_per_tuple_retractions_cannot_hide_behind_a_valid_key_total() {
         for (left, right, input) in [
-            (ZSet::new(), z(&[((1, 30), -3), ((1, 31), 3)]), BagInput::Right),
-            (z(&[((2, 20), -4), ((2, 21), 4)]), ZSet::new(), BagInput::Left),
+            (
+                ZSet::new(),
+                z(&[((1, 30), -3), ((1, 31), 3)]),
+                BagInput::Right,
+            ),
+            (
+                z(&[((2, 20), -4), ((2, 21), 4)]),
+                ZSet::new(),
+                BagInput::Left,
+            ),
         ] {
             let mut state = seed();
-            assert_eq!(state.apply(&left, &right, LIMBS, &mut allow),
-                Err(BagJoinError::NegativeMultiplicity { input }));
+            assert_eq!(
+                state.apply(&left, &right, LIMBS, &mut allow),
+                Err(BagJoinError::NegativeMultiplicity { input })
+            );
             assert_eq!(state, seed());
         }
     }
@@ -716,18 +914,28 @@ mod outer_tests {
         let right = z(&[((1, 30), -2), ((2, 31), 3)]);
         let mut success = seed();
         let mut calls = 0;
-        let expected = success.apply(&left, &right, LIMBS, &mut |_| {
-            calls += 1; Ok::<_, usize>(())
-        }).unwrap();
+        let expected = success
+            .apply(&left, &right, LIMBS, &mut |_| {
+                calls += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap();
         for stop in 1..=calls {
             let mut state = seed();
             let mut seen = 0;
-            assert_eq!(state.apply(&left, &right, LIMBS, &mut |_| {
-                seen += 1; if seen == stop { Err(stop) } else { Ok(()) }
-            }), Err(BagJoinError::ZSet(ZSetError::Control(stop))));
+            assert_eq!(
+                state.apply(&left, &right, LIMBS, &mut |_| {
+                    seen += 1;
+                    if seen == stop { Err(stop) } else { Ok(()) }
+                }),
+                Err(BagJoinError::ZSet(ZSetError::Control(stop)))
+            );
             assert_eq!(seen, stop);
             assert_eq!(state, seed());
-            assert_eq!(state.apply(&left, &right, LIMBS, &mut allow).unwrap(), expected);
+            assert_eq!(
+                state.apply(&left, &right, LIMBS, &mut allow).unwrap(),
+                expected
+            );
             assert_eq!(state, success);
         }
         let mut state = seed();
@@ -743,14 +951,29 @@ mod outer_tests {
         let mut state = Operator::new();
         let left = z(&[((1, 10), i128::MAX)]);
         let before = state.apply(&left, &ZSet::new(), LIMBS, &mut allow).unwrap();
-        assert!(matches!(state.apply(&ZSet::new(), &z(&[((1, 30), 2)]),
-            LimbLimit::new(0), &mut allow), Err(BagJoinError::ZSet(ZSetError::Arithmetic(_)))));
+        assert!(matches!(
+            state.apply(
+                &ZSet::new(),
+                &z(&[((1, 30), 2)]),
+                LimbLimit::new(0),
+                &mut allow
+            ),
+            Err(BagJoinError::ZSet(ZSetError::Arithmetic(_)))
+        ));
         assert_eq!(state.snapshot(LIMBS, &mut allow).unwrap(), before);
         assert!(state.witness_counts().is_empty());
         assert!(state.right_weight(&1, &30).is_none());
-        let delta = state.apply(&ZSet::new(), &z(&[((1, 30), 2)]), LIMBS, &mut allow).unwrap();
-        assert_eq!(delta.weight(&(1, 10, None)), Some(&ZWeight::from_i128(-i128::MAX)));
+        let delta = state
+            .apply(&ZSet::new(), &z(&[((1, 30), 2)]), LIMBS, &mut allow)
+            .unwrap();
+        assert_eq!(
+            delta.weight(&(1, 10, None)),
+            Some(&ZWeight::from_i128(-i128::MAX))
+        );
         assert!(delta.weight(&(1, 10, Some(30))).unwrap().is_promoted());
-        assert_eq!(before.plus(&delta, LIMBS, &mut allow).unwrap(), state.snapshot(LIMBS, &mut allow).unwrap());
+        assert_eq!(
+            before.plus(&delta, LIMBS, &mut allow).unwrap(),
+            state.snapshot(LIMBS, &mut allow).unwrap()
+        );
     }
 }

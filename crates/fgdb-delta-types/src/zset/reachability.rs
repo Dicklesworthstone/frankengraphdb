@@ -37,7 +37,9 @@ impl<E: core::fmt::Display> core::fmt::Display for ReachabilityError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Delta(error) => error.fmt(f),
-            Self::NegativeMultiplicity => f.write_str("negative integrated reachability edge count"),
+            Self::NegativeMultiplicity => {
+                f.write_str("negative integrated reachability edge count")
+            }
         }
     }
 }
@@ -71,7 +73,9 @@ impl<V: Ord> IncrementalReachability<V> {
     }
 
     pub fn contains(&self, source: &V, destination: &V) -> bool {
-        self.reachable.get(source).is_some_and(|row| row.contains(destination))
+        self.reachable
+            .get(source)
+            .is_some_and(|row| row.contains(destination))
     }
 
     pub fn edge_weight(&self, edge: &(V, V)) -> Option<&ZWeight> {
@@ -80,9 +84,9 @@ impl<V: Ord> IncrementalReachability<V> {
 
     /// Explicit ordered export, without constructing a second result relation.
     pub fn pairs(&self) -> impl Iterator<Item = (&V, &V)> {
-        self.reachable.iter().flat_map(|(source, row)| {
-            row.iter().map(move |destination| (source, destination))
-        })
+        self.reachable
+            .iter()
+            .flat_map(|(source, row)| row.iter().map(move |destination| (source, destination)))
     }
 }
 
@@ -105,7 +109,12 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
         let mut result = ZSet::new();
         for (source, destination) in self.pairs() {
             event(control, ZSetEvent::Work)?;
-            result.accumulate((source.clone(), destination.clone()), ZWeight::ONE, limbs, control)?;
+            result.accumulate(
+                (source.clone(), destination.clone()),
+                ZWeight::ONE,
+                limbs,
+                control,
+            )?;
         }
         Ok(result)
     }
@@ -170,7 +179,9 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
                     if !next.contains(destination) {
                         output.accumulate(
                             (source.clone(), destination.clone()),
-                            ZWeight::from_i128(-1), limbs, control,
+                            ZWeight::from_i128(-1),
+                            limbs,
+                            control,
                         )?;
                     }
                 }
@@ -182,7 +193,10 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
                     event(control, ZSetEvent::ScratchEntry)?;
                     event(control, ZSetEvent::ScratchEntry)?;
                     output.accumulate(
-                        (source.clone(), destination.clone()), ZWeight::ONE, limbs, control,
+                        (source.clone(), destination.clone()),
+                        ZWeight::ONE,
+                        limbs,
+                        control,
                     )?;
                 }
             }
@@ -194,7 +208,12 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
         }
         event(control, ZSetEvent::Work)?;
         Ok(ReachabilityUpdate {
-            owner: self, weights, inserted, removed, replacements, delta: output,
+            owner: self,
+            weights,
+            inserted,
+            removed,
+            replacements,
+            delta: output,
         })
     }
 
@@ -312,7 +331,14 @@ impl<V: Ord + Clone> ReachabilityUpdate<'_, V> {
     /// Publish after downstream sinks/operators have also prepared. No
     /// recoverable arithmetic or callback runs between these assignments.
     pub fn commit(self) -> ZSet<(V, V)> {
-        let Self { owner, weights, inserted, removed, replacements, delta } = self;
+        let Self {
+            owner,
+            weights,
+            inserted,
+            removed,
+            replacements,
+            delta,
+        } = self;
         owner.edges.publish(weights);
         for (source, row) in removed {
             for destination in row {
@@ -333,7 +359,11 @@ impl<V: Ord + Clone> ReachabilityUpdate<'_, V> {
             if weight < &ZWeight::ZERO {
                 remove_pair(&mut owner.predecessors, destination, source);
             } else {
-                owner.predecessors.entry(destination.clone()).or_default().insert(source.clone());
+                owner
+                    .predecessors
+                    .entry(destination.clone())
+                    .or_default()
+                    .insert(source.clone());
             }
         }
         delta

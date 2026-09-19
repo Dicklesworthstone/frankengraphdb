@@ -17,9 +17,16 @@ impl History {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
         let mut history = Self {
-            mode, source, edges: BTreeSet::new(), vertices: BTreeSet::new(), closed: false,
+            mode,
+            source,
+            edges: BTreeSet::new(),
+            vertices: BTreeSet::new(),
+            closed: false,
         };
-        if matches!(mode, GraphCheapestPathMode::Acyclic | GraphCheapestPathMode::Simple) {
+        if matches!(
+            mode,
+            GraphCheapestPathMode::Acyclic | GraphCheapestPathMode::Simple
+        ) {
             control(GlaExecutionEvent::ScratchEntry)?;
             history.vertices.insert(source);
         }
@@ -28,24 +35,31 @@ impl History {
 
     // Callers charge logical work before every membership decision.
     pub(super) fn allows(&self, step: Step) -> bool {
-        if self.closed { return false; }
+        if self.closed {
+            return false;
+        }
         match self.mode {
             GraphCheapestPathMode::Walk => true,
             GraphCheapestPathMode::Trail => !self.edges.contains(&step.0),
             GraphCheapestPathMode::Acyclic => !self.vertices.contains(&step.1),
-            GraphCheapestPathMode::Simple => step.1 == self.source || !self.vertices.contains(&step.1),
+            GraphCheapestPathMode::Simple => {
+                step.1 == self.source || !self.vertices.contains(&step.1)
+            }
         }
     }
 
     pub(super) fn closes(&self, step: Step) -> bool {
         self.mode == GraphCheapestPathMode::Simple && step.1 == self.source
     }
-    pub(super) fn closed(&self) -> bool { self.closed }
+    pub(super) fn closed(&self) -> bool {
+        self.closed
+    }
 
     // Only an allowed prefix step may enter this state. WALK does not acquire
     // history entries or change its original event stream.
     pub(super) fn advance<E>(
-        &mut self, step: Step,
+        &mut self,
+        step: Step,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<(), E> {
         match self.mode {
@@ -76,14 +90,19 @@ impl History {
 // histories. STOP must participate in the partition for variable-length ties.
 impl Search {
     pub(super) fn admissible<E>(
-        &self, entry: &Partition,
+        &self,
+        entry: &Partition,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
-        if self.mode == GraphCheapestPathMode::Walk { return Ok(true); }
+        if self.mode == GraphCheapestPathMode::Walk {
+            return Ok(true);
+        }
         let mut history = History::new(self.mode, self.source, control)?;
         for &step in &entry.steps {
             control(GlaExecutionEvent::Work)?;
-            if !history.allows(step) { return Ok(false); }
+            if !history.allows(step) {
+                return Ok(false);
+            }
             history.advance(step, control)?;
         }
         Ok(true)

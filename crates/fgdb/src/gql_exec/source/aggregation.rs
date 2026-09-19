@@ -253,7 +253,10 @@ impl<V: Vfs + Clone> Database<V> {
         bounds: GraphWalkBounds,
         policy: GqlQueryPolicy,
     ) -> ShortestResult {
-        let as_of = self.frontier().map_err(GqlError::Read).map_err(GqlQueryError::Source)?;
+        let as_of = self
+            .frontier()
+            .map_err(GqlError::Read)
+            .map_err(GqlQueryError::Source)?;
         self.execute_all_shortest_walk_governed_at(
             cx, source, relation, direction, bounds, as_of, policy,
         )

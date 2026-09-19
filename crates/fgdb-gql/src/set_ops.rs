@@ -71,7 +71,8 @@ impl From<&ValueProjection> for GraphSetColumnType {
 impl GraphSetColumnType {
     pub(crate) fn accepts(self, value: &crate::algebra::GraphValue) -> bool {
         use crate::algebra::GraphValue;
-        self == Self::Any || value.is_null()
+        self == Self::Any
+            || value.is_null()
             || matches!(
                 (self, value),
                 (Self::Vertex, GraphValue::Vertex(_))

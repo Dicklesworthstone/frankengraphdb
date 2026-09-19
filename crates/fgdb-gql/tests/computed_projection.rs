@@ -15,10 +15,13 @@ use std::cell::Cell;
 type QueryResult<C = ()> =
     Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<GraphSetExecutionError<()>, C>>;
 fn input() -> PreparedGraphSet {
-    PreparedGraphText::prepare("MATCH (n) RETURN n,n.p AS p", |kind: GraphSymbolKind, name: &str| {
-        (kind == GraphSymbolKind::Property && name == "p")
-            .then_some(GraphSymbol::Property(PropertyKeyId(1)))
-    })
+    PreparedGraphText::prepare(
+        "MATCH (n) RETURN n,n.p AS p",
+        |kind: GraphSymbolKind, name: &str| {
+            (kind == GraphSymbolKind::Property && name == "p")
+                .then_some(GraphSymbol::Property(PropertyKeyId(1)))
+        },
+    )
     .unwrap()
     .bind_parameters(&GqlParameters::new())
     .unwrap()

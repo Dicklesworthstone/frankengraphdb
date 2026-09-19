@@ -22,8 +22,13 @@ fn policy(rows: u64) -> GqlQueryPolicy {
 
 fn run() -> Result<(), Error> {
     // Retained for inspection. Never delete or silently reuse a database path.
-    let path = std::env::temp_dir().join(format!("fgdb-standing-reachability-{}", std::process::id()));
-    let keys = DatabaseKeys::new([0x5a; 32], DatabaseSecurityNamespaceId([0x77; 32]), [0x3c; 32]);
+    let path =
+        std::env::temp_dir().join(format!("fgdb-standing-reachability-{}", std::process::id()));
+    let keys = DatabaseKeys::new(
+        [0x5a; 32],
+        DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
+    );
     let runtime = RuntimeBuilder::new().build()?;
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);

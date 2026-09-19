@@ -460,9 +460,11 @@ fn infrastructure_refusal_is_not_mislabeled_as_a_record_failure() {
                 &query,
                 &batch,
                 policy(40, 40),
-                |request| Ok::<_, ()>(ElementId::Vertex(VId(
-                    1000 + (request.statement / 2) as u128,
-                ))),
+                |request| {
+                    Ok::<_, ()>(ElementId::Vertex(VId(
+                        1000 + (request.statement / 2) as u128
+                    )))
+                },
             )
             .unwrap();
         assert_eq!(receipt.stats().created_vertices, 40);

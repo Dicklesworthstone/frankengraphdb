@@ -62,7 +62,8 @@ impl PreparedGraphAggregate {
         relation
             .check_parent_depth()
             .map_err(GraphAggregateBuildError::RelationalInput)?;
-        let source = relation.first_pattern_input()
+        let source = relation
+            .first_pattern_input()
             .ok_or(GraphAggregateBuildError::RequiresSingleGraphSource)?
             .clone();
         Self::prepare_input(

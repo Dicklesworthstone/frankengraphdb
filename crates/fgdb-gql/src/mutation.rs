@@ -294,8 +294,7 @@ impl PreparedGraphMutation {
                     columns.get(target),
                     Some(GraphSetColumnType::Vertex | GraphSetColumnType::Edge)
                 ),
-                GraphMutationAction::SetLabel { .. }
-                | GraphMutationAction::DetachDelete { .. } => {
+                GraphMutationAction::SetLabel { .. } | GraphMutationAction::DetachDelete { .. } => {
                     columns.get(target) == Some(&GraphSetColumnType::Vertex)
                 }
             };

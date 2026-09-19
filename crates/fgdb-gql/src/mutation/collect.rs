@@ -323,12 +323,16 @@ pub(super) fn execute<E, C>(
                 meter.event(GlaExecutionEvent::ScratchEntry)?;
                 property_intent(target, key, Some(value))
             }
-            (ElementId::Vertex(vertex), Field::Label(label), Value::Label(present)) => GraphMutationIntent::Label {
-                vertex,
-                label,
-                present,
-            },
-            (ElementId::Vertex(vertex), Field::Delete, Value::Delete) => GraphMutationIntent::DetachDelete { vertex },
+            (ElementId::Vertex(vertex), Field::Label(label), Value::Label(present)) => {
+                GraphMutationIntent::Label {
+                    vertex,
+                    label,
+                    present,
+                }
+            }
+            (ElementId::Vertex(vertex), Field::Delete, Value::Delete) => {
+                GraphMutationIntent::DetachDelete { vertex }
+            }
             _ => unreachable!("field and proposal are constructed together"),
         };
         intents.push(intent);

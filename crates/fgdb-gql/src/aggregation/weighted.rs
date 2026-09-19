@@ -315,20 +315,16 @@ where
                                     | crate::algebra::GlaOperator::SelectBoolean { .. }
                             ) {
                                 crate::algebra_exec::compare_properties(
-                                    operator,
-                                    bindings,
-                                    property,
-                                    control,
+                                    operator, bindings, property, control,
                                 )?;
                             }
                         }
                         for column in columns {
                             if let crate::algebra::ValueProjection::Property { slot, key } = column
+                                && let Some(Some(vid)) = bindings.get(slot.ordinal() as usize)
                             {
-                                if let Some(Some(vid)) = bindings.get(slot.ordinal() as usize) {
-                                    control(GlaExecutionEvent::Work)?;
-                                    property(*vid, *key)?;
-                                }
+                                control(GlaExecutionEvent::Work)?;
+                                property(*vid, *key)?;
                             }
                         }
                     }
@@ -597,9 +593,7 @@ mod tests {
                 || Ok::<_, ()>(()),
             )
         };
-        let rejected = query(&format!(
-            "MATCH {pattern} WHERE a.n=0 RETURN COUNT(*) AS n"
-        ));
+        let rejected = query(&format!("MATCH {pattern} WHERE a.n=0 RETURN COUNT(*) AS n"));
         assert!(eligible(&rejected));
         let value = CanonicalScalar::Int(1);
         assert_eq!(
@@ -609,9 +603,9 @@ mod tests {
         let counted = query(&format!("MATCH {pattern} RETURN COUNT(a.n) AS n"));
         assert!(matches!(
             run(&counted, &edges, &value),
-            Err(GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow {
-                aggregate: 0
-            }))
+            Err(GqlQueryError::Source(
+                GraphAggregateError::ArithmeticOverflow { aggregate: 0 }
+            ))
         ));
         let null = CanonicalScalar::Null;
         assert_eq!(

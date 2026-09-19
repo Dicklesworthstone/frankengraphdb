@@ -62,14 +62,13 @@ fn separately_matched_merges_bind_distinct_relations_in_one_script() {
     let text = "MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (a)-[:R]->(b);\n\
         MATCH (a),(b) WHERE a.p=$left AND b.p=$right MERGE (a)-[:S]->(b);\n\
         MATCH (a),(b) WHERE a.p=$left AND b.p=$last MERGE (a)-[:T]->(b)";
-    let script = PreparedGraphWriteScript::prepare(text, RelationId(9), |kind, name| {
-        match (kind, name) {
+    let script =
+        PreparedGraphWriteScript::prepare(text, RelationId(9), |kind, name| match (kind, name) {
             (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
             (GraphSymbolKind::Relation, "T") => Some(GraphSymbol::Relation(RelationId(3))),
             _ => symbols(kind, name),
-        }
-    })
-    .unwrap();
+        })
+        .unwrap();
     let arguments = GqlParameters::new()
         .with_int64("left", 1)
         .unwrap()

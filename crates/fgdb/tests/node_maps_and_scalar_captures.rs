@@ -1,9 +1,7 @@
 //! Native MATCH maps and computed correlations across canonical database surfaces.
 
 use asupersync::lab::run_async_under_lab;
-use fgdb::{
-    Database, DatabaseKeys, MemVfs, VertexRow, WriteBatch, WriteError, WriteTxnError,
-};
+use fgdb::{Database, DatabaseKeys, MemVfs, VertexRow, WriteBatch, WriteError, WriteTxnError};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::algebra::{GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{
@@ -109,7 +107,10 @@ async fn seed(db: &mut Database<MemVfs>, cx: &CommitCx) -> CommitSeq {
         batch.create_vertex(
             VId(id),
             vec![OWNER],
-            vec![(N, CanonicalScalar::Int(10)), (FLAG, CanonicalScalar::Bool(flag))],
+            vec![
+                (N, CanonicalScalar::Int(10)),
+                (FLAG, CanonicalScalar::Bool(flag)),
+            ],
         );
     }
     for id in [2, 3] {
@@ -156,19 +157,28 @@ fn native_maps_and_captures_survive_staging_compaction_reopen_and_pinned_history
         let frozen = captured.canonical_bytes();
         for (plan, expected) in [(&mapped, &map_rows), (&captured, &capture_rows)] {
             for result in [
-                db.execute_graph_pattern_governed(&query, plan, wide()).unwrap(),
+                db.execute_graph_pattern_governed(&query, plan, wide())
+                    .unwrap(),
                 db.execute_graph_pattern_governed_at(&query, plan, basis, wide())
                     .unwrap(),
-                pinned.execute_graph_pattern_governed(&query, plan, wide()).unwrap(),
-                pinned.execute_graph_pattern_governed_at(&query, plan, basis, wide())
+                pinned
+                    .execute_graph_pattern_governed(&query, plan, wide())
                     .unwrap(),
-                txn.execute_graph_pattern_governed(&db, &query, plan, wide()).unwrap(),
+                pinned
+                    .execute_graph_pattern_governed_at(&query, plan, basis, wide())
+                    .unwrap(),
+                txn.execute_graph_pattern_governed(&db, &query, plan, wide())
+                    .unwrap(),
             ] {
                 assert_eq!(&pairs(&result.value), expected);
             }
         }
         assert_eq!(
-            counts(&db.execute_graph_aggregate_governed(&query, &aggregate, wide()).unwrap().value),
+            counts(
+                &db.execute_graph_aggregate_governed(&query, &aggregate, wide())
+                    .unwrap()
+                    .value
+            ),
             vec![(VId(1), 3)]
         );
         let selected = txn
@@ -178,21 +188,37 @@ fn native_maps_and_captures_survive_staging_compaction_reopen_and_pinned_history
         let missing = vec![(VId(1), None)];
         for (plan, expected) in [(&mapped, &map_rows), (&captured, &capture_rows)] {
             assert_eq!(
-                pairs(&txn.execute_graph_pattern_governed(&db, &query, plan, wide()).unwrap().value),
+                pairs(
+                    &txn.execute_graph_pattern_governed(&db, &query, plan, wide())
+                        .unwrap()
+                        .value
+                ),
                 missing
             );
             assert_eq!(
-                &pairs(&db.execute_graph_pattern_governed(&query, plan, wide()).unwrap().value),
+                &pairs(
+                    &db.execute_graph_pattern_governed(&query, plan, wide())
+                        .unwrap()
+                        .value
+                ),
                 expected
             );
         }
         assert_eq!(
-            counts(&txn.execute_graph_aggregate_governed(&db, &query, &aggregate, wide()).unwrap().value),
+            counts(
+                &txn.execute_graph_aggregate_governed(&db, &query, &aggregate, wide())
+                    .unwrap()
+                    .value
+            ),
             vec![(VId(1), 0)]
         );
         let moved = pattern(CAPTURE_HEAD, &argument("delta", 6));
         assert_eq!(
-            pairs(&txn.execute_graph_pattern_governed(&db, &query, &moved, wide()).unwrap().value),
+            pairs(
+                &txn.execute_graph_pattern_governed(&db, &query, &moved, wide())
+                    .unwrap()
+                    .value
+            ),
             capture_rows
         );
         assert_eq!(db.frontier().unwrap(), basis);
@@ -204,20 +230,40 @@ fn native_maps_and_captures_survive_staging_compaction_reopen_and_pinned_history
             .unwrap();
         for (plan, expected) in [(&mapped, &map_rows), (&captured, &capture_rows)] {
             assert_eq!(
-                pairs(&reopened.execute_graph_pattern_governed(&query, plan, wide()).unwrap().value),
+                pairs(
+                    &reopened
+                        .execute_graph_pattern_governed(&query, plan, wide())
+                        .unwrap()
+                        .value
+                ),
                 missing
             );
             assert_eq!(
-                &pairs(&reopened.execute_graph_pattern_governed_at(&query, plan, basis, wide()).unwrap().value),
+                &pairs(
+                    &reopened
+                        .execute_graph_pattern_governed_at(&query, plan, basis, wide())
+                        .unwrap()
+                        .value
+                ),
                 expected
             );
             assert_eq!(
-                &pairs(&pinned.execute_graph_pattern_governed(&query, plan, wide()).unwrap().value),
+                &pairs(
+                    &pinned
+                        .execute_graph_pattern_governed(&query, plan, wide())
+                        .unwrap()
+                        .value
+                ),
                 expected
             );
         }
         assert_eq!(
-            counts(&reopened.execute_graph_aggregate_governed(&query, &aggregate, wide()).unwrap().value),
+            counts(
+                &reopened
+                    .execute_graph_aggregate_governed(&query, &aggregate, wide())
+                    .unwrap()
+                    .value
+            ),
             vec![(VId(1), 0)]
         );
         assert_eq!(captured.canonical_bytes(), frozen);
@@ -243,7 +289,9 @@ fn map_selected_correlated_writes_refuse_atomically_and_can_retry() {
         small.max_effects = 1;
         assert!(matches!(
             txn.execute_graph_mutation_governed(&mut db, &query, &plan, small),
-            Err(GqlQueryError::Source(GraphMutationError::EffectLimit { .. }))
+            Err(GqlQueryError::Source(
+                GraphMutationError::EffectLimit { .. }
+            ))
         ));
         assert_eq!(records(&txn.vertices(&db).unwrap()), before);
         assert_eq!(db.frontier().unwrap(), basis);
@@ -272,7 +320,8 @@ fn captured_and_rejected_map_properties_remain_transaction_conflicts() {
             seed(&mut db, &commit).await;
             let mut txn = db.begin(&contexts.txn()).unwrap();
             let plan = pattern(CAPTURE_HEAD, &argument("delta", 1));
-            txn.execute_graph_pattern_governed(&db, &query, &plan, wide()).unwrap();
+            txn.execute_graph_pattern_governed(&db, &query, &plan, wide())
+                .unwrap();
             let mut staged = WriteBatch::new(R);
             staged.create_vertex(VId(777), vec![], vec![]);
             txn.write(&mut db, staged).unwrap();

@@ -210,10 +210,14 @@ fn declarations_and_exact_argument_types_fail_without_reinterpreting_positions()
     ] {
         let calls = Cell::new(0);
         assert!(
-            PreparedGraphText::prepare_with_parameter_types(source, &declarations, |kind: GraphSymbolKind, name: &str| {
-                calls.set(calls.get() + 1);
-                symbols(kind, name)
-            })
+            PreparedGraphText::prepare_with_parameter_types(
+                source,
+                &declarations,
+                |kind: GraphSymbolKind, name: &str| {
+                    calls.set(calls.get() + 1);
+                    symbols(kind, name)
+                }
+            )
             .is_err(),
             "{source}"
         );

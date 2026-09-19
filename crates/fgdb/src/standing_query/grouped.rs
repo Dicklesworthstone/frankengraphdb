@@ -2,12 +2,14 @@
 //! No query AST interpreter or second graph source lives here. The admitted
 //! GLA supplies predicates, binding slots and grouping positions.
 
+#[path = "grouped/computed.rs"]
 mod computed;
+#[path = "grouped/support.rs"]
 mod support;
 
 use super::*;
-use fgdb_delta_types::zset::aggregate::{AggregateError, AggregateValues};
 use fgdb_delta_types::ZWeight;
+use fgdb_delta_types::zset::aggregate::{AggregateError, AggregateValues};
 use fgdb_gql::algebra::GraphValue;
 use fgdb_gql::{GraphAggregateValue, GraphExactAverage};
 
@@ -57,10 +59,19 @@ pub(super) fn binding_contributions(
     if !keeps(query.input_pattern().plan().operators(), binding, meter)? {
         return Ok(());
     }
-    project_contributions(query, |slot| {
-        binding.get(slot as usize).copied().map(Some)
-            .ok_or(StandingQueryFailure::InvalidDelta)
-    }, sign, output, meter)
+    project_contributions(
+        query,
+        |slot| {
+            binding
+                .get(slot as usize)
+                .copied()
+                .map(Some)
+                .ok_or(StandingQueryFailure::InvalidDelta)
+        },
+        sign,
+        output,
+        meter,
+    )
 }
 
 /// Test only the admitted positive scope. Null extension must never rerun its
@@ -73,8 +84,10 @@ pub(super) fn keeps(
     for op in operators {
         match op {
             GlaOperator::Select { slot, predicates } => {
-                let (_, state) = binding.get(slot.ordinal() as usize)
-                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
+                let (_, state) = binding
+                    .get(slot.ordinal() as usize)
+                    .copied()
+                    .ok_or(StandingQueryFailure::InvalidDelta)?;
                 for predicate in predicates {
                     meter.units(ZSetEvent::Work, 1 + predicate.comparison_work_units())?;
                     if !predicate.matches_borrowed(
@@ -87,29 +100,50 @@ pub(super) fn keeps(
             }
             GlaOperator::VertexIdentity { left, right, equal } => {
                 meter.charge(ZSetEvent::Work)?;
-                let left = binding.get(left.ordinal() as usize)
-                    .ok_or(StandingQueryFailure::InvalidDelta)?.0;
-                let right = binding.get(right.ordinal() as usize)
-                    .ok_or(StandingQueryFailure::InvalidDelta)?.0;
-                if (left == right) != *equal { return Ok(false); }
+                let left = binding
+                    .get(left.ordinal() as usize)
+                    .ok_or(StandingQueryFailure::InvalidDelta)?
+                    .0;
+                let right = binding
+                    .get(right.ordinal() as usize)
+                    .ok_or(StandingQueryFailure::InvalidDelta)?
+                    .0;
+                if (left == right) != *equal {
+                    return Ok(false);
+                }
             }
-            GlaOperator::CompareProperties { left, left_key, right, right_key, comparison } => {
-                let (_, left) = binding.get(left.ordinal() as usize)
-                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
-                let (_, right) = binding.get(right.ordinal() as usize)
-                    .copied().ok_or(StandingQueryFailure::InvalidDelta)?;
+            GlaOperator::CompareProperties {
+                left,
+                left_key,
+                right,
+                right_key,
+                comparison,
+            } => {
+                let (_, left) = binding
+                    .get(left.ordinal() as usize)
+                    .copied()
+                    .ok_or(StandingQueryFailure::InvalidDelta)?;
+                let (_, right) = binding
+                    .get(right.ordinal() as usize)
+                    .copied()
+                    .ok_or(StandingQueryFailure::InvalidDelta)?;
                 let left = left.props.get(left_key);
                 let right = right.props.get(right_key);
                 // Reserve variable payload comparison work before invoking
                 // the canonical borrowed comparator. No encoding, coercion or
                 // predicate-literal allocation occurs in this execution path.
                 meter.charge(ZSetEvent::Work)?;
-                meter.units(ZSetEvent::Work,
-                    left.map_or(0, scalar_units).max(right.map_or(0, scalar_units)))?;
+                meter.units(
+                    ZSetEvent::Work,
+                    left.map_or(0, scalar_units)
+                        .max(right.map_or(0, scalar_units)),
+                )?;
                 // Ordinary WHERE keeps only TRUE; NULL/missing and incompatible
                 // kinds do not pass even !=. This bool must never be negated as
                 // though it represented a three-valued Boolean expression.
-                if !comparison.accepts_scalar_pair(left, right) { return Ok(false); }
+                if !comparison.accepts_scalar_pair(left, right) {
+                    return Ok(false);
+                }
             }
             GlaOperator::SelectBoolean { expression } => {
                 if !super::boolean::keeps(expression, binding, meter)? {
@@ -131,12 +165,18 @@ fn projected_value<'a>(
         ValueProjection::Vertex { slot } => {
             let value = binding(slot.ordinal())?;
             meter.charge(ZSetEvent::ScratchEntry)?;
-            Ok(value.map_or(GraphValue::Scalar(CanonicalScalar::Null), |(vid, _)| GraphValue::Vertex(vid)))
+            Ok(
+                value.map_or(GraphValue::Scalar(CanonicalScalar::Null), |(vid, _)| {
+                    GraphValue::Vertex(vid)
+                }),
+            )
         }
         ValueProjection::Property { slot, key } => {
             let state = binding(slot.ordinal())?;
             let null = CanonicalScalar::Null;
-            let value = state.and_then(|(_, state)| state.props.get(&key)).unwrap_or(&null);
+            let value = state
+                .and_then(|(_, state)| state.props.get(&key))
+                .unwrap_or(&null);
             meter.units(ZSetEvent::ScratchEntry, scalar_units(value))?;
             Ok(GraphValue::Scalar(value.clone()))
         }
@@ -160,26 +200,37 @@ pub(super) fn project_contributions<'a>(
     let mut key = Vec::new();
     for &column in query.group_key_columns() {
         meter.charge(ZSetEvent::Work)?;
-        key.push(projected_value(query.input_pattern().value_columns()[column], &mut binding, meter)?);
+        key.push(projected_value(
+            query.input_pattern().value_columns()[column],
+            &mut binding,
+            meter,
+        )?);
     }
     meter.charge(ZSetEvent::ScratchEntry)?;
     let key: GroupKey = Arc::from(key.into_boxed_slice());
     for (index, aggregate) in query.aggregates().iter().enumerate() {
         meter.charge(ZSetEvent::Work)?;
-        let column = aggregate.argument_column()
+        let column = aggregate
+            .argument_column()
             .map(|column| query.input_pattern().value_columns()[column]);
         if support::uses_support(aggregate.function()) {
             let column = column.ok_or(StandingQueryFailure::InvalidDelta)?;
             // Preserve source-row existence separately from distinct support:
             // nonempty all-null groups must survive with zero/null summaries.
             meter.charge(ZSetEvent::ScratchEntry)?;
-            output.push(((support::primary(&key, index), None), ZWeight::from_i128(sign)));
+            output.push((
+                (support::primary(&key, index), None),
+                ZWeight::from_i128(sign),
+            ));
             let value = projected_value(column, &mut binding, meter)?;
             if !value.is_null() {
                 meter.charge(ZSetEvent::ScratchEntry)?;
                 let value = Arc::new(value);
                 meter.charge(ZSetEvent::ScratchEntry)?;
-                output.push((((Arc::clone(&key), index, Some(value)), Some(0)), ZWeight::from_i128(sign)));
+                output.push((
+                    ((Arc::clone(&key), index, Some(value)), Some(0)),
+                    ZWeight::from_i128(sign),
+                ));
             }
             continue;
         }
@@ -197,7 +248,10 @@ pub(super) fn project_contributions<'a>(
             _ => return Err(StandingQueryFailure::InvalidDelta),
         };
         meter.charge(ZSetEvent::ScratchEntry)?;
-        output.push(((support::primary(&key, index), value), ZWeight::from_i128(sign)));
+        output.push((
+            (support::primary(&key, index), value),
+            ZWeight::from_i128(sign),
+        ));
     }
     Ok(())
 }
@@ -211,7 +265,11 @@ fn render<'a>(
     definition: &PreparedGraphAggregate,
     key: &GroupKey,
     mut summary: impl FnMut(usize) -> Option<&'a AggregateValues>,
-    mut extremum: impl FnMut(usize, bool, &mut Meter<'_>) -> Result<Option<Arc<GraphValue>>, StandingQueryFailure>,
+    mut extremum: impl FnMut(
+        usize,
+        bool,
+        &mut Meter<'_>,
+    ) -> Result<Option<Arc<GraphValue>>, StandingQueryFailure>,
     meter: &mut Meter<'_>,
 ) -> Result<GraphAggregateRow, StandingQueryFailure> {
     let mut values = Vec::new();
@@ -228,9 +286,13 @@ fn render<'a>(
                 GraphAggregateValue::Count(summary.map_or(Ok(0), |s| count(s.count_values()))?)
             }
             GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
-                let sum = summary.and_then(|s| if spec.function() == GraphAggregateFunction::SumIntDistinct {
-                    s.sum_distinct()
-                } else { s.sum() });
+                let sum = summary.and_then(|s| {
+                    if spec.function() == GraphAggregateFunction::SumIntDistinct {
+                        s.sum_distinct()
+                    } else {
+                        s.sum()
+                    }
+                });
                 match sum {
                     None => null,
                     Some(sum) => GraphAggregateValue::Integer(
@@ -239,9 +301,13 @@ fn render<'a>(
                 }
             }
             GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
-                let parts = summary.and_then(|s| if spec.function() == GraphAggregateFunction::AverageIntDistinct {
-                    s.average_distinct_parts()
-                } else { s.average_parts() });
+                let parts = summary.and_then(|s| {
+                    if spec.function() == GraphAggregateFunction::AverageIntDistinct {
+                        s.average_distinct_parts()
+                    } else {
+                        s.average_parts()
+                    }
+                });
                 match parts {
                     None => null,
                     Some((sum, denominator)) => {
@@ -269,7 +335,9 @@ fn render<'a>(
         values.push(value);
     }
     let keys = copied_key(key, meter)?;
-    definition.materialize_incremental_row(keys, values).ok_or(StandingQueryFailure::InvalidDelta)
+    definition
+        .materialize_incremental_row(keys, values)
+        .ok_or(StandingQueryFailure::InvalidDelta)
 }
 
 fn visible(
@@ -280,20 +348,23 @@ fn visible(
     if definition.having().is_empty() && definition.having_expression().is_none() {
         return Ok(Some(row));
     }
-    let keep = definition.evaluate_incremental_having(&row, &mut |event| {
-        meter.charge(ZSetEvent::Work)?;
-        match event {
-            fgdb_gql::GlaExecutionEvent::Work => Ok(()),
-            fgdb_gql::GlaExecutionEvent::ScratchEntry => meter.charge(ZSetEvent::ScratchEntry),
-            fgdb_gql::GlaExecutionEvent::ResultRow => Err(StandingQueryFailure::InvalidDelta),
-        }
-    }).map_err(|error| match error {
-        fgdb_gql::GqlQueryError::Interrupted(reason) => reason,
-        fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphAggregateError::NonIntegerHaving { .. }) => {
-            StandingQueryFailure::NonIntegerHaving
-        }
-        _ => StandingQueryFailure::InvalidDelta,
-    })?.ok_or(StandingQueryFailure::InvalidDelta)?;
+    let keep = definition
+        .evaluate_incremental_having(&row, &mut |event| {
+            meter.charge(ZSetEvent::Work)?;
+            match event {
+                fgdb_gql::GlaExecutionEvent::Work => Ok(()),
+                fgdb_gql::GlaExecutionEvent::ScratchEntry => meter.charge(ZSetEvent::ScratchEntry),
+                fgdb_gql::GlaExecutionEvent::ResultRow => Err(StandingQueryFailure::InvalidDelta),
+            }
+        })
+        .map_err(|error| match error {
+            fgdb_gql::GqlQueryError::Interrupted(reason) => reason,
+            fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphAggregateError::NonIntegerHaving {
+                ..
+            }) => StandingQueryFailure::NonIntegerHaving,
+            _ => StandingQueryFailure::InvalidDelta,
+        })?
+        .ok_or(StandingQueryFailure::InvalidDelta)?;
     Ok(keep.then_some(row))
 }
 
@@ -317,7 +388,7 @@ impl StandingQuery {
             .map_err(zset_error)?;
         support::augment(&self.aggregate, &mut delta, meter)?;
         let mut groups = BTreeSet::new();
-        for (((key, _, _), _) , _) in delta.iter() {
+        for (((key, _, _), _), _) in delta.iter() {
             meter.charge(ZSetEvent::Work)?;
             if !groups.contains(key) {
                 meter.charge(ZSetEvent::ScratchEntry)?;
@@ -344,9 +415,12 @@ impl StandingQuery {
             };
             let old = if exists {
                 let row = render(
-                    &self.definition, &key,
+                    &self.definition,
+                    &key,
                     |index| self.aggregate.get(&support::primary(&key, index)),
-                    |index, maximum, meter| support::current_extremum(&self.aggregate, &key, index, maximum, meter),
+                    |index, maximum, meter| {
+                        support::current_extremum(&self.aggregate, &key, index, maximum, meter)
+                    },
                     meter,
                 )?;
                 visible(&self.definition, row, meter)?
@@ -358,7 +432,8 @@ impl StandingQuery {
         }
         // Aggregate ALL qualified input, not just visible groups. A rejected
         // group must keep exact counts/support for future threshold crossings.
-        let prepared = self.aggregate
+        let prepared = self
+            .aggregate
             .prepare(&delta, limbs, &mut |event| meter.charge(event))
             .map_err(|error| match error {
                 AggregateError::ZSet(error) => zset_error(error),
@@ -371,19 +446,25 @@ impl StandingQuery {
             let exists = global || prepared.get(&support::primary(&key, 0)).is_some();
             let new = if exists {
                 let row = render(
-                    &self.definition, &key,
+                    &self.definition,
+                    &key,
                     |index| prepared.get(&support::primary(&key, index)),
-                    |index, maximum, meter| support::pending_extremum(&prepared, &key, index, maximum, meter),
+                    |index, maximum, meter| {
+                        support::pending_extremum(&prepared, &key, index, maximum, meter)
+                    },
                     meter,
                 )?;
                 visible(&self.definition, row, meter)?
             } else {
                 None
             };
-            result_count = result_count.checked_sub(u128::from(old.is_some()))
+            result_count = result_count
+                .checked_sub(u128::from(old.is_some()))
                 .ok_or(StandingQueryFailure::InvalidDelta)?;
             result_count += u128::from(new.is_some());
-            if old == new { continue; }
+            if old == new {
+                continue;
+            }
             if let Some(row) = old {
                 meter.charge(ZSetEvent::ScratchEntry)?;
                 changes.push((row, ZWeight::from_i128(-1)));
@@ -396,7 +477,11 @@ impl StandingQuery {
         // With a downstream projection these are private complete groups;
         // output admission applies after projection and DISTINCT instead.
         if downstream.is_none()
-            && self.policy.rows.max_result_rows().is_some_and(|limit| result_count > u128::from(limit))
+            && self
+                .policy
+                .rows
+                .max_result_rows()
+                .is_some_and(|limit| result_count > u128::from(limit))
         {
             return Err(StandingQueryFailure::ResultBudget);
         }
@@ -406,14 +491,18 @@ impl StandingQuery {
             Some(output) => Some(output.prepare(&changes, meter)?),
             None => None,
         };
-        let sink = self.rows.prepare_update(&changes, limbs, &mut |event| meter.charge(event))
+        let sink = self
+            .rows
+            .prepare_update(&changes, limbs, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
         (meter.checkpoint)()?;
         // Source support, complete groups, projected multiplicities and DISTINCT
         // representatives publish together. No recoverably fallible work remains.
         let _ = prepared.commit();
         sink.commit();
-        if let Some(projected) = projected { projected.commit(); }
+        if let Some(projected) = projected {
+            projected.commit();
+        }
         Ok(())
     }
 }
@@ -421,37 +510,64 @@ impl StandingQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asupersync::lab::run_async_under_lab;
     use crate::{DatabaseKeys, WriteBatch};
+    use asupersync::lab::run_async_under_lab;
     use fgdb_delta_types::RelationId;
-    use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder};
     use fgdb_gql::GraphAggregate;
+    use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder};
     use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
 
     fn definition() -> PreparedGraphAggregate {
         let mut input = GraphPatternBuilder::new();
         input.vertex("n").unwrap();
-        let input = input.prepare_values(&[
-            GraphColumn::property("group", "n", PropertyKeyId(1)),
-            GraphColumn::property("value", "n", PropertyKeyId(2)),
-        ], 0, None).unwrap().with_duplicates();
-        PreparedGraphAggregate::prepare(input, &[0], &[
-            GraphAggregate::count_rows("count"), GraphAggregate::sum_int("sum", 1),
-        ], 0, None).unwrap()
+        let input = input
+            .prepare_values(
+                &[
+                    GraphColumn::property("group", "n", PropertyKeyId(1)),
+                    GraphColumn::property("value", "n", PropertyKeyId(2)),
+                ],
+                0,
+                None,
+            )
+            .unwrap()
+            .with_duplicates();
+        PreparedGraphAggregate::prepare(
+            input,
+            &[0],
+            &[
+                GraphAggregate::count_rows("count"),
+                GraphAggregate::sum_int("sum", 1),
+            ],
+            0,
+            None,
+        )
+        .unwrap()
     }
     fn seeded(initial: &LogicalDeltaBatch) -> StandingQuery {
         seeded_with(initial, definition())
     }
-    fn seeded_with(initial: &LogicalDeltaBatch, definition: PreparedGraphAggregate) -> StandingQuery {
+    fn seeded_with(
+        initial: &LogicalDeltaBatch,
+        definition: PreparedGraphAggregate,
+    ) -> StandingQuery {
         let policy = GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000);
         let mut query = StandingQuery {
-            definition, policy, vertices: BTreeMap::new(),
+            definition,
+            policy,
+            vertices: BTreeMap::new(),
             edges: None,
-            aggregate: IncrementalAggregate::new(), rows: ZSet::new(),
-            frontier: CommitSeq::ORIGIN, stats: StandingQueryStats::default(), failure: None,
+            aggregate: IncrementalAggregate::new(),
+            rows: ZSet::new(),
+            frontier: CommitSeq::ORIGIN,
+            stats: StandingQueryStats::default(),
+            failure: None,
         };
         let mut checkpoint = || Ok(());
-        let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+        let mut meter = Meter {
+            policy,
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
         query.maintain(initial, &mut meter).unwrap();
         query.frontier = initial.commit_seq();
         query
@@ -466,10 +582,14 @@ mod tests {
             let mut db = Database::open_memory(&commit, keys).await.unwrap();
             let mut first = WriteBatch::new(RelationId(1));
             for id in [1, 2] {
-                first.create_vertex(VId(id), vec![], vec![
-                    (PropertyKeyId(1), CanonicalScalar::Int(id as i64)),
-                    (PropertyKeyId(2), CanonicalScalar::Int(id as i64)),
-                ]);
+                first.create_vertex(
+                    VId(id),
+                    vec![],
+                    vec![
+                        (PropertyKeyId(1), CanonicalScalar::Int(id as i64)),
+                        (PropertyKeyId(2), CanonicalScalar::Int(id as i64)),
+                    ],
+                );
             }
             let basis = db.write(&commit, first).await.unwrap();
             let initial = db.delta_index().unwrap().get(basis).unwrap().clone();
@@ -477,7 +597,11 @@ mod tests {
             next.delete_vertex(VId(1));
             next.set_vertex_property(VId(2), PropertyKeyId(1), Some(CanonicalScalar::Int(3)));
             next.set_vertex_property(VId(2), PropertyKeyId(2), Some(CanonicalScalar::Int(9)));
-            next.create_vertex(VId(3), vec![], vec![(PropertyKeyId(1), CanonicalScalar::Int(4))]);
+            next.create_vertex(
+                VId(3),
+                vec![],
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(4))],
+            );
             let at = db.write(&commit, next).await.unwrap();
             let batch = db.delta_index().unwrap().get(at).unwrap().clone();
             let before = seeded(&initial);
@@ -485,8 +609,15 @@ mod tests {
             let policy = success.policy;
             let mut total = 0;
             {
-                let mut checkpoint = || { total += 1; Ok(()) };
-                let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+                let mut checkpoint = || {
+                    total += 1;
+                    Ok(())
+                };
+                let mut meter = Meter {
+                    policy,
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
                 success.maintain(&batch, &mut meter).unwrap();
             }
             for stop in 1..=total {
@@ -495,10 +626,21 @@ mod tests {
                 {
                     let mut checkpoint = || {
                         seen += 1;
-                        if seen == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
+                        if seen == stop {
+                            Err(StandingQueryFailure::Interrupted)
+                        } else {
+                            Ok(())
+                        }
                     };
-                    let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-                    assert_eq!(candidate.maintain(&batch, &mut meter), Err(StandingQueryFailure::Interrupted));
+                    let mut meter = Meter {
+                        policy,
+                        stats: StandingQueryStats::default(),
+                        checkpoint: &mut checkpoint,
+                    };
+                    assert_eq!(
+                        candidate.maintain(&batch, &mut meter),
+                        Err(StandingQueryFailure::Interrupted)
+                    );
                 }
                 assert_eq!(seen, stop);
                 assert_eq!(candidate.vertices, before.vertices);
@@ -506,7 +648,11 @@ mod tests {
                 assert_eq!(candidate.rows, before.rows);
                 assert_eq!(candidate.frontier, basis);
                 let mut checkpoint = || Ok(());
-                let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+                let mut meter = Meter {
+                    policy,
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
                 candidate.maintain(&batch, &mut meter).unwrap();
                 assert_eq!(candidate.vertices, success.vertices);
                 assert_eq!(candidate.aggregate, success.aggregate);
@@ -517,8 +663,15 @@ mod tests {
             let mut bounded = seeded(&initial);
             bounded.policy = GqlQueryPolicy::new(100_000, 1, 10_000_000, 10_000_000);
             let mut checkpoint = || Ok(());
-            let mut meter = Meter { policy: bounded.policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-            assert_eq!(bounded.maintain(&batch, &mut meter), Err(StandingQueryFailure::ResultBudget));
+            let mut meter = Meter {
+                policy: bounded.policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            assert_eq!(
+                bounded.maintain(&batch, &mut meter),
+                Err(StandingQueryFailure::ResultBudget)
+            );
             assert_eq!(bounded.vertices, before.vertices);
             assert_eq!(bounded.aggregate, before.aggregate);
             assert_eq!(bounded.rows, before.rows);
@@ -528,9 +681,11 @@ mod tests {
 
     #[test]
     fn every_having_checkpoint_preserves_visible_and_hidden_groups_then_retries() {
-        use fgdb_gql::{GraphAggregateColumn as Column, GraphHavingExpression, GraphHavingOp as Op,
-            GraphHavingOperand as Arg};
         use fgdb_gql::algebra::IntegerComparison;
+        use fgdb_gql::{
+            GraphAggregateColumn as Column, GraphHavingExpression, GraphHavingOp as Op,
+            GraphHavingOperand as Arg,
+        };
         let ((), report) = run_async_under_lab(0x6a50, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
@@ -538,10 +693,14 @@ mod tests {
             let mut db = Database::open_memory(&commit, keys).await.unwrap();
             let mut initial = WriteBatch::new(RelationId(1));
             for (id, group, value) in [(1, 1, 1), (2, 1, 2), (3, 2, 3)] {
-                initial.create_vertex(VId(id), vec![], vec![
-                    (PropertyKeyId(1), CanonicalScalar::Int(group)),
-                    (PropertyKeyId(2), CanonicalScalar::Int(value)),
-                ]);
+                initial.create_vertex(
+                    VId(id),
+                    vec![],
+                    vec![
+                        (PropertyKeyId(1), CanonicalScalar::Int(group)),
+                        (PropertyKeyId(2), CanonicalScalar::Int(value)),
+                    ],
+                );
             }
             let basis = db.write(&commit, initial).await.unwrap();
             let initial = db.delta_index().unwrap().get(basis).unwrap().clone();
@@ -551,11 +710,19 @@ mod tests {
             let at = db.write(&commit, next).await.unwrap();
             let batch = db.delta_index().unwrap().get(at).unwrap().clone();
             let having = GraphHavingExpression::prepare(&[
-                Op::Compare { left: Arg::Column(Column::Aggregate(0)),
-                    comparison: IntegerComparison::GreaterOrEqual, right: Arg::Integer(2) },
-                Op::Compare { left: Arg::Column(Column::Aggregate(1)),
-                    comparison: IntegerComparison::Greater, right: Arg::Integer(0) }, Op::And,
-            ]).unwrap();
+                Op::Compare {
+                    left: Arg::Column(Column::Aggregate(0)),
+                    comparison: IntegerComparison::GreaterOrEqual,
+                    right: Arg::Integer(2),
+                },
+                Op::Compare {
+                    left: Arg::Column(Column::Aggregate(1)),
+                    comparison: IntegerComparison::Greater,
+                    right: Arg::Integer(0),
+                },
+                Op::And,
+            ])
+            .unwrap();
             let definition = definition().with_having_expression(&having).unwrap();
             let seed = || seeded_with(&initial, definition.clone());
             let before = seed();
@@ -564,8 +731,15 @@ mod tests {
             let policy = success.policy;
             let mut calls = 0;
             let stats = {
-                let mut checkpoint = || { calls += 1; Ok(()) };
-                let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+                let mut checkpoint = || {
+                    calls += 1;
+                    Ok(())
+                };
+                let mut meter = Meter {
+                    policy,
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
                 success.maintain(&batch, &mut meter).unwrap();
                 meter.stats
             };
@@ -575,8 +749,16 @@ mod tests {
             assert_eq!(row.keys(), &[GraphValue::Scalar(CanonicalScalar::Int(2))]);
             assert_eq!(row.get(0).unwrap().as_count(), Some(2));
             assert_eq!(row.get(1).unwrap().as_integer(), Some(7));
-            let hidden: GroupKey = Arc::from(vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice());
-            assert_eq!(success.aggregate.get(&support::primary(&hidden, 0)).unwrap().count_rows(), &ZWeight::ONE);
+            let hidden: GroupKey =
+                Arc::from(vec![GraphValue::Scalar(CanonicalScalar::Int(1))].into_boxed_slice());
+            assert_eq!(
+                success
+                    .aggregate
+                    .get(&support::primary(&hidden, 0))
+                    .unwrap()
+                    .count_rows(),
+                &ZWeight::ONE
+            );
             let same = |actual: &StandingQuery, expected: &StandingQuery| {
                 assert_eq!(actual.vertices, expected.vertices);
                 assert_eq!(actual.aggregate, expected.aggregate);
@@ -590,33 +772,62 @@ mod tests {
                 {
                     let mut checkpoint = || {
                         seen += 1;
-                        if seen == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
+                        if seen == stop {
+                            Err(StandingQueryFailure::Interrupted)
+                        } else {
+                            Ok(())
+                        }
                     };
-                    let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-                    assert_eq!(candidate.maintain(&batch, &mut meter), Err(StandingQueryFailure::Interrupted));
+                    let mut meter = Meter {
+                        policy,
+                        stats: StandingQueryStats::default(),
+                        checkpoint: &mut checkpoint,
+                    };
+                    assert_eq!(
+                        candidate.maintain(&batch, &mut meter),
+                        Err(StandingQueryFailure::Interrupted)
+                    );
                 }
                 assert_eq!(seen, stop);
                 same(&candidate, &before);
                 let mut checkpoint = || Ok(());
-                let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+                let mut meter = Meter {
+                    policy,
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
                 candidate.maintain(&batch, &mut meter).unwrap();
                 same(&candidate, &success);
             }
-            for reason in [StandingQueryFailure::WorkBudget, StandingQueryFailure::ScratchBudget,
-                StandingQueryFailure::ResultBudget]
-            {
+            for reason in [
+                StandingQueryFailure::WorkBudget,
+                StandingQueryFailure::ScratchBudget,
+                StandingQueryFailure::ResultBudget,
+            ] {
                 let mut candidate = seed();
                 match reason {
-                    StandingQueryFailure::WorkBudget => candidate.policy.evaluator.max_work_units = stats.work_units - 1,
-                    StandingQueryFailure::ScratchBudget => candidate.policy.evaluator.max_scratch_entries = stats.scratch_entries - 1,
+                    StandingQueryFailure::WorkBudget => {
+                        candidate.policy.evaluator.max_work_units = stats.work_units - 1
+                    }
+                    StandingQueryFailure::ScratchBudget => {
+                        candidate.policy.evaluator.max_scratch_entries = stats.scratch_entries - 1
+                    }
                     _ => candidate.policy = GqlQueryPolicy::new(100_000, 0, 10_000_000, 10_000_000),
                 }
                 let mut checkpoint = || Ok(());
-                let mut meter = Meter { policy: candidate.policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+                let mut meter = Meter {
+                    policy: candidate.policy,
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
                 assert_eq!(candidate.maintain(&batch, &mut meter), Err(reason));
                 same(&candidate, &before);
                 candidate.policy = policy;
-                let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+                let mut meter = Meter {
+                    policy,
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
                 candidate.maintain(&batch, &mut meter).unwrap();
                 same(&candidate, &success);
             }

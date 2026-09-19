@@ -35,10 +35,13 @@ fn catch_up(
         let index = db.delta_index()?;
         let mut events = 0_u64;
         let mut control = |_: ZSetEvent| -> Result<(), std::io::Error> {
-            cx.checkpoint().map_err(|error| std::io::Error::other(error.to_string()))?;
+            cx.checkpoint()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
             events += 1;
             if events > 1_000_000 {
-                return Err(std::io::Error::other("example catch-up event budget exhausted"));
+                return Err(std::io::Error::other(
+                    "example catch-up event budget exhausted",
+                ));
             }
             Ok(())
         };
@@ -64,7 +67,9 @@ fn run() -> Result<(), Error> {
     // Retained for inspection; the example never deletes a database directory.
     let path = std::env::temp_dir().join(format!("fgdb-reachability-{}", std::process::id()));
     let keys = DatabaseKeys::new(
-        [0x5a; 32], DatabaseSecurityNamespaceId([0x77; 32]), [0x3c; 32],
+        [0x5a; 32],
+        DatabaseSecurityNamespaceId([0x77; 32]),
+        [0x3c; 32],
     );
     let runtime = RuntimeBuilder::new().build()?;
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -99,7 +104,8 @@ fn run() -> Result<(), Error> {
         db.write(commit_cx, close_cycle).await?;
         {
             let mut allow = |_: ZSetEvent| Ok::<_, std::io::Error>(());
-            let pending = view.prepare_next(db.delta_index()?, LIMBS, &mut allow)?
+            let pending = view
+                .prepare_next(db.delta_index()?, LIMBS, &mut allow)?
                 .expect("the durable cycle commit has not been consumed");
             let rejected = sink.prepare_update(pending.delta(), LIMBS, &mut |_| {
                 Err(std::io::Error::other("injected downstream refusal"))
@@ -124,7 +130,10 @@ fn run() -> Result<(), Error> {
         db.write(commit_cx, last).await?;
         catch_up(&db, query_cx, &mut view, &mut sink)?;
         assert_eq!(sink.len(), 3);
-        assert!(!view.contains(VId(1), VId(1)), "a removed cycle cannot self-support");
+        assert!(
+            !view.contains(VId(1), VId(1)),
+            "a removed cycle cannot self-support"
+        );
 
         // Freshly recovered Chronicle history recreates the same input
         // identities, exact frontier and recursive view without saved state.
@@ -145,7 +154,11 @@ fn run() -> Result<(), Error> {
         assert_eq!(view, rebuilt);
         assert_eq!(sink, rebuilt_sink);
         assert_eq!(view.pairs().collect::<Vec<_>>(), vec![(VId(2), VId(3))]);
-        println!("OK: recursive view at {:?}, durable database {}", view.frontier(), path.display());
+        println!(
+            "OK: recursive view at {:?}, durable database {}",
+            view.frontier(),
+            path.display()
+        );
         Ok(())
     })
 }

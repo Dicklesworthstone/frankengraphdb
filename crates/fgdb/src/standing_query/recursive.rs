@@ -3,6 +3,7 @@
 //! delta decoder, recursion algorithm or publication authority lives here.
 
 use super::*;
+use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::zset::committed::EdgeInputError;
 use fgdb_delta_types::zset::committed::snapshot::{EdgeSnapshotBuilder, SnapshotInputError};
 use fgdb_delta_types::zset::reachability::ReachabilityError;
@@ -10,7 +11,6 @@ use fgdb_delta_types::zset::reachability::committed::{
     CommittedReachability, CommittedReachabilityError, CommittedReachabilityUpdate,
 };
 use fgdb_delta_types::{LimbLimit, SchemaEpoch};
-use crate::gql_exec::source::{self, SourceEvent};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 type Pair = (VId, VId);
@@ -27,7 +27,9 @@ pub(crate) struct State {
 fn input_error(error: CommittedReachabilityError<StandingQueryFailure>) -> StandingQueryFailure {
     match error {
         CommittedReachabilityError::Input(EdgeInputError::Delta(error))
-        | CommittedReachabilityError::Reachability(ReachabilityError::Delta(error)) => zset_error(error),
+        | CommittedReachabilityError::Reachability(ReachabilityError::Delta(error)) => {
+            zset_error(error)
+        }
         _ => StandingQueryFailure::InvalidDelta,
     }
 }
@@ -50,7 +52,10 @@ fn observe_batch(
         meter.charge(ZSetEvent::Work)?;
         for _ in &coordinate.rows {
             meter.charge(ZSetEvent::Work)?;
-            meter.stats.delta_rows = meter.stats.delta_rows.checked_add(1)
+            meter.stats.delta_rows = meter
+                .stats
+                .delta_rows
+                .checked_add(1)
                 .ok_or(StandingQueryFailure::WorkBudget)?;
         }
     }
@@ -58,7 +63,11 @@ fn observe_batch(
 }
 
 fn result_bound(rows: u128, policy: GqlQueryPolicy) -> Result<(), StandingQueryFailure> {
-    if policy.rows.max_result_rows().is_some_and(|limit| rows > u128::from(limit)) {
+    if policy
+        .rows
+        .max_result_rows()
+        .is_some_and(|limit| rows > u128::from(limit))
+    {
         return Err(StandingQueryFailure::ResultBudget);
     }
     Ok(())
@@ -78,16 +87,25 @@ fn finish(
         meter.charge(ZSetEvent::Work)?;
         match weight.to_i128() {
             Some(1) if rows.weight(pair).is_none() => {
-                count = count.checked_add(1).ok_or(StandingQueryFailure::Arithmetic)?;
+                count = count
+                    .checked_add(1)
+                    .ok_or(StandingQueryFailure::Arithmetic)?;
             }
-            Some(-1) if rows.weight(pair).is_some_and(|old| old.to_i128() == Some(1)) => {
-                count = count.checked_sub(1).ok_or(StandingQueryFailure::InvalidDelta)?;
+            Some(-1)
+                if rows
+                    .weight(pair)
+                    .is_some_and(|old| old.to_i128() == Some(1)) =>
+            {
+                count = count
+                    .checked_sub(1)
+                    .ok_or(StandingQueryFailure::InvalidDelta)?;
             }
             _ => return Err(StandingQueryFailure::InvalidDelta),
         }
     }
     result_bound(count, meter.policy)?;
-    let sink = rows.prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
+    let sink = rows
+        .prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
         .map_err(zset_error)?;
     (meter.checkpoint)()?;
     // All arithmetic, checks and cancellation are complete. These are the
@@ -99,7 +117,9 @@ fn finish(
 }
 
 impl State {
-    pub(super) fn relation(&self) -> RelationId { self.input.relation() }
+    pub(super) fn relation(&self) -> RelationId {
+        self.input.relation()
+    }
 
     pub(super) fn maintain(
         &mut self,
@@ -111,8 +131,10 @@ impl State {
             return Err(StandingQueryFailure::InvalidDelta);
         }
         observe_batch(batch, meter)?;
-        let pending = self.input.prepare_committed_successor(cx, batch, LIMBS,
-            &mut |event| meter.charge(event)).map_err(input_error)?;
+        let pending = self
+            .input
+            .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
+            .map_err(input_error)?;
         finish(&mut self.rows, pending, meter)
     }
 }
@@ -136,10 +158,17 @@ impl State {
         let mut records = 0_u64;
         for block in &snapshot.blocks {
             meter.charge(ZSetEvent::Work)?;
-            records = records.checked_add(u64::try_from(block.len())
-                .map_err(|_| StandingQueryFailure::SnapshotBudget)?)
+            records = records
+                .checked_add(
+                    u64::try_from(block.len()).map_err(|_| StandingQueryFailure::SnapshotBudget)?,
+                )
                 .ok_or(StandingQueryFailure::SnapshotBudget)?;
-            if meter.policy.rows.max_snapshot_records().is_some_and(|limit| records > limit) {
+            if meter
+                .policy
+                .rows
+                .max_snapshot_records()
+                .is_some_and(|limit| records > limit)
+            {
                 return Err(StandingQueryFailure::SnapshotBudget);
             }
         }
@@ -148,38 +177,62 @@ impl State {
         // vector, reconstructed log or fabricated insertion commit is needed.
         meter.charge(ZSetEvent::ScratchEntry)?;
         let mut builder = EdgeSnapshotBuilder::from_index(
-            crate::GRAPH, crate::BRANCH, &snapshot.delta_index,
+            crate::GRAPH,
+            crate::BRANCH,
+            &snapshot.delta_index,
             &mut |event| meter.charge(event),
-        ).map_err(snapshot_error)?;
+        )
+        .map_err(snapshot_error)?;
         // The embedded write template fixes coordinates to SchemaEpoch(0).
         // Record the selected relation even when empty. A schema-capable spine
         // must supply authenticated current catalog epochs instead; the shared
         // builder already supports them, including known empty relations.
-        builder.record_epoch(relation, SchemaEpoch(0), &mut |event| meter.charge(event))
+        builder
+            .record_epoch(relation, SchemaEpoch(0), &mut |event| meter.charge(event))
             .map_err(snapshot_error)?;
-        source::visit_edges(&snapshot.blocks, snapshot.frontier,
+        source::visit_edges(
+            &snapshot.blocks,
+            snapshot.frontier,
             &mut |event| match event {
                 SourceEvent::Work | SourceEvent::SnapshotRecord => meter.charge(ZSetEvent::Work),
                 SourceEvent::ScratchEntry => meter.charge(ZSetEvent::ScratchEntry),
             },
-            |entry, control| builder.insert(
-                entry.eid, (entry.relation, entry.src, entry.dst), SchemaEpoch(0), LIMBS,
-                &mut |event| control(match event {
-                    ZSetEvent::Work => SourceEvent::Work,
-                    ZSetEvent::ScratchEntry => SourceEvent::ScratchEntry,
-                }),
-            ).map_err(snapshot_error),
+            |entry, control| {
+                builder
+                    .insert(
+                        entry.eid,
+                        (entry.relation, entry.src, entry.dst),
+                        SchemaEpoch(0),
+                        LIMBS,
+                        &mut |event| {
+                            control(match event {
+                                ZSetEvent::Work => SourceEvent::Work,
+                                ZSetEvent::ScratchEntry => SourceEvent::ScratchEntry,
+                            })
+                        },
+                    )
+                    .map_err(snapshot_error)
+            },
         )?;
-        let baseline = builder.finish(&mut |event| meter.charge(event)).map_err(snapshot_error)?;
-        let input = CommittedReachability::from_snapshot(
-            baseline, relation, LIMBS, &mut |event| meter.charge(event),
-        ).map_err(input_error)?;
-        let rows = input.snapshot(LIMBS, &mut |event| meter.charge(event)).map_err(input_error)?;
+        let baseline = builder
+            .finish(&mut |event| meter.charge(event))
+            .map_err(snapshot_error)?;
+        let input = CommittedReachability::from_snapshot(baseline, relation, LIMBS, &mut |event| {
+            meter.charge(event)
+        })
+        .map_err(input_error)?;
+        let rows = input
+            .snapshot(LIMBS, &mut |event| meter.charge(event))
+            .map_err(input_error)?;
         result_bound(rows.len() as u128, meter.policy)?;
         (meter.checkpoint)()?;
         Ok(Self {
-            input, rows, policy: meter.policy, frontier: snapshot.frontier,
-            stats: meter.stats, failure: None,
+            input,
+            rows,
+            policy: meter.policy,
+            frontier: snapshot.frontier,
+            stats: meter.stats,
+            failure: None,
         })
     }
 }
@@ -194,8 +247,15 @@ impl<V: Vfs + Clone> Database<V> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         cx.with_restriction(|| {
-            let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
             // Under &self the topology and the delta anchor are one immutable
             // generation. No new commit authority, historical log copy or cursor
             // injection is needed. A failed build never changes a registered view.

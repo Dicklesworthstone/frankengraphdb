@@ -777,8 +777,16 @@ impl<V: Vfs> BlockStore<V> {
     ) -> Result<ObjectId, StoreError> {
         before_lock();
         let permit = self.acquire_publication_permit(cx)?;
-        self.put_object_under_permit(kind, cx, bytes, crash_at, after_staging_sync, &permit, false)
-            .await
+        self.put_object_under_permit(
+            kind,
+            cx,
+            bytes,
+            crash_at,
+            after_staging_sync,
+            &permit,
+            false,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -900,11 +908,14 @@ impl<V: Vfs> BlockStore<V> {
 
         staging.write_all(bytes).await?;
         if batch && crash_at == Some(BlockStoreCrashPoint::AfterBatchStagingWrite) {
-            return Err(std::io::Error::other("crash: batch staging bytes before inode sync").into());
+            return Err(
+                std::io::Error::other("crash: batch staging bytes before inode sync").into(),
+            );
         }
         cx.with_restriction_async(staging.sync_all()).await?;
         if batch {
-            self.verify_durable_bytes(cx, &staging_path, bytes, limit).await?;
+            self.verify_durable_bytes(cx, &staging_path, bytes, limit)
+                .await?;
         }
         after_staging_sync();
         if crash_at == Some(BlockStoreCrashPoint::AfterStagingFileSyncBeforePublication) {
@@ -920,7 +931,10 @@ impl<V: Vfs> BlockStore<V> {
         self.vfs.rename(&staging_path, &path).await?;
         if batch {
             if crash_at == Some(BlockStoreCrashPoint::AfterBlockFileSyncBeforeStoreDirectorySync) {
-                return Err(std::io::Error::other("crash: strata block inode durable before directory entry").into());
+                return Err(std::io::Error::other(
+                    "crash: strata block inode durable before directory entry",
+                )
+                .into());
             }
             return Ok(id);
         }
@@ -959,10 +973,12 @@ impl<V: Vfs> BlockStore<V> {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "Strata inode sync did not make the offered bytes durable",
-                ).into());
+                )
+                .into());
             }
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Hold publication authority across one commit's data objects. A batch
@@ -1524,7 +1540,9 @@ impl<V: Vfs> BlockStore<V> {
         }
         let stored = self.put_with_crash(cx, bytes, crash_at).await?;
         debug_assert_eq!(stored.0, id, "put derives identity from the same bytes");
-        let entries = self.verify_block_payload(cx, bytes, patch_bytes, receipts.spans.len()).await?;
+        let entries = self
+            .verify_block_payload(cx, bytes, patch_bytes, receipts.spans.len())
+            .await?;
         receipts.admit_block(id, &entries, crate::header_predecessor(bytes))?;
         Ok(stored)
     }
@@ -1880,11 +1898,18 @@ impl PublishReceipts {
         entries: &[crate::AdjacencyEntry],
         predecessor: Option<DeltaBlockVersion>,
     ) -> Result<(), StoreError> {
-        self.validator.observe_block(self.spans.len(), entries)
+        self.validator
+            .observe_block(self.spans.len(), entries)
             .map_err(StoreError::MalformedRoot)?;
         if let Some(span) = crate::root::span_of(entries) {
             self.spans.insert(id, span);
-            self.chains.insert(id, (entries.first().map(|entry| (entry.src, entry.relation)), predecessor));
+            self.chains.insert(
+                id,
+                (
+                    entries.first().map(|entry| (entry.src, entry.relation)),
+                    predecessor,
+                ),
+            );
         }
         Ok(())
     }
@@ -1896,7 +1921,11 @@ impl PublishReceipts {
 }
 
 enum PendingAdmission {
-    Block(ObjectId, Vec<crate::AdjacencyEntry>, Option<DeltaBlockVersion>),
+    Block(
+        ObjectId,
+        Vec<crate::AdjacencyEntry>,
+        Option<DeltaBlockVersion>,
+    ),
     Patch(ObjectId, VertexPatchRows),
 }
 
@@ -1922,9 +1951,9 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     ) -> Result<ObjectId, StoreError> {
         let id = kind.identity(self.store.k_oid.expose(), self.store.namespace, bytes);
         if !self.objects.contains(&id) {
-            self.store.put_object_under_permit(
-                kind, cx, bytes, self.crash_at, || {}, &self.permit, true,
-            ).await?;
+            self.store
+                .put_object_under_permit(kind, cx, bytes, self.crash_at, || {}, &self.permit, true)
+                .await?;
             self.objects.insert(id);
         }
         Ok(id)
@@ -1944,25 +1973,39 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         if !self.receipts.spans.contains_key(&id) && !self.objects.contains(&id) {
             // If the patch was omitted, admit the declared on-disk patch but
             // still establish its durability under this batch's permit.
-            let (_, declared_patch) = crate::decode_block_with_properties(bytes)
-                .map_err(StoreError::Malformed)?;
+            let (_, declared_patch) =
+                crate::decode_block_with_properties(bytes).map_err(StoreError::Malformed)?;
             let owned;
             let patch_bytes = if let Some(bytes) = patch_bytes {
                 Some(bytes)
             } else if let Some((patch_id, _)) = declared_patch {
-                owned = self.store.read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES).await?;
+                owned = self
+                    .store
+                    .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
+                    .await?;
                 Some(owned.as_slice())
             } else {
                 None
             };
-            let entries = self.store.verify_block_payload(
-                cx, bytes, patch_bytes, self.receipts.spans.len() + self.pending.len(),
-            ).await?;
+            let entries = self
+                .store
+                .verify_block_payload(
+                    cx,
+                    bytes,
+                    patch_bytes,
+                    self.receipts.spans.len() + self.pending.len(),
+                )
+                .await?;
             if let Some(patch_bytes) = patch_bytes {
-                self.put_object(cx, StoredObjectKind::EdgePropertyPatch, patch_bytes).await?;
+                self.put_object(cx, StoredObjectKind::EdgePropertyPatch, patch_bytes)
+                    .await?;
             }
             self.put_object(cx, StoredObjectKind::Block, bytes).await?;
-            self.pending.push(PendingAdmission::Block(id, entries, crate::header_predecessor(bytes)));
+            self.pending.push(PendingAdmission::Block(
+                id,
+                entries,
+                crate::header_predecessor(bytes),
+            ));
         }
         self.failed = false;
         Ok(DeltaBlockVersion(id))
@@ -1980,7 +2023,8 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
         if !self.receipts.patch_spans.contains_key(&id) && !self.objects.contains(&id) {
             let rows = decode_patch_inner(bytes, self.store.decode_resolver())
                 .map_err(StoreError::MalformedPatch)?;
-            self.put_object(cx, StoredObjectKind::VertexPatch, bytes).await?;
+            self.put_object(cx, StoredObjectKind::VertexPatch, bytes)
+                .await?;
             self.pending.push(PendingAdmission::Patch(id, rows));
         }
         self.failed = false;
@@ -2001,12 +2045,24 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
     pub async fn finish(self, cx: &CommitCx) -> Result<(), StoreError> {
         self.check_live()?;
         if !self.objects.is_empty() {
-            if matches!(self.crash_at, Some(BlockStoreCrashPoint::AfterBatchRenames | BlockStoreCrashPoint::AfterBatchFileSyncs)) {
-                return Err(std::io::Error::other("crash: batch inodes durable before directory barrier").into());
+            if matches!(
+                self.crash_at,
+                Some(
+                    BlockStoreCrashPoint::AfterBatchRenames
+                        | BlockStoreCrashPoint::AfterBatchFileSyncs
+                )
+            ) {
+                return Err(std::io::Error::other(
+                    "crash: batch inodes durable before directory barrier",
+                )
+                .into());
             }
             sync_directory(cx, &self.store.vfs, &self.store.dir).await?;
             if self.crash_at == Some(BlockStoreCrashPoint::AfterBatchDirectorySync) {
-                return Err(std::io::Error::other("crash: batch directory durable before receipts").into());
+                return Err(std::io::Error::other(
+                    "crash: batch directory durable before receipts",
+                )
+                .into());
             }
         }
         for admission in self.pending {
@@ -2014,14 +2070,16 @@ impl<V: Vfs> BlockPublicationBatch<'_, V> {
                 PendingAdmission::Block(id, entries, predecessor) => {
                     self.receipts.admit_block(id, &entries, predecessor)
                 }
-                PendingAdmission::Patch(id, rows) => {
-                    self.receipts.vertex_validator.observe_patch(self.receipts.patch_spans.len(), &rows)
-                        .map_err(StoreError::MalformedRoot).map(|()| {
-                            if let Some(span) = crate::vertex::span_of_rows(&rows) {
-                                self.receipts.patch_spans.insert(id, span);
-                            }
-                        })
-                }
+                PendingAdmission::Patch(id, rows) => self
+                    .receipts
+                    .vertex_validator
+                    .observe_patch(self.receipts.patch_spans.len(), &rows)
+                    .map_err(StoreError::MalformedRoot)
+                    .map(|()| {
+                        if let Some(span) = crate::vertex::span_of_rows(&rows) {
+                            self.receipts.patch_spans.insert(id, span);
+                        }
+                    }),
             };
             if let Err(error) = result {
                 *self.receipts = PublishReceipts::new();

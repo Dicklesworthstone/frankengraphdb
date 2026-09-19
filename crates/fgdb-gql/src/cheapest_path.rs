@@ -19,12 +19,12 @@ mod ranked;
 pub use ranked::GraphCheapestPathCursor;
 
 use crate::algebra::{
-    GlaDirection, GraphColumn, GraphPath, GraphPathFunction, GraphPatternBuilder,
-    GraphValueRow, PatternBuildError, PreparedGraphPattern,
+    GlaDirection, GraphColumn, GraphPath, GraphPathFunction, GraphPatternBuilder, GraphValueRow,
+    PatternBuildError, PreparedGraphPattern,
 };
 use crate::{
-    GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats,
-    GqlQueryError, GqlQueryExecution, GqlQueryPolicy, GraphWalkBounds,
+    GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
+    GqlQueryExecution, GqlQueryPolicy, GraphWalkBounds,
 };
 use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, EId, VId};
@@ -155,9 +155,26 @@ impl PreparedGraphCheapestPath {
         builder.walk("start", relation, direction, "end", bounds)?;
         builder.capture_path("route")?;
         let input = builder
-            .prepare_values(&[GraphColumn::path("route", "route", GraphPathFunction::Value)], 0, None)?
+            .prepare_values(
+                &[GraphColumn::path(
+                    "route",
+                    "route",
+                    GraphPathFunction::Value,
+                )],
+                0,
+                None,
+            )?
             .with_duplicates();
-        Ok(Self { source, target, relation, direction, weight, bounds, mode: GraphCheapestPathMode::Walk, input })
+        Ok(Self {
+            source,
+            target,
+            relation,
+            direction,
+            weight,
+            bounds,
+            mode: GraphCheapestPathMode::Walk,
+            input,
+        })
     }
 
     /// Select a path-local repetition rule without changing source admission.
@@ -172,7 +189,9 @@ impl PreparedGraphCheapestPath {
     }
 
     #[must_use]
-    pub const fn mode(&self) -> GraphCheapestPathMode { self.mode }
+    pub const fn mode(&self) -> GraphCheapestPathMode {
+        self.mode
+    }
 
     /// Compiled WALK input before endpoint anchoring, mode and cost selection.
     /// This is a source-admission superset, not the executable weighted query:
@@ -183,17 +202,29 @@ impl PreparedGraphCheapestPath {
         &self.input
     }
     #[must_use]
-    pub const fn source(&self) -> VId { self.source }
+    pub const fn source(&self) -> VId {
+        self.source
+    }
     #[must_use]
-    pub const fn target(&self) -> VId { self.target }
+    pub const fn target(&self) -> VId {
+        self.target
+    }
     #[must_use]
-    pub const fn relation(&self) -> RelationId { self.relation }
+    pub const fn relation(&self) -> RelationId {
+        self.relation
+    }
     #[must_use]
-    pub const fn direction(&self) -> GlaDirection { self.direction }
+    pub const fn direction(&self) -> GlaDirection {
+        self.direction
+    }
     #[must_use]
-    pub const fn weight_property(&self) -> PropertyKeyId { self.weight }
+    pub const fn weight_property(&self) -> PropertyKeyId {
+        self.weight
+    }
     #[must_use]
-    pub const fn bounds(&self) -> GraphWalkBounds { self.bounds }
+    pub const fn bounds(&self) -> GraphWalkBounds {
+        self.bounds
+    }
 
     /// Application identity, not a durable format or an old BoundPlan certificate.
     /// The domain pins the mode, ANY, Int64 costs, exact accumulation and path-lex ties.
@@ -202,9 +233,15 @@ impl PreparedGraphCheapestPath {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let domain: &[u8] = match self.mode {
             GraphCheapestPathMode::Walk => b"fgdb:path-find:any-cheapest-int64-walk:path-lex:v1\0",
-            GraphCheapestPathMode::Trail => b"fgdb:path-find:any-cheapest-int64-trail:path-lex:v1\0",
-            GraphCheapestPathMode::Acyclic => b"fgdb:path-find:any-cheapest-int64-acyclic:path-lex:v1\0",
-            GraphCheapestPathMode::Simple => b"fgdb:path-find:any-cheapest-int64-simple:path-lex:v1\0",
+            GraphCheapestPathMode::Trail => {
+                b"fgdb:path-find:any-cheapest-int64-trail:path-lex:v1\0"
+            }
+            GraphCheapestPathMode::Acyclic => {
+                b"fgdb:path-find:any-cheapest-int64-acyclic:path-lex:v1\0"
+            }
+            GraphCheapestPathMode::Simple => {
+                b"fgdb:path-find:any-cheapest-int64-simple:path-lex:v1\0"
+            }
         };
         let mut bytes = domain.to_vec();
         bytes.extend_from_slice(&self.source.0.to_be_bytes());
@@ -232,7 +269,8 @@ impl PreparedGraphCheapestPath {
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Option<GraphCostPath>, GraphCheapestPathError<E>> {
         self.evaluate(
-            vertices, edges,
+            vertices,
+            edges,
             &mut |eid, key| property(eid, key).map_err(GraphCheapestPathError::Source),
             &mut |event| control(event).map_err(GraphCheapestPathError::Source),
             GraphCheapestPathError::Cost,
@@ -251,19 +289,29 @@ impl PreparedGraphCheapestPath {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphCostPath>, GqlQueryError<GraphCheapestPathError<E>, C>> {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
-        policy.rows.check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
+        policy
+            .rows
+            .check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
             .map_err(GqlQueryError::Rows)?;
         let mut evaluator = GlaExecutionStats::default();
         let selected = self.evaluate(
-            vertices, edges,
-            &mut |eid, key| property(eid, key)
-                .map_err(|error| GqlQueryError::Source(GraphCheapestPathError::Source(error))),
+            vertices,
+            edges,
+            &mut |eid, key| {
+                property(eid, key)
+                    .map_err(|error| GqlQueryError::Source(GraphCheapestPathError::Source(error)))
+            },
             &mut |event| {
                 checkpoint().map_err(GqlQueryError::Interrupted)?;
                 if event == GlaExecutionEvent::ResultRow {
-                    policy.rows.check(GqlBudgetDimension::ResultRows, 1).map_err(GqlQueryError::Rows)?;
+                    policy
+                        .rows
+                        .check(GqlBudgetDimension::ResultRows, 1)
+                        .map_err(GqlQueryError::Rows)?;
                 }
-                evaluator.charge_event(policy.evaluator, event).map_err(GqlQueryError::Evaluator)?;
+                evaluator
+                    .charge_event(policy.evaluator, event)
+                    .map_err(GqlQueryError::Evaluator)?;
                 Ok(())
             },
             |error| GqlQueryError::Source(GraphCheapestPathError::Cost(error)),
@@ -271,7 +319,10 @@ impl PreparedGraphCheapestPath {
         let value: Vec<_> = selected.into_iter().collect();
         checkpoint().map_err(GqlQueryError::Interrupted)?;
         Ok(GqlQueryExecution {
-            rows: GqlExecutionStats { snapshot_records, result_rows: value.len() as u64 },
+            rows: GqlExecutionStats {
+                snapshot_records,
+                result_rows: value.len() as u64,
+            },
             value,
             evaluator,
         })
@@ -299,8 +350,12 @@ impl PreparedGraphCheapestPath {
         let mut adjacency = BTreeMap::<VId, BTreeMap<(EId, VId), i64>>::new();
         for (edge, left, relation, right) in edges {
             control(GlaExecutionEvent::Work)?;
-            if relation != self.relation { continue; }
-            if identities.contains(&edge) { return Err(failure(GraphPathCostError::DuplicateEdge)); }
+            if relation != self.relation {
+                continue;
+            }
+            if identities.contains(&edge) {
+                return Err(failure(GraphPathCostError::DuplicateEdge));
+            }
             if !live.contains(&left) || !live.contains(&right) {
                 return Err(failure(GraphPathCostError::DanglingEndpoint));
             }
@@ -316,12 +371,21 @@ impl PreparedGraphCheapestPath {
                 GlaDirection::Reverse => [(right, left), (right, left)],
                 GlaDirection::Undirected => [(left, right), (right, left)],
             };
-            let count = if self.direction == GlaDirection::Undirected && left != right { 2 } else { 1 };
+            let count = if self.direction == GlaDirection::Undirected && left != right {
+                2
+            } else {
+                1
+            };
             for &(from, to) in orientations.iter().take(count) {
                 control(GlaExecutionEvent::Work)?;
-                if !adjacency.contains_key(&from) { control(GlaExecutionEvent::ScratchEntry)?; }
+                if !adjacency.contains_key(&from) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
                 control(GlaExecutionEvent::ScratchEntry)?;
-                adjacency.entry(from).or_default().insert((edge, to), weight);
+                adjacency
+                    .entry(from)
+                    .or_default()
+                    .insert((edge, to), weight);
             }
         }
         Ok((live, adjacency))
@@ -342,9 +406,16 @@ impl PreparedGraphCheapestPath {
         let (live, adjacency) = self.admit(vertices, edges, property, control, &failure)?;
         // Do not hide malformed weights behind missing anchors or LIMIT-like
         // output policies. The complete selected relation was admitted above.
-        if !live.contains(&self.source) || !live.contains(&self.target) { return Ok(None); }
+        if !live.contains(&self.source) || !live.contains(&self.target) {
+            return Ok(None);
+        }
         control(GlaExecutionEvent::ScratchEntry)?;
-        let mut arena = vec![State { vertex: self.source, cost: 0, parent: None, rank: 0 }];
+        let mut arena = vec![State {
+            vertex: self.source,
+            cost: 0,
+            parent: None,
+            rank: 0,
+        }];
         control(GlaExecutionEvent::ScratchEntry)?;
         let mut current = vec![0_usize];
         let mut best = (self.bounds.minimum() == 0 && self.source == self.target).then_some(0);
@@ -357,17 +428,31 @@ impl PreparedGraphCheapestPath {
                 if let Some(neighbors) = adjacency.get(&state.vertex) {
                     for (&(edge, vertex), &weight) in neighbors {
                         control(GlaExecutionEvent::Work)?;
-                        let cost = state.cost.checked_add(i128::from(weight))
+                        let cost = state
+                            .cost
+                            .checked_add(i128::from(weight))
                             .ok_or_else(|| failure(GraphPathCostError::CostOverflow))?;
-                        let candidate = Candidate { cost, parent, edge, parent_rank: state.rank };
-                        if next.get(&vertex).is_none_or(|prior| candidate.key() < prior.key()) {
-                            if !next.contains_key(&vertex) { control(GlaExecutionEvent::ScratchEntry)?; }
+                        let candidate = Candidate {
+                            cost,
+                            parent,
+                            edge,
+                            parent_rank: state.rank,
+                        };
+                        if next
+                            .get(&vertex)
+                            .is_none_or(|prior| candidate.key() < prior.key())
+                        {
+                            if !next.contains_key(&vertex) {
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                            }
                             next.insert(vertex, candidate);
                         }
                     }
                 }
             }
-            if next.is_empty() { break; }
+            if next.is_empty() {
+                break;
+            }
             // A rank is the canonical path order WITHIN this layer, not its
             // cost order. Appending equal-length prefixes preserves this order.
             let mut ranked = BTreeMap::new();
@@ -381,20 +466,32 @@ impl PreparedGraphCheapestPath {
                 control(GlaExecutionEvent::Work)?;
                 control(GlaExecutionEvent::ScratchEntry)?;
                 let at = arena.len();
-                arena.push(State { vertex, cost: candidate.cost, parent: Some((candidate.parent, edge)), rank });
+                arena.push(State {
+                    vertex,
+                    cost: candidate.cost,
+                    parent: Some((candidate.parent, edge)),
+                    rank,
+                });
                 control(GlaExecutionEvent::ScratchEntry)?;
                 current.push(at);
                 if depth >= self.bounds.minimum() && vertex == self.target {
                     let improves = match best {
                         None => true,
-                        Some(prior) => candidate.cost < arena[prior].cost
-                            || (candidate.cost == arena[prior].cost && path_less(&arena, at, prior, control)?),
+                        Some(prior) => {
+                            candidate.cost < arena[prior].cost
+                                || (candidate.cost == arena[prior].cost
+                                    && path_less(&arena, at, prior, control)?)
+                        }
                     };
-                    if improves { best = Some(at); }
+                    if improves {
+                        best = Some(at);
+                    }
                 }
             }
         }
-        let Some(best) = best else { return Ok(None); };
+        let Some(best) = best else {
+            return Ok(None);
+        };
         let steps = path_steps(&arena, best, control)?;
         control(GlaExecutionEvent::ScratchEntry)?;
         control(GlaExecutionEvent::ResultRow)?;
@@ -427,10 +524,13 @@ struct Candidate {
     parent_rank: usize,
 }
 impl Candidate {
-    fn key(&self) -> (i128, usize, EId) { (self.cost, self.parent_rank, self.edge) }
+    fn key(&self) -> (i128, usize, EId) {
+        (self.cost, self.parent_rank, self.edge)
+    }
 }
 fn path_steps<E>(
-    arena: &[State], mut at: usize,
+    arena: &[State],
+    mut at: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Vec<(EId, VId)>, E> {
     let mut steps = Vec::new();
@@ -449,7 +549,9 @@ fn path_steps<E>(
     Ok(steps)
 }
 fn path_less<E>(
-    arena: &[State], left: usize, right: usize,
+    arena: &[State],
+    left: usize,
+    right: usize,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<bool, E> {
     let left = path_steps(arena, left, control)?;

@@ -5,27 +5,21 @@
 
 #[path = "boolean.rs"]
 mod boolean;
-#[path = "grouped.rs"]
-mod grouped;
 #[path = "edge.rs"]
 mod edge;
+#[path = "grouped.rs"]
+mod grouped;
 use grouped::{AggregateKey, contributions};
 
-use crate::{Database, VertexRow};
 use super::{Meter, StandingQueryError, StandingQueryFailure, StandingQueryStats, zset_error};
+use crate::{Database, VertexRow};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::zset::aggregate::IncrementalAggregate;
 use fgdb_delta_types::{
-    DeltaRow, ElementId, LabelId, LimbLimit, LogicalDeltaBatch, PropertyKeyId, ZSet,
-    ZSetEvent,
+    DeltaRow, ElementId, LabelId, LimbLimit, LogicalDeltaBatch, PropertyKeyId, ZSet, ZSetEvent,
 };
-use fgdb_gql::algebra::{
-    GlaOperator, ValueProjection, VertexPredicate,
-};
-use fgdb_gql::{
-    GqlQueryPolicy, GraphAggregateFunction, GraphAggregateRow,
-    PreparedGraphAggregate,
-};
+use fgdb_gql::algebra::{GlaOperator, ValueProjection, VertexPredicate};
+use fgdb_gql::{GqlQueryPolicy, GraphAggregateFunction, GraphAggregateRow, PreparedGraphAggregate};
 use fgdb_types::{CanonicalScalar, CommitSeq, QueryCx, VId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -78,22 +72,26 @@ fn eligible(query: &PreparedGraphAggregate) -> bool {
         && (eligible_flat_input(query) || edge::supports_scoped(query))
 }
 fn aggregate_functions_eligible(query: &PreparedGraphAggregate) -> bool {
-    query.aggregates().iter().all(|aggregate| match aggregate.function() {
-        GraphAggregateFunction::CountRows => aggregate.argument_column().is_none(),
-        GraphAggregateFunction::Count
-        | GraphAggregateFunction::CountDistinct
-        | GraphAggregateFunction::Min
-        | GraphAggregateFunction::Max => aggregate.argument_column().is_some(),
-        GraphAggregateFunction::SumInt
-        | GraphAggregateFunction::SumIntDistinct
-        | GraphAggregateFunction::AverageInt
-        | GraphAggregateFunction::AverageIntDistinct => {
-            aggregate.argument_column().is_some_and(|column| {
-                query.incremental_input_column_type(column) == Some(fgdb_gql::GraphSetColumnType::Scalar)
-            })
-        }
-        _ => false,
-    })
+    query
+        .aggregates()
+        .iter()
+        .all(|aggregate| match aggregate.function() {
+            GraphAggregateFunction::CountRows => aggregate.argument_column().is_none(),
+            GraphAggregateFunction::Count
+            | GraphAggregateFunction::CountDistinct
+            | GraphAggregateFunction::Min
+            | GraphAggregateFunction::Max => aggregate.argument_column().is_some(),
+            GraphAggregateFunction::SumInt
+            | GraphAggregateFunction::SumIntDistinct
+            | GraphAggregateFunction::AverageInt
+            | GraphAggregateFunction::AverageIntDistinct => {
+                aggregate.argument_column().is_some_and(|column| {
+                    query.incremental_input_column_type(column)
+                        == Some(fgdb_gql::GraphSetColumnType::Scalar)
+                })
+            }
+            _ => false,
+        })
 }
 fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
     let operators = query.input_pattern().plan().operators();
@@ -106,20 +104,29 @@ fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
     let mut projections = 0;
     for (position, op) in operators.iter().enumerate() {
         match op {
-            GlaOperator::ScanVertices | GlaOperator::ScanEdges { .. } if position == 0 => scans += 1,
+            GlaOperator::ScanVertices | GlaOperator::ScanEdges { .. } if position == 0 => {
+                scans += 1
+            }
             // Predicates, including Boolean/scalar programs, reuse GLA. Shape
             // admission still rejects pages and unsupported source operators.
             GlaOperator::Select { slot, predicates } if slot.ordinal() < width => {
-                if !predicates.iter().all(|predicate| matches!(predicate,
-                    VertexPredicate::HasLabel(_)
-                    | VertexPredicate::IntegerProperty { .. }
-                    | VertexPredicate::ScalarProperty { .. }
-                    | VertexPredicate::PropertyNull { .. })) {
+                if !predicates.iter().all(|predicate| {
+                    matches!(
+                        predicate,
+                        VertexPredicate::HasLabel(_)
+                            | VertexPredicate::IntegerProperty { .. }
+                            | VertexPredicate::ScalarProperty { .. }
+                            | VertexPredicate::PropertyNull { .. }
+                    )
+                }) {
                     return false;
                 }
             }
-            GlaOperator::VertexIdentity { left, right, equal: _ }
-                if left.ordinal() < width && right.ordinal() < width => {}
+            GlaOperator::VertexIdentity {
+                left,
+                right,
+                equal: _,
+            } if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::CompareProperties { left, right, .. }
                 if left.ordinal() < width && right.ordinal() < width => {}
             GlaOperator::SelectBoolean { expression }
@@ -140,14 +147,27 @@ fn eligible_flat_input(query: &PreparedGraphAggregate) -> bool {
     scans == 1 && projections == 1
 }
 fn needs_property(query: &PreparedGraphAggregate, key: PropertyKeyId) -> bool {
-    query.input_pattern().value_columns().iter().any(|column| matches!(column, ValueProjection::Property { key: actual, .. } if *actual == key))
-        || query.input_pattern().plan().operators().iter().any(|op| match op {
-            GlaOperator::Select { predicates, .. } => predicates.iter().any(|p| p.property_key() == Some(key)),
+    query.input_pattern().value_columns().iter().any(
+        |column| matches!(column, ValueProjection::Property { key: actual, .. } if *actual == key),
+    ) || query
+        .input_pattern()
+        .plan()
+        .operators()
+        .iter()
+        .any(|op| match op {
+            GlaOperator::Select { predicates, .. } => {
+                predicates.iter().any(|p| p.property_key() == Some(key))
+            }
             // Operands need not be returned or appear in a unary predicate.
             // Retain and invalidate on BOTH sides of a binding-dependent test.
-            GlaOperator::CompareProperties { left_key, right_key, .. } => *left_key == key || *right_key == key,
+            GlaOperator::CompareProperties {
+                left_key,
+                right_key,
+                ..
+            } => *left_key == key || *right_key == key,
             GlaOperator::SelectBoolean { expression } => expression
-                .referenced_vertex_properties().any(|(_, actual)| actual == key),
+                .referenced_vertex_properties()
+                .any(|(_, actual)| actual == key),
             _ => false,
         })
 }
@@ -192,8 +212,11 @@ impl StandingQuery {
         meter: &mut Meter<'_>,
         downstream: Option<&mut super::output::State>,
     ) -> Result<(), StandingQueryFailure> {
-        if batch.commit_seq() != self.frontier.checked_successor()
-            .map_err(|_| StandingQueryFailure::InvalidDelta)?
+        if batch.commit_seq()
+            != self
+                .frontier
+                .checked_successor()
+                .map_err(|_| StandingQueryFailure::InvalidDelta)?
             || batch.frontier() != batch.commit_seq()
             || batch.commit_marker_identity().commit_seq != batch.commit_seq()
         {
@@ -210,7 +233,10 @@ impl StandingQuery {
             }
             for row in &entry.rows {
                 meter.charge(ZSetEvent::Work)?;
-                meter.stats.delta_rows = meter.stats.delta_rows.checked_add(1)
+                meter.stats.delta_rows = meter
+                    .stats
+                    .delta_rows
+                    .checked_add(1)
                     .ok_or(StandingQueryFailure::WorkBudget)?;
                 if matches!(row, DeltaRow::Schema { .. } | DeltaRow::Constraint { .. }) {
                     return Err(StandingQueryFailure::InvalidDelta);
@@ -266,7 +292,9 @@ impl StandingQuery {
                     props,
                     ..
                 } => {
-                    let target = staged.get_mut(vid).ok_or(StandingQueryFailure::InvalidDelta)?;
+                    let target = staged
+                        .get_mut(vid)
+                        .ok_or(StandingQueryFailure::InvalidDelta)?;
                     if target.is_some() {
                         return Err(StandingQueryFailure::InvalidDelta);
                     }
@@ -297,7 +325,10 @@ impl StandingQuery {
                         .ok_or(StandingQueryFailure::InvalidDelta)?;
                 }
                 DeltaRow::LabelMembership {
-                    vid, label, before, after,
+                    vid,
+                    label,
+                    before,
+                    after,
                 } if needs_label(&self.definition, *label) => {
                     let state = staged
                         .get_mut(vid)
@@ -350,7 +381,12 @@ impl StandingQuery {
         }
         let edge_patch = if let Some(edges) = &self.edges {
             Some(edges.prepare(
-                &self.definition, batch, &self.vertices, &staged, &mut updates, meter,
+                &self.definition,
+                batch,
+                &self.vertices,
+                &staged,
+                &mut updates,
+                meter,
             )?)
         } else {
             for vid in &affected {
@@ -369,8 +405,12 @@ impl StandingQuery {
         // patches remain. No fallible callback or arithmetic follows here.
         for (vid, state) in staged {
             match state {
-                Some(state) => { self.vertices.insert(vid, state); }
-                None => { self.vertices.remove(&vid); }
+                Some(state) => {
+                    self.vertices.insert(vid, state);
+                }
+                None => {
+                    self.vertices.remove(&vid);
+                }
             }
         }
         if let (Some(edges), Some(patch)) = (&mut self.edges, edge_patch) {
@@ -381,10 +421,8 @@ impl StandingQuery {
 }
 fn affected_vertex(query: &PreparedGraphAggregate, row: &DeltaRow) -> Option<VId> {
     match row {
-        DeltaRow::CreateVertex { vid, .. }
-        | DeltaRow::DeleteVertex { vid, .. } => Some(*vid),
-        DeltaRow::LabelMembership { vid, label, .. }
-            if needs_label(query, *label) => Some(*vid),
+        DeltaRow::CreateVertex { vid, .. } | DeltaRow::DeleteVertex { vid, .. } => Some(*vid),
+        DeltaRow::LabelMembership { vid, label, .. } if needs_label(query, *label) => Some(*vid),
         DeltaRow::Property {
             elem: ElementId::Vertex(vid),
             property,
@@ -487,32 +525,48 @@ impl<V: Vfs + Clone> Database<V> {
                 let state = state_from(&query.definition, &row, &mut meter)
                     .map_err(StandingQueryError::Maintenance)?;
                 if query.edges.is_none() {
-                    contributions(&query.definition, row.vid, &state, 1, &mut updates, &mut meter)
-                        .map_err(StandingQueryError::Maintenance)?;
+                    contributions(
+                        &query.definition,
+                        row.vid,
+                        &state,
+                        1,
+                        &mut updates,
+                        &mut meter,
+                    )
+                    .map_err(StandingQueryError::Maintenance)?;
                 }
                 query.vertices.insert(row.vid, state);
             }
             if let Some(edges) = &mut query.edges {
                 for row in self.edges().map_err(StandingQueryError::Read)? {
-                    edges.seed(
-                        &query.definition, &row.entry, &query.vertices, &mut updates, &mut meter,
-                    ).map_err(StandingQueryError::Maintenance)?;
+                    edges
+                        .seed(
+                            &query.definition,
+                            &row.entry,
+                            &query.vertices,
+                            &mut updates,
+                            &mut meter,
+                        )
+                        .map_err(StandingQueryError::Maintenance)?;
                 }
             }
             if let Some(edges) = &mut query.edges {
-                edges.finish_seed(&query.definition, &query.vertices, &mut updates, &mut meter)
+                edges
+                    .finish_seed(&query.definition, &query.vertices, &mut updates, &mut meter)
                     .map_err(StandingQueryError::Maintenance)?;
             }
             match downstream {
                 Some(output) => query.integrate_with_output(updates, &mut meter, Some(output)),
                 None => query.integrate(updates, &mut meter),
-            }.map_err(StandingQueryError::Maintenance)?;
+            }
+            .map_err(StandingQueryError::Maintenance)?;
             // Both source and output are still private during registration.
-            meter.units(ZSetEvent::ScratchEntry, boxes).map_err(StandingQueryError::Maintenance)?;
+            meter
+                .units(ZSetEvent::ScratchEntry, boxes)
+                .map_err(StandingQueryError::Maintenance)?;
             query.stats = meter.stats;
             (meter.checkpoint)().map_err(StandingQueryError::Maintenance)?;
             Ok(query)
         })
     }
-
 }

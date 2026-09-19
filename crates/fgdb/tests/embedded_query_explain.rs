@@ -361,14 +361,15 @@ fn certificates_bind_resolved_symbols_not_query_spelling() {
     let text = "MATCH (n:Person) WHERE n.p >= $floor RETURN n.p AS p";
     let original = fgdb::PreparedNativeRead::prepare(text, &args, symbols).unwrap();
     let certificate = NativeExplainCertificate::new(&original, CommitSeq(1));
-    let changed = fgdb::PreparedNativeRead::prepare(text, &args, |kind: GraphSymbolKind, name: &str| {
-        if kind == GraphSymbolKind::Property && name == "p" {
-            Some(GraphSymbol::Property(PropertyKeyId(2)))
-        } else {
-            symbols(kind, name)
-        }
-    })
-    .unwrap();
+    let changed =
+        fgdb::PreparedNativeRead::prepare(text, &args, |kind: GraphSymbolKind, name: &str| {
+            if kind == GraphSymbolKind::Property && name == "p" {
+                Some(GraphSymbol::Property(PropertyKeyId(2)))
+            } else {
+                symbols(kind, name)
+            }
+        })
+        .unwrap();
     assert!(
         !certificate.verifies(&changed),
         "same spelling must not certify a different resolved property"
@@ -413,13 +414,17 @@ fn every_read_certificate_binds_resolved_symbols_not_formatting() {
             let prepared = fgdb::PreparedNativeRead::prepare(text, &args, symbols).unwrap();
             assert_eq!(prepared.facade_class(), class);
             let certificate = NativeExplainCertificate::new(&prepared, CommitSeq(1));
-            let changed = fgdb::PreparedNativeRead::prepare(text, &args, |kind: GraphSymbolKind, name: &str| {
-                if kind == GraphSymbolKind::Property && name == "p" {
-                    Some(GraphSymbol::Property(PropertyKeyId(2)))
-                } else {
-                    symbols(kind, name)
-                }
-            })
+            let changed = fgdb::PreparedNativeRead::prepare(
+                text,
+                &args,
+                |kind: GraphSymbolKind, name: &str| {
+                    if kind == GraphSymbolKind::Property && name == "p" {
+                        Some(GraphSymbol::Property(PropertyKeyId(2)))
+                    } else {
+                        symbols(kind, name)
+                    }
+                },
+            )
             .unwrap();
             assert!(
                 !certificate.verifies(&changed),

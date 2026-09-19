@@ -3,14 +3,14 @@
 
 use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::insertion::{
-    GraphInsertBatch, GraphInsertBuildError, GraphInsertError, GraphInsertIntent, GraphInsertPolicy,
-    GraphInsertRequest,
+    GraphInsertBatch, GraphInsertBuildError, GraphInsertError, GraphInsertIntent,
+    GraphInsertPolicy, GraphInsertRequest,
 };
 use fgdb_gql::{
     GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphInsertTextError,
-    GraphInsertTextErrorKind,
-    GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind, GraphWriteProgramTemplateError,
-    GraphWriteScriptErrorKind, PreparedGraphInsertText, PreparedGraphWriteScript,
+    GraphInsertTextErrorKind, GraphPatternTextErrorKind, GraphSymbol, GraphSymbolKind,
+    GraphWriteProgramTemplateError, GraphWriteScriptErrorKind, PreparedGraphInsertText,
+    PreparedGraphWriteScript,
 };
 use fgdb_types::{CanonicalScalar, CanonicalScalarKind, EId, VId};
 
@@ -262,8 +262,8 @@ fn bound_node_redeclarations_and_malformed_syntax_have_identical_typed_refusals(
         let text = format!("{spelling} (a)-[:S]->(b)");
         let prepared = PreparedGraphInsertText::prepare(&text, R, symbols).unwrap();
         let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
-        let result: Result<GraphInsertBatch, GqlQueryError<GraphInsertError<(), ()>, ()>> =
-            bound.execute_governed(
+        let result: Result<GraphInsertBatch, GqlQueryError<GraphInsertError<(), ()>, ()>> = bound
+            .execute_governed(
                 GraphInsertPolicy::new(GqlQueryPolicy::new(0, 1, 100_000, 100_000), 2, 1),
                 |_, _| panic!("standalone insertion must not scan a graph source"),
                 |request| {

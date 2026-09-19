@@ -363,6 +363,7 @@ impl<'a> Parser<'a> {
         self.read_recursive_value(None, &[], &mut Some(resolve), depth)
     }
 
+    #[allow(clippy::type_complexity)]
     fn read_recursive_value(
         &mut self,
         mut inputs: Option<&mut Vec<Projection<'a>>>,

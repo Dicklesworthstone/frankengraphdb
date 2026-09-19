@@ -7,8 +7,8 @@
 //! global seen-path set or bag of already enumerated walks is necessary.
 
 mod history;
-use history::History;
 use super::*;
+use history::History;
 use std::cmp::Ordering;
 
 type Step = (EId, VId);
@@ -99,7 +99,10 @@ impl PreparedGraphCheapestPath {
         mut control: impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<GraphCostPath>, GraphCheapestPathError<E>> {
         collect(
-            self, count, vertices, edges,
+            self,
+            count,
+            vertices,
+            edges,
             &mut |edge, key| property(edge, key).map_err(GraphCheapestPathError::Source),
             &mut |event| control(event).map_err(GraphCheapestPathError::Source),
             &GraphCheapestPathError::Cost,
@@ -121,24 +124,37 @@ impl PreparedGraphCheapestPath {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphCostPath>, GqlQueryError<GraphCheapestPathError<E>, C>> {
         checkpoint().map_err(GqlQueryError::Interrupted)?;
-        policy.rows.check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
+        policy
+            .rows
+            .check(GqlBudgetDimension::SnapshotRecords, snapshot_records)
             .map_err(GqlQueryError::Rows)?;
         let mut evaluator = GlaExecutionStats::default();
         let mut result_rows = 0_u64;
         let value = collect(
-            self, count, vertices, edges,
-            &mut |edge, key| property(edge, key)
-                .map_err(|error| GqlQueryError::Source(GraphCheapestPathError::Source(error))),
+            self,
+            count,
+            vertices,
+            edges,
+            &mut |edge, key| {
+                property(edge, key)
+                    .map_err(|error| GqlQueryError::Source(GraphCheapestPathError::Source(error)))
+            },
             &mut |event| {
                 checkpoint().map_err(GqlQueryError::Interrupted)?;
                 if event == GlaExecutionEvent::ResultRow {
                     // At most `count <= u64::MAX` successful pulls occur.
-                    let observed = result_rows.checked_add(1).expect("bounded K-prefix row count");
-                    policy.rows.check(GqlBudgetDimension::ResultRows, observed)
+                    let observed = result_rows
+                        .checked_add(1)
+                        .expect("bounded K-prefix row count");
+                    policy
+                        .rows
+                        .check(GqlBudgetDimension::ResultRows, observed)
                         .map_err(GqlQueryError::Rows)?;
                     result_rows = observed;
                 }
-                evaluator.charge_event(policy.evaluator, event).map_err(GqlQueryError::Evaluator)
+                evaluator
+                    .charge_event(policy.evaluator, event)
+                    .map_err(GqlQueryError::Evaluator)
             },
             &|error| GqlQueryError::Source(GraphCheapestPathError::Cost(error)),
         )?;
@@ -146,7 +162,10 @@ impl PreparedGraphCheapestPath {
         debug_assert_eq!(value.len() as u64, result_rows);
         Ok(GqlQueryExecution {
             value,
-            rows: GqlExecutionStats { snapshot_records, result_rows },
+            rows: GqlExecutionStats {
+                snapshot_records,
+                result_rows,
+            },
             evaluator,
         })
     }
@@ -162,10 +181,13 @@ pub(super) fn collect<'a, E>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     failure: &impl Fn(GraphPathCostError) -> E,
 ) -> Result<Vec<GraphCostPath>, E> {
-    let mut cursor = GraphCheapestPathCursor::create(query, vertices, edges, property, control, failure)?;
+    let mut cursor =
+        GraphCheapestPathCursor::create(query, vertices, edges, property, control, failure)?;
     let mut rows = Vec::new();
     for _ in 0..count {
-        let Some(row) = cursor.pull(control, failure)? else { break; };
+        let Some(row) = cursor.pull(control, failure)? else {
+            break;
+        };
         // The pull reserves one returned row as well as every owned path step.
         rows.push(row);
     }
@@ -190,7 +212,9 @@ impl GraphCheapestPathCursor {
             control(GlaExecutionEvent::Work)?;
             for (&(edge, to), &weight) in edges {
                 control(GlaExecutionEvent::Work)?;
-                if !reverse.contains_key(&to) { control(GlaExecutionEvent::ScratchEntry)?; }
+                if !reverse.contains_key(&to) {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                }
                 control(GlaExecutionEvent::ScratchEntry)?;
                 reverse.entry(to).or_default().insert((edge, from), weight);
             }
@@ -201,7 +225,13 @@ impl GraphCheapestPathCursor {
             let mut layer = BTreeMap::new();
             if depth >= query.bounds.minimum() {
                 control(GlaExecutionEvent::ScratchEntry)?;
-                layer.insert(query.target, Suffix { cost: 0, step: None });
+                layer.insert(
+                    query.target,
+                    Suffix {
+                        cost: 0,
+                        step: None,
+                    },
+                );
             }
             if let Some(next) = suffixes.last() {
                 // Only predecessors of viable suffixes are visited. A sparse
@@ -210,12 +240,20 @@ impl GraphCheapestPathCursor {
                     control(GlaExecutionEvent::Work)?;
                     for (&(edge, from), &weight) in reverse.get(&to).into_iter().flatten() {
                         control(GlaExecutionEvent::Work)?;
-                        let cost = suffix.cost.checked_add(i128::from(weight))
+                        let cost = suffix
+                            .cost
+                            .checked_add(i128::from(weight))
                             .ok_or_else(|| failure(GraphPathCostError::CostOverflow))?;
-                        let candidate = Suffix { cost, step: Some((edge, to)) };
-                        if layer.get(&from).is_none_or(|prior: &Suffix|
-                            (candidate.cost, candidate.step) < (prior.cost, prior.step)) {
-                            if !layer.contains_key(&from) { control(GlaExecutionEvent::ScratchEntry)?; }
+                        let candidate = Suffix {
+                            cost,
+                            step: Some((edge, to)),
+                        };
+                        if layer.get(&from).is_none_or(|prior: &Suffix| {
+                            (candidate.cost, candidate.step) < (prior.cost, prior.step)
+                        }) {
+                            if !layer.contains_key(&from) {
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                            }
                             layer.insert(from, candidate);
                         }
                     }
@@ -223,16 +261,37 @@ impl GraphCheapestPathCursor {
             }
             suffixes.push(layer);
         }
-        let Some(best) = suffixes.last().and_then(|layer| layer.get(&query.source)).copied() else {
+        let Some(best) = suffixes
+            .last()
+            .and_then(|layer| layer.get(&query.source))
+            .copied()
+        else {
             return Ok(Self { search: None });
         };
         let mut search = Search {
-            source: query.source, target: query.target, bounds: query.bounds, mode: query.mode,
-            forward, suffixes, heap: Vec::new(), pending: None,
+            source: query.source,
+            target: query.target,
+            bounds: query.bounds,
+            mode: query.mode,
+            forward,
+            suffixes,
+            heap: Vec::new(),
+            pending: None,
         };
         let steps = search.complete(Vec::new(), query.source, 0, control)?;
-        heap_push(&mut search.heap, Partition { cost: best.cost, steps, fixed: 0, terminal: false }, control)?;
-        Ok(Self { search: Some(search) })
+        heap_push(
+            &mut search.heap,
+            Partition {
+                cost: best.cost,
+                steps,
+                fixed: 0,
+                terminal: false,
+            },
+            control,
+        )?;
+        Ok(Self {
+            search: Some(search),
+        })
     }
 
     pub fn next_with_control<E>(
@@ -250,17 +309,25 @@ impl GraphCheapestPathCursor {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         failure: &impl Fn(GraphPathCostError) -> E,
     ) -> Result<Option<GraphCostPath>, E> {
-        let Some(search) = &mut self.search else { return Ok(None); };
+        let Some(search) = &mut self.search else {
+            return Ok(None);
+        };
         let result = search.pull(control, failure);
-        if result.is_err() || matches!(&result, Ok(None)) { self.close(); }
+        if result.is_err() || matches!(&result, Ok(None)) {
+            self.close();
+        }
         result
     }
 
-    pub fn close(&mut self) { self.search = None; }
+    pub fn close(&mut self) {
+        self.search = None;
+    }
 
     /// True after explicit close, refusal, or a pull that observed exhaustion.
     #[must_use]
-    pub fn is_exhausted(&self) -> bool { self.search.is_none() }
+    pub fn is_exhausted(&self) -> bool {
+        self.search.is_none()
+    }
 }
 
 impl core::fmt::Debug for GraphCheapestPathCursor {
@@ -274,17 +341,26 @@ impl core::fmt::Debug for GraphCheapestPathCursor {
 
 impl Search {
     fn suffix(&self, depth: usize, vertex: VId) -> Option<Suffix> {
-        self.suffixes[self.bounds.maximum() as usize - depth].get(&vertex).copied()
+        self.suffixes[self.bounds.maximum() as usize - depth]
+            .get(&vertex)
+            .copied()
     }
 
     fn complete<E>(
-        &self, mut steps: Vec<Step>, mut vertex: VId, mut depth: usize,
+        &self,
+        mut steps: Vec<Step>,
+        mut vertex: VId,
+        mut depth: usize,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<Step>, E> {
         loop {
             control(GlaExecutionEvent::Work)?;
-            let suffix = self.suffix(depth, vertex).expect("admitted feasible suffix");
-            let Some(step) = suffix.step else { return Ok(steps); };
+            let suffix = self
+                .suffix(depth, vertex)
+                .expect("admitted feasible suffix");
+            let Some(step) = suffix.step else {
+                return Ok(steps);
+            };
             control(GlaExecutionEvent::ScratchEntry)?;
             control(GlaExecutionEvent::ScratchEntry)?;
             steps.push(step);
@@ -299,10 +375,16 @@ impl Search {
         failure: &impl Fn(GraphPathCostError) -> E,
     ) -> Result<Option<GraphCostPath>, E> {
         // Defer all deviations from a returned answer until another pull.
-        if let Some(previous) = self.pending.take() { self.expand(previous, control, failure)?; }
+        if let Some(previous) = self.pending.take() {
+            self.expand(previous, control, failure)?;
+        }
         let entry = loop {
-            let Some(entry) = heap_pop(&mut self.heap, control)? else { return Ok(None); };
-            if self.admissible(&entry, control)? { break entry; }
+            let Some(entry) = heap_pop(&mut self.heap, control)? else {
+                return Ok(None);
+            };
+            if self.admissible(&entry, control)? {
+                break entry;
+            }
             // The optimistic WALK minimum need not be legal. Refine its
             // partition only up to the first forbidden step; do not enumerate
             // all invalid walks below that prefix before discovering a route.
@@ -311,17 +393,23 @@ impl Search {
         let steps = copy_steps(&entry.steps, control)?;
         control(GlaExecutionEvent::ScratchEntry)?;
         control(GlaExecutionEvent::ResultRow)?;
-        let result = GraphCostPath { path: GraphPath::new(self.source, steps.into_boxed_slice()), cost: entry.cost };
+        let result = GraphCostPath {
+            path: GraphPath::new(self.source, steps.into_boxed_slice()),
+            cost: entry.cost,
+        };
         self.pending = Some(entry);
         Ok(Some(result))
     }
 
     fn expand<E>(
-        &mut self, entry: Partition,
+        &mut self,
+        entry: Partition,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
         failure: &impl Fn(GraphPathCostError) -> E,
     ) -> Result<(), E> {
-        if entry.terminal { return Ok(()); }
+        if entry.terminal {
+            return Ok(());
+        }
         let mut history = History::new(self.mode, self.source, control)?;
         let mut vertex = self.source;
         let mut prefix_cost = 0_i128;
@@ -331,34 +419,62 @@ impl Search {
             if depth >= entry.fixed {
                 // STOP is a real alternative when the minimum continued past
                 // this target. Its partition must not grow descendants again.
-                if selected.is_some() && vertex == self.target && depth >= self.bounds.minimum() as usize {
+                if selected.is_some()
+                    && vertex == self.target
+                    && depth >= self.bounds.minimum() as usize
+                {
                     let steps = copy_steps(&entry.steps[..depth], control)?;
-                    heap_push(&mut self.heap, Partition { cost: prefix_cost, steps, fixed: depth, terminal: true }, control)?;
+                    heap_push(
+                        &mut self.heap,
+                        Partition {
+                            cost: prefix_cost,
+                            steps,
+                            fixed: depth,
+                            terminal: true,
+                        },
+                        control,
+                    )?;
                 }
                 // Also visit the final STOP position: otherwise longer paths
                 // sharing an emitted path as a prefix would disappear.
                 if !history.closed() && depth < self.bounds.maximum() as usize {
                     for (&step, &weight) in self.forward.get(&vertex).into_iter().flatten() {
                         control(GlaExecutionEvent::Work)?;
-                        if Some(step) == selected || !history.allows(step) { continue; }
+                        if Some(step) == selected || !history.allows(step) {
+                            continue;
+                        }
                         // SIMPLE may close at its start exactly once and must
                         // stop there, even when a negative suffix would improve
                         // the unconstrained WALK bound. Never allocate a
                         // terminal closure that cannot satisfy the hop interval.
                         if history.closes(step) {
-                            if step.1 == self.target && depth + 1 >= self.bounds.minimum() as usize {
-                                let cost = prefix_cost.checked_add(i128::from(weight))
+                            if step.1 == self.target && depth + 1 >= self.bounds.minimum() as usize
+                            {
+                                let cost = prefix_cost
+                                    .checked_add(i128::from(weight))
                                     .ok_or_else(|| failure(GraphPathCostError::CostOverflow))?;
                                 let mut steps = copy_steps(&entry.steps[..depth], control)?;
                                 control(GlaExecutionEvent::ScratchEntry)?;
                                 control(GlaExecutionEvent::ScratchEntry)?;
                                 steps.push(step);
-                                heap_push(&mut self.heap, Partition { cost, steps, fixed: depth + 1, terminal: true }, control)?;
+                                heap_push(
+                                    &mut self.heap,
+                                    Partition {
+                                        cost,
+                                        steps,
+                                        fixed: depth + 1,
+                                        terminal: true,
+                                    },
+                                    control,
+                                )?;
                             }
                             continue;
                         }
-                        let Some(suffix) = self.suffix(depth + 1, step.1) else { continue; };
-                        let cost = prefix_cost.checked_add(i128::from(weight))
+                        let Some(suffix) = self.suffix(depth + 1, step.1) else {
+                            continue;
+                        };
+                        let cost = prefix_cost
+                            .checked_add(i128::from(weight))
                             .and_then(|value| value.checked_add(suffix.cost))
                             .ok_or_else(|| failure(GraphPathCostError::CostOverflow))?;
                         let mut steps = copy_steps(&entry.steps[..depth], control)?;
@@ -366,14 +482,26 @@ impl Search {
                         control(GlaExecutionEvent::ScratchEntry)?;
                         steps.push(step);
                         let steps = self.complete(steps, step.1, depth + 1, control)?;
-                        heap_push(&mut self.heap, Partition { cost, steps, fixed: depth + 1, terminal: false }, control)?;
+                        heap_push(
+                            &mut self.heap,
+                            Partition {
+                                cost,
+                                steps,
+                                fixed: depth + 1,
+                                terminal: false,
+                            },
+                            control,
+                        )?;
                     }
                 }
             }
             if let Some(step) = selected {
-                if !history.allows(step) { return Ok(()); }
+                if !history.allows(step) {
+                    return Ok(());
+                }
                 history.advance(step, control)?;
-                prefix_cost = prefix_cost.checked_add(i128::from(self.forward[&vertex][&step]))
+                prefix_cost = prefix_cost
+                    .checked_add(i128::from(self.forward[&vertex][&step]))
                     .ok_or_else(|| failure(GraphPathCostError::CostOverflow))?;
                 vertex = step.1;
             }
@@ -382,7 +510,10 @@ impl Search {
     }
 }
 
-fn copy_steps<E>(steps: &[Step], control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<Vec<Step>, E> {
+fn copy_steps<E>(
+    steps: &[Step],
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Vec<Step>, E> {
     let mut copy = Vec::new();
     for &step in steps {
         control(GlaExecutionEvent::Work)?;
@@ -395,7 +526,11 @@ fn copy_steps<E>(steps: &[Step], control: &mut impl FnMut(GlaExecutionEvent) -> 
 
 // A fallible heap keeps long equal-cost path comparisons inside query control.
 // std::BinaryHeap's Ord cannot propagate a mid-comparison interruption.
-fn less<E>(left: &Partition, right: &Partition, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<bool, E> {
+fn less<E>(
+    left: &Partition,
+    right: &Partition,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<bool, E> {
     control(GlaExecutionEvent::Work)?;
     match left.cost.cmp(&right.cost) {
         Ordering::Less => return Ok(true),
@@ -414,13 +549,19 @@ fn less<E>(left: &Partition, right: &Partition, control: &mut impl FnMut(GlaExec
     Ok(left.steps.len() < right.steps.len())
 }
 
-fn heap_push<E>(heap: &mut Vec<Partition>, entry: Partition, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<(), E> {
+fn heap_push<E>(
+    heap: &mut Vec<Partition>,
+    entry: Partition,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<(), E> {
     control(GlaExecutionEvent::ScratchEntry)?;
     heap.push(entry);
     let mut at = heap.len() - 1;
     while at > 0 {
         let parent = (at - 1) / 2;
-        if !less(&heap[at], &heap[parent], control)? { break; }
+        if !less(&heap[at], &heap[parent], control)? {
+            break;
+        }
         control(GlaExecutionEvent::Work)?;
         heap.swap(at, parent);
         at = parent;
@@ -428,17 +569,28 @@ fn heap_push<E>(heap: &mut Vec<Partition>, entry: Partition, control: &mut impl 
     Ok(())
 }
 
-fn heap_pop<E>(heap: &mut Vec<Partition>, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<Option<Partition>, E> {
-    if heap.is_empty() { return Ok(None); }
+fn heap_pop<E>(
+    heap: &mut Vec<Partition>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Option<Partition>, E> {
+    if heap.is_empty() {
+        return Ok(None);
+    }
     control(GlaExecutionEvent::Work)?;
     let last = heap.pop().expect("nonempty heap");
-    if heap.is_empty() { return Ok(Some(last)); }
+    if heap.is_empty() {
+        return Ok(Some(last));
+    }
     let best = std::mem::replace(&mut heap[0], last);
     let mut root = 0;
     while root < heap.len() / 2 {
         let mut child = 2 * root + 1;
-        if child + 1 < heap.len() && less(&heap[child + 1], &heap[child], control)? { child += 1; }
-        if !less(&heap[child], &heap[root], control)? { break; }
+        if child + 1 < heap.len() && less(&heap[child + 1], &heap[child], control)? {
+            child += 1;
+        }
+        if !less(&heap[child], &heap[root], control)? {
+            break;
+        }
         control(GlaExecutionEvent::Work)?;
         heap.swap(root, child);
         root = child;

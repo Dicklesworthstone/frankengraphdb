@@ -25,6 +25,8 @@
 // seeds * 6 ops). 4_200 campaigns => 50_400 mutated inputs; each is fanned
 // across the three decoders (>=50k decode calls per run counting the
 // fan-out), well under ~90s debug on one core.
+#![allow(dead_code, unused_imports, clippy::cloned_ref_to_slice_refs)]
+
 const CAMPAIGNS: usize = 4_200;
 
 use fgdb_chronicle::capsule::{

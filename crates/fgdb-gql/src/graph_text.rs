@@ -62,10 +62,10 @@ impl core::fmt::Debug for GraphSymbol {
 }
 
 pub const COMMON_GRAPH_SYMBOLS: &[&str] = &[
-    "Person", "Agent", "Company", "User", "Account", "Device", "Post", "Comment",
-    "Tag", "Group", "Member", "Admin", "Item", "Product", "Order", "Customer",
-    "Source", "Copy", "Node", "Edge", "Entity", "Link", "L", "M", "N", "A", "B", "C",
-    "KNOWS", "WORKS_AT", "SHIPS", "BACKS", "TO", "R", "S", "T", "RELATION", "REL",
+    "Person", "Agent", "Company", "User", "Account", "Device", "Post", "Comment", "Tag", "Group",
+    "Member", "Admin", "Item", "Product", "Order", "Customer", "Source", "Copy", "Node", "Edge",
+    "Entity", "Link", "L", "M", "N", "A", "B", "C", "KNOWS", "WORKS_AT", "SHIPS", "BACKS", "TO",
+    "R", "S", "T", "RELATION", "REL",
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -94,10 +94,14 @@ impl ReverseSymbolCatalog {
         }
         let mut catalog = Self::default();
         let mut probe_name = |name: &str| {
-            if let Some(GraphSymbol::Label(id)) = resolver.resolve_symbol(GraphSymbolKind::Label, name) {
+            if let Some(GraphSymbol::Label(id)) =
+                resolver.resolve_symbol(GraphSymbolKind::Label, name)
+            {
                 catalog.insert_label(id, name);
             }
-            if let Some(GraphSymbol::Relation(id)) = resolver.resolve_symbol(GraphSymbolKind::Relation, name) {
+            if let Some(GraphSymbol::Relation(id)) =
+                resolver.resolve_symbol(GraphSymbolKind::Relation, name)
+            {
                 catalog.insert_relation(id, name);
             }
         };
@@ -105,7 +109,9 @@ impl ReverseSymbolCatalog {
             probe_name(common);
         }
         for word in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
-            if !word.is_empty() && (word.as_bytes()[0].is_ascii_alphabetic() || word.as_bytes()[0] == b'_') {
+            if !word.is_empty()
+                && (word.as_bytes()[0].is_ascii_alphabetic() || word.as_bytes()[0] == b'_')
+            {
                 probe_name(word);
             }
         }
@@ -134,8 +140,6 @@ where
         self(kind, name)
     }
 }
-
-
 
 /// Diagnostics contain byte positions and structural classes, not query text,
 /// identifiers, catalog IDs, or supplied argument values.
@@ -1145,10 +1149,10 @@ struct BoundColumn {
 }
 impl BoundColumn {
     fn declaration(&self) -> GraphColumn<'_> {
-        if self.path == Some(GraphPathFunction::Edge) {
-            if let Some(key) = self.key {
-                return GraphColumn::edge_property(&self.alias, &self.variable, key);
-            }
+        if self.path == Some(GraphPathFunction::Edge)
+            && let Some(key) = self.key
+        {
+            return GraphColumn::edge_property(&self.alias, &self.variable, key);
         }
         if let Some(function) = self.path {
             return GraphColumn::path(&self.alias, &self.variable, function);
@@ -1344,10 +1348,16 @@ impl PreparedGraphText {
             builder.prepare_values_with_clauses(&clauses, &projected, 0, None),
         )?;
         let needs_reverse = columns.iter().any(|c| {
-            matches!(c.path, Some(GraphPathFunction::Labels | GraphPathFunction::Type))
+            matches!(
+                c.path,
+                Some(GraphPathFunction::Labels | GraphPathFunction::Type)
+            )
         });
         let reverse_catalog = if needs_reverse {
-            Some(std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(&mut resolve, statement)))
+            Some(std::sync::Arc::new(ReverseSymbolCatalog::from_resolver(
+                &mut resolve,
+                statement,
+            )))
         } else {
             None
         };
@@ -1638,7 +1648,9 @@ mod tests {
         for (function, expected_col) in [("labels(p)", "labels"), ("type(r)", "type")] {
             let text = format!("MATCH (p:L)-[r:R]->(q) RETURN {function}");
             let template = PreparedGraphText::prepare(&text, symbols).expect("positive prepare");
-            let pattern = template.bind_parameters(&GqlParameters::new()).expect("bind");
+            let pattern = template
+                .bind_parameters(&GqlParameters::new())
+                .expect("bind");
             assert_eq!(pattern.columns(), &[expected_col]);
             assert!(pattern.plan().reverse_catalog.is_some());
         }

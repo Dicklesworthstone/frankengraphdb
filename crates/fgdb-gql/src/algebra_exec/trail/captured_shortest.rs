@@ -252,8 +252,9 @@ impl<'a> CapturedPathCursor<'a> {
         if destination == self.source {
             // A SIMPLE closing return may only be this layer's last step;
             // it never becomes a transit prefix, even below the lower bound.
-            return Ok(self.mode == CaptureMode::Simple
-                && self.steps.len() + 1 == self.depth as usize);
+            return Ok(
+                self.mode == CaptureMode::Simple && self.steps.len() + 1 == self.depth as usize
+            );
         }
         for &(_, vertex) in &self.steps {
             control(GlaExecutionEvent::Work)?;
@@ -308,8 +309,8 @@ impl<'a> CapturedPathCursor<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{GraphWalkSearch, IdentifiedExpansion};
+    use super::*;
 
     const MODES: [CaptureMode; 4] = [
         CaptureMode::All,
@@ -403,14 +404,11 @@ mod tests {
                     for maximum in 0..=3 {
                         for minimum in 0..=maximum {
                             let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
-                            let actual = collect(
-                                VId(source),
-                                bounds,
-                                mode,
-                                Some(&adjacency),
-                                &mut |_| Ok::<_, ()>(()),
-                            )
-                            .unwrap();
+                            let actual =
+                                collect(VId(source), bounds, mode, Some(&adjacency), &mut |_| {
+                                    Ok::<_, ()>(())
+                                })
+                                .unwrap();
                             assert_eq!(
                                 actual,
                                 oracle(VId(source), bounds, mode, &adjacency),
@@ -425,10 +423,8 @@ mod tests {
 
     #[test]
     fn maximum_depth_parallel_cycles_deliver_without_materializing_ties() {
-        let adjacency = Adjacency::from([(
-            VId(7),
-            (0..8).map(|edge| (EId(edge), VId(7))).collect(),
-        )]);
+        let adjacency =
+            Adjacency::from([(VId(7), (0..8).map(|edge| (EId(edge), VId(7))).collect())]);
         let bounds =
             GraphWalkBounds::new(crate::MAX_GRAPH_WALK_HOPS, crate::MAX_GRAPH_WALK_HOPS).unwrap();
         for mode in [CaptureMode::All, CaptureMode::AllShortest] {
@@ -499,7 +495,8 @@ mod tests {
             )
             .unwrap();
             let (endpoint, first) = cursor.next_with_control(&mut control).unwrap().unwrap();
-            let (second_endpoint, second) = cursor.next_with_control(&mut control).unwrap().unwrap();
+            let (second_endpoint, second) =
+                cursor.next_with_control(&mut control).unwrap().unwrap();
             let first = first.expect("capture survives production dispatch");
             let second = second.expect("capture survives production dispatch");
             assert_eq!(endpoint, VId(40));
@@ -564,16 +561,24 @@ mod tests {
             assert_eq!(path.start(), VId(5));
             assert_eq!(cursor.layers.len(), 1);
             assert_eq!(
-                collect(VId(5), GraphWalkBounds::new(0, 0).unwrap(), mode, None, &mut |_| {
-                    Ok::<_, ()>(())
-                })
+                collect(
+                    VId(5),
+                    GraphWalkBounds::new(0, 0).unwrap(),
+                    mode,
+                    None,
+                    &mut |_| { Ok::<_, ()>(()) }
+                )
                 .unwrap(),
                 vec![path]
             );
             assert!(
-                collect(VId(5), GraphWalkBounds::new(1, 1).unwrap(), mode, None, &mut |_| {
-                    Ok::<_, ()>(())
-                })
+                collect(
+                    VId(5),
+                    GraphWalkBounds::new(1, 1).unwrap(),
+                    mode,
+                    None,
+                    &mut |_| { Ok::<_, ()>(()) }
+                )
                 .unwrap()
                 .is_empty()
             );
@@ -582,10 +587,7 @@ mod tests {
 
     #[test]
     fn impossible_restricted_prefixes_stop_without_searching_the_remaining_hop_bound() {
-        let adjacency = Adjacency::from([(
-            VId(1),
-            vec![(EId(1), VId(1)), (EId(2), VId(2))],
-        )]);
+        let adjacency = Adjacency::from([(VId(1), vec![(EId(1), VId(1)), (EId(2), VId(2))])]);
         for mode in [CaptureMode::Acyclic, CaptureMode::Simple] {
             let mut work = 0;
             let paths = collect(
@@ -626,7 +628,11 @@ mod tests {
                         if seen == stop { Err(stop) } else { Ok(()) }
                     };
                     let mut cursor = match CapturedPathCursor::new(
-                        VId(1), bounds, mode, Some(&adjacency), &mut control,
+                        VId(1),
+                        bounds,
+                        mode,
+                        Some(&adjacency),
+                        &mut control,
                     ) {
                         Err(error) => {
                             assert_eq!(error, stop);

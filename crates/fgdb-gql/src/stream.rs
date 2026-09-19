@@ -16,8 +16,8 @@
 
 use crate::algebra::{GlaOperator, GlaPlan, VertexPredicate};
 use crate::{
-    GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats,
-    GqlQueryError, GqlQueryPolicy,
+    GlaExecutionEvent, GlaExecutionStats, GqlBudgetDimension, GqlExecutionStats, GqlQueryError,
+    GqlQueryPolicy,
 };
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::{CanonicalScalar, CommitSeq, VId};
@@ -34,7 +34,11 @@ pub struct VertexScanBuildError {
 }
 impl core::fmt::Display for VertexScanBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "operator {} is outside the ordered vertex-stream profile", self.operator)
+        write!(
+            f,
+            "operator {} is outside the ordered vertex-stream profile",
+            self.operator
+        )
     }
 }
 impl core::error::Error for VertexScanBuildError {}
@@ -83,11 +87,16 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         }
         let projection_at = at;
         at += 1;
-        if matches!(operators.get(at), Some(GlaOperator::Distinct)) { at += 1; }
+        if matches!(operators.get(at), Some(GlaOperator::Distinct)) {
+            at += 1;
+        }
         // A unique leading identity establishes both whole-row uniqueness and
         // order even when later cells are properties. No global set is needed.
-        if plan.visible_columns.is_some() || !operators.get(at).is_some_and(|order|
-            Row::accepts_projection(&operators[projection_at], order)) {
+        if plan.visible_columns.is_some()
+            || !operators
+                .get(at)
+                .is_some_and(|order| Row::accepts_projection(&operators[projection_at], order))
+        {
             return Err(VertexScanBuildError { operator: at });
         }
         at += 1;
@@ -97,8 +106,14 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         if at + 1 != operators.len() {
             return Err(VertexScanBuildError { operator: at + 1 });
         }
-        Ok(Self { empty, tests: tests.into(), offset: *offset, count: *count,
-            projection: Arc::new(operators[projection_at].clone()), output: core::marker::PhantomData })
+        Ok(Self {
+            empty,
+            tests: tests.into(),
+            offset: *offset,
+            count: *count,
+            projection: Arc::new(operators[projection_at].clone()),
+            output: core::marker::PhantomData,
+        })
     }
 
     fn accepts<E>(
@@ -128,7 +143,9 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
                             (None, found.map(|(key, value)| (*key, value)))
                         }
                     };
-                    if !predicate.matches_borrowed(label, property) { return Ok(false); }
+                    if !predicate.matches_borrowed(label, property) {
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -142,7 +159,9 @@ impl<Row> core::fmt::Debug for VertexScanPlan<Row> {
 }
 
 fn seek<'a, T, K: Ord, E>(
-    values: &'a [T], wanted: &K, key: impl Fn(&T) -> K,
+    values: &'a [T],
+    wanted: &K,
+    key: impl Fn(&T) -> K,
     control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
 ) -> Result<Option<&'a T>, E> {
     let (mut low, mut high) = (0, values.len());
@@ -172,12 +191,18 @@ impl core::fmt::Debug for VertexScanRow<'_> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VertexScanEvent { Work, ScratchEntry }
+pub enum VertexScanEvent {
+    Work,
+    ScratchEntry,
+}
 
 /// Source effects and caller controls remain distinct; neither becomes a
 /// missing row. Implementations must propagate each refused control unchanged.
 #[derive(Debug)]
-pub enum VertexScanSourceError<E, C> { Source(E), Control(C) }
+pub enum VertexScanSourceError<E, C> {
+    Source(E),
+    Control(C),
+}
 
 /// An immutable, admitted source. This trait is an execution seam, NOT an
 /// authentication interface: implementing it does not confer graph authority.
@@ -200,7 +225,12 @@ pub trait VertexScanSource {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VertexScanState { Open, Exhausted, Closed, Failed }
+pub enum VertexScanState {
+    Open,
+    Exhausted,
+    Closed,
+    Failed,
+}
 
 #[derive(Debug)]
 pub enum VertexScanError<E> {
@@ -215,7 +245,9 @@ impl<E: core::fmt::Display> core::fmt::Display for VertexScanError<E> {
         match self {
             Self::Source(error) => error.fmt(f),
             Self::Plan(error) => error.fmt(f),
-            Self::NonIncreasingIdentity => f.write_str("vertex stream source is not strictly increasing"),
+            Self::NonIncreasingIdentity => {
+                f.write_str("vertex stream source is not strictly increasing")
+            }
             Self::CounterExhausted => f.write_str("vertex stream counter exhausted"),
         }
     }
@@ -240,30 +272,49 @@ struct Meter<F> {
 }
 impl<F> Meter<F> {
     fn event<E, C>(&mut self, event: VertexScanEvent) -> ScanResult<(), E, C>
-    where F: FnMut() -> Result<(), C> {
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         (self.checkpoint)().map_err(GqlQueryError::Interrupted)?;
-        self.evaluator.charge_event(self.policy.evaluator, match event {
-            VertexScanEvent::Work => GlaExecutionEvent::Work,
-            VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
-        }).map_err(GqlQueryError::Evaluator)
+        self.evaluator
+            .charge_event(
+                self.policy.evaluator,
+                match event {
+                    VertexScanEvent::Work => GlaExecutionEvent::Work,
+                    VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+                },
+            )
+            .map_err(GqlQueryError::Evaluator)
     }
     fn record<E, C>(&mut self) -> ScanResult<(), E, C> {
-        let count = self.rows.snapshot_records.checked_add(1)
+        let count = self
+            .rows
+            .snapshot_records
+            .checked_add(1)
             .ok_or(GqlQueryError::Source(VertexScanError::CounterExhausted))?;
-        self.policy.rows.check(GqlBudgetDimension::SnapshotRecords, count)
+        self.policy
+            .rows
+            .check(GqlBudgetDimension::SnapshotRecords, count)
             .map_err(GqlQueryError::Rows)?;
         self.rows.snapshot_records = count;
         Ok(())
     }
     fn next_result_count<E, C>(&self) -> ScanResult<u64, E, C> {
-        let count = self.rows.result_rows.checked_add(1)
+        let count = self
+            .rows
+            .result_rows
+            .checked_add(1)
             .ok_or(GqlQueryError::Source(VertexScanError::CounterExhausted))?;
-        self.policy.rows.check(GqlBudgetDimension::ResultRows, count)
+        self.policy
+            .rows
+            .check(GqlBudgetDimension::ResultRows, count)
             .map_err(GqlQueryError::Rows)?;
         Ok(count)
     }
     fn emit<E, C>(&mut self) -> ScanResult<(), E, C>
-    where F: FnMut() -> Result<(), C> {
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         let count = self.next_result_count()?;
         // Last fallible boundary before the caller receives this complete row.
         self.event(VertexScanEvent::Work)?;
@@ -296,56 +347,96 @@ pub struct VertexScanCursor<S, F, Row = VId> {
 impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> {
     /// Pure construction: no source scan or checkpoint occurs until a pull.
     /// Database adapters admit ownership/frontier and QueryCx before this call.
-    pub fn new(source: S, plan: VertexScanPlan<Row>, policy: GqlQueryPolicy, checkpoint: F) -> Self {
+    pub fn new(
+        source: S,
+        plan: VertexScanPlan<Row>,
+        policy: GqlQueryPolicy,
+        checkpoint: F,
+    ) -> Self {
         Self {
             snapshot_seq: source.snapshot_seq(),
             skip: plan.offset,
             source: Some(source),
             plan,
-            meter: Meter { checkpoint, policy, rows: GqlExecutionStats { snapshot_records: 0, result_rows: 0 }, evaluator: GlaExecutionStats::default() },
+            meter: Meter {
+                checkpoint,
+                policy,
+                rows: GqlExecutionStats {
+                    snapshot_records: 0,
+                    result_rows: 0,
+                },
+                evaluator: GlaExecutionStats::default(),
+            },
             last: None,
             state: VertexScanState::Open,
         }
     }
     #[must_use]
-    pub fn snapshot_seq(&self) -> CommitSeq { self.snapshot_seq }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.snapshot_seq
+    }
     #[must_use]
-    pub fn state(&self) -> VertexScanState { self.state }
+    pub fn state(&self) -> VertexScanState {
+        self.state
+    }
     #[must_use]
-    pub fn row_stats(&self) -> GqlExecutionStats { self.meter.rows }
+    pub fn row_stats(&self) -> GqlExecutionStats {
+        self.meter.rows
+    }
     #[must_use]
-    pub fn evaluator_stats(&self) -> GlaExecutionStats { self.meter.evaluator }
+    pub fn evaluator_stats(&self) -> GlaExecutionStats {
+        self.meter.evaluator
+    }
     /// Idempotent close drops the pinned source without reading its suffix.
     /// Completed/failed state and all counters remain inspectable unchanged.
     pub fn close(&mut self) {
-        if self.state == VertexScanState::Open { self.state = VertexScanState::Closed; }
+        if self.state == VertexScanState::Open {
+            self.state = VertexScanState::Closed;
+        }
         self.source = None;
     }
 
     fn advance<C>(&mut self) -> ScanResult<Option<Row>, S::Error, C>
-    where F: FnMut() -> Result<(), C> {
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         let meter = &mut self.meter;
         meter.event(VertexScanEvent::Work)?;
-        if self.plan.empty || self.plan.count == Some(0) { return Ok(None); }
+        if self.plan.empty || self.plan.count == Some(0) {
+            return Ok(None);
+        }
         let source = self.source.as_mut().expect("open cursor owns its source");
         loop {
             let next = flatten(source.next_vertex(&mut |event| meter.event(event)))?;
-            let Some(vid) = next else { return Ok(None); };
+            let Some(vid) = next else {
+                return Ok(None);
+            };
             meter.event(VertexScanEvent::Work)?;
             if self.last.is_some_and(|last| vid <= last) {
-                return Err(GqlQueryError::Source(VertexScanError::NonIncreasingIdentity));
+                return Err(GqlQueryError::Source(
+                    VertexScanError::NonIncreasingIdentity,
+                ));
             }
             self.last = Some(vid);
             meter.record()?;
             let row = flatten(source.vertex(vid, &mut |event| meter.event(event)))?;
-            let Some(row) = row else { continue; };
-            if !self.plan.accepts(row, &mut |event| meter.event(event))? { continue; }
+            let Some(row) = row else {
+                continue;
+            };
+            if !self.plan.accepts(row, &mut |event| meter.event(event))? {
+                continue;
+            }
             meter.event(VertexScanEvent::Work)?;
-            if self.skip != 0 { self.skip -= 1; continue; }
+            if self.skip != 0 {
+                self.skip -= 1;
+                continue;
+            }
             // Refuse an exhausted output budget before copying any property
             // payload; count delivery only after the whole row is complete.
             let _ = meter.next_result_count()?;
-            let value = Row::project(vid, row, &self.plan.projection, &mut |event| meter.event(event))?;
+            let value = Row::project(vid, row, &self.plan.projection, &mut |event| {
+                meter.event(event)
+            })?;
             meter.emit()?;
             return Ok(Some(value));
         }
@@ -355,15 +446,23 @@ fn flatten<T, E, C>(
     result: Result<T, VertexScanSourceError<E, GqlQueryError<VertexScanError<E>, C>>>,
 ) -> ScanResult<T, E, C> {
     result.map_err(|error| match error {
-        VertexScanSourceError::Source(error) => GqlQueryError::Source(VertexScanError::Source(error)),
+        VertexScanSourceError::Source(error) => {
+            GqlQueryError::Source(VertexScanError::Source(error))
+        }
         VertexScanSourceError::Control(error) => error,
     })
 }
 impl<S, F, C, Row> Iterator for VertexScanCursor<S, F, Row>
-where S: VertexScanSource, F: FnMut() -> Result<(), C>, Row: VertexScanOutput {
+where
+    S: VertexScanSource,
+    F: FnMut() -> Result<(), C>,
+    Row: VertexScanOutput,
+{
     type Item = ScanResult<Row, S::Error, C>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.state != VertexScanState::Open { return None; }
+        if self.state != VertexScanState::Open {
+            return None;
+        }
         match self.advance() {
             Ok(Some(vid)) => {
                 if self.plan.count == Some(self.meter.rows.result_rows) {
@@ -390,7 +489,12 @@ where S: VertexScanSource, F: FnMut() -> Result<(), C>, Row: VertexScanOutput {
     }
 }
 impl<S, F, C, Row> FusedIterator for VertexScanCursor<S, F, Row>
-where S: VertexScanSource, F: FnMut() -> Result<(), C>, Row: VertexScanOutput {}
+where
+    S: VertexScanSource,
+    F: FnMut() -> Result<(), C>,
+    Row: VertexScanOutput,
+{
+}
 impl<S, F, Row> core::fmt::Debug for VertexScanCursor<S, F, Row> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("VertexScanCursor")
@@ -398,7 +502,8 @@ impl<S, F, Row> core::fmt::Debug for VertexScanCursor<S, F, Row> {
             .field("state", &self.state)
             .field("rows", &self.meter.rows)
             .field("evaluator", &self.meter.evaluator)
-            .field("definition_and_source", &"[REDACTED]").finish()
+            .field("definition_and_source", &"[REDACTED]")
+            .finish()
     }
 }
 
