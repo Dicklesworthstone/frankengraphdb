@@ -16,8 +16,8 @@
 use super::{IncrementalReachability, ReachabilityError, ReachabilityUpdate};
 use crate::zset::committed::{CommittedEdgeInput, EdgeInputError, EdgeInputUpdate};
 use crate::zset::event;
-use crate::{LimbLimit, LocalDeltaBatchIndex, RelationId, ZSet, ZSetError, ZSetEvent};
-use fgdb_types::{BranchId, CommitSeq, GraphId, VId};
+use crate::{LimbLimit, LocalDeltaBatchIndex, LogicalDeltaBatch, RelationId, ZSet, ZSetError, ZSetEvent};
+use fgdb_types::{BranchId, CommitCx, CommitSeq, GraphId, VId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommittedReachabilityError<E> {
@@ -113,18 +113,46 @@ impl CommittedReachability {
         let Some(input) = self.input.prepare_next(index, limbs, control)? else {
             return Ok(None);
         };
+        Self::prepare_input(input, &mut self.reachability, self.relation, limbs, control).map(Some)
+    }
+
+    /// Advance from the SAME authenticated live publisher without retaining or
+    /// cloning a second history index. Requires commit-purpose authority and
+    /// exactly the next whole global batch. The publisher, not this algebra
+    /// adapter, proves source continuity and that the batch really committed.
+    /// Detached readers use `prepare_next` and its retained-anchor checks.
+    /// Both lanes share input validation, relation projection, recursion and
+    /// the atomic prepared guard, including every cancellation boundary.
+    pub fn prepare_committed_successor<E>(
+        &mut self,
+        cx: &CommitCx,
+        batch: &LogicalDeltaBatch,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<CommittedReachabilityUpdate<'_>, CommittedReachabilityError<E>> {
+        let input = self.input.prepare_committed_successor(cx, batch, limbs, control)?;
+        Self::prepare_input(input, &mut self.reachability, self.relation, limbs, control)
+    }
+
+    fn prepare_input<'a, E>(
+        input: EdgeInputUpdate<'a>,
+        state: &'a mut IncrementalReachability<VId>,
+        selected: RelationId,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<CommittedReachabilityUpdate<'a>, CommittedReachabilityError<E>> {
         let mut edges = ZSet::new();
         for ((relation, source, destination), weight) in input.delta().iter() {
             event(control, ZSetEvent::Work)?;
-            if *relation == self.relation {
+            if *relation == selected {
                 let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
                 edges.accumulate((*source, *destination), weight, limbs, control)?;
             }
         }
-        let reachability = self.reachability.prepare(&edges, limbs, control)?;
+        let reachability = state.prepare(&edges, limbs, control)?;
         // One last cancellable boundary while BOTH publications are tentative.
         event(control, ZSetEvent::Work)?;
-        Ok(Some(CommittedReachabilityUpdate { input, reachability }))
+        Ok(CommittedReachabilityUpdate { input, reachability })
     }
 }
 
@@ -174,3 +202,7 @@ impl core::fmt::Debug for CommittedReachabilityUpdate<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "committed_successor_tests.rs"]
+mod successor_tests;
