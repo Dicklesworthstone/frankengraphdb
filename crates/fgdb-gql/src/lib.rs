@@ -32,6 +32,7 @@ mod prepared;
 mod set_ops;
 mod set_text;
 mod shortest_walk;
+pub mod stream;
 mod temporal_aggregate_text;
 mod temporal_set_text;
 mod temporal_text;
