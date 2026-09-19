@@ -5,8 +5,10 @@
 //! not create infinite weights and parallel edges survive partial retraction.
 //! Insertion-only support changes propagate through the retained closure and
 //! new edges, without rescanning old topology or copying unchanged result rows.
-//! Deletions rederive sources preceding a changed edge in the OLD closure on
-//! the complete prospective topology, avoiding self-supporting deleted paths.
+//! Deletion-only support changes rederive only potentially lost pairs, seeded
+//! from surviving paths outside their affected region. Mixed support changes
+//! rederive affected sources on the complete prospective topology. Neither
+//! path lets a cycle keep itself reachable after its last real support is lost.
 //!
 //! This is an in-memory algebra operator, not durable arrangement storage or a
 //! subscription scheduler. Closure storage can be quadratic. Work/scratch
@@ -14,6 +16,7 @@
 //! comparison, allocation failure and panic have the parent Z-set boundary.
 
 pub mod committed;
+mod deletions;
 mod insertions;
 
 use super::{ZSet, ZSetError, ZSetEvent, event};
@@ -54,6 +57,7 @@ impl<E: core::error::Error + 'static> core::error::Error for ReachabilityError<E
 pub struct IncrementalReachability<V: Ord> {
     edges: ZSet<(V, V)>,
     outgoing: Relation<V>,
+    incoming: Relation<V>,
     reachable: Relation<V>,
     predecessors: Relation<V>,
 }
@@ -69,6 +73,7 @@ impl<V: Ord> IncrementalReachability<V> {
         Self {
             edges: ZSet::new(),
             outgoing: BTreeMap::new(),
+            incoming: BTreeMap::new(),
             reachable: BTreeMap::new(),
             predecessors: BTreeMap::new(),
         }
@@ -134,6 +139,10 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
     /// propagate through OLD closure cones and the inserted-edge arrangement;
     /// only new result pairs are staged. A redundant transitive insertion does
     /// not visit its old predecessors, though its edge support is still kept.
+    /// Without support insertions, only old pairs in the removed-edge cones
+    /// are reconsidered. Incoming support from outside a source's affected
+    /// region seeds rederivation inside it; unchanged closure rows are neither
+    /// traversed nor copied. Dense affected regions may still be quadratic.
     pub fn prepare<E>(
         &mut self,
         delta: &ZSet<(V, V)>,
@@ -156,10 +165,12 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
                 continue;
             }
             if new_present {
-                // Staging and eventual retained topology are separate entries.
+                // Staging and both retained topology directions are separate
+                // entries/groups, reserved before the infallible publication.
                 insert_pair(&mut inserted, source, destination, control)?;
-                event(control, ZSetEvent::ScratchEntry)?;
-                event(control, ZSetEvent::ScratchEntry)?;
+                for _ in 0..4 {
+                    event(control, ZSetEvent::ScratchEntry)?;
+                }
             } else {
                 insert_pair(&mut removed, source, destination, control)?;
             }
@@ -175,6 +186,20 @@ impl<V: Ord + Clone> IncrementalReachability<V> {
                 removed,
                 replacements: Relation::new(),
                 additions,
+                delta: output,
+            });
+        }
+
+        if inserted.is_empty() {
+            let output = self.derive_deletions(&removed, limbs, control)?;
+            event(control, ZSetEvent::Work)?;
+            return Ok(ReachabilityUpdate {
+                owner: self,
+                weights,
+                inserted,
+                removed,
+                replacements: Relation::new(),
+                additions: Relation::new(),
                 delta: output,
             });
         }
@@ -368,9 +393,13 @@ impl<V: Ord + Clone> ReachabilityUpdate<'_, V> {
         for (source, row) in removed {
             for destination in row {
                 remove_pair(&mut owner.outgoing, &source, &destination);
+                remove_pair(&mut owner.incoming, &destination, &source);
             }
         }
         for (source, row) in inserted {
+            for destination in &row {
+                owner.incoming.entry(destination.clone()).or_default().insert(source.clone());
+            }
             owner.outgoing.entry(source).or_default().extend(row);
         }
         for (source, row) in replacements {
@@ -385,6 +414,10 @@ impl<V: Ord + Clone> ReachabilityUpdate<'_, V> {
         }
         for ((source, destination), weight) in delta.iter() {
             if weight < &ZWeight::ZERO {
+                // Deletion-only preparation stages individual losses, not
+                // replacement copies of every affected source's closure row.
+                // On mixed updates this removal is already reflected above.
+                remove_pair(&mut owner.reachable, source, destination);
                 remove_pair(&mut owner.predecessors, destination, source);
             } else {
                 owner
