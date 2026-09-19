@@ -306,6 +306,33 @@ where
                     };
                     weight = weight.product(topology.get(&key).copied().ok_or_else(unavailable)?);
                 }
+                if let Some(count) = weight.exact_count() {
+                    for _ in 1..count {
+                        for operator in plan.operators() {
+                            if matches!(
+                                operator,
+                                crate::algebra::GlaOperator::CompareProperties { .. }
+                                    | crate::algebra::GlaOperator::SelectBoolean { .. }
+                            ) {
+                                crate::algebra_exec::compare_properties(
+                                    operator,
+                                    bindings,
+                                    property,
+                                    control,
+                                )?;
+                            }
+                        }
+                        for column in columns {
+                            if let crate::algebra::ValueProjection::Property { slot, key } = column
+                            {
+                                if let Some(Some(vid)) = bindings.get(slot.ordinal() as usize) {
+                                    control(GlaExecutionEvent::Work)?;
+                                    property(*vid, *key)?;
+                                }
+                            }
+                        }
+                    }
+                }
                 visit(columns, bindings, property, control, weight)
             },
         );
