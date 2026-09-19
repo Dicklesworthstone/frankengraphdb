@@ -208,8 +208,8 @@ impl PreparedGraphAggregate {
     ///
     /// Scalar/vertex MIN/MAX preserve their input type. Counts cannot be NULL;
     /// SUM/AVG may be NULL but never narrow into an ordinary scalar. Nullable
-    /// vertex slots (OPTIONAL MATCH) may supply NULL keys or extrema. Functions
-    /// and input projections outside this maintained profile fail closed.
+    /// vertex slots (OPTIONAL MATCH) may supply NULL keys or extrema. Schema
+    /// checks use computed input positions when an input projection is present.
     pub fn materialize_incremental_row(
         &self,
         keys: Vec<GraphValue>,
@@ -233,41 +233,41 @@ impl PreparedGraphAggregate {
         keys: &[GraphValue],
         values: &[GraphAggregateValue],
     ) -> bool {
+        use crate::GraphSetColumnType::{Scalar, Vertex};
         if keys.len() != self.keys.len() || values.len() != self.aggregates.len() {
             return false;
         }
-        let input = self.input.value_columns();
-        let accepts = |projection: &ValueProjection, value: &GraphValue| match projection {
-            ValueProjection::Property { .. } => matches!(value, GraphValue::Scalar(_)),
-            ValueProjection::Vertex { .. } => matches!(value, GraphValue::Vertex(_)) || value.is_null(),
+        let accepts = |kind, value: &GraphValue| match kind {
+            Some(Scalar) => matches!(value, GraphValue::Scalar(_)),
+            Some(Vertex) => matches!(value, GraphValue::Vertex(_)) || value.is_null(),
             _ => false,
         };
         for (column, value) in self.keys.iter().zip(keys) {
-            if !input.get(*column).is_some_and(|projection| accepts(projection, value)) {
+            if !accepts(self.incremental_input_column_type(*column), value) {
                 return false;
             }
         }
         for (aggregate, value) in self.aggregates.iter().zip(values) {
-            let argument = aggregate.column.and_then(|column| input.get(column));
+            let argument = aggregate.column.and_then(|column| self.incremental_input_column_type(column));
             let accepted = match aggregate.function {
                 GraphAggregateFunction::CountRows => {
                     aggregate.column.is_none() && matches!(value, GraphAggregateValue::Count(_))
                 }
                 GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct => {
-                    matches!(argument, Some(ValueProjection::Property { .. } | ValueProjection::Vertex { .. }))
+                    matches!(argument, Some(Scalar | Vertex))
                         && matches!(value, GraphAggregateValue::Count(_))
                 }
                 GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
-                    matches!(argument, Some(ValueProjection::Property { .. }))
+                    matches!(argument, Some(Scalar))
                         && (matches!(value, GraphAggregateValue::Integer(_)) || value.is_null())
                 }
                 GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
-                    matches!(argument, Some(ValueProjection::Property { .. }))
+                    matches!(argument, Some(Scalar))
                         && (matches!(value, GraphAggregateValue::Average(_)) || value.is_null())
                 }
                 GraphAggregateFunction::Min | GraphAggregateFunction::Max => {
-                    match (argument, value) {
-                        (Some(argument), GraphAggregateValue::Value(value)) => accepts(argument, value),
+                    match value {
+                        GraphAggregateValue::Value(value) => accepts(argument, value),
                         _ => false,
                     }
                 }

@@ -2,6 +2,7 @@
 //! No query AST interpreter or second graph source lives here. The admitted
 //! GLA supplies predicates, binding slots and grouping positions.
 
+mod computed;
 mod support;
 
 use super::*;
@@ -152,6 +153,9 @@ pub(super) fn project_contributions<'a>(
     output: &mut Vec<Contribution>,
     meter: &mut Meter<'_>,
 ) -> Result<(), StandingQueryFailure> {
+    if query.input_projection().is_some() {
+        return computed::contributions(query, binding, sign, output, meter);
+    }
     meter.charge(ZSetEvent::ScratchEntry)?;
     let mut key = Vec::new();
     for &column in query.group_key_columns() {
@@ -304,7 +308,7 @@ impl StandingQuery {
             .map_err(zset_error)?;
         support::augment(&self.aggregate, &mut delta, meter)?;
         let mut groups = BTreeSet::new();
-        for (((key, _, _), _), _) in delta.iter() {
+        for (((key, _, _), _) , _) in delta.iter() {
             meter.charge(ZSetEvent::Work)?;
             if !groups.contains(key) {
                 meter.charge(ZSetEvent::ScratchEntry)?;

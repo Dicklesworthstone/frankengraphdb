@@ -418,14 +418,13 @@ impl PreparedGraphAggregate {
         self.having_expression.as_ref()
     }
 
-    /// Full, unprojected groups may be maintained and then filtered by HAVING.
-    /// Input topology and aggregate functions still require consumer admission.
-    /// Ordering, pages, computed inputs/outputs and output DISTINCT stay outside
-    /// this profile; accepting a filter must never silently erase those clauses.
+    /// Complete groups over row-local scalar/vertex inputs may be maintained
+    /// and filtered by HAVING, including computed input columns. Input topology
+    /// and aggregate functions still require consumer admission. Ordering, pages,
+    /// computed outputs and output DISTINCT remain outside this profile.
     #[must_use]
     pub fn supports_incremental_maintenance_with_having(&self) -> bool {
-        self.computed_input.is_none()
-            && self.relational_input.is_none()
+        self.supports_incremental_input()
             && self.output_projection.is_none()
             && !self.output_distinct
             && self.offset == 0

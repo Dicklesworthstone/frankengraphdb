@@ -53,6 +53,9 @@ pub enum StandingQueryFailure {
     Arithmetic,
     NonIntegerSum,
     NonIntegerHaving,
+    /// Computed input column and value-independent scalar failure. A source
+    /// binding identity or payload is never included in the diagnostic.
+    InputExpression { column: usize, error: fgdb_gql::GraphIntegerError },
     InvalidDelta,
 }
 
@@ -205,8 +208,7 @@ fn aggregate_functions_eligible(query: &PreparedGraphAggregate) -> bool {
         | GraphAggregateFunction::AverageInt
         | GraphAggregateFunction::AverageIntDistinct => {
             aggregate.argument_column().is_some_and(|column| {
-                matches!(query.input_pattern().value_columns().get(column),
-                    Some(ValueProjection::Property { .. }))
+                query.incremental_input_column_type(column) == Some(fgdb_gql::GraphSetColumnType::Scalar)
             })
         }
         _ => false,
@@ -511,8 +513,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// snapshot. Initialization and later explicit rebuilds share one admitted
     /// source path; ordinary commit maintenance never scans that source again.
     /// COUNT/DISTINCT and MIN/MAX admit scalar or vertex arguments; integer
-    /// SUM/AVG and their DISTINCT forms require property arguments. These
-    /// functions reuse the admitted vertex, fixed-hop and optional/probe shapes.
+    /// SUM/AVG and their DISTINCT forms admit scalar input columns, including
+    /// computed ones. Each computed row uses the shared GQL projection evaluator
+    /// before grouping, with checked arithmetic and ordinary lazy scalar branches.
+    /// These functions reuse the admitted vertex, fixed-hop and optional/probe shapes.
     /// Boolean WHERE and its scalar programs use ordinary GLA semantics, with
     /// every hidden vertex-property dependency retained for invalidation.
     /// HAVING evaluates only completed changed groups; filtered-out groups keep
