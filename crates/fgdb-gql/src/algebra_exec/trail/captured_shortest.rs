@@ -1,10 +1,13 @@
-//! Lazy ALL SHORTEST capture over the executor's sorted identified index.
+//! Lazy layered path capture over the executor's sorted identified index.
 //!
-//! Reachability is shared by (depth, vertex), not by path occurrence. After a
-//! layer is settled, backward viability removes prefixes with no continuation
-//! to that layer. A depth-first walk of that layered graph then emits the real
+//! Reachability is shared by (depth, vertex), not by path occurrence. Once an
+//! output layer is selected, backward viability removes dead prefixes. A
+//! depth-first walk of that layered graph then emits the real
 //! edge/vertex identities in the same hop-first, lexicographic order as the
-//! eager path cursor. Parallel edges and duplicate occurrences are not merged.
+//! eager path cursor. Only ALL SHORTEST settles endpoints across depths.
+//! ACYCLIC/SIMPLE use WALK reachability as an overapproximation, then check
+//! the actual path's membership before descent. Their histories never coalesce.
+//! Parallel edges and duplicate occurrences are not merged.
 //! This is bounded query scratch, not a storage or spill implementation.
 
 use super::{EId, GlaExecutionEvent, GraphPath, GraphWalkBounds, VId};
@@ -17,10 +20,19 @@ struct Frame {
     next: usize,
 }
 
-pub(crate) struct CapturedShortestCursor<'a> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CaptureMode {
+    All,
+    AllShortest,
+    Acyclic,
+    Simple,
+}
+
+pub(crate) struct CapturedPathCursor<'a> {
     adjacency: Option<&'a Adjacency>,
     source: VId,
     bounds: GraphWalkBounds,
+    mode: CaptureMode,
     depth: u32,
     layers: Vec<BTreeSet<VId>>,
     settled: BTreeSet<VId>,
@@ -29,15 +41,17 @@ pub(crate) struct CapturedShortestCursor<'a> {
     frames: Vec<Frame>,
     steps: Vec<(EId, VId)>,
     started: bool,
+    emitted_layer: bool,
     done: bool,
 }
 
-impl<'a> CapturedShortestCursor<'a> {
+impl<'a> CapturedPathCursor<'a> {
     /// The enclosing identified-index builder sorts by (EId, VId) with its
     /// ordinary fallible controls. Borrow that index; do not copy graph rows.
     pub(super) fn new<E>(
         source: VId,
         bounds: GraphWalkBounds,
+        mode: CaptureMode,
         adjacency: Option<&'a Adjacency>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
@@ -48,6 +62,7 @@ impl<'a> CapturedShortestCursor<'a> {
             adjacency,
             source,
             bounds,
+            mode,
             depth: 0,
             layers: vec![BTreeSet::from([source])],
             settled: BTreeSet::new(),
@@ -55,6 +70,7 @@ impl<'a> CapturedShortestCursor<'a> {
             frames: Vec::new(),
             steps: Vec::new(),
             started: false,
+            emitted_layer: false,
             done: false,
         })
     }
@@ -92,6 +108,17 @@ impl<'a> CapturedShortestCursor<'a> {
                 return Ok(Some(path));
             }
             if self.started {
+                // A repetition-restricted path at a later depth would have
+                // a valid prefix at this depth. Once an admissible layer is
+                // empty, WALK's reachability overapproximation cannot justify
+                // searching more layers of impossible histories.
+                if self.depth >= self.bounds.minimum()
+                    && !self.emitted_layer
+                    && matches!(self.mode, CaptureMode::Acyclic | CaptureMode::Simple)
+                {
+                    self.finish();
+                    return Ok(None);
+                }
                 // Do not build a later layer before the caller has consumed
                 // this one. LIMIT/cancellation can stop without that work.
                 if !self.advance_layer(control)? {
@@ -102,6 +129,7 @@ impl<'a> CapturedShortestCursor<'a> {
                 self.started = true;
             }
             if self.depth >= self.bounds.minimum() {
+                self.emitted_layer = false;
                 self.prepare_output(control)?;
             }
         }
@@ -121,7 +149,10 @@ impl<'a> CapturedShortestCursor<'a> {
             if let Some(neighbors) = self.adjacency.and_then(|map| map.get(&vertex)) {
                 for &(_, destination) in neighbors {
                     control(GlaExecutionEvent::Work)?;
-                    if self.settled.contains(&destination) || next.contains(&destination) {
+                    if (self.mode == CaptureMode::AllShortest
+                        && self.settled.contains(&destination))
+                        || next.contains(&destination)
+                    {
                         continue;
                     }
                     control(GlaExecutionEvent::ScratchEntry)?;
@@ -144,10 +175,12 @@ impl<'a> CapturedShortestCursor<'a> {
     ) -> Result<(), E> {
         // Only admissible depths settle an endpoint. A visit below the lower
         // bound must not suppress a later qualifying walk through a cycle.
-        for &vertex in self.layers.last().expect("an active cursor has a layer") {
-            control(GlaExecutionEvent::Work)?;
-            control(GlaExecutionEvent::ScratchEntry)?;
-            self.settled.insert(vertex);
+        if self.mode == CaptureMode::AllShortest {
+            for &vertex in self.layers.last().expect("an active cursor has a layer") {
+                control(GlaExecutionEvent::Work)?;
+                control(GlaExecutionEvent::ScratchEntry)?;
+                self.settled.insert(vertex);
+            }
         }
         self.viable = Vec::new();
         self.frames = Vec::new();
@@ -203,8 +236,32 @@ impl<'a> CapturedShortestCursor<'a> {
     }
 
     fn pop_frame(&mut self) {
-        self.frames.pop();
-        self.steps.pop();
+        let _ = self.frames.pop();
+        let _ = self.steps.pop();
+    }
+
+    fn accepts_step<E>(
+        &self,
+        destination: VId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        if !matches!(self.mode, CaptureMode::Acyclic | CaptureMode::Simple) {
+            return Ok(true);
+        }
+        control(GlaExecutionEvent::Work)?;
+        if destination == self.source {
+            // A SIMPLE closing return may only be this layer's last step;
+            // it never becomes a transit prefix, even below the lower bound.
+            return Ok(self.mode == CaptureMode::Simple
+                && self.steps.len() + 1 == self.depth as usize);
+        }
+        for &(_, vertex) in &self.steps {
+            control(GlaExecutionEvent::Work)?;
+            if vertex == destination {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn next_path<E>(
@@ -222,6 +279,7 @@ impl<'a> CapturedShortestCursor<'a> {
                 }
                 let path = GraphPath::new(self.source, self.steps.clone().into_boxed_slice());
                 self.pop_frame();
+                self.emitted_layer = true;
                 return Ok(Some(path));
             }
             let frame = &mut self.frames[at];
@@ -236,7 +294,7 @@ impl<'a> CapturedShortestCursor<'a> {
             };
             frame.next += 1;
             let remaining = self.depth as usize - at - 1;
-            if self.viable[remaining].contains(&step.1) {
+            if self.viable[remaining].contains(&step.1) && self.accepts_step(step.1, control)? {
                 self.frames.push(Frame {
                     vertex: step.1,
                     next: 0,
@@ -251,14 +309,23 @@ impl<'a> CapturedShortestCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::{GraphWalkSearch, IdentifiedExpansion};
+
+    const MODES: [CaptureMode; 4] = [
+        CaptureMode::All,
+        CaptureMode::AllShortest,
+        CaptureMode::Acyclic,
+        CaptureMode::Simple,
+    ];
 
     fn collect<E>(
         source: VId,
         bounds: GraphWalkBounds,
+        mode: CaptureMode,
         adjacency: Option<&Adjacency>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<GraphPath>, E> {
-        let mut cursor = CapturedShortestCursor::new(source, bounds, adjacency, control)?;
+        let mut cursor = CapturedPathCursor::new(source, bounds, mode, adjacency, control)?;
         let mut output = Vec::new();
         while let Some(path) = cursor.next_with_control(control)? {
             output.push(path);
@@ -266,9 +333,14 @@ mod tests {
         Ok(output)
     }
 
-    // No reachability sharing, settlement or viability: enumerate all finite
-    // walks, independently select each endpoint's first admissible depth, sort.
-    fn oracle(source: VId, bounds: GraphWalkBounds, adjacency: &Adjacency) -> Vec<GraphPath> {
+    // Enumerate every bounded WALK, without sharing, settlement or pruning.
+    // Then independently filter complete paths by mode and select minima.
+    fn oracle(
+        source: VId,
+        bounds: GraphWalkBounds,
+        mode: CaptureMode,
+        adjacency: &Adjacency,
+    ) -> Vec<GraphPath> {
         let mut todo = vec![GraphPath::new(source, Box::new([]))];
         let mut paths = Vec::new();
         let mut first = BTreeMap::<VId, usize>::new();
@@ -281,24 +353,37 @@ mod tests {
                     todo.push(GraphPath::new(source, steps.into_boxed_slice()));
                 }
             }
-            if path.len() >= bounds.minimum() as usize {
-                first
-                    .entry(endpoint)
-                    .and_modify(|depth| *depth = (*depth).min(path.len()))
-                    .or_insert(path.len());
-                paths.push(path);
+            if path.len() < bounds.minimum() as usize {
+                continue;
             }
+            if matches!(mode, CaptureMode::Acyclic | CaptureMode::Simple) {
+                let mut vertices = path.vertices().collect::<Vec<_>>();
+                if mode == CaptureMode::Simple && !path.is_empty() && endpoint == source {
+                    let _ = vertices.pop();
+                }
+                let unique = vertices.iter().copied().collect::<BTreeSet<_>>();
+                if unique.len() != vertices.len() {
+                    continue;
+                }
+            }
+            first
+                .entry(endpoint)
+                .and_modify(|depth| *depth = (*depth).min(path.len()))
+                .or_insert(path.len());
+            paths.push(path);
         }
-        paths.retain(|path| {
-            let endpoint = path.steps().last().map_or(source, |step| step.1);
-            first.get(&endpoint) == Some(&path.len())
-        });
+        if mode == CaptureMode::AllShortest {
+            paths.retain(|path| {
+                let endpoint = path.steps().last().map_or(source, |step| step.1);
+                first.get(&endpoint) == Some(&path.len())
+            });
+        }
         paths.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
         paths
     }
 
     #[test]
-    fn captured_shortest_matches_all_unpruned_three_vertex_graphs() {
+    fn all_capture_modes_match_every_unpruned_three_vertex_graph() {
         for mask in 0..512_u32 {
             let mut adjacency = Adjacency::new();
             for source in 0..3_u128 {
@@ -313,19 +398,25 @@ mod tests {
                     }
                 }
             }
-            for source in 0..4_u128 {
-                for maximum in 0..=3 {
-                    for minimum in 0..=maximum {
-                        let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
-                        let actual = collect(VId(source), bounds, Some(&adjacency), &mut |_| {
-                            Ok::<_, ()>(())
-                        })
-                        .unwrap();
-                        assert_eq!(
-                            actual,
-                            oracle(VId(source), bounds, &adjacency),
-                            "mask={mask}, source={source}, bounds={bounds:?}"
-                        );
+            for mode in MODES {
+                for source in 0..4_u128 {
+                    for maximum in 0..=3 {
+                        for minimum in 0..=maximum {
+                            let bounds = GraphWalkBounds::new(minimum, maximum).unwrap();
+                            let actual = collect(
+                                VId(source),
+                                bounds,
+                                mode,
+                                Some(&adjacency),
+                                &mut |_| Ok::<_, ()>(()),
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                actual,
+                                oracle(VId(source), bounds, mode, &adjacency),
+                                "mask={mask}, source={source}, bounds={bounds:?}, mode={mode:?}"
+                            );
+                        }
                     }
                 }
             }
@@ -340,29 +431,85 @@ mod tests {
         )]);
         let bounds =
             GraphWalkBounds::new(crate::MAX_GRAPH_WALK_HOPS, crate::MAX_GRAPH_WALK_HOPS).unwrap();
-        let mut events = 0;
-        let mut control = |_| {
-            events += 1;
-            if events > 50_000 {
-                Err("materialized tied routes")
-            } else {
-                Ok(())
-            }
-        };
-        let mut cursor =
-            CapturedShortestCursor::new(VId(7), bounds, Some(&adjacency), &mut control).unwrap();
-        let first = cursor.next_with_control(&mut control).unwrap().unwrap();
-        let second = cursor.next_with_control(&mut control).unwrap().unwrap();
-        assert_eq!(first.len(), crate::MAX_GRAPH_WALK_HOPS as usize);
-        assert!(first.edges().all(|edge| edge == EId(0)));
-        assert_eq!(second.steps().last(), Some(&(EId(1), VId(7))));
-        assert_eq!(
-            &first.steps()[..first.len() - 1],
-            &second.steps()[..second.len() - 1]
-        );
-        assert!(first < second);
-        assert!(cursor.frames.capacity() <= crate::MAX_GRAPH_WALK_HOPS as usize + 1);
-        assert!(cursor.steps.capacity() <= crate::MAX_GRAPH_WALK_HOPS as usize);
+        for mode in [CaptureMode::All, CaptureMode::AllShortest] {
+            let mut events = 0;
+            let mut control = |_| {
+                events += 1;
+                if events > 50_000 {
+                    Err("materialized tied routes")
+                } else {
+                    Ok(())
+                }
+            };
+            let mut cursor =
+                CapturedPathCursor::new(VId(7), bounds, mode, Some(&adjacency), &mut control)
+                    .unwrap();
+            let first = cursor.next_with_control(&mut control).unwrap().unwrap();
+            let second = cursor.next_with_control(&mut control).unwrap().unwrap();
+            assert_eq!(first.len(), crate::MAX_GRAPH_WALK_HOPS as usize);
+            assert!(first.edges().all(|edge| edge == EId(0)));
+            assert_eq!(second.steps().last(), Some(&(EId(1), VId(7))));
+            assert_eq!(
+                &first.steps()[..first.len() - 1],
+                &second.steps()[..second.len() - 1]
+            );
+            assert!(first < second);
+            // Logical retained entries, not an allocator-specific byte bound:
+            // Vec::with_capacity is permitted to reserve more than requested.
+            assert!(cursor.frames.len() <= crate::MAX_GRAPH_WALK_HOPS as usize + 1);
+            assert!(cursor.steps.len() <= crate::MAX_GRAPH_WALK_HOPS as usize);
+            assert_eq!(cursor.layers.len(), crate::MAX_GRAPH_WALK_HOPS as usize + 1);
+        }
+    }
+
+    #[test]
+    fn production_dispatch_streams_the_first_of_a_trillion_captured_paths() {
+        let mut adjacency = Adjacency::new();
+        for depth in 0..40_u128 {
+            adjacency.insert(
+                VId(depth),
+                vec![
+                    (EId(2 * depth), VId(depth + 1)),
+                    (EId(2 * depth + 1), VId(depth + 1)),
+                ],
+            );
+        }
+        for search in [
+            GraphWalkSearch::All,
+            GraphWalkSearch::AllShortest,
+            GraphWalkSearch::Acyclic,
+            GraphWalkSearch::Simple,
+        ] {
+            let mut events = 0;
+            let mut control = |_| {
+                events += 1;
+                if events > 50_000 {
+                    Err("eager captured-path layer")
+                } else {
+                    Ok(())
+                }
+            };
+            let mut cursor = IdentifiedExpansion::new(
+                VId(0),
+                GraphWalkBounds::new(40, 40).unwrap(),
+                search,
+                Some(&adjacency),
+                true,
+                &mut control,
+            )
+            .unwrap();
+            let (endpoint, first) = cursor.next_with_control(&mut control).unwrap().unwrap();
+            let (second_endpoint, second) = cursor.next_with_control(&mut control).unwrap().unwrap();
+            let first = first.expect("capture survives production dispatch");
+            let second = second.expect("capture survives production dispatch");
+            assert_eq!(endpoint, VId(40));
+            assert_eq!(second_endpoint, endpoint);
+            assert_eq!(first.len(), 40);
+            assert!(first.edges().all(|edge| edge.0 % 2 == 0));
+            assert_eq!(&first.steps()[..39], &second.steps()[..39]);
+            assert_eq!(first.steps()[39], (EId(78), VId(40)));
+            assert_eq!(second.steps()[39], (EId(79), VId(40)));
+        }
     }
 
     #[test]
@@ -376,53 +523,85 @@ mod tests {
             (VId(3), vec![(EId(8), VId(4))]),
         ]);
         let bounds = GraphWalkBounds::new(2, 3).unwrap();
-        let actual = collect(VId(1), bounds, Some(&adjacency), &mut |_| Ok::<_, ()>(())).unwrap();
-        assert_eq!(actual, oracle(VId(1), bounds, &adjacency));
-        assert_eq!(actual.len(), 3);
-        assert_eq!(actual[0], actual[1]);
-        assert_eq!(actual[0].edges().collect::<Vec<_>>(), vec![EId(2), EId(8)]);
-        assert_eq!(actual[2].edges().collect::<Vec<_>>(), vec![EId(9), EId(1)]);
+        for mode in MODES {
+            let actual = collect(VId(1), bounds, mode, Some(&adjacency), &mut |_| {
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+            assert_eq!(actual, oracle(VId(1), bounds, mode, &adjacency));
+            assert_eq!(actual.len(), 3);
+            assert_eq!(actual[0], actual[1]);
+            assert_eq!(actual[0].edges().collect::<Vec<_>>(), vec![EId(2), EId(8)]);
+            assert_eq!(actual[2].edges().collect::<Vec<_>>(), vec![EId(9), EId(1)]);
+        }
     }
 
     #[test]
     fn zero_hops_never_build_or_consult_a_later_layer() {
         let adjacency = Adjacency::from([(VId(5), vec![(EId(1), VId(6)); 10_000])]);
-        let mut cursor = CapturedShortestCursor::new(
-            VId(5),
-            GraphWalkBounds::new(0, 10).unwrap(),
-            Some(&adjacency),
-            &mut |_| Ok::<_, ()>(()),
-        )
-        .unwrap();
-        let mut work = 0;
-        let path = cursor
-            .next_with_control(&mut |_| {
-                work += 1;
-                if work > 20 {
-                    Err("read future adjacency before output")
-                } else {
-                    Ok(())
-                }
-            })
-            .unwrap()
+        for mode in MODES {
+            let mut cursor = CapturedPathCursor::new(
+                VId(5),
+                GraphWalkBounds::new(0, 10).unwrap(),
+                mode,
+                Some(&adjacency),
+                &mut |_| Ok::<_, ()>(()),
+            )
             .unwrap();
-        assert!(path.is_empty());
-        assert_eq!(path.start(), VId(5));
-        assert_eq!(cursor.layers.len(), 1);
-        assert_eq!(
-            collect(VId(5), GraphWalkBounds::new(0, 0).unwrap(), None, &mut |_| {
-                Ok::<_, ()>(())
-            })
-            .unwrap(),
-            vec![path]
-        );
-        assert!(
-            collect(VId(5), GraphWalkBounds::new(1, 1).unwrap(), None, &mut |_| {
-                Ok::<_, ()>(())
-            })
-            .unwrap()
-            .is_empty()
-        );
+            let mut work = 0;
+            let path = cursor
+                .next_with_control(&mut |_| {
+                    work += 1;
+                    if work > 20 {
+                        Err("read future adjacency before output")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap()
+                .unwrap();
+            assert!(path.is_empty());
+            assert_eq!(path.start(), VId(5));
+            assert_eq!(cursor.layers.len(), 1);
+            assert_eq!(
+                collect(VId(5), GraphWalkBounds::new(0, 0).unwrap(), mode, None, &mut |_| {
+                    Ok::<_, ()>(())
+                })
+                .unwrap(),
+                vec![path]
+            );
+            assert!(
+                collect(VId(5), GraphWalkBounds::new(1, 1).unwrap(), mode, None, &mut |_| {
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
+                .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn impossible_restricted_prefixes_stop_without_searching_the_remaining_hop_bound() {
+        let adjacency = Adjacency::from([(
+            VId(1),
+            vec![(EId(1), VId(1)), (EId(2), VId(2))],
+        )]);
+        for mode in [CaptureMode::Acyclic, CaptureMode::Simple] {
+            let mut work = 0;
+            let paths = collect(
+                VId(1),
+                GraphWalkBounds::new(0, crate::MAX_GRAPH_WALK_HOPS).unwrap(),
+                mode,
+                Some(&adjacency),
+                &mut |_| {
+                    work += 1;
+                    if work > 200 { Err(()) } else { Ok(()) }
+                },
+            )
+            .unwrap();
+            assert_eq!(paths.len(), if mode == CaptureMode::Simple { 3 } else { 2 });
+            assert!(paths.iter().all(|path| path.len() <= 1));
+        }
     }
 
     #[test]
@@ -431,54 +610,53 @@ mod tests {
             (VId(1), vec![(EId(1), VId(1)), (EId(2), VId(2))]),
             (VId(2), vec![(EId(3), VId(1)), (EId(4), VId(3))]),
         ]);
-        for minimum in [0, 1, 3] {
-            let bounds = GraphWalkBounds::new(minimum, 4).unwrap();
-            let mut total = 0;
-            collect(VId(1), bounds, Some(&adjacency), &mut |_| {
-                total += 1;
-                Ok::<_, usize>(())
-            })
-            .unwrap();
-            for stop in 1..=total {
-                let mut seen = 0;
-                let mut control = |_| {
-                    seen += 1;
-                    if seen == stop { Err(stop) } else { Ok(()) }
-                };
-                let mut cursor = match CapturedShortestCursor::new(
-                    VId(1),
-                    bounds,
-                    Some(&adjacency),
-                    &mut control,
-                ) {
-                    Err(error) => {
-                        assert_eq!(error, stop);
-                        continue;
-                    }
-                    Ok(cursor) => cursor,
-                };
-                loop {
-                    match cursor.next_with_control(&mut control) {
-                        Ok(Some(_)) => {}
-                        Ok(None) => panic!("missed refusal {stop}"),
+        for mode in MODES {
+            for minimum in [0, 1, 3] {
+                let bounds = GraphWalkBounds::new(minimum, 4).unwrap();
+                let mut total = 0;
+                collect(VId(1), bounds, mode, Some(&adjacency), &mut |_| {
+                    total += 1;
+                    Ok::<_, usize>(())
+                })
+                .unwrap();
+                for stop in 1..=total {
+                    let mut seen = 0;
+                    let mut control = |_| {
+                        seen += 1;
+                        if seen == stop { Err(stop) } else { Ok(()) }
+                    };
+                    let mut cursor = match CapturedPathCursor::new(
+                        VId(1), bounds, mode, Some(&adjacency), &mut control,
+                    ) {
                         Err(error) => {
                             assert_eq!(error, stop);
-                            break;
+                            continue;
+                        }
+                        Ok(cursor) => cursor,
+                    };
+                    loop {
+                        match cursor.next_with_control(&mut control) {
+                            Ok(Some(_)) => {}
+                            Ok(None) => panic!("missed refusal {stop}"),
+                            Err(error) => {
+                                assert_eq!(error, stop);
+                                break;
+                            }
                         }
                     }
+                    assert_eq!(seen, stop);
+                    assert!(cursor.done);
+                    assert!(cursor.adjacency.is_none());
+                    assert!(cursor.settled.is_empty());
+                    assert_eq!(cursor.layers.capacity(), 0);
+                    assert_eq!(cursor.viable.capacity(), 0);
+                    assert_eq!(cursor.frames.capacity(), 0);
+                    assert_eq!(cursor.steps.capacity(), 0);
+                    assert_eq!(
+                        cursor.next_with_control(&mut |_| Err::<(), _>(usize::MAX)),
+                        Ok(None)
+                    );
                 }
-                assert_eq!(seen, stop);
-                assert!(cursor.done);
-                assert!(cursor.adjacency.is_none());
-                assert!(cursor.settled.is_empty());
-                assert_eq!(cursor.layers.capacity(), 0);
-                assert_eq!(cursor.viable.capacity(), 0);
-                assert_eq!(cursor.frames.capacity(), 0);
-                assert_eq!(cursor.steps.capacity(), 0);
-                assert_eq!(
-                    cursor.next_with_control(&mut |_| Err::<(), _>(usize::MAX)),
-                    Ok(None)
-                );
             }
         }
     }
