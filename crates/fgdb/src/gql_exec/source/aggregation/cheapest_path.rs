@@ -1,6 +1,8 @@
 //! Weighted path selection over the same admitted source as graph patterns.
 //! Snapshot topology and costs have one generation and one shared allowance.
 
+mod text;
+
 use crate::gql_exec::{AdmissionUsage, AdmittedGqlSnapshot, GqlSnapshotReader};
 use crate::{Database, EmbeddedReadView, GqlError, ReadError};
 use asupersync::fs::Vfs;
