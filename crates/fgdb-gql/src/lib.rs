@@ -7,6 +7,7 @@
 mod aggregation;
 pub mod algebra;
 mod algebra_exec;
+mod cheapest_path;
 mod deletion;
 mod edge_merge;
 mod edge_upsert;
@@ -42,6 +43,9 @@ mod walk;
 mod write_receipt;
 mod write_script;
 
+pub use cheapest_path::{
+    GraphCheapestPathError, GraphCostPath, GraphPathCostError, PreparedGraphCheapestPath,
+};
 pub use pipeline_aggregate_text::{
     GraphPipelineAggregateTextError, GraphPipelineAggregateTextErrorKind,
     PreparedGraphPipelineAggregateText,
