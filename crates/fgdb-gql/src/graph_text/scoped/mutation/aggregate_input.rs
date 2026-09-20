@@ -64,25 +64,46 @@ impl<'a> Parser<'a> {
             .map(|&(variable, property)| Projection {
                 variable,
                 property,
-                path: None,
+                path: if self
+                    .syntax
+                    .path
+                    .is_some_and(|path| path.text == variable.text)
+                {
+                    Some(GraphPathFunction::Value)
+                } else if self
+                    .syntax
+                    .edges
+                    .iter()
+                    .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text))
+                {
+                    Some(GraphPathFunction::Edge)
+                } else {
+                    None
+                },
             })
             .collect();
-        // A bound vertex with a literal-looking name retains its identity.
+        // A bound vertex, edge, or path with a literal-looking name retains its identity.
         // Integer operators cannot silently cast it into a scalar column.
-        let bare_vertex = if self.starts_integer_case()? {
+        let bare_variable = if self.starts_integer_case()? {
             false
         } else if let TokenKind::Word(word) = self.current.kind {
             let next = self.lexer.clone().next()?;
             !matches!(next.kind, TokenKind::Punct(b'.' | b'('))
                 && (self.syntax.variables.iter().any(|name| name.text == word)
+                    || self.syntax.path.is_some_and(|path| path.text == word)
+                    || self
+                        .syntax
+                        .edges
+                        .iter()
+                        .any(|edge| edge.variable.is_some_and(|name| name.text == word))
                     || !(word.eq_ignore_ascii_case("TRUE")
                         || word.eq_ignore_ascii_case("FALSE")
                         || word.eq_ignore_ascii_case("NULL")))
         } else {
             false
         };
-        let operand = if bare_vertex {
-            let variable = self.variable()?;
+        let operand = if bare_variable {
+            let variable = self.any_variable()?;
             Operand::Column(self.mutation_projection(&mut sources, variable, None)?)
         } else {
             self.aggregate_value_expression(&mut sources)

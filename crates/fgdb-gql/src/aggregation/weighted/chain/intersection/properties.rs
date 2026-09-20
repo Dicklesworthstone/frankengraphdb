@@ -206,7 +206,9 @@ fn interleaved_vertex_filters_keep_fallback_reads_even_when_the_cycle_never_clos
 #[test]
 fn changing_property_callbacks_are_not_cached_or_reordered_by_the_kernel() {
     let graph = topology(511, GlaDirection::Forward);
-    let q = pattern("MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE a.p=b.p RETURN c.p AS cp, a.p AS ap");
+    let q = pattern(
+        "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE a.p=b.p RETURN c.p AS cp, a.p AS ap",
+    );
     let values = [
         CanonicalScalar::Int(1),
         CanonicalScalar::Int(2),

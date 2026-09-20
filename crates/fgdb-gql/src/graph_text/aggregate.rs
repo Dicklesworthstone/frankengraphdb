@@ -22,6 +22,20 @@ pub enum GraphAggregateTextSlot {
     Aggregate(usize),
 }
 
+fn column_path(syntax: &Syntax<'_>, variable: Name<'_>) -> Option<GraphPathFunction> {
+    if syntax.path.is_some_and(|path| path.text == variable.text) {
+        Some(GraphPathFunction::Value)
+    } else if syntax
+        .edges
+        .iter()
+        .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text))
+    {
+        Some(GraphPathFunction::Edge)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone)]
 struct Summary {
     function: GraphAggregateFunction,
@@ -408,7 +422,7 @@ impl PreparedGraphAggregateText {
             parser.syntax.columns.push(Column {
                 variable: group.variable,
                 property: group.property,
-                path: None,
+                path: column_path(&parser.syntax, group.variable),
                 alias,
             });
         }
@@ -442,7 +456,7 @@ impl PreparedGraphAggregateText {
                     parser.syntax.columns.push(Column {
                         variable: expression.variable,
                         property: expression.property,
-                        path: None,
+                        path: column_path(&parser.syntax, expression.variable),
                         alias: item.alias,
                     });
                     at
@@ -501,7 +515,7 @@ impl PreparedGraphAggregateText {
                 parser.syntax.columns.push(Column {
                     variable: expression.variable,
                     property: expression.property,
-                    path: None,
+                    path: column_path(&parser.syntax, expression.variable),
                     alias,
                 });
                 at
@@ -556,7 +570,7 @@ impl PreparedGraphAggregateText {
                         text: alias.as_str(),
                         at: variable.at,
                     },
-                    path: None,
+                    path: column_path(&parser.syntax, variable),
                 })
                 .collect();
             Some(projection)

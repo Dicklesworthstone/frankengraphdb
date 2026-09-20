@@ -100,12 +100,22 @@ impl<'a> Parser<'a> {
         columns.push(Projection {
             variable,
             property,
-            path: self
+            path: if self
+                .syntax
+                .path
+                .is_some_and(|path| path.text == variable.text)
+            {
+                Some(GraphPathFunction::Value)
+            } else if self
                 .syntax
                 .edges
                 .iter()
                 .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text))
-                .then_some(GraphPathFunction::Edge),
+            {
+                Some(GraphPathFunction::Edge)
+            } else {
+                None
+            },
         });
         Ok(at)
     }

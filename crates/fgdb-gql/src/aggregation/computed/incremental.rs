@@ -28,7 +28,10 @@ impl PreparedGraphAggregate {
     pub fn incremental_input_column_type(&self, column: usize) -> Option<GraphSetColumnType> {
         if let Some(relation) = &self.relational_input {
             return relation.column_types().get(column).copied().filter(|kind| {
-                matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Vertex)
+                matches!(
+                    kind,
+                    GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
+                )
             });
         }
         let Some(projection) = &self.computed_input else {
@@ -57,7 +60,7 @@ impl PreparedGraphAggregate {
                     .all(|column| self.incremental_input_column_type(column).is_some());
         }
         if (0..self.input.value_columns().len())
-                .any(|column| self.incremental_source_column_type(column).is_none())
+            .any(|column| self.incremental_source_column_type(column).is_none())
         {
             return false;
         }

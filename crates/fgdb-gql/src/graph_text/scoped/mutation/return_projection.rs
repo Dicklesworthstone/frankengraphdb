@@ -417,13 +417,20 @@ impl<'a> Parser<'a> {
                 .map_err(expression_error)?;
             self.read_value_template(operand, at)?
         } else if let Some(columns) = inputs.as_deref_mut() {
-            let bare = matches!(self.current.kind, TokenKind::Word(word) if self.syntax.variables.iter().any(|name| name.text == word))
+            let bare = matches!(self.current.kind, TokenKind::Word(word)
+                if self.syntax.variables.iter().any(|name| name.text == word)
+                    || self.syntax.path.is_some_and(|path| path.text == word)
+                    || self
+                        .syntax
+                        .edges
+                        .iter()
+                        .any(|edge| edge.variable.is_some_and(|name| name.text == word)))
                 && !matches!(
                     self.lexer.clone().next()?.kind,
                     TokenKind::Punct(b'.' | b'(')
                 );
             if bare {
-                let variable = self.variable()?;
+                let variable = self.any_variable()?;
                 ReadValueTemplate::Column(self.mutation_projection(columns, variable, None)?)
             } else {
                 let operand = self

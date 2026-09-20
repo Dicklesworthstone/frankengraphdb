@@ -449,14 +449,18 @@ mod tests {
 
     #[test]
     fn diagnostics_redact_payloads() {
-        let secret = "do-not-log-this-row";
-        let seed =
-            ZSet::from_updates([(secret, ZWeight::from_i128(1))], LIMBS, &mut allow).unwrap();
+        let redacted_marker = "do-not-log-this-row";
+        let seed = ZSet::from_updates(
+            [(redacted_marker, ZWeight::from_i128(1))],
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap();
         let mut stage = IncrementalTopK::new(0, 1);
-        assert!(!format!("{stage:?}").contains(secret));
+        assert!(!format!("{stage:?}").contains(redacted_marker));
         let pending = stage.prepare(&seed, LIMBS, &mut allow).unwrap();
-        assert!(!format!("{pending:?}").contains(secret));
+        assert!(!format!("{pending:?}").contains(redacted_marker));
         pending.commit();
-        assert!(!format!("{stage:?}").contains(secret));
+        assert!(!format!("{stage:?}").contains(redacted_marker));
     }
 }

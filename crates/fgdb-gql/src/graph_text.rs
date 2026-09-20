@@ -1105,6 +1105,23 @@ impl<'a> Parser<'a> {
         }
         Ok(name)
     }
+
+    pub(in crate::graph_text) fn any_variable(
+        &mut self,
+    ) -> Result<Name<'a>, GraphPatternTextError> {
+        let name = self.name()?;
+        if !self.syntax.variables.iter().any(|v| v.text == name.text)
+            && !self.syntax.path.is_some_and(|path| path.text == name.text)
+            && !self
+                .syntax
+                .edges
+                .iter()
+                .any(|e| e.variable.is_some_and(|v| v.text == name.text))
+        {
+            return Err(error(name.at, GraphPatternTextErrorKind::UnknownVariable));
+        }
+        Ok(name)
+    }
     fn parse_pagination(&mut self) -> Result<(), GraphPatternTextError> {
         if self.take_word("SKIP")? {
             self.syntax.offset = self.number(GqlParameterType::UInt64)?;

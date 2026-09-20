@@ -1104,7 +1104,9 @@ mod tests {
         let scalar = GqlScalarParameter::new(
             fgdb_types::CanonicalScalar::bytes(vec![
                 0;
-                (crate::algebra::MAX_SCALAR_PREDICATE_BYTES * 3) / 4
+                (crate::algebra::MAX_SCALAR_PREDICATE_BYTES
+                    * 3)
+                    / 4
             ])
             .unwrap(),
         )
