@@ -2,7 +2,9 @@
 
 use super::*;
 use fgdb_gql::GraphAggregateError;
-use fgdb_gql::stream::aggregate::{VertexAggregateCursor, VertexAggregateError, VertexAggregatePlan};
+use fgdb_gql::stream::aggregate::{
+    VertexAggregateCursor, VertexAggregateError, VertexAggregatePlan,
+};
 
 type AggregateError = VertexAggregateError<ReadError, Cancel>;
 
@@ -25,7 +27,9 @@ fn open_global<'q>(
 > {
     // The host still admits health, retained history and QueryCx. A checked
     // physical definition is not authority to manufacture a data generation.
-    view.snapshot.check_frontier(as_of).map_err(admission_error)?;
+    view.snapshot
+        .check_frontier(as_of)
+        .map_err(admission_error)?;
     cx.with_restriction(|| cx.checkpoint())
         .map_err(GqlQueryError::Interrupted)?;
     Ok(VertexAggregateCursor::new(

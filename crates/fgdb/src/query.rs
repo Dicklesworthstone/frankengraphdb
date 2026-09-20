@@ -10,14 +10,14 @@ use fgdb_types::{CommitCx, EmbeddedTxnCompletion, QueryCx, TxnCx};
 
 type Cancel = Box<asupersync::error::Error>;
 
+#[path = "query_aggregate_stream.rs"]
+mod aggregate_stream;
 #[path = "query_explain.rs"]
 mod explain;
 #[path = "query_view.rs"]
 mod view;
-#[path = "query_aggregate_stream.rs"]
-mod aggregate_stream;
-pub use aggregate_stream::NativeAggregateCursor;
 pub use crate::gql_cert::NativeResultCertificate;
+pub use aggregate_stream::NativeAggregateCursor;
 pub use explain::{NativeExplainCertificate, PreparedNativeRead, ReplayRefusal};
 
 /// Lossless cells: identity/scalar values, counts, wide integer sums and exact
@@ -71,7 +71,9 @@ pub enum QueryError {
     /// Fixed-edge aggregate compilation failed before source access.
     EdgeAggregateStreamPlan(fgdb_gql::edge_stream::aggregate::EdgeAggregateBuildError),
     /// The selected edge aggregate source/frontier/context refused opening.
-    EdgeAggregateStream(fgdb_gql::edge_stream::aggregate::EdgeAggregateError<crate::ReadError, Cancel>),
+    EdgeAggregateStream(
+        fgdb_gql::edge_stream::aggregate::EdgeAggregateError<crate::ReadError, Cancel>,
+    ),
     /// This native class has no pull specialization. Never collect an eager
     /// result and misrepresent its iterator as a streaming execution.
     StreamingUnsupported {

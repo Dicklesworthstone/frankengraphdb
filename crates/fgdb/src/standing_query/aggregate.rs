@@ -579,23 +579,40 @@ impl<V: Vfs + Clone> Database<V> {
 #[cfg(test)]
 mod relational_admission_tests {
     use super::*;
-    use fgdb_gql::{GraphAggregate, GraphSetQuantifier, GraphSetProjection, GraphSetValue};
     use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder};
+    use fgdb_gql::{GraphAggregate, GraphSetProjection, GraphSetQuantifier, GraphSetValue};
 
     #[test]
     fn relational_schema_admission_never_authorizes_first_leaf_maintenance() {
         let mut builder = GraphPatternBuilder::new();
         builder.vertex("n").unwrap();
-        let leaf = builder.prepare_values(&[GraphColumn::vertex("id", "n")], 0, None)
-            .unwrap().with_duplicates();
-        let plain = PreparedGraphAggregate::prepare(leaf.clone(), &[],
-            &[GraphAggregate::count_rows("n")], 0, None).unwrap();
+        let leaf = builder
+            .prepare_values(&[GraphColumn::vertex("id", "n")], 0, None)
+            .unwrap()
+            .with_duplicates();
+        let plain = PreparedGraphAggregate::prepare(
+            leaf.clone(),
+            &[],
+            &[GraphAggregate::count_rows("n")],
+            0,
+            None,
+        )
+        .unwrap();
         assert!(eligible(&plain));
         let input = fgdb_gql::PreparedGraphSet::from(leaf)
-            .project(vec![GraphSetProjection::new("id", GraphSetValue::Column(0))],
-                GraphSetQuantifier::Distinct).unwrap();
-        let relational = PreparedGraphAggregate::prepare_relation(input, &[],
-            &[GraphAggregate::count_rows("n")], 0, None).unwrap();
+            .project(
+                vec![GraphSetProjection::new("id", GraphSetValue::Column(0))],
+                GraphSetQuantifier::Distinct,
+            )
+            .unwrap();
+        let relational = PreparedGraphAggregate::prepare_relation(
+            input,
+            &[],
+            &[GraphAggregate::count_rows("n")],
+            0,
+            None,
+        )
+        .unwrap();
         assert!(relational.supports_incremental_maintenance_with_having());
         assert!(eligible_flat_input(&relational));
         assert!(!eligible(&relational));

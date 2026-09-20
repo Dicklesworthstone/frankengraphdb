@@ -252,33 +252,15 @@ impl StandingQuery {
             Self::Reachability(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
-            Self::Triangles(query) => {
-                (&mut query.frontier, &mut query.failure, &mut query.stats)
-            }
-            Self::Components(query) => {
-                (&mut query.frontier, &mut query.failure, &mut query.stats)
-            }
-            Self::CoreNumbers(query) => {
-                (&mut query.frontier, &mut query.failure, &mut query.stats)
-            }
-            Self::Set(query) => {
-                (&mut query.frontier, &mut query.failure, &mut query.stats)
-            }
-            Self::Join(query) => {
-                (&mut query.frontier, &mut query.failure, &mut query.stats)
-            }
-            Self::Projection(query) => {
-                (&mut query.frontier, &mut query.failure, &mut query.stats)
-            }
-            Self::Filter(query) => {
-                (&mut query.frontier, &mut query.failure, &mut query.stats)
-            }
-            Self::Reduction(query) => {
-                (&mut query.frontier, &mut query.failure, &mut query.stats)
-            }
-            Self::Window(query) => {
-                (&mut query.frontier, &mut query.failure, &mut query.stats)
-            }
+            Self::Triangles(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Components(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::CoreNumbers(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Set(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Join(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Projection(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Filter(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Reduction(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Window(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
         };
         match result {
             Ok(()) => *frontier = at,
@@ -512,25 +494,60 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::CoreNumbers(query) => StandingQuery::CoreNumbers(Box::new(
                 self.prepare_standing_core_numbers(cx, query.relation, policy)?,
             )),
-            StandingQuery::Set(query) => StandingQuery::Set(Box::new(
-                self.prepare_standing_set(cx, query.inputs, query.operation(), policy, handle.index)?,
-            )),
-            StandingQuery::Join(query) => StandingQuery::Join(Box::new(
-                self.prepare_standing_join(cx, query.inputs, query.spec().keys(), query.spec().kind(), policy, handle.index)?,
-            )),
-            StandingQuery::Projection(query) => StandingQuery::Projection(Box::new(
-                self.prepare_standing_projection(cx, query.input, query.spec().clone(), policy, handle.index)?,
-            )),
-            StandingQuery::Filter(query) => StandingQuery::Filter(Box::new(
-                self.prepare_standing_filter(cx, query.input, query.spec().clone(), policy, handle.index)?,
-            )),
-            StandingQuery::Reduction(query) => StandingQuery::Reduction(Box::new(
-                self.prepare_standing_reduction(cx, query.input, query.spec().key_columns(),
-                    query.spec().value_column(), policy, handle.index)?,
-            )),
-            StandingQuery::Window(query) => StandingQuery::Window(Box::new(
-                self.prepare_standing_window(cx, query.input, query.spec().clone(), policy, handle.index)?,
-            )),
+            StandingQuery::Set(query) => StandingQuery::Set(Box::new(self.prepare_standing_set(
+                cx,
+                query.inputs,
+                query.operation(),
+                policy,
+                handle.index,
+            )?)),
+            StandingQuery::Join(query) => {
+                StandingQuery::Join(Box::new(self.prepare_standing_join(
+                    cx,
+                    query.inputs,
+                    query.spec().keys(),
+                    query.spec().kind(),
+                    policy,
+                    handle.index,
+                )?))
+            }
+            StandingQuery::Projection(query) => {
+                StandingQuery::Projection(Box::new(self.prepare_standing_projection(
+                    cx,
+                    query.input,
+                    query.spec().clone(),
+                    policy,
+                    handle.index,
+                )?))
+            }
+            StandingQuery::Filter(query) => {
+                StandingQuery::Filter(Box::new(self.prepare_standing_filter(
+                    cx,
+                    query.input,
+                    query.spec().clone(),
+                    policy,
+                    handle.index,
+                )?))
+            }
+            StandingQuery::Reduction(query) => {
+                StandingQuery::Reduction(Box::new(self.prepare_standing_reduction(
+                    cx,
+                    query.input,
+                    query.spec().key_columns(),
+                    query.spec().value_column(),
+                    policy,
+                    handle.index,
+                )?))
+            }
+            StandingQuery::Window(query) => {
+                StandingQuery::Window(Box::new(self.prepare_standing_window(
+                    cx,
+                    query.input,
+                    query.spec().clone(),
+                    policy,
+                    handle.index,
+                )?))
+            }
         };
         let frontier = replacement.status().1;
         // No source mutation, await or fallible work between preparation and swap.

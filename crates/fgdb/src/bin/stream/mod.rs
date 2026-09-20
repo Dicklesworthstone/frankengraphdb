@@ -11,11 +11,13 @@
 //! RETURN slots select keys and summaries without payload copies or narrowing.
 //! Unsupported aggregate definitions refuse during preparation, never retry.
 
-use super::{Failure, Options, cell, emit, execution_failure, human_value, policy, quoted, value_cell};
+use super::{
+    Failure, Options, cell, emit, execution_failure, human_value, policy, quoted, value_cell,
+};
 use asupersync::fs::Vfs;
 use fgdb::{Database, PreparedNativeRead, QueryValue};
-use fgdb_gql::{GraphAggregateRow, GraphAggregateTextSlot};
 use fgdb_gql::algebra::GraphValueRow;
+use fgdb_gql::{GraphAggregateRow, GraphAggregateTextSlot};
 use fgdb_types::QueryCx;
 use std::io::Write;
 
@@ -43,9 +45,16 @@ pub(super) fn run<V: Vfs + Clone>(
         let columns = cursor.columns().to_vec();
         let slots = cursor.output_slots().to_vec();
         let seq = cursor.snapshot_seq().0;
-        let result = deliver(&columns, seq, &mut cursor.by_ref().map(|result| {
-            result.map(|row| AggregateDeliveryRow { row, slots: &slots })
-        }), robot, out, || cx.checkpoint().map_err(Failure::query));
+        let result = deliver(
+            &columns,
+            seq,
+            &mut cursor
+                .by_ref()
+                .map(|result| result.map(|row| AggregateDeliveryRow { row, slots: &slots })),
+            robot,
+            out,
+            || cx.checkpoint().map_err(Failure::query),
+        );
         cursor.close();
         return result;
     }
@@ -72,14 +81,22 @@ trait DeliveryRow {
     fn encode(&self, column: usize, robot: bool) -> Result<String, Failure>;
 }
 impl DeliveryRow for GraphValueRow {
-    fn width(&self) -> usize { self.values().len() }
+    fn width(&self) -> usize {
+        self.values().len()
+    }
     fn encode(&self, column: usize, robot: bool) -> Result<String, Failure> {
         let value = self.values().get(column).ok_or_else(invalid_layout)?;
-        if robot { value_cell(value) } else { human_value(value) }
+        if robot {
+            value_cell(value)
+        } else {
+            human_value(value)
+        }
     }
 }
 impl DeliveryRow for GraphAggregateRow {
-    fn width(&self) -> usize { self.values().len() }
+    fn width(&self) -> usize {
+        self.values().len()
+    }
     fn encode(&self, column: usize, robot: bool) -> Result<String, Failure> {
         let value = self.values().get(column).ok_or_else(invalid_layout)?;
         if robot {
@@ -94,7 +111,9 @@ impl DeliveryRow for GraphAggregateRow {
     }
 }
 
-fn invalid_layout() -> Failure { Failure::query("stream row does not match its native layout") }
+fn invalid_layout() -> Failure {
+    Failure::query("stream row does not match its native layout")
+}
 
 // Only the physical result row is owned. Repeated keys and aggregates borrow
 // the same payload, and names/slots are frozen before the first source demand.
@@ -103,13 +122,19 @@ struct AggregateDeliveryRow<'a> {
     slots: &'a [GraphAggregateTextSlot],
 }
 impl DeliveryRow for AggregateDeliveryRow<'_> {
-    fn width(&self) -> usize { self.slots.len() }
+    fn width(&self) -> usize {
+        self.slots.len()
+    }
     fn encode(&self, column: usize, robot: bool) -> Result<String, Failure> {
         match self.slots.get(column).ok_or_else(invalid_layout)? {
             GraphAggregateTextSlot::Aggregate(at) => self.row.encode(*at, robot),
             GraphAggregateTextSlot::GroupKey(at) => {
                 let key = self.row.keys().get(*at).ok_or_else(invalid_layout)?;
-                if robot { value_cell(key) } else { human_value(key) }
+                if robot {
+                    value_cell(key)
+                } else {
+                    human_value(key)
+                }
             }
         }
     }

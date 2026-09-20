@@ -203,11 +203,16 @@ impl<V: Vfs + Clone> Database<V> {
     /// admission counts both compressed input bags. Final occurrence, work and
     /// scratch quotas are per view; products may be quadratic and do not spill.
     pub fn register_standing_cross_join(
-        &mut self, cx: &QueryCx, left: &StandingQueryHandle, right: &StandingQueryHandle,
+        &mut self,
+        cx: &QueryCx,
+        left: &StandingQueryHandle,
+        right: &StandingQueryHandle,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
-        if !Arc::ptr_eq(&self.handle_owner, &left.owner) || !Arc::ptr_eq(&self.handle_owner, &right.owner) {
+        if !Arc::ptr_eq(&self.handle_owner, &left.owner)
+            || !Arc::ptr_eq(&self.handle_owner, &right.owner)
+        {
             return Err(StandingQueryError::ForeignHandle);
         }
         for handle in [left, right] {
@@ -215,8 +220,14 @@ impl<V: Vfs + Clone> Database<V> {
                 return Err(StandingQueryError::Unsupported);
             }
         }
-        let query = self.prepare_standing_join(cx, [left.index, right.index], &[], RowJoinKind::Inner,
-            policy, self.standing_queries.len())?;
+        let query = self.prepare_standing_join(
+            cx,
+            [left.index, right.index],
+            &[],
+            RowJoinKind::Inner,
+            policy,
+            self.standing_queries.len(),
+        )?;
         Ok(self.store_standing_query(StandingQuery::Join(Box::new(query))))
     }
 

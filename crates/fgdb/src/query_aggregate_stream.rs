@@ -10,9 +10,7 @@ use fgdb_gql::algebra::GlaOperator;
 use fgdb_gql::edge_stream::aggregate::{EdgeAggregateCursor, EdgeAggregatePlan};
 use fgdb_gql::edge_stream::{EdgeScanSource, EdgeScanState};
 use fgdb_gql::scan_stream::{ScanError, ScanKind};
-use fgdb_gql::stream::aggregate::{
-    VertexAggregateCursor, VertexAggregatePlan,
-};
+use fgdb_gql::stream::aggregate::{VertexAggregateCursor, VertexAggregatePlan};
 use fgdb_gql::stream::{VertexScanSource, VertexScanState};
 use fgdb_gql::{
     GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryPolicy,
@@ -247,11 +245,11 @@ impl PreparedNativeRead {
         policy: GqlQueryPolicy,
     ) -> Result<NativeAggregateCursor<'q>, QueryError> {
         let view = database.read_session().map_err(|error| {
-            QueryError::AggregateStream(
-                fgdb_gql::GqlQueryError::Source(fgdb_gql::GraphAggregateError::Source(
-                    fgdb_gql::stream::VertexScanError::Source(error),
+            QueryError::AggregateStream(fgdb_gql::GqlQueryError::Source(
+                fgdb_gql::GraphAggregateError::Source(fgdb_gql::stream::VertexScanError::Source(
+                    error,
                 )),
-            )
+            ))
         })?;
         self.stream_aggregate_in_view(&view, cx, params, policy)
     }
@@ -270,21 +268,32 @@ impl PreparedNativeRead {
         let facade = self.facade_class();
         let (compiled, as_of) = match self {
             Self::Aggregate(prepared) => {
-                let query = prepared.bind_parameters(params).map_err(QueryError::PatternText)?;
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::PatternText)?;
                 (
                     compile(&query, prepared.columns(), prepared.output_slots(), facade)?,
                     view.frontier(),
                 )
             }
             Self::TemporalAggregate(prepared) => {
-                let query = prepared.bind_parameters(params).map_err(QueryError::TemporalText)?;
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::TemporalText)?;
                 (
-                    compile(query.aggregate(), prepared.columns(), prepared.output_slots(), facade)?,
+                    compile(
+                        query.aggregate(),
+                        prepared.columns(),
+                        prepared.output_slots(),
+                        facade,
+                    )?,
                     query.as_of(),
                 )
             }
             Self::PipelineAggregate(prepared) => {
-                let query = prepared.bind_parameters(params).map_err(QueryError::PipelineText)?;
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::PipelineText)?;
                 (
                     compile(&query, prepared.columns(), prepared.output_slots(), facade)?,
                     view.frontier(),
@@ -366,7 +375,10 @@ fn compile(
     }
     Ok(CompiledAggregate {
         plan,
-        layout: OutputLayout { columns: columns.to_vec(), slots: slots.to_vec() },
+        layout: OutputLayout {
+            columns: columns.to_vec(),
+            slots: slots.to_vec(),
+        },
     })
 }
 
@@ -389,12 +401,20 @@ fn valid_layout(
     // names each retained cell; repeating a key later with a different alias is
     // valid native projection, not another group or another owned key payload.
     keys.iter().enumerate().all(|(index, name)| {
-        slots.iter().position(|slot| matches!(slot,
-            GraphAggregateTextSlot::GroupKey(at) if *at == index))
+        slots
+            .iter()
+            .position(|slot| {
+                matches!(slot,
+            GraphAggregateTextSlot::GroupKey(at) if *at == index)
+            })
             .is_some_and(|at| &columns[at] == name)
     }) && aggregates.iter().enumerate().all(|(index, name)| {
-        slots.iter().position(|slot| matches!(slot,
-            GraphAggregateTextSlot::Aggregate(at) if *at == index))
+        slots
+            .iter()
+            .position(|slot| {
+                matches!(slot,
+            GraphAggregateTextSlot::Aggregate(at) if *at == index)
+            })
             .is_some_and(|at| &columns[at] == name)
     })
 }
@@ -412,9 +432,7 @@ mod tests {
     fn layout_admits_interleaved_reordered_and_repeated_keys_without_copying_cells() {
         let keys = names(&["first", "second"]);
         let aggregates = names(&["count", "sum"]);
-        for order in [
-            [0, 1, 2, 3], [2, 0, 3, 1], [1, 3, 0, 2], [3, 2, 1, 0],
-        ] {
+        for order in [[0, 1, 2, 3], [2, 0, 3, 1], [1, 3, 0, 2], [3, 2, 1, 0]] {
             let schema = names(&["first", "second", "count", "sum"]);
             let all = [GroupKey(0), GroupKey(1), Aggregate(0), Aggregate(1)];
             let columns: Vec<_> = order.iter().map(|&at| schema[at].clone()).collect();
@@ -423,8 +441,15 @@ mod tests {
         }
         assert!(valid_layout(
             &names(&["count", "first", "alias", "sum", "second"]),
-            &[Aggregate(0), GroupKey(0), GroupKey(0), Aggregate(1), GroupKey(1)],
-            &keys, &aggregates,
+            &[
+                Aggregate(0),
+                GroupKey(0),
+                GroupKey(0),
+                Aggregate(1),
+                GroupKey(1)
+            ],
+            &keys,
+            &aggregates,
         ));
     }
 
@@ -443,7 +468,11 @@ mod tests {
             assert!(!valid_layout(&columns, &slots, &keys, &aggregates));
         }
         let len = fgdb_gql::algebra::MAX_PATTERN_VERTICES + 1;
-        assert!(!valid_layout(&vec!["total".to_owned(); len],
-            &vec![Aggregate(0); len], &[], &aggregates));
+        assert!(!valid_layout(
+            &vec!["total".to_owned(); len],
+            &vec![Aggregate(0); len],
+            &[],
+            &aggregates
+        ));
     }
 }

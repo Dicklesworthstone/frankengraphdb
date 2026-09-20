@@ -179,7 +179,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// including for a zero terminal limit.
     /// Session-local and in-memory, not a durable subscription or spill engine.
     pub fn register_standing_relation(
-        &mut self, cx: &QueryCx, query: &fgdb_gql::PreparedGraphSet, policy: GqlQueryPolicy,
+        &mut self,
+        cx: &QueryCx,
+        query: &fgdb_gql::PreparedGraphSet,
+        policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
@@ -251,67 +254,72 @@ impl<V: Vfs + Clone> Database<V> {
                 (query.frontier, rows)
             } else {
                 match layout {
-                Layout::Rows { .. } | Layout::Circuit { .. } => {
-                    let mut view = match self.admitted_standing_query(cx, handle)? {
-                        StandingQuery::Rows { .. } => self.standing_rows(cx, handle)?,
-                        StandingQuery::Set(_) => self.standing_set(cx, handle)?,
-                        StandingQuery::Join(_) => self.standing_join(cx, handle)?,
-                        StandingQuery::Projection(_) => self.standing_projection(cx, handle)?,
-                        _ => return Err(StandingQueryError::Unsupported),
-                    };
-                    if matches!(layout, Layout::Circuit { .. }) {
-                        // PreparedGraphSet canonicalizes a pattern's selected
-                        // bag before set composition. Do not leak the leaf's
-                        // pre-wrapper ordering from a transparent root scope.
-                        view.ordered = None;
-                    }
-                    let rows = collect(&view, layout.columns().len(), &mut meter, |row, meter| {
-                        let mut cells = Vec::new();
-                        for value in row.values() {
-                            reserve_value(value, meter)?;
-                            cells.push(QueryValue::Value(value.clone()));
+                    Layout::Rows { .. } | Layout::Circuit { .. } => {
+                        let mut view = match self.admitted_standing_query(cx, handle)? {
+                            StandingQuery::Rows { .. } => self.standing_rows(cx, handle)?,
+                            StandingQuery::Set(_) => self.standing_set(cx, handle)?,
+                            StandingQuery::Join(_) => self.standing_join(cx, handle)?,
+                            StandingQuery::Projection(_) => self.standing_projection(cx, handle)?,
+                            _ => return Err(StandingQueryError::Unsupported),
+                        };
+                        if matches!(layout, Layout::Circuit { .. }) {
+                            // PreparedGraphSet canonicalizes a pattern's selected
+                            // bag before set composition. Do not leak the leaf's
+                            // pre-wrapper ordering from a transparent root scope.
+                            view.ordered = None;
                         }
-                        Ok(cells)
-                    })
-                    .map_err(StandingQueryError::Delivery)?;
-                    (view.frontier(), rows)
-                }
-                Layout::Aggregate { slots, .. } => {
-                    let view = self.standing_query(cx, handle)?;
-                    let rows = collect(&view, layout.columns().len(), &mut meter, |row, meter| {
-                        let mut cells = Vec::new();
-                        for slot in slots {
-                            match *slot {
-                                GraphAggregateTextSlot::GroupKey(at) => {
-                                    let value = row
-                                        .keys()
-                                        .get(at)
-                                        .ok_or(StandingQueryFailure::InvalidDelta)?;
+                        let rows =
+                            collect(&view, layout.columns().len(), &mut meter, |row, meter| {
+                                let mut cells = Vec::new();
+                                for value in row.values() {
                                     reserve_value(value, meter)?;
                                     cells.push(QueryValue::Value(value.clone()));
                                 }
-                                GraphAggregateTextSlot::Aggregate(at) => {
-                                    let value = row
-                                        .values()
-                                        .get(at)
-                                        .ok_or(StandingQueryFailure::InvalidDelta)?;
-                                    match value {
-                                        QueryValue::Value(value) => reserve_value(value, meter)?,
-                                        _ => {
-                                            meter.charge(ZSetEvent::Work)?;
-                                            meter.charge(ZSetEvent::ScratchEntry)?;
+                                Ok(cells)
+                            })
+                            .map_err(StandingQueryError::Delivery)?;
+                        (view.frontier(), rows)
+                    }
+                    Layout::Aggregate { slots, .. } => {
+                        let view = self.standing_query(cx, handle)?;
+                        let rows =
+                            collect(&view, layout.columns().len(), &mut meter, |row, meter| {
+                                let mut cells = Vec::new();
+                                for slot in slots {
+                                    match *slot {
+                                        GraphAggregateTextSlot::GroupKey(at) => {
+                                            let value = row
+                                                .keys()
+                                                .get(at)
+                                                .ok_or(StandingQueryFailure::InvalidDelta)?;
+                                            reserve_value(value, meter)?;
+                                            cells.push(QueryValue::Value(value.clone()));
+                                        }
+                                        GraphAggregateTextSlot::Aggregate(at) => {
+                                            let value = row
+                                                .values()
+                                                .get(at)
+                                                .ok_or(StandingQueryFailure::InvalidDelta)?;
+                                            match value {
+                                                QueryValue::Value(value) => {
+                                                    reserve_value(value, meter)?
+                                                }
+                                                _ => {
+                                                    meter.charge(ZSetEvent::Work)?;
+                                                    meter.charge(ZSetEvent::ScratchEntry)?;
+                                                }
+                                            }
+                                            cells.push(value.clone());
                                         }
                                     }
-                                    cells.push(value.clone());
                                 }
-                            }
-                        }
-                        Ok(cells)
-                    })
-                    .map_err(StandingQueryError::Delivery)?;
-                    (view.frontier(), rows)
+                                Ok(cells)
+                            })
+                            .map_err(StandingQueryError::Delivery)?;
+                        (view.frontier(), rows)
+                    }
                 }
-            }};
+            };
             let mut columns = Vec::new();
             for name in layout.columns() {
                 meter

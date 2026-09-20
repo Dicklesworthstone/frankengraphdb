@@ -31,7 +31,10 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
     // inherited rank after scopes/filters. Restore that rank with an ordinary
     // compressed window only when a finite occurrence bound is proved.
     fn compile_root(
-        &mut self, cx: &QueryCx, query: &PreparedGraphSet, policy: GqlQueryPolicy,
+        &mut self,
+        cx: &QueryCx,
+        query: &PreparedGraphSet,
+        policy: GqlQueryPolicy,
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
         checkpoint()?;
@@ -39,18 +42,37 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         // mixed with pages. Explicit/proved ordering can safely consume those
         // bags; every internal page must independently prove its own rank.
         if query.incremental_result_order().is_none()
-            && !query.incremental_window_sequence_compatible() {
+            && !query.incremental_window_sequence_compatible()
+        {
             return Err(StandingQueryError::Unsupported);
         }
         let index = self.compile(cx, query, policy, checkpoint)?;
-        let Some((order, Some(bound))) = query.incremental_result_order() else { return Ok(index); };
-        if order.is_empty() || matches!(&self.database.standing_queries[index], StandingQuery::Window(_)) {
+        let Some((order, Some(bound))) = query.incremental_result_order() else {
+            return Ok(index);
+        };
+        if order.is_empty()
+            || matches!(
+                &self.database.standing_queries[index],
+                StandingQuery::Window(_)
+            )
+        {
             return Ok(index);
         }
-        let spec = RowWindowSpec::new(query.column_types().to_vec(), order.to_vec(),
-            GraphSetQuantifier::All, 0, bound).map_err(StandingQueryError::WindowSchema)?;
-        let query = self.database.prepare_standing_window(cx, index, spec, policy,
-            self.database.standing_queries.len())?;
+        let spec = RowWindowSpec::new(
+            query.column_types().to_vec(),
+            order.to_vec(),
+            GraphSetQuantifier::All,
+            0,
+            bound,
+        )
+        .map_err(StandingQueryError::WindowSchema)?;
+        let query = self.database.prepare_standing_window(
+            cx,
+            index,
+            spec,
+            policy,
+            self.database.standing_queries.len(),
+        )?;
         let index = self.append(StandingQuery::Window(Box::new(query)));
         checkpoint()?;
         Ok(index)
@@ -63,7 +85,8 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
         checkpoint()?;
-        let index = if let Some((input, order, offset, count)) = query.incremental_ordered_window() {
+        let index = if let Some((input, order, offset, count)) = query.incremental_ordered_window()
+        {
             // Peel just this scope. Never move a page across DISTINCT, a
             // filter, or an expression, including when the page is empty.
             let spec = RowWindowSpec::new(
@@ -122,27 +145,51 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         } else if let Some((input, predicate)) = query.incremental_filter() {
             // Keep the complete child scope upstream, including DISTINCT and
             // source paging. Identity projection preserves all native cells.
-            let spec = RowProjectionSpec::selection(input.column_types().to_vec(),
-                input.columns().to_vec(), predicate).map_err(StandingQueryError::ProjectionSchema)?;
+            let spec = RowProjectionSpec::selection(
+                input.column_types().to_vec(),
+                input.columns().to_vec(),
+                predicate,
+            )
+            .map_err(StandingQueryError::ProjectionSchema)?;
             let input = self.compile(cx, input, policy, checkpoint)?;
-            let query = self.database.prepare_standing_projection(cx, input, spec,
-                policy, self.database.standing_queries.len())?;
+            let query = self.database.prepare_standing_projection(
+                cx,
+                input,
+                spec,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
             self.append(StandingQuery::Projection(Box::new(query)))
         } else if let Some((input, name, value)) = query.incremental_unwind() {
-            let spec = RowProjectionSpec::unwind(input.column_types().to_vec(),
-                input.columns().to_vec(), name.to_owned(), value.clone())
-                .map_err(StandingQueryError::ProjectionSchema)?;
+            let spec = RowProjectionSpec::unwind(
+                input.column_types().to_vec(),
+                input.columns().to_vec(),
+                name.to_owned(),
+                value.clone(),
+            )
+            .map_err(StandingQueryError::ProjectionSchema)?;
             let input = self.compile(cx, input, policy, checkpoint)?;
-            let query = self.database.prepare_standing_projection(cx, input, spec,
-                policy, self.database.standing_queries.len())?;
+            let query = self.database.prepare_standing_projection(
+                cx,
+                input,
+                spec,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
             self.append(StandingQuery::Projection(Box::new(query)))
         } else if let Some((left, right)) = query.incremental_cross_join() {
             // Never short-circuit the other operand when one result is empty:
             // its schema, definition and failures are still part of the query.
             let left = self.compile(cx, left, policy, checkpoint)?;
             let right = self.compile(cx, right, policy, checkpoint)?;
-            let query = self.database.prepare_standing_join(cx, [left, right], &[], RowJoinKind::Inner,
-                policy, self.database.standing_queries.len())?;
+            let query = self.database.prepare_standing_join(
+                cx,
+                [left, right],
+                &[],
+                RowJoinKind::Inner,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
             self.append(StandingQuery::Join(Box::new(query)))
         } else if let Some((operation, quantifier, left, right)) = query.incremental_binary() {
             let left = self.compile(cx, left, policy, checkpoint)?;
@@ -194,7 +241,10 @@ pub(super) fn register<V: Vfs + Clone>(
     register_checked(database, cx, query, policy, &mut checkpoint)
 }
 fn register_checked<V: Vfs + Clone>(
-    database: &mut Database<V>, cx: &QueryCx, query: &PreparedGraphSet, policy: GqlQueryPolicy,
+    database: &mut Database<V>,
+    cx: &QueryCx,
+    query: &PreparedGraphSet,
+    policy: GqlQueryPolicy,
     checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
 ) -> Result<StandingQueryHandle, StandingQueryError> {
     let mut staged = Staging::new(database);
@@ -270,11 +320,22 @@ fn rebuild_checked<V: Vfs + Clone>(
             StandingQuery::Join(query) => {
                 let mut inputs = [0; 2];
                 for (next, input) in inputs.iter_mut().zip(query.inputs) {
-                    if input < first || input >= old { return Err(StandingQueryError::Unsupported); }
-                    *next = staged.first.checked_add(input - first).ok_or(StandingQueryError::Unsupported)?;
+                    if input < first || input >= old {
+                        return Err(StandingQueryError::Unsupported);
+                    }
+                    *next = staged
+                        .first
+                        .checked_add(input - first)
+                        .ok_or(StandingQueryError::Unsupported)?;
                 }
-                StandingQuery::Join(Box::new(staged.database.prepare_standing_join(cx, inputs,
-                    query.spec().keys(), query.spec().kind(), policy, staged.database.standing_queries.len())?))
+                StandingQuery::Join(Box::new(staged.database.prepare_standing_join(
+                    cx,
+                    inputs,
+                    query.spec().keys(),
+                    query.spec().kind(),
+                    policy,
+                    staged.database.standing_queries.len(),
+                )?))
             }
             StandingQuery::Projection(query) => {
                 if query.input < first || query.input >= old {
@@ -293,11 +354,20 @@ fn rebuild_checked<V: Vfs + Clone>(
                 )?))
             }
             StandingQuery::Window(query) => {
-                if query.input < first || query.input >= old { return Err(StandingQueryError::Unsupported); }
-                let input = staged.first.checked_add(query.input - first)
+                if query.input < first || query.input >= old {
+                    return Err(StandingQueryError::Unsupported);
+                }
+                let input = staged
+                    .first
+                    .checked_add(query.input - first)
                     .ok_or(StandingQueryError::Unsupported)?;
-                StandingQuery::Window(Box::new(staged.database.prepare_standing_window(cx, input,
-                    query.spec().clone(), policy, staged.database.standing_queries.len())?))
+                StandingQuery::Window(Box::new(staged.database.prepare_standing_window(
+                    cx,
+                    input,
+                    query.spec().clone(),
+                    policy,
+                    staged.database.standing_queries.len(),
+                )?))
             }
             _ => return Err(StandingQueryError::Unsupported),
         };
@@ -317,7 +387,9 @@ fn rebuild_checked<V: Vfs + Clone>(
             }
         } else if let StandingQuery::Join(query) = query {
             for input in &mut query.inputs {
-                *input = input.checked_sub(staged.first).and_then(|offset| first.checked_add(offset))
+                *input = input
+                    .checked_sub(staged.first)
+                    .and_then(|offset| first.checked_add(offset))
                     .ok_or(StandingQueryError::Unsupported)?;
             }
         } else if let StandingQuery::Projection(query) = query {
@@ -327,7 +399,10 @@ fn rebuild_checked<V: Vfs + Clone>(
                 .and_then(|offset| first.checked_add(offset))
                 .ok_or(StandingQueryError::Unsupported)?;
         } else if let StandingQuery::Window(query) = query {
-            query.input = query.input.checked_sub(staged.first).and_then(|offset| first.checked_add(offset))
+            query.input = query
+                .input
+                .checked_sub(staged.first)
+                .and_then(|offset| first.checked_add(offset))
                 .ok_or(StandingQueryError::Unsupported)?;
         }
     }
