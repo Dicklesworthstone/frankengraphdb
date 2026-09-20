@@ -190,3 +190,22 @@ fn sparse_cycle_closure_intersects_before_a_quadratic_wedge_is_generated() {
     assert_eq!(result.value.len(), n as usize);
     assert!(result.evaluator.work_units < n as u64 * n as u64);
 }
+
+#[test]
+fn support_summaries_do_not_expand_or_reject_an_above_count_parallel_product() {
+    let body = "(a)-[:R]->(b)-[:S]->(c)-[:T]->(a)".to_owned()
+        + &",(a)-[:R]->(b)".repeat(5);
+    // Eight independent factors of 256 give 2^64 edge-identified occurrences,
+    // but only one complete vertex assignment. Its support remains meaningful.
+    let edges: Vec<_> = [(VId(0),RelationId(1),VId(1)),
+        (VId(1),RelationId(2),VId(2)), (VId(2),RelationId(3),VId(0))]
+        .into_iter().flat_map(|edge| std::iter::repeat_n(edge,256)).collect();
+    let support = aggregate(&format!("MATCH {body} RETURN a,b,c,COUNT(DISTINCT c) AS n GROUP BY a,b,c"));
+    let count = aggregate(&format!("MATCH {body} RETURN a,b,c,COUNT(*) AS n GROUP BY a,b,c"));
+    let run = |q: &PreparedGraphAggregate| q.execute_governed(768,[VId(0),VId(1),VId(2)],edges.iter().copied(),
+        |_,_| Ok::<_,()>(true), |_,_| Ok(None),GqlQueryPolicy::new(768,1,100_000,100_000),|| Ok::<_,()>(()));
+    let rows = run(&support).unwrap().value;
+    assert_eq!(rows.len(),1);
+    assert_eq!(rows[0].get(0).unwrap().as_count(),Some(1));
+    assert!(matches!(run(&count),Err(GqlQueryError::Source(_))));
+}

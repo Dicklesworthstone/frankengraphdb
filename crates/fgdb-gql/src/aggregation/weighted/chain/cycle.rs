@@ -5,7 +5,8 @@
 //! is a unary factor, not an independent endpoint. Eliminate only hidden nodes
 //! with one or two distinct neighbors, in stable original-position order. This
 //! covers series/parallel cyclic regions without a higher-arity factor or a
-//! second matcher. Larger separators stay in the original GLA execution core.
+//! second matcher. Retained cyclic cores use the shared trie-intersection
+//! visitor; noncyclic cores retain their original GLA execution path.
 //!
 //! Root positions, output operands, inequalities and forest attachments remain
 //! observable. All tables are private, metered and in memory, not spill storage.
@@ -494,9 +495,10 @@ impl Reduced {
             Multiplicity,
         ) -> Result<(), VisitError<E, C>>,
     {
-        self.pattern.plan().visit_value_bindings(
+        super::intersection::visit_bindings(
+            self.pattern.plan(),
             vertices,
-            self.topology.keys().copied(),
+            &self.topology,
             test_vertex,
             property,
             control,
@@ -539,6 +541,38 @@ impl Reduced {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_triangle_intersection_composes_with_hidden_factor_multiplicity() {
+        use crate::{GqlParameters, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText};
+        let text = "MATCH (a)-[:R]->(b)-[:S]->(c)-[:U]->(hidden)-[:T]->(a) RETURN a,b,c,COUNT(*) AS n GROUP BY a,b,c";
+        let query = PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
+            GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(match name {
+                "R" => 1, "S" => 2, "T" => 3, _ => 4,
+            }))),
+            _ => None,
+        }).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        let n = 1024_u128;
+        let mut edges = Vec::new();
+        for i in 0..n {
+            edges.push((VId(i), RelationId(1), VId(n)));
+            edges.push((VId(n), RelationId(2), VId(n + 1 + i)));
+            for _ in 0..2 {
+                edges.push((VId(n + 1 + i), RelationId(4), VId(2 * n + 1 + i)));
+            }
+            edges.push((VId(2 * n + 1 + i), RelationId(3), VId(i)));
+        }
+        // Removing hidden creates a weighted closing factor, not an independent
+        // marginal. The residual three-variable join must still intersect all
+        // constraints instead of generating a million rejected wedges.
+        let result = query.execute_governed(edges.len() as u64, (0..=3 * n).map(VId), edges,
+            |_, _| Ok::<_, ()>(true), |_, _| Ok(None),
+            GqlQueryPolicy::new(5 * n as u64, n as u64, 1_000_000, 300_000),
+            || Ok::<_, ()>(())).unwrap();
+        assert_eq!(result.value.len(), n as usize);
+        assert!(result.value.iter().all(|row| row.get(0).unwrap().as_count() == Some(2)));
+        assert!(result.evaluator.work_units < n as u64 * n as u64);
+    }
 
     fn weight(n: u64) -> Multiplicity {
         Multiplicity(NonZeroU64::new(n))
