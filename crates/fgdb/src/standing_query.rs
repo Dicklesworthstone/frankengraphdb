@@ -6,6 +6,7 @@
 
 mod aggregate;
 mod components;
+mod filter;
 mod joins;
 mod kcore;
 mod native;
@@ -86,6 +87,7 @@ pub enum StandingQueryError {
     SetSchema(fgdb_gql::GraphSetBuildError),
     JoinSchema(fgdb_gql::row_join::RowJoinBuildError),
     ProjectionSchema(fgdb_gql::row_projection::RowProjectionBuildError),
+    FilterSchema(fgdb_gql::row_filter::RowFilterBuildError),
     ReductionSchema(fgdb_gql::row_aggregate::RowAggregateBuildError),
     NativePrepare(Box<crate::QueryError>),
     NativeClassUnsupported { facade: crate::NativeReadClass },
@@ -111,6 +113,7 @@ impl core::fmt::Display for StandingQueryError {
             Self::SetSchema(error) => error.fmt(f),
             Self::JoinSchema(error) => error.fmt(f),
             Self::ProjectionSchema(error) => error.fmt(f),
+            Self::FilterSchema(error) => error.fmt(f),
             Self::ReductionSchema(error) => error.fmt(f),
             Self::NativePrepare(error) => error.fmt(f),
             Self::NativeClassUnsupported { facade } => {
@@ -135,6 +138,7 @@ impl core::error::Error for StandingQueryError {
             Self::NativePrepare(error) => Some(error.as_ref()),
             Self::SetSchema(error) => Some(error),
             Self::ProjectionSchema(error) => Some(error),
+            Self::FilterSchema(error) => Some(error),
             Self::ReductionSchema(error) => Some(error),
             Self::JoinSchema(error) => Some(error),
             Self::Read(error) => Some(error),
@@ -200,6 +204,7 @@ pub(crate) enum StandingQuery {
     Set(Box<sets::State>),
     Join(Box<joins::State>),
     Projection(Box<projection::State>),
+    Filter(Box<filter::State>),
     Reduction(Box<reduction::State>),
 }
 
@@ -217,6 +222,7 @@ impl StandingQuery {
             Self::Set(query) => (query.policy, query.frontier, query.failure),
             Self::Join(query) => (query.policy, query.frontier, query.failure),
             Self::Projection(query) => (query.policy, query.frontier, query.failure),
+            Self::Filter(query) => (query.policy, query.frontier, query.failure),
             Self::Reduction(query) => (query.policy, query.frontier, query.failure),
         }
     }
@@ -251,6 +257,9 @@ impl StandingQuery {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
             Self::Projection(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
+            Self::Filter(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
             Self::Reduction(query) => {
@@ -492,6 +501,9 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Projection(query) => StandingQuery::Projection(Box::new(
                 self.prepare_standing_projection(cx, query.input, query.spec().clone(), policy, handle.index)?,
             )),
+            StandingQuery::Filter(query) => StandingQuery::Filter(Box::new(
+                self.prepare_standing_filter(cx, query.input, query.spec().clone(), policy, handle.index)?,
+            )),
             StandingQuery::Reduction(query) => StandingQuery::Reduction(Box::new(
                 self.prepare_standing_reduction(cx, query.input, query.spec().key_columns(),
                     query.spec().value_column(), policy, handle.index)?,
@@ -547,6 +559,7 @@ impl<V: Vfs + Clone> Database<V> {
             | StandingQuery::Triangles(_) | StandingQuery::Components(_)
             | StandingQuery::CoreNumbers(_) | StandingQuery::Set(_)
             | StandingQuery::Join(_) | StandingQuery::Projection(_)
+            | StandingQuery::Filter(_)
             | StandingQuery::Reduction(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
@@ -627,6 +640,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Set(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Join(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Projection(query) => query.maintain(batch, prior, &mut meter),
+            StandingQuery::Filter(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Reduction(query) => query.maintain(batch, prior, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);

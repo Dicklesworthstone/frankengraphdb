@@ -34,6 +34,7 @@ pub(super) fn columns(query: &StandingQuery) -> Option<&[String]> {
         StandingQuery::Set(query) => Some(&query.columns),
         StandingQuery::Join(query) => Some(query.columns()),
         StandingQuery::Projection(query) => Some(query.columns()),
+        StandingQuery::Filter(query) => Some(query.columns()),
         _ => None,
     }
 }
@@ -44,6 +45,7 @@ pub(super) fn column_type(query: &StandingQuery, column: usize) -> Option<GraphS
         StandingQuery::Set(query) => query.types.get(column).copied(),
         StandingQuery::Join(query) => query.spec().column_types().nth(column),
         StandingQuery::Projection(query) => query.spec().column_types().get(column).copied(),
+        StandingQuery::Filter(query) => query.spec().column_types().get(column).copied(),
         _ => None,
     }
 }
@@ -53,6 +55,7 @@ pub(super) fn rows(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
         StandingQuery::Set(query) => Some(&query.rows),
         StandingQuery::Join(query) => Some(query.rows()),
         StandingQuery::Projection(query) => Some(query.rows()),
+        StandingQuery::Filter(query) => Some(query.rows()),
         _ => None,
     }
 }
@@ -62,6 +65,7 @@ pub(super) fn delta(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
         StandingQuery::Set(query) => query.last_delta.as_ref(),
         StandingQuery::Join(query) => query.delta(),
         StandingQuery::Projection(query) => query.delta(),
+        StandingQuery::Filter(query) => query.delta(),
         _ => None,
     }
 }
