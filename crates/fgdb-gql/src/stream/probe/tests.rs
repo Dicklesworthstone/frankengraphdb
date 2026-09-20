@@ -296,16 +296,16 @@ fn full_depth_probes_find_first_witness_without_an_outer_edge_or_result_bag() {
 #[test]
 fn unsupported_scopes_and_outputs_refuse_even_at_limit_zero_without_driving_a_source() {
     for input in [
-        "MATCH (a) WHERE EXISTS { MATCH (x)-[:R*1..3]->(y) } RETURN a LIMIT 0",
-        "MATCH (a) WHERE EXISTS { MATCH (a)-[:R*1..3]->(x) } RETURN a LIMIT 0",
         "MATCH (a) OPTIONAL MATCH (a)-[:R]->(x) RETURN a, x LIMIT 0",
         "MATCH (a) WHERE EXISTS { MATCH (a)-[:R]->(x) } RETURN a.p LIMIT 0",
     ] { let q = prepare(input); assert!(VertexScanPlan::compile(q.plan()).is_err(), "{input}"); }
-    let q = prepare("MATCH (a) WHERE NOT EXISTS { MATCH (a)-[:R]->(x) } RETURN a LIMIT 0");
-    let f = Fixture::small(63); let roots = f.roots.clone(); let seeks = f.seeks.clone();
-    let mut cursor = VertexScanCursor::new(NoLookup(f), VertexScanPlan::compile(q.plan()).unwrap(), GqlQueryPolicy::new(0,0,10,0), || Ok::<_, ()>(()));
-    assert!(cursor.next().is_none());
-    assert_eq!(roots.load(Ordering::SeqCst), 0); assert_eq!(seeks.load(Ordering::SeqCst), 0);
+    for body in ["MATCH (a)-[:R*1..3]->(x)", "MATCH (x)-[:R*1..3]->(y)"] {
+        let q = prepare(&format!("MATCH (a) WHERE NOT EXISTS {{ {body} }} RETURN a LIMIT 0"));
+        let f = Fixture::small(63); let roots = f.roots.clone(); let seeks = f.seeks.clone();
+        let mut cursor = VertexScanCursor::new(NoLookup(f), VertexScanPlan::compile(q.plan()).unwrap(), GqlQueryPolicy::new(0,0,10,0), || Ok::<_, ()>(()));
+        assert!(cursor.next().is_none());
+        assert_eq!(roots.load(Ordering::SeqCst), 0); assert_eq!(seeks.load(Ordering::SeqCst), 0);
+    }
 }
 
 mod independent;

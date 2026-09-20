@@ -1,15 +1,22 @@
 //! Indexed semi/anti joins over a compiler-owned GLA probe scope.
 //! Probe bindings never escape into the outer row. One complete witness ends
 //! the search, irrespective of its multiplicity; absence requires exhaustion.
-//! No result bag, seen set, neighbor vector, or outer-root rescan is built.
+//! Fixed hops keep no result bag or neighbor vector. Variable-length atoms
+//! retain governed endpoint support and mode-aware traversal state only.
 
 use super::*;
+use crate::algebra::GraphWalkSearch;
+use crate::GraphWalkBounds;
+use std::collections::BTreeMap;
+
+mod walk;
 
 #[derive(Clone, Copy)]
 enum Binding {
     Copy { source: usize, nullable: bool },
     Expand(Expansion),
     Scan,
+    Walk { expansion: Expansion, bounds: GraphWalkBounds, search: GraphWalkSearch },
 }
 
 // A local scan owns its position, never the outer cursor's mutable position.
@@ -19,6 +26,7 @@ enum Position {
     Copy(bool),
     Edge(Option<EId>),
     Vertex(Option<VId>),
+    Walk,
 }
 impl Position {
     fn new(binding: Binding) -> Self {
@@ -26,6 +34,7 @@ impl Position {
             Binding::Copy { .. } => Self::Copy(false),
             Binding::Expand(_) => Self::Edge(None),
             Binding::Scan => Self::Vertex(None),
+            Binding::Walk { .. } => Self::Walk,
         }
     }
 }
@@ -45,10 +54,11 @@ pub(crate) struct Probe {
 }
 
 impl Probe {
-    /// Fixed-hop bodies may start from a correlation or an independent vertex
-    /// scan. Captures only copy values; a nullable capture is not an anchor.
-    /// Nested/optional scopes and variable-length atoms still refuse, including
-    /// for LIMIT zero. Every local scan restarts only its own ordered position.
+    /// Fixed and finite variable-length atoms may start from a correlation or
+    /// an independent vertex scan. Captures only copy values; a nullable capture
+    /// is not an anchor. Probe-local paths cannot be captured or projected:
+    /// only endpoint support matters. Nested/optional scopes still refuse,
+    /// including at LIMIT zero. Local scans keep their own ordered positions.
     pub(crate) fn compile(
         ops: &[GlaOperator], start: usize, outer_width: usize,
     ) -> Result<(Self, usize), EdgeScanBuildError> {
@@ -80,6 +90,15 @@ impl Probe {
                     expansions += 1;
                     Some(Binding::Expand(Expansion { source: source.ordinal() as usize,
                         relation: *relation, direction: *direction }))
+                }
+                GlaOperator::VarLengthExpand { source, relation, direction, bounds, search }
+                    if (source.ordinal() as usize) < width && expansions < MAX_PATTERN_EDGES => {
+                    expansions += 1;
+                    Some(Binding::Walk {
+                        expansion: Expansion { source: source.ordinal() as usize,
+                            relation: *relation, direction: *direction },
+                        bounds: *bounds, search: *search,
+                    })
                 }
                 GlaOperator::Select { slot, .. } if (slot.ordinal() as usize) < width => None,
                 GlaOperator::VertexIdentity { left, right, .. }
@@ -133,6 +152,9 @@ impl Probe {
             ids.push(*id);
         }
         let mut frames: Vec<_> = self.steps.iter().map(|step| Position::new(step.binding)).collect();
+        // Only active variable-length atoms allocate entries. Fixed-hop probes
+        // keep their original frame and control-event sequence unchanged.
+        let mut walks = BTreeMap::<usize, walk::Endpoints>::new();
         let mut depth = 0;
         loop {
             control(GlaExecutionEvent::Work)?;
@@ -191,24 +213,27 @@ impl Probe {
                         }
                         frames[depth] = Position::Edge(Some(eid));
                         record()?;
-                        let Some(edge) = flatten(source.edge(eid, control))? else { continue; };
-                        if edge.relation != expansion.relation { continue; }
-                        // Historical incidence is only a candidate index. The
-                        // source's actual visible edge decides membership.
-                        let to = match expansion.direction {
-                            GlaDirection::Forward if edge.source == from => edge.target,
-                            GlaDirection::Reverse if edge.target == from => edge.source,
-                            GlaDirection::Undirected if edge.source == from => edge.target,
-                            GlaDirection::Undirected if edge.target == from => edge.source,
-                            _ => continue,
-                        };
-                        vertex(source, from, control)?;
-                        if from != to { vertex(source, to, control)?; }
+                        let Some(to) = resolve_target(source, eid, from, expansion, control)? else { continue; };
                         Some(Some(to))
                     } else { None }
                 }
+                Binding::Walk { expansion, bounds, search } => {
+                    match ids[expansion.source] {
+                        None => None, // Even *0 cannot turn a NULL correlation into a vertex.
+                        Some(from) => {
+                            if !walks.contains_key(&depth) {
+                                let cursor = walk::Endpoints::new(from, bounds, search, source, control)?;
+                                control(GlaExecutionEvent::ScratchEntry)?;
+                                walks.insert(depth, cursor);
+                            }
+                            walks.get_mut(&depth).expect("initialized atom")
+                                .next(expansion, source, control, record)?.map(Some)
+                        }
+                    }
+                }
             };
             let Some(candidate) = candidate else {
+                walks.remove(&depth);
                 if depth == 0 { return Ok(false); }
                 depth -= 1;
                 ids.pop();
@@ -225,7 +250,30 @@ impl Probe {
             }
             if !passed { ids.pop(); continue; }
             depth += 1;
-            if depth < self.steps.len() { frames[depth] = Position::new(self.steps[depth].binding); }
+            if depth < self.steps.len() {
+                frames[depth] = Position::new(self.steps[depth].binding);
+                walks.remove(&depth); // A new correlated prefix gets fresh atom-local history.
+            }
         }
     }
+}
+
+// Both fixed and variable atoms resolve historical incidence through the SAME
+// visible edge and endpoint readers. Candidate indexes never establish liveness.
+fn resolve_target<S: EdgeScanSource, C>(
+    source: &S, eid: EId, from: VId, expansion: Expansion,
+    control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
+) -> ScanResult<Option<VId>, S::Error, C> {
+    let Some(edge) = flatten(source.edge(eid, control))? else { return Ok(None); };
+    if edge.relation != expansion.relation { return Ok(None); }
+    let to = match expansion.direction {
+        GlaDirection::Forward if edge.source == from => edge.target,
+        GlaDirection::Reverse if edge.target == from => edge.source,
+        GlaDirection::Undirected if edge.source == from => edge.target,
+        GlaDirection::Undirected if edge.target == from => edge.source,
+        _ => return Ok(None),
+    };
+    vertex(source, from, control)?;
+    if from != to { vertex(source, to, control)?; }
+    Ok(Some(to))
 }

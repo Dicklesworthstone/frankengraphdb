@@ -286,11 +286,15 @@ fn a_deep_probe_finds_one_of_exponentially_many_witnesses_with_linear_demand() {
 }
 
 #[test]
-fn variable_length_probes_refuse_before_source_access_even_with_limit_zero() {
+fn finite_atoms_do_not_read_a_limit_zero_source() {
     for body in ["MATCH (x)-[:R*1..2]->(y)", "MATCH (b)-[:R*1..2]->(x)"] {
         let text = format!("MATCH (a)-[r:R]->(b) WHERE EXISTS {{ {body} }} RETURN r, a, b LIMIT 0");
         let q = prepare(&text);
-        assert!(EdgeScanPlan::compile(q.plan()).is_err(), "{text}");
+        let f = Fixture::small(63); let seeks = f.seeks.clone(); let roots = f.roots.clone();
+        let mut c = EdgeScanCursor::new(f, EdgeScanPlan::compile(q.plan()).unwrap(), policy(), || Ok::<_, ()>(()));
+        assert!(c.next().is_none());
+        assert_eq!(seeks.load(Ordering::SeqCst), 0);
+        assert_eq!(roots.load(Ordering::SeqCst), 0);
     }
     // A correlated zero-edge probe copies a live vertex; no incidence scan.
     let q = prepare("MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (b) } RETURN r, a, b LIMIT 1");
