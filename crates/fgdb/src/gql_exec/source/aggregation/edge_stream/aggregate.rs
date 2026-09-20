@@ -41,16 +41,22 @@ fn open_aggregate<'q>(
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Stream exact global COUNT/SUM over a checked fixed-edge pattern. Compile
+    /// Stream global or grouped exact aggregates over a fixed-edge pattern.
+    /// COUNT/SUM/AVG, their argument-DISTINCT variants, and MIN/MAX use the
+    /// shared exact cells. Scalar, identity and captured-path keys retain their
+    /// native domains. Compile
     /// with EdgeAggregatePlan::compile; unsupported shapes never fall back to
     /// an eager query. Opening checks handle health and context but examines no
     /// candidate. Each source lookup uses the same immutable generation.
     ///
     /// The first pull consumes the indexed match stream, retaining one input
-    /// row plus numeric cells, then emits one complete summary. Only that row
-    /// counts against the result allowance. Every root, join and probe candidate
-    /// shares cumulative work/scratch/record limits; no partial summary escapes.
-    /// The source still pins decoded storage. This is not spill or a byte cap.
+    /// row plus per-group cells/support, then releases the source and yields
+    /// completed groups in canonical key order. Global empty input emits one
+    /// zero/null row; grouped empty input emits none. Only final groups count
+    /// against the result allowance. Root, join, probe, grouping and delivery
+    /// share cumulative work/scratch/record limits. No partial group escapes;
+    /// a late delivery error may follow completed groups. Group state and the
+    /// pinned source remain resident; this is not spill or a byte cap.
     pub fn stream_global_edge_aggregate_governed<'q>(
         &self,
         cx: &'q QueryCx,

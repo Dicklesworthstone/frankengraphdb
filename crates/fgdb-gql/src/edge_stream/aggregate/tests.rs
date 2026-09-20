@@ -1,5 +1,6 @@
 use super::*;
 mod groups;
+mod grouped;
 use crate::algebra::GraphValue;
 use crate::{
     GqlParameters, GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,

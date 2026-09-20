@@ -96,8 +96,7 @@ where
         EdgeAggregateCursor::columns(self)
     }
     fn key_columns(&self) -> &[String] {
-        // EdgeAggregatePlan currently admits global definitions only.
-        &[]
+        EdgeAggregateCursor::key_columns(self)
     }
     fn snapshot_seq(&self) -> CommitSeq {
         EdgeAggregateCursor::snapshot_seq(self)
@@ -334,7 +333,7 @@ impl AggregatePlan {
     fn key_columns(&self) -> &[String] {
         match self {
             Self::Vertex(plan) => plan.key_columns(),
-            Self::Edge(_) => &[],
+            Self::Edge(plan) => plan.key_columns(),
         }
     }
 }
