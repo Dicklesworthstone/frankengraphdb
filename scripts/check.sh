@@ -1308,7 +1308,7 @@ run_ubs() {
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=3"
   "Secret/token comparisons without timing-safe equality=15"
-  "panic!/unreachable!/todo!/unimplemented!=388"
+  "panic!/unreachable!/todo!/unimplemented!=416"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1323,7 +1323,7 @@ UBS_CRITICAL_BASELINE=(
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=3"
   "Secret/token comparisons without timing-safe equality=15"
-  "panic!/unreachable!/todo!/unimplemented!=388"
+  "panic!/unreachable!/todo!/unimplemented!=416"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new
