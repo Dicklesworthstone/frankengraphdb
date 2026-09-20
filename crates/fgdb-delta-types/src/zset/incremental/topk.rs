@@ -184,7 +184,9 @@ fn select_window<T: Ord + Clone, E>(
         let selected = if available < remaining {
             available
         } else {
-            remaining.checked_clone(limbs).map_err(ZSetError::Arithmetic)?
+            remaining
+                .checked_clone(limbs)
+                .map_err(ZSetError::Arithmetic)?
         };
         event(control, ZSetEvent::Work)?;
         remaining = remaining
@@ -415,7 +417,11 @@ mod tests {
         assert_eq!(selected, z(&[(7, i128::from(u64::MAX))]));
         assert!(stage.counts().weight(&7).unwrap().is_promoted());
         let mut denied = IncrementalTopK::new(0, 1);
-        assert!(denied.apply(&changes, LimbLimit::new(0), &mut allow).is_err());
+        assert!(
+            denied
+                .apply(&changes, LimbLimit::new(0), &mut allow)
+                .is_err()
+        );
         assert!(denied.counts().is_empty());
         assert!(denied.rows().is_empty());
     }
@@ -444,7 +450,8 @@ mod tests {
     #[test]
     fn diagnostics_redact_payloads() {
         let secret = "do-not-log-this-row";
-        let seed = ZSet::from_updates([(secret, ZWeight::from_i128(1))], LIMBS, &mut allow).unwrap();
+        let seed =
+            ZSet::from_updates([(secret, ZWeight::from_i128(1))], LIMBS, &mut allow).unwrap();
         let mut stage = IncrementalTopK::new(0, 1);
         assert!(!format!("{stage:?}").contains(secret));
         let pending = stage.prepare(&seed, LIMBS, &mut allow).unwrap();

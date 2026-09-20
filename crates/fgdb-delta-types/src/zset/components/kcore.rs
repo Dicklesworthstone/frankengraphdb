@@ -63,7 +63,10 @@ impl<V: Ord> Default for IncrementalCoreNumbers<V> {
 }
 impl<V: Ord> IncrementalCoreNumbers<V> {
     pub fn new() -> Self {
-        Self { topology: IncrementalComponents::new(), numbers: BTreeMap::new() }
+        Self {
+            topology: IncrementalComponents::new(),
+            numbers: BTreeMap::new(),
+        }
     }
     pub fn vertex_count(&self) -> usize {
         self.numbers.len()
@@ -79,7 +82,9 @@ impl<V: Ord> IncrementalCoreNumbers<V> {
 impl<V: Ord> core::fmt::Debug for IncrementalCoreNumbers<V> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("IncrementalCoreNumbers")
-            .field("vertices", &self.vertex_count()).field("data", &"[REDACTED]").finish()
+            .field("vertices", &self.vertex_count())
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -87,13 +92,23 @@ impl<V: Ord> core::fmt::Debug for IncrementalCoreNumbers<V> {
 // transition law. Retractions are tested AFTER charging each candidate visit;
 // a filter iterator must not hide arbitrarily many removed edges from control.
 fn adjacent<'a, V: Ord>(
-    topology: &'a ComponentUpdate<'_, V>, vertex: &V,
+    topology: &'a ComponentUpdate<'_, V>,
+    vertex: &V,
 ) -> impl Iterator<Item = &'a V> {
-    topology.owner.neighbors.get(vertex).into_iter().flatten()
+    topology
+        .owner
+        .neighbors
+        .get(vertex)
+        .into_iter()
+        .flatten()
         .chain(topology.inserted.get(vertex).into_iter().flatten())
 }
 fn retained<V: Ord>(topology: &ComponentUpdate<'_, V>, vertex: &V, neighbor: &V) -> bool {
-    vertex != neighbor && !topology.removed.get(vertex).is_some_and(|row| row.contains(neighbor))
+    vertex != neighbor
+        && !topology
+            .removed
+            .get(vertex)
+            .is_some_and(|row| row.contains(neighbor))
 }
 
 fn peel<V: Ord + Clone, E>(
@@ -107,7 +122,9 @@ fn peel<V: Ord + Clone, E>(
         let mut degree = 0_u64;
         for neighbor in adjacent(topology, vertex) {
             event(control, ZSetEvent::Work)?;
-            if !retained(topology, vertex, neighbor) { continue; }
+            if !retained(topology, vertex, neighbor) {
+                continue;
+            }
             // Affected regions are complete components of the final support.
             if !topology.labels.contains_key(neighbor) {
                 return Err(CoreError::InconsistentTopology);
@@ -131,7 +148,9 @@ fn peel<V: Ord + Clone, E>(
         event(control, ZSetEvent::ScratchEntry)?;
         for neighbor in adjacent(topology, &vertex) {
             event(control, ZSetEvent::Work)?;
-            if !retained(topology, &vertex, neighbor) { continue; }
+            if !retained(topology, &vertex, neighbor) {
+                continue;
+            }
             if let Some(old) = degrees.get_mut(neighbor) {
                 // Do NOT decrement a neighbor already at this shell's degree.
                 // Otherwise a triangle would be mislabeled 2,1,0 instead of 2,2,2.
@@ -156,7 +175,10 @@ impl<V: Ord + Clone> IncrementalCoreNumbers<V> {
     /// peeling/output change remain tentative until the returned guard commits.
     /// Multiplicity-only ticks have no affected region and do not peel a core.
     pub fn prepare<E>(
-        &mut self, vertices: &ZSet<V>, edges: &ZSet<(V, V)>, limbs: LimbLimit,
+        &mut self,
+        vertices: &ZSet<V>,
+        edges: &ZSet<(V, V)>,
+        limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<CoreUpdate<'_, V>, CoreError<E>> {
         let topology = self.topology.prepare(vertices, edges, limbs, control)?;
@@ -166,29 +188,51 @@ impl<V: Ord + Clone> IncrementalCoreNumbers<V> {
             event(control, ZSetEvent::Work)?;
             let old = self.numbers.get(vertex);
             let next = replacements.get(vertex);
-            if old == next { continue; }
+            if old == next {
+                continue;
+            }
             if let Some(number) = old {
-                delta.accumulate((vertex.clone(), *number), ZWeight::from_i128(-1), limbs, control)?;
+                delta.accumulate(
+                    (vertex.clone(), *number),
+                    ZWeight::from_i128(-1),
+                    limbs,
+                    control,
+                )?;
             }
             if let Some(number) = next {
                 delta.accumulate((vertex.clone(), *number), ZWeight::ONE, limbs, control)?;
             }
         }
         event(control, ZSetEvent::Work)?;
-        Ok(CoreUpdate { topology, numbers: &mut self.numbers, replacements, delta })
+        Ok(CoreUpdate {
+            topology,
+            numbers: &mut self.numbers,
+            replacements,
+            delta,
+        })
     }
     pub fn apply<E>(
-        &mut self, vertices: &ZSet<V>, edges: &ZSet<(V, V)>, limbs: LimbLimit,
+        &mut self,
+        vertices: &ZSet<V>,
+        edges: &ZSet<(V, V)>,
+        limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<ZSet<(V, u64)>, CoreError<E>> {
         Ok(self.prepare(vertices, edges, limbs, control)?.commit())
     }
     /// Explicit full export; ordinary maintenance never scans this result map.
     pub fn snapshot<E>(
-        &self, limbs: LimbLimit, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+        &self,
+        limbs: LimbLimit,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<ZSet<(V, u64)>, CoreError<E>> {
-        Ok(ZSet::from_updates(self.numbers.iter().map(|(v, n)| ((v.clone(), *n), ZWeight::ONE)),
-            limbs, control)?)
+        Ok(ZSet::from_updates(
+            self.numbers
+                .iter()
+                .map(|(v, n)| ((v.clone(), *n), ZWeight::ONE)),
+            limbs,
+            control,
+        )?)
     }
 }
 
@@ -200,9 +244,15 @@ pub struct CoreUpdate<'a, V: Ord> {
     delta: ZSet<(V, u64)>,
 }
 impl<V: Ord> CoreUpdate<'_, V> {
-    pub fn delta(&self) -> &ZSet<(V, u64)> { &self.delta }
-    pub fn vertex_count(&self) -> usize { self.topology.vertex_count() }
-    pub fn affected_vertices(&self) -> usize { self.topology.affected_vertices() }
+    pub fn delta(&self) -> &ZSet<(V, u64)> {
+        &self.delta
+    }
+    pub fn vertex_count(&self) -> usize {
+        self.topology.vertex_count()
+    }
+    pub fn affected_vertices(&self) -> usize {
+        self.topology.affected_vertices()
+    }
     /// Inspect the prospective answer without accidentally reviving a retired
     /// vertex from the accepted map when its replacement is absent.
     pub fn core_number(&self, vertex: &V) -> Option<u64> {
@@ -216,8 +266,15 @@ impl<V: Ord> CoreUpdate<'_, V> {
 impl<V: Ord + Clone> CoreUpdate<'_, V> {
     /// Publish with no recoverable callback or arithmetic between participants.
     pub fn commit(self) -> ZSet<(V, u64)> {
-        let Self { topology, numbers, replacements, delta } = self;
-        for vertex in &topology.candidates { numbers.remove(vertex); }
+        let Self {
+            topology,
+            numbers,
+            replacements,
+            delta,
+        } = self;
+        for vertex in &topology.candidates {
+            numbers.remove(vertex);
+        }
         numbers.extend(replacements);
         let _ = topology.commit();
         delta
@@ -225,8 +282,11 @@ impl<V: Ord + Clone> CoreUpdate<'_, V> {
 }
 impl<V: Ord> core::fmt::Debug for CoreUpdate<'_, V> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("CoreUpdate").field("affected_vertices", &self.affected_vertices())
-            .field("delta_support", &self.delta.len()).field("data", &"[REDACTED]").finish()
+        f.debug_struct("CoreUpdate")
+            .field("affected_vertices", &self.affected_vertices())
+            .field("delta_support", &self.delta.len())
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 
