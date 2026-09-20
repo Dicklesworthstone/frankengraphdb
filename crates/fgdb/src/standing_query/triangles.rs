@@ -2,10 +2,10 @@
 //! snapshot source, failure fence and prepared sink as other maintained views.
 
 use super::*;
-use fgdb_delta_types::{LimbLimit, ZWeight};
 use fgdb_delta_types::zset::committed::EdgeInputError;
-use fgdb_delta_types::zset::triangles::{TriangleError, TriangleQuantifier};
 use fgdb_delta_types::zset::triangles::committed::{CommittedTriangles, CommittedTrianglesError};
+use fgdb_delta_types::zset::triangles::{TriangleError, TriangleQuantifier};
+use fgdb_delta_types::{LimbLimit, ZWeight};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 type Triple = (VId, VId, VId);
@@ -26,31 +26,53 @@ fn input_error(error: CommittedTrianglesError<StandingQueryFailure>) -> Standing
     }
 }
 fn result_bound(total: &ZWeight, policy: GqlQueryPolicy) -> Result<(), StandingQueryFailure> {
-    if total < &ZWeight::ZERO { return Err(StandingQueryFailure::InvalidDelta); }
-    if policy.rows.max_result_rows().is_some_and(|limit| total > &ZWeight::from_i128(i128::from(limit))) {
+    if total < &ZWeight::ZERO {
+        return Err(StandingQueryFailure::InvalidDelta);
+    }
+    if policy
+        .rows
+        .max_result_rows()
+        .is_some_and(|limit| total > &ZWeight::from_i128(i128::from(limit)))
+    {
         return Err(StandingQueryFailure::ResultBudget);
     }
     Ok(())
 }
 impl State {
-    pub(super) fn relation(&self) -> RelationId { self.input.relation() }
-    pub(super) fn quantifier(&self) -> TriangleQuantifier { self.input.quantifier() }
+    pub(super) fn relation(&self) -> RelationId {
+        self.input.relation()
+    }
+    pub(super) fn quantifier(&self) -> TriangleQuantifier {
+        self.input.quantifier()
+    }
 
     pub(super) fn maintain(
-        &mut self, cx: &CommitCx, batch: &LogicalDeltaBatch, meter: &mut Meter<'_>,
+        &mut self,
+        cx: &CommitCx,
+        batch: &LogicalDeltaBatch,
+        meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        if self.frontier != self.input.frontier() { return Err(StandingQueryFailure::InvalidDelta); }
+        if self.frontier != self.input.frontier() {
+            return Err(StandingQueryFailure::InvalidDelta);
+        }
         recursive::observe_batch(batch, meter)?;
-        let pending = self.input.prepare_committed_successor(cx, batch, LIMBS,
-            &mut |event| meter.charge(event)).map_err(input_error)?;
+        let pending = self
+            .input
+            .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
+            .map_err(input_error)?;
         // Bound the FINAL occurrence count, not support size or a transient
         // insertion-before-retraction prefix. ALL does not expand duplicates.
         result_bound(pending.total(), meter.policy)?;
-        let sink = self.rows.prepare_update(pending.delta(), LIMBS,
-            &mut |event| meter.charge(event)).map_err(zset_error)?;
+        let sink = self
+            .rows
+            .prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
+            .map_err(zset_error)?;
         for (triple, _) in pending.delta().iter() {
             meter.charge(ZSetEvent::Work)?;
-            if sink.weight(triple).is_some_and(|weight| weight < &ZWeight::ZERO) {
+            if sink
+                .weight(triple)
+                .is_some_and(|weight| weight < &ZWeight::ZERO)
+            {
                 return Err(StandingQueryFailure::InvalidDelta);
             }
         }
@@ -63,17 +85,33 @@ impl State {
     }
 
     fn from_snapshot(
-        snapshot: &crate::Snapshot, relation: RelationId, quantifier: TriangleQuantifier,
+        snapshot: &crate::Snapshot,
+        relation: RelationId,
+        quantifier: TriangleQuantifier,
         meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
         let baseline = recursive::topology_snapshot(snapshot, relation, meter)?;
-        let input = CommittedTriangles::from_snapshot(baseline, relation, quantifier, LIMBS,
-            &mut |event| meter.charge(event)).map_err(input_error)?;
+        let input = CommittedTriangles::from_snapshot(
+            baseline,
+            relation,
+            quantifier,
+            LIMBS,
+            &mut |event| meter.charge(event),
+        )
+        .map_err(input_error)?;
         result_bound(input.total(), meter.policy)?;
-        let rows = input.snapshot(LIMBS, &mut |event| meter.charge(event)).map_err(input_error)?;
+        let rows = input
+            .snapshot(LIMBS, &mut |event| meter.charge(event))
+            .map_err(input_error)?;
         (meter.checkpoint)()?;
-        Ok(Self { input, rows, policy: meter.policy, frontier: snapshot.frontier,
-            stats: meter.stats, failure: None })
+        Ok(Self {
+            input,
+            rows,
+            policy: meter.policy,
+            frontier: snapshot.frontier,
+            stats: meter.stats,
+            failure: None,
+        })
     }
 }
 
@@ -97,7 +135,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// retains in-memory arrangements and triples, not spill or byte-memory bounds.
     /// Registration is session-local, not durable subscription/certificate state.
     pub fn register_standing_triangles(
-        &mut self, cx: &QueryCx, relation: RelationId, quantifier: TriangleQuantifier,
+        &mut self,
+        cx: &QueryCx,
+        relation: RelationId,
+        quantifier: TriangleQuantifier,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
         let query = self.prepare_standing_triangles(cx, relation, quantifier, policy)?;
@@ -105,14 +146,24 @@ impl<V: Vfs + Clone> Database<V> {
     }
 
     pub(super) fn prepare_standing_triangles(
-        &self, cx: &QueryCx, relation: RelationId, quantifier: TriangleQuantifier,
+        &self,
+        cx: &QueryCx,
+        relation: RelationId,
+        quantifier: TriangleQuantifier,
         policy: GqlQueryPolicy,
     ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         cx.with_restriction(|| {
-            let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
             State::from_snapshot(&self.snapshot, relation, quantifier, &mut meter)
                 .map_err(StandingQueryError::Maintenance)
         })
@@ -123,20 +174,28 @@ impl<V: Vfs + Clone> Database<V> {
     /// are not expanded into repeated allocations. Shares the registry's owner,
     /// health, cancellation and unavailable checks with aggregate/recursive reads.
     pub fn standing_triangles<'a>(
-        &'a self, cx: &QueryCx, handle: &StandingQueryHandle,
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
     ) -> Result<StandingQueryView<'a, (VId, VId, VId)>, StandingQueryError> {
         let StandingQuery::Triangles(query) = self.admitted_standing_query(cx, handle)? else {
             return Err(StandingQueryError::Unsupported);
         };
-        Ok(StandingQueryView { rows: &query.rows, ordered: None,
-            frontier: query.frontier, stats: &query.stats })
+        Ok(StandingQueryView {
+            rows: &query.rows,
+            ordered: None,
+            frontier: query.frontier,
+            stats: &query.stats,
+        })
     }
 
     /// Borrow the maintained exact occurrence count without scanning triples or
     /// narrowing wide arithmetic. The database borrow pins it to the same
     /// generation as a simultaneously borrowed standing_triangles() result.
     pub fn standing_triangle_total<'a>(
-        &'a self, cx: &QueryCx, handle: &StandingQueryHandle,
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
     ) -> Result<&'a ZWeight, StandingQueryError> {
         let StandingQuery::Triangles(query) = self.admitted_standing_query(cx, handle)? else {
             return Err(StandingQueryError::Unsupported);
@@ -148,8 +207,8 @@ impl<V: Vfs + Clone> Database<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asupersync::lab::run_async_under_lab;
     use crate::{DatabaseKeys, WriteBatch};
+    use asupersync::lab::run_async_under_lab;
     use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts};
 
     fn policy() -> GqlQueryPolicy {
@@ -157,8 +216,11 @@ mod tests {
     }
     fn build(snapshot: &crate::Snapshot) -> State {
         let mut checkpoint = || Ok(());
-        let mut meter = Meter { policy: policy(), stats: StandingQueryStats::default(),
-            checkpoint: &mut checkpoint };
+        let mut meter = Meter {
+            policy: policy(),
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
         State::from_snapshot(snapshot, RelationId(1), TriangleQuantifier::All, &mut meter).unwrap()
     }
     fn unchanged(actual: &State, before: &State) {
@@ -175,10 +237,16 @@ mod tests {
         let ((), report) = run_async_under_lab(0x7472_6910, |root| async move {
             let contexts = PurposeContexts::narrow_runtime_root(&root);
             let commit = contexts.commit();
-            let keys = DatabaseKeys::new([0xe1; 32], DatabaseSecurityNamespaceId([0xe2; 32]), [0xe3; 32]);
+            let keys = DatabaseKeys::new(
+                [0xe1; 32],
+                DatabaseSecurityNamespaceId([0xe2; 32]),
+                [0xe3; 32],
+            );
             let mut db = Database::open_memory(&commit, keys).await.unwrap();
             let mut seed = WriteBatch::new(RelationId(1));
-            for id in 1..=4 { seed.create_vertex(VId(id), vec![], vec![]); }
+            for id in 1..=4 {
+                seed.create_vertex(VId(id), vec![], vec![]);
+            }
             for (id, a, b) in [(1, 1, 2), (2, 2, 3), (3, 3, 1)] {
                 seed.add_edge(EId(id), VId(a), VId(b), vec![]);
             }
@@ -196,9 +264,15 @@ mod tests {
             let mut success = build(&baseline);
             let mut calls = 0;
             let stats = {
-                let mut checkpoint = || { calls += 1; Ok(()) };
-                let mut meter = Meter { policy: policy(), stats: StandingQueryStats::default(),
-                    checkpoint: &mut checkpoint };
+                let mut checkpoint = || {
+                    calls += 1;
+                    Ok(())
+                };
+                let mut meter = Meter {
+                    policy: policy(),
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
+                };
                 success.maintain(&commit, batch, &mut meter).unwrap();
                 meter.stats
             };
@@ -212,12 +286,22 @@ mod tests {
                 {
                     let mut checkpoint = || {
                         visited += 1;
-                        if visited == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
+                        if visited == stop {
+                            Err(StandingQueryFailure::Interrupted)
+                        } else {
+                            Ok(())
+                        }
                     };
-                    let mut meter = Meter { policy: policy(), stats: StandingQueryStats::default(),
-                        checkpoint: &mut checkpoint };
-                    assert_eq!(state.maintain(&commit, batch, &mut meter),
-                        Err(StandingQueryFailure::Interrupted), "refusal at {stop}");
+                    let mut meter = Meter {
+                        policy: policy(),
+                        stats: StandingQueryStats::default(),
+                        checkpoint: &mut checkpoint,
+                    };
+                    assert_eq!(
+                        state.maintain(&commit, batch, &mut meter),
+                        Err(StandingQueryFailure::Interrupted),
+                        "refusal at {stop}"
+                    );
                 }
                 assert_eq!(visited, stop);
                 unchanged(&state, &before);
@@ -226,14 +310,23 @@ mod tests {
             // publishing even a successfully prepared upstream participant.
             for (work, scratch, error) in [
                 (stats.work_units, stats.scratch_entries, None),
-                (stats.work_units - 1, stats.scratch_entries, Some(StandingQueryFailure::WorkBudget)),
-                (stats.work_units, stats.scratch_entries - 1, Some(StandingQueryFailure::ScratchBudget)),
+                (
+                    stats.work_units - 1,
+                    stats.scratch_entries,
+                    Some(StandingQueryFailure::WorkBudget),
+                ),
+                (
+                    stats.work_units,
+                    stats.scratch_entries - 1,
+                    Some(StandingQueryFailure::ScratchBudget),
+                ),
             ] {
                 let mut state = build(&baseline);
                 let mut checkpoint = || Ok(());
                 let mut meter = Meter {
                     policy: GqlQueryPolicy::new(100_000, 1, work, scratch),
-                    stats: StandingQueryStats::default(), checkpoint: &mut checkpoint,
+                    stats: StandingQueryStats::default(),
+                    checkpoint: &mut checkpoint,
                 };
                 let result = state.maintain(&commit, batch, &mut meter);
                 if let Some(error) = error {

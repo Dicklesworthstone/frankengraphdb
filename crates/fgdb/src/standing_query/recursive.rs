@@ -5,7 +5,9 @@
 use super::*;
 use crate::gql_exec::source::{self, SourceEvent};
 use fgdb_delta_types::zset::committed::EdgeInputError;
-use fgdb_delta_types::zset::committed::snapshot::{EdgeSnapshot, EdgeSnapshotBuilder, SnapshotInputError};
+use fgdb_delta_types::zset::committed::snapshot::{
+    EdgeSnapshot, EdgeSnapshotBuilder, SnapshotInputError,
+};
 use fgdb_delta_types::zset::reachability::ReachabilityError;
 use fgdb_delta_types::zset::reachability::committed::{
     CommittedReachability, CommittedReachabilityError, CommittedReachabilityUpdate,
@@ -143,79 +145,79 @@ impl State {
 /// borrowed source, the exact retained anchor and the original meter sequence;
 /// callers compose their own operator/sink before publishing a new generation.
 pub(super) fn topology_snapshot(
-        snapshot: &crate::Snapshot,
-        relation: RelationId,
-        meter: &mut Meter<'_>,
-    ) -> Result<EdgeSnapshot, StandingQueryFailure> {
+    snapshot: &crate::Snapshot,
+    relation: RelationId,
+    meter: &mut Meter<'_>,
+) -> Result<EdgeSnapshot, StandingQueryFailure> {
+    meter.charge(ZSetEvent::Work)?;
+    if snapshot.frontier != snapshot.delta_index.frontier() {
+        return Err(StandingQueryFailure::InvalidDelta);
+    }
+    // Bound the PHYSICAL topology records before the source can allocate its
+    // winner map. History retained in Strata still costs work and scratch;
+    // unrelated vertex/property delta history is not replayed or scanned.
+    let mut records = 0_u64;
+    for block in &snapshot.blocks {
         meter.charge(ZSetEvent::Work)?;
-        if snapshot.frontier != snapshot.delta_index.frontier() {
-            return Err(StandingQueryFailure::InvalidDelta);
+        records = records
+            .checked_add(
+                u64::try_from(block.len()).map_err(|_| StandingQueryFailure::SnapshotBudget)?,
+            )
+            .ok_or(StandingQueryFailure::SnapshotBudget)?;
+        if meter
+            .policy
+            .rows
+            .max_snapshot_records()
+            .is_some_and(|limit| records > limit)
+        {
+            return Err(StandingQueryFailure::SnapshotBudget);
         }
-        // Bound the PHYSICAL topology records before the source can allocate its
-        // winner map. History retained in Strata still costs work and scratch;
-        // unrelated vertex/property delta history is not replayed or scanned.
-        let mut records = 0_u64;
-        for block in &snapshot.blocks {
-            meter.charge(ZSetEvent::Work)?;
-            records = records
-                .checked_add(
-                    u64::try_from(block.len()).map_err(|_| StandingQueryFailure::SnapshotBudget)?,
-                )
-                .ok_or(StandingQueryFailure::SnapshotBudget)?;
-            if meter
-                .policy
-                .rows
-                .max_snapshot_records()
-                .is_some_and(|limit| records > limit)
-            {
-                return Err(StandingQueryFailure::SnapshotBudget);
-            }
-        }
-        // The shared builder streams directly from the borrowed source. It
-        // poisons on any swallowed insertion refusal; no temporary full edge
-        // vector, reconstructed log or fabricated insertion commit is needed.
-        meter.charge(ZSetEvent::ScratchEntry)?;
-        let mut builder = EdgeSnapshotBuilder::from_index(
-            crate::GRAPH,
-            crate::BRANCH,
-            &snapshot.delta_index,
-            &mut |event| meter.charge(event),
-        )
+    }
+    // The shared builder streams directly from the borrowed source. It
+    // poisons on any swallowed insertion refusal; no temporary full edge
+    // vector, reconstructed log or fabricated insertion commit is needed.
+    meter.charge(ZSetEvent::ScratchEntry)?;
+    let mut builder = EdgeSnapshotBuilder::from_index(
+        crate::GRAPH,
+        crate::BRANCH,
+        &snapshot.delta_index,
+        &mut |event| meter.charge(event),
+    )
+    .map_err(snapshot_error)?;
+    // The embedded write template fixes coordinates to SchemaEpoch(0).
+    // Record the selected relation even when empty. A schema-capable spine
+    // must supply authenticated current catalog epochs instead; the shared
+    // builder already supports them, including known empty relations.
+    builder
+        .record_epoch(relation, SchemaEpoch(0), &mut |event| meter.charge(event))
         .map_err(snapshot_error)?;
-        // The embedded write template fixes coordinates to SchemaEpoch(0).
-        // Record the selected relation even when empty. A schema-capable spine
-        // must supply authenticated current catalog epochs instead; the shared
-        // builder already supports them, including known empty relations.
-        builder
-            .record_epoch(relation, SchemaEpoch(0), &mut |event| meter.charge(event))
-            .map_err(snapshot_error)?;
-        source::visit_edges(
-            &snapshot.blocks,
-            snapshot.frontier,
-            &mut |event| match event {
-                SourceEvent::Work | SourceEvent::SnapshotRecord => meter.charge(ZSetEvent::Work),
-                SourceEvent::ScratchEntry => meter.charge(ZSetEvent::ScratchEntry),
-            },
-            |entry, control| {
-                builder
-                    .insert(
-                        entry.eid,
-                        (entry.relation, entry.src, entry.dst),
-                        SchemaEpoch(0),
-                        LIMBS,
-                        &mut |event| {
-                            control(match event {
-                                ZSetEvent::Work => SourceEvent::Work,
-                                ZSetEvent::ScratchEntry => SourceEvent::ScratchEntry,
-                            })
-                        },
-                    )
-                    .map_err(snapshot_error)
-            },
-        )?;
-        builder
-            .finish(&mut |event| meter.charge(event))
-            .map_err(snapshot_error)
+    source::visit_edges(
+        &snapshot.blocks,
+        snapshot.frontier,
+        &mut |event| match event {
+            SourceEvent::Work | SourceEvent::SnapshotRecord => meter.charge(ZSetEvent::Work),
+            SourceEvent::ScratchEntry => meter.charge(ZSetEvent::ScratchEntry),
+        },
+        |entry, control| {
+            builder
+                .insert(
+                    entry.eid,
+                    (entry.relation, entry.src, entry.dst),
+                    SchemaEpoch(0),
+                    LIMBS,
+                    &mut |event| {
+                        control(match event {
+                            ZSetEvent::Work => SourceEvent::Work,
+                            ZSetEvent::ScratchEntry => SourceEvent::ScratchEntry,
+                        })
+                    },
+                )
+                .map_err(snapshot_error)
+        },
+    )?;
+    builder
+        .finish(&mut |event| meter.charge(event))
+        .map_err(snapshot_error)
 }
 
 impl State {

@@ -368,16 +368,22 @@ impl<V: asupersync::fs::Vfs + Clone> super::Database<V> {
         &'a self,
         cx: &fgdb_types::QueryCx,
         handle: &super::StandingQueryHandle,
-    ) -> Result<Option<super::StandingQueryView<'a, GraphValueRow>>, super::StandingQueryError> {
-        let super::StandingQuery::Rows { source, output } = self.admitted_standing_query(cx, handle)? else {
+    ) -> Result<Option<super::StandingQueryView<'a, GraphValueRow>>, super::StandingQueryError>
+    {
+        let super::StandingQuery::Rows { source, output } =
+            self.admitted_standing_query(cx, handle)?
+        else {
             return Err(super::StandingQueryError::Unsupported);
         };
-        Ok(output.last_delta.as_ref().map(|rows| super::StandingQueryView {
-            rows,
-            ordered: None,
-            frontier: source.frontier,
-            stats: &source.stats,
-        }))
+        Ok(output
+            .last_delta
+            .as_ref()
+            .map(|rows| super::StandingQueryView {
+                rows,
+                ordered: None,
+                frontier: source.frontier,
+                stats: &source.stats,
+            }))
     }
 }
 
@@ -530,18 +536,27 @@ mod occurrence_regressions {
         apply(&mut state, &[(1, 2, 1)], 10).unwrap();
         assert!(state.last_delta.is_none(), "initialization is a baseline");
         apply(&mut state, &[(1, 2, -1), (1, 3, 1)], 10).unwrap();
-        let before = state.last_delta.as_ref().unwrap()
-            .checked_clone(LimbLimit::new(4), &mut |_| Ok::<_, ()>(())).unwrap();
+        let before = state
+            .last_delta
+            .as_ref()
+            .unwrap()
+            .checked_clone(LimbLimit::new(4), &mut |_| Ok::<_, ()>(()))
+            .unwrap();
         assert_eq!(before.len(), 1);
         assert_eq!(before.iter().next().unwrap().1.to_i128(), Some(1));
         let changes = delta(&state.definition, &[(1, 3, -1), (2, 1, 1)]);
         let mut checkpoint = || Ok(());
-        let mut meter = Meter { policy: GqlQueryPolicy::new(100, 10, 100_000, 100_000),
-            stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+        let mut meter = Meter {
+            policy: GqlQueryPolicy::new(100, 10, 100_000, 100_000),
+            stats: StandingQueryStats::default(),
+            checkpoint: &mut checkpoint,
+        };
         drop(state.prepare(&changes, &mut meter).unwrap());
         assert_eq!(state.last_delta.as_ref(), Some(&before));
-        assert_eq!(apply(&mut state, &[(1, 3, -1), (1, 4, 1)], 3),
-            Err(StandingQueryFailure::ResultBudget));
+        assert_eq!(
+            apply(&mut state, &[(1, 3, -1), (1, 4, 1)], 3),
+            Err(StandingQueryFailure::ResultBudget)
+        );
         assert_eq!(state.last_delta.as_ref(), Some(&before));
         apply(&mut state, &[], 10).unwrap();
         assert!(state.last_delta.as_ref().unwrap().is_empty());

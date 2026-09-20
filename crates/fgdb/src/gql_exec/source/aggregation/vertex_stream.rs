@@ -150,10 +150,13 @@ pub(super) fn probe_vertex_from_view<C>(
     after: Option<VId>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
 ) -> Result<Option<VId>, EdgeExpansionSourceError<ReadError, C>> {
-    vertex_successor(view, cx, after, &mut |event| control(match event {
-        VertexScanEvent::Work => GlaExecutionEvent::Work,
-        VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
-    })).map_err(|error| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(error)))
+    vertex_successor(view, cx, after, &mut |event| {
+        control(match event {
+            VertexScanEvent::Work => GlaExecutionEvent::Work,
+            VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+        })
+    })
+    .map_err(|error| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(error)))
 }
 
 fn source_error(error: ReadError) -> StreamError {

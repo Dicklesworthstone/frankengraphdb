@@ -3,9 +3,9 @@
 //! no second graph representation, delta decoder or publication authority.
 
 use super::*;
-use fgdb_delta_types::{LimbLimit, ZWeight};
 use fgdb_delta_types::zset::committed::CommittedEdgeInput;
 use fgdb_delta_types::zset::components::kcore::{CoreError, IncrementalCoreNumbers};
+use fgdb_delta_types::{LimbLimit, ZWeight};
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 
@@ -29,26 +29,40 @@ fn core_error(error: CoreError<StandingQueryFailure>) -> StandingQueryFailure {
 }
 impl State {
     pub(super) fn maintain(
-        &mut self, cx: &CommitCx, batch: &LogicalDeltaBatch, meter: &mut Meter<'_>,
+        &mut self,
+        cx: &CommitCx,
+        batch: &LogicalDeltaBatch,
+        meter: &mut Meter<'_>,
     ) -> Result<(), StandingQueryFailure> {
-        if self.frontier != self.input.frontier() { return Err(StandingQueryFailure::InvalidDelta); }
+        if self.frontier != self.input.frontier() {
+            return Err(StandingQueryFailure::InvalidDelta);
+        }
         recursive::observe_batch(batch, meter)?;
-        let input = self.input.prepare_committed_successor(cx, batch, LIMBS,
-            &mut |event| meter.charge(event)).map_err(components::input_error)?;
+        let input = self
+            .input
+            .prepare_committed_successor(cx, batch, LIMBS, &mut |event| meter.charge(event))
+            .map_err(components::input_error)?;
         // Global vertex membership is projected only after full batch admission.
         let vertices = components::vertex_delta(batch, meter)?;
         let edges = components::project(input.delta(), self.relation, meter)?;
-        let pending = self.cores.prepare(&vertices, &edges, LIMBS,
-            &mut |event| meter.charge(event)).map_err(core_error)?;
+        let pending = self
+            .cores
+            .prepare(&vertices, &edges, LIMBS, &mut |event| meter.charge(event))
+            .map_err(core_error)?;
         meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
             .map_err(|_| StandingQueryFailure::Arithmetic)?;
         // A vertex has one final number, irrespective of a changed shell value.
         components::result_bound(pending.vertex_count(), meter.policy)?;
-        let sink = self.rows.prepare_update(pending.delta(), LIMBS,
-            &mut |event| meter.charge(event)).map_err(zset_error)?;
+        let sink = self
+            .rows
+            .prepare_update(pending.delta(), LIMBS, &mut |event| meter.charge(event))
+            .map_err(zset_error)?;
         for (row, _) in pending.delta().iter() {
             meter.charge(ZSetEvent::Work)?;
-            if sink.weight(row).is_some_and(|weight| weight != &ZWeight::ONE) {
+            if sink
+                .weight(row)
+                .is_some_and(|weight| weight != &ZWeight::ONE)
+            {
                 return Err(StandingQueryFailure::InvalidDelta);
             }
         }
@@ -61,20 +75,34 @@ impl State {
     }
 
     fn from_snapshot(
-        snapshot: &crate::Snapshot, relation: RelationId, meter: &mut Meter<'_>,
+        snapshot: &crate::Snapshot,
+        relation: RelationId,
+        meter: &mut Meter<'_>,
     ) -> Result<Self, StandingQueryFailure> {
-        let components::TopologyInput { input, vertices, edges } =
-            components::topology_input(snapshot, relation, meter)?;
+        let components::TopologyInput {
+            input,
+            vertices,
+            edges,
+        } = components::topology_input(snapshot, relation, meter)?;
         let mut cores = IncrementalCoreNumbers::new();
-        let pending = cores.prepare(&vertices, &edges, LIMBS,
-            &mut |event| meter.charge(event)).map_err(core_error)?;
+        let pending = cores
+            .prepare(&vertices, &edges, LIMBS, &mut |event| meter.charge(event))
+            .map_err(core_error)?;
         components::result_bound(pending.vertex_count(), meter.policy)?;
         meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
             .map_err(|_| StandingQueryFailure::Arithmetic)?;
         (meter.checkpoint)()?;
         let rows = pending.commit();
-        Ok(Self { input, cores, rows, relation, policy: meter.policy,
-            frontier: snapshot.frontier, stats: meter.stats, failure: None })
+        Ok(Self {
+            input,
+            cores,
+            rows,
+            relation,
+            policy: meter.policy,
+            frontier: snapshot.frontier,
+            stats: meter.stats,
+            failure: None,
+        })
     }
 }
 impl<V: Vfs + Clone> Database<V> {
@@ -95,41 +123,64 @@ impl<V: Vfs + Clone> Database<V> {
     /// Registrations and arrangements are session-local and in-memory, not
     /// durable subscriptions, historical core indexes or a spill/byte bound.
     pub fn register_standing_core_numbers(
-        &mut self, cx: &QueryCx, relation: RelationId, policy: GqlQueryPolicy,
+        &mut self,
+        cx: &QueryCx,
+        relation: RelationId,
+        policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
         let state = self.prepare_standing_core_numbers(cx, relation, policy)?;
         Ok(self.store_standing_query(StandingQuery::CoreNumbers(Box::new(state))))
     }
 
     pub(super) fn prepare_standing_core_numbers(
-        &self, cx: &QueryCx, relation: RelationId, policy: GqlQueryPolicy,
+        &self,
+        cx: &QueryCx,
+        relation: RelationId,
+        policy: GqlQueryPolicy,
     ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         cx.with_restriction(|| {
-            let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-            State::from_snapshot(&self.snapshot, relation, &mut meter).map_err(StandingQueryError::Maintenance)
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            State::from_snapshot(&self.snapshot, relation, &mut meter)
+                .map_err(StandingQueryError::Maintenance)
         })
     }
 
     /// Borrow canonical (vertex, core-number) rows from one current generation.
     /// ordered_rows() is None; rows() already uses canonical vertex order.
     pub fn standing_core_numbers<'a>(
-        &'a self, cx: &QueryCx, handle: &StandingQueryHandle,
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
     ) -> Result<StandingQueryView<'a, (VId, u64)>, StandingQueryError> {
         let StandingQuery::CoreNumbers(query) = self.admitted_standing_query(cx, handle)? else {
             return Err(StandingQueryError::Unsupported);
         };
-        Ok(StandingQueryView { rows: &query.rows, ordered: None,
-            frontier: query.frontier, stats: &query.stats })
+        Ok(StandingQueryView {
+            rows: &query.rows,
+            ordered: None,
+            frontier: query.frontier,
+            stats: &query.stats,
+        })
     }
 
     /// Read one current core number without scanning result rows. Some(0)
     /// names a live isolate; None names a non-live vertex. Unavailable/wrong-kind
     /// and foreign views refuse instead of being confused with either case.
     pub fn standing_core_number(
-        &self, cx: &QueryCx, handle: &StandingQueryHandle, vertex: VId,
+        &self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+        vertex: VId,
     ) -> Result<Option<u64>, StandingQueryError> {
         let StandingQuery::CoreNumbers(query) = self.admitted_standing_query(cx, handle)? else {
             return Err(StandingQueryError::Unsupported);
