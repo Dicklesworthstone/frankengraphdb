@@ -49,6 +49,61 @@ impl PreparedGraphAggregate {
         self.computed_input.as_deref()
     }
 
+    /// Admission for physical reducers that execute the optional row-local
+    /// input projection themselves. This is NOT delta-maintenance admission:
+    /// that public contract continues to reject transformed definitions.
+    /// The consumer must independently admit the complete graph input and its
+    /// accumulator family. A relational child cannot be replaced by its leaf,
+    /// and no result modifier may disappear merely because input is empty.
+    pub(crate) fn supports_row_local_aggregate_stream(&self) -> bool {
+        self.relational_input.is_none()
+            && self.having.is_empty()
+            && self.having_expression.is_none()
+            && self.output_projection.is_none()
+            && !self.output_distinct
+            && self.offset == 0
+            && self.count.is_none()
+            && self.ordering.is_empty()
+            && self.key_output.is_none()
+            && self.output_aggregates == self.aggregates.len()
+    }
+
+    /// Consume one complete admitted binding without retaining an input table.
+    /// All declared projection columns run in declaration order, including
+    /// unused columns, through the same scalar/type/payload evaluator as batch
+    /// aggregation. Group keys and arguments subsequently address this OUTPUT
+    /// schema, never the original graph projection's positions.
+    ///
+    /// Like evaluate_incremental_input, InputExpression.row is zero: this
+    /// invocation owns one local binding, not a sorted graph-wide row ordinal.
+    /// Source and expression failures are encountered in physical pull order,
+    /// unlike batch execution's source-materialization-then-projection order.
+    /// Control failures remain their original errors. Unprojected definitions
+    /// return their row directly with no extra copies or control events.
+    pub(crate) fn evaluate_streamed_input<E, C>(
+        &self,
+        input: GraphValueRow,
+        control: &mut impl FnMut(
+            GlaExecutionEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<GraphValueRow, GqlQueryError<GraphAggregateError<E>, C>> {
+        match &self.computed_input {
+            None => Ok(input),
+            Some(projection) => GraphSetProjection::evaluate_row_with_control(
+                &input,
+                projection,
+                control,
+                |column, error| {
+                    GqlQueryError::Source(GraphAggregateError::InputExpression {
+                        row: 0,
+                        column,
+                        error,
+                    })
+                },
+            ),
+        }
+    }
+
     /// Execute an identified source whose property expressions refer to vertices.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_governed_with_identified_properties<'a, E, C>(

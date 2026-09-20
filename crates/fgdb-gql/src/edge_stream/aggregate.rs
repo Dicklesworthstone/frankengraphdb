@@ -36,7 +36,13 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// and per aggregate. Group keys and extrema retain scalar, vertex, edge and
 /// path domains; there is no coercion or digest substituted for equality.
 ///
-/// Computed/relational input, output DISTINCT, HAVING, result ordering/pages
+/// Optional row-local computed columns execute once per complete match before
+/// grouping and argument DISTINCT, using the shared projection evaluator.
+/// Every declared column executes, even when no aggregate uses it. Constants
+/// preserve match multiplicity; null and lazy-branch semantics remain native.
+/// Only the current source/projected binding is transient, never an input bag.
+///
+/// Relational input, output DISTINCT, HAVING, result ordering/pages
 /// and COLLECT remain outside this physical profile. Every child operator and
 /// column is checked before opening the source; a failed plan is never retried
 /// as another source or an eager query. The ordinary row stream's identity
@@ -48,7 +54,7 @@ pub struct EdgeAggregatePlan {
 }
 impl EdgeAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, EdgeAggregateBuildError> {
-        if !aggregate.supports_incremental_maintenance()
+        if !aggregate.supports_row_local_aggregate_stream()
             || !aggregate.aggregates().iter().all(|spec| NumericState::supports(spec.function())) {
             return Err(EdgeAggregateBuildError::RequiresPlainGlobalAggregate);
         }
@@ -125,6 +131,12 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         let mut largest_key = 0_usize;
         while let Some(row) = self.input.advance().map_err(lift)? {
             let meter = &mut self.input.meter;
+            // The graph compiler still owns source matching/projection. This
+            // single-row transformation completes before any group is changed;
+            // a refusal discards accumulation and releases no partial summary.
+            let row = self.aggregate.evaluate_streamed_input(
+                row, &mut |event| meter.event(event).map_err(lift),
+            )?;
             let state = if global {
                 groups.get_mut(&Vec::<GraphValue>::new()).expect("global group installed")
             } else {
