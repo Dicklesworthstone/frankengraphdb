@@ -142,7 +142,11 @@ fn parameters_freeze_per_circuit_and_unsupported_final_pages_refuse_without_fall
         assert_ne!(db.standing_native_query(&cx, &a, policy()).unwrap().1,
             db.standing_native_query(&cx, &b, policy()).unwrap().1);
         let paged = format!("({}) ORDER BY p DESC LIMIT 0", query("UNION ALL"));
-        db.query(&cx, &paged, &GqlParameters::new(), symbols, policy()).unwrap();
+        let expected = db.query(&cx, &paged, &GqlParameters::new(), symbols, policy()).unwrap();
+        let window = db.register_standing_native(&cx, &paged, &GqlParameters::new(), symbols, policy()).unwrap();
+        assert_eq!(db.standing_native_query(&cx, &window, policy()).unwrap().1, expected);
+        // A bare relational limit still cannot erase inherited sequence order.
+        let paged = format!("({}) LIMIT 0", query("UNION ALL"));
         assert!(matches!(db.register_standing_native(&cx, &paged, &GqlParameters::new(), symbols, policy()),
             Err(StandingQueryError::Unsupported)));
         assert!(db.standing_native_query(&cx, &a, policy()).is_ok());

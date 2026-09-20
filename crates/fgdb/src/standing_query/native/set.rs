@@ -8,6 +8,7 @@ use fgdb_delta_types::zset::set::SetOperation;
 use fgdb_gql::{GraphSetOperation, GraphSetQuantifier, PreparedGraphSet};
 use fgdb_gql::row_projection::RowProjectionSpec;
 use fgdb_gql::row_join::RowJoinKind;
+use fgdb_gql::row_window::RowWindowSpec;
 
 struct Staging<'a, V: Vfs + Clone> {
     database: &'a mut Database<V>,
@@ -20,6 +21,27 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
     }
     fn append(&mut self, query: StandingQuery) -> usize {
         self.database.store_standing_query(query).index
+    }
+
+    // Only the terminal scope may introduce a ranked finite window. The
+    // ordinary recursive compiler still refuses nested wrapper order/pages,
+    // so it cannot replace inherited sequence semantics with a bag surrogate.
+    fn compile_root(
+        &mut self, cx: &QueryCx, query: &PreparedGraphSet, policy: GqlQueryPolicy,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+    ) -> Result<usize, StandingQueryError> {
+        checkpoint()?;
+        let Some((input, order, offset, count)) = query.incremental_ordered_window() else {
+            return self.compile(cx, query, policy, checkpoint);
+        };
+        let spec = RowWindowSpec::new(input.column_types().to_vec(), order.to_vec(),
+            GraphSetQuantifier::All, offset, count).map_err(StandingQueryError::WindowSchema)?;
+        let input = self.compile(cx, &input, policy, checkpoint)?;
+        let query = self.database.prepare_standing_window(cx, input, spec, policy,
+            self.database.standing_queries.len())?;
+        let index = self.append(StandingQuery::Window(Box::new(query)));
+        checkpoint()?;
+        Ok(index)
     }
     fn compile(
         &mut self, cx: &QueryCx, query: &PreparedGraphSet, policy: GqlQueryPolicy,
@@ -101,7 +123,7 @@ pub(super) fn register<V: Vfs + Clone>(
 ) -> Result<StandingQueryHandle, StandingQueryError> {
     let mut checkpoint = || cx.checkpoint().map_err(StandingQueryError::Interrupted);
     let mut staged = Staging::new(database);
-    let index = staged.compile(cx, query, policy, &mut checkpoint)?;
+    let index = staged.compile_root(cx, query, policy, &mut checkpoint)?;
     let layout = Arc::new(Layout::Circuit { columns: query.columns().to_vec(), first: staged.first });
     let handle = StandingQueryHandle { owner: Arc::clone(&staged.database.handle_owner), index,
         native: Some(layout) };
@@ -159,6 +181,13 @@ fn rebuild_checked<V: Vfs + Clone>(
                 StandingQuery::Projection(Box::new(staged.database.prepare_standing_projection(cx, input,
                     query.spec().clone(), policy, staged.database.standing_queries.len())?))
             }
+            StandingQuery::Window(query) => {
+                if query.input < first || query.input >= old { return Err(StandingQueryError::Unsupported); }
+                let input = staged.first.checked_add(query.input - first)
+                    .ok_or(StandingQueryError::Unsupported)?;
+                StandingQuery::Window(Box::new(staged.database.prepare_standing_window(cx, input,
+                    query.spec().clone(), policy, staged.database.standing_queries.len())?))
+            }
             _ => return Err(StandingQueryError::Unsupported),
         };
         staged.append(replacement);
@@ -179,6 +208,9 @@ fn rebuild_checked<V: Vfs + Clone>(
                     .ok_or(StandingQueryError::Unsupported)?;
             }
         } else if let StandingQuery::Projection(query) = query {
+            query.input = query.input.checked_sub(staged.first).and_then(|offset| first.checked_add(offset))
+                .ok_or(StandingQueryError::Unsupported)?;
+        } else if let StandingQuery::Window(query) = query {
             query.input = query.input.checked_sub(staged.first).and_then(|offset| first.checked_add(offset))
                 .ok_or(StandingQueryError::Unsupported)?;
         }
@@ -206,3 +238,6 @@ mod cross_tests;
 
 #[cfg(test)]
 mod unwind_tests;
+
+#[cfg(test)]
+mod window_tests;

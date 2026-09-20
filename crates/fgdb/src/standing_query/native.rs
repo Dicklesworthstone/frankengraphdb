@@ -43,10 +43,12 @@ impl PreparedNativeRead {
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
     /// Set registration owns a bounded row/set/join/projection tree; admission and
     /// maintenance policies apply PER NODE, not to their aggregate footprint.
-    /// Grouping and complete operand semantics are preserved. Relational outer
-    /// order/page stages currently refuse, including LIMIT 0.
-    /// Compound delivery is canonical bag order, not the snapshot executor's
-    /// implicit left-major enumeration. Input-local selection remains upstream.
+    /// Grouping and complete operand semantics are preserved. An explicit
+    /// terminal ORDER BY with finite LIMIT (including zero) uses a maintained
+    /// ranked window. Nested relational pages, bare LIMIT/OFFSET and unbounded
+    /// ORDER BY still refuse. Without a terminal window, compound delivery is
+    /// canonical bag order, not implicit left-major enumeration. Input-local
+    /// pattern selection remains upstream. Policies still apply per node.
     /// The normal rebuild API repairs the complete owned circuit atomically.
     pub fn register_standing<V: Vfs + Clone>(
         &self, database: &mut Database<V>, cx: &QueryCx, params: &GqlParameters,
@@ -120,9 +122,11 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// Read through standing_native_query/standing_native_columns. The one
     /// returned handle owns an atomically admitted circuit and rebuilds it as a
-    /// unit. Delivery uses canonical bag order, not implicit left-major snapshot
-    /// enumeration. Each node keeps its own allowance. Unsupported descendants
-    /// and wrapper order/pages refuse; no eager per-commit fallback is used.
+    /// unit. Explicit terminal ORDER BY with finite LIMIT is ranked; otherwise
+    /// delivery uses canonical bag order, not implicit left-major enumeration.
+    /// Each node keeps its own allowance. Unsupported descendants, nested
+    /// relational pages, bare LIMIT/OFFSET and unbounded ORDER BY refuse; no
+    /// eager per-commit fallback is used, including for a zero terminal limit.
     /// Session-local and in-memory, not a durable subscription or spill engine.
     pub fn register_standing_relation(
         &mut self, cx: &QueryCx, query: &fgdb_gql::PreparedGraphSet, policy: GqlQueryPolicy,
@@ -159,7 +163,19 @@ impl<V: Vfs + Clone> Database<V> {
         cx.with_restriction(|| {
             let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
             let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-            let (at, rows) = match layout {
+            let root = self.admitted_standing_query(cx, handle)?;
+            let (at, rows) = if let StandingQuery::Window(query) = root {
+                let rows = collect_runs(query.ordered().map(|(row, count)| (row, Some(count))),
+                    layout.columns().len(), &mut meter, |row, meter| {
+                        let mut cells = Vec::new();
+                        for value in row.values() {
+                            reserve_value(value, meter)?;
+                            cells.push(QueryValue::Value(value.clone()));
+                        }
+                        Ok(cells)
+                    }).map_err(StandingQueryError::Delivery)?;
+                (query.frontier, rows)
+            } else { match layout {
                 Layout::Rows { .. } | Layout::Circuit { .. } => {
                     let mut view = match self.admitted_standing_query(cx, handle)? {
                         StandingQuery::Rows { .. } => self.standing_rows(cx, handle)?,
@@ -209,7 +225,7 @@ impl<V: Vfs + Clone> Database<V> {
                     }).map_err(StandingQueryError::Delivery)?;
                     (view.frontier(), rows)
                 }
-            };
+            }};
             let mut columns = Vec::new();
             for name in layout.columns() {
                 meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Delivery)?;
@@ -232,11 +248,33 @@ fn reserve_value(value: &fgdb_gql::algebra::GraphValue, meter: &mut Meter<'_>)
 
 fn collect<Row: Ord>(
     view: &StandingQueryView<'_, Row>, width: usize, meter: &mut Meter<'_>,
+    project: impl FnMut(&Row, &mut Meter<'_>) -> Result<Vec<QueryValue>, StandingQueryFailure>,
+) -> Result<Vec<Vec<QueryValue>>, StandingQueryFailure> {
+    if let Some(ordered) = view.ordered_rows() {
+        collect_runs(ordered.map(|row| (row, None)), width, meter, project)
+    } else {
+        collect_runs(view.rows().iter().map(|(row, weight)| (row, Some(weight))),
+            width, meter, project)
+    }
+}
+
+// Ordered unit occurrences, canonical bags and compressed ranked runs share
+// exactly one delivery allowance. Expansion happens only here, after checking
+// the next complete run against the caller's cumulative result-row limit.
+fn collect_runs<'a, Row: Ord + 'a>(
+    runs: impl IntoIterator<Item = (&'a Row, Option<&'a ZWeight>)>,
+    width: usize, meter: &mut Meter<'_>,
     mut project: impl FnMut(&Row, &mut Meter<'_>) -> Result<Vec<QueryValue>, StandingQueryFailure>,
 ) -> Result<Vec<Vec<QueryValue>>, StandingQueryFailure> {
     let mut rows = Vec::new();
     let mut delivered = 0_u64;
-    let mut append = |row: &Row, count: u64, meter: &mut Meter<'_>| {
+    for (row, weight) in runs {
+        let count = if let Some(weight) = weight {
+            meter.charge(ZSetEvent::Work)?;
+            if weight <= &ZWeight::ZERO { return Err(StandingQueryFailure::InvalidDelta); }
+            weight.to_i128().and_then(|n| u64::try_from(n).ok())
+                .ok_or(StandingQueryFailure::ResultBudget)?
+        } else { 1 };
         let final_count = delivered.checked_add(count).ok_or(StandingQueryFailure::ResultBudget)?;
         if meter.policy.rows.max_result_rows().is_some_and(|limit| final_count > limit)
             || usize::try_from(final_count).is_err() {
@@ -250,18 +288,6 @@ fn collect<Row: Ord>(
             rows.push(cells);
         }
         delivered = final_count;
-        Ok(())
-    };
-    if let Some(ordered) = view.ordered_rows() {
-        for row in ordered { append(row, 1, meter)?; }
-    } else {
-        for (row, weight) in view.rows().iter() {
-            meter.charge(ZSetEvent::Work)?;
-            if weight <= &ZWeight::ZERO { return Err(StandingQueryFailure::InvalidDelta); }
-            let count = weight.to_i128().and_then(|n| u64::try_from(n).ok())
-                .ok_or(StandingQueryFailure::ResultBudget)?;
-            append(row, count, meter)?;
-        }
     }
     (meter.checkpoint)()?;
     Ok(rows)

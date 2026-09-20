@@ -8,6 +8,27 @@ impl PreparedGraphSet {
         self.order.is_empty() && self.offset == 0 && self.count.is_none()
     }
 
+    /// Split an explicitly ordered finite terminal window from its complete
+    /// input definition. Only this node's order/page metadata is removed from
+    /// the cloned input; child scopes, projections, filters and quantifiers
+    /// are untouched. The caller must admit that input independently, even for
+    /// LIMIT 0. This accessor does not promise derivatives for descendants.
+    ///
+    /// Bare LIMIT/OFFSET is deliberately not recognized: its input may inherit
+    /// a child order or a left-major product enumeration. Replacing that order
+    /// with canonical bag order could select different rows. ORDER BY without
+    /// a finite LIMIT is also outside this bounded window specialization.
+    pub fn incremental_ordered_window(&self)
+        -> Option<(Self, &[GraphValueOrder], u64, u64)> {
+        let count = self.count?;
+        if self.order.is_empty() { return None; }
+        let mut input = self.clone();
+        input.order.clear();
+        input.offset = 0;
+        input.count = None;
+        Some((input, &self.order, self.offset, count))
+    }
+
     /// Borrow a complete bound pattern leaf without erasing a relational page
     /// or order wrapped around it. The pattern's OWN DISTINCT/order/page remain
     /// part of the returned definition. A set wrapper canonicalizes those
@@ -187,4 +208,25 @@ mod tests {
         assert!(leaf.incremental_unwind().is_none());
     }
 
+
+    #[test]
+    fn terminal_window_split_preserves_every_child_scope_and_requires_explicit_order() {
+        let leaf = PreparedGraphSet::from(pattern());
+        let input = leaf.clone().combine(GraphSetOperation::Union, GraphSetQuantifier::All,
+            leaf.clone().with_page(1, Some(2))).unwrap().nested().unwrap();
+        let order = [GraphValueOrder::descending(0)];
+        for count in [0, 1, u64::MAX] {
+            let query = input.clone().with_order_by(&order).unwrap().with_page(3, Some(count));
+            let frozen = query.canonical_bytes();
+            let (child, keys, skip, take) = query.incremental_ordered_window().unwrap();
+            assert_eq!(child.canonical_bytes(), input.canonical_bytes());
+            assert_eq!(keys, order);
+            assert_eq!((skip, take), (3, count));
+            assert_eq!(query.canonical_bytes(), frozen);
+            assert!(child.incremental_ordered_window().is_none());
+        }
+        assert!(input.clone().with_page(0, Some(0)).incremental_ordered_window().is_none());
+        assert!(input.clone().with_page(1, None).incremental_ordered_window().is_none());
+        assert!(input.with_order_by(&order).unwrap().incremental_ordered_window().is_none());
+    }
 }
