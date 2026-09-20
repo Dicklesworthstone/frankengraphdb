@@ -19,6 +19,8 @@ use fgdb_gql::stream::{
 use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy, PreparedGqlQuery};
 use fgdb_types::{CommitSeq, EId, QueryCx, VId};
 
+mod global_aggregate;
+
 type Cancel = Box<asupersync::error::Error>;
 type StreamError = GqlQueryError<VertexScanError<ReadError>, Cancel>;
 
