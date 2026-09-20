@@ -10,6 +10,7 @@ mod joins;
 mod kcore;
 mod native;
 mod output;
+mod projection;
 mod recursive;
 mod sets;
 mod triangles;
@@ -83,6 +84,7 @@ pub enum StandingQueryError {
     Unsupported,
     SetSchema(fgdb_gql::GraphSetBuildError),
     JoinSchema(fgdb_gql::row_join::RowJoinBuildError),
+    ProjectionSchema(fgdb_gql::row_projection::RowProjectionBuildError),
     NativePrepare(Box<crate::QueryError>),
     NativeClassUnsupported { facade: crate::NativeReadClass },
     /// Reading a healthy maintained result exceeded the caller's delivery
@@ -106,6 +108,7 @@ impl core::fmt::Display for StandingQueryError {
             }
             Self::SetSchema(error) => error.fmt(f),
             Self::JoinSchema(error) => error.fmt(f),
+            Self::ProjectionSchema(error) => error.fmt(f),
             Self::NativePrepare(error) => error.fmt(f),
             Self::NativeClassUnsupported { facade } => {
                 write!(f, "native {facade:?} has no supported standing-query registration")
@@ -128,6 +131,7 @@ impl core::error::Error for StandingQueryError {
         match self {
             Self::NativePrepare(error) => Some(error.as_ref()),
             Self::SetSchema(error) => Some(error),
+            Self::ProjectionSchema(error) => Some(error),
             Self::JoinSchema(error) => Some(error),
             Self::Read(error) => Some(error),
             Self::Interrupted(error) => Some(error.as_ref()),
@@ -191,6 +195,7 @@ pub(crate) enum StandingQuery {
     /// is a topological order without a second scheduler or recursive walk.
     Set(Box<sets::State>),
     Join(Box<joins::State>),
+    Projection(Box<projection::State>),
 }
 
 impl StandingQuery {
@@ -206,6 +211,7 @@ impl StandingQuery {
             Self::CoreNumbers(query) => (query.policy, query.frontier, query.failure),
             Self::Set(query) => (query.policy, query.frontier, query.failure),
             Self::Join(query) => (query.policy, query.frontier, query.failure),
+            Self::Projection(query) => (query.policy, query.frontier, query.failure),
         }
     }
 
@@ -236,6 +242,9 @@ impl StandingQuery {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
             Self::Join(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
+            Self::Projection(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
         };
@@ -471,6 +480,9 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Join(query) => StandingQuery::Join(Box::new(
                 self.prepare_standing_join(cx, query.inputs, query.spec().keys(), query.spec().kind(), policy, handle.index)?,
             )),
+            StandingQuery::Projection(query) => StandingQuery::Projection(Box::new(
+                self.prepare_standing_projection(cx, query.input, query.spec().clone(), policy, handle.index)?,
+            )),
         };
         let frontier = replacement.status().1;
         // No source mutation, await or fallible work between preparation and swap.
@@ -521,7 +533,7 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Reachability(_) | StandingQuery::Rows { .. }
             | StandingQuery::Triangles(_) | StandingQuery::Components(_)
             | StandingQuery::CoreNumbers(_) | StandingQuery::Set(_)
-            | StandingQuery::Join(_) => return Err(StandingQueryError::Unsupported),
+            | StandingQuery::Join(_) | StandingQuery::Projection(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
             rows,
@@ -600,6 +612,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::CoreNumbers(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Set(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Join(query) => query.maintain(batch, prior, &mut meter),
+            StandingQuery::Projection(query) => query.maintain(batch, prior, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);
     }

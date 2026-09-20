@@ -6,6 +6,7 @@
 use super::*;
 use fgdb_delta_types::zset::set::SetOperation;
 use fgdb_gql::{GraphSetOperation, GraphSetQuantifier, PreparedGraphSet};
+use fgdb_gql::row_projection::RowProjectionSpec;
 
 struct Staging<'a, V: Vfs + Clone> {
     database: &'a mut Database<V>,
@@ -29,6 +30,13 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             self.append(query)
         } else if let Some(input) = query.incremental_scope() {
             return self.compile(cx, input, policy, checkpoint);
+        } else if let Some((input, projection, quantifier)) = query.incremental_projection() {
+            let spec = RowProjectionSpec::new(input.column_types().to_vec(), projection.to_vec(), quantifier)
+                .map_err(StandingQueryError::ProjectionSchema)?;
+            let input = self.compile(cx, input, policy, checkpoint)?;
+            let query = self.database.prepare_standing_projection(cx, input, spec,
+                policy, self.database.standing_queries.len())?;
+            self.append(StandingQuery::Projection(Box::new(query)))
         } else if let Some((operation, quantifier, left, right)) = query.incremental_binary() {
             let left = self.compile(cx, left, policy, checkpoint)?;
             let right = self.compile(cx, right, policy, checkpoint)?;
@@ -79,7 +87,7 @@ pub(super) fn register<V: Vfs + Clone>(
 /// Called only after ordinary owner/health admission. One native handle owns a
 /// contiguous, topologically ordered circuit. Original definitions are used;
 /// no text, parameters, resolver or hidden handle is needed to repair it.
-/// Per-node preparation uses the ordinary source and set engines/budgets.
+/// Per-node preparation uses the ordinary source, set and projection engines.
 pub(in crate::standing_query) fn rebuild<V: Vfs + Clone>(
     database: &mut Database<V>, cx: &QueryCx, first: usize, root: usize, policy: GqlQueryPolicy,
 ) -> Result<CommitSeq, StandingQueryError> {
@@ -109,6 +117,13 @@ fn rebuild_checked<V: Vfs + Clone>(
                 StandingQuery::Set(Box::new(staged.database.prepare_standing_set(cx, inputs,
                     query.operation(), policy, staged.database.standing_queries.len())?))
             }
+            StandingQuery::Projection(query) => {
+                if query.input < first || query.input >= old { return Err(StandingQueryError::Unsupported); }
+                let input = staged.first.checked_add(query.input - first)
+                    .ok_or(StandingQueryError::Unsupported)?;
+                StandingQuery::Projection(Box::new(staged.database.prepare_standing_projection(cx, input,
+                    query.spec().clone(), policy, staged.database.standing_queries.len())?))
+            }
             _ => return Err(StandingQueryError::Unsupported),
         };
         staged.append(replacement);
@@ -123,6 +138,9 @@ fn rebuild_checked<V: Vfs + Clone>(
                 *input = input.checked_sub(staged.first).and_then(|offset| first.checked_add(offset))
                     .ok_or(StandingQueryError::Unsupported)?;
             }
+        } else if let StandingQuery::Projection(query) = query {
+            query.input = query.input.checked_sub(staged.first).and_then(|offset| first.checked_add(offset))
+                .ok_or(StandingQueryError::Unsupported)?;
         }
     }
     checkpoint()?;
@@ -136,3 +154,6 @@ fn rebuild_checked<V: Vfs + Clone>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod projection_tests;

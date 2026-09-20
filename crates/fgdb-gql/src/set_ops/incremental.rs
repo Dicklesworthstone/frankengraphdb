@@ -32,9 +32,23 @@ impl PreparedGraphSet {
         }
     }
 
+    /// Borrow a checked computed projection without dropping its quantifier or
+    /// the child's complete semantics. Wrapper ordering and every finite page
+    /// refuse, including LIMIT 0. The host must still admit the child and the
+    /// expression schema; this accessor never evaluates a row.
+    pub fn incremental_projection(&self)
+        -> Option<(&Self, &[GraphSetProjection], GraphSetQuantifier)> {
+        if !self.unadorned_incremental_node() { return None; }
+        match &self.node {
+            SetNode::Project { input, projection, quantifier } =>
+                Some((input, projection, *quantifier)),
+            _ => None,
+        }
+    }
+
     /// Transparent grouping only. A scope carrying a relational order/page
-    /// cannot be peeled away. Projections, filters, UNWIND, singleton values and
-    /// cross joins have no structural fallback through these accessors.
+    /// cannot be peeled away. A projection has its own exact accessor; filters,
+    /// UNWIND, singleton values and cross joins have no transparent fallback.
     pub fn incremental_scope(&self) -> Option<&Self> {
         if !self.unadorned_incremental_node() { return None; }
         match &self.node { SetNode::Scope(input) => Some(input), _ => None }
@@ -93,5 +107,28 @@ mod tests {
         let mut projected = leaf;
         projected.node = SetNode::Project { input: child, projection: vec![], quantifier: GraphSetQuantifier::All };
         unavailable(&projected);
+    }
+
+    #[test]
+    fn projection_accessor_preserves_child_expressions_and_quantifier_but_not_wrapper_pages() {
+        let leaf = PreparedGraphSet::from(pattern());
+        for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
+            let projection = vec![GraphSetProjection::new("renamed", GraphSetValue::Column(0))];
+            let projected = leaf.clone().project(projection.clone(), quantifier).unwrap();
+            let (child, expressions, observed) = projected.incremental_projection().unwrap();
+            assert_eq!(child.canonical_bytes(), leaf.canonical_bytes());
+            assert_eq!(expressions, projection);
+            assert_eq!(observed, quantifier);
+            assert_eq!(projected.columns(), &["renamed"]);
+            unavailable(&projected); // Not an unprojected leaf/binary/scope.
+            for (offset, count) in [(1, None), (0, Some(0)), (0, Some(2))] {
+                assert!(projected.clone().with_page(offset, count).incremental_projection().is_none());
+            }
+            let ordered = projected.with_order_by(&[GraphValueOrder {
+                column: 0, descending: true, nulls_first: false,
+            }]).unwrap();
+            assert!(ordered.incremental_projection().is_none());
+        }
+        assert!(leaf.incremental_projection().is_none());
     }
 }

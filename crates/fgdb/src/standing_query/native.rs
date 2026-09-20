@@ -37,14 +37,14 @@ impl PreparedNativeRead {
     /// cannot change an accepted definition. Handles remain session-local.
     ///
     /// Ordinary patterns, aggregates, WITH-aggregate pipelines and unadorned
-    /// binary set circuits are admitted
+    /// binary set circuits with computed projections are admitted
     /// only where the existing standing engines support their bound operators.
     /// Historical selectors refuse: a fixed historical answer is not a current
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
-    /// Set registration owns a bounded tree of row/set nodes; admission and
+    /// Set registration owns a bounded tree of row/set/projection nodes; admission and
     /// maintenance policies apply PER NODE, not to their aggregate footprint.
     /// Grouping and complete operand semantics are preserved. Relational outer
-    /// order/page/projection/filter stages currently refuse, including LIMIT 0.
+    /// order/page/filter stages currently refuse, including LIMIT 0.
     /// The normal rebuild API repairs the complete owned circuit atomically.
     pub fn register_standing<V: Vfs + Clone>(
         &self, database: &mut Database<V>, cx: &QueryCx, params: &GqlParameters,
@@ -142,6 +142,7 @@ impl<V: Vfs + Clone> Database<V> {
                     let mut view = match self.admitted_standing_query(cx, handle)? {
                         StandingQuery::Rows { .. } => self.standing_rows(cx, handle)?,
                         StandingQuery::Set(_) => self.standing_set(cx, handle)?,
+                        StandingQuery::Projection(_) => self.standing_projection(cx, handle)?,
                         _ => return Err(StandingQueryError::Unsupported),
                     };
                     if matches!(layout, Layout::Circuit { .. }) {
