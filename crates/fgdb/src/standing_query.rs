@@ -16,6 +16,7 @@ mod recursive;
 mod reduction;
 mod sets;
 mod triangles;
+mod window;
 // Reuse the concurrently introduced row-output file as one registry sink.
 #[path = "standing_query/output/values.rs"]
 mod row;
@@ -89,6 +90,7 @@ pub enum StandingQueryError {
     ProjectionSchema(fgdb_gql::row_projection::RowProjectionBuildError),
     FilterSchema(fgdb_gql::row_filter::RowFilterBuildError),
     ReductionSchema(fgdb_gql::row_aggregate::RowAggregateBuildError),
+    WindowSchema(fgdb_gql::row_window::RowWindowBuildError),
     NativePrepare(Box<crate::QueryError>),
     NativeClassUnsupported { facade: crate::NativeReadClass },
     /// Reading a healthy maintained result exceeded the caller's delivery
@@ -115,6 +117,7 @@ impl core::fmt::Display for StandingQueryError {
             Self::ProjectionSchema(error) => error.fmt(f),
             Self::FilterSchema(error) => error.fmt(f),
             Self::ReductionSchema(error) => error.fmt(f),
+            Self::WindowSchema(error) => error.fmt(f),
             Self::NativePrepare(error) => error.fmt(f),
             Self::NativeClassUnsupported { facade } => {
                 write!(f, "native {facade:?} has no supported standing-query registration")
@@ -140,6 +143,7 @@ impl core::error::Error for StandingQueryError {
             Self::ProjectionSchema(error) => Some(error),
             Self::FilterSchema(error) => Some(error),
             Self::ReductionSchema(error) => Some(error),
+            Self::WindowSchema(error) => Some(error),
             Self::JoinSchema(error) => Some(error),
             Self::Read(error) => Some(error),
             Self::Interrupted(error) => Some(error.as_ref()),
@@ -206,6 +210,7 @@ pub(crate) enum StandingQuery {
     Projection(Box<projection::State>),
     Filter(Box<filter::State>),
     Reduction(Box<reduction::State>),
+    Window(Box<window::State>),
 }
 
 impl StandingQuery {
@@ -224,6 +229,7 @@ impl StandingQuery {
             Self::Projection(query) => (query.policy, query.frontier, query.failure),
             Self::Filter(query) => (query.policy, query.frontier, query.failure),
             Self::Reduction(query) => (query.policy, query.frontier, query.failure),
+            Self::Window(query) => (query.policy, query.frontier, query.failure),
         }
     }
 
@@ -263,6 +269,9 @@ impl StandingQuery {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
             Self::Reduction(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
+            Self::Window(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
         };
@@ -508,6 +517,9 @@ impl<V: Vfs + Clone> Database<V> {
                 self.prepare_standing_reduction(cx, query.input, query.spec().key_columns(),
                     query.spec().value_column(), policy, handle.index)?,
             )),
+            StandingQuery::Window(query) => StandingQuery::Window(Box::new(
+                self.prepare_standing_window(cx, query.input, query.spec().clone(), policy, handle.index)?,
+            )),
         };
         let frontier = replacement.status().1;
         // No source mutation, await or fallible work between preparation and swap.
@@ -560,7 +572,7 @@ impl<V: Vfs + Clone> Database<V> {
             | StandingQuery::CoreNumbers(_) | StandingQuery::Set(_)
             | StandingQuery::Join(_) | StandingQuery::Projection(_)
             | StandingQuery::Filter(_)
-            | StandingQuery::Reduction(_) => return Err(StandingQueryError::Unsupported),
+            | StandingQuery::Reduction(_) | StandingQuery::Window(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
             rows,
@@ -642,6 +654,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Projection(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Filter(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Reduction(query) => query.maintain(batch, prior, &mut meter),
+            StandingQuery::Window(query) => query.maintain(batch, prior, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);
     }
