@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::edge_stream::{
-    EdgeExpansionSourceError, EdgeScanError, EdgeScanRow, EdgeScanSource,
-    EdgeScanSourceError, Probe,
+    EdgeExpansionSourceError, EdgeScanError, EdgeScanRow, EdgeScanSource, EdgeScanSourceError,
+    Probe,
 };
 
 pub(super) fn accepts<S: VertexScanSource, C>(
@@ -15,13 +15,17 @@ pub(super) fn accepts<S: VertexScanSource, C>(
     control: &mut impl FnMut(VertexScanEvent) -> ScanResult<(), S::Error, C>,
     record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
 ) -> ScanResult<bool, S::Error, C> {
-    probe.accepts(
-        &[Some(vid)],
-        &Lookup(source),
-        &mut |event| control(vertex_event(event))
-            .map_err(|error| error.map_source(EdgeScanError::Source)),
-        &mut || record().map_err(|error| error.map_source(EdgeScanError::Source)),
-    ).map_err(|error| error.map_source(unpack))
+    probe
+        .accepts(
+            &[Some(vid)],
+            &Lookup(source),
+            &mut |event| {
+                control(vertex_event(event))
+                    .map_err(|error| error.map_source(EdgeScanError::Source))
+            },
+            &mut || record().map_err(|error| error.map_source(EdgeScanError::Source)),
+        )
+        .map_err(|error| error.map_source(unpack))
 }
 
 fn vertex_event(event: GlaExecutionEvent) -> VertexScanEvent {
@@ -37,11 +41,13 @@ fn edge_event(event: VertexScanEvent) -> GlaExecutionEvent {
     }
 }
 
-fn source_error<E, C>(error: VertexScanSourceError<E, C>)
-    -> EdgeScanSourceError<VertexScanError<E>, C>
-{
+fn source_error<E, C>(
+    error: VertexScanSourceError<E, C>,
+) -> EdgeScanSourceError<VertexScanError<E>, C> {
     match error {
-        VertexScanSourceError::Source(error) => EdgeScanSourceError::Source(VertexScanError::Source(error)),
+        VertexScanSourceError::Source(error) => {
+            EdgeScanSourceError::Source(VertexScanError::Source(error))
+        }
         VertexScanSourceError::Control(error) => EdgeScanSourceError::Control(error),
     }
 }
@@ -53,7 +59,9 @@ struct Lookup<'a, S>(&'a S);
 impl<S: VertexScanSource> EdgeScanSource for Lookup<'_, S> {
     type Error = VertexScanError<S::Error>;
 
-    fn snapshot_seq(&self) -> CommitSeq { self.0.snapshot_seq() }
+    fn snapshot_seq(&self) -> CommitSeq {
+        self.0.snapshot_seq()
+    }
 
     fn next_edge<C>(
         &mut self,
@@ -65,40 +73,58 @@ impl<S: VertexScanSource> EdgeScanSource for Lookup<'_, S> {
     }
 
     fn next_probe_vertex<C>(
-        &self, after: Option<VId>,
+        &self,
+        after: Option<VId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, EdgeExpansionSourceError<Self::Error, C>> {
-        self.0.next_probe_vertex(after, control).map_err(|error| match error {
-            EdgeExpansionSourceError::Unavailable => EdgeExpansionSourceError::Unavailable,
-            EdgeExpansionSourceError::Read(error) => EdgeExpansionSourceError::Read(source_error(error)),
-        })
+        self.0
+            .next_probe_vertex(after, control)
+            .map_err(|error| match error {
+                EdgeExpansionSourceError::Unavailable => EdgeExpansionSourceError::Unavailable,
+                EdgeExpansionSourceError::Read(error) => {
+                    EdgeExpansionSourceError::Read(source_error(error))
+                }
+            })
     }
 
     fn edge<'a, C>(
-        &'a self, eid: EId,
+        &'a self,
+        eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
-        self.0.probe_edge(eid, control).map_err(|error| match error {
-            EdgeExpansionSourceError::Unavailable => EdgeScanSourceError::Source(unavailable()),
-            EdgeExpansionSourceError::Read(error) => source_error(error),
-        })
+        self.0
+            .probe_edge(eid, control)
+            .map_err(|error| match error {
+                EdgeExpansionSourceError::Unavailable => EdgeScanSourceError::Source(unavailable()),
+                EdgeExpansionSourceError::Read(error) => source_error(error),
+            })
     }
 
     fn vertex<'a, C>(
-        &'a self, vid: VId,
+        &'a self,
+        vid: VId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<Self::Error, C>> {
-        self.0.vertex(vid, &mut |event| control(edge_event(event))).map_err(source_error)
+        self.0
+            .vertex(vid, &mut |event| control(edge_event(event)))
+            .map_err(source_error)
     }
 
     fn next_incident_edge<C>(
-        &self, endpoint: VId, direction: crate::algebra::GlaDirection, after: Option<EId>,
+        &self,
+        endpoint: VId,
+        direction: crate::algebra::GlaDirection,
+        after: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
-        self.0.next_probe_edge(endpoint, direction, after, control).map_err(|error| match error {
-            EdgeExpansionSourceError::Unavailable => EdgeExpansionSourceError::Unavailable,
-            EdgeExpansionSourceError::Read(error) => EdgeExpansionSourceError::Read(source_error(error)),
-        })
+        self.0
+            .next_probe_edge(endpoint, direction, after, control)
+            .map_err(|error| match error {
+                EdgeExpansionSourceError::Unavailable => EdgeExpansionSourceError::Unavailable,
+                EdgeExpansionSourceError::Read(error) => {
+                    EdgeExpansionSourceError::Read(source_error(error))
+                }
+            })
     }
 }
 

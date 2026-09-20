@@ -548,10 +548,16 @@ mod tests {
         let text = "MATCH (a)-[:R]->(b)-[:S]->(c)-[:U]->(hidden)-[:T]->(a) RETURN a,b,c,COUNT(*) AS n GROUP BY a,b,c";
         let query = PreparedGraphAggregateText::prepare(text, |kind, name| match kind {
             GraphSymbolKind::Relation => Some(GraphSymbol::Relation(RelationId(match name {
-                "R" => 1, "S" => 2, "T" => 3, _ => 4,
+                "R" => 1,
+                "S" => 2,
+                "T" => 3,
+                _ => 4,
             }))),
             _ => None,
-        }).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        })
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
         let n = 1024_u128;
         let mut edges = Vec::new();
         for i in 0..n {
@@ -565,12 +571,24 @@ mod tests {
         // Removing hidden creates a weighted closing factor, not an independent
         // marginal. The residual three-variable join must still intersect all
         // constraints instead of generating a million rejected wedges.
-        let result = query.execute_governed(edges.len() as u64, (0..=3 * n).map(VId), edges,
-            |_, _| Ok::<_, ()>(true), |_, _| Ok(None),
-            GqlQueryPolicy::new(5 * n as u64, n as u64, 1_000_000, 300_000),
-            || Ok::<_, ()>(())).unwrap();
+        let result = query
+            .execute_governed(
+                edges.len() as u64,
+                (0..=3 * n).map(VId),
+                edges,
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                GqlQueryPolicy::new(5 * n as u64, n as u64, 1_000_000, 300_000),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
         assert_eq!(result.value.len(), n as usize);
-        assert!(result.value.iter().all(|row| row.get(0).unwrap().as_count() == Some(2)));
+        assert!(
+            result
+                .value
+                .iter()
+                .all(|row| row.get(0).unwrap().as_count() == Some(2))
+        );
         assert!(result.evaluator.work_units < n as u64 * n as u64);
     }
 

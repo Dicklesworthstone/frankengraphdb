@@ -502,21 +502,34 @@ impl GlaPlan {
 impl<Row> GlaPlan<Row> {
     // This stays private to the algebra compiler and its child modules. Row and
     // terminal operator shape must be chosen together, not supplied by callers.
-    fn from_operators(mut operators: Vec<GlaOperator>) -> Self {
+    pub(crate) fn from_operators(mut operators: Vec<GlaOperator>) -> Self {
         // WALK and independent scans need the complete vertex domain, not just
         // requested edge endpoints. Normalize an edge root onto the existing
         // two-table admission path so isolates, intermediate values, snapshot
         // budgets and transaction scan observations all share the same source.
         // Expanding the root adds no binding slot: ScanEdges already bound two.
-        if operators.iter().any(|op| {
-            matches!(
-                op,
+        let mut probe_depth = 0usize;
+        let mut normalize = false;
+        for op in &operators {
+            match op {
+                GlaOperator::Probe { .. } => probe_depth += 1,
+                GlaOperator::ProbeEnd { .. } => {
+                    probe_depth = probe_depth.saturating_sub(1);
+                }
                 GlaOperator::VarLengthExpand { .. } | GlaOperator::ScanVertices
-            )
-        }) && let Some(GlaOperator::ScanEdges {
-            relation,
-            direction,
-        }) = operators.first().cloned()
+                    if probe_depth == 0 =>
+                {
+                    normalize = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if normalize
+            && let Some(GlaOperator::ScanEdges {
+                relation,
+                direction,
+            }) = operators.first().cloned()
         {
             operators[0] = GlaOperator::ScanVertices;
             operators.insert(

@@ -50,7 +50,7 @@ impl<Row> core::fmt::Debug for GqlQueryExecution<Row> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum GqlQueryError<E, C> {
     Source(E),
     Rows(GqlBudgetExceeded),

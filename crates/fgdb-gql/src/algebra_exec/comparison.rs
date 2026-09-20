@@ -220,11 +220,7 @@ mod tests {
 
     #[test]
     fn null_element_bindings_reject_without_reading_either_operand() {
-        for bindings in [
-            [Some(VId(1)), None],
-            [None, Some(VId(2))],
-            [None, None],
-        ] {
+        for bindings in [[Some(VId(1)), None], [None, Some(VId(2))], [None, None]] {
             let result = compare_element_properties(
                 &comparison(),
                 &bindings,

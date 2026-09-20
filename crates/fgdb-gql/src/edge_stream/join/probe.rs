@@ -5,18 +5,25 @@
 //! retain governed endpoint support and mode-aware traversal state only.
 
 use super::*;
-use crate::algebra::GraphWalkSearch;
 use crate::GraphWalkBounds;
+use crate::algebra::GraphWalkSearch;
 use std::collections::BTreeMap;
 
 mod walk;
 
 #[derive(Clone, Copy)]
 enum Binding {
-    Copy { source: usize, nullable: bool },
+    Copy {
+        source: usize,
+        nullable: bool,
+    },
     Expand(Expansion),
     Scan,
-    Walk { expansion: Expansion, bounds: GraphWalkBounds, search: GraphWalkSearch },
+    Walk {
+        expansion: Expansion,
+        bounds: GraphWalkBounds,
+        search: GraphWalkSearch,
+    },
 }
 
 // A local scan owns its position, never the outer cursor's mutable position.
@@ -60,18 +67,30 @@ impl Probe {
     /// only endpoint support matters. Nested/optional scopes still refuse,
     /// including at LIMIT zero. Local scans keep their own ordered positions.
     pub(crate) fn compile(
-        ops: &[GlaOperator], start: usize, outer_width: usize,
+        ops: &[GlaOperator],
+        start: usize,
+        outer_width: usize,
     ) -> Result<(Self, usize), EdgeScanBuildError> {
         let GlaOperator::Probe { group, end, anti } = &ops[start] else {
             return Err(EdgeScanBuildError { operator: start });
         };
         let end = *end as usize;
-        if end <= start + 1 || !matches!(ops.get(end), Some(GlaOperator::ProbeEnd { group: close }) if close == group) {
+        if end <= start + 1
+            || !matches!(ops.get(end), Some(GlaOperator::ProbeEnd { group: close }) if close == group)
+        {
             return Err(EdgeScanBuildError { operator: start });
         }
-        if !matches!(ops.get(start + 1), Some(GlaOperator::ScanVertices
-            | GlaOperator::BindVertex { .. } | GlaOperator::BindOuterVertex { .. })) {
-            return Err(EdgeScanBuildError { operator: start + 1 });
+        if !matches!(
+            ops.get(start + 1),
+            Some(
+                GlaOperator::ScanVertices
+                    | GlaOperator::BindVertex { .. }
+                    | GlaOperator::BindOuterVertex { .. }
+            )
+        ) {
+            return Err(EdgeScanBuildError {
+                operator: start + 1,
+            });
         }
         let mut steps: Vec<Step> = Vec::new();
         let mut width = outer_width;
@@ -81,54 +100,101 @@ impl Probe {
             let binding = match op {
                 GlaOperator::ScanVertices => Some(Binding::Scan),
                 GlaOperator::BindVertex { source } | GlaOperator::BindOuterVertex { source }
-                    if (source.ordinal() as usize) < outer_width => {
-                    Some(Binding::Copy { source: source.ordinal() as usize,
-                        nullable: matches!(op, GlaOperator::BindOuterVertex { .. }) })
+                    if (source.ordinal() as usize) < outer_width =>
+                {
+                    Some(Binding::Copy {
+                        source: source.ordinal() as usize,
+                        nullable: matches!(op, GlaOperator::BindOuterVertex { .. }),
+                    })
                 }
-                GlaOperator::Expand { source, relation, direction }
-                    if (source.ordinal() as usize) < width && expansions < MAX_PATTERN_EDGES => {
+                GlaOperator::Expand {
+                    source,
+                    relation,
+                    direction,
+                } if (source.ordinal() as usize) < width && expansions < MAX_PATTERN_EDGES => {
                     expansions += 1;
-                    Some(Binding::Expand(Expansion { source: source.ordinal() as usize,
-                        relation: *relation, direction: *direction }))
+                    Some(Binding::Expand(Expansion {
+                        source: source.ordinal() as usize,
+                        relation: *relation,
+                        direction: *direction,
+                    }))
                 }
-                GlaOperator::VarLengthExpand { source, relation, direction, bounds, search }
-                    if (source.ordinal() as usize) < width && expansions < MAX_PATTERN_EDGES => {
+                GlaOperator::VarLengthExpand {
+                    source,
+                    relation,
+                    direction,
+                    bounds,
+                    search,
+                } if (source.ordinal() as usize) < width && expansions < MAX_PATTERN_EDGES => {
                     expansions += 1;
                     Some(Binding::Walk {
-                        expansion: Expansion { source: source.ordinal() as usize,
-                            relation: *relation, direction: *direction },
-                        bounds: *bounds, search: *search,
+                        expansion: Expansion {
+                            source: source.ordinal() as usize,
+                            relation: *relation,
+                            direction: *direction,
+                        },
+                        bounds: *bounds,
+                        search: *search,
                     })
                 }
                 GlaOperator::Select { slot, .. } if (slot.ordinal() as usize) < width => None,
                 GlaOperator::VertexIdentity { left, right, .. }
                 | GlaOperator::CompareProperties { left, right, .. }
-                    if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width => None,
+                    if (left.ordinal() as usize) < width && (right.ordinal() as usize) < width =>
+                {
+                    None
+                }
                 GlaOperator::SelectBoolean { expression } => {
                     let mut vertices_valid = true;
                     let mut captures_valid = true;
                     let _ = expression.remap_elements(
-                        |slot| { vertices_valid &= (slot.ordinal() as usize) < width; slot },
-                        |capture| { captures_valid = false; capture },
+                        |slot| {
+                            vertices_valid &= (slot.ordinal() as usize) < width;
+                            slot
+                        },
+                        |capture| {
+                            captures_valid = false;
+                            capture
+                        },
                     );
-                    if !vertices_valid || !captures_valid { return Err(bad()); }
+                    if !vertices_valid || !captures_valid {
+                        return Err(bad());
+                    }
                     None
                 }
                 _ => return Err(bad()),
             };
             if let Some(binding) = binding {
-                if width >= MAX_PATTERN_BINDINGS { return Err(bad()); }
+                if width >= MAX_PATTERN_BINDINGS {
+                    return Err(bad());
+                }
                 width += 1;
-                steps.push(Step { binding, predicates: Vec::new() });
+                steps.push(Step {
+                    binding,
+                    predicates: Vec::new(),
+                });
             } else {
-                steps.last_mut().ok_or_else(bad)?.predicates.push(op.clone());
+                steps
+                    .last_mut()
+                    .ok_or_else(bad)?
+                    .predicates
+                    .push(op.clone());
             }
         }
-        Ok((Self { anti: *anti, outer_width, steps }, end))
+        Ok((
+            Self {
+                anti: *anti,
+                outer_width,
+                steps,
+            },
+            end,
+        ))
     }
 
     pub(crate) fn accepts<S: EdgeScanSource, C>(
-        &self, outer: &[Option<VId>], source: &S,
+        &self,
+        outer: &[Option<VId>],
+        source: &S,
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
     ) -> ScanResult<bool, S::Error, C> {
@@ -136,7 +202,9 @@ impl Probe {
     }
 
     fn witness<S: EdgeScanSource, C>(
-        &self, outer: &[Option<VId>], source: &S,
+        &self,
+        outer: &[Option<VId>],
+        source: &S,
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
     ) -> ScanResult<bool, S::Error, C> {
@@ -151,25 +219,42 @@ impl Probe {
             control(GlaExecutionEvent::Work)?;
             ids.push(*id);
         }
-        let mut frames: Vec<_> = self.steps.iter().map(|step| Position::new(step.binding)).collect();
+        let mut frames: Vec<_> = self
+            .steps
+            .iter()
+            .map(|step| Position::new(step.binding))
+            .collect();
         // Only active variable-length atoms allocate entries. Fixed-hop probes
         // keep their original frame and control-event sequence unchanged.
         let mut walks = BTreeMap::<usize, walk::Endpoints>::new();
         let mut depth = 0;
         loop {
             control(GlaExecutionEvent::Work)?;
-            if depth == self.steps.len() { return Ok(true); }
+            if depth == self.steps.len() {
+                return Ok(true);
+            }
             let step = &self.steps[depth];
             let candidate = match step.binding {
-                Binding::Copy { source: from, nullable } => {
-                    if matches!(frames[depth], Position::Copy(true)) { None } else {
+                Binding::Copy {
+                    source: from,
+                    nullable,
+                } => {
+                    if matches!(frames[depth], Position::Copy(true)) {
+                        None
+                    } else {
                         frames[depth] = Position::Copy(true);
                         let value = ids[from];
-                        if value.is_none() && !nullable { None } else { Some(value) }
+                        if value.is_none() && !nullable {
+                            None
+                        } else {
+                            Some(value)
+                        }
                     }
                 }
                 Binding::Scan => {
-                    let Position::Vertex(after) = frames[depth] else { unreachable!("scan position"); };
+                    let Position::Vertex(after) = frames[depth] else {
+                        unreachable!("scan position");
+                    };
                     let next = match source.next_probe_vertex(after, control) {
                         Ok(next) => next,
                         Err(EdgeExpansionSourceError::Unavailable) => {
@@ -180,24 +265,34 @@ impl Probe {
                     if let Some(vid) = next {
                         control(GlaExecutionEvent::Work)?;
                         if after.is_some_and(|prior| vid <= prior) {
-                            return Err(GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity));
+                            return Err(GqlQueryError::Source(
+                                EdgeScanError::NonIncreasingIdentity,
+                            ));
                         }
                         frames[depth] = Position::Vertex(Some(vid));
                         record()?;
                         // Histories may have no visible version at this cut.
                         // That is not a dangling edge and not a NULL witness.
-                        if flatten(source.vertex(vid, control))?.is_none() { continue; }
+                        if flatten(source.vertex(vid, control))?.is_none() {
+                            continue;
+                        }
                         Some(Some(vid))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 Binding::Expand(expansion) => {
                     let Some(from) = ids[expansion.source] else {
-                        if depth == 0 { return Ok(false); }
+                        if depth == 0 {
+                            return Ok(false);
+                        }
                         depth -= 1;
                         ids.pop();
                         continue;
                     };
-                    let Position::Edge(after) = frames[depth] else { unreachable!("edge position"); };
+                    let Position::Edge(after) = frames[depth] else {
+                        unreachable!("edge position");
+                    };
                     let next = source.next_incident_edge(from, expansion.direction, after, control);
                     let next = match next {
                         Ok(next) => next,
@@ -209,32 +304,49 @@ impl Probe {
                     if let Some(eid) = next {
                         control(GlaExecutionEvent::Work)?;
                         if after.is_some_and(|prior| eid <= prior) {
-                            return Err(GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity));
+                            return Err(GqlQueryError::Source(
+                                EdgeScanError::NonIncreasingIdentity,
+                            ));
                         }
                         frames[depth] = Position::Edge(Some(eid));
                         record()?;
-                        let Some(to) = resolve_target(source, eid, from, expansion, control)? else { continue; };
+                        let Some(to) = resolve_target(source, eid, from, expansion, control)?
+                        else {
+                            continue;
+                        };
                         Some(Some(to))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
-                Binding::Walk { expansion, bounds, search } => {
+                Binding::Walk {
+                    expansion,
+                    bounds,
+                    search,
+                } => {
                     match ids[expansion.source] {
                         None => None, // Even *0 cannot turn a NULL correlation into a vertex.
                         Some(from) => {
                             if !walks.contains_key(&depth) {
-                                let cursor = walk::Endpoints::new(from, bounds, search, source, control)?;
+                                let cursor =
+                                    walk::Endpoints::new(from, bounds, search, source, control)?;
                                 control(GlaExecutionEvent::ScratchEntry)?;
                                 walks.insert(depth, cursor);
                             }
-                            walks.get_mut(&depth).expect("initialized atom")
-                                .next(expansion, source, control, record)?.map(Some)
+                            walks
+                                .get_mut(&depth)
+                                .expect("initialized atom")
+                                .next(expansion, source, control, record)?
+                                .map(Some)
                         }
                     }
                 }
             };
             let Some(candidate) = candidate else {
                 walks.remove(&depth);
-                if depth == 0 { return Ok(false); }
+                if depth == 0 {
+                    return Ok(false);
+                }
                 depth -= 1;
                 ids.pop();
                 continue;
@@ -248,7 +360,10 @@ impl Probe {
                     break;
                 }
             }
-            if !passed { ids.pop(); continue; }
+            if !passed {
+                ids.pop();
+                continue;
+            }
             depth += 1;
             if depth < self.steps.len() {
                 frames[depth] = Position::new(self.steps[depth].binding);
@@ -261,11 +376,18 @@ impl Probe {
 // Both fixed and variable atoms resolve historical incidence through the SAME
 // visible edge and endpoint readers. Candidate indexes never establish liveness.
 fn resolve_target<S: EdgeScanSource, C>(
-    source: &S, eid: EId, from: VId, expansion: Expansion,
+    source: &S,
+    eid: EId,
+    from: VId,
+    expansion: Expansion,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
 ) -> ScanResult<Option<VId>, S::Error, C> {
-    let Some(edge) = flatten(source.edge(eid, control))? else { return Ok(None); };
-    if edge.relation != expansion.relation { return Ok(None); }
+    let Some(edge) = flatten(source.edge(eid, control))? else {
+        return Ok(None);
+    };
+    if edge.relation != expansion.relation {
+        return Ok(None);
+    }
     let to = match expansion.direction {
         GlaDirection::Forward if edge.source == from => edge.target,
         GlaDirection::Reverse if edge.target == from => edge.source,
@@ -274,6 +396,8 @@ fn resolve_target<S: EdgeScanSource, C>(
         _ => return Ok(None),
     };
     vertex(source, from, control)?;
-    if from != to { vertex(source, to, control)?; }
+    if from != to {
+        vertex(source, to, control)?;
+    }
     Ok(Some(to))
 }

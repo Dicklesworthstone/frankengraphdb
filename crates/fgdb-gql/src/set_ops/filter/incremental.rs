@@ -19,7 +19,9 @@ pub enum RowFilterBuildError {
 impl core::fmt::Display for RowFilterBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::InputWidth { observed } => write!(f, "filter input width {observed} exceeds the native bound"),
+            Self::InputWidth { observed } => {
+                write!(f, "filter input width {observed} exceeds the native bound")
+            }
             Self::Predicate(error) => error.fmt(f),
         }
     }
@@ -36,21 +38,35 @@ pub struct RowFilterSpec {
     predicate: RowPredicate,
 }
 impl RowFilterSpec {
-    pub fn new(types: Vec<GraphSetColumnType>, code: &[GraphSetPredicateOp])
-        -> Result<Self, RowFilterBuildError> {
+    pub fn new(
+        types: Vec<GraphSetColumnType>,
+        code: &[GraphSetPredicateOp],
+    ) -> Result<Self, RowFilterBuildError> {
         if types.len() > MAX_PATTERN_VERTICES {
-            return Err(RowFilterBuildError::InputWidth { observed: types.len() });
+            return Err(RowFilterBuildError::InputWidth {
+                observed: types.len(),
+            });
         }
-        let predicate = RowPredicate::prepare(&types, code).map_err(RowFilterBuildError::Predicate)?;
-        Ok(Self { types: types.into(), predicate })
+        let predicate =
+            RowPredicate::prepare(&types, code).map_err(RowFilterBuildError::Predicate)?;
+        Ok(Self {
+            types: types.into(),
+            predicate,
+        })
     }
-    pub fn column_types(&self) -> &[GraphSetColumnType] { &self.types }
-    pub fn predicate(&self) -> &[GraphSetPredicateOp] { &self.predicate.code }
+    pub fn column_types(&self) -> &[GraphSetColumnType] {
+        &self.types
+    }
+    pub fn predicate(&self) -> &[GraphSetPredicateOp] {
+        &self.predicate.code
+    }
 }
 impl core::fmt::Debug for RowFilterSpec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RowFilterSpec").field("columns", &self.types.len())
-            .field("definition", &"[REDACTED]").finish()
+        f.debug_struct("RowFilterSpec")
+            .field("columns", &self.types.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -63,7 +79,9 @@ pub enum RowFilterError<E> {
     ResultBudget { limit: u64 },
 }
 impl<E> From<ZSetError<E>> for RowFilterError<E> {
-    fn from(error: ZSetError<E>) -> Self { Self::Delta(error) }
+    fn from(error: ZSetError<E>) -> Self {
+        Self::Delta(error)
+    }
 }
 impl<E: core::fmt::Display> core::fmt::Display for RowFilterError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -78,14 +96,22 @@ impl<E: core::fmt::Display> core::fmt::Display for RowFilterError<E> {
 }
 impl<E: core::error::Error + 'static> core::error::Error for RowFilterError<E> {}
 
-fn charge<E>(control: &mut impl FnMut(ZSetEvent) -> Result<(), E>, event: ZSetEvent)
-    -> Result<(), ZSetError<E>> { control(event).map_err(ZSetError::Control) }
-fn reserve_row<E>(row: &GraphValueRow, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>)
-    -> Result<(), ZSetError<E>> {
+fn charge<E>(
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    event: ZSetEvent,
+) -> Result<(), ZSetError<E>> {
+    control(event).map_err(ZSetError::Control)
+}
+fn reserve_row<E>(
+    row: &GraphValueRow,
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+) -> Result<(), ZSetError<E>> {
     charge(control, ZSetEvent::ScratchEntry)?;
     for value in row.values() {
         charge(control, ZSetEvent::Work)?;
-        for _ in 0..=value.payload_units() { charge(control, ZSetEvent::ScratchEntry)?; }
+        for _ in 0..=value.payload_units() {
+            charge(control, ZSetEvent::ScratchEntry)?;
+        }
     }
     Ok(())
 }
@@ -104,33 +130,55 @@ pub struct IncrementalRowFilter {
 }
 impl IncrementalRowFilter {
     pub fn new(spec: RowFilterSpec) -> Self {
-        Self { spec, input: ZSet::new(), rows: ZSet::new(), total: ZWeight::ZERO }
+        Self {
+            spec,
+            input: ZSet::new(),
+            rows: ZSet::new(),
+            total: ZWeight::ZERO,
+        }
     }
-    pub fn spec(&self) -> &RowFilterSpec { &self.spec }
-    pub fn rows(&self) -> &ZSet<GraphValueRow> { &self.rows }
-    pub fn total(&self) -> &ZWeight { &self.total }
+    pub fn spec(&self) -> &RowFilterSpec {
+        &self.spec
+    }
+    pub fn rows(&self) -> &ZSet<GraphValueRow> {
+        &self.rows
+    }
+    pub fn total(&self) -> &ZWeight {
+        &self.total
+    }
 
     /// Validate the complete changed input before predicate evaluation. Even a
     /// constant FALSE predicate and a zero output allowance cannot hide invalid
     /// rows or over-retractions. The quota counts final selected occurrences,
     /// never an insertion-before-deletion transient prefix. All accepted state
     /// is unchanged until the returned guard commits, including on cancellation.
-    pub fn prepare<E>(&mut self, changes: &ZSet<GraphValueRow>, limbs: LimbLimit,
-        max_result_rows: Option<u64>, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    pub fn prepare<E>(
+        &mut self,
+        changes: &ZSet<GraphValueRow>,
+        limbs: LimbLimit,
+        max_result_rows: Option<u64>,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<RowFilterUpdate<'_>, RowFilterError<E>> {
         charge(control, ZSetEvent::Work)?;
         for (row, weight) in changes.iter() {
             charge(control, ZSetEvent::Work)?;
-            if row.len() != self.spec.types.len() { return Err(RowFilterError::InputSchema); }
+            if row.len() != self.spec.types.len() {
+                return Err(RowFilterError::InputSchema);
+            }
             for (value, kind) in row.values().iter().zip(self.spec.types.iter()) {
                 charge(control, ZSetEvent::Work)?;
-                if !kind.accepts(value) || !value.validate_bounds() { return Err(RowFilterError::InputSchema); }
+                if !kind.accepts(value) || !value.validate_bounds() {
+                    return Err(RowFilterError::InputSchema);
+                }
             }
             let next = match self.input.weight(row) {
                 Some(old) => old.checked_add(weight, limbs),
                 None => weight.checked_clone(limbs),
-            }.map_err(ZSetError::Arithmetic)?;
-            if next < ZWeight::ZERO { return Err(RowFilterError::NegativeMultiplicity); }
+            }
+            .map_err(ZSetError::Arithmetic)?;
+            if next < ZWeight::ZERO {
+                return Err(RowFilterError::NegativeMultiplicity);
+            }
             reserve_row(row, control)?;
             reserve_row(row, control)?;
         }
@@ -138,10 +186,15 @@ impl IncrementalRowFilter {
         let mut updates = Vec::new();
         for (row, weight) in changes.iter() {
             charge(control, ZSetEvent::Work)?;
-            let keep = self.spec.predicate.evaluate(row, &mut |event| charge(control, match event {
-                GlaExecutionEvent::ScratchEntry => ZSetEvent::ScratchEntry,
-                GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => ZSetEvent::Work,
-            }))?;
+            let keep = self.spec.predicate.evaluate(row, &mut |event| {
+                charge(
+                    control,
+                    match event {
+                        GlaExecutionEvent::ScratchEntry => ZSetEvent::ScratchEntry,
+                        GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => ZSetEvent::Work,
+                    },
+                )
+            })?;
             if keep {
                 reserve_row(row, control)?;
                 let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
@@ -152,29 +205,49 @@ impl IncrementalRowFilter {
         let delta = ZSet::from_updates(updates, limbs, control)?;
         let change = delta.total_weight(limbs, control)?;
         charge(control, ZSetEvent::Work)?;
-        let next_total = self.total.checked_add(&change, limbs).map_err(ZSetError::Arithmetic)?;
-        if next_total < ZWeight::ZERO { return Err(RowFilterError::InvalidResult); }
+        let next_total = self
+            .total
+            .checked_add(&change, limbs)
+            .map_err(ZSetError::Arithmetic)?;
+        if next_total < ZWeight::ZERO {
+            return Err(RowFilterError::InvalidResult);
+        }
         if let Some(limit) = max_result_rows {
             if next_total > ZWeight::from_i128(i128::from(limit)) {
                 return Err(RowFilterError::ResultBudget { limit });
             }
         }
-        for (row, _) in delta.iter() { reserve_row(row, control)?; reserve_row(row, control)?; }
+        for (row, _) in delta.iter() {
+            reserve_row(row, control)?;
+            reserve_row(row, control)?;
+        }
         let sink = self.rows.prepare_update(&delta, limbs, control)?;
         for (row, _) in delta.iter() {
             charge(control, ZSetEvent::Work)?;
-            if sink.weight(row).is_some_and(|weight| weight < &ZWeight::ZERO) {
+            if sink
+                .weight(row)
+                .is_some_and(|weight| weight < &ZWeight::ZERO)
+            {
                 return Err(RowFilterError::InvalidResult);
             }
         }
         charge(control, ZSetEvent::Work)?;
-        Ok(RowFilterUpdate { input, sink, total: &mut self.total, next_total, delta })
+        Ok(RowFilterUpdate {
+            input,
+            sink,
+            total: &mut self.total,
+            next_total,
+            delta,
+        })
     }
 }
 impl core::fmt::Debug for IncrementalRowFilter {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("IncrementalRowFilter").field("spec", &self.spec)
-            .field("support", &self.rows.len()).field("data", &"[REDACTED]").finish()
+        f.debug_struct("IncrementalRowFilter")
+            .field("spec", &self.spec)
+            .field("support", &self.rows.len())
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -187,10 +260,20 @@ pub struct RowFilterUpdate<'a> {
     delta: ZSet<GraphValueRow>,
 }
 impl RowFilterUpdate<'_> {
-    pub fn delta(&self) -> &ZSet<GraphValueRow> { &self.delta }
-    pub fn total(&self) -> &ZWeight { &self.next_total }
+    pub fn delta(&self) -> &ZSet<GraphValueRow> {
+        &self.delta
+    }
+    pub fn total(&self) -> &ZWeight {
+        &self.next_total
+    }
     pub fn commit(self) -> ZSet<GraphValueRow> {
-        let Self { input, sink, total, next_total, delta } = self;
+        let Self {
+            input,
+            sink,
+            total,
+            next_total,
+            delta,
+        } = self;
         input.commit();
         sink.commit();
         *total = next_total;
@@ -199,8 +282,10 @@ impl RowFilterUpdate<'_> {
 }
 impl core::fmt::Debug for RowFilterUpdate<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RowFilterUpdate").field("delta_support", &self.delta.len())
-            .field("data", &"[REDACTED]").finish()
+        f.debug_struct("RowFilterUpdate")
+            .field("delta_support", &self.delta.len())
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 

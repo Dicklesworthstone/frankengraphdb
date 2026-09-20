@@ -92,7 +92,9 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
             match operators.get(at) {
                 Some(GlaOperator::Probe { .. }) => {
                     let (probe, end) = crate::edge_stream::Probe::compile(operators, at, 1)
-                        .map_err(|error| VertexScanBuildError { operator: error.operator })?;
+                        .map_err(|error| VertexScanBuildError {
+                            operator: error.operator,
+                        })?;
                     tests.push(Test::Probe(Arc::new(probe)));
                     at = end;
                 }
@@ -346,8 +348,10 @@ pub trait VertexScanSource {
         &'a self,
         _eid: EId,
         _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
-    ) -> Result<Option<crate::edge_stream::EdgeScanRow<'a>>,
-        crate::edge_stream::EdgeExpansionSourceError<Self::Error, C>> {
+    ) -> Result<
+        Option<crate::edge_stream::EdgeScanRow<'a>>,
+        crate::edge_stream::EdgeExpansionSourceError<Self::Error, C>,
+    > {
         Err(crate::edge_stream::EdgeExpansionSourceError::Unavailable)
     }
 }
@@ -561,9 +565,13 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             // These callback borrows are sequential; none spans a source call.
             let accepted = {
                 let metered = std::cell::RefCell::new(&mut *meter);
-                self.plan.accepts(vid, row, &*source,
+                self.plan.accepts(
+                    vid,
+                    row,
+                    &*source,
                     &mut |event| metered.borrow_mut().event(event),
-                    &mut || metered.borrow_mut().record())?
+                    &mut || metered.borrow_mut().record(),
+                )?
             };
             if !accepted {
                 continue;

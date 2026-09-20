@@ -100,20 +100,32 @@ impl PreparedGraphSet {
     /// already-selected rows; a downstream set circuit consumes their bag.
     /// This shape accessor does not promise that every pattern has a derivative.
     pub fn incremental_pattern(&self) -> Option<&PreparedGraphPattern<GraphValueRow>> {
-        if !self.unadorned_incremental_node() { return None; }
-        match &self.node { SetNode::Pattern(pattern) => Some(pattern), _ => None }
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
+        match &self.node {
+            SetNode::Pattern(pattern) => Some(pattern),
+            _ => None,
+        }
     }
 
     /// Borrow the exact binary operation and quantifier with its bound children.
     /// An outer ORDER BY, OFFSET or LIMIT (including zero) makes this node
     /// unavailable, never silently ignored. Children must be admitted in turn;
     /// returning Some here does not authorize unsupported descendant operators.
-    pub fn incremental_binary(&self)
-        -> Option<(GraphSetOperation, GraphSetQuantifier, &Self, &Self)> {
-        if !self.unadorned_incremental_node() { return None; }
+    pub fn incremental_binary(
+        &self,
+    ) -> Option<(GraphSetOperation, GraphSetQuantifier, &Self, &Self)> {
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
         match &self.node {
-            SetNode::Binary { operation, quantifier, left, right } =>
-                Some((*operation, *quantifier, left, right)),
+            SetNode::Binary {
+                operation,
+                quantifier,
+                left,
+                right,
+            } => Some((*operation, *quantifier, left, right)),
             _ => None,
         }
     }
@@ -122,12 +134,18 @@ impl PreparedGraphSet {
     /// the child's complete semantics. Wrapper ordering and every finite page
     /// refuse, including LIMIT 0. The host must still admit the child and the
     /// expression schema; this accessor never evaluates a row.
-    pub fn incremental_projection(&self)
-        -> Option<(&Self, &[GraphSetProjection], GraphSetQuantifier)> {
-        if !self.unadorned_incremental_node() { return None; }
+    pub fn incremental_projection(
+        &self,
+    ) -> Option<(&Self, &[GraphSetProjection], GraphSetQuantifier)> {
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
         match &self.node {
-            SetNode::Project { input, projection, quantifier } =>
-                Some((input, projection, *quantifier)),
+            SetNode::Project {
+                input,
+                projection,
+                quantifier,
+            } => Some((input, projection, *quantifier)),
             _ => None,
         }
     }
@@ -158,8 +176,13 @@ impl PreparedGraphSet {
     /// cannot be peeled away. A projection has its own exact accessor; filters,
     /// UNWIND, singleton values and cross joins have no transparent fallback.
     pub fn incremental_scope(&self) -> Option<&Self> {
-        if !self.unadorned_incremental_node() { return None; }
-        match &self.node { SetNode::Scope(input) => Some(input), _ => None }
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
+        match &self.node {
+            SetNode::Scope(input) => Some(input),
+            _ => None,
+        }
     }
 }
 
@@ -170,7 +193,9 @@ mod tests {
 
     fn pattern() -> PreparedGraphPattern<GraphValueRow> {
         PreparedGraphText::prepare("MATCH (n) RETURN n AS id LIMIT 2", |_, _: &str| None)
-            .unwrap().bind_parameters(&GqlParameters::new()).unwrap()
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
     }
     fn unavailable(query: &PreparedGraphSet) {
         assert!(query.incremental_pattern().is_none());
@@ -182,12 +207,25 @@ mod tests {
     fn admitted_nodes_preserve_exact_children_and_refuse_all_wrapper_pages() {
         let pattern = pattern();
         let leaf = PreparedGraphSet::from(pattern.clone());
-        assert_eq!(leaf.incremental_pattern().unwrap().canonical_bytes(), pattern.canonical_bytes());
+        assert_eq!(
+            leaf.incremental_pattern().unwrap().canonical_bytes(),
+            pattern.canonical_bytes()
+        );
         let scope = leaf.clone().nested().unwrap();
-        assert_eq!(scope.incremental_scope().unwrap().canonical_bytes(), leaf.canonical_bytes());
-        for operation in [GraphSetOperation::Union, GraphSetOperation::Intersect, GraphSetOperation::Except] {
+        assert_eq!(
+            scope.incremental_scope().unwrap().canonical_bytes(),
+            leaf.canonical_bytes()
+        );
+        for operation in [
+            GraphSetOperation::Union,
+            GraphSetOperation::Intersect,
+            GraphSetOperation::Except,
+        ] {
             for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
-                let binary = leaf.clone().combine(operation, quantifier, scope.clone()).unwrap();
+                let binary = leaf
+                    .clone()
+                    .combine(operation, quantifier, scope.clone())
+                    .unwrap();
                 let (op, q, left, right) = binary.incremental_binary().unwrap();
                 assert_eq!((op, q), (operation, quantifier));
                 assert_eq!(left.canonical_bytes(), leaf.canonical_bytes());
@@ -197,7 +235,11 @@ mod tests {
                         unavailable(&(*node).clone().with_page(offset, count));
                     }
                     let mut ordered = (*node).clone();
-                    ordered.order.push(GraphValueOrder { column: 0, descending: true, nulls_first: false });
+                    ordered.order.push(GraphValueOrder {
+                        column: 0,
+                        descending: true,
+                        nulls_first: false,
+                    });
                     unavailable(&ordered);
                 }
             }
@@ -246,7 +288,11 @@ mod tests {
         // Private construction isolates shape admission from projection syntax;
         // ordinary callers still use the checked public constructors.
         let mut projected = leaf;
-        projected.node = SetNode::Project { input: child, projection: vec![], quantifier: GraphSetQuantifier::All };
+        projected.node = SetNode::Project {
+            input: child,
+            projection: vec![],
+            quantifier: GraphSetQuantifier::All,
+        };
         unavailable(&projected);
     }
 
@@ -255,7 +301,10 @@ mod tests {
         let leaf = PreparedGraphSet::from(pattern());
         for quantifier in [GraphSetQuantifier::All, GraphSetQuantifier::Distinct] {
             let projection = vec![GraphSetProjection::new("renamed", GraphSetValue::Column(0))];
-            let projected = leaf.clone().project(projection.clone(), quantifier).unwrap();
+            let projected = leaf
+                .clone()
+                .project(projection.clone(), quantifier)
+                .unwrap();
             let (child, expressions, observed) = projected.incremental_projection().unwrap();
             assert_eq!(child.canonical_bytes(), leaf.canonical_bytes());
             assert_eq!(expressions, projection);
@@ -263,11 +312,21 @@ mod tests {
             assert_eq!(projected.columns(), &["renamed"]);
             unavailable(&projected); // Not an unprojected leaf/binary/scope.
             for (offset, count) in [(1, None), (0, Some(0)), (0, Some(2))] {
-                assert!(projected.clone().with_page(offset, count).incremental_projection().is_none());
+                assert!(
+                    projected
+                        .clone()
+                        .with_page(offset, count)
+                        .incremental_projection()
+                        .is_none()
+                );
             }
-            let ordered = projected.with_order_by(&[GraphValueOrder {
-                column: 0, descending: true, nulls_first: false,
-            }]).unwrap();
+            let ordered = projected
+                .with_order_by(&[GraphValueOrder {
+                    column: 0,
+                    descending: true,
+                    nulls_first: false,
+                }])
+                .unwrap();
             assert!(ordered.incremental_projection().is_none());
         }
         assert!(leaf.incremental_projection().is_none());

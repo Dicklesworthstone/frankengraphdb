@@ -35,26 +35,40 @@ pub(super) struct Endpoints {
 }
 impl Endpoints {
     pub(super) fn new<S: EdgeScanSource, C>(
-        start: VId, bounds: GraphWalkBounds, search: GraphWalkSearch, source: &S,
+        start: VId,
+        bounds: GraphWalkBounds,
+        search: GraphWalkSearch,
+        source: &S,
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
     ) -> ScanResult<Self, S::Error, C> {
         // Identity paths still require a live vertex; no lookup capability is
         // needed when maximum=0, and missing/NULL roots are not invented.
         vertex(source, start, control)?;
         let mut cursor = Self {
-            start, bounds, search, stack: Vec::new(), visited: BTreeSet::new(),
-            emitted: BTreeSet::new(), edges: BTreeSet::new(), vertices: BTreeSet::new(),
+            start,
+            bounds,
+            search,
+            stack: Vec::new(),
+            visited: BTreeSet::new(),
+            emitted: BTreeSet::new(),
+            edges: BTreeSet::new(),
+            vertices: BTreeSet::new(),
         };
         cursor.push(start, None, control)?;
         Ok(cursor)
     }
 
     fn merge_depths(&self) -> bool {
-        matches!(self.search, GraphWalkSearch::All | GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest)
+        matches!(
+            self.search,
+            GraphWalkSearch::All | GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest
+        )
     }
 
     fn push<E>(
-        &mut self, vertex: VId, incoming: Option<EId>,
+        &mut self,
+        vertex: VId,
+        incoming: Option<EId>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<(), E> {
         // Reserve before every growing container; failed preparation/pull
@@ -71,16 +85,28 @@ impl Endpoints {
             control(GlaExecutionEvent::ScratchEntry)?;
             self.vertices.insert(vertex);
         }
-        for _ in 0..4 { control(GlaExecutionEvent::ScratchEntry)?; }
-        self.stack.push(Frame { vertex, incoming, after: None, offered: false });
+        for _ in 0..4 {
+            control(GlaExecutionEvent::ScratchEntry)?;
+        }
+        self.stack.push(Frame {
+            vertex,
+            incoming,
+            after: None,
+            offered: false,
+        });
         Ok(())
     }
 
-    fn pop<E>(&mut self, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>) -> Result<(), E> {
+    fn pop<E>(
+        &mut self,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
         control(GlaExecutionEvent::Work)?;
         let frame = self.stack.pop().expect("nonempty traversal");
         if self.search == GraphWalkSearch::Trail {
-            if let Some(edge) = frame.incoming { self.edges.remove(&edge); }
+            if let Some(edge) = frame.incoming {
+                self.edges.remove(&edge);
+            }
         } else if !self.merge_depths() && frame.vertex != self.start {
             self.vertices.remove(&frame.vertex);
         }
@@ -88,7 +114,9 @@ impl Endpoints {
     }
 
     pub(super) fn next<S: EdgeScanSource, C>(
-        &mut self, expansion: Expansion, source: &S,
+        &mut self,
+        expansion: Expansion,
+        source: &S,
         control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
         record: &mut impl FnMut() -> ScanResult<(), S::Error, C>,
     ) -> ScanResult<Option<VId>, S::Error, C> {
@@ -106,7 +134,8 @@ impl Endpoints {
                 }
             }
             if depth == self.bounds.maximum() as usize
-                || (self.search == GraphWalkSearch::Simple && depth > 0 && from == self.start) {
+                || (self.search == GraphWalkSearch::Simple && depth > 0 && from == self.start)
+            {
                 self.pop(control)?;
                 continue;
             }
@@ -118,23 +147,31 @@ impl Endpoints {
                 }
                 Err(EdgeExpansionSourceError::Read(error)) => flatten(Err(error))?,
             };
-            let Some(eid) = next else { self.pop(control)?; continue; };
+            let Some(eid) = next else {
+                self.pop(control)?;
+                continue;
+            };
             control(GlaExecutionEvent::Work)?;
             if after.is_some_and(|prior| eid <= prior) {
                 return Err(GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity));
             }
             self.stack.last_mut().expect("nonempty traversal").after = Some(eid);
             record()?;
-            let Some(to) = resolve_target(source, eid, from, expansion, control)? else { continue; };
+            let Some(to) = resolve_target(source, eid, from, expansion, control)? else {
+                continue;
+            };
             control(GlaExecutionEvent::Work)?;
             let allowed = match self.search {
-                GraphWalkSearch::All | GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest =>
-                    !self.visited.contains(&(depth + 1, to)),
+                GraphWalkSearch::All
+                | GraphWalkSearch::AllShortest
+                | GraphWalkSearch::AnyShortest => !self.visited.contains(&(depth + 1, to)),
                 GraphWalkSearch::Trail => !self.edges.contains(&eid),
                 GraphWalkSearch::Acyclic => !self.vertices.contains(&to),
                 GraphWalkSearch::Simple => to == self.start || !self.vertices.contains(&to),
             };
-            if allowed { self.push(to, Some(eid), control)?; }
+            if allowed {
+                self.push(to, Some(eid), control)?;
+            }
         }
         Ok(None)
     }

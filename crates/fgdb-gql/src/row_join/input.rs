@@ -1,11 +1,11 @@
 //! Select existing exact kernels; keep one transactional native-row sink.
 
 use super::*;
-use fgdb_delta_types::zset::incremental::{IncrementalJoin, JoinUpdate};
 use fgdb_delta_types::zset::incremental::presence::{
-    BagInput, BagJoinError, IncrementalLeftJoin, IncrementalPresence, LeftJoinUpdate,
-    PresenceMode, PresenceUpdate,
+    BagInput, BagJoinError, IncrementalLeftJoin, IncrementalPresence, LeftJoinUpdate, PresenceMode,
+    PresenceUpdate,
 };
+use fgdb_delta_types::zset::incremental::{IncrementalJoin, JoinUpdate};
 use fgdb_types::CanonicalScalar;
 
 #[derive(PartialEq, Eq)]
@@ -25,7 +25,10 @@ fn bag_error<E>(error: BagJoinError<E>) -> RowJoinError<E> {
     match error {
         BagJoinError::ZSet(error) => RowJoinError::Delta(error),
         BagJoinError::NegativeMultiplicity { input } => RowJoinError::NegativeMultiplicity {
-            side: match input { BagInput::Left => 0, BagInput::Right => 1 },
+            side: match input {
+                BagInput::Left => 0,
+                BagInput::Right => 1,
+            },
         },
     }
 }
@@ -70,17 +73,29 @@ impl Input {
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<InputUpdate<'_>, RowJoinError<E>> {
         match self {
-            Self::Inner(input) => Ok(InputUpdate::Inner(input.prepare(left, right, limbs, control)?)),
-            Self::Left(input) => Ok(InputUpdate::Left(
-                input.prepare(left, right, limbs, control).map_err(bag_error)?,
+            Self::Inner(input) => Ok(InputUpdate::Inner(
+                input.prepare(left, right, limbs, control)?,
             )),
-            Self::Presence { operator, right: retained } => {
+            Self::Left(input) => Ok(InputUpdate::Left(
+                input
+                    .prepare(left, right, limbs, control)
+                    .map_err(bag_error)?,
+            )),
+            Self::Presence {
+                operator,
+                right: retained,
+            } => {
                 // Signed projection retains the simultaneous-update cross term.
                 // Do not threshold each delta or enumerate any matched products.
                 let witnesses = right.map(|(key, _)| Ok(key.clone()), limbs, control)?;
                 let rows = retained.prepare_update(right, limbs, control)?;
-                let update = operator.prepare(left, &witnesses, limbs, control).map_err(bag_error)?;
-                Ok(InputUpdate::Presence { update, right: rows })
+                let update = operator
+                    .prepare(left, &witnesses, limbs, control)
+                    .map_err(bag_error)?;
+                Ok(InputUpdate::Presence {
+                    update,
+                    right: rows,
+                })
             }
         }
     }
@@ -106,12 +121,28 @@ impl InputUpdate<'_> {
         match self {
             Self::Inner(input) => {
                 for ((_, left, right), weight) in input.delta().iter() {
-                    append(&mut updates, spec, left, Some(right), weight, limbs, control)?;
+                    append(
+                        &mut updates,
+                        spec,
+                        left,
+                        Some(right),
+                        weight,
+                        limbs,
+                        control,
+                    )?;
                 }
             }
             Self::Left(input) => {
                 for ((_, left, right), weight) in input.delta().iter() {
-                    append(&mut updates, spec, left, right.as_ref(), weight, limbs, control)?;
+                    append(
+                        &mut updates,
+                        spec,
+                        left,
+                        right.as_ref(),
+                        weight,
+                        limbs,
+                        control,
+                    )?;
                 }
             }
             Self::Presence { update, .. } => {
@@ -125,8 +156,12 @@ impl InputUpdate<'_> {
 
     pub(super) fn commit(self) {
         match self {
-            Self::Inner(input) => { let _ = input.commit(); }
-            Self::Left(input) => { let _ = input.commit(); }
+            Self::Inner(input) => {
+                let _ = input.commit();
+            }
+            Self::Left(input) => {
+                let _ = input.commit();
+            }
             Self::Presence { update, right } => {
                 let _ = update.commit();
                 right.commit();

@@ -471,7 +471,7 @@ impl GraphValueRow {
     }
     /// Compiler-owned relational operators call this only after schema checks
     /// and per-cell/payload reservations. It is not a public unchecked row API.
-    pub(crate) fn from_owned_values(values: Vec<GraphValue>) -> Self {
+    pub fn from_owned_values(values: Vec<GraphValue>) -> Self {
         debug_assert!(!values.is_empty() && values.len() <= MAX_PATTERN_VERTICES);
         Self {
             values: values.into_boxed_slice(),

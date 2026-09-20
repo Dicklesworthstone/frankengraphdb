@@ -170,8 +170,8 @@ impl GqlParameters {
         let next_entry_bytes = value
             .transcript_entry_bytes(name.len())
             .and_then(|bytes| self.transcript_entry_bytes.checked_add(bytes));
-        let next_transcript_bytes = next_entry_bytes
-            .and_then(|bytes| PARAMETER_TRANSCRIPT_HEADER_BYTES.checked_add(bytes));
+        let next_transcript_bytes =
+            next_entry_bytes.and_then(|bytes| PARAMETER_TRANSCRIPT_HEADER_BYTES.checked_add(bytes));
         let Some(next_entry_bytes) = next_entry_bytes.filter(|_| {
             next_transcript_bytes.is_some_and(|bytes| bytes <= MAX_GQL_PARAMETER_TRANSCRIPT_BYTES)
         }) else {
@@ -1056,7 +1056,12 @@ mod tests {
         let source = format!("MATCH (a:L) WHERE a.n=${name} RETURN a");
         let template = PreparedGqlTemplate::prepare(&source, &bindings()).unwrap();
         let mut args = GqlParameters::new().with_int64(&name, 7).unwrap();
-        assert!(template.bind_parameters(&args).unwrap().verifies_definition());
+        assert!(
+            template
+                .bind_parameters(&args)
+                .unwrap()
+                .verifies_definition()
+        );
         let frozen = args.clone();
         let oversized = format!("{name}x");
         assert!(matches!(
@@ -1099,7 +1104,7 @@ mod tests {
         let scalar = GqlScalarParameter::new(
             fgdb_types::CanonicalScalar::bytes(vec![
                 0;
-                crate::algebra::MAX_SCALAR_PREDICATE_BYTES - 128
+                (crate::algebra::MAX_SCALAR_PREDICATE_BYTES * 3) / 4
             ])
             .unwrap(),
         )
@@ -1109,8 +1114,8 @@ mod tests {
         for index in 0..MAX_GQL_PARAMETER_COUNT {
             let name = format!("p{index}");
             let value = GqlParameterValue::Scalar(scalar.clone());
-            let observed = args.canonical_byte_len()
-                + value.transcript_entry_bytes(name.len()).unwrap();
+            let observed =
+                args.canonical_byte_len() + value.transcript_entry_bytes(name.len()).unwrap();
             if observed > MAX_GQL_PARAMETER_TRANSCRIPT_BYTES {
                 let frozen = args.clone();
                 assert_eq!(
@@ -1128,7 +1133,10 @@ mod tests {
             }
             args.insert(name, value).unwrap();
         }
-        assert!(refused, "byte budget must be exercised before the count cap");
+        assert!(
+            refused,
+            "byte budget must be exercised before the count cap"
+        );
     }
 
     #[test]

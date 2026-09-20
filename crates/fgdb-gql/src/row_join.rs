@@ -6,8 +6,8 @@
 //! Input and output multiplicities stay exact and compressed. Only changed key
 //! groups are probed, including the simultaneous-input cross term.
 
-use crate::algebra::{GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::GraphSetColumnType;
+use crate::algebra::{GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
 use fgdb_delta_types::zset::ZSetUpdate;
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
 use std::sync::Arc;
@@ -72,24 +72,46 @@ impl RowJoinSpec {
         right: &[GraphSetColumnType],
         keys: &[(usize, usize)],
     ) -> Result<Self, RowJoinBuildError> {
-        if left.is_empty() || right.is_empty() { return Err(RowJoinBuildError::EmptyInput); }
-        let width = left.len().checked_add(right.len()).unwrap_or(usize::MAX);
-        if width > MAX_PATTERN_VERTICES { return Err(RowJoinBuildError::TooManyColumns { observed: width }); }
-        if keys.is_empty() { return Err(RowJoinBuildError::EmptyKeys); }
-        if keys.len() > MAX_PATTERN_VERTICES { return Err(RowJoinBuildError::TooManyKeys); }
+        if left.is_empty() || right.is_empty() {
+            return Err(RowJoinBuildError::EmptyInput);
+        }
+        let width = left.len().saturating_add(right.len());
+        if width > MAX_PATTERN_VERTICES {
+            return Err(RowJoinBuildError::TooManyColumns { observed: width });
+        }
+        if keys.is_empty() {
+            return Err(RowJoinBuildError::EmptyKeys);
+        }
+        if keys.len() > MAX_PATTERN_VERTICES {
+            return Err(RowJoinBuildError::TooManyKeys);
+        }
         for (side, columns) in [left, right].into_iter().enumerate() {
             for (column, kind) in columns.iter().enumerate() {
-                if !matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Vertex) {
+                if !matches!(
+                    kind,
+                    GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
+                ) {
                     return Err(RowJoinBuildError::UnsupportedColumn { side, column });
                 }
             }
         }
         for (key, &(l, r)) in keys.iter().enumerate() {
-            let l = left.get(l).ok_or(RowJoinBuildError::KeyColumn { side: 0, column: l })?;
-            let r = right.get(r).ok_or(RowJoinBuildError::KeyColumn { side: 1, column: r })?;
-            if l != r { return Err(RowJoinBuildError::KeyType { key }); }
+            let l = left
+                .get(l)
+                .ok_or(RowJoinBuildError::KeyColumn { side: 0, column: l })?;
+            let r = right
+                .get(r)
+                .ok_or(RowJoinBuildError::KeyColumn { side: 1, column: r })?;
+            if l != r {
+                return Err(RowJoinBuildError::KeyType { key });
+            }
         }
-        Ok(Self { left: left.into(), right: right.into(), keys: keys.into(), kind: RowJoinKind::Inner })
+        Ok(Self {
+            left: left.into(),
+            right: right.into(),
+            keys: keys.into(),
+            kind: RowJoinKind::Inner,
+        })
     }
     /// An unconditional Cartesian product, using the existing exact join
     /// derivative with one shared empty key. NULL is ordinary payload here:
@@ -120,22 +142,46 @@ impl RowJoinSpec {
         self.kind = kind;
         self
     }
-    pub fn kind(&self) -> RowJoinKind { self.kind }
-    pub fn left_types(&self) -> &[GraphSetColumnType] { &self.left }
-    pub fn right_types(&self) -> &[GraphSetColumnType] { &self.right }
-    pub fn keys(&self) -> &[(usize, usize)] { &self.keys }
+    pub fn kind(&self) -> RowJoinKind {
+        self.kind
+    }
+    pub fn left_types(&self) -> &[GraphSetColumnType] {
+        &self.left
+    }
+    pub fn right_types(&self) -> &[GraphSetColumnType] {
+        &self.right
+    }
+    pub fn keys(&self) -> &[(usize, usize)] {
+        &self.keys
+    }
     pub fn width(&self) -> usize {
-        self.left.len() + if self.kind.includes_right() { self.right.len() } else { 0 }
+        self.left.len()
+            + if self.kind.includes_right() {
+                self.right.len()
+            } else {
+                0
+            }
     }
     pub fn column_types(&self) -> impl Iterator<Item = GraphSetColumnType> + '_ {
-        let right = if self.kind.includes_right() { self.right.len() } else { 0 };
-        self.left.iter().chain(self.right.iter().take(right)).copied()
+        let right = if self.kind.includes_right() {
+            self.right.len()
+        } else {
+            0
+        };
+        self.left
+            .iter()
+            .chain(self.right.iter().take(right))
+            .copied()
     }
 }
 impl core::fmt::Debug for RowJoinSpec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RowJoinSpec").field("kind", &self.kind).field("columns", &self.width())
-            .field("keys", &self.keys.len()).field("definition", &"[REDACTED]").finish()
+        f.debug_struct("RowJoinSpec")
+            .field("kind", &self.kind)
+            .field("columns", &self.width())
+            .field("keys", &self.keys.len())
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -148,14 +194,20 @@ pub enum RowJoinError<E> {
     InvalidResult,
 }
 impl<E> From<ZSetError<E>> for RowJoinError<E> {
-    fn from(error: ZSetError<E>) -> Self { Self::Delta(error) }
+    fn from(error: ZSetError<E>) -> Self {
+        Self::Delta(error)
+    }
 }
 impl<E: core::fmt::Display> core::fmt::Display for RowJoinError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Delta(error) => error.fmt(f),
-            Self::InputSchema { side } => write!(f, "row join operand {side} has an incompatible row"),
-            Self::NegativeMultiplicity { side } => write!(f, "row join operand {side} has a negative final count"),
+            Self::InputSchema { side } => {
+                write!(f, "row join operand {side} has an incompatible row")
+            }
+            Self::NegativeMultiplicity { side } => {
+                write!(f, "row join operand {side} has a negative final count")
+            }
             Self::ResultBudget { limit } => write!(f, "row join final occurrences exceed {limit}"),
             Self::InvalidResult => f.write_str("row join result has a negative final count"),
         }
@@ -163,30 +215,47 @@ impl<E: core::fmt::Display> core::fmt::Display for RowJoinError<E> {
 }
 impl<E: core::error::Error + 'static> core::error::Error for RowJoinError<E> {}
 
-fn charge<E>(control: &mut impl FnMut(ZSetEvent) -> Result<(), E>, event: ZSetEvent)
-    -> Result<(), ZSetError<E>> {
+fn charge<E>(
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    event: ZSetEvent,
+) -> Result<(), ZSetError<E>> {
     control(event).map_err(ZSetError::Control)
 }
-fn reserve_cell<E>(value: &GraphValue, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>)
-    -> Result<(), ZSetError<E>> {
+fn reserve_cell<E>(
+    value: &GraphValue,
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+) -> Result<(), ZSetError<E>> {
     charge(control, ZSetEvent::Work)?;
     // Bounds are checked before this reservation, including recursive payloads.
-    for _ in 0..=value.payload_units() { charge(control, ZSetEvent::ScratchEntry)?; }
+    for _ in 0..=value.payload_units() {
+        charge(control, ZSetEvent::ScratchEntry)?;
+    }
     Ok(())
 }
-fn reserve_row<E>(row: &GraphValueRow, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>)
-    -> Result<(), ZSetError<E>> {
+fn reserve_row<E>(
+    row: &GraphValueRow,
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+) -> Result<(), ZSetError<E>> {
     charge(control, ZSetEvent::ScratchEntry)?;
-    for value in row.values() { reserve_cell(value, control)?; }
+    for value in row.values() {
+        reserve_cell(value, control)?;
+    }
     Ok(())
 }
-fn arrange<E>(spec: &RowJoinSpec, side: usize, rows: &ZSet<GraphValueRow>, limbs: LimbLimit,
-    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>) -> Result<Arranged, RowJoinError<E>> {
+fn arrange<E>(
+    spec: &RowJoinSpec,
+    side: usize,
+    rows: &ZSet<GraphValueRow>,
+    limbs: LimbLimit,
+    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+) -> Result<Arranged, RowJoinError<E>> {
     let schema = if side == 0 { &spec.left } else { &spec.right };
     let mut updates = Vec::new();
     for (row, weight) in rows.iter() {
         charge(control, ZSetEvent::Work)?;
-        if row.len() != schema.len() { return Err(RowJoinError::InputSchema { side }); }
+        if row.len() != schema.len() {
+            return Err(RowJoinError::InputSchema { side });
+        }
         for (value, kind) in row.values().iter().zip(schema.iter()) {
             charge(control, ZSetEvent::Work)?;
             if !kind.accepts(value) || !value.validate_bounds() {
@@ -202,7 +271,11 @@ fn arrange<E>(spec: &RowJoinSpec, side: usize, rows: &ZSet<GraphValueRow>, limbs
             reserve_cell(value, control)?;
             values.push(value.clone());
         }
-        let tag = if has_null { if side == 0 { 1 } else { 2 } } else { 0 };
+        let tag = if has_null {
+            if side == 0 { 1 } else { 2 }
+        } else {
+            0
+        };
         reserve_row(row, control)?;
         charge(control, ZSetEvent::ScratchEntry)?;
         let row = Arc::new(row.clone());
@@ -230,11 +303,22 @@ pub struct IncrementalRowJoin {
 impl IncrementalRowJoin {
     pub fn new(spec: RowJoinSpec) -> Self {
         let input = Input::new(spec.kind);
-        Self { spec, input, rows: ZSet::new(), total: ZWeight::ZERO }
+        Self {
+            spec,
+            input,
+            rows: ZSet::new(),
+            total: ZWeight::ZERO,
+        }
     }
-    pub fn spec(&self) -> &RowJoinSpec { &self.spec }
-    pub fn rows(&self) -> &ZSet<GraphValueRow> { &self.rows }
-    pub fn total(&self) -> &ZWeight { &self.total }
+    pub fn spec(&self) -> &RowJoinSpec {
+        &self.spec
+    }
+    pub fn rows(&self) -> &ZSet<GraphValueRow> {
+        &self.rows
+    }
+    pub fn total(&self) -> &ZWeight {
+        &self.total
+    }
 
     /// Prepare both complete derivatives against the OLD input arrangements.
     /// Equijoin NULL keys never match; cross definitions have no key columns.
@@ -243,8 +327,11 @@ impl IncrementalRowJoin {
     /// The output bound tests final occurrences, not support or a transient
     /// insertion-first prefix. Dropping the guard leaves all state unchanged.
     pub fn prepare<E>(
-        &mut self, left: &ZSet<GraphValueRow>, right: &ZSet<GraphValueRow>,
-        limbs: LimbLimit, max_result_rows: Option<u64>,
+        &mut self,
+        left: &ZSet<GraphValueRow>,
+        right: &ZSet<GraphValueRow>,
+        limbs: LimbLimit,
+        max_result_rows: Option<u64>,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<RowJoinUpdate<'_>, RowJoinError<E>> {
         charge(control, ZSetEvent::Work)?;
@@ -253,42 +340,67 @@ impl IncrementalRowJoin {
         for (side, rows) in [&left, &right].into_iter().enumerate() {
             for ((key, row), weight) in rows.iter() {
                 charge(control, ZSetEvent::Work)?;
-                let old = if side == 0 { self.input.left_weight(key, row) }
-                    else { self.input.right_weight(key, row) };
+                let old = if side == 0 {
+                    self.input.left_weight(key, row)
+                } else {
+                    self.input.right_weight(key, row)
+                };
                 let next = match old {
                     Some(old) => old.checked_add(weight, limbs),
                     None => weight.checked_clone(limbs),
-                }.map_err(ZSetError::Arithmetic)?;
-                if next < ZWeight::ZERO { return Err(RowJoinError::NegativeMultiplicity { side }); }
+                }
+                .map_err(ZSetError::Arithmetic)?;
+                if next < ZWeight::ZERO {
+                    return Err(RowJoinError::NegativeMultiplicity { side });
+                }
             }
         }
         let input = self.input.prepare(&left, &right, limbs, control)?;
         let delta = input.project_delta(&self.spec, limbs, control)?;
         let change = delta.total_weight(limbs, control)?;
         charge(control, ZSetEvent::Work)?;
-        let next_total = self.total.checked_add(&change, limbs).map_err(ZSetError::Arithmetic)?;
-        if next_total < ZWeight::ZERO { return Err(RowJoinError::InvalidResult); }
+        let next_total = self
+            .total
+            .checked_add(&change, limbs)
+            .map_err(ZSetError::Arithmetic)?;
+        if next_total < ZWeight::ZERO {
+            return Err(RowJoinError::InvalidResult);
+        }
         if let Some(limit) = max_result_rows {
             if next_total > ZWeight::from_i128(i128::from(limit)) {
                 return Err(RowJoinError::ResultBudget { limit });
             }
         }
-        for (row, _) in delta.iter() { reserve_row(row, control)?; }
+        for (row, _) in delta.iter() {
+            reserve_row(row, control)?;
+        }
         let sink = self.rows.prepare_update(&delta, limbs, control)?;
         for (row, _) in delta.iter() {
             charge(control, ZSetEvent::Work)?;
-            if sink.weight(row).is_some_and(|weight| weight < &ZWeight::ZERO) {
+            if sink
+                .weight(row)
+                .is_some_and(|weight| weight < &ZWeight::ZERO)
+            {
                 return Err(RowJoinError::InvalidResult);
             }
         }
         charge(control, ZSetEvent::Work)?;
-        Ok(RowJoinUpdate { input, sink, total: &mut self.total, next_total, delta })
+        Ok(RowJoinUpdate {
+            input,
+            sink,
+            total: &mut self.total,
+            next_total,
+            delta,
+        })
     }
 }
 impl core::fmt::Debug for IncrementalRowJoin {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("IncrementalRowJoin").field("spec", &self.spec)
-            .field("support", &self.rows.len()).field("data", &"[REDACTED]").finish()
+        f.debug_struct("IncrementalRowJoin")
+            .field("spec", &self.spec)
+            .field("support", &self.rows.len())
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -301,11 +413,21 @@ pub struct RowJoinUpdate<'a> {
     delta: ZSet<GraphValueRow>,
 }
 impl RowJoinUpdate<'_> {
-    pub fn delta(&self) -> &ZSet<GraphValueRow> { &self.delta }
-    pub fn total(&self) -> &ZWeight { &self.next_total }
+    pub fn delta(&self) -> &ZSet<GraphValueRow> {
+        &self.delta
+    }
+    pub fn total(&self) -> &ZWeight {
+        &self.next_total
+    }
     /// Publish without recoverable callbacks between input, output and total.
     pub fn commit(self) -> ZSet<GraphValueRow> {
-        let Self { input, sink, total, next_total, delta } = self;
+        let Self {
+            input,
+            sink,
+            total,
+            next_total,
+            delta,
+        } = self;
         input.commit();
         sink.commit();
         *total = next_total;
@@ -314,8 +436,10 @@ impl RowJoinUpdate<'_> {
 }
 impl core::fmt::Debug for RowJoinUpdate<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RowJoinUpdate").field("delta_support", &self.delta.len())
-            .field("data", &"[REDACTED]").finish()
+        f.debug_struct("RowJoinUpdate")
+            .field("delta_support", &self.delta.len())
+            .field("data", &"[REDACTED]")
+            .finish()
     }
 }
 
