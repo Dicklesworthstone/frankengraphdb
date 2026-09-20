@@ -14,6 +14,17 @@ use fgdb_types::CanonicalScalarKind;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+/// Maximum number of distinct arguments admitted by one parameter map.
+pub const MAX_GQL_PARAMETER_COUNT: usize = 1_000;
+/// Maximum UTF-8 byte length of an argument name, excluding the `$` sigil.
+pub const MAX_GQL_PARAMETER_NAME_BYTES: usize = 64;
+/// Maximum size of the complete canonical parameter transcript, including its
+/// header and all names, type tags, length prefixes and value payloads. Shared
+/// payloads are charged per entry, so cloning cannot bypass admission bounds.
+pub const MAX_GQL_PARAMETER_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
+const PARAMETER_TRANSCRIPT_HEADER: &[u8] = b"fgdb:gql-parameters:v1\0";
+const PARAMETER_TRANSCRIPT_HEADER_BYTES: usize = PARAMETER_TRANSCRIPT_HEADER.len() + 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GqlParameterType {
     Int64,
@@ -52,6 +63,20 @@ impl GqlParameterValue {
                 unreachable!("legacy template validation admits only numeric arguments")
             }
         }
+    }
+
+    /// Use lengths from admitted immutable payloads; never encode or clone a
+    /// value merely to decide whether retaining it would exceed the budget.
+    fn transcript_entry_bytes(&self, name_bytes: usize) -> Option<usize> {
+        let payload_bytes = match self {
+            Self::Int64(_) | Self::UInt64(_) => 8,
+            Self::Scalar(value) => 8_usize.checked_add(value.canonical_bytes().len())?,
+            Self::List(value) => 8_usize.checked_add(value.canonical_bytes().len())?,
+        };
+        8_usize
+            .checked_add(name_bytes)?
+            .checked_add(1)?
+            .checked_add(payload_bytes)
     }
 }
 
@@ -104,10 +129,13 @@ impl core::fmt::Debug for GqlListParameter {
 }
 
 /// Exact, case-sensitive argument names without their leading `$`.
-/// Duplicate insertion refuses without replacing the existing argument.
+/// Duplicate or over-budget insertion refuses without changing the map.
+/// Retained entries and their complete canonical transcript are bounded before
+/// insertion; scalar/list payloads also retain their individual admission caps.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct GqlParameters {
     values: BTreeMap<String, GqlParameterValue>,
+    transcript_entry_bytes: usize,
 }
 
 impl GqlParameters {
@@ -122,13 +150,40 @@ impl GqlParameters {
         value: GqlParameterValue,
     ) -> Result<(), GqlParameterError> {
         let name = name.into();
+        if name.len() > MAX_GQL_PARAMETER_NAME_BYTES {
+            return Err(GqlParameterError::ArgumentNameTooLong {
+                observed: name.len(),
+                limit: MAX_GQL_PARAMETER_NAME_BYTES,
+            });
+        }
         if !valid_name(&name) {
             return Err(GqlParameterError::InvalidArgumentName { name });
         }
         if self.values.contains_key(&name) {
             return Err(GqlParameterError::Duplicate { name });
         }
+        if self.values.len() >= MAX_GQL_PARAMETER_COUNT {
+            return Err(GqlParameterError::ParameterCountExceeded {
+                limit: MAX_GQL_PARAMETER_COUNT,
+            });
+        }
+        let next_entry_bytes = value
+            .transcript_entry_bytes(name.len())
+            .and_then(|bytes| self.transcript_entry_bytes.checked_add(bytes));
+        let next_transcript_bytes = next_entry_bytes
+            .and_then(|bytes| PARAMETER_TRANSCRIPT_HEADER_BYTES.checked_add(bytes));
+        let Some(next_entry_bytes) = next_entry_bytes.filter(|_| {
+            next_transcript_bytes.is_some_and(|bytes| bytes <= MAX_GQL_PARAMETER_TRANSCRIPT_BYTES)
+        }) else {
+            return Err(GqlParameterError::TranscriptBytesExceeded {
+                observed: next_transcript_bytes.unwrap_or(usize::MAX),
+                limit: MAX_GQL_PARAMETER_TRANSCRIPT_BYTES,
+            });
+        };
+        // Commit accounting only after every validation has succeeded. In
+        // particular a rejected duplicate must neither replace nor charge data.
         self.values.insert(name, value);
+        self.transcript_entry_bytes = next_entry_bytes;
         Ok(())
     }
 
@@ -185,13 +240,20 @@ impl GqlParameters {
             .map(|(name, value)| (name.as_str(), value.parameter_type()))
     }
 
+    /// Size of the complete admitted transcript without allocating or encoding.
+    #[must_use]
+    pub fn canonical_byte_len(&self) -> usize {
+        PARAMETER_TRANSCRIPT_HEADER_BYTES + self.transcript_entry_bytes
+    }
+
     /// Explicit plaintext export. Unlike Debug, these bytes contain values.
     /// This is a self-delimiting application transcript, not a durable format.
     /// Numeric-only maps retain their exact existing bytes. Scalar tag 2 uses
     /// the already admitted canonical encoding, never a second scalar encoder.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"fgdb:gql-parameters:v1\0".to_vec();
+        let mut bytes = Vec::with_capacity(self.canonical_byte_len());
+        bytes.extend_from_slice(PARAMETER_TRANSCRIPT_HEADER);
         bytes.extend_from_slice(&(self.values.len() as u64).to_be_bytes());
         for (name, value) in &self.values {
             append_bytes(&mut bytes, name.as_bytes());
@@ -214,6 +276,7 @@ impl GqlParameters {
                 }
             }
         }
+        debug_assert_eq!(bytes.len(), self.canonical_byte_len());
         bytes
     }
 }
@@ -244,6 +307,17 @@ pub enum GqlParameterError {
     ScalarLiteral,
     /// List depth, node count, scalar encoding or aggregate payload exceeded admission.
     ListLiteral,
+    ArgumentNameTooLong {
+        observed: usize,
+        limit: usize,
+    },
+    ParameterCountExceeded {
+        limit: usize,
+    },
+    TranscriptBytesExceeded {
+        observed: usize,
+        limit: usize,
+    },
     InvalidParameterName {
         offset: usize,
     },
@@ -290,6 +364,17 @@ impl core::fmt::Display for GqlParameterError {
             Self::ScalarLiteral => {
                 f.write_str("scalar argument exceeds canonical operand admission bounds")
             }
+            Self::ArgumentNameTooLong { observed, limit } => write!(
+                f,
+                "parameter argument name has {observed} bytes; limit is {limit}"
+            ),
+            Self::ParameterCountExceeded { limit } => {
+                write!(f, "parameter argument count exceeds limit {limit}")
+            }
+            Self::TranscriptBytesExceeded { observed, limit } => write!(
+                f,
+                "parameter transcript requires {observed} bytes; limit is {limit}"
+            ),
             Self::InvalidParameterName { offset } => {
                 write!(f, "invalid GQL parameter name at byte {offset}")
             }
@@ -464,6 +549,11 @@ impl PreparedGqlTemplate {
         let mut schema: BTreeMap<String, GqlParameterSpec> = BTreeMap::new();
         let mut targets = Vec::new();
         for occurrence in &occurrences {
+            if occurrence.name.len() > MAX_GQL_PARAMETER_NAME_BYTES {
+                return Err(GqlParameterError::InvalidParameterName {
+                    offset: occurrence.span.start,
+                });
+            }
             let target = occurrence.target;
             if targets.contains(&target) {
                 return Err(GqlParameterError::DefinitionMismatch {
@@ -958,5 +1048,109 @@ mod tests {
         assert_eq!(query.statement(), literal);
         assert!(query.verifies_definition());
         assert!(template.parameter_schema().is_empty());
+    }
+
+    #[test]
+    fn parameter_name_boundary_matches_template_admission() {
+        let name = "x".repeat(MAX_GQL_PARAMETER_NAME_BYTES);
+        let source = format!("MATCH (a:L) WHERE a.n=${name} RETURN a");
+        let template = PreparedGqlTemplate::prepare(&source, &bindings()).unwrap();
+        let mut args = GqlParameters::new().with_int64(&name, 7).unwrap();
+        assert!(template.bind_parameters(&args).unwrap().verifies_definition());
+        let frozen = args.clone();
+        let oversized = format!("{name}x");
+        assert!(matches!(
+            args.insert(&oversized, GqlParameterValue::Int64(8)),
+            Err(GqlParameterError::ArgumentNameTooLong { observed, limit })
+                if observed == limit + 1 && limit == MAX_GQL_PARAMETER_NAME_BYTES
+        ));
+        assert_eq!(args, frozen);
+        let source = format!("MATCH (a:L) WHERE a.n=${oversized} RETURN a");
+        assert!(matches!(
+            PreparedGqlTemplate::prepare(&source, &bindings()),
+            Err(GqlParameterError::InvalidParameterName { offset })
+                if offset == source.find('$').unwrap()
+        ));
+    }
+
+    #[test]
+    fn count_admission_is_atomic_and_duplicates_do_not_consume_budget() {
+        let mut args = GqlParameters::new();
+        for index in 0..MAX_GQL_PARAMETER_COUNT {
+            args.insert(format!("p{index}"), GqlParameterValue::Int64(7))
+                .unwrap();
+        }
+        let frozen = args.clone();
+        assert!(matches!(
+            args.insert("overflow", GqlParameterValue::UInt64(0)),
+            Err(GqlParameterError::ParameterCountExceeded { limit })
+                if limit == MAX_GQL_PARAMETER_COUNT
+        ));
+        assert!(matches!(
+            args.insert("p0", GqlParameterValue::Int64(99)),
+            Err(GqlParameterError::Duplicate { .. })
+        ));
+        assert_eq!(args, frozen);
+        assert_eq!(args.canonical_byte_len(), args.canonical_bytes().len());
+    }
+
+    #[test]
+    fn transcript_budget_charges_shared_payloads_and_refuses_before_retention() {
+        let scalar = GqlScalarParameter::new(
+            fgdb_types::CanonicalScalar::bytes(vec![
+                0;
+                crate::algebra::MAX_SCALAR_PREDICATE_BYTES - 128
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = GqlParameters::new();
+        let mut refused = false;
+        for index in 0..MAX_GQL_PARAMETER_COUNT {
+            let name = format!("p{index}");
+            let value = GqlParameterValue::Scalar(scalar.clone());
+            let observed = args.canonical_byte_len()
+                + value.transcript_entry_bytes(name.len()).unwrap();
+            if observed > MAX_GQL_PARAMETER_TRANSCRIPT_BYTES {
+                let frozen = args.clone();
+                assert_eq!(
+                    args.insert(name, value),
+                    Err(GqlParameterError::TranscriptBytesExceeded {
+                        observed,
+                        limit: MAX_GQL_PARAMETER_TRANSCRIPT_BYTES,
+                    })
+                );
+                assert_eq!(args, frozen);
+                assert_eq!(args.canonical_byte_len(), args.canonical_bytes().len());
+                assert!(args.canonical_byte_len() <= MAX_GQL_PARAMETER_TRANSCRIPT_BYTES);
+                refused = true;
+                break;
+            }
+            args.insert(name, value).unwrap();
+        }
+        assert!(refused, "byte budget must be exercised before the count cap");
+    }
+
+    #[test]
+    fn cached_transcript_size_matches_every_value_kind_and_empty_maps() {
+        let empty = GqlParameters::new();
+        assert_eq!(empty.canonical_byte_len(), empty.canonical_bytes().len());
+        let args = empty
+            .with_int64("signed", i64::MIN)
+            .unwrap()
+            .with_uint64("unsigned", u64::MAX)
+            .unwrap()
+            .with_text("text", "' $x 雪")
+            .unwrap()
+            .with_bool("boolean", true)
+            .unwrap()
+            .with_null("null")
+            .unwrap()
+            .with_list("list", Vec::new())
+            .unwrap();
+        assert_eq!(args.canonical_byte_len(), args.canonical_bytes().len());
+        let clone = args.clone().with_int64("extra", 1).unwrap();
+        assert_eq!(clone.canonical_byte_len(), clone.canonical_bytes().len());
+        assert!(clone.canonical_byte_len() > args.canonical_byte_len());
     }
 }
