@@ -14,6 +14,8 @@
 //! Logical work/scratch admission is not a byte bound; arbitrary key code and
 //! standard allocation retain the parent Z-set panic/allocation boundary.
 
+pub mod kcore;
+
 use super::{ZSet, ZSetError, ZSetEvent, event};
 use crate::{LimbLimit, ZWeight};
 use std::collections::{BTreeMap, BTreeSet};
