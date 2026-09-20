@@ -200,6 +200,18 @@ impl NumericAccumulator {
 }
 
 impl GraphAggregateRow {
+    /// Internal assembly after a physical group reducer has checked its whole
+    /// definition, admitted payloads and finished the shared numeric states.
+    /// Unlike the maintained scalar/vertex schema, graph joins can group native
+    /// edge/path values. This does not evaluate or weaken public row admission.
+    pub(crate) fn from_group_values(
+        keys: Vec<GraphValue>,
+        values: Vec<GraphAggregateValue>,
+    ) -> Self {
+        debug_assert!(keys.len() + values.len() <= MAX_PATTERN_VERTICES);
+        Self { keys: keys.into_boxed_slice(), values: values.into_boxed_slice() }
+    }
+
     /// Internal result assembly for a checked global physical operator. The
     /// closed accumulator family has already enforced result domains and the
     /// caller must admit every owned cell before invoking this constructor.

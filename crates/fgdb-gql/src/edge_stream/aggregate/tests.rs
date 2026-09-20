@@ -1,4 +1,5 @@
 use super::*;
+mod groups;
 use crate::algebra::GraphValue;
 use crate::{
     GqlParameters, GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
@@ -439,7 +440,7 @@ fn ordinary_row_profile_is_not_relaxed_and_unsupported_aggregate_shapes_refuse()
     assert!(EdgeScanPlan::compile(q.input_pattern().plan()).is_err());
     assert!(EdgeAggregatePlan::compile(&q).is_ok());
     for text in [
-        "MATCH (a)-[r:R]->(b) RETURN b,COUNT(*) AS n GROUP BY b",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n HAVING n > 0",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT b) AS n",
         "MATCH (a)-[r:R]->(b) RETURN MIN(r.p+1) AS n",
         "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n LIMIT 0",
