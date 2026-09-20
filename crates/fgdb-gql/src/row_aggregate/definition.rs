@@ -10,6 +10,8 @@ use crate::{GlaExecutionEvent, GqlQueryError, GraphAggregateError, GraphAggregat
     GraphHavingExpression, GraphSetColumnType};
 use core::convert::Infallible;
 
+pub mod operator;
+
 pub(crate) mod sealed {
     pub trait Sealed {}
 }
