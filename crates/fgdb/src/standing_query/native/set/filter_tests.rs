@@ -163,8 +163,9 @@ fn filter_scope_does_not_hide_unsupported_pages_or_errors_in_completed_children(
         let (child, code) = filtered.incremental_filter().unwrap();
         assert_eq!(child.canonical_bytes(), leaf().canonical_bytes()); assert_eq!(code, &[positive()]);
         assert!(leaf().incremental_filter().is_none());
-        for query in [filtered.clone().with_page(0, Some(0)), filtered.with_page(1, None),
-            leaf().with_page(0, Some(0)).filter(&[Predicate::Truth(Some(false))]).unwrap()] {
+        for query in [filtered.clone().with_order_by(&[fgdb_gql::algebra::GraphValueOrder {
+                column:0,descending:true,nulls_first:false }]).unwrap(), filtered.with_page(1, None),
+            leaf().with_page(1, None).filter(&[Predicate::Truth(Some(false))]).unwrap()] {
             assert!(register(&mut db, &cx, &query, policy()).is_err());
             assert_eq!(saved(&db.standing_queries), before);
         }

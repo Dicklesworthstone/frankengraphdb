@@ -55,7 +55,7 @@ fn every_circuit_stage_refusal_and_unwind_drops_only_the_unpublished_suffix() {
         let leaf = PreparedGraphSet::from(PreparedGraphText::prepare("MATCH (n) RETURN n AS id", none)
             .unwrap().bind_parameters(&GqlParameters::new()).unwrap());
         let invalid = leaf.clone().combine(GraphSetOperation::Union, GraphSetQuantifier::All,
-            leaf.with_page(0, Some(0))).unwrap();
+            leaf.with_page(1, None)).unwrap();
         assert!(register(&mut db, &cx, &invalid, policy()).is_err());
         assert_eq!(db.standing_queries.len(), before, "valid left operand must be reclaimed");
         // A panic before acceptance uses the same Drop guard, not a special

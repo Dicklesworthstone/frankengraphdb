@@ -23,17 +23,37 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         self.database.store_standing_query(query).index
     }
 
-    // Only the terminal scope may introduce a ranked finite window. The
-    // ordinary recursive compiler still refuses nested wrapper order/pages,
-    // so it cannot replace inherited sequence semantics with a bag surrogate.
+    // Keep explicit terminal ordering over unwindowed products/UNWIND. Their
+    // enumeration no longer matters once the terminal order is explicit. The
+    // recursive extension below is deliberately restricted to product-free
+    // window trees, where inherited scope/filter order has a finite bound.
     fn compile_root(
         &mut self, cx: &QueryCx, query: &PreparedGraphSet, policy: GqlQueryPolicy,
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
         checkpoint()?;
         let Some((input, order, offset, count)) = query.incremental_ordered_window() else {
-            return self.compile(cx, query, policy, checkpoint);
+            if !query.incremental_window_sequence_compatible() {
+                return Err(StandingQueryError::Unsupported);
+            }
+            let index = self.compile(cx, query, policy, checkpoint)?;
+            if matches!(&self.database.standing_queries[index], StandingQuery::Window(_)) {
+                return Ok(index);
+            }
+            let Some((order, count)) = query.incremental_finite_order() else { return Ok(index); };
+            // Filters retain a child's order semantically but publish a bag.
+            // Restore only that already-selected finite sequence for delivery.
+            let spec = RowWindowSpec::new(query.column_types().to_vec(), order.to_vec(),
+                GraphSetQuantifier::All, 0, count).map_err(StandingQueryError::WindowSchema)?;
+            let state = self.database.prepare_standing_window(cx, index, spec, policy,
+                self.database.standing_queries.len())?;
+            let index = self.append(StandingQuery::Window(Box::new(state)));
+            checkpoint()?;
+            return Ok(index);
         };
+        if !input.incremental_window_sequence_compatible() {
+            return Err(StandingQueryError::Unsupported);
+        }
         let spec = RowWindowSpec::new(input.column_types().to_vec(), order.to_vec(),
             GraphSetQuantifier::All, offset, count).map_err(StandingQueryError::WindowSchema)?;
         let input = self.compile(cx, &input, policy, checkpoint)?;
@@ -48,7 +68,13 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
         checkpoint()?;
-        let index = if let Some(pattern) = query.incremental_pattern() {
+        let index = if let Some((input, spec)) = query.incremental_window()
+            .map_err(StandingQueryError::WindowSchema)? {
+            let input = self.compile(cx, &input, policy, checkpoint)?;
+            let state = self.database.prepare_standing_window(cx, input, spec, policy,
+                self.database.standing_queries.len())?;
+            self.append(StandingQuery::Window(Box::new(state)))
+        } else if let Some(pattern) = query.incremental_pattern() {
             let query = self.database.prepare_registered_rows(cx, pattern.clone(), policy)?;
             self.append(query)
         } else if let Some(input) = query.incremental_scope() {
@@ -122,8 +148,14 @@ pub(super) fn register<V: Vfs + Clone>(
     database: &mut Database<V>, cx: &QueryCx, query: &PreparedGraphSet, policy: GqlQueryPolicy,
 ) -> Result<StandingQueryHandle, StandingQueryError> {
     let mut checkpoint = || cx.checkpoint().map_err(StandingQueryError::Interrupted);
+    register_checked(database, cx, query, policy, &mut checkpoint)
+}
+fn register_checked<V: Vfs + Clone>(
+    database: &mut Database<V>, cx: &QueryCx, query: &PreparedGraphSet, policy: GqlQueryPolicy,
+    checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
+) -> Result<StandingQueryHandle, StandingQueryError> {
     let mut staged = Staging::new(database);
-    let index = staged.compile_root(cx, query, policy, &mut checkpoint)?;
+    let index = staged.compile_root(cx, query, policy, checkpoint)?;
     let layout = Arc::new(Layout::Circuit { columns: query.columns().to_vec(), first: staged.first });
     let handle = StandingQueryHandle { owner: Arc::clone(&staged.database.handle_owner), index,
         native: Some(layout) };
@@ -241,3 +273,6 @@ mod unwind_tests;
 
 #[cfg(test)]
 mod window_tests;
+
+#[cfg(test)]
+mod nested_window_tests;

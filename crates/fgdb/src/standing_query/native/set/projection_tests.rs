@@ -133,7 +133,8 @@ fn unsupported_projection_descendants_and_late_expression_failures_leave_no_part
         db.write(&commit,seed).await.unwrap();
         let sibling=register(&mut db,&cx,&leaf(),policy()).unwrap();let before=saved(&db.standing_queries);
         let projected=computed(GraphSetQuantifier::All);
-        for query in [projected.clone().with_page(0,Some(0)),
+        for query in [projected.clone().with_order_by(&[fgdb_gql::algebra::GraphValueOrder {
+                column:0,descending:true,nulls_first:false }]).unwrap(),
             leaf().combine(GraphSetOperation::Union,GraphSetQuantifier::All,projected.with_page(1,None)).unwrap()] {
             assert!(register(&mut db,&cx,&query,policy()).is_err());
             assert_eq!(saved(&db.standing_queries),before);

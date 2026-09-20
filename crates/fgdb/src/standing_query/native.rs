@@ -43,12 +43,16 @@ impl PreparedNativeRead {
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
     /// Set registration owns a bounded row/set/join/projection tree; admission and
     /// maintenance policies apply PER NODE, not to their aggregate footprint.
-    /// Grouping and complete operand semantics are preserved. An explicit
-    /// terminal ORDER BY with finite LIMIT (including zero) uses a maintained
-    /// ranked window. Nested relational pages, bare LIMIT/OFFSET and unbounded
-    /// ORDER BY still refuse. Without a terminal window, compound delivery is
-    /// canonical bag order, not implicit left-major enumeration. Input-local
-    /// pattern selection remains upstream. Policies still apply per node.
+    /// Grouping and complete operand semantics are preserved. Finite windows
+    /// may be nested through product/UNWIND-free trees. Bare LIMIT with optional
+    /// OFFSET inherits scope/filter order; projection and set nodes canonicalize.
+    /// Filters preserve a finite child's selected sequence at delivery too.
+    /// Explicit terminal ORDER BY with finite LIMIT also remains available over
+    /// unwindowed products/UNWIND. Bare pages over those positional sources and
+    /// mixing them with nested relational windows refuse. Unbounded ORDER BY or
+    /// OFFSET still refuses. LIMIT 0 never bypasses child admission or quotas.
+    /// Unwindowed compound delivery is canonical bag order, not implicit
+    /// left-major enumeration. Policies still apply per node.
     /// The normal rebuild API repairs the complete owned circuit atomically.
     pub fn register_standing<V: Vfs + Clone>(
         &self, database: &mut Database<V>, cx: &QueryCx, params: &GqlParameters,
@@ -124,9 +128,11 @@ impl<V: Vfs + Clone> Database<V> {
     /// returned handle owns an atomically admitted circuit and rebuilds it as a
     /// unit. Explicit terminal ORDER BY with finite LIMIT is ranked; otherwise
     /// delivery uses canonical bag order, not implicit left-major enumeration.
-    /// Each node keeps its own allowance. Unsupported descendants, nested
-    /// relational pages, bare LIMIT/OFFSET and unbounded ORDER BY refuse; no
-    /// eager per-commit fallback is used, including for a zero terminal limit.
+    /// Nested finite windows and inherited scope/filter order are supported on
+    /// product/UNWIND-free trees. Bare pages over positional sources, nested
+    /// windows mixed with those sources, and unbounded ordering/pages refuse.
+    /// Each node keeps its own allowance; no eager per-commit fallback is used,
+    /// including for a zero terminal limit.
     /// Session-local and in-memory, not a durable subscription or spill engine.
     pub fn register_standing_relation(
         &mut self, cx: &QueryCx, query: &fgdb_gql::PreparedGraphSet, policy: GqlQueryPolicy,

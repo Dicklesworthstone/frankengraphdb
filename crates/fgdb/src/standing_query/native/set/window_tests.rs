@@ -190,7 +190,7 @@ fn terminal_zero_windows_admit_every_child_and_do_not_erase_nested_sequence_sema
         let product = || leaf().cross_join(leaf()).unwrap();
         for query in [product().with_page(0, Some(0)),
             product().with_order_by(&[GraphValueOrder::descending(0)]).unwrap(),
-            ordered(leaf().nested().unwrap().with_page(0, Some(0)).nested().unwrap(), 0, 0)] {
+            ordered(leaf().nested().unwrap().with_page(1, None).nested().unwrap(), 0, 0)] {
             assert!(matches!(db.register_standing_relation(&cx, &query, policy()), Err(StandingQueryError::Unsupported)));
             assert_eq!(saved(&db.standing_queries), before);
         }
