@@ -6,7 +6,7 @@
 
 use super::*;
 use fgdb_delta_types::{LimbLimit, ZWeight};
-use fgdb_gql::row_join::{IncrementalRowJoin, RowJoinBuildError, RowJoinError, RowJoinSpec};
+use fgdb_gql::row_join::{IncrementalRowJoin, RowJoinBuildError, RowJoinError, RowJoinKind, RowJoinSpec};
 use fgdb_gql::algebra::MAX_PATTERN_VERTICES;
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
@@ -92,6 +92,32 @@ impl<V: Vfs + Clone> Database<V> {
         &mut self, cx: &QueryCx, left: &StandingQueryHandle, right: &StandingQueryHandle,
         keys: &[(usize, usize)], policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
+        self.register_standing_join_with_kind(cx, left, right, keys, RowJoinKind::Inner, policy)
+    }
+
+    /// Maintain an inner, left outer, semi or anti equijoin through the same
+    /// dependency-ordered registry. `kind` is fixed for the handle's lifetime,
+    /// including rebuild. The existing registration method defaults to Inner.
+    ///
+    /// Left emits every matching pair or a NULL right frame for each unmatched
+    /// left occurrence. Semi emits the left bag when any witness exists; Anti
+    /// emits it when none exists. Neither multiplies by the right witness count.
+    /// Losing one of several witnesses does not change presence; first/last
+    /// witness changes and simultaneous left/right updates form one atomic tick.
+    /// NULL in ANY key component never matches, even another NULL. Thus a NULL
+    /// left key survives Anti and is null-extended by Left, but never enters Semi.
+    ///
+    /// Inner/Left columns are `left.<name>` followed by `right.<name>`;
+    /// Semi/Anti have only `left.<name>` columns. All kinds can feed later joins
+    /// and sets. NULL extensions keep column types, including full-width VIds.
+    /// Input schemas, source admission, final-result quotas and failure fencing
+    /// are the same as register_standing_join. Semi/Anti use counted witnesses,
+    /// not Cartesian products. No arbitrary ON filters or new GQL syntax is
+    /// implied; registrations remain session-local, not durable subscriptions.
+    pub fn register_standing_join_with_kind(
+        &mut self, cx: &QueryCx, left: &StandingQueryHandle, right: &StandingQueryHandle,
+        keys: &[(usize, usize)], kind: RowJoinKind, policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         if !Arc::ptr_eq(&self.handle_owner, &left.owner) || !Arc::ptr_eq(&self.handle_owner, &right.owner) {
             return Err(StandingQueryError::ForeignHandle);
@@ -101,14 +127,14 @@ impl<V: Vfs + Clone> Database<V> {
                 return Err(StandingQueryError::Unsupported);
             }
         }
-        let query = self.prepare_standing_join(cx, [left.index, right.index], keys, policy,
+        let query = self.prepare_standing_join(cx, [left.index, right.index], keys, kind, policy,
             self.standing_queries.len())?;
         Ok(self.store_standing_query(StandingQuery::Join(Box::new(query))))
     }
 
     pub(super) fn prepare_standing_join(
         &self, cx: &QueryCx, inputs: [usize; 2], keys: &[(usize, usize)],
-        policy: GqlQueryPolicy, before: usize,
+        kind: RowJoinKind, policy: GqlQueryPolicy, before: usize,
     ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
@@ -138,7 +164,8 @@ impl<V: Vfs + Clone> Database<V> {
                 return Err(StandingQueryError::JoinSchema(RowJoinBuildError::TooManyKeys));
             }
             meter.units(ZSetEvent::ScratchEntry, width + keys.len()).map_err(StandingQueryError::Maintenance)?;
-            let spec = RowJoinSpec::new(&types[0], &types[1], keys).map_err(StandingQueryError::JoinSchema)?;
+            let spec = RowJoinSpec::new(&types[0], &types[1], keys)
+                .map_err(StandingQueryError::JoinSchema)?.with_kind(kind);
             let left_rows = sets::rows(left).ok_or(StandingQueryError::Unsupported)?;
             let right_rows = sets::rows(right).ok_or(StandingQueryError::Unsupported)?;
             let records = (left_rows.len() as u128) + (right_rows.len() as u128);
@@ -146,7 +173,8 @@ impl<V: Vfs + Clone> Database<V> {
                 return Err(StandingQueryError::Maintenance(StandingQueryFailure::SnapshotBudget));
             }
             let mut columns = Vec::new();
-            for (prefix, names) in [("left.", left_names), ("right.", right_names)] {
+            let sides = if matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti) { 1 } else { 2 };
+            for (prefix, names) in [("left.", left_names), ("right.", right_names)].into_iter().take(sides) {
                 for name in names {
                     meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Maintenance)?;
                     let bytes = prefix.len().checked_add(name.len())
@@ -190,6 +218,14 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(StandingQueryError::Unsupported);
         };
         Ok(query.columns())
+    }
+    /// Inspect the fixed semantics of a healthy maintained join.
+    pub fn standing_join_kind(&self, cx: &QueryCx, handle: &StandingQueryHandle)
+        -> Result<RowJoinKind, StandingQueryError> {
+        let StandingQuery::Join(query) = self.admitted_standing_query(cx, handle)? else {
+            return Err(StandingQueryError::Unsupported);
+        };
+        Ok(query.spec().kind())
     }
     /// Exact accepted occurrence total, without scanning or expanding rows.
     pub fn standing_join_total<'a>(&'a self, cx: &QueryCx, handle: &StandingQueryHandle)

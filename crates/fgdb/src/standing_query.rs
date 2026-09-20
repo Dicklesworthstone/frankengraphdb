@@ -469,7 +469,7 @@ impl<V: Vfs + Clone> Database<V> {
                 self.prepare_standing_set(cx, query.inputs, query.operation(), policy, handle.index)?,
             )),
             StandingQuery::Join(query) => StandingQuery::Join(Box::new(
-                self.prepare_standing_join(cx, query.inputs, query.spec().keys(), policy, handle.index)?,
+                self.prepare_standing_join(cx, query.inputs, query.spec().keys(), query.spec().kind(), policy, handle.index)?,
             )),
         };
         let frontier = replacement.status().1;

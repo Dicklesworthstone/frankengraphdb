@@ -92,9 +92,9 @@ fn every_composed_refusal_preserves_accepted_state_and_baselines_never_become_em
             if let Some(error)=error {assert_eq!(result,Err(error));unchanged(&state,&before);}
             else {result.unwrap();assert_eq!(state.operator,expected.operator);}
         }
-        assert!(matches!(db.prepare_standing_join(&cx,[0,1],&[(0,0)],GqlQueryPolicy::new(2,1000,1_000_000,1_000_000),2),
+        assert!(matches!(db.prepare_standing_join(&cx,[0,1],&[(0,0)],RowJoinKind::Inner,GqlQueryPolicy::new(2,1000,1_000_000,1_000_000),2),
             Err(StandingQueryError::Maintenance(StandingQueryFailure::SnapshotBudget))));
-        assert!(db.prepare_standing_join(&cx,[0,1],&[(0,0)],GqlQueryPolicy::new(3,1000,1_000_000,1_000_000),2).is_ok());
+        assert!(db.prepare_standing_join(&cx,[0,1],&[(0,0)],RowJoinKind::Inner,GqlQueryPolicy::new(3,1000,1_000_000,1_000_000),2).is_ok());
         // Real rebuild creates a new baseline, not a fabricated zero delta.
         db.rebuild_standing_query(&cx,&left,policy()).unwrap();
         let batch=db.delta_since(basis).unwrap().next().unwrap();
@@ -105,4 +105,49 @@ fn every_composed_refusal_preserves_accepted_state_and_baselines_never_become_em
         assert_eq!(db.frontier().unwrap(),at);
     });
     assert!(report.lab_test_passed(),"{report:?}");
+}
+
+#[test]
+fn outer_and_presence_registry_publication_is_atomic_at_every_checkpoint() {
+    use fgdb_gql::algebra::GraphValue;
+    let bag = |key: i64, payload: i64, count: i128| ZSet::from_updates([
+        (GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(key)),
+            GraphValue::Scalar(CanonicalScalar::Int(payload))]), ZWeight::from_i128(count))],
+        LIMBS, &mut |_| Ok::<_, StandingQueryFailure>(())).unwrap();
+    let left = bag(1, 10, 2); let right = bag(1, 20, 1);
+    let dl = bag(1, 11, 3); let dr = bag(1, 20, -1);
+    for kind in [RowJoinKind::Left, RowJoinKind::Semi, RowJoinKind::Anti] {
+        let seed = || {
+            let spec = RowJoinSpec::new(&[GraphSetColumnType::Scalar; 2],
+                &[GraphSetColumnType::Scalar; 2], &[(0, 0)]).unwrap().with_kind(kind);
+            let mut state = State { inputs: [0, 1], columns: vec![],
+                operator: IncrementalRowJoin::new(spec), last_delta: None, policy: policy(),
+                frontier: CommitSeq(1), stats: StandingQueryStats::default(), failure: None };
+            let mut checkpoint = || Ok(());
+            let mut meter = Meter { policy: policy(), stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+            state.apply(&left, &right, &mut meter).unwrap();
+            state.last_delta = None;
+            state
+        };
+        let before = seed(); let mut complete = seed(); let mut calls = 0;
+        {
+            let mut checkpoint = || { calls += 1; Ok(()) };
+            let mut meter = Meter { policy: policy(), stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+            complete.apply(&dl, &dr, &mut meter).unwrap();
+        }
+        assert!(calls > 1 && complete.last_delta.is_some());
+        for stop in 1..=calls {
+            let mut state = seed(); let mut at = 0;
+            {
+                let mut checkpoint = || {
+                    at += 1;
+                    if at == stop { Err(StandingQueryFailure::Interrupted) } else { Ok(()) }
+                };
+                let mut meter = Meter { policy: policy(), stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+                assert_eq!(state.apply(&dl, &dr, &mut meter), Err(StandingQueryFailure::Interrupted));
+            }
+            assert_eq!(at, stop);
+            unchanged(&state, &before);
+        }
+    }
 }
