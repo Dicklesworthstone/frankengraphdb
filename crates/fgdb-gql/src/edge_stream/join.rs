@@ -35,11 +35,16 @@ pub(super) fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<EdgeScanPlan, Edg
     compile_output(plan, true)
 }
 
-pub(super) fn compile_aggregate(plan: &GlaPlan<GraphValueRow>) -> Result<EdgeScanPlan, EdgeScanBuildError> {
+pub(super) fn compile_aggregate(
+    plan: &GlaPlan<GraphValueRow>,
+) -> Result<EdgeScanPlan, EdgeScanBuildError> {
     compile_output(plan, false)
 }
 
-fn compile_output(plan: &GlaPlan<GraphValueRow>, emit_rows: bool) -> Result<EdgeScanPlan, EdgeScanBuildError> {
+fn compile_output(
+    plan: &GlaPlan<GraphValueRow>,
+    emit_rows: bool,
+) -> Result<EdgeScanPlan, EdgeScanBuildError> {
     let ops = plan.operators();
     let Some(GlaOperator::ScanEdges {
         relation,
@@ -142,9 +147,10 @@ fn compile_output(plan: &GlaPlan<GraphValueRow>, emit_rows: bool) -> Result<Edge
                     matches!(column, Some(ValueProjection::Path { capture, function: GraphPathFunction::Edge })
                         if captures.get(*capture as usize).is_some_and(|parts| parts.len() == 1 && parts[0] == step))
                 };
-                if emit_rows && (!edge_column(columns.first(), 0)
-                    || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
-                    || !(1..width - 1).all(|step| edge_column(columns.get(step + 1), step))
+                if emit_rows
+                    && (!edge_column(columns.first(), 0)
+                        || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
+                        || !(1..width - 1).all(|step| edge_column(columns.get(step + 1), step)))
                 {
                     return Err(bad());
                 }

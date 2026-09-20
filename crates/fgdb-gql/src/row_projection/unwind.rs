@@ -3,8 +3,8 @@
 //! parent projection engine. This module introduces no graph/source authority.
 
 use super::*;
-use crate::algebra::GraphValue;
 use crate::GraphIntegerErrorKind;
+use crate::algebra::GraphValue;
 
 impl RowProjectionSpec {
     /// Append each element of a native list expression to the original row.
@@ -25,13 +25,18 @@ impl RowProjectionSpec {
     /// Work/scratch bound evaluated and copied payloads and element fanout, not
     /// allocator bytes. Final result limits count consolidated occurrences.
     pub fn unwind(
-        input: Vec<GraphSetColumnType>, columns: Vec<String>, name: String, value: GraphSetValue,
+        input: Vec<GraphSetColumnType>,
+        columns: Vec<String>,
+        name: String,
+        value: GraphSetValue,
     ) -> Result<Self, RowProjectionBuildError> {
         let column = input.len();
         if column >= MAX_PATTERN_VERTICES {
             return Err(GraphSetProjectionError::TooManyColumns {
-                limit: MAX_PATTERN_VERTICES, observed: column.saturating_add(1),
-            }.into());
+                limit: MAX_PATTERN_VERTICES,
+                observed: column.saturating_add(1),
+            }
+            .into());
         }
         GraphSetProjection::validate_output_name(&name, column)?;
         if columns.contains(&name) {
@@ -55,29 +60,44 @@ impl RowProjectionSpec {
 }
 
 pub(super) fn append<E>(
-    evaluated: &GraphValueRow, weight: &ZWeight, limbs: LimbLimit,
+    evaluated: &GraphValueRow,
+    weight: &ZWeight,
+    limbs: LimbLimit,
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     output: &mut Vec<(GraphValueRow, ZWeight)>,
 ) -> Result<(), RowProjectionError<E>> {
     charge(control, ZSetEvent::Work)?;
-    let (list, prefix) = evaluated.values().split_last().ok_or(RowProjectionError::InvalidResult)?;
+    let (list, prefix) = evaluated
+        .values()
+        .split_last()
+        .ok_or(RowProjectionError::InvalidResult)?;
     let failure = |kind| RowProjectionError::Expression {
-        column: prefix.len(), error: GraphIntegerError { instruction: 0, kind },
+        column: prefix.len(),
+        error: GraphIntegerError {
+            instruction: 0,
+            kind,
+        },
     };
-    if list.is_null() { return Ok(()); }
+    if list.is_null() {
+        return Ok(());
+    }
     let GraphValue::List(elements) = list else {
         return Err(failure(GraphIntegerErrorKind::IncompatibleOperands));
     };
     // Nested values may be assembled from several valid input cells. Check the
     // evaluated list before its descendants are copied or traversed repeatedly.
-    if !list.validate_bounds() { return Err(failure(GraphIntegerErrorKind::Overflow)); }
+    if !list.validate_bounds() {
+        return Err(failure(GraphIntegerErrorKind::Overflow));
+    }
     for element in elements.iter() {
         charge(control, ZSetEvent::Work)?;
         charge(control, ZSetEvent::ScratchEntry)?;
         let mut cells = Vec::new();
         for cell in prefix.iter().chain(core::iter::once(element)) {
             charge(control, ZSetEvent::Work)?;
-            for _ in 0..=cell.payload_units() { charge(control, ZSetEvent::ScratchEntry)?; }
+            for _ in 0..=cell.payload_units() {
+                charge(control, ZSetEvent::ScratchEntry)?;
+            }
             cells.push(cell.clone());
         }
         let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;

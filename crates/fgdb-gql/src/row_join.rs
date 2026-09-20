@@ -124,17 +124,24 @@ impl RowJoinSpec {
     /// when the opposite bag is empty. Products can be quadratic in support;
     /// this constructor promises neither a selective index nor spill.
     pub fn cross(
-        left: &[GraphSetColumnType], right: &[GraphSetColumnType],
+        left: &[GraphSetColumnType],
+        right: &[GraphSetColumnType],
     ) -> Result<Self, RowJoinBuildError> {
-        let width = left.len().checked_add(right.len()).unwrap_or(usize::MAX);
+        let width = left.len().saturating_add(right.len());
         if width > MAX_PATTERN_VERTICES {
             return Err(RowJoinBuildError::TooManyColumns { observed: width });
         }
-        Ok(Self { left: left.into(), right: right.into(), keys: Box::new([]),
-            kind: RowJoinKind::Inner })
+        Ok(Self {
+            left: left.into(),
+            right: right.into(),
+            keys: Box::new([]),
+            kind: RowJoinKind::Inner,
+        })
     }
     /// True only for the explicitly constructed unconditional definition.
-    pub fn is_cross(&self) -> bool { self.keys.is_empty() }
+    pub fn is_cross(&self) -> bool {
+        self.keys.is_empty()
+    }
 
     /// Choose semantics before constructing the operator. Input schemas and
     /// key admission are identical for all kinds; a live operator cannot switch.

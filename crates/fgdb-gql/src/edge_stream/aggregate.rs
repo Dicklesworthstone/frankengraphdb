@@ -10,7 +10,9 @@
 use super::*;
 use crate::algebra::GraphValue;
 use crate::stream::aggregate::{Input, NumericState};
-use crate::{GraphAggregateError, GraphAggregateFunction, GraphAggregateRow, PreparedGraphAggregate};
+use crate::{
+    GraphAggregateError, GraphAggregateFunction, GraphAggregateRow, PreparedGraphAggregate,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeAggregateBuildError {
@@ -20,14 +22,19 @@ pub enum EdgeAggregateBuildError {
 impl core::fmt::Display for EdgeAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::RequiresPlainGlobalCountOrSum => f.write_str("edge aggregate stream requires plain global COUNT or SUM"),
+            Self::RequiresPlainGlobalCountOrSum => {
+                f.write_str("edge aggregate stream requires plain global COUNT or SUM")
+            }
             Self::Scan(error) => error.fmt(f),
         }
     }
 }
 impl core::error::Error for EdgeAggregateBuildError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self { Self::Scan(error) => Some(error), _ => None }
+        match self {
+            Self::Scan(error) => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -49,16 +56,28 @@ impl EdgeAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, EdgeAggregateBuildError> {
         if !aggregate.supports_incremental_maintenance()
             || !aggregate.group_key_columns().is_empty()
-            || !aggregate.aggregates().iter().all(|spec| matches!(spec.function(),
-                GraphAggregateFunction::CountRows | GraphAggregateFunction::Count | GraphAggregateFunction::SumInt)) {
+            || !aggregate.aggregates().iter().all(|spec| {
+                matches!(
+                    spec.function(),
+                    GraphAggregateFunction::CountRows
+                        | GraphAggregateFunction::Count
+                        | GraphAggregateFunction::SumInt
+                )
+            })
+        {
             return Err(EdgeAggregateBuildError::RequiresPlainGlobalCountOrSum);
         }
         let input = join::compile_aggregate(aggregate.input_pattern().plan())
             .map_err(EdgeAggregateBuildError::Scan)?;
-        Ok(Self { input, aggregate: aggregate.clone() })
+        Ok(Self {
+            input,
+            aggregate: aggregate.clone(),
+        })
     }
     #[must_use]
-    pub fn columns(&self) -> &[String] { self.aggregate.aggregate_columns() }
+    pub fn columns(&self) -> &[String] {
+        self.aggregate.aggregate_columns()
+    }
 }
 impl core::fmt::Debug for EdgeAggregatePlan {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -85,39 +104,80 @@ pub struct EdgeAggregateCursor<S, F> {
 }
 impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
     pub fn new(source: S, plan: EdgeAggregatePlan, policy: GqlQueryPolicy, checkpoint: F) -> Self {
-        Self { input: EdgeScanCursor::new(source, plan.input, policy, checkpoint), aggregate: plan.aggregate }
+        Self {
+            input: EdgeScanCursor::new(source, plan.input, policy, checkpoint),
+            aggregate: plan.aggregate,
+        }
     }
     #[must_use]
-    pub fn columns(&self) -> &[String] { self.aggregate.aggregate_columns() }
+    pub fn columns(&self) -> &[String] {
+        self.aggregate.aggregate_columns()
+    }
     #[must_use]
-    pub fn snapshot_seq(&self) -> CommitSeq { self.input.snapshot_seq() }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.input.snapshot_seq()
+    }
     #[must_use]
-    pub fn state(&self) -> EdgeScanState { self.input.state() }
+    pub fn state(&self) -> EdgeScanState {
+        self.input.state()
+    }
     #[must_use]
-    pub fn row_stats(&self) -> GqlExecutionStats { self.input.row_stats() }
+    pub fn row_stats(&self) -> GqlExecutionStats {
+        self.input.row_stats()
+    }
     #[must_use]
-    pub fn evaluator_stats(&self) -> GlaExecutionStats { self.input.evaluator_stats() }
-    pub fn close(&mut self) { self.input.close(); }
+    pub fn evaluator_stats(&self) -> GlaExecutionStats {
+        self.input.evaluator_stats()
+    }
+    pub fn close(&mut self) {
+        self.input.close();
+    }
 
     fn evaluate<C>(&mut self) -> Result<GraphAggregateRow, EdgeAggregateError<S::Error, C>>
-    where F: FnMut() -> Result<(), C> {
-        self.input.meter.event(GlaExecutionEvent::Work).map_err(lift)?;
+    where
+        F: FnMut() -> Result<(), C>,
+    {
+        self.input
+            .meter
+            .event(GlaExecutionEvent::Work)
+            .map_err(lift)?;
         // This profile always has exactly one output, including on empty input.
         // Refuse an impossible output allowance before driving any candidate.
-        let result_count = self.input.meter.increment(GqlBudgetDimension::ResultRows, 0).map_err(lift)?;
-        self.input.meter.event(GlaExecutionEvent::ScratchEntry).map_err(lift)?;
+        let result_count = self
+            .input
+            .meter
+            .increment(GqlBudgetDimension::ResultRows, 0)
+            .map_err(lift)?;
+        self.input
+            .meter
+            .event(GlaExecutionEvent::ScratchEntry)
+            .map_err(lift)?;
         let mut states = Vec::new();
         for spec in self.aggregate.aggregates() {
-            self.input.meter.event(GlaExecutionEvent::ScratchEntry).map_err(lift)?;
+            self.input
+                .meter
+                .event(GlaExecutionEvent::ScratchEntry)
+                .map_err(lift)?;
             states.push(match spec.function() {
-                GraphAggregateFunction::CountRows | GraphAggregateFunction::Count => NumericState::Count(0),
+                GraphAggregateFunction::CountRows | GraphAggregateFunction::Count => {
+                    NumericState::Count(0)
+                }
                 GraphAggregateFunction::SumInt => NumericState::Sum(None),
                 _ => unreachable!("checked global numeric aggregate"),
             });
         }
         while let Some(row) = self.input.advance().map_err(lift)? {
-            for (at, (spec, state)) in self.aggregate.aggregates().iter().zip(&mut states).enumerate() {
-                self.input.meter.event(GlaExecutionEvent::Work).map_err(lift)?;
+            for (at, (spec, state)) in self
+                .aggregate
+                .aggregates()
+                .iter()
+                .zip(&mut states)
+                .enumerate()
+            {
+                self.input
+                    .meter
+                    .event(GlaExecutionEvent::Work)
+                    .map_err(lift)?;
                 let value = match spec.argument_column() {
                     None => Input::Identity,
                     Some(column) => match &row.values()[column] {
@@ -131,12 +191,20 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         }
         let mut values = Vec::new();
         for state in states {
-            self.input.meter.event(GlaExecutionEvent::ScratchEntry).map_err(lift)?;
+            self.input
+                .meter
+                .event(GlaExecutionEvent::ScratchEntry)
+                .map_err(lift)?;
             values.push(state.finish());
         }
-        let row = self.aggregate.incremental_global_row(values)
+        let row = self
+            .aggregate
+            .incremental_global_row(values)
             .expect("checked definition and shared exact numeric domains");
-        self.input.meter.event(GlaExecutionEvent::ResultRow).map_err(lift)?;
+        self.input
+            .meter
+            .event(GlaExecutionEvent::ResultRow)
+            .map_err(lift)?;
         self.input.meter.rows.result_rows = result_count;
         Ok(row)
     }
@@ -147,21 +215,35 @@ fn lift<E, C>(error: GqlQueryError<EdgeScanError<E>, C>) -> EdgeAggregateError<E
 impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeAggregateCursor<S, F> {
     type Item = Result<GraphAggregateRow, EdgeAggregateError<S::Error, C>>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.input.state != EdgeScanState::Open { return None; }
+        if self.input.state != EdgeScanState::Open {
+            return None;
+        }
         let result = self.evaluate();
-        self.input.state = if result.is_ok() { EdgeScanState::Exhausted } else { EdgeScanState::Failed };
+        self.input.state = if result.is_ok() {
+            EdgeScanState::Exhausted
+        } else {
+            EdgeScanState::Failed
+        };
         self.input.close();
         Some(result)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(usize::from(self.input.state == EdgeScanState::Open)))
+        (
+            0,
+            Some(usize::from(self.input.state == EdgeScanState::Open)),
+        )
     }
 }
-impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> std::iter::FusedIterator for EdgeAggregateCursor<S, F> {}
+impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> std::iter::FusedIterator
+    for EdgeAggregateCursor<S, F>
+{
+}
 impl<S, F> core::fmt::Debug for EdgeAggregateCursor<S, F> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("EdgeAggregateCursor").field("input", &self.input)
-            .field("definition", &"[REDACTED]").finish()
+        f.debug_struct("EdgeAggregateCursor")
+            .field("input", &self.input)
+            .field("definition", &"[REDACTED]")
+            .finish()
     }
 }
 

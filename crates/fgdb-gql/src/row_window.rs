@@ -53,10 +53,12 @@ impl RowWindowSpec {
             });
         }
         if order.len() > MAX_PATTERN_VERTICES {
-            return Err(RowWindowBuildError::Order(GraphOrderError::TooManyColumns {
-                limit: MAX_PATTERN_VERTICES,
-                observed: order.len(),
-            }));
+            return Err(RowWindowBuildError::Order(
+                GraphOrderError::TooManyColumns {
+                    limit: MAX_PATTERN_VERTICES,
+                    observed: order.len(),
+                },
+            ));
         }
         for (at, key) in order.iter().enumerate() {
             if key.column >= input.len() {
@@ -68,9 +70,9 @@ impl RowWindowSpec {
                 .iter()
                 .any(|previous| previous.column == key.column)
             {
-                return Err(RowWindowBuildError::Order(GraphOrderError::DuplicateColumn {
-                    column: key.column,
-                }));
+                return Err(RowWindowBuildError::Order(
+                    GraphOrderError::DuplicateColumn { column: key.column },
+                ));
             }
         }
         Ok(Self {
@@ -204,8 +206,8 @@ pub struct IncrementalRowWindow {
 }
 impl IncrementalRowWindow {
     pub fn new(spec: RowWindowSpec) -> Self {
-        let distinct = (spec.quantifier == GraphSetQuantifier::Distinct)
-            .then(IncrementalDistinct::new);
+        let distinct =
+            (spec.quantifier == GraphSetQuantifier::Distinct).then(IncrementalDistinct::new);
         let window = IncrementalTopK::new(spec.offset, spec.count);
         Self {
             spec,
@@ -262,10 +264,10 @@ impl IncrementalRowWindow {
                 row: Arc::new(copy_row(row, control)?),
                 order: Arc::clone(&self.spec.order),
             };
-            let counts = self.distinct.as_ref().map_or_else(
-                || self.window.counts(),
-                IncrementalDistinct::counts,
-            );
+            let counts = self
+                .distinct
+                .as_ref()
+                .map_or_else(|| self.window.counts(), IncrementalDistinct::counts);
             let next = match counts.weight(&key) {
                 Some(old) => old.checked_add(weight, limbs),
                 None => weight.checked_clone(limbs),

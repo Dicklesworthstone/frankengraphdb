@@ -13,14 +13,33 @@ impl PreparedGraphSet {
     /// Mixed product/UNWIND/window trees refuse: positional enumeration is not
     /// represented by the existing maintained stages' canonical bags.
     /// This is shape analysis, not derivative admission for any descendant.
-    pub fn incremental_window(&self) -> Result<Option<(Self, crate::row_window::RowWindowSpec)>,
-        crate::row_window::RowWindowBuildError> {
-        let Some(count) = self.count else { return Ok(None); };
-        if !self.incremental_window_sequence_compatible() { return Ok(None); }
-        let inherited = self.incremental_finite_order().map_or(&[][..], |(order, _)| order);
-        let order = if self.order.is_empty() { inherited.to_vec() } else { self.order.clone() };
-        let spec = crate::row_window::RowWindowSpec::new(self.types.clone(), order,
-            GraphSetQuantifier::All, self.offset, count)?;
+    pub fn incremental_window(
+        &self,
+    ) -> Result<
+        Option<(Self, crate::row_window::RowWindowSpec)>,
+        crate::row_window::RowWindowBuildError,
+    > {
+        let Some(count) = self.count else {
+            return Ok(None);
+        };
+        if !self.incremental_window_sequence_compatible() {
+            return Ok(None);
+        }
+        let inherited = self
+            .incremental_finite_order()
+            .map_or(&[][..], |(order, _)| order);
+        let order = if self.order.is_empty() {
+            inherited.to_vec()
+        } else {
+            self.order.clone()
+        };
+        let spec = crate::row_window::RowWindowSpec::new(
+            self.types.clone(),
+            order,
+            GraphSetQuantifier::All,
+            self.offset,
+            count,
+        )?;
         let mut input = self.clone();
         input.order.clear();
         input.offset = 0;
@@ -55,14 +74,17 @@ impl PreparedGraphSet {
         fn shape(query: &PreparedGraphSet) -> (bool, bool) {
             let (nested_window, positional_source) = match &query.node {
                 SetNode::Pattern(_) => (false, false),
-                SetNode::Scope(input) | SetNode::Filter { input, .. }
-                    | SetNode::Project { input, .. } => shape(input),
+                SetNode::Scope(input)
+                | SetNode::Filter { input, .. }
+                | SetNode::Project { input, .. } => shape(input),
                 SetNode::Binary { left, right, .. } => {
-                    let a = shape(left); let b = shape(right);
+                    let a = shape(left);
+                    let b = shape(right);
                     (a.0 || b.0, a.1 || b.1)
                 }
                 SetNode::CrossJoin { left, right } => {
-                    let a = shape(left); let b = shape(right);
+                    let a = shape(left);
+                    let b = shape(right);
                     (a.0 || b.0, true)
                 }
                 SetNode::Unwind { input, .. } => (shape(input).0, true),
@@ -88,9 +110,10 @@ impl PreparedGraphSet {
     /// by this ranked specialization. Unbounded sorting also refuses. Callers
     /// must admit the full returned input independently, including LIMIT 0;
     /// proving a comparator never authorizes unsupported descendants.
-    pub fn incremental_ordered_window(&self)
-        -> Option<(Self, &[GraphValueOrder], u64, u64)> {
-        if self.incremental_result_order()?.0.is_empty() { return None; }
+    pub fn incremental_ordered_window(&self) -> Option<(Self, &[GraphValueOrder], u64, u64)> {
+        if self.incremental_result_order()?.0.is_empty() {
+            return None;
+        }
         self.split_incremental_window()
     }
 
@@ -154,7 +177,9 @@ impl PreparedGraphSet {
     /// Every child must still be admitted and initialized, even when its peer
     /// is empty. A wrapper order/page is never discarded, including LIMIT 0.
     pub fn incremental_cross_join(&self) -> Option<(&Self, &Self)> {
-        if !self.unadorned_incremental_node() { return None; }
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
         match &self.node {
             SetNode::CrossJoin { left, right } => Some((left, right)),
             _ => None,
@@ -165,7 +190,9 @@ impl PreparedGraphSet {
     /// No element is evaluated here. Every wrapper order/page still refuses;
     /// the caller must admit the complete child and native expression schema.
     pub fn incremental_unwind(&self) -> Option<(&Self, &str, &GraphSetValue)> {
-        if !self.unadorned_incremental_node() { return None; }
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
         match &self.node {
             SetNode::Unwind { input, value } => Some((input, self.columns.last()?.as_str(), value)),
             _ => None,
@@ -249,34 +276,98 @@ mod tests {
     #[test]
     fn finite_windows_preserve_exact_input_and_inherited_filter_scope_order() {
         let leaf = PreparedGraphSet::from(pattern());
-        let order = vec![GraphValueOrder { column:0,descending:true,nulls_first:false }];
-        let first = leaf.clone().with_order_by(&order).unwrap().with_page(0,Some(7));
+        let order = vec![GraphValueOrder {
+            column: 0,
+            descending: true,
+            nulls_first: false,
+        }];
+        let first = leaf
+            .clone()
+            .with_order_by(&order)
+            .unwrap()
+            .with_page(0, Some(7));
         let frozen = first.canonical_bytes();
         let (input, spec) = first.incremental_window().unwrap().unwrap();
-        assert_eq!(input.canonical_bytes(),leaf.canonical_bytes());
-        assert_eq!(spec.order(),order); assert_eq!(spec.count(),7);
-        assert_eq!(spec.quantifier(),GraphSetQuantifier::All);
-        let filtered = first.clone().filter(&[GraphSetPredicateOp::Truth(Some(true))]).unwrap();
-        assert_eq!(filtered.incremental_finite_order(),Some((order.as_slice(),7)));
-        let second = filtered.clone().nested().unwrap().with_page(1,Some(2));
+        assert_eq!(input.canonical_bytes(), leaf.canonical_bytes());
+        assert_eq!(spec.order(), order);
+        assert_eq!(spec.count(), 7);
+        assert_eq!(spec.quantifier(), GraphSetQuantifier::All);
+        let filtered = first
+            .clone()
+            .filter(&[GraphSetPredicateOp::Truth(Some(true))])
+            .unwrap();
+        assert_eq!(
+            filtered.incremental_finite_order(),
+            Some((order.as_slice(), 7))
+        );
+        let second = filtered.clone().nested().unwrap().with_page(1, Some(2));
         let (input, spec) = second.incremental_window().unwrap().unwrap();
-        assert_eq!(input.canonical_bytes(),filtered.clone().nested().unwrap().canonical_bytes());
-        assert_eq!(spec.order(),order); assert_eq!((spec.offset(),spec.count()),(1,2));
-        let projected = filtered.project(vec![GraphSetProjection::new("id",GraphSetValue::Column(0))],
-            GraphSetQuantifier::All).unwrap();
+        assert_eq!(
+            input.canonical_bytes(),
+            filtered.clone().nested().unwrap().canonical_bytes()
+        );
+        assert_eq!(spec.order(), order);
+        assert_eq!((spec.offset(), spec.count()), (1, 2));
+        let projected = filtered
+            .project(
+                vec![GraphSetProjection::new("id", GraphSetValue::Column(0))],
+                GraphSetQuantifier::All,
+            )
+            .unwrap();
         assert!(projected.incremental_finite_order().is_none());
-        assert!(leaf.clone().with_order_by(&order).unwrap().incremental_window().unwrap().is_none());
-        assert_eq!(first.canonical_bytes(),frozen);
-        assert_eq!(leaf.clone().with_page(0,Some(0)).incremental_window().unwrap().unwrap().1.count(),0);
+        assert!(
+            leaf.clone()
+                .with_order_by(&order)
+                .unwrap()
+                .incremental_window()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(first.canonical_bytes(), frozen);
+        assert_eq!(
+            leaf.clone()
+                .with_page(0, Some(0))
+                .incremental_window()
+                .unwrap()
+                .unwrap()
+                .1
+                .count(),
+            0
+        );
         let product = leaf.clone().cross_join(leaf.clone()).unwrap();
         assert!(product.incremental_window_sequence_compatible());
-        assert!(!product.clone().with_page(0,Some(0)).incremental_window_sequence_compatible());
-        assert!(product.with_page(0,Some(2)).incremental_window().unwrap().is_none());
-        assert!(!leaf.clone().cross_join(leaf.clone().with_page(0,Some(1))).unwrap()
-            .incremental_window_sequence_compatible());
-        let expanded = leaf.unwind("item".into(), GraphSetValue::List(vec![GraphSetValue::Column(0)])).unwrap();
+        assert!(
+            !product
+                .clone()
+                .with_page(0, Some(0))
+                .incremental_window_sequence_compatible()
+        );
+        assert!(
+            product
+                .with_page(0, Some(2))
+                .incremental_window()
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !leaf
+                .clone()
+                .cross_join(leaf.clone().with_page(0, Some(1)))
+                .unwrap()
+                .incremental_window_sequence_compatible()
+        );
+        let expanded = leaf
+            .unwind(
+                "item".into(),
+                GraphSetValue::List(vec![GraphSetValue::Column(0)]),
+            )
+            .unwrap();
         assert!(expanded.incremental_window_sequence_compatible());
-        assert!(!expanded.with_page(0,Some(0)).incremental_window_sequence_compatible());
+        assert!(
+            !expanded
+                .with_page(0, Some(0))
+                .incremental_window_sequence_compatible()
+        );
     }
 
     #[test]
@@ -341,39 +432,81 @@ mod tests {
         assert_eq!(a.canonical_bytes(), left.canonical_bytes());
         assert_eq!(b.canonical_bytes(), right.canonical_bytes());
         for (offset, count) in [(1, None), (0, Some(0)), (0, Some(2))] {
-            assert!(query.clone().with_page(offset, count).incremental_cross_join().is_none());
+            assert!(
+                query
+                    .clone()
+                    .with_page(offset, count)
+                    .incremental_cross_join()
+                    .is_none()
+            );
         }
-        let ordered = query.with_order_by(&[GraphValueOrder::descending(0)]).unwrap();
+        let ordered = query
+            .with_order_by(&[GraphValueOrder::descending(0)])
+            .unwrap();
         assert!(ordered.incremental_cross_join().is_none());
         assert!(left.incremental_cross_join().is_none());
-        assert!(PreparedGraphSet::singleton().incremental_cross_join().is_none());
+        assert!(
+            PreparedGraphSet::singleton()
+                .incremental_cross_join()
+                .is_none()
+        );
     }
 
     #[test]
     fn unwind_accessor_keeps_original_input_expression_alias_and_wrapper_refusals() {
         let leaf = PreparedGraphSet::from(pattern());
         let value = GraphSetValue::List(vec![GraphSetValue::Column(0), GraphSetValue::Column(0)]);
-        let query = leaf.clone().unwind("element".into(), value.clone()).unwrap();
+        let query = leaf
+            .clone()
+            .unwind("element".into(), value.clone())
+            .unwrap();
         let (input, alias, expression) = query.incremental_unwind().unwrap();
         assert_eq!(input.canonical_bytes(), leaf.canonical_bytes());
-        assert_eq!(alias, "element"); assert_eq!(expression, &value);
-        assert_eq!(query.column_types(), &[GraphSetColumnType::Vertex, GraphSetColumnType::Any]);
+        assert_eq!(alias, "element");
+        assert_eq!(expression, &value);
+        assert_eq!(
+            query.column_types(),
+            &[GraphSetColumnType::Vertex, GraphSetColumnType::Any]
+        );
         for (offset, count) in [(1, None), (0, Some(0)), (0, Some(2))] {
-            assert!(query.clone().with_page(offset, count).incremental_unwind().is_none());
+            assert!(
+                query
+                    .clone()
+                    .with_page(offset, count)
+                    .incremental_unwind()
+                    .is_none()
+            );
         }
-        assert!(query.with_order_by(&[GraphValueOrder::descending(0)]).unwrap().incremental_unwind().is_none());
+        assert!(
+            query
+                .with_order_by(&[GraphValueOrder::descending(0)])
+                .unwrap()
+                .incremental_unwind()
+                .is_none()
+        );
         assert!(leaf.incremental_unwind().is_none());
     }
-
 
     #[test]
     fn terminal_window_split_preserves_every_child_scope_and_requires_explicit_order() {
         let leaf = PreparedGraphSet::from(pattern());
-        let input = leaf.clone().combine(GraphSetOperation::Union, GraphSetQuantifier::All,
-            leaf.clone().with_page(1, Some(2))).unwrap().nested().unwrap();
+        let input = leaf
+            .clone()
+            .combine(
+                GraphSetOperation::Union,
+                GraphSetQuantifier::All,
+                leaf.clone().with_page(1, Some(2)),
+            )
+            .unwrap()
+            .nested()
+            .unwrap();
         let order = [GraphValueOrder::descending(0)];
         for count in [0, 1, u64::MAX] {
-            let query = input.clone().with_order_by(&order).unwrap().with_page(3, Some(count));
+            let query = input
+                .clone()
+                .with_order_by(&order)
+                .unwrap()
+                .with_page(3, Some(count));
             let frozen = query.canonical_bytes();
             let (child, keys, skip, take) = query.incremental_ordered_window().unwrap();
             assert_eq!(child.canonical_bytes(), input.canonical_bytes());
@@ -382,8 +515,26 @@ mod tests {
             assert_eq!(query.canonical_bytes(), frozen);
             assert!(child.incremental_ordered_window().is_none());
         }
-        assert!(input.clone().with_page(0, Some(0)).incremental_ordered_window().is_none());
-        assert!(input.clone().with_page(1, None).incremental_ordered_window().is_none());
-        assert!(input.with_order_by(&order).unwrap().incremental_ordered_window().is_none());
+        assert!(
+            input
+                .clone()
+                .with_page(0, Some(0))
+                .incremental_ordered_window()
+                .is_none()
+        );
+        assert!(
+            input
+                .clone()
+                .with_page(1, None)
+                .incremental_ordered_window()
+                .is_none()
+        );
+        assert!(
+            input
+                .with_order_by(&order)
+                .unwrap()
+                .incremental_ordered_window()
+                .is_none()
+        );
     }
 }

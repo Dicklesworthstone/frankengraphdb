@@ -18,8 +18,13 @@ impl PreparedGraphSet {
     /// No claim that a graph source or descendant has a derivative is implied.
     pub fn incremental_result_order(&self) -> Option<(&[GraphValueOrder], Option<u64>)> {
         let inherited = self.incremental_node_order();
-        let order = if self.order.is_empty() { inherited?.0 } else { &self.order };
-        let remaining = inherited.and_then(|(_, bound)| bound)
+        let order = if self.order.is_empty() {
+            inherited?.0
+        } else {
+            &self.order
+        };
+        let remaining = inherited
+            .and_then(|(_, bound)| bound)
             .map(|bound| bound.saturating_sub(self.offset));
         let bound = match (remaining, self.count) {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -39,7 +44,9 @@ impl PreparedGraphSet {
     /// still compile the entire returned input: an empty final page must never
     /// bypass unsupported operators, expression failures or source admission.
     pub(super) fn split_incremental_window(&self) -> Option<(Self, &[GraphValueOrder], u64, u64)> {
-        if self.unadorned_incremental_node() { return None; }
+        if self.unadorned_incremental_node() {
+            return None;
+        }
         let (order, bound) = self.incremental_result_order()?;
         let count = self.count.or(bound)?;
         let mut input = self.clone();
@@ -54,9 +61,16 @@ impl PreparedGraphSet {
             // A set pattern wrapper sorts the already-selected pattern bag,
             // even if the pattern's own output used a different ordering.
             SetNode::Pattern(_) => Some((&[], None)),
-            SetNode::Binary { operation, left, right, .. } => {
+            SetNode::Binary {
+                operation,
+                left,
+                right,
+                ..
+            } => {
                 let left = left.incremental_result_order().and_then(|(_, bound)| bound);
-                let right = right.incremental_result_order().and_then(|(_, bound)| bound);
+                let right = right
+                    .incremental_result_order()
+                    .and_then(|(_, bound)| bound);
                 let bound = match operation {
                     GraphSetOperation::Union => left.zip(right).and_then(|(a, b)| a.checked_add(b)),
                     GraphSetOperation::Intersect => match (left, right) {
@@ -68,11 +82,15 @@ impl PreparedGraphSet {
                 Some((&[], bound))
             }
             SetNode::Values => Some((&[], Some(1))),
-            SetNode::Scope(input) | SetNode::Filter { input, .. } =>
-                input.incremental_result_order(),
-            SetNode::Project { input, quantifier, .. }
-                if *quantifier == GraphSetQuantifier::Distinct || !input.preserves_row_order() => {
-                let bound = input.incremental_result_order().and_then(|(_, bound)| bound);
+            SetNode::Scope(input) | SetNode::Filter { input, .. } => {
+                input.incremental_result_order()
+            }
+            SetNode::Project {
+                input, quantifier, ..
+            } if *quantifier == GraphSetQuantifier::Distinct || !input.preserves_row_order() => {
+                let bound = input
+                    .incremental_result_order()
+                    .and_then(|(_, bound)| bound);
                 Some((&[], bound))
             }
             // Reordering or collapsing output cells can destroy the relation

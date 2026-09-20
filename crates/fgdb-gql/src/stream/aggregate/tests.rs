@@ -1,6 +1,6 @@
 use super::*;
-use crate::algebra::{GraphColumn, GraphPatternBuilder};
 use crate::GraphAggregate;
+use crate::algebra::{GraphColumn, GraphPatternBuilder};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -85,7 +85,9 @@ fn wide() -> GqlQueryPolicy {
 fn input() -> crate::algebra::PreparedGraphPattern<GraphValueRow> {
     let mut builder = GraphPatternBuilder::new();
     builder.vertex("n").unwrap();
-    builder.filter("n", VertexPredicate::HasLabel(LABEL)).unwrap();
+    builder
+        .filter("n", VertexPredicate::HasLabel(LABEL))
+        .unwrap();
     builder
         .prepare_values(&[GraphColumn::property("value", "n", KEY)], 0, None)
         .unwrap()
@@ -231,7 +233,9 @@ fn one_meter_enforces_exact_boundaries_and_never_counts_input_as_output() {
         row(2, Some(CanonicalScalar::Int(-3))),
     ];
     let mut baseline =
-        VertexAggregateCursor::new(source(rows.clone()), plan.clone(), wide(), || Ok::<_, ()>(()));
+        VertexAggregateCursor::new(source(rows.clone()), plan.clone(), wide(), || {
+            Ok::<_, ()>(())
+        });
     let expected = baseline.next().unwrap().unwrap();
     let stats = baseline.evaluator_stats();
     let run = |policy| {
@@ -245,7 +249,13 @@ fn one_meter_enforces_exact_boundaries_and_never_counts_input_as_output() {
         result
     };
     assert_eq!(
-        run(GqlQueryPolicy::new(3, 1, stats.work_units, stats.scratch_entries)).unwrap(),
+        run(GqlQueryPolicy::new(
+            3,
+            1,
+            stats.work_units,
+            stats.scratch_entries
+        ))
+        .unwrap(),
         expected
     );
     for policy in [
@@ -281,9 +291,9 @@ fn late_data_and_source_errors_are_terminal_and_release_no_partial_row() {
     let mut cursor = VertexAggregateCursor::new(input, plan.clone(), wide(), || Ok::<_, ()>(()));
     assert!(matches!(
         cursor.next(),
-        Some(Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum {
-            aggregate: 2
-        })))
+        Some(Err(GqlQueryError::Source(
+            GraphAggregateError::NonIntegerSum { aggregate: 2 }
+        )))
     ));
     assert_eq!(cursor.state(), VertexScanState::Failed);
     assert_eq!(cursor.row_stats().result_rows, 0);
@@ -324,15 +334,11 @@ fn cancellation_at_every_checkpoint_is_terminal_and_close_never_scans() {
     let rows = vec![row(1, Some(CanonicalScalar::Int(7))), row(2, None)];
     let calls = Rc::new(Cell::new(0));
     let count = Rc::clone(&calls);
-    let mut baseline = VertexAggregateCursor::new(
-        source(rows.clone()),
-        plan.clone(),
-        wide(),
-        move || {
+    let mut baseline =
+        VertexAggregateCursor::new(source(rows.clone()), plan.clone(), wide(), move || {
             count.set(count.get() + 1);
             Ok::<_, ()>(())
-        },
-    );
+        });
     baseline.next().unwrap().unwrap();
     for boundary in 0..calls.get() {
         let input = source(rows.clone());
@@ -343,7 +349,10 @@ fn cancellation_at_every_checkpoint_is_terminal_and_close_never_scans() {
             calls += 1;
             if at == boundary { Err(()) } else { Ok(()) }
         });
-        assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Interrupted(())))));
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Interrupted(())))
+        ));
         assert_eq!(cursor.state(), VertexScanState::Failed);
         assert_eq!(cursor.row_stats().result_rows, 0);
         assert!(dropped.get());
@@ -398,16 +407,16 @@ fn numeric_accumulators_check_overflow_and_reject_noninteger_identities() {
     let mut count = NumericState::Count(u64::MAX);
     assert!(matches!(
         count.update::<(), ()>(Input::Identity, 4),
-        Err(GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow {
-            aggregate: 4
-        }))
+        Err(GqlQueryError::Source(
+            GraphAggregateError::ArithmeticOverflow { aggregate: 4 }
+        ))
     ));
     let mut sum = NumericState::Sum(Some(i128::MAX));
     assert!(matches!(
         sum.update::<(), ()>(Input::Scalar(Some(&CanonicalScalar::Int(1))), 5),
-        Err(GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow {
-            aggregate: 5
-        }))
+        Err(GqlQueryError::Source(
+            GraphAggregateError::ArithmeticOverflow { aggregate: 5 }
+        ))
     ));
     assert!(matches!(
         sum.update::<(), ()>(Input::Identity, 5),
@@ -423,61 +432,125 @@ const BUCKET: PropertyKeyId = PropertyKeyId(8);
 fn grouped_definition(keys: &[usize]) -> PreparedGraphAggregate {
     let mut builder = GraphPatternBuilder::new();
     builder.vertex("n").unwrap();
-    builder.filter("n", VertexPredicate::HasLabel(LABEL)).unwrap();
-    let input = builder.prepare_values(&[
-        GraphColumn::property("bucket", "n", BUCKET),
-        GraphColumn::property("value", "n", KEY),
-        GraphColumn::vertex("id", "n"),
-    ], 0, None).unwrap().with_duplicates();
-    PreparedGraphAggregate::prepare(input, keys, &[
-        GraphAggregate::count_rows("rows"), GraphAggregate::count("nonnull", 1),
-        GraphAggregate::sum_int("sum", 1), GraphAggregate::average_int("average", 1),
-        GraphAggregate::count("identities", 2),
-        GraphAggregate::min("minimum", 1), GraphAggregate::max("maximum", 1),
-        GraphAggregate::min("first_id", 2), GraphAggregate::max("last_id", 2),
-        GraphAggregate::min("first_bucket", 0), GraphAggregate::max("last_bucket", 0),
-    ], 0, None).unwrap()
+    builder
+        .filter("n", VertexPredicate::HasLabel(LABEL))
+        .unwrap();
+    let input = builder
+        .prepare_values(
+            &[
+                GraphColumn::property("bucket", "n", BUCKET),
+                GraphColumn::property("value", "n", KEY),
+                GraphColumn::vertex("id", "n"),
+            ],
+            0,
+            None,
+        )
+        .unwrap()
+        .with_duplicates();
+    PreparedGraphAggregate::prepare(
+        input,
+        keys,
+        &[
+            GraphAggregate::count_rows("rows"),
+            GraphAggregate::count("nonnull", 1),
+            GraphAggregate::sum_int("sum", 1),
+            GraphAggregate::average_int("average", 1),
+            GraphAggregate::count("identities", 2),
+            GraphAggregate::min("minimum", 1),
+            GraphAggregate::max("maximum", 1),
+            GraphAggregate::min("first_id", 2),
+            GraphAggregate::max("last_id", 2),
+            GraphAggregate::min("first_bucket", 0),
+            GraphAggregate::max("last_bucket", 0),
+        ],
+        0,
+        None,
+    )
+    .unwrap()
 }
 fn grouped_row(vid: u128, bucket: Option<CanonicalScalar>, value: Option<i64>) -> Row {
     let mut result = row(vid, value.map(CanonicalScalar::Int));
-    result.properties.extend(bucket.map(|value| (BUCKET, value)));
+    result
+        .properties
+        .extend(bucket.map(|value| (BUCKET, value)));
     result
 }
 fn expected_groups(definition: &PreparedGraphAggregate, rows: &[Row]) -> Vec<GraphAggregateRow> {
-    definition.execute_governed(rows.len() as u64,
-        rows.iter().filter(|row| row.visible).map(|row| row.vid), [],
-        |vid, predicates| Ok::<_, &'static str>(rows.iter().find(|row| row.vid == vid)
-            .is_some_and(|row| row.visible && predicates.iter()
-                .all(|p| p.matches(&row.labels, &row.properties)))),
-        |vid, key| Ok::<_, &'static str>(rows.iter().find(|row| row.vid == vid)
-            .and_then(|row| row.properties.iter().find(|(actual, _)| *actual == key)
-                .map(|(_, value)| value))),
-        wide(), || Ok::<_, ()>(())).unwrap().value
+    definition
+        .execute_governed(
+            rows.len() as u64,
+            rows.iter().filter(|row| row.visible).map(|row| row.vid),
+            [],
+            |vid, predicates| {
+                Ok::<_, &'static str>(rows.iter().find(|row| row.vid == vid).is_some_and(|row| {
+                    row.visible
+                        && predicates
+                            .iter()
+                            .all(|p| p.matches(&row.labels, &row.properties))
+                }))
+            },
+            |vid, key| {
+                Ok::<_, &'static str>(rows.iter().find(|row| row.vid == vid).and_then(|row| {
+                    row.properties
+                        .iter()
+                        .find(|(actual, _)| *actual == key)
+                        .map(|(_, value)| value)
+                }))
+            },
+            wide(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap()
+        .value
 }
 
 #[test]
 fn grouped_count_sum_and_exact_average_match_batch_for_4096_unsorted_inputs() {
     let definition = grouped_definition(&[0]);
     let plan = VertexAggregatePlan::compile(&definition).unwrap();
-    let choices = [None, Some(CanonicalScalar::Null), Some(CanonicalScalar::Int(-1)),
-        Some(CanonicalScalar::ucs_basic_text("same").unwrap())];
+    let choices = [
+        None,
+        Some(CanonicalScalar::Null),
+        Some(CanonicalScalar::Int(-1)),
+        Some(CanonicalScalar::ucs_basic_text("same").unwrap()),
+    ];
     for mut code in 0..4096_usize {
         let mut rows = Vec::new();
         for (at, vid) in [0, 1, 1_u128 << 100, u128::MAX].into_iter().enumerate() {
-            let bucket = choices[code % 4].clone(); code /= 4;
+            let bucket = choices[code % 4].clone();
+            code /= 4;
             let value = [None, Some(i64::MIN), Some(i64::MAX), Some(3)][(code + at) % 4];
             let mut row = grouped_row(vid, bucket, value);
-            if code % 13 == 0 { row.visible = false; }
-            if code % 17 == 0 { row.labels.clear(); }
+            if code % 13 == 0 {
+                row.visible = false;
+            }
+            if code % 17 == 0 {
+                row.labels.clear();
+            }
             rows.push(row);
         }
         let expected = expected_groups(&definition, &rows);
         let input = source(rows);
         let dropped = Rc::clone(&input.dropped);
-        let mut cursor = VertexAggregateCursor::new(input, plan.clone(), wide(), || Ok::<_, ()>(()));
+        let mut cursor =
+            VertexAggregateCursor::new(input, plan.clone(), wide(), || Ok::<_, ()>(()));
         assert_eq!(cursor.key_columns(), &["bucket"]);
-        assert_eq!(cursor.columns(), &["rows", "nonnull", "sum", "average", "identities",
-            "minimum", "maximum", "first_id", "last_id", "first_bucket", "last_bucket"]);
+        assert_eq!(
+            cursor.columns(),
+            &[
+                "rows",
+                "nonnull",
+                "sum",
+                "average",
+                "identities",
+                "minimum",
+                "maximum",
+                "first_id",
+                "last_id",
+                "first_bucket",
+                "last_bucket"
+            ]
+        );
         assert_eq!(cursor.size_hint(), (0, None));
         let actual = cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(actual, expected);
@@ -490,33 +563,62 @@ fn grouped_count_sum_and_exact_average_match_batch_for_4096_unsorted_inputs() {
 
 #[test]
 fn owned_composite_keys_preserve_null_domains_wide_identities_and_release_source_before_delivery() {
-    let buckets = [None, Some(CanonicalScalar::Null), Some(CanonicalScalar::Int(7)),
+    let buckets = [
+        None,
+        Some(CanonicalScalar::Null),
+        Some(CanonicalScalar::Int(7)),
         Some(CanonicalScalar::ucs_basic_text("7").unwrap()),
-        Some(CanonicalScalar::bytes(vec![7; 8192]).unwrap())];
-    let rows: Vec<_> = buckets.into_iter().enumerate().map(|(at, bucket)|
-        grouped_row(if at == 4 { u128::MAX } else { at as u128 }, bucket, Some(at as i64))).collect();
+        Some(CanonicalScalar::bytes(vec![7; 8192]).unwrap()),
+    ];
+    let rows: Vec<_> = buckets
+        .into_iter()
+        .enumerate()
+        .map(|(at, bucket)| {
+            grouped_row(
+                if at == 4 { u128::MAX } else { at as u128 },
+                bucket,
+                Some(at as i64),
+            )
+        })
+        .collect();
     for keys in [&[0][..], &[0, 2][..], &[2, 0][..]] {
         let definition = grouped_definition(keys);
         let expected = expected_groups(&definition, &rows);
-        let input = source(rows.clone()); let dropped = Rc::clone(&input.dropped);
-        let mut cursor = VertexAggregateCursor::new(input, VertexAggregatePlan::compile(&definition).unwrap(),
-            wide(), || Ok::<_, ()>(()));
+        let input = source(rows.clone());
+        let dropped = Rc::clone(&input.dropped);
+        let mut cursor = VertexAggregateCursor::new(
+            input,
+            VertexAggregatePlan::compile(&definition).unwrap(),
+            wide(),
+            || Ok::<_, ()>(()),
+        );
         let first = cursor.next().unwrap().unwrap();
         assert!(dropped.get());
         assert_eq!(first, expected[0]);
         assert_eq!(cursor.size_hint(), (0, Some(expected.len() - 1)));
         assert_eq!(cursor.pending.as_ref().unwrap().len(), expected.len() - 1);
-        assert_eq!(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), expected[1..]);
+        assert_eq!(
+            cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+            expected[1..]
+        );
         assert!(cursor.pending.is_none());
     }
     let definition = grouped_definition(&[0]);
-    let mut cursor = VertexAggregateCursor::new(source(vec![]), VertexAggregatePlan::compile(&definition).unwrap(),
-        GqlQueryPolicy::new(0, 0, u64::MAX, u64::MAX), || Ok::<_, ()>(()));
+    let mut cursor = VertexAggregateCursor::new(
+        source(vec![]),
+        VertexAggregatePlan::compile(&definition).unwrap(),
+        GqlQueryPolicy::new(0, 0, u64::MAX, u64::MAX),
+        || Ok::<_, ()>(()),
+    );
     assert!(cursor.next().is_none());
     assert_eq!(cursor.row_stats().result_rows, 0);
     let definition = grouped_definition(&[]);
-    let mut cursor = VertexAggregateCursor::new(source(vec![]), VertexAggregatePlan::compile(&definition).unwrap(),
-        wide(), || Ok::<_, ()>(()));
+    let mut cursor = VertexAggregateCursor::new(
+        source(vec![]),
+        VertexAggregatePlan::compile(&definition).unwrap(),
+        wide(),
+        || Ok::<_, ()>(()),
+    );
     let row = cursor.next().unwrap().unwrap();
     assert_eq!(row.values()[0].as_count(), Some(0));
     assert!(row.values()[2].is_null() && row.values()[3].is_null());
@@ -524,69 +626,129 @@ fn owned_composite_keys_preserve_null_domains_wide_identities_and_release_source
 
 #[test]
 fn grouped_source_data_and_final_group_budget_refusals_emit_no_partial_groups() {
-    let definition = grouped_definition(&[0]); let plan = VertexAggregatePlan::compile(&definition).unwrap();
-    let rows = vec![grouped_row(1, Some(CanonicalScalar::Int(2)), Some(5)),
-        grouped_row(2, Some(CanonicalScalar::Int(1)), Some(9))];
-    let mut input = source(rows.clone()); input.fail_at = Some(2);
+    let definition = grouped_definition(&[0]);
+    let plan = VertexAggregatePlan::compile(&definition).unwrap();
+    let rows = vec![
+        grouped_row(1, Some(CanonicalScalar::Int(2)), Some(5)),
+        grouped_row(2, Some(CanonicalScalar::Int(1)), Some(9)),
+    ];
+    let mut input = source(rows.clone());
+    input.fail_at = Some(2);
     let dropped = Rc::clone(&input.dropped);
     let mut cursor = VertexAggregateCursor::new(input, plan.clone(), wide(), || Ok::<_, ()>(()));
-    assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(GraphAggregateError::Source(
-        VertexScanError::Source("source failed")))))));
-    assert!(dropped.get()); assert_eq!(cursor.row_stats().result_rows, 0); assert!(cursor.pending.is_none());
-    let mut bad = rows.clone(); bad[1].properties[0].1 = CanonicalScalar::ucs_basic_text("bad").unwrap();
-    let mut cursor = VertexAggregateCursor::new(source(bad), plan.clone(), wide(), || Ok::<_, ()>(()));
-    assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(GraphAggregateError::NonIntegerSum { aggregate: 2 })))));
-    assert_eq!(cursor.row_stats().result_rows, 0); assert!(cursor.next().is_none());
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(GraphAggregateError::Source(
+            VertexScanError::Source("source failed")
+        ))))
+    ));
+    assert!(dropped.get());
+    assert_eq!(cursor.row_stats().result_rows, 0);
+    assert!(cursor.pending.is_none());
+    let mut bad = rows.clone();
+    bad[1].properties[0].1 = CanonicalScalar::ucs_basic_text("bad").unwrap();
+    let mut cursor =
+        VertexAggregateCursor::new(source(bad), plan.clone(), wide(), || Ok::<_, ()>(()));
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(
+            GraphAggregateError::NonIntegerSum { aggregate: 2 }
+        )))
+    ));
+    assert_eq!(cursor.row_stats().result_rows, 0);
+    assert!(cursor.next().is_none());
     for bound in [0, 1] {
-        let mut cursor = VertexAggregateCursor::new(source(rows.clone()), plan.clone(),
-            GqlQueryPolicy::new(2, bound, u64::MAX, u64::MAX), || Ok::<_, ()>(()));
+        let mut cursor = VertexAggregateCursor::new(
+            source(rows.clone()),
+            plan.clone(),
+            GqlQueryPolicy::new(2, bound, u64::MAX, u64::MAX),
+            || Ok::<_, ()>(()),
+        );
         assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Rows(_)))));
-        assert_eq!(cursor.row_stats().result_rows, 0); assert!(cursor.next().is_none());
+        assert_eq!(cursor.row_stats().result_rows, 0);
+        assert!(cursor.next().is_none());
     }
-    let mut cursor = VertexAggregateCursor::new(source(rows.clone()), plan,
-        GqlQueryPolicy::new(2, 2, u64::MAX, u64::MAX), || Ok::<_, ()>(()));
-    assert_eq!(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), expected_groups(&definition, &rows));
+    let mut cursor = VertexAggregateCursor::new(
+        source(rows.clone()),
+        plan,
+        GqlQueryPolicy::new(2, 2, u64::MAX, u64::MAX),
+        || Ok::<_, ()>(()),
+    );
+    assert_eq!(
+        cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        expected_groups(&definition, &rows)
+    );
 }
 
 #[test]
 fn grouped_cancellation_at_every_scan_and_delivery_checkpoint_fuses_and_drops_all_retained_state() {
-    let definition = grouped_definition(&[0]); let plan = VertexAggregatePlan::compile(&definition).unwrap();
-    let rows = vec![grouped_row(1, Some(CanonicalScalar::Int(2)), Some(3)),
-        grouped_row(2, None, Some(-2)), grouped_row(3, Some(CanonicalScalar::Int(1)), None)];
+    let definition = grouped_definition(&[0]);
+    let plan = VertexAggregatePlan::compile(&definition).unwrap();
+    let rows = vec![
+        grouped_row(1, Some(CanonicalScalar::Int(2)), Some(3)),
+        grouped_row(2, None, Some(-2)),
+        grouped_row(3, Some(CanonicalScalar::Int(1)), None),
+    ];
     let expected = expected_groups(&definition, &rows);
-    let calls = Rc::new(Cell::new(0)); let counting = Rc::clone(&calls);
-    let mut baseline = VertexAggregateCursor::new(source(rows.clone()), plan.clone(), wide(), move || {
-        counting.set(counting.get() + 1); Ok::<_, usize>(())
-    });
-    assert_eq!(baseline.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), expected);
+    let calls = Rc::new(Cell::new(0));
+    let counting = Rc::clone(&calls);
+    let mut baseline =
+        VertexAggregateCursor::new(source(rows.clone()), plan.clone(), wide(), move || {
+            counting.set(counting.get() + 1);
+            Ok::<_, usize>(())
+        });
+    assert_eq!(
+        baseline.by_ref().collect::<Result<Vec<_>, _>>().unwrap(),
+        expected
+    );
     let stats = baseline.evaluator_stats();
     for stop in 1..=calls.get() {
-        let input = source(rows.clone()); let dropped = Rc::clone(&input.dropped); let mut at = 0;
+        let input = source(rows.clone());
+        let dropped = Rc::clone(&input.dropped);
+        let mut at = 0;
         let mut cursor = VertexAggregateCursor::new(input, plan.clone(), wide(), move || {
-            at += 1; if at == stop { Err(stop) } else { Ok(()) }
+            at += 1;
+            if at == stop { Err(stop) } else { Ok(()) }
         });
         let mut delivered = Vec::new();
         loop {
             match cursor.next() {
                 Some(Ok(row)) => delivered.push(row),
-                Some(Err(GqlQueryError::Interrupted(actual))) => { assert_eq!(actual, stop); break; }
+                Some(Err(GqlQueryError::Interrupted(actual))) => {
+                    assert_eq!(actual, stop);
+                    break;
+                }
                 other => panic!("expected interruption, got {other:?}"),
             }
         }
         assert_eq!(delivered, expected[..delivered.len()]);
-        assert_eq!(cursor.state(), VertexScanState::Failed); assert!(cursor.pending.is_none());
-        assert!(dropped.get()); assert!(cursor.next().is_none());
+        assert_eq!(cursor.state(), VertexScanState::Failed);
+        assert!(cursor.pending.is_none());
+        assert!(dropped.get());
+        assert!(cursor.next().is_none());
     }
-    for (work, scratch, passes) in [(stats.work_units, stats.scratch_entries, true),
-        (stats.work_units - 1, stats.scratch_entries, false), (stats.work_units, stats.scratch_entries - 1, false)] {
-        let mut cursor = VertexAggregateCursor::new(source(rows.clone()), plan.clone(),
-            GqlQueryPolicy::new(3, 3, work, scratch), || Ok::<_, ()>(()));
+    for (work, scratch, passes) in [
+        (stats.work_units, stats.scratch_entries, true),
+        (stats.work_units - 1, stats.scratch_entries, false),
+        (stats.work_units, stats.scratch_entries - 1, false),
+    ] {
+        let mut cursor = VertexAggregateCursor::new(
+            source(rows.clone()),
+            plan.clone(),
+            GqlQueryPolicy::new(3, 3, work, scratch),
+            || Ok::<_, ()>(()),
+        );
         let result = cursor.by_ref().collect::<Result<Vec<_>, _>>();
-        assert_eq!(result.is_ok(), passes); assert!(cursor.pending.is_none());
+        assert_eq!(result.is_ok(), passes);
+        assert!(cursor.pending.is_none());
     }
     let mut cursor = VertexAggregateCursor::new(source(rows), plan, wide(), || Ok::<_, ()>(()));
-    cursor.next().unwrap().unwrap(); assert!(cursor.pending.is_some());
-    cursor.close(); cursor.close(); assert!(cursor.pending.is_none()); assert!(cursor.next().is_none());
+    cursor.next().unwrap().unwrap();
+    assert!(cursor.pending.is_some());
+    cursor.close();
+    cursor.close();
+    assert!(cursor.pending.is_none());
+    assert!(cursor.next().is_none());
     assert_eq!(cursor.state(), VertexScanState::Closed);
 }
 
@@ -594,25 +756,72 @@ fn grouped_cancellation_at_every_scan_and_delivery_checkpoint_fuses_and_drops_al
 fn averages_keep_exact_ratios_and_check_both_overflow_domains_before_mutation() {
     for (sum, count) in [(i128::MAX, 1), (0, u64::MAX)] {
         let mut state = NumericState::Average { sum, count };
-        assert!(matches!(state.update::<(), ()>(Input::Scalar(Some(&CanonicalScalar::Int(1))), 9),
-            Err(GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate: 9 }))));
-        assert!(matches!(state, NumericState::Average { sum: a, count: b } if a == sum && b == count));
-        assert!(matches!(state.update::<(), ()>(Input::Identity, 9),
-            Err(GqlQueryError::Source(GraphAggregateError::NonIntegerAverage { aggregate: 9 }))));
+        assert!(matches!(
+            state.update::<(), ()>(Input::Scalar(Some(&CanonicalScalar::Int(1))), 9),
+            Err(GqlQueryError::Source(
+                GraphAggregateError::ArithmeticOverflow { aggregate: 9 }
+            ))
+        ));
+        assert!(
+            matches!(state, NumericState::Average { sum: a, count: b } if a == sum && b == count)
+        );
+        assert!(matches!(
+            state.update::<(), ()>(Input::Identity, 9),
+            Err(GqlQueryError::Source(
+                GraphAggregateError::NonIntegerAverage { aggregate: 9 }
+            ))
+        ));
     }
-    let mut builder = GraphPatternBuilder::new(); builder.vertex("n").unwrap();
-    let input = builder.prepare_values(&[GraphColumn::property("value", "n", KEY)], 0, None)
-        .unwrap().with_duplicates();
-    let definition = PreparedGraphAggregate::prepare(input, &[], &[GraphAggregate::average_int("a", 0)], 0, None).unwrap();
+    let mut builder = GraphPatternBuilder::new();
+    builder.vertex("n").unwrap();
+    let input = builder
+        .prepare_values(&[GraphColumn::property("value", "n", KEY)], 0, None)
+        .unwrap()
+        .with_duplicates();
+    let definition = PreparedGraphAggregate::prepare(
+        input,
+        &[],
+        &[GraphAggregate::average_int("a", 0)],
+        0,
+        None,
+    )
+    .unwrap();
     let plan = VertexAggregatePlan::compile(&definition).unwrap();
-    for values in [vec![], vec![None], vec![Some(-2), Some(1)], vec![Some(i64::MAX), Some(i64::MIN)]] {
-        let rows: Vec<_> = values.iter().enumerate().map(|(at, v)| row(at as u128, v.map(CanonicalScalar::Int))).collect();
-        let mut cursor = VertexAggregateCursor::new(source(rows.clone()), plan.clone(), wide(), || Ok::<_, ()>(()));
-        assert_eq!(cursor.next().unwrap().unwrap(), expected(&definition, &rows));
+    for values in [
+        vec![],
+        vec![None],
+        vec![Some(-2), Some(1)],
+        vec![Some(i64::MAX), Some(i64::MIN)],
+    ] {
+        let rows: Vec<_> = values
+            .iter()
+            .enumerate()
+            .map(|(at, v)| row(at as u128, v.map(CanonicalScalar::Int)))
+            .collect();
+        let mut cursor =
+            VertexAggregateCursor::new(source(rows.clone()), plan.clone(), wide(), || {
+                Ok::<_, ()>(())
+            });
+        assert_eq!(
+            cursor.next().unwrap().unwrap(),
+            expected(&definition, &rows)
+        );
     }
-    let mut cursor = VertexAggregateCursor::new(source(vec![row(0, Some(CanonicalScalar::ucs_basic_text("bad").unwrap()))]),
-        plan, wide(), || Ok::<_, ()>(()));
-    assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(GraphAggregateError::NonIntegerAverage { aggregate: 0 })))));
+    let mut cursor = VertexAggregateCursor::new(
+        source(vec![row(
+            0,
+            Some(CanonicalScalar::ucs_basic_text("bad").unwrap()),
+        )]),
+        plan,
+        wide(),
+        || Ok::<_, ()>(()),
+    );
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(
+            GraphAggregateError::NonIntegerAverage { aggregate: 0 }
+        )))
+    ));
 }
 
 fn statistics() -> PreparedGraphAggregate {
@@ -668,12 +877,15 @@ fn statistics_match_the_ordinary_engine_across_nulls_visibility_and_integer_extr
         assert!(dropped.get());
         assert!(cursor.next().is_none());
     }
-    let mut empty =
-        VertexAggregateCursor::new(source(vec![]), plan, wide(), || Ok::<_, ()>(()));
+    let mut empty = VertexAggregateCursor::new(source(vec![]), plan, wide(), || Ok::<_, ()>(()));
     let result = empty.next().unwrap().unwrap();
     assert_eq!(result, expected(&definition, &[]));
     assert_eq!(result.values()[0].as_count(), Some(0));
-    assert!(result.values()[1..].iter().all(GraphAggregateValue::is_null));
+    assert!(
+        result.values()[1..]
+            .iter()
+            .all(GraphAggregateValue::is_null)
+    );
 }
 
 #[test]
@@ -717,13 +929,18 @@ fn averages_retain_exact_fractions_and_identity_extrema_retain_all_128_bits() {
     .unwrap();
     let plan = VertexAggregatePlan::compile(&definition).unwrap();
     let rows = vec![row(0, None), row(1_u128 << 100, None), row(u128::MAX, None)];
-    let mut cursor = VertexAggregateCursor::new(
-        source(rows.clone()), plan, wide(), || Ok::<_, ()>(()),
-    );
+    let mut cursor =
+        VertexAggregateCursor::new(source(rows.clone()), plan, wide(), || Ok::<_, ()>(()));
     let result = cursor.next().unwrap().unwrap();
     assert_eq!(result, expected(&definition, &rows));
-    assert_eq!(result.values()[0].as_value(), Some(&GraphValue::Vertex(VId(0))));
-    assert_eq!(result.values()[1].as_value(), Some(&GraphValue::Vertex(VId(u128::MAX))));
+    assert_eq!(
+        result.values()[0].as_value(),
+        Some(&GraphValue::Vertex(VId(0)))
+    );
+    assert_eq!(
+        result.values()[1].as_value(),
+        Some(&GraphValue::Vertex(VId(u128::MAX)))
+    );
 
     // Numeric domain errors are evaluated, not guessed from static column
     // types. Empty input is NULL; the first nonnull vertex must fail typed.
@@ -736,18 +953,21 @@ fn averages_retain_exact_fractions_and_identity_extrema_retain_all_128_bits() {
         let definition =
             PreparedGraphAggregate::prepare(vertices.clone(), &[], &[spec], 0, None).unwrap();
         let plan = VertexAggregatePlan::compile(&definition).unwrap();
-        let mut empty = VertexAggregateCursor::new(
-            source(vec![]), plan.clone(), wide(), || Ok::<_, ()>(()),
-        );
+        let mut empty =
+            VertexAggregateCursor::new(source(vec![]), plan.clone(), wide(), || Ok::<_, ()>(()));
         let result = empty.next().unwrap().unwrap();
         assert!(result.values()[0].is_null());
         assert_eq!(result, expected(&definition, &[]));
         let mut nonempty = VertexAggregateCursor::new(
-            source(vec![row(1, None)]), plan, wide(), || Ok::<_, ()>(()),
+            source(vec![row(1, None)]),
+            plan,
+            wide(),
+            || Ok::<_, ()>(()),
         );
         let error = nonempty.next().unwrap().unwrap_err();
         assert!(match error {
-            GqlQueryError::Source(GraphAggregateError::NonIntegerAverage { aggregate: 0 }) => average,
+            GqlQueryError::Source(GraphAggregateError::NonIntegerAverage { aggregate: 0 }) =>
+                average,
             GqlQueryError::Source(GraphAggregateError::NonIntegerSum { aggregate: 0 }) => !average,
             _ => false,
         });
@@ -759,9 +979,13 @@ fn averages_retain_exact_fractions_and_identity_extrema_retain_all_128_bits() {
 #[test]
 fn extrema_preserve_canonical_scalar_order_without_retaining_an_input_bag() {
     let definition = PreparedGraphAggregate::prepare(
-        input(), &[],
-        &[GraphAggregate::min("min", 0), GraphAggregate::max("max", 0)], 0, None,
-    ).unwrap();
+        input(),
+        &[],
+        &[GraphAggregate::min("min", 0), GraphAggregate::max("max", 0)],
+        0,
+        None,
+    )
+    .unwrap();
     let plan = VertexAggregatePlan::compile(&definition).unwrap();
     let choices = [
         None,
@@ -776,9 +1000,10 @@ fn extrema_preserve_canonical_scalar_order_without_retaining_an_input_bag() {
             for c in &choices {
                 let rows = vec![row(0, a.clone()), row(1, b.clone()), row(2, c.clone())];
                 let oracle = expected(&definition, &rows);
-                let mut cursor = VertexAggregateCursor::new(
-                    source(rows), plan.clone(), wide(), || Ok::<_, ()>(()),
-                );
+                let mut cursor =
+                    VertexAggregateCursor::new(source(rows), plan.clone(), wide(), || {
+                        Ok::<_, ()>(())
+                    });
                 assert_eq!(cursor.next().unwrap().unwrap(), oracle);
                 assert!(cursor.next().is_none());
             }
@@ -791,12 +1016,14 @@ fn extrema_preserve_canonical_scalar_order_without_retaining_an_input_bag() {
     let mut work = 0;
     for count in [1, 2, 100] {
         let rows = (0..count).map(|id| row(id, Some(value.clone()))).collect();
-        let mut cursor = VertexAggregateCursor::new(
-            source(rows), plan.clone(), wide(), || Ok::<_, ()>(()),
-        );
+        let mut cursor =
+            VertexAggregateCursor::new(source(rows), plan.clone(), wide(), || Ok::<_, ()>(()));
         cursor.next().unwrap().unwrap();
         let stats = cursor.evaluator_stats();
-        assert_eq!(*scratch.get_or_insert(stats.scratch_entries), stats.scratch_entries);
+        assert_eq!(
+            *scratch.get_or_insert(stats.scratch_entries),
+            stats.scratch_entries
+        );
         assert!(stats.work_units > work);
         work = stats.work_units;
         assert!(!format!("{cursor:?} {plan:?}").contains("private"));
@@ -806,38 +1033,53 @@ fn extrema_preserve_canonical_scalar_order_without_retaining_an_input_bag() {
 #[test]
 fn extrema_payload_admission_and_every_checkpoint_refusal_are_atomic() {
     let definition = PreparedGraphAggregate::prepare(
-        input(), &[],
-        &[GraphAggregate::min("min", 0), GraphAggregate::max("max", 0)], 0, None,
-    ).unwrap();
+        input(),
+        &[],
+        &[GraphAggregate::min("min", 0), GraphAggregate::max("max", 0)],
+        0,
+        None,
+    )
+    .unwrap();
     let plan = VertexAggregatePlan::compile(&definition).unwrap();
     let rows = ["mmmm", "aaaa", "zzzz"]
-        .into_iter().enumerate()
-        .map(|(id, text)| row(id as u128, Some(CanonicalScalar::ucs_basic_text(&text.repeat(512)).unwrap())))
+        .into_iter()
+        .enumerate()
+        .map(|(id, text)| {
+            row(
+                id as u128,
+                Some(CanonicalScalar::ucs_basic_text(&text.repeat(512)).unwrap()),
+            )
+        })
         .collect::<Vec<_>>();
     let calls = Rc::new(Cell::new(0));
     let observed = Rc::clone(&calls);
-    let mut baseline = VertexAggregateCursor::new(
-        source(rows.clone()), plan.clone(), wide(), move || {
+    let mut baseline =
+        VertexAggregateCursor::new(source(rows.clone()), plan.clone(), wide(), move || {
             observed.set(observed.get() + 1);
             Ok::<_, ()>(())
-        },
-    );
+        });
     let result = baseline.next().unwrap().unwrap();
     assert_eq!(result, expected(&definition, &rows));
     let stats = baseline.evaluator_stats();
     let mut exact = VertexAggregateCursor::new(
-        source(rows.clone()), plan.clone(),
-        GqlQueryPolicy::new(3, 1, stats.work_units, stats.scratch_entries), || Ok::<_, ()>(()),
+        source(rows.clone()),
+        plan.clone(),
+        GqlQueryPolicy::new(3, 1, stats.work_units, stats.scratch_entries),
+        || Ok::<_, ()>(()),
     );
     assert_eq!(exact.next().unwrap().unwrap(), result);
     for policy in [
         GqlQueryPolicy::new(3, 1, stats.work_units - 1, u64::MAX),
         GqlQueryPolicy::new(3, 1, u64::MAX, stats.scratch_entries - 1),
     ] {
-        let mut cursor = VertexAggregateCursor::new(
-            source(rows.clone()), plan.clone(), policy, || Ok::<_, ()>(()),
-        );
-        assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Evaluator(_)))));
+        let mut cursor =
+            VertexAggregateCursor::new(source(rows.clone()), plan.clone(), policy, || {
+                Ok::<_, ()>(())
+            });
+        assert!(matches!(
+            cursor.next(),
+            Some(Err(GqlQueryError::Evaluator(_)))
+        ));
         assert_eq!(cursor.row_stats().result_rows, 0);
     }
     for stop in 0..calls.get() {
@@ -864,13 +1106,19 @@ fn extrema_payload_admission_and_every_checkpoint_refusal_are_atomic() {
     let events = old_units + new_units + 1 + new_units;
     for stop in 0..events {
         let mut state = NumericState::Extreme {
-            value: Some(GraphValue::Scalar(old.clone())), maximum: true, payload_units: old_units,
+            value: Some(GraphValue::Scalar(old.clone())),
+            maximum: true,
+            payload_units: old_units,
         };
         let mut at = 0;
         let error = state.update_governed::<(), usize>(Input::Scalar(Some(&new)), 0, &mut |_| {
             let here = at;
             at += 1;
-            if here == stop { Err(GqlQueryError::Interrupted(stop)) } else { Ok(()) }
+            if here == stop {
+                Err(GqlQueryError::Interrupted(stop))
+            } else {
+                Ok(())
+            }
         });
         assert!(matches!(error, Err(GqlQueryError::Interrupted(at)) if at == stop));
         assert!(matches!(state, NumericState::Extreme {
@@ -884,23 +1132,39 @@ fn average_overflow_is_atomic_and_scratch_is_independent_of_cardinality() {
     for (sum, count) in [(0, u64::MAX), (i128::MAX, 1), (i128::MIN, 1)] {
         let mut state = NumericState::Average { sum, count };
         let value = CanonicalScalar::Int(if sum == i128::MIN { -1 } else { 1 });
-        assert!(matches!(state.update::<(), ()>(Input::Scalar(Some(&value)), 7),
-            Err(GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate: 7 }))));
-        assert!(matches!(state, NumericState::Average { sum: s, count: c } if s == sum && c == count));
+        assert!(matches!(
+            state.update::<(), ()>(Input::Scalar(Some(&value)), 7),
+            Err(GqlQueryError::Source(
+                GraphAggregateError::ArithmeticOverflow { aggregate: 7 }
+            ))
+        ));
+        assert!(
+            matches!(state, NumericState::Average { sum: s, count: c } if s == sum && c == count)
+        );
         state.update::<(), ()>(Input::Scalar(None), 7).unwrap();
-        state.update::<(), ()>(Input::Scalar(Some(&CanonicalScalar::Null)), 7).unwrap();
-        assert!(matches!(state, NumericState::Average { sum: s, count: c } if s == sum && c == count));
+        state
+            .update::<(), ()>(Input::Scalar(Some(&CanonicalScalar::Null)), 7)
+            .unwrap();
+        assert!(
+            matches!(state, NumericState::Average { sum: s, count: c } if s == sum && c == count)
+        );
     }
     let definition = PreparedGraphAggregate::prepare(
-        input(), &[], &[GraphAggregate::average_int("avg", 0)], 0, None,
-    ).unwrap();
+        input(),
+        &[],
+        &[GraphAggregate::average_int("avg", 0)],
+        0,
+        None,
+    )
+    .unwrap();
     let plan = VertexAggregatePlan::compile(&definition).unwrap();
     let mut scratch = None;
     for count in [0, 1, 100, 10_000] {
-        let rows = (0..count).map(|vid| row(vid, Some(CanonicalScalar::Int(-7)))).collect();
-        let mut cursor = VertexAggregateCursor::new(
-            source(rows), plan.clone(), wide(), || Ok::<_, ()>(()),
-        );
+        let rows = (0..count)
+            .map(|vid| row(vid, Some(CanonicalScalar::Int(-7))))
+            .collect();
+        let mut cursor =
+            VertexAggregateCursor::new(source(rows), plan.clone(), wide(), || Ok::<_, ()>(()));
         let result = cursor.next().unwrap().unwrap();
         if count == 0 {
             assert!(result.values()[0].is_null());
@@ -909,16 +1173,23 @@ fn average_overflow_is_atomic_and_scratch_is_independent_of_cardinality() {
             assert_eq!((avg.numerator(), avg.denominator()), (-7, 1));
         }
         let stats = cursor.evaluator_stats();
-        assert_eq!(*scratch.get_or_insert(stats.scratch_entries), stats.scratch_entries);
+        assert_eq!(
+            *scratch.get_or_insert(stats.scratch_entries),
+            stats.scratch_entries
+        );
     }
     let bad = source(vec![
-        row(0, Some(CanonicalScalar::Int(5))), row(1, Some(CanonicalScalar::Bool(true))),
+        row(0, Some(CanonicalScalar::Int(5))),
+        row(1, Some(CanonicalScalar::Bool(true))),
     ]);
     let dropped = Rc::clone(&bad.dropped);
     let mut cursor = VertexAggregateCursor::new(bad, plan, wide(), || Ok::<_, ()>(()));
-    assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Source(
-        GraphAggregateError::NonIntegerAverage { aggregate: 0 }
-    )))));
+    assert!(matches!(
+        cursor.next(),
+        Some(Err(GqlQueryError::Source(
+            GraphAggregateError::NonIntegerAverage { aggregate: 0 }
+        )))
+    ));
     assert_eq!(cursor.row_stats().result_rows, 0);
     assert!(dropped.get());
     assert!(cursor.next().is_none());

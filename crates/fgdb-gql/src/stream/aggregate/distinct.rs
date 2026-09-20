@@ -19,7 +19,9 @@ impl DistinctState {
         let accumulator = match function {
             GraphAggregateFunction::CountDistinct => NumericState::Count(0),
             GraphAggregateFunction::SumIntDistinct => NumericState::Sum(None),
-            GraphAggregateFunction::AverageIntDistinct => NumericState::Average { sum: 0, count: 0 },
+            GraphAggregateFunction::AverageIntDistinct => {
+                NumericState::Average { sum: 0, count: 0 }
+            }
             _ => unreachable!("the physical compiler checked the DISTINCT function"),
         };
         Self {
@@ -50,7 +52,10 @@ impl DistinctState {
         // variable scalar payloads. This is not an assertion about the exact
         // comparison count or allocator-byte cost of std::BTreeSet.
         let levels = size.saturating_add(1).ilog2() as usize + 1;
-        for _ in 0..levels.saturating_mul(24).saturating_mul(largest.saturating_add(1)) {
+        for _ in 0..levels
+            .saturating_mul(24)
+            .saturating_mul(largest.saturating_add(1))
+        {
             control(VertexScanEvent::Work)?;
         }
         let present = match input {
@@ -70,8 +75,12 @@ impl DistinctState {
         }
         self.accumulator.update(input, aggregate)?;
         match input {
-            Input::Vertex(vid) => { self.vertices.insert(vid); }
-            Input::Scalar(Some(value)) => { self.scalars.insert(value.clone()); }
+            Input::Vertex(vid) => {
+                self.vertices.insert(vid);
+            }
+            Input::Scalar(Some(value)) => {
+                self.scalars.insert(value.clone());
+            }
             _ => unreachable!("the nonnull argument was checked"),
         }
         self.max_payload = largest;

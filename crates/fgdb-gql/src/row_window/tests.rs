@@ -153,15 +153,14 @@ fn all_and_distinct_deltas_match_batch_gla_for_every_small_transition_and_null_o
 fn distinct_retains_raw_duplicates_and_promotes_tail_only_after_last_retraction() {
     let a = row(1, Some(7));
     let b = row(2, Some(7));
-    let mut stage = IncrementalRowWindow::new(spec(
-        GraphSetQuantifier::Distinct,
-        true,
-        true,
-        0,
-        1,
-    ));
+    let mut stage = IncrementalRowWindow::new(spec(GraphSetQuantifier::Distinct, true, true, 0, 1));
     stage
-        .apply(&z(&[(a.clone(), 4), (b.clone(), 1)]), LIMBS, Some(1), &mut allow)
+        .apply(
+            &z(&[(a.clone(), 4), (b.clone(), 1)]),
+            LIMBS,
+            Some(1),
+            &mut allow,
+        )
         .unwrap();
     assert!(
         stage
@@ -336,7 +335,11 @@ fn promoted_multiplicity_and_large_payloads_remain_compressed_and_cancellable() 
     assert_eq!(stage.rows().len(), 1);
     assert!(calls > 256, "both owned payload copies are charged");
     let mut denied = IncrementalRowWindow::new(definition.clone());
-    assert!(denied.apply(&seed, LimbLimit::new(0), None, &mut allow).is_err());
+    assert!(
+        denied
+            .apply(&seed, LimbLimit::new(0), None, &mut allow)
+            .is_err()
+    );
     assert_eq!(denied, IncrementalRowWindow::new(definition));
     stage
         .apply(
@@ -366,14 +369,17 @@ fn schema_and_order_admission_and_zero_column_identity_are_explicit() {
     assert!(matches!(
         RowWindowSpec::new(
             vec![GraphSetColumnType::Scalar],
-            vec![GraphValueOrder::ascending(0), GraphValueOrder::descending(0)],
+            vec![
+                GraphValueOrder::ascending(0),
+                GraphValueOrder::descending(0)
+            ],
             GraphSetQuantifier::All,
             0,
             1,
         ),
-        Err(RowWindowBuildError::Order(GraphOrderError::DuplicateColumn {
-            column: 0,
-        }))
+        Err(RowWindowBuildError::Order(
+            GraphOrderError::DuplicateColumn { column: 0 }
+        ))
     ));
     assert!(matches!(
         RowWindowSpec::new(

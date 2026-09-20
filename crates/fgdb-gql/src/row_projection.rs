@@ -41,7 +41,9 @@ impl From<GraphSetProjectionError> for RowProjectionBuildError {
     }
 }
 impl From<GraphSetFilterError> for RowProjectionBuildError {
-    fn from(error: GraphSetFilterError) -> Self { Self::Filter(error) }
+    fn from(error: GraphSetFilterError) -> Self {
+        Self::Filter(error)
+    }
 }
 
 /// Frozen input schema and checked native expressions. All expressions refer

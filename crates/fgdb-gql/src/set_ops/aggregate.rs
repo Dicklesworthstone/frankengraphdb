@@ -42,12 +42,16 @@ impl PreparedGraphSetAggregate {
     /// The complete input and all result clauses are retained unchanged. Plain
     /// graph/computed-binding definitions refuse; no schema carrier is invented.
     pub fn from_relation(summary: PreparedGraphAggregate) -> Option<Self> {
-        summary.input_relation().is_some().then_some(Self { summary })
+        summary
+            .input_relation()
+            .is_some()
+            .then_some(Self { summary })
     }
 
     /// Reuse native post-HAVING expressions without exposing a graph executor.
     pub fn with_output_projection(
-        mut self, projection: Vec<crate::GraphSetProjection>,
+        mut self,
+        projection: Vec<crate::GraphSetProjection>,
     ) -> Result<Self, GraphAggregateBuildError> {
         self.summary = self.summary.with_output_projection(projection)?;
         Ok(self)
