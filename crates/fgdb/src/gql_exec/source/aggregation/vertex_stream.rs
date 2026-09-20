@@ -42,26 +42,20 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
         &mut self,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, VertexScanSourceError<ReadError, C>> {
-        let cx = self.cx;
-        cx.with_restriction(|| {
-            let mut node = self.view.snapshot.property_index.histories.0.as_deref();
-            let mut successor = None;
-            // Seek strictly after the last identity. No +1 arithmetic: both
-            // VId(0) and VId(u128::MAX) are ordinary legal identities.
-            while let Some(current) = node {
-                control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-                if self.after.is_none_or(|after| current.key > after) {
-                    successor = Some(current.key);
-                    node = current.left.0.as_deref();
-                } else {
-                    node = current.right.0.as_deref();
-                }
-            }
-            if let Some(vid) = successor {
-                self.after = Some(vid);
-            }
-            Ok(successor)
-        })
+        let successor = vertex_successor(&self.view, self.cx, self.after, control)
+            .map_err(VertexScanSourceError::Control)?;
+        if let Some(vid) = successor {
+            self.after = Some(vid);
+        }
+        Ok(successor)
+    }
+
+    fn next_probe_vertex<C>(
+        &self,
+        after: Option<VId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VId>, EdgeExpansionSourceError<ReadError, C>> {
+        probe_vertex_from_view(&self.view, self.cx, after, control)
     }
 
     fn vertex<'a, C>(
@@ -120,6 +114,46 @@ impl core::fmt::Debug for SnapshotVertexSource<'_> {
     }
 }
 
+// Strict successor in the already admitted persistent vertex history index.
+// This body is shared by the root and every independent probe position. It
+// does not advance a cursor, pre-resolve visibility, clone a pin or collect IDs.
+fn vertex_successor<C>(
+    view: &EmbeddedReadView,
+    cx: &QueryCx,
+    after: Option<VId>,
+    control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+) -> Result<Option<VId>, C> {
+    cx.with_restriction(|| {
+        let mut node = view.snapshot.property_index.histories.0.as_deref();
+        let mut successor = None;
+        // No +1 sentinel: VId(0) and VId(u128::MAX) are ordinary identities.
+        while let Some(current) = node {
+            control(VertexScanEvent::Work)?;
+            if after.is_none_or(|after| current.key > after) {
+                successor = Some(current.key);
+                node = current.left.0.as_deref();
+            } else {
+                node = current.right.0.as_deref();
+            }
+        }
+        Ok(successor)
+    })
+}
+
+// Both outer source kinds reuse the same successor and own exactly one pin.
+// The kernel charges a candidate record before resolving its visible vertex.
+pub(super) fn probe_vertex_from_view<C>(
+    view: &EmbeddedReadView,
+    cx: &QueryCx,
+    after: Option<VId>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+) -> Result<Option<VId>, EdgeExpansionSourceError<ReadError, C>> {
+    vertex_successor(view, cx, after, &mut |event| control(match event {
+        VertexScanEvent::Work => GlaExecutionEvent::Work,
+        VertexScanEvent::ScratchEntry => GlaExecutionEvent::ScratchEntry,
+    })).map_err(|error| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(error)))
+}
+
 fn source_error(error: ReadError) -> StreamError {
     GqlQueryError::Source(VertexScanError::Source(error))
 }
@@ -159,9 +193,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// may repeat that identity or read its canonical properties. The leading
     /// unique identity proves whole-row order and DISTINCT without sorting.
     /// Other projections/orderings refuse, rather than quietly changing order.
-    /// Correlated fixed-hop EXISTS/NOT EXISTS use the same pinned incidence and
-    /// edge-version readers, including for isolated outer vertices. Candidate
-    /// counts include examined root histories and every probe edge examination.
+    /// Correlated/independent fixed-hop EXISTS/NOT EXISTS share the pinned
+    /// vertex, incidence and edge-version readers. Isolates are candidates;
+    /// every root and probe vertex/edge examination uses the same allowance.
     /// The stream keeps one view and original QueryCx, not a new graph per root.
     pub fn stream_graph_values_governed<'q>(
         &self,
@@ -226,7 +260,7 @@ impl<V: Vfs + Clone> Database<V> {
         open(view, cx, pattern.plan(), as_of, policy)
     }
 
-    /// Health and exact-sequence admission precede cursor preparation. A future
+    /// Health and exact-sequence admission precedes cursor preparation. A future
     /// cut never becomes a successful empty stream, including under LIMIT 0.
     pub fn stream_graph_vertices_governed_at<'q>(
         &self,
@@ -403,3 +437,6 @@ mod tests;
 
 #[cfg(test)]
 mod probe_tests;
+
+#[cfg(test)]
+mod independent_tests;

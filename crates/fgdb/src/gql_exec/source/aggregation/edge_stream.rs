@@ -61,6 +61,14 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
         })
     }
 
+    fn next_probe_vertex<C>(
+        &self,
+        after: Option<VId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VId>, fgdb_gql::edge_stream::EdgeExpansionSourceError<ReadError, C>> {
+        super::vertex_stream::probe_vertex_from_view(&self.view, self.cx, after, control)
+    }
+
     fn next_incident_edge<C>(
         &self,
         endpoint: VId,
