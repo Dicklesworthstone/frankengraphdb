@@ -13,6 +13,7 @@ mod incremental;
 mod merge;
 mod projection;
 pub use aggregate::PreparedGraphSetAggregate;
+pub use filter::incremental as row_filter;
 pub use filter::{GraphSetFilterError, GraphSetOperand, GraphSetPredicateOp};
 pub use projection::{GraphSetProjection, GraphSetProjectionError, GraphSetValue};
 

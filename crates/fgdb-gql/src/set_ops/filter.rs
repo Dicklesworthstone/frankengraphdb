@@ -4,6 +4,8 @@
 //! ordering used by set equality. Evaluation is eager and three-valued; only
 //! TRUE retains a row. Project computed operands first, then filter their cells.
 
+pub mod incremental;
+
 use super::{GraphSetBuildError, GraphSetColumnType, PreparedGraphSet, SetNode, check_depth};
 use crate::algebra::{
     GraphValue, GraphValueRow, IntegerComparison, MAX_BOOLEAN_INSTRUCTIONS, MAX_PATTERN_PREDICATES,
