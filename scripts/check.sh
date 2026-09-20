@@ -1307,8 +1307,8 @@ run_ubs() {
 # - Retired rules (transmute, JWT decode, Security-sensitive non-crypto randomness) no longer reported
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=3"
-  "Secret/token comparisons without timing-safe equality=15"
-  "panic!/unreachable!/todo!/unimplemented!=416"
+  "Secret/token comparisons without timing-safe equality=16"
+  "panic!/unreachable!/todo!/unimplemented!=462"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1322,8 +1322,8 @@ UBS_CRITICAL_BASELINE=(
 # above). Both tables fail closed on any increase, decrease, or unknown class.
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=3"
-  "Secret/token comparisons without timing-safe equality=15"
-  "panic!/unreachable!/todo!/unimplemented!=416"
+  "Secret/token comparisons without timing-safe equality=16"
+  "panic!/unreachable!/todo!/unimplemented!=462"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new

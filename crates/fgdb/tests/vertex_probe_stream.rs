@@ -424,8 +424,7 @@ fn exact_cumulative_limits_and_admission_precedence_survive_vertex_probe_dispatc
             stream.close();
             assert!(stream.next().is_none());
         }
-        let unavailable =
-            prepare("MATCH (a) OPTIONAL MATCH (a)-[:R]->(y) RETURN a LIMIT 0");
+        let unavailable = prepare("MATCH (a) OPTIONAL MATCH (a)-[:R]->(y) RETURN a LIMIT 0");
         let none = GqlQueryPolicy::new(0, 0, 0, 0);
         assert!(matches!(
             db.stream_graph_values_governed(&cx, &unavailable, none),

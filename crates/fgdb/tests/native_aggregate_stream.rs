@@ -6,6 +6,7 @@ use fgdb_gql::stream::{VertexScanError, VertexScanState};
 use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, RelationBind};
 use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
 
+#[path = "native_aggregate_stream/extended.rs"]
 mod extended;
 
 const LABEL: LabelId = LabelId(3);
@@ -14,7 +15,11 @@ const TAG: PropertyKeyId = PropertyKeyId(8);
 const SUMMARY: &str =
     "MATCH (n:L) RETURN COUNT(*) AS total, COUNT(n.score) AS present, SUM(n.score) AS sum";
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0x61; 32], DatabaseSecurityNamespaceId([0x62; 32]), [0x63; 32])
+    DatabaseKeys::new(
+        [0x61; 32],
+        DatabaseSecurityNamespaceId([0x62; 32]),
+        [0x63; 32],
+    )
 }
 fn symbols() -> RelationBind {
     RelationBind::new()
@@ -28,11 +33,26 @@ fn wide() -> GqlQueryPolicy {
 }
 fn seed() -> WriteBatch {
     let mut batch = WriteBatch::new(RelationId(1));
-    for (id, value) in [(0, Some(-9)), (1, Some(14)), (2, None), (u128::MAX, Some(2))] {
-        batch.create_vertex(VId(id), vec![LABEL], vec![
-            (SCORE, value.map_or(CanonicalScalar::Null, CanonicalScalar::Int)),
-            (TAG, CanonicalScalar::ucs_basic_text("' $not_syntax").unwrap()),
-        ]);
+    for (id, value) in [
+        (0, Some(-9)),
+        (1, Some(14)),
+        (2, None),
+        (u128::MAX, Some(2)),
+    ] {
+        batch.create_vertex(
+            VId(id),
+            vec![LABEL],
+            vec![
+                (
+                    SCORE,
+                    value.map_or(CanonicalScalar::Null, CanonicalScalar::Int),
+                ),
+                (
+                    TAG,
+                    CanonicalScalar::ucs_basic_text("' $not_syntax").unwrap(),
+                ),
+            ],
+        );
     }
     batch
 }
@@ -47,20 +67,34 @@ fn native_aliases_typed_arguments_and_empty_inputs_equal_the_ordinary_engine() {
         db.write(&commit, seed()).await.unwrap();
         let cases = [
             (SUMMARY, GqlParameters::new()),
-            ("MATCH (n:L) WHERE n.score >= $floor RETURN SUM(n.score) AS sum, COUNT(*) AS count",
-                GqlParameters::new().with_int64("floor", 3).unwrap()),
-            ("MATCH (n:L) WHERE n.score >= $floor RETURN COUNT(*) AS count, SUM(n.score) AS sum",
-                GqlParameters::new().with_int64("floor", 100).unwrap()),
-            ("MATCH (n:L) WHERE n.tag=$tag RETURN COUNT(n.tag) AS tags, COUNT(*) AS rows",
-                GqlParameters::new().with_text("tag", "' $not_syntax").unwrap()),
-            ("MATCH (n:L) RETURN COUNT(*) AS first, COUNT(*) AS second", GqlParameters::new()),
+            (
+                "MATCH (n:L) WHERE n.score >= $floor RETURN SUM(n.score) AS sum, COUNT(*) AS count",
+                GqlParameters::new().with_int64("floor", 3).unwrap(),
+            ),
+            (
+                "MATCH (n:L) WHERE n.score >= $floor RETURN COUNT(*) AS count, SUM(n.score) AS sum",
+                GqlParameters::new().with_int64("floor", 100).unwrap(),
+            ),
+            (
+                "MATCH (n:L) WHERE n.tag=$tag RETURN COUNT(n.tag) AS tags, COUNT(*) AS rows",
+                GqlParameters::new()
+                    .with_text("tag", "' $not_syntax")
+                    .unwrap(),
+            ),
+            (
+                "MATCH (n:L) RETURN COUNT(*) AS first, COUNT(*) AS second",
+                GqlParameters::new(),
+            ),
         ];
         for (text, params) in cases {
             let QueryResult::Rows { columns, rows } =
-                db.query(&cx, text, &params, symbols(), wide()).unwrap() else {
-                    panic!("read returned a write");
-                };
-            let mut cursor = db.query_aggregate_stream(&cx, text, &params, symbols(), wide()).unwrap();
+                db.query(&cx, text, &params, symbols(), wide()).unwrap()
+            else {
+                panic!("read returned a write");
+            };
+            let mut cursor = db
+                .query_aggregate_stream(&cx, text, &params, symbols(), wide())
+                .unwrap();
             assert_eq!(cursor.columns(), columns);
             assert_eq!(cursor.row_stats().snapshot_records, 0);
             assert_eq!(cursor.row_stats().result_rows, 0);
@@ -87,12 +121,16 @@ fn native_cursor_owns_definition_arguments_and_generation_not_the_live_writer() 
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, seed()).await.unwrap();
         let view = db.read_session().unwrap();
-        let text = String::from("MATCH (n:L) WHERE n.score >= $floor RETURN COUNT(*) AS count, SUM(n.score) AS sum");
+        let text = String::from(
+            "MATCH (n:L) WHERE n.score >= $floor RETURN COUNT(*) AS count, SUM(n.score) AS sum",
+        );
         let args = GqlParameters::new().with_int64("floor", 0).unwrap();
         let prepared = PreparedNativeRead::prepare(&text, &args, symbols()).unwrap();
         let mut first = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
         let other = GqlParameters::new().with_int64("floor", 10).unwrap();
-        let mut second = prepared.stream_aggregate_in_view(&view, &cx, &other, wide()).unwrap();
+        let mut second = prepared
+            .stream_aggregate_in_view(&view, &cx, &other, wide())
+            .unwrap();
         drop(prepared);
         drop(text);
         drop(args);
@@ -133,24 +171,46 @@ fn temporal_rebinding_stays_at_the_exact_cut_and_refuses_future_view_reads() {
         for seq in 0..=2 {
             let args = GqlParameters::new().with_uint64("seq", seq).unwrap();
             let QueryResult::Rows { columns, rows } =
-                prepared.execute(&db, &cx, &args, wide()).unwrap() else { panic!("not rows") };
+                prepared.execute(&db, &cx, &args, wide()).unwrap()
+            else {
+                panic!("not rows")
+            };
             let mut cursor = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
             assert_eq!(cursor.columns(), columns);
             assert_eq!(cursor.snapshot_seq(), CommitSeq(seq));
-            assert_eq!(rows, vec![cursor.next().unwrap().unwrap().values().to_vec()]);
+            assert_eq!(
+                rows,
+                vec![cursor.next().unwrap().unwrap().values().to_vec()]
+            );
         }
         let future = GqlParameters::new().with_uint64("seq", 2).unwrap();
-        let error = view.query_aggregate_stream(
-            &cx, text, &future, symbols(), GqlQueryPolicy::new(0, 0, 0, 0),
-        ).unwrap_err();
-        assert!(matches!(error, QueryError::AggregateStream(GqlQueryError::Source(
-            GraphAggregateError::Source(VertexScanError::Source(_))
-        ))));
+        let error = view
+            .query_aggregate_stream(
+                &cx,
+                text,
+                &future,
+                symbols(),
+                GqlQueryPolicy::new(0, 0, 0, 0),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            QueryError::AggregateStream(GqlQueryError::Source(GraphAggregateError::Source(
+                VertexScanError::Source(_)
+            )))
+        ));
         let wrong = GqlParameters::new().with_int64("seq", 1).unwrap();
-        assert!(matches!(prepared.stream_aggregate_in_view(&view, &cx, &wrong, wide()),
-            Err(QueryError::TemporalText(_))));
-        let mut historical = prepared.stream_aggregate_in_view(&view, &cx, &args, wide()).unwrap();
-        assert_eq!(historical.next().unwrap().unwrap().values()[0].as_count(), Some(4));
+        assert!(matches!(
+            prepared.stream_aggregate_in_view(&view, &cx, &wrong, wide()),
+            Err(QueryError::TemporalText(_))
+        ));
+        let mut historical = prepared
+            .stream_aggregate_in_view(&view, &cx, &args, wide())
+            .unwrap();
+        assert_eq!(
+            historical.next().unwrap().unwrap().values()[0].as_count(),
+            Some(4)
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -170,14 +230,28 @@ fn unsupported_aggregate_shapes_are_never_stripped_or_eagerly_retried() {
             "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(DISTINCT b.score) AS count",
         ] {
             // Ensure a valid native definition, not a vacuous syntax refusal.
-            let prepared = PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();
-            assert!(matches!(prepared.stream_aggregate(
-                &db, &cx, &GqlParameters::new(), GqlQueryPolicy::new(0, 0, 0, 0),
-            ), Err(QueryError::AggregateStreamPlan(_) | QueryError::EdgeAggregateStreamPlan(_))), "{text}");
+            let prepared =
+                PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();
+            assert!(
+                matches!(
+                    prepared.stream_aggregate(
+                        &db,
+                        &cx,
+                        &GqlParameters::new(),
+                        GqlQueryPolicy::new(0, 0, 0, 0),
+                    ),
+                    Err(QueryError::AggregateStreamPlan(_) | QueryError::EdgeAggregateStreamPlan(_))
+                ),
+                "{text}"
+            );
         }
-        let scan = PreparedNativeRead::prepare("MATCH (n:L) RETURN n", &GqlParameters::new(), symbols()).unwrap();
-        assert!(matches!(scan.stream_aggregate(&db, &cx, &GqlParameters::new(), wide()),
-            Err(QueryError::StreamingUnsupported { .. })));
+        let scan =
+            PreparedNativeRead::prepare("MATCH (n:L) RETURN n", &GqlParameters::new(), symbols())
+                .unwrap();
+        assert!(matches!(
+            scan.stream_aggregate(&db, &cx, &GqlParameters::new(), wide()),
+            Err(QueryError::StreamingUnsupported { .. })
+        ));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -196,7 +270,12 @@ fn native_streams_keep_exact_budgets_typed_late_failures_and_nondraining_close()
         let expected = baseline.next().unwrap().unwrap();
         let rows = baseline.row_stats();
         let work = baseline.evaluator_stats();
-        let exact = GqlQueryPolicy::new(rows.snapshot_records, 1, work.work_units, work.scratch_entries);
+        let exact = GqlQueryPolicy::new(
+            rows.snapshot_records,
+            1,
+            work.work_units,
+            work.scratch_entries,
+        );
         let mut cursor = prepared.stream_aggregate(&db, &cx, &args, exact).unwrap();
         assert_eq!(cursor.next().unwrap().unwrap(), expected);
         for policy in [
@@ -206,7 +285,10 @@ fn native_streams_keep_exact_budgets_typed_late_failures_and_nondraining_close()
             GqlQueryPolicy::new(u64::MAX, 1, u64::MAX, work.scratch_entries - 1),
         ] {
             let mut cursor = prepared.stream_aggregate(&db, &cx, &args, policy).unwrap();
-            assert!(matches!(cursor.next(), Some(Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)))));
+            assert!(matches!(
+                cursor.next(),
+                Some(Err(GqlQueryError::Rows(_) | GqlQueryError::Evaluator(_)))
+            ));
             assert_eq!(cursor.state(), VertexScanState::Failed);
             assert_eq!(cursor.row_stats().result_rows, 0);
             assert!(cursor.next().is_none());
@@ -219,13 +301,19 @@ fn native_streams_keep_exact_budgets_typed_late_failures_and_nondraining_close()
         assert_eq!(closed.row_stats().snapshot_records, 0);
         assert_eq!(closed.evaluator_stats().work_units, 0);
         let mut edit = WriteBatch::new(RelationId(1));
-        edit.set_vertex_property(VId(u128::MAX), SCORE,
-            Some(CanonicalScalar::ucs_basic_text("private incompatible operand").unwrap()));
+        edit.set_vertex_property(
+            VId(u128::MAX),
+            SCORE,
+            Some(CanonicalScalar::ucs_basic_text("private incompatible operand").unwrap()),
+        );
         db.write(&commit, edit).await.unwrap();
         let mut invalid = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
-        assert!(matches!(invalid.next(), Some(Err(GqlQueryError::Source(
-            GraphAggregateError::NonIntegerSum { aggregate: 2 }
-        )))));
+        assert!(matches!(
+            invalid.next(),
+            Some(Err(GqlQueryError::Source(
+                GraphAggregateError::NonIntegerSum { aggregate: 2 }
+            )))
+        ));
         assert_eq!(invalid.row_stats().result_rows, 0);
         assert_eq!(invalid.state(), VertexScanState::Failed);
         assert!(!format!("{invalid:?}").contains("private incompatible operand"));

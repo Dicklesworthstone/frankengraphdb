@@ -428,9 +428,8 @@ fn probe_limits_are_cumulative_and_binding_frontier_and_unsupported_errors_prece
                 ReadError::BeyondFrontier { .. }
             )))
         ));
-        let unsupported = prepare(
-            "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN r, a, b LIMIT 0",
-        );
+        let unsupported =
+            prepare("MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:R]->(c) RETURN r, a, b LIMIT 0");
         assert!(matches!(
             db.stream_graph_edges_governed(&cx, &unsupported, GqlQueryPolicy::new(0, 0, 0, 0)),
             Err(GqlQueryError::Source(EdgeScanError::Plan(_)))
