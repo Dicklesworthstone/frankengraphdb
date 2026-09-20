@@ -27,36 +27,41 @@ pub(crate) struct State {
     pub(super) failure: Option<StandingQueryFailure>,
 }
 
-fn columns(query: &StandingQuery) -> Option<&[String]> {
+// Shared maintained-row interface for set and join circuit dependencies.
+pub(super) fn columns(query: &StandingQuery) -> Option<&[String]> {
     match query {
         StandingQuery::Rows { output, .. } => Some(output.definition().columns()),
         StandingQuery::Set(query) => Some(&query.columns),
+        StandingQuery::Join(query) => Some(query.columns()),
         _ => None,
     }
 }
-fn column_type(query: &StandingQuery, column: usize) -> Option<GraphSetColumnType> {
+pub(super) fn column_type(query: &StandingQuery, column: usize) -> Option<GraphSetColumnType> {
     match query {
         StandingQuery::Rows { output, .. } => output.definition().value_columns()
             .get(column).map(GraphSetColumnType::from),
         StandingQuery::Set(query) => query.types.get(column).copied(),
+        StandingQuery::Join(query) => query.spec().column_types().nth(column),
         _ => None,
     }
 }
-fn rows(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
+pub(super) fn rows(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
     match query {
         StandingQuery::Rows { output, .. } => Some(&output.rows),
         StandingQuery::Set(query) => Some(&query.rows),
+        StandingQuery::Join(query) => Some(query.rows()),
         _ => None,
     }
 }
-fn delta(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
+pub(super) fn delta(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
     match query {
         StandingQuery::Rows { output, .. } => output.last_delta.as_ref(),
         StandingQuery::Set(query) => query.last_delta.as_ref(),
+        StandingQuery::Join(query) => query.delta(),
         _ => None,
     }
 }
-fn input_at(
+pub(super) fn input_at(
     sources: &[StandingQuery], index: usize, at: CommitSeq,
 ) -> Result<&StandingQuery, StandingQueryFailure> {
     let query = sources.get(index).ok_or(StandingQueryFailure::DependencyUnavailable)?;
@@ -169,14 +174,14 @@ impl Update<'_> {
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Compose two existing standing row/set views using UNION, INTERSECT or
+    /// Compose two existing standing row/set/join views using UNION, INTERSECT or
     /// EXCEPT with ALL/DISTINCT bag semantics. Operands keep their own DISTINCT,
     /// ordering and page BEFORE composition. Canonical full-row equality makes
     /// NULL equal NULL here; scalar and vertex domains are never coerced.
     /// Column positions/types must agree, even for empty inputs. Output names
     /// come from the left operand. The same handle may supply both operands.
     ///
-    /// Shared parents are maintained once. A set may feed later sets, forming
+    /// Shared parents are maintained once. Sets and joins may feed each other in
     /// an append-ordered acyclic circuit. Each commit uses both complete input
     /// derivatives at that exact sequence, or leaves this child unavailable.
     /// Parent/sibling success is not undone by a child's policy refusal. Repair

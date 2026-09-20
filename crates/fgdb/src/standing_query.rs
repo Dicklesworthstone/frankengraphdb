@@ -6,6 +6,7 @@
 
 mod aggregate;
 mod components;
+mod joins;
 mod kcore;
 mod native;
 mod output;
@@ -81,6 +82,7 @@ pub enum StandingQueryError {
     UnknownHandle,
     Unsupported,
     SetSchema(fgdb_gql::GraphSetBuildError),
+    JoinSchema(fgdb_gql::row_join::RowJoinBuildError),
     NativePrepare(Box<crate::QueryError>),
     NativeClassUnsupported { facade: crate::NativeReadClass },
     /// Reading a healthy maintained result exceeded the caller's delivery
@@ -103,6 +105,7 @@ impl core::fmt::Display for StandingQueryError {
                 f.write_str("standing query kind or definition is unsupported by this operation")
             }
             Self::SetSchema(error) => error.fmt(f),
+            Self::JoinSchema(error) => error.fmt(f),
             Self::NativePrepare(error) => error.fmt(f),
             Self::NativeClassUnsupported { facade } => {
                 write!(f, "native {facade:?} has no supported standing-query registration")
@@ -125,6 +128,7 @@ impl core::error::Error for StandingQueryError {
         match self {
             Self::NativePrepare(error) => Some(error.as_ref()),
             Self::SetSchema(error) => Some(error),
+            Self::JoinSchema(error) => Some(error),
             Self::Read(error) => Some(error),
             Self::Interrupted(error) => Some(error.as_ref()),
             _ => None,
@@ -186,6 +190,7 @@ pub(crate) enum StandingQuery {
     /// Dependencies name only earlier registry entries, so the append order
     /// is a topological order without a second scheduler or recursive walk.
     Set(Box<sets::State>),
+    Join(Box<joins::State>),
 }
 
 impl StandingQuery {
@@ -200,6 +205,7 @@ impl StandingQuery {
             Self::Components(query) => (query.policy, query.frontier, query.failure),
             Self::CoreNumbers(query) => (query.policy, query.frontier, query.failure),
             Self::Set(query) => (query.policy, query.frontier, query.failure),
+            Self::Join(query) => (query.policy, query.frontier, query.failure),
         }
     }
 
@@ -227,6 +233,9 @@ impl StandingQuery {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
             Self::Set(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
+            Self::Join(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
         };
@@ -414,7 +423,7 @@ impl<V: Vfs + Clone> Database<V> {
     /// the old rows, frontier, policy and failure untouched. Successful repair
     /// replaces all state together and resumes ordinary commit maintenance.
     /// An already durable write is never rolled back by a maintenance failure.
-    /// Set compositions rebuild from their current healthy operand views;
+    /// Set/join compositions rebuild from their current healthy operand views;
     /// repair unavailable dependencies first, then rebuild their dependents.
     pub fn rebuild_standing_query(
         &mut self,
@@ -458,6 +467,9 @@ impl<V: Vfs + Clone> Database<V> {
             )),
             StandingQuery::Set(query) => StandingQuery::Set(Box::new(
                 self.prepare_standing_set(cx, query.inputs, query.operation(), policy, handle.index)?,
+            )),
+            StandingQuery::Join(query) => StandingQuery::Join(Box::new(
+                self.prepare_standing_join(cx, query.inputs, query.spec().keys(), policy, handle.index)?,
             )),
         };
         let frontier = replacement.status().1;
@@ -508,7 +520,8 @@ impl<V: Vfs + Clone> Database<V> {
             }
             StandingQuery::Reachability(_) | StandingQuery::Rows { .. }
             | StandingQuery::Triangles(_) | StandingQuery::Components(_)
-            | StandingQuery::CoreNumbers(_) | StandingQuery::Set(_) => return Err(StandingQueryError::Unsupported),
+            | StandingQuery::CoreNumbers(_) | StandingQuery::Set(_)
+            | StandingQuery::Join(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
             rows,
@@ -586,6 +599,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Components(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::CoreNumbers(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Set(query) => query.maintain(batch, prior, &mut meter),
+            StandingQuery::Join(query) => query.maintain(batch, prior, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);
     }
