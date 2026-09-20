@@ -59,6 +59,67 @@ impl GraphSetPredicateOp {
     ) -> Result<(), GraphSetFilterError> {
         RowPredicate::prepare(types, code).map(|_| ())
     }
+
+    /// Shared snapshot/derivative kernel. Callers must first validate this
+    /// immutable code against the input schema and validate each row's shape.
+    /// Evaluation is eager, charges every instruction/payload, and retains
+    /// only TRUE. No literal clone or predicate recompilation occurs per row.
+    pub(crate) fn evaluate_row_with_control<E>(
+        code: &[Self],
+        row: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let mut stack: [Option<bool>; MAX_PATTERN_PREDICATES] = [None; MAX_PATTERN_PREDICATES];
+        let mut depth = 0;
+        for op in code {
+            control(GlaExecutionEvent::Work)?;
+            let value = match op {
+                GraphSetPredicateOp::Compare {
+                    left,
+                    comparison,
+                    right,
+                } => {
+                    let left = resolve(left, row, control)?;
+                    let right = resolve(right, row, control)?;
+                    for value in [left, right] {
+                        if let Cell::Scalar(value) = value {
+                            crate::algebra_exec::charge_payload(value, control)?;
+                        }
+                    }
+                    compare(left, right, *comparison)
+                }
+                GraphSetPredicateOp::IsNull { operand, is_null } => {
+                    Some(resolve(operand, row, control)?.is_null() == *is_null)
+                }
+                GraphSetPredicateOp::Truth(value) => *value,
+                GraphSetPredicateOp::Not => {
+                    stack[depth - 1] = stack[depth - 1].map(|value| !value);
+                    continue;
+                }
+                GraphSetPredicateOp::And | GraphSetPredicateOp::Or => {
+                    let right = stack[depth - 1];
+                    depth -= 1;
+                    let left = stack[depth - 1];
+                    stack[depth - 1] = if matches!(op, GraphSetPredicateOp::And) {
+                        if left == Some(false) || right == Some(false) {
+                            Some(false)
+                        } else {
+                            left.zip(right).map(|(a, b)| a && b)
+                        }
+                    } else if left == Some(true) || right == Some(true) {
+                        Some(true)
+                    } else {
+                        left.zip(right).map(|(a, b)| a || b)
+                    };
+                    continue;
+                }
+            };
+            stack[depth] = value;
+            depth += 1;
+        }
+        debug_assert_eq!(depth, 1);
+        Ok(stack[0] == Some(true))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,56 +244,7 @@ impl RowPredicate {
         row: &GraphValueRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
-        let mut stack: [Option<bool>; MAX_PATTERN_PREDICATES] = [None; MAX_PATTERN_PREDICATES];
-        let mut depth = 0;
-        for op in self.code.iter() {
-            control(GlaExecutionEvent::Work)?;
-            let value = match op {
-                GraphSetPredicateOp::Compare {
-                    left,
-                    comparison,
-                    right,
-                } => {
-                    let left = resolve(left, row, control)?;
-                    let right = resolve(right, row, control)?;
-                    for value in [left, right] {
-                        if let Cell::Scalar(value) = value {
-                            crate::algebra_exec::charge_payload(value, control)?;
-                        }
-                    }
-                    compare(left, right, *comparison)
-                }
-                GraphSetPredicateOp::IsNull { operand, is_null } => {
-                    Some(resolve(operand, row, control)?.is_null() == *is_null)
-                }
-                GraphSetPredicateOp::Truth(value) => *value,
-                GraphSetPredicateOp::Not => {
-                    stack[depth - 1] = stack[depth - 1].map(|value| !value);
-                    continue;
-                }
-                GraphSetPredicateOp::And | GraphSetPredicateOp::Or => {
-                    let right = stack[depth - 1];
-                    depth -= 1;
-                    let left = stack[depth - 1];
-                    stack[depth - 1] = if matches!(op, GraphSetPredicateOp::And) {
-                        if left == Some(false) || right == Some(false) {
-                            Some(false)
-                        } else {
-                            left.zip(right).map(|(a, b)| a && b)
-                        }
-                    } else if left == Some(true) || right == Some(true) {
-                        Some(true)
-                    } else {
-                        left.zip(right).map(|(a, b)| a || b)
-                    };
-                    continue;
-                }
-            };
-            stack[depth] = value;
-            depth += 1;
-        }
-        debug_assert_eq!(depth, 1);
-        Ok(stack[0] == Some(true))
+        GraphSetPredicateOp::evaluate_row_with_control(&self.code, row, control)
     }
 
     pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
@@ -340,6 +352,19 @@ fn append_operand(operand: &GraphSetOperand, bytes: &mut Vec<u8>) {
 }
 
 impl PreparedGraphSet {
+    /// Borrow a checked selection and its complete input for maintained circuits.
+    /// An outer relational order or page, including LIMIT 0, is never erased.
+    /// The input remains subject to independent derivative admission.
+    pub fn incremental_filter(&self) -> Option<(&Self, &[GraphSetPredicateOp])> {
+        if !self.order.is_empty() || self.offset != 0 || self.count.is_some() {
+            return None;
+        }
+        match &self.node {
+            SetNode::Filter { input, predicate } => Some((input, &predicate.code)),
+            _ => None,
+        }
+    }
+
     /// Filter the completed input, preserving its duplicates and order. The
     /// child's DISTINCT/order/page runs BEFORE this predicate; this new scope's
     /// own order/page runs AFTER it. Only TRUE survives. NULL and incompatible

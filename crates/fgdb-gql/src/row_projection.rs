@@ -1,251 +1,381 @@
-//! Exact projection derivatives over complete native row bags.
+//! Row predicates between relational stages. No graph or source is reopened.
 //!
-//! Expressions use the existing relational evaluator, not another interpreter.
-//! Each changed input tuple is evaluated once, independent of its multiplicity.
-//! DISTINCT thresholds integrated projected support, never signed delta values.
-//! Complete input counts remain available to reject invalid retractions even
-//! when their projected images cancel. No graph source or scheduler lives here.
+//! Comparisons use the same canonical scalar law as GLA WHERE, not the total
+//! ordering used by set equality. Evaluation is eager and three-valued; only
+//! TRUE retains a row. Project computed operands first, then filter their cells.
 
-use crate::algebra::{GraphValueRow, MAX_PATTERN_VERTICES};
-use crate::{GlaExecutionEvent, GraphIntegerError, GraphSetColumnType, GraphSetProjection,
-    GraphSetProjectionError, GraphSetQuantifier};
-use fgdb_delta_types::zset::ZSetUpdate;
-use fgdb_delta_types::zset::incremental::{DistinctUpdate, IncrementalDistinct};
-use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
-use std::collections::BTreeSet;
+use super::{GraphSetBuildError, GraphSetColumnType, PreparedGraphSet, SetNode, check_depth};
+use crate::algebra::{
+    GraphValue, GraphValueRow, IntegerComparison, MAX_BOOLEAN_INSTRUCTIONS, MAX_PATTERN_PREDICATES,
+};
+use crate::{GlaExecutionEvent, GqlScalarParameter};
+use fgdb_types::CanonicalScalar;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RowProjectionBuildError {
-    InputWidth { observed: usize },
-    Projection(GraphSetProjectionError),
-}
-impl core::fmt::Display for RowProjectionBuildError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "row projection definition: {self:?}")
-    }
-}
-impl core::error::Error for RowProjectionBuildError {}
-impl From<GraphSetProjectionError> for RowProjectionBuildError {
-    fn from(error: GraphSetProjectionError) -> Self { Self::Projection(error) }
-}
-
-/// Frozen input schema and checked native expressions. All expressions refer
-/// to the original input, never an earlier alias in this same projection.
-/// Zero-column inputs are allowed for a relational singleton. Output names
-/// and expressions obey exactly the existing GraphSetProjection admission.
+/// Positions refer to the completed input relation, never private graph slots.
+/// Literals have already passed the ordinary scalar-parameter admission rules.
 #[derive(Clone, PartialEq, Eq)]
-pub struct RowProjectionSpec {
-    input: Box<[GraphSetColumnType]>,
-    projection: Box<[GraphSetProjection]>,
-    types: Box<[GraphSetColumnType]>,
-    quantifier: GraphSetQuantifier,
+pub enum GraphSetOperand {
+    Column(usize),
+    Literal(GqlScalarParameter),
 }
-impl RowProjectionSpec {
-    pub fn new(input: Vec<GraphSetColumnType>, projection: Vec<GraphSetProjection>,
-        quantifier: GraphSetQuantifier) -> Result<Self, RowProjectionBuildError> {
-        if input.len() > MAX_PATTERN_VERTICES {
-            return Err(RowProjectionBuildError::InputWidth { observed: input.len() });
-        }
-        if projection.is_empty() { return Err(GraphSetProjectionError::Empty.into()); }
-        if projection.len() > MAX_PATTERN_VERTICES {
-            return Err(GraphSetProjectionError::TooManyColumns {
-                limit: MAX_PATTERN_VERTICES, observed: projection.len(),
-            }.into());
-        }
-        let mut names = BTreeSet::new();
-        let mut types = Vec::new();
-        for (column, output) in projection.iter().enumerate() {
-            GraphSetProjection::validate_output_name(output.name(), column)?;
-            if !names.insert(output.name()) {
-                return Err(GraphSetProjectionError::DuplicateName { column }.into());
-            }
-            types.push(GraphSetProjection::admit_output(output.value(), &input, column)?);
-        }
-        Ok(Self { input: input.into(), projection: projection.into(), types: types.into(), quantifier })
-    }
-    pub fn input_types(&self) -> &[GraphSetColumnType] { &self.input }
-    pub fn column_types(&self) -> &[GraphSetColumnType] { &self.types }
-    pub fn columns(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.projection.iter().map(GraphSetProjection::name)
-    }
-    pub fn quantifier(&self) -> GraphSetQuantifier { self.quantifier }
-}
-impl core::fmt::Debug for RowProjectionSpec {
+impl core::fmt::Debug for GraphSetOperand {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RowProjectionSpec").field("columns", &self.types.len())
-            .field("quantifier", &self.quantifier).field("definition", &"[REDACTED]").finish()
+        f.write_str("GraphSetOperand([REDACTED])")
+    }
+}
+
+/// Checked postfix Boolean IR. Every comparison and null test pushes one
+/// Boolean; NOT consumes one and AND/OR consume two. Truth(None) is UNKNOWN.
+/// Aliases and parameter names are resolved during preparation, not execution.
+#[derive(Clone, PartialEq, Eq)]
+pub enum GraphSetPredicateOp {
+    Compare {
+        left: GraphSetOperand,
+        comparison: IntegerComparison,
+        right: GraphSetOperand,
+    },
+    IsNull {
+        operand: GraphSetOperand,
+        is_null: bool,
+    },
+    Truth(Option<bool>),
+    Not,
+    And,
+    Or,
+}
+impl core::fmt::Debug for GraphSetPredicateOp {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("GraphSetPredicateOp([REDACTED])")
+    }
+}
+impl GraphSetPredicateOp {
+    // Native preparation validates even parameterized filters before catalog
+    // callbacks. Placeholder scalar values prove structure, never truth.
+    pub(crate) fn validate_schema(
+        types: &[GraphSetColumnType],
+        code: &[Self],
+    ) -> Result<(), GraphSetFilterError> {
+        RowPredicate::prepare(types, code).map(|_| ())
+    }
+
+    /// Shared snapshot/derivative kernel. Callers must first validate this
+    /// immutable code against the input schema and validate each row's shape.
+    /// Evaluation is eager, charges every instruction/payload, and retains
+    /// only TRUE. No literal clone or predicate recompilation occurs per row.
+    pub(crate) fn evaluate_row_with_control<E>(
+        code: &[Self],
+        row: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let mut stack: [Option<bool>; MAX_PATTERN_PREDICATES] = [None; MAX_PATTERN_PREDICATES];
+        let mut depth = 0;
+        for op in code {
+            control(GlaExecutionEvent::Work)?;
+            let value = match op {
+                GraphSetPredicateOp::Compare {
+                    left,
+                    comparison,
+                    right,
+                } => {
+                    let left = resolve(left, row, control)?;
+                    let right = resolve(right, row, control)?;
+                    for value in [left, right] {
+                        if let Cell::Scalar(value) = value {
+                            crate::algebra_exec::charge_payload(value, control)?;
+                        }
+                    }
+                    compare(left, right, *comparison)
+                }
+                GraphSetPredicateOp::IsNull { operand, is_null } => {
+                    Some(resolve(operand, row, control)?.is_null() == *is_null)
+                }
+                GraphSetPredicateOp::Truth(value) => *value,
+                GraphSetPredicateOp::Not => {
+                    stack[depth - 1] = stack[depth - 1].map(|value| !value);
+                    continue;
+                }
+                GraphSetPredicateOp::And | GraphSetPredicateOp::Or => {
+                    let right = stack[depth - 1];
+                    depth -= 1;
+                    let left = stack[depth - 1];
+                    stack[depth - 1] = if matches!(op, GraphSetPredicateOp::And) {
+                        if left == Some(false) || right == Some(false) {
+                            Some(false)
+                        } else {
+                            left.zip(right).map(|(a, b)| a && b)
+                        }
+                    } else if left == Some(true) || right == Some(true) {
+                        Some(true)
+                    } else {
+                        left.zip(right).map(|(a, b)| a || b)
+                    };
+                    continue;
+                }
+            };
+            stack[depth] = value;
+            depth += 1;
+        }
+        debug_assert_eq!(depth, 1);
+        Ok(stack[0] == Some(true))
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RowProjectionError<E> {
-    Delta(ZSetError<E>),
-    InputSchema,
-    NegativeMultiplicity,
-    Expression { column: usize, error: GraphIntegerError },
-    InvalidResult,
-    ResultBudget { limit: u64 },
+pub enum GraphSetFilterError {
+    Empty,
+    TooManyInstructions { limit: usize, observed: usize },
+    TooManyPredicates { limit: usize, observed: usize },
+    InvalidStack { instruction: usize },
+    UnknownInput { instruction: usize, column: usize },
+    InvalidVertexComparison { instruction: usize },
+    InvalidValueComparison { instruction: usize },
+    SetBuild(GraphSetBuildError),
 }
-impl<E> From<ZSetError<E>> for RowProjectionError<E> {
-    fn from(error: ZSetError<E>) -> Self { Self::Delta(error) }
-}
-impl<E: core::fmt::Display> core::fmt::Display for RowProjectionError<E> {
+impl core::fmt::Display for GraphSetFilterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Delta(error) => error.fmt(f),
-            Self::InputSchema => f.write_str("projection input does not match its bounded schema"),
-            Self::NegativeMultiplicity => f.write_str("negative integrated projection input"),
-            Self::Expression { column, error } => write!(f, "projection column {column}: {error}"),
-            Self::InvalidResult => f.write_str("invalid integrated projection result"),
-            Self::ResultBudget { limit } => write!(f, "projection occurrence limit {limit} exceeded"),
+        write!(f, "graph row filter definition: {self:?}")
+    }
+}
+impl core::error::Error for GraphSetFilterError {}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct RowPredicate {
+    code: Box<[GraphSetPredicateOp]>,
+}
+impl RowPredicate {
+    pub(super) fn prepare(
+        types: &[GraphSetColumnType],
+        code: &[GraphSetPredicateOp],
+    ) -> Result<Self, GraphSetFilterError> {
+        use GraphSetFilterError as Error;
+        if code.is_empty() {
+            return Err(Error::Empty);
         }
-    }
-}
-impl<E: core::error::Error + 'static> core::error::Error for RowProjectionError<E> {}
-
-fn charge<E>(control: &mut impl FnMut(ZSetEvent) -> Result<(), E>, event: ZSetEvent)
-    -> Result<(), ZSetError<E>> { control(event).map_err(ZSetError::Control) }
-fn reserve_row<E>(row: &GraphValueRow, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>)
-    -> Result<(), ZSetError<E>> {
-    charge(control, ZSetEvent::ScratchEntry)?;
-    for value in row.values() {
-        charge(control, ZSetEvent::Work)?;
-        for _ in 0..=value.payload_units() { charge(control, ZSetEvent::ScratchEntry)?; }
-    }
-    Ok(())
-}
-
-/// One in-memory exact map/DISTINCT stage. Source tuples, projected support,
-/// final rows and occurrence total publish together. Only changed keys are
-/// visited; no repeated occurrence expansion or full-result differencing.
-/// Logical events/payload units are not allocator-byte or spill bounds.
-#[derive(PartialEq, Eq)]
-pub struct IncrementalRowProjection {
-    spec: RowProjectionSpec,
-    input: ZSet<GraphValueRow>,
-    distinct: Option<IncrementalDistinct<GraphValueRow>>,
-    rows: ZSet<GraphValueRow>,
-    total: ZWeight,
-}
-impl IncrementalRowProjection {
-    pub fn new(spec: RowProjectionSpec) -> Self {
-        let distinct = (spec.quantifier == GraphSetQuantifier::Distinct).then(IncrementalDistinct::new);
-        Self { spec, input: ZSet::new(), distinct, rows: ZSet::new(), total: ZWeight::ZERO }
-    }
-    pub fn spec(&self) -> &RowProjectionSpec { &self.spec }
-    pub fn rows(&self) -> &ZSet<GraphValueRow> { &self.rows }
-    pub fn total(&self) -> &ZWeight { &self.total }
-
-    /// Invalid individual input counts refuse before evaluating expressions.
-    /// A successful expression is applied once per changed tuple, including
-    /// retractions. Errors retain their native column/type without row data.
-    /// The result limit checks FINAL occurrences after collision consolidation
-    /// and DISTINCT, not an insertion-first transient prefix.
-    pub fn prepare<E>(&mut self, changes: &ZSet<GraphValueRow>, limbs: LimbLimit,
-        max_result_rows: Option<u64>, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
-    ) -> Result<RowProjectionUpdate<'_>, RowProjectionError<E>> {
-        charge(control, ZSetEvent::Work)?;
-        for (row, weight) in changes.iter() {
-            charge(control, ZSetEvent::Work)?;
-            if row.len() != self.spec.input.len() { return Err(RowProjectionError::InputSchema); }
-            for (value, kind) in row.values().iter().zip(self.spec.input.iter()) {
-                charge(control, ZSetEvent::Work)?;
-                if !kind.accepts(value) || !value.validate_bounds() {
-                    return Err(RowProjectionError::InputSchema);
+        if code.len() > MAX_BOOLEAN_INSTRUCTIONS {
+            return Err(Error::TooManyInstructions {
+                limit: MAX_BOOLEAN_INSTRUCTIONS,
+                observed: code.len(),
+            });
+        }
+        let mut depth = 0;
+        let mut predicates = 0;
+        for (instruction, op) in code.iter().enumerate() {
+            let domain = |operand: &GraphSetOperand| match operand {
+                GraphSetOperand::Column(column) => {
+                    types.get(*column).copied().ok_or(Error::UnknownInput {
+                        instruction,
+                        column: *column,
+                    })
                 }
+                GraphSetOperand::Literal(_) => Ok(GraphSetColumnType::Scalar),
+            };
+            match op {
+                GraphSetPredicateOp::Not if depth >= 1 => continue,
+                GraphSetPredicateOp::And | GraphSetPredicateOp::Or if depth >= 2 => {
+                    depth -= 1;
+                    continue;
+                }
+                GraphSetPredicateOp::Compare {
+                    left,
+                    comparison,
+                    right,
+                } => {
+                    let left = domain(left)?;
+                    let right = domain(right)?;
+                    if matches!(
+                        left,
+                        GraphSetColumnType::Path
+                            | GraphSetColumnType::Vertices
+                            | GraphSetColumnType::Edges
+                            | GraphSetColumnType::Edge
+                            | GraphSetColumnType::List
+                    ) || matches!(
+                        right,
+                        GraphSetColumnType::Path
+                            | GraphSetColumnType::Vertices
+                            | GraphSetColumnType::Edges
+                            | GraphSetColumnType::Edge
+                            | GraphSetColumnType::List
+                    ) {
+                        return Err(Error::InvalidValueComparison { instruction });
+                    }
+                    if (left == GraphSetColumnType::Vertex || right == GraphSetColumnType::Vertex)
+                        && left != GraphSetColumnType::Any
+                        && right != GraphSetColumnType::Any
+                        && !(left == right
+                            && matches!(
+                                comparison,
+                                IntegerComparison::Equal | IntegerComparison::NotEqual
+                            ))
+                    {
+                        return Err(Error::InvalidVertexComparison { instruction });
+                    }
+                }
+                GraphSetPredicateOp::IsNull { operand, .. } => {
+                    domain(operand)?;
+                }
+                GraphSetPredicateOp::Truth(_) => {}
+                _ => return Err(Error::InvalidStack { instruction }),
             }
-            let next = match self.input.weight(row) {
-                Some(old) => old.checked_add(weight, limbs),
-                None => weight.checked_clone(limbs),
-            }.map_err(ZSetError::Arithmetic)?;
-            if next < ZWeight::ZERO { return Err(RowProjectionError::NegativeMultiplicity); }
-            reserve_row(row, control)?;
-            reserve_row(row, control)?;
-        }
-        let input = self.input.prepare_update(changes, limbs, control)?;
-        let mut updates = Vec::new();
-        for (row, weight) in changes.iter() {
-            charge(control, ZSetEvent::Work)?;
-            let row = GraphSetProjection::evaluate_row_with_control(row, &self.spec.projection,
-                &mut |event| charge(control, match event {
-                    GlaExecutionEvent::ScratchEntry => ZSetEvent::ScratchEntry,
-                    // This is one compressed value, not occurrence delivery.
-                    GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => ZSetEvent::Work,
-                }).map_err(RowProjectionError::Delta),
-                |column, error| RowProjectionError::Expression { column, error })?;
-            let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
-            charge(control, ZSetEvent::ScratchEntry)?;
-            updates.push((row, weight));
-        }
-        let mapped = ZSet::from_updates(updates, limbs, control)?;
-        // DISTINCT can clone a mapped key into counts, its derivative and the
-        // returned derivative. Reserve those payloads before generic operations.
-        if self.distinct.is_some() {
-            for (row, _) in mapped.iter() { for _ in 0..3 { reserve_row(row, control)?; } }
-        }
-        let distinct = match &mut self.distinct {
-            Some(operator) => Some(operator.prepare(&mapped, limbs, control)?),
-            None => None,
-        };
-        let delta = match &distinct {
-            Some(update) => update.delta().checked_clone(limbs, control)?,
-            None => mapped,
-        };
-        let change = delta.total_weight(limbs, control)?;
-        charge(control, ZSetEvent::Work)?;
-        let next_total = self.total.checked_add(&change, limbs).map_err(ZSetError::Arithmetic)?;
-        if next_total < ZWeight::ZERO { return Err(RowProjectionError::InvalidResult); }
-        if let Some(limit) = max_result_rows {
-            if next_total > ZWeight::from_i128(i128::from(limit)) {
-                return Err(RowProjectionError::ResultBudget { limit });
+            depth += 1;
+            predicates += 1;
+            if predicates > MAX_PATTERN_PREDICATES {
+                return Err(Error::TooManyPredicates {
+                    limit: MAX_PATTERN_PREDICATES,
+                    observed: predicates,
+                });
             }
         }
-        for (row, _) in delta.iter() { reserve_row(row, control)?; reserve_row(row, control)?; }
-        let sink = self.rows.prepare_update(&delta, limbs, control)?;
-        for (row, _) in delta.iter() {
-            charge(control, ZSetEvent::Work)?;
-            if sink.weight(row).is_some_and(|weight| weight < &ZWeight::ZERO) {
-                return Err(RowProjectionError::InvalidResult);
-            }
+        if depth != 1 {
+            return Err(Error::InvalidStack {
+                instruction: code.len(),
+            });
         }
-        charge(control, ZSetEvent::Work)?;
-        Ok(RowProjectionUpdate { input, distinct, sink, total: &mut self.total, next_total, delta })
+        // The complete definition and schema are checked before cloning literals.
+        Ok(Self {
+            code: code.to_vec().into_boxed_slice(),
+        })
     }
-}
-impl core::fmt::Debug for IncrementalRowProjection {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("IncrementalRowProjection").field("spec", &self.spec)
-            .field("support", &self.rows.len()).field("data", &"[REDACTED]").finish()
+
+    pub(super) fn evaluate<E>(
+        &self,
+        row: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        GraphSetPredicateOp::evaluate_row_with_control(&self.code, row, control)
+    }
+
+    pub(super) fn append_transcript(&self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&(self.code.len() as u64).to_be_bytes());
+        for op in self.code.iter() {
+            match op {
+                GraphSetPredicateOp::Compare {
+                    left,
+                    comparison,
+                    right,
+                } => {
+                    bytes.push(0);
+                    append_operand(left, bytes);
+                    bytes.push(match comparison {
+                        IntegerComparison::Equal => 0,
+                        IntegerComparison::NotEqual => 1,
+                        IntegerComparison::Greater => 2,
+                        IntegerComparison::Less => 3,
+                        IntegerComparison::GreaterOrEqual => 4,
+                        IntegerComparison::LessOrEqual => 5,
+                    });
+                    append_operand(right, bytes);
+                }
+                GraphSetPredicateOp::IsNull { operand, is_null } => {
+                    bytes.push(1);
+                    append_operand(operand, bytes);
+                    bytes.push(u8::from(*is_null));
+                }
+                GraphSetPredicateOp::Truth(value) => bytes.extend_from_slice(&[
+                    2,
+                    match value {
+                        None => 0,
+                        Some(false) => 1,
+                        Some(true) => 2,
+                    },
+                ]),
+                GraphSetPredicateOp::Not => bytes.push(3),
+                GraphSetPredicateOp::And => bytes.push(4),
+                GraphSetPredicateOp::Or => bytes.push(5),
+            }
+        }
     }
 }
 
-#[must_use = "dropping a projection update preserves all accepted arrangements"]
-pub struct RowProjectionUpdate<'a> {
-    input: ZSetUpdate<'a, GraphValueRow>,
-    distinct: Option<DistinctUpdate<'a, GraphValueRow>>,
-    sink: ZSetUpdate<'a, GraphValueRow>,
-    total: &'a mut ZWeight,
-    next_total: ZWeight,
-    delta: ZSet<GraphValueRow>,
+#[derive(Clone, Copy)]
+enum Cell<'a> {
+    Scalar(&'a CanonicalScalar),
+    Vertex(fgdb_types::VId),
+    Incompatible,
 }
-impl RowProjectionUpdate<'_> {
-    pub fn delta(&self) -> &ZSet<GraphValueRow> { &self.delta }
-    pub fn total(&self) -> &ZWeight { &self.next_total }
-    pub fn commit(self) -> ZSet<GraphValueRow> {
-        let Self { input, distinct, sink, total, next_total, delta } = self;
-        input.commit();
-        if let Some(update) = distinct { let _ = update.commit(); }
-        sink.commit();
-        *total = next_total;
-        delta
+impl Cell<'_> {
+    fn is_null(self) -> bool {
+        matches!(self, Self::Scalar(CanonicalScalar::Null))
     }
 }
-impl core::fmt::Debug for RowProjectionUpdate<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RowProjectionUpdate").field("delta_support", &self.delta.len())
-            .field("data", &"[REDACTED]").finish()
+fn resolve<'a, E>(
+    operand: &'a GraphSetOperand,
+    row: &'a GraphValueRow,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+) -> Result<Cell<'a>, E> {
+    control(GlaExecutionEvent::Work)?;
+    Ok(match operand {
+        GraphSetOperand::Column(column) => match &row.values()[*column] {
+            GraphValue::Vertex(value) => Cell::Vertex(*value),
+            GraphValue::Scalar(value) => Cell::Scalar(value),
+            GraphValue::Path(_)
+            | GraphValue::Vertices(_)
+            | GraphValue::Edges(_)
+            | GraphValue::Edge(_)
+            | GraphValue::List(_) => Cell::Incompatible,
+        },
+        GraphSetOperand::Literal(value) => Cell::Scalar(value.value()),
+    })
+}
+fn compare(left: Cell<'_>, right: Cell<'_>, comparison: IntegerComparison) -> Option<bool> {
+    if left.is_null() || right.is_null() {
+        return None;
+    }
+    match (left, right) {
+        (Cell::Vertex(left), Cell::Vertex(right)) => Some(match comparison {
+            IntegerComparison::Equal => left == right,
+            IntegerComparison::NotEqual => left != right,
+            _ => return None,
+        }),
+        (Cell::Scalar(left), Cell::Scalar(right))
+            if core::mem::discriminant(left) == core::mem::discriminant(right) =>
+        {
+            Some(comparison.accepts_scalar_pair(Some(left), Some(right)))
+        }
+        _ => None,
+    }
+}
+fn append_operand(operand: &GraphSetOperand, bytes: &mut Vec<u8>) {
+    match operand {
+        GraphSetOperand::Column(column) => {
+            bytes.push(0);
+            bytes.extend_from_slice(&(*column as u64).to_be_bytes());
+        }
+        GraphSetOperand::Literal(value) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&(value.canonical_bytes().len() as u64).to_be_bytes());
+            bytes.extend_from_slice(value.canonical_bytes());
+        }
     }
 }
 
-#[cfg(test)]
-mod tests;
+impl PreparedGraphSet {
+    /// Filter the completed input, preserving its duplicates and order. The
+    /// child's DISTINCT/order/page runs BEFORE this predicate; this new scope's
+    /// own order/page runs AFTER it. Only TRUE survives. NULL and incompatible
+    /// scalar kinds produce UNKNOWN, including beneath NOT. Vertex comparisons
+    /// require two vertex columns and equality/inequality; IS NULL is explicit.
+    ///
+    /// No source is reopened and no payload is cloned. The materialized set
+    /// executor charges each retained row and every predicate operation under
+    /// its one cumulative allowance. A late error or cancellation releases no
+    /// result prefix, even for an outer LIMIT 0.
+    pub fn filter(self, code: &[GraphSetPredicateOp]) -> Result<Self, GraphSetFilterError> {
+        let depth = self.depth + 1;
+        check_depth(depth).map_err(GraphSetFilterError::SetBuild)?;
+        let predicate = RowPredicate::prepare(&self.types, code)?;
+        Ok(Self {
+            columns: self.columns.clone(),
+            types: self.types.clone(),
+            operands: self.operands,
+            depth,
+            node: SetNode::Filter {
+                input: Box::new(self),
+                predicate,
+            },
+            order: Vec::new(),
+            offset: 0,
+            count: None,
+        })
+    }
+}
