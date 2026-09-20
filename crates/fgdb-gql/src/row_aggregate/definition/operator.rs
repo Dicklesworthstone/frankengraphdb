@@ -255,6 +255,9 @@ fn render<'a, D: GroupDefinition, E>(
 /// one prepared update. Only changed tuples/groups and invalidated extrema are
 /// visited; occurrences are never expanded. Logical payload/event quotas are
 /// not allocator-byte or spill bounds. Unsupported output transforms refuse.
+/// Completed relational rows may contain any bounded native value: keys,
+/// COUNT/DISTINCT and extrema retain canonical typed equality/order. Numeric
+/// reducers admit Scalar or Any and check every changed operand for Int64/NULL.
 #[derive(PartialEq, Eq)]
 pub struct IncrementalGroupAggregate<D: GroupDefinition> {
     definition: D,
@@ -294,8 +297,12 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                 Function::SumInt
                 | Function::SumIntDistinct
                 | Function::AverageInt
-                | Function::AverageIntDistinct => column
-                    .is_some_and(|column| schema.get(column) == Some(&GraphSetColumnType::Scalar)),
+                | Function::AverageIntDistinct => column.is_some_and(|column| {
+                    matches!(
+                        schema.get(column),
+                        Some(GraphSetColumnType::Scalar | GraphSetColumnType::Any)
+                    )
+                }),
                 _ => false,
             };
             if !valid {
@@ -583,3 +590,6 @@ impl core::fmt::Debug for GroupUpdate<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod value_tests;

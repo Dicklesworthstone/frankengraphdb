@@ -97,7 +97,11 @@ impl<'a> GroupCells<'a> for MaintainedGroup<'a> {
         let value = |value: &'a GraphValue| match value {
             GraphValue::Scalar(value) => Cell::Value(ValueRef::Scalar(value)),
             GraphValue::Vertex(value) => Cell::Value(ValueRef::Vertex(*value)),
-            _ => unreachable!("maintained row schema admits only scalar and vertex cells"),
+            GraphValue::Edge(value) => Cell::Value(ValueRef::Edge(*value)),
+            GraphValue::Path(value) => Cell::Value(ValueRef::Path(value)),
+            GraphValue::Vertices(value) => Cell::Value(ValueRef::Vertices(value)),
+            GraphValue::Edges(value) => Cell::Value(ValueRef::Edges(value)),
+            GraphValue::List(value) => Cell::Value(ValueRef::List(value)),
         };
         match column {
             GraphAggregateColumn::GroupKey(at) => value(&self.0.keys[at]),
@@ -418,8 +422,8 @@ impl PreparedGraphAggregate {
         self.having_expression.as_ref()
     }
 
-    /// Complete groups over row-local scalar/vertex inputs may be maintained
-    /// and filtered by HAVING, including computed input columns. Input topology
+    /// Complete groups over checked row-local or relational inputs may be
+    /// maintained and filtered by HAVING. Input topology
     /// and aggregate functions still require consumer admission. Ordering, pages,
     /// computed outputs and output DISTINCT remain outside this profile.
     #[must_use]

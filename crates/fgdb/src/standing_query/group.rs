@@ -103,7 +103,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// Maintain a complete bound relational aggregate in one owned circuit.
     /// All input set/product/projection/filter/window semantics execute BEFORE
     /// grouping. COUNT, COUNT DISTINCT, SUM, SUM DISTINCT, AVG, AVG DISTINCT,
-    /// MIN and MAX preserve native exact domains; key columns are scalar/vertex.
+    /// MIN and MAX preserve native exact domains, including collection keys
+    /// and extrema. UNWIND/list-index Any inputs keep runtime Int64/NULL checks
+    /// for numeric functions; arbitrary payloads are never silently coerced.
     /// NULL group keys coalesce, while NULL arguments do not contribute to
     /// nonnull statistics. Empty global input has one zero/null group; empty
     /// grouped input has none. HAVING runs before output expressions, output

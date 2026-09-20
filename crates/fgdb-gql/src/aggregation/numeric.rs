@@ -202,8 +202,8 @@ impl NumericAccumulator {
 impl GraphAggregateRow {
     /// Internal assembly after a physical group reducer has checked its whole
     /// definition, admitted payloads and finished the shared numeric states.
-    /// Unlike the maintained scalar/vertex schema, graph joins can group native
-    /// edge/path values. This does not evaluate or weaken public row admission.
+    /// This does not evaluate or bypass public maintained-row admission; that
+    /// path separately validates every value against its completed input schema.
     pub(crate) fn from_group_values(
         keys: Vec<GraphValue>,
         values: Vec<GraphAggregateValue>,
@@ -232,10 +232,10 @@ impl PreparedGraphAggregate {
     /// A definition with HAVING must subsequently use evaluate_incremental_having
     /// before releasing the row. This does not project, order or paginate it.
     ///
-    /// Scalar/vertex MIN/MAX preserve their input type. Counts cannot be NULL;
-    /// SUM/AVG may be NULL but never narrow into an ordinary scalar. Nullable
-    /// vertex slots (OPTIONAL MATCH) may supply NULL keys or extrema. Schema
-    /// checks use computed input positions when an input projection is present.
+    /// MIN/MAX and keys preserve the completed input's native value domains.
+    /// Counts cannot be NULL; SUM/AVG may be NULL but never narrow into an
+    /// ordinary scalar. Any arguments require per-input runtime numeric checks
+    /// by the producer. Schema and collection bounds are checked here too.
     pub fn materialize_incremental_row(
         &self,
         keys: Vec<GraphValue>,
@@ -259,14 +259,12 @@ impl PreparedGraphAggregate {
         keys: &[GraphValue],
         values: &[GraphAggregateValue],
     ) -> bool {
-        use crate::GraphSetColumnType::{Scalar, Vertex};
+        use crate::GraphSetColumnType::{Any, Scalar};
         if keys.len() != self.keys.len() || values.len() != self.aggregates.len() {
             return false;
         }
-        let accepts = |kind, value: &GraphValue| match kind {
-            Some(Scalar) => matches!(value, GraphValue::Scalar(_)),
-            Some(Vertex) => matches!(value, GraphValue::Vertex(_)) || value.is_null(),
-            _ => false,
+        let accepts = |kind: Option<crate::GraphSetColumnType>, value: &GraphValue| {
+            kind.is_some_and(|kind| kind.accepts(value)) && value.validate_bounds()
         };
         for (column, value) in self.keys.iter().zip(keys) {
             if !accepts(self.incremental_input_column_type(*column), value) {
@@ -282,15 +280,15 @@ impl PreparedGraphAggregate {
                     aggregate.column.is_none() && matches!(value, GraphAggregateValue::Count(_))
                 }
                 GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct => {
-                    matches!(argument, Some(Scalar | Vertex))
+                    argument.is_some()
                         && matches!(value, GraphAggregateValue::Count(_))
                 }
                 GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
-                    matches!(argument, Some(Scalar))
+                    matches!(argument, Some(Scalar | Any))
                         && (matches!(value, GraphAggregateValue::Integer(_)) || value.is_null())
                 }
                 GraphAggregateFunction::AverageInt | GraphAggregateFunction::AverageIntDistinct => {
-                    matches!(argument, Some(Scalar))
+                    matches!(argument, Some(Scalar | Any))
                         && (matches!(value, GraphAggregateValue::Average(_)) || value.is_null())
                 }
                 GraphAggregateFunction::Min | GraphAggregateFunction::Max => match value {

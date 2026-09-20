@@ -23,16 +23,13 @@ impl PreparedGraphAggregate {
     /// individual scalar kinds and integer overflow are checked at execution.
     /// A relational owner uses the COMPLETE pipeline's schema, not its first
     /// graph leaf. This is group-schema admission, not admission of the input
-    /// operators. List/path/edge columns remain outside this group profile.
+    /// operators. Completed relations preserve every native value domain,
+    /// including the dynamic Any domain produced by UNWIND and list indexing.
+    /// This does not widen the scalar/vertex graph-binding adapter below.
     #[must_use]
     pub fn incremental_input_column_type(&self, column: usize) -> Option<GraphSetColumnType> {
         if let Some(relation) = &self.relational_input {
-            return relation.column_types().get(column).copied().filter(|kind| {
-                matches!(
-                    kind,
-                    GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
-                )
-            });
+            return relation.column_types().get(column).copied();
         }
         let Some(projection) = &self.computed_input else {
             return self.incremental_source_column_type(column);
@@ -48,7 +45,7 @@ impl PreparedGraphAggregate {
         }
     }
 
-    /// Scalar/vertex aggregate-input schema. A relational owner must separately
+    /// Checked aggregate-input schema. A relational owner must separately
     /// admit and maintain its COMPLETE input tree; this never authorizes a
     /// graph-source adapter to execute only input_pattern(). Source topology,
     /// result clauses and aggregate functions require independent admission.
