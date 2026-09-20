@@ -338,7 +338,7 @@ fn lift<E, C>(error: GqlQueryError<VertexScanError<E>, C>) -> VertexAggregateErr
     error.map_source(GraphAggregateError::Source)
 }
 
-enum Input<'a> {
+pub(crate) enum Input<'a> {
     Identity,
     Vertex(VId),
     Scalar(Option<&'a CanonicalScalar>),
@@ -351,13 +351,24 @@ impl Input<'_> {
         }
     }
 }
-enum NumericState {
+pub(crate) enum NumericState {
     Count(u64),
     Sum(Option<i128>),
     Average { sum: i128, count: u64 },
     Extreme { value: Option<GraphValue>, maximum: bool, payload_units: usize },
 }
 impl NumericState {
+    // The edge reducer admits only COUNT/SUM. Share their exact output domains
+    // without changing the vertex AVG/extremum path or its event sequence.
+    pub(crate) fn finish(self) -> GraphAggregateValue {
+        match self {
+            Self::Count(value) => GraphAggregateValue::Count(value),
+            Self::Sum(Some(value)) => GraphAggregateValue::Integer(value),
+            Self::Sum(None) => GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+            _ => unreachable!("checked COUNT/SUM reducer"),
+        }
+    }
+
     fn update_governed<E, C>(
         &mut self,
         input: Input<'_>,
@@ -399,8 +410,8 @@ impl NumericState {
         }
         Ok(())
     }
-    fn update<E, C>(&mut self, input: Input<'_>, aggregate: usize)
-        -> Result<(), VertexAggregateError<E, C>>
+    pub(crate) fn update<E, C>(&mut self, input: Input<'_>, aggregate: usize)
+        -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>
     {
         if matches!(input, Input::Scalar(None | Some(CanonicalScalar::Null))) { return Ok(()); }
         let overflow = || GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate });

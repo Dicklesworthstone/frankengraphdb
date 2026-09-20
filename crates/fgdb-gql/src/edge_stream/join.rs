@@ -20,11 +20,22 @@ struct Expansion { source: usize, relation: RelationId, direction: GlaDirection 
 pub(super) struct JoinPlan {
     expansions: Vec<Expansion>,
     stages: Vec<Vec<Instruction>>,
+    // Aggregate input is private to EdgeAggregatePlan. It retains the same
+    // binding/projection semantics but emits no externally delivered rows.
+    emit_rows: bool,
 }
 
 // Private GLA construction is still the logical authority. Audit every operand
 // here before accepting a physical execution profile, including LIMIT zero.
 pub(super) fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<EdgeScanPlan, EdgeScanBuildError> {
+    compile_output(plan, true)
+}
+
+pub(super) fn compile_aggregate(plan: &GlaPlan<GraphValueRow>) -> Result<EdgeScanPlan, EdgeScanBuildError> {
+    compile_output(plan, false)
+}
+
+fn compile_output(plan: &GlaPlan<GraphValueRow>, emit_rows: bool) -> Result<EdgeScanPlan, EdgeScanBuildError> {
     let ops = plan.operators();
     let Some(GlaOperator::ScanEdges { relation, direction }) = ops.first() else {
         return Err(EdgeScanBuildError { operator: 0 });
@@ -84,9 +95,9 @@ pub(super) fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<EdgeScanPlan, Edg
                     matches!(column, Some(ValueProjection::Path { capture, function: GraphPathFunction::Edge })
                         if captures.get(*capture as usize).is_some_and(|parts| parts.len() == 1 && parts[0] == step))
                 };
-                if !edge_column(columns.first(), 0)
+                if emit_rows && (!edge_column(columns.first(), 0)
                     || !matches!(columns.get(1), Some(ValueProjection::Vertex { slot }) if slot.ordinal() == 0)
-                    || !(1..width - 1).all(|step| edge_column(columns.get(step + 1), step)) {
+                    || !(1..width - 1).all(|step| edge_column(columns.get(step + 1), step))) {
                     return Err(bad());
                 }
                 for column in columns {
@@ -112,16 +123,22 @@ pub(super) fn compile(plan: &GlaPlan<GraphValueRow>) -> Result<EdgeScanPlan, Edg
     }
     let projection = Arc::new(ops[at].clone());
     at += 1;
-    if matches!(ops.get(at), Some(GlaOperator::Distinct)) { at += 1; }
+    if matches!(ops.get(at), Some(GlaOperator::Distinct)) {
+        // A numeric reducer consumes occurrences, not projected support.
+        // Its private unordered input cannot implement DISTINCT by omission.
+        if !emit_rows { return Err(EdgeScanBuildError { operator: at }); }
+        at += 1;
+    }
     if plan.visible_columns.is_some() || !matches!(ops.get(at), Some(GlaOperator::OrderByValues)) {
         return Err(EdgeScanBuildError { operator: at });
     }
     at += 1;
     let Some(GlaOperator::Limit { offset, count }) = ops.get(at) else { return Err(EdgeScanBuildError { operator: at }); };
+    if !emit_rows && (*offset != 0 || count.is_some()) { return Err(EdgeScanBuildError { operator: at }); }
     if at + 1 != ops.len() { return Err(EdgeScanBuildError { operator: at + 1 }); }
     Ok(EdgeScanPlan {
         relation: *relation, direction: *direction, instructions: Arc::from([]), projection,
-        offset: *offset, count: *count, joined: Some(Arc::new(JoinPlan { expansions, stages })),
+        offset: *offset, count: *count, joined: Some(Arc::new(JoinPlan { expansions, stages, emit_rows })),
     })
 }
 
@@ -241,10 +258,16 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             continue;
         }
         if cursor.skip != 0 { cursor.skip -= 1; traversal.pop(); continue; }
-        let count = meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?;
+        let count = if plan.emit_rows {
+            Some(meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows)?)
+        } else { None };
         let row = project(&cursor.plan.projection, &traversal.bindings, &paths, source, &mut |event| meter.event(event))?;
-        meter.event(GlaExecutionEvent::ResultRow)?;
-        meter.rows.result_rows = count;
+        if let Some(count) = count {
+            meter.event(GlaExecutionEvent::ResultRow)?;
+            meter.rows.result_rows = count;
+        } else {
+            meter.event(GlaExecutionEvent::Work)?;
+        }
         traversal.resume = true;
         return Ok(Some(row));
     }

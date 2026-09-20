@@ -5,6 +5,7 @@
 //! No adjacency/result bag, sorting, DISTINCT set or unread suffix is built.
 //! This is a physical specialization of compiler-owned GLA, not a text parser.
 
+pub mod aggregate;
 mod join;
 pub(crate) use join::Probe;
 
