@@ -21,12 +21,15 @@ impl PreparedGraphAggregate {
     /// This is not an index into input_pattern().value_columns() when a
     /// projection exists. Scalar programs retain their nullable scalar domain;
     /// individual scalar kinds and integer overflow are checked at execution.
-    /// List/path/edge expressions and relational input pipelines are not part
-    /// of this incremental profile, including when their outputs are unused.
+    /// A relational owner uses the COMPLETE pipeline's schema, not its first
+    /// graph leaf. This is group-schema admission, not admission of the input
+    /// operators. List/path/edge columns remain outside this group profile.
     #[must_use]
     pub fn incremental_input_column_type(&self, column: usize) -> Option<GraphSetColumnType> {
-        if self.relational_input.is_some() {
-            return None;
+        if let Some(relation) = &self.relational_input {
+            return relation.column_types().get(column).copied().filter(|kind| {
+                matches!(kind, GraphSetColumnType::Scalar | GraphSetColumnType::Vertex)
+            });
         }
         let Some(projection) = &self.computed_input else {
             return self.incremental_source_column_type(column);
@@ -42,14 +45,18 @@ impl PreparedGraphAggregate {
         }
     }
 
-    /// Row-local scalar/vertex input, with no relational pipeline. Source
-    /// topology, result clauses and aggregate functions are admitted separately.
-    /// Projection trees are already validated by prepare_projected; there is no
-    /// recompile, literal encoding or source ownership change on this path.
+    /// Scalar/vertex aggregate-input schema. A relational owner must separately
+    /// admit and maintain its COMPLETE input tree; this never authorizes a
+    /// graph-source adapter to execute only input_pattern(). Source topology,
+    /// result clauses and aggregate functions require independent admission.
     #[must_use]
     pub fn supports_incremental_input(&self) -> bool {
-        if self.relational_input.is_some()
-            || (0..self.input.value_columns().len())
+        if let Some(relation) = &self.relational_input {
+            return relation.column_types().len() <= MAX_PATTERN_VERTICES
+                && (0..relation.column_types().len())
+                    .all(|column| self.incremental_input_column_type(column).is_some());
+        }
+        if (0..self.input.value_columns().len())
                 .any(|column| self.incremental_source_column_type(column).is_none())
         {
             return false;
@@ -80,6 +87,11 @@ impl PreparedGraphAggregate {
             control(event).map_err(GqlQueryError::<GraphAggregateError<Infallible>, C>::Interrupted)
         };
         govern(GlaExecutionEvent::Work)?;
+        // One source binding is not a completed relation. Even identical
+        // schemas cannot erase filters, DISTINCT, joins or local pages.
+        if self.relational_input.is_some() {
+            return Ok(None);
+        }
         // Validate bounded widths before any per-cell loop or row construction.
         if values.len() != self.input.value_columns().len()
             || values.is_empty()

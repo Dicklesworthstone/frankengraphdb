@@ -7,6 +7,8 @@
 //! including the zero-row case. Results retain ZWeight precision, not a narrowed
 //! GQL scalar or an approximate floating-point average.
 
+pub mod definition;
+
 use crate::GraphSetColumnType;
 use crate::algebra::{GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
 use fgdb_delta_types::zset::ZSetUpdate;

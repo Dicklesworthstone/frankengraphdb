@@ -67,7 +67,10 @@ fn scalar_units(value: &CanonicalScalar) -> usize {
     1 + bytes.div_ceil(64)
 }
 fn eligible(query: &PreparedGraphAggregate) -> bool {
-    query.supports_incremental_maintenance_with_having()
+    // A complete relational schema is NOT permission to maintain only its
+    // first graph leaf. Relational definitions need a dependency-owned source.
+    query.input_relation().is_none()
+        && query.supports_incremental_maintenance_with_having()
         && aggregate_functions_eligible(query)
         && (eligible_flat_input(query) || edge::supports_scoped(query))
 }
@@ -570,5 +573,31 @@ impl<V: Vfs + Clone> Database<V> {
             (meter.checkpoint)().map_err(StandingQueryError::Maintenance)?;
             Ok(query)
         })
+    }
+}
+
+#[cfg(test)]
+mod relational_admission_tests {
+    use super::*;
+    use fgdb_gql::{GraphAggregate, GraphSetQuantifier, GraphSetProjection, GraphSetValue};
+    use fgdb_gql::algebra::{GraphColumn, GraphPatternBuilder};
+
+    #[test]
+    fn relational_schema_admission_never_authorizes_first_leaf_maintenance() {
+        let mut builder = GraphPatternBuilder::new();
+        builder.vertex("n").unwrap();
+        let leaf = builder.prepare_values(&[GraphColumn::vertex("id", "n")], 0, None)
+            .unwrap().with_duplicates();
+        let plain = PreparedGraphAggregate::prepare(leaf.clone(), &[],
+            &[GraphAggregate::count_rows("n")], 0, None).unwrap();
+        assert!(eligible(&plain));
+        let input = fgdb_gql::PreparedGraphSet::from(leaf)
+            .project(vec![GraphSetProjection::new("id", GraphSetValue::Column(0))],
+                GraphSetQuantifier::Distinct).unwrap();
+        let relational = PreparedGraphAggregate::prepare_relation(input, &[],
+            &[GraphAggregate::count_rows("n")], 0, None).unwrap();
+        assert!(relational.supports_incremental_maintenance_with_having());
+        assert!(eligible_flat_input(&relational));
+        assert!(!eligible(&relational));
     }
 }

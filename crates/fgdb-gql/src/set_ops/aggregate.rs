@@ -22,6 +22,10 @@ pub struct PreparedGraphSetAggregate {
     summary: PreparedGraphAggregate,
 }
 
+crate::row_aggregate::definition::delegate_group_definition!(
+    PreparedGraphSetAggregate, owner => &owner.summary, |summary| Self { summary }
+);
+
 impl core::fmt::Debug for PreparedGraphSetAggregate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PreparedGraphSetAggregate")
@@ -34,6 +38,21 @@ impl core::fmt::Debug for PreparedGraphSetAggregate {
 }
 
 impl PreparedGraphSetAggregate {
+    /// Keep an already checked relational aggregate in its source-aware owner.
+    /// The complete input and all result clauses are retained unchanged. Plain
+    /// graph/computed-binding definitions refuse; no schema carrier is invented.
+    pub fn from_relation(summary: PreparedGraphAggregate) -> Option<Self> {
+        summary.input_relation().is_some().then_some(Self { summary })
+    }
+
+    /// Reuse native post-HAVING expressions without exposing a graph executor.
+    pub fn with_output_projection(
+        mut self, projection: Vec<crate::GraphSetProjection>,
+    ) -> Result<Self, GraphAggregateBuildError> {
+        self.summary = self.summary.with_output_projection(projection)?;
+        Ok(self)
+    }
+
     /// Keys and arguments address the completed relation's column schema.
     /// The usual nine exact aggregate functions and group-result clauses are
     /// unchanged; counts/sums/averages never narrow into CanonicalScalar.
