@@ -7,6 +7,8 @@ use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, Purpos
 use std::cell::Cell;
 use std::rc::Rc;
 
+mod aggregates;
+
 fn okay<T>(value: Result<T, Failure>) -> T {
     value.unwrap_or_else(|error| panic!("{}: {}", error.class, error.message))
 }
@@ -309,7 +311,7 @@ fn unsupported_plans_or_future_cuts_emit_no_header_but_limit_zero_completes() {
         db.write(&contexts.commit(), batch(1, 4)).await.unwrap();
         for text in [
             "MATCH (n) RETURN n.p AS p",
-            "MATCH (n) RETURN COUNT(*) AS total",
+            "MATCH (n) RETURN COUNT(DISTINCT n.p) AS total",
             "MATCH (n) RETURN n UNION ALL MATCH (m) RETURN m",
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN n AS id LIMIT 0",
         ] {
