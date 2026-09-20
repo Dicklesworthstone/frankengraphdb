@@ -3,6 +3,8 @@
 
 use super::*;
 
+mod window;
+
 impl PreparedGraphSet {
     /// Peel exactly one finite relational window, preserving its entire input
     /// node. The ALL window runs after the node's own quantifier. A page without
@@ -44,10 +46,10 @@ impl PreparedGraphSet {
         }
     }
 
-    /// The recursive finite-window compiler preserves sequence only for trees
-    /// without products, UNWIND or singleton sources. Unwindowed circuits stay
-    /// admitted under their canonical-bag contract. An explicitly ordered root
-    /// may separately use incremental_ordered_window before checking its input.
+    /// Conservative product-free profile used by incremental_window. Unwindowed
+    /// circuits stay admitted under their canonical-bag contract. The ranked
+    /// incremental_ordered_window accessor separately proves comparators and
+    /// bounds at each scope, including explicitly ordered positional inputs.
     /// This finite structural walk examines no rows and clones no definitions.
     pub fn incremental_window_sequence_compatible(&self) -> bool {
         fn shape(query: &PreparedGraphSet) -> (bool, bool) {
@@ -76,25 +78,20 @@ impl PreparedGraphSet {
         self.order.is_empty() && self.offset == 0 && self.count.is_none()
     }
 
-    /// Split an explicitly ordered finite terminal window from its complete
-    /// input definition. Only this node's order/page metadata is removed from
-    /// the cloned input; child scopes, projections, filters and quantifiers
-    /// are untouched. The caller must admit that input independently, even for
-    /// LIMIT 0. This accessor does not promise derivatives for descendants.
+    /// Split a ranked finite window from its complete input definition. Only
+    /// this node's order/page metadata is removed; child scopes, projections,
+    /// filters and quantifiers stay untouched. The comparator can be explicit
+    /// or inherited through scopes/filters. The finite occurrence bound can be
+    /// an explicit LIMIT or follow from already-bounded upstream operators.
     ///
-    /// Bare LIMIT/OFFSET is deliberately not recognized: its input may inherit
-    /// a child order or a left-major product enumeration. Replacing that order
-    /// with canonical bag order could select different rows. ORDER BY without
-    /// a finite LIMIT is also outside this bounded window specialization.
+    /// Canonical-only pages and unknown implicit enumeration are not recognized
+    /// by this ranked specialization. Unbounded sorting also refuses. Callers
+    /// must admit the full returned input independently, including LIMIT 0;
+    /// proving a comparator never authorizes unsupported descendants.
     pub fn incremental_ordered_window(&self)
         -> Option<(Self, &[GraphValueOrder], u64, u64)> {
-        let count = self.count?;
-        if self.order.is_empty() { return None; }
-        let mut input = self.clone();
-        input.order.clear();
-        input.offset = 0;
-        input.count = None;
-        Some((input, &self.order, self.offset, count))
+        if self.incremental_result_order()?.0.is_empty() { return None; }
+        self.split_incremental_window()
     }
 
     /// Borrow a complete bound pattern leaf without erasing a relational page
