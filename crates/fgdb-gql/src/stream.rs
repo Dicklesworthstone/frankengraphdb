@@ -28,6 +28,7 @@ use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use std::iter::FusedIterator;
 use std::sync::Arc;
 
+pub mod aggregate;
 mod output;
 mod probe;
 pub use output::VertexScanOutput;
@@ -69,6 +70,16 @@ pub struct VertexScanPlan<Row = VId> {
 }
 impl<Row: VertexScanOutput> VertexScanPlan<Row> {
     pub fn compile(plan: &GlaPlan<Row>) -> Result<Self, VertexScanBuildError> {
+        Self::compile_with_projection(plan, Row::accepts_projection)
+    }
+
+    // Private to this operator family. A checked global numeric aggregate may
+    // consume an unordered value projection; ordinary row streams still prove
+    // the requested canonical order through their sealed output profile.
+    fn compile_with_projection(
+        plan: &GlaPlan<Row>,
+        accepts_projection: impl FnOnce(&GlaOperator, &GlaOperator) -> bool,
+    ) -> Result<Self, VertexScanBuildError> {
         let operators = plan.operators();
         let empty = match operators.first() {
             Some(GlaOperator::ScanVertices) => false,
@@ -127,7 +138,7 @@ impl<Row: VertexScanOutput> VertexScanPlan<Row> {
         if plan.visible_columns.is_some()
             || !operators
                 .get(at)
-                .is_some_and(|order| Row::accepts_projection(&operators[projection_at], order))
+                .is_some_and(|order| accepts_projection(&operators[projection_at], order))
         {
             return Err(VertexScanBuildError { operator: at });
         }
