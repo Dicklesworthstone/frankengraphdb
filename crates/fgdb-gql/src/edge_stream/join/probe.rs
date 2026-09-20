@@ -1,4 +1,4 @@
-//! Indexed correlated semi/anti joins over a compiler-owned GLA probe scope.
+//! Indexed semi/anti joins over a compiler-owned GLA probe scope.
 //! Probe bindings never escape into the outer row. One complete witness ends
 //! the search, irrespective of its multiplicity; absence requires exhaustion.
 //! No result bag, seen set, neighbor vector, or outer-root rescan is built.
@@ -9,6 +9,25 @@ use super::*;
 enum Binding {
     Copy { source: usize, nullable: bool },
     Expand(Expansion),
+    Scan,
+}
+
+// A local scan owns its position, never the outer cursor's mutable position.
+// Keep the domains distinct even though both identities use all 128 bits.
+#[derive(Clone, Copy)]
+enum Position {
+    Copy(bool),
+    Edge(Option<EId>),
+    Vertex(Option<VId>),
+}
+impl Position {
+    fn new(binding: Binding) -> Self {
+        match binding {
+            Binding::Copy { .. } => Self::Copy(false),
+            Binding::Expand(_) => Self::Edge(None),
+            Binding::Scan => Self::Vertex(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -26,9 +45,10 @@ pub(crate) struct Probe {
 }
 
 impl Probe {
-    /// Only positively anchored, fixed-hop bodies are admitted. Independent
-    /// scans, nested probes, optional/null-extending joins and variable-length
-    /// atoms refuse at compile time, including for an outer LIMIT zero.
+    /// Fixed-hop bodies may start from a correlation or an independent vertex
+    /// scan. Captures only copy values; a nullable capture is not an anchor.
+    /// Nested/optional scopes and variable-length atoms still refuse, including
+    /// for LIMIT zero. Every local scan restarts only its own ordered position.
     pub(crate) fn compile(
         ops: &[GlaOperator], start: usize, outer_width: usize,
     ) -> Result<(Self, usize), EdgeScanBuildError> {
@@ -39,8 +59,8 @@ impl Probe {
         if end <= start + 1 || !matches!(ops.get(end), Some(GlaOperator::ProbeEnd { group: close }) if close == group) {
             return Err(EdgeScanBuildError { operator: start });
         }
-        if !matches!(ops.get(start + 1), Some(GlaOperator::BindVertex { source })
-            if (source.ordinal() as usize) < outer_width) {
+        if !matches!(ops.get(start + 1), Some(GlaOperator::ScanVertices
+            | GlaOperator::BindVertex { .. } | GlaOperator::BindOuterVertex { .. })) {
             return Err(EdgeScanBuildError { operator: start + 1 });
         }
         let mut steps: Vec<Step> = Vec::new();
@@ -49,6 +69,7 @@ impl Probe {
         for (at, op) in ops.iter().enumerate().take(end).skip(start + 1) {
             let bad = || EdgeScanBuildError { operator: at };
             let binding = match op {
+                GlaOperator::ScanVertices => Some(Binding::Scan),
                 GlaOperator::BindVertex { source } | GlaOperator::BindOuterVertex { source }
                     if (source.ordinal() as usize) < outer_width => {
                     Some(Binding::Copy { source: source.ordinal() as usize,
@@ -111,7 +132,7 @@ impl Probe {
             control(GlaExecutionEvent::Work)?;
             ids.push(*id);
         }
-        let mut frames = vec![(None::<EId>, false); self.steps.len()];
+        let mut frames: Vec<_> = self.steps.iter().map(|step| Position::new(step.binding)).collect();
         let mut depth = 0;
         loop {
             control(GlaExecutionEvent::Work)?;
@@ -119,11 +140,33 @@ impl Probe {
             let step = &self.steps[depth];
             let candidate = match step.binding {
                 Binding::Copy { source: from, nullable } => {
-                    if frames[depth].1 { None } else {
-                        frames[depth].1 = true;
+                    if matches!(frames[depth], Position::Copy(true)) { None } else {
+                        frames[depth] = Position::Copy(true);
                         let value = ids[from];
                         if value.is_none() && !nullable { None } else { Some(value) }
                     }
+                }
+                Binding::Scan => {
+                    let Position::Vertex(after) = frames[depth] else { unreachable!("scan position"); };
+                    let next = match source.next_probe_vertex(after, control) {
+                        Ok(next) => next,
+                        Err(EdgeExpansionSourceError::Unavailable) => {
+                            return Err(GqlQueryError::Source(EdgeScanError::ExpansionUnavailable));
+                        }
+                        Err(EdgeExpansionSourceError::Read(error)) => flatten(Err(error))?,
+                    };
+                    if let Some(vid) = next {
+                        control(GlaExecutionEvent::Work)?;
+                        if after.is_some_and(|prior| vid <= prior) {
+                            return Err(GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity));
+                        }
+                        frames[depth] = Position::Vertex(Some(vid));
+                        record()?;
+                        // Histories may have no visible version at this cut.
+                        // That is not a dangling edge and not a NULL witness.
+                        if flatten(source.vertex(vid, control))?.is_none() { continue; }
+                        Some(Some(vid))
+                    } else { None }
                 }
                 Binding::Expand(expansion) => {
                     let Some(from) = ids[expansion.source] else {
@@ -132,7 +175,8 @@ impl Probe {
                         ids.pop();
                         continue;
                     };
-                    let next = source.next_incident_edge(from, expansion.direction, frames[depth].0, control);
+                    let Position::Edge(after) = frames[depth] else { unreachable!("edge position"); };
+                    let next = source.next_incident_edge(from, expansion.direction, after, control);
                     let next = match next {
                         Ok(next) => next,
                         Err(EdgeExpansionSourceError::Unavailable) => {
@@ -142,10 +186,10 @@ impl Probe {
                     };
                     if let Some(eid) = next {
                         control(GlaExecutionEvent::Work)?;
-                        if frames[depth].0.is_some_and(|prior| eid <= prior) {
+                        if after.is_some_and(|prior| eid <= prior) {
                             return Err(GqlQueryError::Source(EdgeScanError::NonIncreasingIdentity));
                         }
-                        frames[depth].0 = Some(eid);
+                        frames[depth] = Position::Edge(Some(eid));
                         record()?;
                         let Some(edge) = flatten(source.edge(eid, control))? else { continue; };
                         if edge.relation != expansion.relation { continue; }
@@ -181,7 +225,7 @@ impl Probe {
             }
             if !passed { ids.pop(); continue; }
             depth += 1;
-            if depth < self.steps.len() { frames[depth] = (None, false); }
+            if depth < self.steps.len() { frames[depth] = Position::new(self.steps[depth].binding); }
         }
     }
 }

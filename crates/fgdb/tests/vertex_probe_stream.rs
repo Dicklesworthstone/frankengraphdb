@@ -223,7 +223,7 @@ fn exact_cumulative_limits_and_admission_precedence_survive_vertex_probe_dispatc
             assert_eq!(delivered,expected[..delivered.len()]); assert_eq!(stream.row_stats().result_rows,delivered.len() as u64);
             assert_eq!(stream.state(),VertexScanState::Failed); stream.close(); assert!(stream.next().is_none());
         }
-        let unavailable=prepare("MATCH (a) WHERE EXISTS { MATCH (x)-[:R]->(y) } RETURN a LIMIT 0");
+        let unavailable=prepare("MATCH (a) WHERE EXISTS { MATCH (x)-[:R*1..2]->(y) } RETURN a LIMIT 0");
         let none=GqlQueryPolicy::new(0,0,0,0);
         assert!(matches!(db.stream_graph_values_governed(&cx,&unavailable,none),Err(GqlQueryError::Source(VertexScanError::Plan(_)))));
         assert!(matches!(db.stream_graph_values_governed_at(&cx,&unavailable,CommitSeq(basis.0+1),none),

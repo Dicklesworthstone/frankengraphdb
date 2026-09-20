@@ -59,9 +59,19 @@ impl<S: VertexScanSource> EdgeScanSource for Lookup<'_, S> {
         &mut self,
         _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
-        // The shared probe compiler forbids independent scans. Even a future
-        // accidental call must fail, never manufacture an empty graph.
+        // Probes enumerate vertices with caller-owned positions, not this
+        // mutable outer-edge scan. Accidental calls must not fabricate EOF.
         Err(EdgeScanSourceError::Source(unavailable()))
+    }
+
+    fn next_probe_vertex<C>(
+        &self, after: Option<VId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VId>, EdgeExpansionSourceError<Self::Error, C>> {
+        self.0.next_probe_vertex(after, control).map_err(|error| match error {
+            EdgeExpansionSourceError::Unavailable => EdgeExpansionSourceError::Unavailable,
+            EdgeExpansionSourceError::Read(error) => EdgeExpansionSourceError::Read(source_error(error)),
+        })
     }
 
     fn edge<'a, C>(

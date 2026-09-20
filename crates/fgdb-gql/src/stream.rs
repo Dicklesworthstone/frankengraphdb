@@ -8,7 +8,7 @@
 //! identity tests, identity-led projection, DISTINCT/ALL, canonical order and
 //! SKIP/LIMIT are admitted. Binding predicates use the ordinary GLA evaluator,
 //! including its eager operands and governed scalar-expression scratch.
-//! Correlated fixed-hop EXISTS/NOT EXISTS reuse the indexed edge probe kernel;
+//! Correlated/independent fixed-hop EXISTS/NOT EXISTS share the probe kernel;
 //! their private bindings neither multiply nor change the ordered outer row.
 //! Unsupported operators refuse before a source is driven; there is no eager
 //! fallback, AST interpreter, alternate property semantics or storage model.
@@ -300,6 +300,18 @@ pub trait VertexScanSource {
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<Self::Error, C>>;
 
+    /// Strict successor for an independent probe's caller-owned VId position.
+    /// Unlike next_vertex(), this never moves the outer scan. Yield candidate
+    /// histories (including isolates), resolving visibility through vertex().
+    /// Implementations must retain the same snapshot and propagate controls.
+    fn next_probe_vertex<C>(
+        &self,
+        _after: Option<VId>,
+        _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VId>, crate::edge_stream::EdgeExpansionSourceError<Self::Error, C>> {
+        Err(crate::edge_stream::EdgeExpansionSourceError::Unavailable)
+    }
+
     /// Optional indexed probe access, at the SAME immutable cut as vertex().
     /// Return incident EIds strictly after `after`, in increasing order. The
     /// probe rechecks actual visibility, orientation and relation; historical
@@ -436,7 +448,7 @@ impl<F> Meter<F> {
 /// A single-owner pull cursor. Source and predicate work share one cumulative
 /// allowance across ALL pulls; collecting another page cannot reset it.
 /// SnapshotRecords counts examined candidate identity histories (even when
-/// invisible at the cut), plus each examined probe edge history before its
+/// invisible at the cut), plus each examined probe vertex/edge history before its
 /// fields are resolved. Repeat probe examinations are charged again. ResultRows
 /// counts emitted rows AFTER predicates and SKIP/LIMIT. This is not the
 /// eager executor's complete-table admission count. Work/scratch are logical

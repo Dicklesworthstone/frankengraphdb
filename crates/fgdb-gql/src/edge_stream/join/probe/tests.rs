@@ -286,8 +286,8 @@ fn a_deep_probe_finds_one_of_exponentially_many_witnesses_with_linear_demand() {
 }
 
 #[test]
-fn independent_and_variable_length_probes_refuse_before_source_access_even_with_limit_zero() {
-    for body in ["MATCH (x)-[:R]->(y)", "MATCH (b)-[:R*1..2]->(x)"] {
+fn variable_length_probes_refuse_before_source_access_even_with_limit_zero() {
+    for body in ["MATCH (x)-[:R*1..2]->(y)", "MATCH (b)-[:R*1..2]->(x)"] {
         let text = format!("MATCH (a)-[r:R]->(b) WHERE EXISTS {{ {body} }} RETURN r, a, b LIMIT 0");
         let q = prepare(&text);
         assert!(EdgeScanPlan::compile(q.plan()).is_err(), "{text}");

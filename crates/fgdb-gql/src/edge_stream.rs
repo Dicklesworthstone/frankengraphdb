@@ -44,8 +44,8 @@ impl core::error::Error for EdgeScanBuildError {}
 /// This prefix permits DISTINCT and ALL without storing a seen-set. Other order,
 /// hidden sort columns, optional/variable-length expansions, and catalog-name output
 /// refuse before a source is driven. Boolean filters use the ordinary engine.
-/// Correlated fixed-hop EXISTS/NOT EXISTS use indexed, short-circuit probes;
-/// independent scans and nested/optional probe bodies remain unavailable.
+/// Correlated and independent fixed-hop EXISTS/NOT EXISTS use indexed,
+/// short-circuit probes; nested/optional probe bodies remain unavailable.
 #[derive(Clone)]
 pub struct EdgeScanPlan {
     relation: RelationId,
@@ -161,6 +161,18 @@ pub trait EdgeScanSource {
     fn vertex<'a, C>(&'a self, vid: VId, control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>)
         -> Result<Option<VertexScanRow<'a>>, EdgeScanSourceError<Self::Error, C>>;
 
+    /// Independent probe scan at snapshot_seq(). Yield candidate VIds strictly
+    /// after the caller-owned position; vertex() resolves their visibility.
+    /// Do not advance a root cursor, omit isolates, or allocate a candidate bag.
+    /// Each probe/local scan has its own position; no result cache suppresses
+    /// later fallible source reads. An unavailable index is NOT an empty graph.
+    fn next_probe_vertex<C>(
+        &self, _after: Option<VId>,
+        _control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<VId>, EdgeExpansionSourceError<Self::Error, C>> {
+        Err(EdgeExpansionSourceError::Unavailable)
+    }
+
     /// Strict successor in the chosen endpoint's incident EId histories. Each
     /// invocation resumes from `after`; separate nested bindings have separate
     /// positions. Historical membership may be a superset: the cursor rechecks
@@ -176,7 +188,7 @@ pub trait EdgeScanSource {
     }
 }
 
-/// An optional adjacency lookup cannot silently become an empty neighborhood.
+/// An optional indexed lookup cannot silently become an empty search domain.
 #[derive(Debug)]
 pub enum EdgeExpansionSourceError<E, C> {
     Unavailable,
@@ -204,7 +216,7 @@ impl<E: core::fmt::Display> core::fmt::Display for EdgeScanError<E> {
             Self::NonIncreasingIdentity => f.write_str("edge stream source is not strictly increasing"),
             Self::DanglingEndpoint => f.write_str("edge stream source has a dangling endpoint"),
             Self::CounterExhausted => f.write_str("edge stream counter exhausted"),
-            Self::ExpansionUnavailable => f.write_str("edge source has no indexed expansion capability"),
+            Self::ExpansionUnavailable => f.write_str("graph source lacks a required indexed lookup"),
             Self::BoundEdgeUnavailable => f.write_str("a bound edge disappeared from the immutable source"),
         }
     }
@@ -249,8 +261,8 @@ impl<F> Meter<F> {
 /// Errors are yielded once and fuse/drop the source; close/drop never drain it.
 /// Connected fixed-hop joins extend this lane with depth-bounded resumable
 /// adjacency positions, not per-prefix neighbor/result bags. Their record meter
-/// counts candidate examinations at every join level (including re-examinations
-/// under different outer bindings). This is not arbitrary-order joining,
+/// counts edge and independent-probe vertex examinations at every join level
+/// (including re-examinations under different outer bindings). This is not arbitrary-order joining,
 /// variable-length traversal, spilling, a byte-memory cap or a durable cursor.
 pub struct EdgeScanCursor<S, F> {
     source: Option<S>,

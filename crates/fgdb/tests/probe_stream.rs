@@ -236,7 +236,7 @@ fn probe_limits_are_cumulative_and_binding_frontier_and_unsupported_errors_prece
         assert!(zero_stream.next().is_none()); assert_eq!(zero_stream.row_stats().snapshot_records, 0);
         assert!(matches!(db.stream_graph_edges_governed_at(&cx, &zero, CommitSeq(basis.0 + 1), GqlQueryPolicy::new(0, 0, 0, 0)),
             Err(GqlQueryError::Source(EdgeScanError::Source(ReadError::BeyondFrontier { .. })))));
-        let unsupported = prepare("MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (x)-[:Q]->(y) } RETURN r, a, b LIMIT 0");
+        let unsupported = prepare("MATCH (a)-[r:R]->(b) WHERE EXISTS { MATCH (x)-[:Q*1..2]->(y) } RETURN r, a, b LIMIT 0");
         assert!(matches!(db.stream_graph_edges_governed(&cx, &unsupported, GqlQueryPolicy::new(0, 0, 0, 0)),
             Err(GqlQueryError::Source(EdgeScanError::Plan(_)))));
     });
