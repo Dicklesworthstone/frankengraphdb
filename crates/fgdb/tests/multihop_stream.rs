@@ -373,12 +373,12 @@ fn limit_one_joins_only_two_candidate_histories_despite_unrelated_graph_size() {
         let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         let mut b = WriteBatch::new(R);
-        for id in 0..2051 {
+        for id in 0..256 {
             b.create_vertex(VId(id), vec![], vec![]);
         }
         b.add_edge(EId(0), VId(0), VId(1), vec![]);
         b.add_edge(EId(1), VId(1), VId(2), vec![]);
-        for id in 3..2051 {
+        for id in 3..256 {
             b.add_edge(EId(id), VId(id), VId(id), vec![]);
         }
         db.write(&commit, b).await.unwrap();

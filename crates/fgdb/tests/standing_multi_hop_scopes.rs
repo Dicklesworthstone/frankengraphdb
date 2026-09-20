@@ -367,13 +367,13 @@ fn multi_hop_scopes_match_snapshot_sequences_across_shapes_and_result_stages() {
         hidden.set_vertex_property(VId(5), AMOUNT, Some(CanonicalScalar::Int(9)));
         batches.push(vec![hidden]);
         let mut restore = WriteBatch::new(R);
-        restore.set_vertex_property(VId(2), CHILD_GATE, Some(CanonicalScalar::Bool(true)));
         restore.set_vertex_property(VId(3), THRESHOLD, Some(CanonicalScalar::Int(3)));
         restore.set_vertex_property(VId(4), ROOT_GATE, Some(CanonicalScalar::Bool(true)));
         restore.set_vertex_property(VId(6), ROOT_GATE, Some(CanonicalScalar::Bool(true)));
         restore.set_vertex_property(VId(3), CHILD_GATE, Some(CanonicalScalar::Null));
         restore.delete_edge(EId(1));
         let mut s = WriteBatch::new(S);
+        s.set_vertex_property(VId(2), CHILD_GATE, Some(CanonicalScalar::Bool(true)));
         s.delete_edge(EId(11));
         s.add_edge(EId(17), VId(2), VId(5), vec![]);
         batches.push(vec![restore, s]);
@@ -587,13 +587,16 @@ fn hidden_middle_property_updates_do_not_scan_unrelated_components() {
                 for id in 1..=3 {
                     put(&mut r, id, Some(id as i64));
                 }
-                r.add_edge(EId(1), VId(1), VId(2), vec![]);
-                s.add_edge(EId(2), VId(2), VId(3), vec![]);
                 for component in 0..extra {
                     let base = 10 + 3 * component;
                     for id in base..base + 3 {
                         put(&mut r, id, Some(id as i64));
                     }
+                }
+                r.add_edge(EId(1), VId(1), VId(2), vec![]);
+                s.add_edge(EId(2), VId(2), VId(3), vec![]);
+                for component in 0..extra {
+                    let base = 10 + 3 * component;
                     r.add_edge(EId(base), VId(base), VId(base + 1), vec![]);
                     s.add_edge(EId(base + 1), VId(base + 1), VId(base + 2), vec![]);
                 }
