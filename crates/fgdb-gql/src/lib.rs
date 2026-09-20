@@ -33,6 +33,7 @@ mod parser;
 mod pipeline_aggregate_text;
 mod prepared;
 pub mod row_join;
+pub mod row_projection;
 pub mod scan_stream;
 mod set_ops;
 mod set_text;
