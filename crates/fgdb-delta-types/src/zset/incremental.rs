@@ -9,6 +9,7 @@
 //! have the same explicit boundary as the parent Z-set value API.
 
 pub mod presence;
+pub mod topk;
 
 use super::{ZSet, ZSetError, ZSetEvent, admit, event};
 use crate::{LimbLimit, ZWeight};
