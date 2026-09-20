@@ -7,6 +7,7 @@
 mod aggregate;
 mod components;
 mod filter;
+mod group;
 mod joins;
 mod kcore;
 mod native;
@@ -63,6 +64,8 @@ pub enum StandingQueryFailure {
     Arithmetic,
     NonIntegerSum,
     NonIntegerHaving,
+    /// A numeric aggregate saw a noninteger, nonnull completed input cell.
+    NonIntegerAggregate { column: usize },
     /// An input view did not publish the same complete successor. Never
     /// interpret an unavailable input or a new baseline as an empty delta.
     DependencyUnavailable,
@@ -91,6 +94,7 @@ pub enum StandingQueryError {
     FilterSchema(fgdb_gql::row_filter::RowFilterBuildError),
     ReductionSchema(fgdb_gql::row_aggregate::RowAggregateBuildError),
     WindowSchema(fgdb_gql::row_window::RowWindowBuildError),
+    GroupSchema(fgdb_gql::row_aggregate::definition::operator::GroupBuildError),
     NativePrepare(Box<crate::QueryError>),
     NativeClassUnsupported {
         facade: crate::NativeReadClass,
@@ -120,6 +124,7 @@ impl core::fmt::Display for StandingQueryError {
             Self::FilterSchema(error) => error.fmt(f),
             Self::ReductionSchema(error) => error.fmt(f),
             Self::WindowSchema(error) => error.fmt(f),
+            Self::GroupSchema(error) => error.fmt(f),
             Self::NativePrepare(error) => error.fmt(f),
             Self::NativeClassUnsupported { facade } => {
                 write!(
@@ -149,6 +154,7 @@ impl core::error::Error for StandingQueryError {
             Self::FilterSchema(error) => Some(error),
             Self::ReductionSchema(error) => Some(error),
             Self::WindowSchema(error) => Some(error),
+            Self::GroupSchema(error) => Some(error),
             Self::JoinSchema(error) => Some(error),
             Self::Read(error) => Some(error),
             Self::Interrupted(error) => Some(error.as_ref()),
@@ -216,6 +222,8 @@ pub(crate) enum StandingQuery {
     Filter(Box<filter::State>),
     Reduction(Box<reduction::State>),
     Window(Box<window::State>),
+    /// Complete selected row input, then native groups and the shared output sink.
+    Group(Box<group::State>),
 }
 
 impl StandingQuery {
@@ -234,6 +242,7 @@ impl StandingQuery {
             Self::Filter(query) => (query.policy, query.frontier, query.failure),
             Self::Reduction(query) => (query.policy, query.frontier, query.failure),
             Self::Window(query) => (query.policy, query.frontier, query.failure),
+            Self::Group(query) => (query.policy, query.frontier, query.failure),
         }
     }
 
@@ -261,6 +270,7 @@ impl StandingQuery {
             Self::Filter(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Reduction(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Window(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Group(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
         };
         match result {
             Ok(()) => *frontier = at,
@@ -322,12 +332,22 @@ impl<V: Vfs + Clone> Database<V> {
     /// A finite page walks its ranked prefix, not the graph. Large offsets cost
     /// that prefix; unbounded ranking materializes the complete ordered result.
     /// Use ordered_rows() for query order and rows() for its selected Z-set bag.
+    ///
+    /// A definition with a relational input owns the complete maintained input
+    /// circuit, not only its first graph leaf. Its final row allowance applies
+    /// to group outputs; private input nodes retain source/work/scratch limits.
+    /// standing_group_delta exposes its latest accepted final-output change.
     pub fn register_standing_query(
         &mut self,
         cx: &QueryCx,
         definition: PreparedGraphAggregate,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
+        if definition.input_relation().is_some() {
+            let definition = fgdb_gql::PreparedGraphSetAggregate::from_relation(definition)
+                .ok_or(StandingQueryError::Unsupported)?;
+            return self.register_standing_relation_aggregate(cx, &definition, policy);
+        }
         let query = self.prepare_registered_aggregate(cx, definition, policy)?;
         Ok(self.store_standing_query(query))
     }
@@ -465,7 +485,9 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(StandingQueryError::ForeignHandle);
         }
         self.ensure_readable().map_err(StandingQueryError::Read)?;
-        if let Some(native::Layout::Circuit { first, .. }) = handle.native.as_deref() {
+        if let Some(native::Layout::Circuit { first, .. } | native::Layout::GroupCircuit { first, .. })
+            = handle.native.as_deref()
+        {
             return native::set::rebuild(self, cx, *first, handle.index, policy);
         }
         let current = self
@@ -548,6 +570,9 @@ impl<V: Vfs + Clone> Database<V> {
                     handle.index,
                 )?))
             }
+            StandingQuery::Group(query) => StandingQuery::Group(Box::new(self.prepare_standing_group(
+                cx, query.input, query.definition().clone(), policy, handle.index,
+            )?)),
         };
         let frontier = replacement.status().1;
         // No source mutation, await or fallible work between preparation and swap.
@@ -590,11 +615,12 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         handle: &StandingQueryHandle,
     ) -> Result<StandingQueryView<'a>, StandingQueryError> {
-        let (query, rows, ordered) = match self.admitted_standing_query(cx, handle)? {
-            StandingQuery::Aggregate(query) => (query.as_ref(), &query.rows, None),
+        let (rows, ordered, frontier, stats) = match self.admitted_standing_query(cx, handle)? {
+            StandingQuery::Aggregate(query) => (&query.rows, None, query.frontier, &query.stats),
             StandingQuery::ProjectedAggregate { source, output } => {
-                (source.as_ref(), &output.rows, output.ordered_rows())
+                (&output.rows, output.ordered_rows(), source.frontier, &source.stats)
             }
+            StandingQuery::Group(query) => (query.rows(), query.ordered_rows(), query.frontier, &query.stats),
             StandingQuery::Reachability(_)
             | StandingQuery::Rows { .. }
             | StandingQuery::Triangles(_)
@@ -610,8 +636,8 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(StandingQueryView {
             rows,
             ordered,
-            frontier: query.frontier,
-            stats: &query.stats,
+            frontier,
+            stats,
         })
     }
 
@@ -693,6 +719,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Filter(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Reduction(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Window(query) => query.maintain(batch, prior, &mut meter),
+            StandingQuery::Group(query) => query.maintain(batch, prior, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);
     }

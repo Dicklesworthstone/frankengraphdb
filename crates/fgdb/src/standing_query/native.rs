@@ -20,13 +20,19 @@ pub(super) enum Layout {
         columns: Vec<String>,
         first: usize,
     },
+    GroupCircuit {
+        columns: Vec<String>,
+        slots: Vec<GraphAggregateTextSlot>,
+        first: usize,
+    },
 }
 impl Layout {
     fn columns(&self) -> &[String] {
         match self {
             Self::Rows { columns }
             | Self::Aggregate { columns, .. }
-            | Self::Circuit { columns, .. } => columns,
+            | Self::Circuit { columns, .. }
+            | Self::GroupCircuit { columns, .. } => columns,
         }
     }
 }
@@ -67,6 +73,9 @@ impl PreparedNativeRead {
     /// Unwindowed compound delivery is canonical bag order, not implicit
     /// left-major enumeration. Policies still apply per node.
     /// The normal rebuild API repairs the complete owned circuit atomically.
+    /// Relational aggregate inputs use that same circuit before exact grouping,
+    /// HAVING and output selection. Final group quotas do not limit private
+    /// pre-group occurrences; work/scratch remain per-node allowances.
     pub fn register_standing<V: Vfs + Clone>(
         &self,
         database: &mut Database<V>,
@@ -99,6 +108,12 @@ impl PreparedNativeRead {
                     let bound = prepared
                         .bind_parameters(params)
                         .map_err(|e| prepare_error(QueryError::PatternText(e)))?;
+                    if bound.input_relation().is_some() {
+                        let definition = fgdb_gql::PreparedGraphSetAggregate::from_relation(bound)
+                            .ok_or(StandingQueryError::Unsupported)?;
+                        return set::register_group(database, cx, &definition,
+                            prepared.columns(), prepared.output_slots(), policy);
+                    }
                     let layout = Layout::Aggregate {
                         columns: prepared.columns().to_vec(),
                         slots: prepared.output_slots().to_vec(),
@@ -112,6 +127,12 @@ impl PreparedNativeRead {
                     let bound = prepared
                         .bind_parameters(params)
                         .map_err(|e| prepare_error(QueryError::PipelineText(e)))?;
+                    if bound.input_relation().is_some() {
+                        let definition = fgdb_gql::PreparedGraphSetAggregate::from_relation(bound)
+                            .ok_or(StandingQueryError::Unsupported)?;
+                        return set::register_group(database, cx, &definition,
+                            prepared.columns(), prepared.output_slots(), policy);
+                    }
                     let layout = Layout::Aggregate {
                         columns: prepared.columns().to_vec(),
                         slots: prepared.output_slots().to_vec(),
@@ -280,7 +301,7 @@ impl<V: Vfs + Clone> Database<V> {
                             .map_err(StandingQueryError::Delivery)?;
                         (view.frontier(), rows)
                     }
-                    Layout::Aggregate { slots, .. } => {
+                    Layout::Aggregate { slots, .. } | Layout::GroupCircuit { slots, .. } => {
                         let view = self.standing_query(cx, handle)?;
                         let rows =
                             collect(&view, layout.columns().len(), &mut meter, |row, meter| {
