@@ -2,6 +2,7 @@
 //! Successor/predecessor walks use the existing persistent history indexes;
 //! opening does not collect candidate IDs, visible edges, or projected rows.
 
+mod aggregate;
 mod expansion;
 pub(super) use expansion::next_from_view;
 
