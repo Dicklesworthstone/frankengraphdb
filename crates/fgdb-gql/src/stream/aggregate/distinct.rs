@@ -12,6 +12,7 @@ pub(crate) struct DistinctState {
     pub(super) accumulator: NumericState,
     pub(super) scalars: BTreeSet<CanonicalScalar>,
     pub(super) vertices: BTreeSet<VId>,
+    pub(super) values: BTreeSet<GraphValue>,
     pub(super) max_payload: usize,
 }
 impl DistinctState {
@@ -28,6 +29,7 @@ impl DistinctState {
             accumulator,
             scalars: BTreeSet::new(),
             vertices: BTreeSet::new(),
+            values: BTreeSet::new(),
             max_payload: 0,
         }
     }
@@ -36,8 +38,9 @@ impl DistinctState {
         &mut self,
         input: Input<'_>,
         aggregate: usize,
-        control: &mut impl FnMut(VertexScanEvent) -> Result<(), VertexAggregateError<E, C>>,
-    ) -> Result<(), VertexAggregateError<E, C>> {
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+    ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
+        let input = input.normalized();
         if matches!(input, Input::Scalar(None | Some(CanonicalScalar::Null))) {
             return Ok(());
         }
@@ -46,6 +49,7 @@ impl DistinctState {
         let size = match input {
             Input::Vertex(_) => self.vertices.len(),
             Input::Scalar(_) => self.scalars.len(),
+            Input::Value(_) => self.values.len(),
             Input::Identity => unreachable!("DISTINCT has a checked argument column"),
         };
         // Deterministic logical reservation for lookup and insertion, including
@@ -61,6 +65,7 @@ impl DistinctState {
         let present = match input {
             Input::Vertex(vid) => self.vertices.contains(&vid),
             Input::Scalar(Some(value)) => self.scalars.contains(value),
+            Input::Value(value) => self.values.contains(value),
             _ => unreachable!("the nonnull argument was checked"),
         };
         if present {
@@ -80,6 +85,9 @@ impl DistinctState {
             }
             Input::Scalar(Some(value)) => {
                 self.scalars.insert(value.clone());
+            }
+            Input::Value(value) => {
+                self.values.insert(value.clone());
             }
             _ => unreachable!("the nonnull argument was checked"),
         }
