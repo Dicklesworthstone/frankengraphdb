@@ -165,13 +165,13 @@ fn unsupported_aggregate_shapes_are_never_stripped_or_eagerly_retried() {
             "MATCH (n:L) RETURN COUNT(DISTINCT n.score) AS count",
             "MATCH (n:L) RETURN COUNT(*) AS count LIMIT 0",
             "MATCH (n:L) RETURN COUNT(*) AS count HAVING count > 0",
-            "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(*) AS count",
+            "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(DISTINCT b.score) AS count",
         ] {
             // Ensure a valid native definition, not a vacuous syntax refusal.
             let prepared = PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();
             assert!(matches!(prepared.stream_aggregate(
                 &db, &cx, &GqlParameters::new(), GqlQueryPolicy::new(0, 0, 0, 0),
-            ), Err(QueryError::AggregateStreamPlan(_))), "{text}");
+            ), Err(QueryError::AggregateStreamPlan(_) | QueryError::EdgeAggregateStreamPlan(_))), "{text}");
         }
         let scan = PreparedNativeRead::prepare("MATCH (n:L) RETURN n", &GqlParameters::new(), symbols()).unwrap();
         assert!(matches!(scan.stream_aggregate(&db, &cx, &GqlParameters::new(), wide()),

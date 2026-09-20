@@ -6,22 +6,30 @@
 use super::{Cancel, PreparedNativeRead, QueryError};
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
+use fgdb_gql::algebra::GlaOperator;
+use fgdb_gql::edge_stream::aggregate::{EdgeAggregateCursor, EdgeAggregatePlan};
+use fgdb_gql::edge_stream::{EdgeScanSource, EdgeScanState};
+use fgdb_gql::scan_stream::{ScanError, ScanKind};
 use fgdb_gql::stream::aggregate::{
-    VertexAggregateCursor, VertexAggregateError, VertexAggregatePlan,
+    VertexAggregateCursor, VertexAggregatePlan,
 };
 use fgdb_gql::stream::{VertexScanSource, VertexScanState};
 use fgdb_gql::{
-    GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryPolicy, GraphAggregateRow,
-    GraphAggregateTextSlot, GraphSymbolResolver, PreparedGraphAggregate,
+    GlaExecutionStats, GqlExecutionStats, GqlParameters, GqlQueryError, GqlQueryPolicy,
+    GraphAggregateError, GraphAggregateRow, GraphAggregateTextSlot, GraphSymbolResolver,
+    PreparedGraphAggregate,
 };
 use fgdb_types::{CommitSeq, QueryCx};
+
+type NativeError = GqlQueryError<GraphAggregateError<ScanError<ReadError>>, Cancel>;
 
 // Erase only the host/source implementation, not result domains or errors.
 // One fixed-size ownership box makes the public lifetime depend ONLY on QueryCx,
 // never on a temporary resolver, parameter map, template or database handle.
-trait AggregatePull:
-    Iterator<Item = Result<GraphAggregateRow, VertexAggregateError<ReadError, Cancel>>> + Send
-{
+trait AggregatePull: Send {
+    fn next_row(&mut self) -> Option<Result<GraphAggregateRow, NativeError>>;
+    fn size_hint(&self) -> (usize, Option<usize>);
+    fn kind(&self) -> ScanKind;
     fn columns(&self) -> &[String];
     fn snapshot_seq(&self) -> CommitSeq;
     fn state(&self) -> VertexScanState;
@@ -35,6 +43,17 @@ where
     S: VertexScanSource<Error = ReadError> + Send,
     F: FnMut() -> Result<(), Cancel> + Send,
 {
+    fn next_row(&mut self) -> Option<Result<GraphAggregateRow, NativeError>> {
+        self.next().map(|row| {
+            row.map_err(|error| error.map_source(|error| error.map_source(ScanError::Vertex)))
+        })
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        Iterator::size_hint(self)
+    }
+    fn kind(&self) -> ScanKind {
+        ScanKind::Vertex
+    }
     fn columns(&self) -> &[String] {
         VertexAggregateCursor::columns(self)
     }
@@ -55,6 +74,47 @@ where
     }
 }
 
+impl<S, F> AggregatePull for EdgeAggregateCursor<S, F>
+where
+    S: EdgeScanSource<Error = ReadError> + Send,
+    F: FnMut() -> Result<(), Cancel> + Send,
+{
+    fn next_row(&mut self) -> Option<Result<GraphAggregateRow, NativeError>> {
+        self.next().map(|row| {
+            row.map_err(|error| error.map_source(|error| error.map_source(ScanError::Edge)))
+        })
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        Iterator::size_hint(self)
+    }
+    fn kind(&self) -> ScanKind {
+        ScanKind::Edge
+    }
+    fn columns(&self) -> &[String] {
+        EdgeAggregateCursor::columns(self)
+    }
+    fn snapshot_seq(&self) -> CommitSeq {
+        EdgeAggregateCursor::snapshot_seq(self)
+    }
+    fn state(&self) -> VertexScanState {
+        match EdgeAggregateCursor::state(self) {
+            EdgeScanState::Open => VertexScanState::Open,
+            EdgeScanState::Exhausted => VertexScanState::Exhausted,
+            EdgeScanState::Closed => VertexScanState::Closed,
+            EdgeScanState::Failed => VertexScanState::Failed,
+        }
+    }
+    fn row_stats(&self) -> GqlExecutionStats {
+        EdgeAggregateCursor::row_stats(self)
+    }
+    fn evaluator_stats(&self) -> GlaExecutionStats {
+        EdgeAggregateCursor::evaluator_stats(self)
+    }
+    fn close(&mut self) {
+        EdgeAggregateCursor::close(self);
+    }
+}
+
 /// A native aggregate query whose first pull consumes the source and emits one
 /// complete row, including on empty input. `columns()` addresses `row.values()`
 /// in textual RETURN order; counts and wide sums keep their exact domains.
@@ -64,18 +124,22 @@ where
 /// No projected input table, per-row query, data copy or second meter is added.
 /// The one ownership box is metadata; the pinned database is still in memory.
 /// This is not a grouped cursor, session lease or a durable resumption token.
+/// Vertex and fixed-edge/join profiles share this surface. Source failures keep
+/// their original typed cause in ScanError; budgets and interruption stay outside
+/// that sum. The selected operator never changes after opening.
 pub struct NativeAggregateCursor<'q> {
     inner: Box<dyn AggregatePull + 'q>,
 }
 impl<'q> NativeAggregateCursor<'q> {
-    fn new<S, F>(cursor: VertexAggregateCursor<S, F>) -> Self
-    where
-        S: VertexScanSource<Error = ReadError> + Send + 'q,
-        F: FnMut() -> Result<(), Cancel> + Send + 'q,
-    {
+    fn new(cursor: impl AggregatePull + 'q) -> Self {
         Self {
             inner: Box::new(cursor),
         }
+    }
+    /// The physical source chosen structurally before any candidate is read.
+    #[must_use]
+    pub fn kind(&self) -> ScanKind {
+        self.inner.kind()
     }
     #[must_use]
     pub fn columns(&self) -> &[String] {
@@ -102,9 +166,9 @@ impl<'q> NativeAggregateCursor<'q> {
     }
 }
 impl Iterator for NativeAggregateCursor<'_> {
-    type Item = Result<GraphAggregateRow, VertexAggregateError<ReadError, Cancel>>;
+    type Item = Result<GraphAggregateRow, NativeError>;
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
+        self.inner.next_row()
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
@@ -114,6 +178,7 @@ impl std::iter::FusedIterator for NativeAggregateCursor<'_> {}
 impl core::fmt::Debug for NativeAggregateCursor<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("NativeAggregateCursor")
+            .field("kind", &self.kind())
             .field("snapshot_seq", &self.snapshot_seq())
             .field("state", &self.state())
             .field("rows", &self.row_stats())
@@ -196,10 +261,32 @@ impl PreparedNativeRead {
             }
             _ => return Err(QueryError::StreamingUnsupported { facade }),
         };
-        let cursor = view
-            .stream_global_aggregate_governed_at(cx, &plan, as_of, policy)
-            .map_err(QueryError::AggregateStream)?;
-        Ok(NativeAggregateCursor::new(cursor))
+        match plan {
+            AggregatePlan::Vertex(plan) => Ok(NativeAggregateCursor::new(
+                view.stream_global_aggregate_governed_at(cx, &plan, as_of, policy)
+                    .map_err(QueryError::AggregateStream)?,
+            )),
+            AggregatePlan::Edge(plan) => Ok(NativeAggregateCursor::new(
+                view.stream_global_edge_aggregate_governed_at(cx, &plan, as_of, policy)
+                    .map_err(QueryError::EdgeAggregateStream)?,
+            )),
+        }
+    }
+}
+
+// Select by the bound GLA root, never by source text, a trial execution, or a
+// failed compilation. A rejected edge shape cannot silently become a vertex
+// scan (nor an eagerly materialized aggregate) even on empty input.
+enum AggregatePlan {
+    Vertex(VertexAggregatePlan),
+    Edge(EdgeAggregatePlan),
+}
+impl AggregatePlan {
+    fn columns(&self) -> &[String] {
+        match self {
+            Self::Vertex(plan) => plan.columns(),
+            Self::Edge(plan) => plan.columns(),
+        }
     }
 }
 
@@ -208,12 +295,24 @@ fn compile(
     columns: &[String],
     slots: &[GraphAggregateTextSlot],
     facade: crate::NativeReadClass,
-) -> Result<VertexAggregatePlan, QueryError> {
-    let plan = VertexAggregatePlan::compile(query).map_err(QueryError::AggregateStreamPlan)?;
+) -> Result<AggregatePlan, QueryError> {
+    let plan = if matches!(
+        query.input_pattern().plan().operators().first(),
+        Some(GlaOperator::ScanEdges { .. })
+    ) {
+        AggregatePlan::Edge(
+            EdgeAggregatePlan::compile(query).map_err(QueryError::EdgeAggregateStreamPlan)?,
+        )
+    } else {
+        AggregatePlan::Vertex(
+            VertexAggregatePlan::compile(query).map_err(QueryError::AggregateStreamPlan)?,
+        )
+    };
     // Expose row.values() directly, without coercing/cloning numeric or scalar
     // payloads. The checked plain global shape has no keys/hidden summaries;
     // refuse a future facade remapping rather than silently mislabeling cells.
-    if columns != plan.columns()
+    if !query.group_key_columns().is_empty()
+        || columns != plan.columns()
         || slots.len() != columns.len()
         || !slots.iter().enumerate().all(|(index, slot)| {
             matches!(slot, GraphAggregateTextSlot::Aggregate(at) if *at == index)

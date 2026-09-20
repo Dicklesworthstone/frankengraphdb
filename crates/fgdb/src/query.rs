@@ -65,9 +65,13 @@ pub enum QueryError {
     EdgeStream(GqlQueryError<fgdb_gql::edge_stream::EdgeScanError<crate::ReadError>, Cancel>),
     /// Native aggregate preparation cannot discard unsupported operators.
     AggregateStreamPlan(fgdb_gql::stream::aggregate::VertexAggregateBuildError),
-    /// Source/frontier/context refusal while opening the global aggregate.
-    /// Later failures retain this same native error on the returned cursor.
+    /// Source/frontier/context refusal while opening a vertex aggregate.
+    /// Late failures preserve the cause inside the cursor's ScanError sum.
     AggregateStream(fgdb_gql::stream::aggregate::VertexAggregateError<crate::ReadError, Cancel>),
+    /// Fixed-edge aggregate compilation failed before source access.
+    EdgeAggregateStreamPlan(fgdb_gql::edge_stream::aggregate::EdgeAggregateBuildError),
+    /// The selected edge aggregate source/frontier/context refused opening.
+    EdgeAggregateStream(fgdb_gql::edge_stream::aggregate::EdgeAggregateError<crate::ReadError, Cancel>),
     /// This native class has no pull specialization. Never collect an eager
     /// result and misrepresent its iterator as a streaming execution.
     StreamingUnsupported {
@@ -103,6 +107,8 @@ impl core::fmt::Display for QueryError {
             Self::EdgeStream(e) => e.fmt(f),
             Self::AggregateStreamPlan(e) => e.fmt(f),
             Self::AggregateStream(e) => e.fmt(f),
+            Self::EdgeAggregateStreamPlan(e) => e.fmt(f),
+            Self::EdgeAggregateStream(e) => e.fmt(f),
             Self::StreamingUnsupported { facade } => {
                 write!(f, "native {facade:?} read has no supported pull execution")
             }
@@ -125,6 +131,8 @@ impl core::error::Error for QueryError {
             Self::EdgeStream(error) => Some(error),
             Self::AggregateStreamPlan(error) => Some(error),
             Self::AggregateStream(error) => Some(error),
+            Self::EdgeAggregateStreamPlan(error) => Some(error),
+            Self::EdgeAggregateStream(error) => Some(error),
             Self::Transaction(error) => Some(error.as_ref()),
             Self::TransactionPattern(error) => Some(error.as_ref()),
             Self::TransactionAggregate(error) => Some(error.as_ref()),
