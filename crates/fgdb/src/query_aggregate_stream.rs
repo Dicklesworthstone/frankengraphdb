@@ -1,4 +1,4 @@
-//! Native text entrypoints for the bounded global aggregate pull operator.
+//! Native text entrypoints for governed global and grouped aggregate pulls.
 //!
 //! Preparation and binding remain the native grammar's job. Physical admission
 //! happens once, before the source is driven, and never retries an eager query.
@@ -31,6 +31,7 @@ trait AggregatePull: Send {
     fn size_hint(&self) -> (usize, Option<usize>);
     fn kind(&self) -> ScanKind;
     fn columns(&self) -> &[String];
+    fn key_columns(&self) -> &[String];
     fn snapshot_seq(&self) -> CommitSeq;
     fn state(&self) -> VertexScanState;
     fn row_stats(&self) -> GqlExecutionStats;
@@ -56,6 +57,9 @@ where
     }
     fn columns(&self) -> &[String] {
         VertexAggregateCursor::columns(self)
+    }
+    fn key_columns(&self) -> &[String] {
+        VertexAggregateCursor::key_columns(self)
     }
     fn snapshot_seq(&self) -> CommitSeq {
         VertexAggregateCursor::snapshot_seq(self)
@@ -93,6 +97,10 @@ where
     fn columns(&self) -> &[String] {
         EdgeAggregateCursor::columns(self)
     }
+    fn key_columns(&self) -> &[String] {
+        // EdgeAggregatePlan currently admits global definitions only.
+        &[]
+    }
     fn snapshot_seq(&self) -> CommitSeq {
         EdgeAggregateCursor::snapshot_seq(self)
     }
@@ -115,25 +123,34 @@ where
     }
 }
 
-/// A native aggregate query whose first pull consumes the source and emits one
-/// complete row, including on empty input. `columns()` addresses `row.values()`
-/// in textual RETURN order; counts and wide sums keep their exact domains.
+/// A native aggregate query whose first pull consumes the source. Subsequent
+/// pulls move completed groups out in the operator's canonical key order.
+/// Global empty input emits one zero/null row; grouped empty input emits none.
+/// `columns()` and `output_slots()` describe textual RETURN order, which may
+/// interleave or repeat keys among aggregates. The returned GraphAggregateRow
+/// keeps separate keys()/values() storage, addressed by key_columns() and
+/// aggregate_columns(). No scalar, identity or exact numeric domain is coerced.
 ///
 /// Opening reads no candidates. Close/drop does not drain the source. Failure
-/// emits one typed error, releases the pin and permanently fuses the cursor.
+/// emits one typed error and permanently fuses the cursor. Source/accumulation
+/// failures precede all output; delivery failure may follow complete groups.
+/// Closing releases the pin and any undelivered group state without draining.
 /// No projected input table, per-row query, data copy or second meter is added.
 /// The one ownership box is metadata; the pinned database is still in memory.
-/// This is not a grouped cursor, session lease or a durable resumption token.
+/// Group state is governed but not spill-backed. This is not a session lease
+/// or a durable resumption token.
 /// Vertex and fixed-edge/join profiles share this surface. Source failures keep
 /// their original typed cause in ScanError; budgets and interruption stay outside
 /// that sum. The selected operator never changes after opening.
 pub struct NativeAggregateCursor<'q> {
     inner: Box<dyn AggregatePull + 'q>,
+    layout: OutputLayout,
 }
 impl<'q> NativeAggregateCursor<'q> {
-    fn new(cursor: impl AggregatePull + 'q) -> Self {
+    fn new(cursor: impl AggregatePull + 'q, layout: OutputLayout) -> Self {
         Self {
             inner: Box::new(cursor),
+            layout,
         }
     }
     /// The physical source chosen structurally before any candidate is read.
@@ -143,6 +160,20 @@ impl<'q> NativeAggregateCursor<'q> {
     }
     #[must_use]
     pub fn columns(&self) -> &[String] {
+        &self.layout.columns
+    }
+    /// Each RETURN column selects a borrowed key or aggregate by its native
+    /// ordinal. Repeated expressions with distinct aliases need no payload copy.
+    #[must_use]
+    pub fn output_slots(&self) -> &[GraphAggregateTextSlot] {
+        &self.layout.slots
+    }
+    #[must_use]
+    pub fn key_columns(&self) -> &[String] {
+        self.inner.key_columns()
+    }
+    #[must_use]
+    pub fn aggregate_columns(&self) -> &[String] {
         self.inner.columns()
     }
     #[must_use]
@@ -205,7 +236,7 @@ impl EmbeddedReadView {
 }
 
 impl PreparedNativeRead {
-    /// Open the checked global aggregate specialization from this native
+    /// Open a checked aggregate specialization from this native
     /// definition. Rebinding neither reparses text nor re-resolves graph names.
     /// The returned cursor borrows only cx, not this template or its arguments.
     pub fn stream_aggregate<'q, V: Vfs + Clone>(
@@ -237,7 +268,7 @@ impl PreparedNativeRead {
         policy: GqlQueryPolicy,
     ) -> Result<NativeAggregateCursor<'q>, QueryError> {
         let facade = self.facade_class();
-        let (plan, as_of) = match self {
+        let (compiled, as_of) = match self {
             Self::Aggregate(prepared) => {
                 let query = prepared.bind_parameters(params).map_err(QueryError::PatternText)?;
                 (
@@ -261,14 +292,17 @@ impl PreparedNativeRead {
             }
             _ => return Err(QueryError::StreamingUnsupported { facade }),
         };
+        let CompiledAggregate { plan, layout } = compiled;
         match plan {
             AggregatePlan::Vertex(plan) => Ok(NativeAggregateCursor::new(
                 view.stream_global_aggregate_governed_at(cx, &plan, as_of, policy)
                     .map_err(QueryError::AggregateStream)?,
+                layout,
             )),
             AggregatePlan::Edge(plan) => Ok(NativeAggregateCursor::new(
                 view.stream_global_edge_aggregate_governed_at(cx, &plan, as_of, policy)
                     .map_err(QueryError::EdgeAggregateStream)?,
+                layout,
             )),
         }
     }
@@ -288,6 +322,21 @@ impl AggregatePlan {
             Self::Edge(plan) => plan.columns(),
         }
     }
+    fn key_columns(&self) -> &[String] {
+        match self {
+            Self::Vertex(plan) => plan.key_columns(),
+            Self::Edge(_) => &[],
+        }
+    }
+}
+
+struct OutputLayout {
+    columns: Vec<String>,
+    slots: Vec<GraphAggregateTextSlot>,
+}
+struct CompiledAggregate {
+    plan: AggregatePlan,
+    layout: OutputLayout,
 }
 
 fn compile(
@@ -295,7 +344,7 @@ fn compile(
     columns: &[String],
     slots: &[GraphAggregateTextSlot],
     facade: crate::NativeReadClass,
-) -> Result<AggregatePlan, QueryError> {
+) -> Result<CompiledAggregate, QueryError> {
     let plan = if matches!(
         query.input_pattern().plan().operators().first(),
         Some(GlaOperator::ScanEdges { .. })
@@ -308,17 +357,93 @@ fn compile(
             VertexAggregatePlan::compile(query).map_err(QueryError::AggregateStreamPlan)?,
         )
     };
-    // Expose row.values() directly, without coercing/cloning numeric or scalar
-    // payloads. The checked plain global shape has no keys/hidden summaries;
-    // refuse a future facade remapping rather than silently mislabeling cells.
-    if !query.group_key_columns().is_empty()
-        || columns != plan.columns()
-        || slots.len() != columns.len()
-        || !slots.iter().enumerate().all(|(index, slot)| {
-            matches!(slot, GraphAggregateTextSlot::Aggregate(at) if *at == index)
-        })
-    {
+    // Keep the physical row unmodified. Only bounded, owned schema metadata
+    // maps the native RETURN order onto its keys and aggregate values. Reject
+    // inconsistent future compiler metadata BEFORE opening a source, including
+    // an out-of-range, missing, or misnamed first occurrence of a column.
+    if !valid_layout(columns, slots, plan.key_columns(), plan.columns()) {
         return Err(QueryError::StreamingUnsupported { facade });
     }
-    Ok(plan)
+    Ok(CompiledAggregate {
+        plan,
+        layout: OutputLayout { columns: columns.to_vec(), slots: slots.to_vec() },
+    })
+}
+
+fn valid_layout(
+    columns: &[String],
+    slots: &[GraphAggregateTextSlot],
+    keys: &[String],
+    aggregates: &[String],
+) -> bool {
+    if columns.len() != slots.len()
+        || columns.len() > fgdb_gql::algebra::MAX_PATTERN_VERTICES
+        || slots.iter().any(|slot| match slot {
+            GraphAggregateTextSlot::GroupKey(at) => *at >= keys.len(),
+            GraphAggregateTextSlot::Aggregate(at) => *at >= aggregates.len(),
+        })
+    {
+        return false;
+    }
+    // The physical profiles retain all keys and summaries. The first alias
+    // names each retained cell; repeating a key later with a different alias is
+    // valid native projection, not another group or another owned key payload.
+    keys.iter().enumerate().all(|(index, name)| {
+        slots.iter().position(|slot| matches!(slot,
+            GraphAggregateTextSlot::GroupKey(at) if *at == index))
+            .is_some_and(|at| &columns[at] == name)
+    }) && aggregates.iter().enumerate().all(|(index, name)| {
+        slots.iter().position(|slot| matches!(slot,
+            GraphAggregateTextSlot::Aggregate(at) if *at == index))
+            .is_some_and(|at| &columns[at] == name)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use GraphAggregateTextSlot::{Aggregate, GroupKey};
+
+    fn names(items: &[&str]) -> Vec<String> {
+        items.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn layout_admits_interleaved_reordered_and_repeated_keys_without_copying_cells() {
+        let keys = names(&["first", "second"]);
+        let aggregates = names(&["count", "sum"]);
+        for order in [
+            [0, 1, 2, 3], [2, 0, 3, 1], [1, 3, 0, 2], [3, 2, 1, 0],
+        ] {
+            let schema = names(&["first", "second", "count", "sum"]);
+            let all = [GroupKey(0), GroupKey(1), Aggregate(0), Aggregate(1)];
+            let columns: Vec<_> = order.iter().map(|&at| schema[at].clone()).collect();
+            let slots: Vec<_> = order.iter().map(|&at| all[at]).collect();
+            assert!(valid_layout(&columns, &slots, &keys, &aggregates));
+        }
+        assert!(valid_layout(
+            &names(&["count", "first", "alias", "sum", "second"]),
+            &[Aggregate(0), GroupKey(0), GroupKey(0), Aggregate(1), GroupKey(1)],
+            &keys, &aggregates,
+        ));
+    }
+
+    #[test]
+    fn layout_rejects_wrong_names_missing_cells_bad_ordinals_and_unbounded_metadata() {
+        let keys = names(&["key"]);
+        let aggregates = names(&["total"]);
+        for (columns, slots) in [
+            (names(&["key", "total"]), vec![Aggregate(0), GroupKey(0)]),
+            (names(&["key", "total"]), vec![GroupKey(1), Aggregate(0)]),
+            (names(&["key", "total"]), vec![GroupKey(0), Aggregate(1)]),
+            (names(&["key"]), vec![GroupKey(0)]),
+            (names(&["total"]), vec![Aggregate(0)]),
+            (names(&["key", "total"]), vec![GroupKey(0)]),
+        ] {
+            assert!(!valid_layout(&columns, &slots, &keys, &aggregates));
+        }
+        let len = fgdb_gql::algebra::MAX_PATTERN_VERTICES + 1;
+        assert!(!valid_layout(&vec!["total".to_owned(); len],
+            &vec![Aggregate(0); len], &[], &aggregates));
+    }
 }

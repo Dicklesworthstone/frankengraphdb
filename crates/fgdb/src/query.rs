@@ -270,7 +270,8 @@ impl<V: Vfs + Clone> Database<V> {
         PreparedNativeRead::prepare(text, params, resolver)?.execute(self, cx, params, budget)
     }
 
-    /// Prepare and open a native global aggregate without collecting its input.
+    /// Prepare a supported native aggregate without collecting its input rows.
+    /// Grouped vertex reads expose keys and aggregates through output_slots().
     /// Reuse PreparedNativeRead::stream_aggregate for repeated parameter binding.
     /// Unsupported physical shapes refuse; execution never retries eagerly.
     pub fn query_aggregate_stream<'q>(
