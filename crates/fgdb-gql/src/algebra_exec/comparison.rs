@@ -46,16 +46,26 @@ pub(crate) fn compare_element_properties<'a, E>(
                 _ => None,
             })
     };
-    let left = match (vertex(left), edge(left)) {
+    // Resolve BOTH identities before invoking either fallible source. OPTIONAL
+    // null extension must not depend on which operand was written first.
+    // Missing properties on bound identities are different: both source reads
+    // still execute, and a failure must not be disguised as a missing value.
+    let left_binding = (vertex(left), edge(left));
+    let right_binding = (vertex(right), edge(right));
+    if left_binding == (None, None) || right_binding == (None, None) {
+        return Ok(false);
+    }
+    control(GlaExecutionEvent::Work)?;
+    let left = match left_binding {
         (_, Some(captured)) => edge_property(captured, *left_key)?,
         (Some(identity), None) => property(identity, *left_key)?,
-        (None, None) => return Ok(false),
+        (None, None) => unreachable!("null bindings were rejected before source access"),
     };
     control(GlaExecutionEvent::Work)?;
-    let right = match (vertex(right), edge(right)) {
+    let right = match right_binding {
         (_, Some(captured)) => edge_property(captured, *right_key)?,
         (Some(identity), None) => property(identity, *right_key)?,
-        (None, None) => return Ok(false),
+        (None, None) => unreachable!("null bindings were rejected before source access"),
     };
     for value in [left, right].into_iter().flatten() {
         charge_payload(value, control)?;
@@ -205,6 +215,74 @@ mod tests {
             );
             assert_eq!(result, Err(stop));
             assert_eq!(at, stop);
+        }
+    }
+
+    #[test]
+    fn null_element_bindings_reject_without_reading_either_operand() {
+        for bindings in [
+            [Some(VId(1)), None],
+            [None, Some(VId(2))],
+            [None, None],
+        ] {
+            let result = compare_element_properties(
+                &comparison(),
+                &bindings,
+                &[],
+                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("unexpected vertex read"),
+                &mut |_, _| Err::<Option<&CanonicalScalar>, _>("unexpected edge read"),
+                &mut |_| Err("unexpected work for null bindings"),
+            );
+            assert_eq!(result, Ok(false));
+        }
+    }
+
+    #[test]
+    fn missing_element_properties_still_propagate_the_other_source_error() {
+        let mut reads = Vec::new();
+        let result = compare_element_properties(
+            &comparison(),
+            &[Some(VId(1)), Some(VId(2))],
+            &[],
+            &mut |vid, _| {
+                reads.push(vid);
+                if vid == VId(1) {
+                    Ok(None)
+                } else {
+                    Err("right source failed")
+                }
+            },
+            &mut |_, _| Err("unexpected edge read"),
+            &mut |_| Ok(()),
+        );
+        assert_eq!(result, Err("right source failed"));
+        assert_eq!(reads, vec![VId(1), VId(2)]);
+    }
+
+    #[test]
+    fn element_comparison_can_be_cancelled_before_each_source_read() {
+        let value = CanonicalScalar::ucs_basic_text("").unwrap();
+        for stop in 1..=3 {
+            let mut events = 0;
+            let mut reads = 0;
+            let result = compare_element_properties(
+                &comparison(),
+                &[Some(VId(1)), Some(VId(2))],
+                &[],
+                &mut |_, _| {
+                    reads += 1;
+                    Ok(Some(&value))
+                },
+                &mut |_, _| panic!("vertex bindings must not read the edge source"),
+                &mut |event| {
+                    assert_eq!(event, GlaExecutionEvent::Work);
+                    events += 1;
+                    if events == stop { Err(stop) } else { Ok(()) }
+                },
+            );
+            assert_eq!(result, Err(stop));
+            assert_eq!(events, stop);
+            assert_eq!(reads, stop - 1);
         }
     }
 }
