@@ -11,12 +11,13 @@ use crate::gql_exec::source::SourceEvent;
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_gql::algebra::{GlaPlan, GraphValueRow, PreparedGraphPattern};
+use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanRow};
 use fgdb_gql::stream::{
     VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanOutput, VertexScanPlan,
     VertexScanRow, VertexScanSource, VertexScanSourceError,
 };
-use fgdb_gql::{GqlQueryError, GqlQueryPolicy, PreparedGqlQuery};
-use fgdb_types::{CommitSeq, QueryCx, VId};
+use fgdb_gql::{GlaExecutionEvent, GqlQueryError, GqlQueryPolicy, PreparedGqlQuery};
+use fgdb_types::{CommitSeq, EId, QueryCx, VId};
 
 type Cancel = Box<asupersync::error::Error>;
 type StreamError = GqlQueryError<VertexScanError<ReadError>, Cancel>;
@@ -90,6 +91,25 @@ impl VertexScanSource for SnapshotVertexSource<'_> {
                 .map_err(VertexScanSourceError::Control)
         })
     }
+
+    fn next_probe_edge<C>(
+        &self,
+        endpoint: VId,
+        direction: fgdb_gql::algebra::GlaDirection,
+        after: Option<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, EdgeExpansionSourceError<ReadError, C>> {
+        super::edge_stream::next_from_view(&self.view, self.cx, endpoint, direction, after, control)
+    }
+
+    fn probe_edge<'a, C>(
+        &'a self,
+        eid: EId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EdgeScanRow<'a>>, EdgeExpansionSourceError<ReadError, C>> {
+        super::edge_stream::edge_from_view(&self.view, self.cx, self.as_of, eid, control)
+            .map_err(EdgeExpansionSourceError::Read)
+    }
 }
 impl core::fmt::Debug for SnapshotVertexSource<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -139,6 +159,10 @@ impl<V: Vfs + Clone> Database<V> {
     /// may repeat that identity or read its canonical properties. The leading
     /// unique identity proves whole-row order and DISTINCT without sorting.
     /// Other projections/orderings refuse, rather than quietly changing order.
+    /// Correlated fixed-hop EXISTS/NOT EXISTS use the same pinned incidence and
+    /// edge-version readers, including for isolated outer vertices. Candidate
+    /// counts include examined root histories and every probe edge examination.
+    /// The stream keeps one view and original QueryCx, not a new graph per root.
     pub fn stream_graph_values_governed<'q>(
         &self,
         cx: &'q QueryCx,
@@ -376,3 +400,6 @@ impl EmbeddedReadView {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod probe_tests;

@@ -3,6 +3,7 @@
 //! opening does not collect candidate IDs, visible edges, or projected rows.
 
 mod expansion;
+pub(super) use expansion::next_from_view;
 
 use crate::gql_exec::source::{SourceEvent, edge_properties_at};
 use crate::{Database, EmbeddedReadView, ReadError};
@@ -75,54 +76,7 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<ReadError, C>> {
-        self.cx.with_restriction(|| {
-            let snapshot = &self.view.snapshot;
-            let mut node = snapshot.adjacency_index.histories.0.as_deref();
-            let mut history = None;
-            while let Some(current) = node {
-                control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-                match eid.cmp(&current.key) {
-                    core::cmp::Ordering::Less => node = current.left.0.as_deref(),
-                    core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
-                    core::cmp::Ordering::Equal => {
-                        history = Some(&current.value);
-                        break;
-                    }
-                }
-            }
-            let Some(history) = history else {
-                return Ok(None);
-            };
-            let mut node = history.0.as_deref();
-            let mut winner = None;
-            while let Some(current) = node {
-                control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-                // History keys are (created_at, block, row). Pick the last
-                // coordinate at or before the cut, INCLUDING a retirement
-                // restatement. Falling back to an older live row resurrects
-                // deletes and can mix topology with another version's costs.
-                if current.key.0 <= self.as_of {
-                    winner = Some(current.key);
-                    node = current.right.0.as_deref();
-                } else {
-                    node = current.left.0.as_deref();
-                }
-            }
-            let Some((_, block, row)) = winner else {
-                return Ok(None);
-            };
-            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
-            let entry = &snapshot.blocks[block][row];
-            if !entry.visible_at(self.as_of) {
-                return Ok(None);
-            }
-            Ok(Some(EdgeScanRow {
-                source: entry.src,
-                target: entry.dst,
-                relation: entry.relation,
-                properties: edge_properties_at(&snapshot.block_props, block, row),
-            }))
-        })
+        edge_from_view(&self.view, self.cx, self.as_of, eid, control)
     }
 
     fn vertex<'a, C>(
@@ -152,6 +106,66 @@ impl EdgeScanSource for SnapshotEdgeSource<'_> {
                 .map_err(EdgeScanSourceError::Control)
         })
     }
+}
+
+/// Reuse the exact MVCC winner selection for all indexed stream roots.
+/// The borrowed fields cannot outlive the already admitted view; this helper
+/// does not construct a snapshot, grant authority or advance a source cursor.
+pub(super) fn edge_from_view<'a, C>(
+    view: &'a EmbeddedReadView,
+    cx: &QueryCx,
+    as_of: CommitSeq,
+    eid: EId,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<ReadError, C>> {
+    cx.with_restriction(|| {
+        let snapshot = &view.snapshot;
+        let mut node = snapshot.adjacency_index.histories.0.as_deref();
+        let mut history = None;
+        while let Some(current) = node {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+            match eid.cmp(&current.key) {
+                core::cmp::Ordering::Less => node = current.left.0.as_deref(),
+                core::cmp::Ordering::Greater => node = current.right.0.as_deref(),
+                core::cmp::Ordering::Equal => {
+                    history = Some(&current.value);
+                    break;
+                }
+            }
+        }
+        let Some(history) = history else {
+            return Ok(None);
+        };
+        let mut node = history.0.as_deref();
+        let mut winner = None;
+        while let Some(current) = node {
+            control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+            // History keys are (created_at, block, row). Pick the last
+            // coordinate at or before the cut, INCLUDING a retirement
+            // restatement. Falling back to an older live row resurrects
+            // deletes and can mix topology with another version's costs.
+            if current.key.0 <= as_of {
+                winner = Some(current.key);
+                node = current.right.0.as_deref();
+            } else {
+                node = current.left.0.as_deref();
+            }
+        }
+        let Some((_, block, row)) = winner else {
+            return Ok(None);
+        };
+        control(GlaExecutionEvent::Work).map_err(EdgeScanSourceError::Control)?;
+        let entry = &snapshot.blocks[block][row];
+        if !entry.visible_at(as_of) {
+            return Ok(None);
+        }
+        Ok(Some(EdgeScanRow {
+            source: entry.src,
+            target: entry.dst,
+            relation: entry.relation,
+            properties: edge_properties_at(&snapshot.block_props, block, row),
+        }))
+    })
 }
 impl core::fmt::Debug for SnapshotEdgeSource<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -13,8 +13,21 @@ pub(super) fn next<C>(
     after: Option<EId>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
 ) -> Result<Option<EId>, EdgeExpansionSourceError<ReadError, C>> {
-    source.cx.with_restriction(|| {
-        let index = &source.view.snapshot.adjacency_index;
+    next_from_view(&source.view, source.cx, endpoint, direction, after, control)
+}
+
+/// Shared immutable lookup for edge-rooted joins and vertex-rooted probes.
+/// The caller owns the admitted view and position; no extra pin or index copy.
+pub(crate) fn next_from_view<C>(
+    view: &EmbeddedReadView,
+    cx: &QueryCx,
+    endpoint: VId,
+    direction: GlaDirection,
+    after: Option<EId>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+) -> Result<Option<EId>, EdgeExpansionSourceError<ReadError, C>> {
+    cx.with_restriction(|| {
+        let index = &view.snapshot.adjacency_index;
         let result = match direction {
             GlaDirection::Forward => successor(&index.outgoing, endpoint, after, control),
             GlaDirection::Reverse => successor(&index.incoming, endpoint, after, control),
