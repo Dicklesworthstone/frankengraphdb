@@ -4,6 +4,74 @@
 use super::*;
 
 impl PreparedGraphSet {
+    /// Peel exactly one finite relational window, preserving its entire input
+    /// node. The ALL window runs after the node's own quantifier. A page without
+    /// ORDER BY inherits a scope/filter child's selected order; pattern wrappers
+    /// and product-free projections canonicalize rows as in the batch executor.
+    /// Mixed product/UNWIND/window trees refuse: positional enumeration is not
+    /// represented by the existing maintained stages' canonical bags.
+    /// This is shape analysis, not derivative admission for any descendant.
+    pub fn incremental_window(&self) -> Result<Option<(Self, crate::row_window::RowWindowSpec)>,
+        crate::row_window::RowWindowBuildError> {
+        let Some(count) = self.count else { return Ok(None); };
+        if !self.incremental_window_sequence_compatible() { return Ok(None); }
+        let inherited = self.incremental_finite_order().map_or(&[][..], |(order, _)| order);
+        let order = if self.order.is_empty() { inherited.to_vec() } else { self.order.clone() };
+        let spec = crate::row_window::RowWindowSpec::new(self.types.clone(), order,
+            GraphSetQuantifier::All, self.offset, count)?;
+        let mut input = self.clone();
+        input.order.clear();
+        input.offset = 0;
+        input.count = None;
+        Ok(Some((input, spec)))
+    }
+
+    /// Noncanonical result order with a finite occurrence upper bound for the
+    /// standing source/set/projection/filter subset. Scope and filter preserve
+    /// order; a projection or binary set canonicalizes its output. Unsupported
+    /// source shapes must still refuse in the host. No unbounded sort is admitted.
+    pub fn incremental_finite_order(&self) -> Option<(&[GraphValueOrder], u64)> {
+        if !self.order.is_empty() {
+            return self.count.map(|count| (self.order.as_slice(), count));
+        }
+        match &self.node {
+            SetNode::Scope(input) | SetNode::Filter { input, .. } => {
+                let (order, bound) = input.incremental_finite_order()?;
+                let bound = bound.saturating_sub(self.offset);
+                Some((order, self.count.map_or(bound, |count| count.min(bound))))
+            }
+            _ => None,
+        }
+    }
+
+    /// The recursive finite-window compiler preserves sequence only for trees
+    /// without products, UNWIND or singleton sources. Unwindowed circuits stay
+    /// admitted under their canonical-bag contract. An explicitly ordered root
+    /// may separately use incremental_ordered_window before checking its input.
+    /// This finite structural walk examines no rows and clones no definitions.
+    pub fn incremental_window_sequence_compatible(&self) -> bool {
+        fn shape(query: &PreparedGraphSet) -> (bool, bool) {
+            let (nested_window, positional_source) = match &query.node {
+                SetNode::Pattern(_) => (false, false),
+                SetNode::Scope(input) | SetNode::Filter { input, .. }
+                    | SetNode::Project { input, .. } => shape(input),
+                SetNode::Binary { left, right, .. } => {
+                    let a = shape(left); let b = shape(right);
+                    (a.0 || b.0, a.1 || b.1)
+                }
+                SetNode::CrossJoin { left, right } => {
+                    let a = shape(left); let b = shape(right);
+                    (a.0 || b.0, true)
+                }
+                SetNode::Unwind { input, .. } => (shape(input).0, true),
+                SetNode::Values => (false, true),
+            };
+            (query.count.is_some() || nested_window, positional_source)
+        }
+        let (window, positional) = shape(self);
+        !window || !positional
+    }
+
     fn unadorned_incremental_node(&self) -> bool {
         self.order.is_empty() && self.offset == 0 && self.count.is_none()
     }
@@ -137,6 +205,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn finite_windows_preserve_exact_input_and_inherited_filter_scope_order() {
+        let leaf = PreparedGraphSet::from(pattern());
+        let order = vec![GraphValueOrder { column:0,descending:true,nulls_first:false }];
+        let first = leaf.clone().with_order_by(&order).unwrap().with_page(0,Some(7));
+        let frozen = first.canonical_bytes();
+        let (input, spec) = first.incremental_window().unwrap().unwrap();
+        assert_eq!(input.canonical_bytes(),leaf.canonical_bytes());
+        assert_eq!(spec.order(),order); assert_eq!(spec.count(),7);
+        assert_eq!(spec.quantifier(),GraphSetQuantifier::All);
+        let filtered = first.clone().filter(&[GraphSetPredicateOp::Truth(Some(true))]).unwrap();
+        assert_eq!(filtered.incremental_finite_order(),Some((order.as_slice(),7)));
+        let second = filtered.clone().nested().unwrap().with_page(1,Some(2));
+        let (input, spec) = second.incremental_window().unwrap().unwrap();
+        assert_eq!(input.canonical_bytes(),filtered.clone().nested().unwrap().canonical_bytes());
+        assert_eq!(spec.order(),order); assert_eq!((spec.offset(),spec.count()),(1,2));
+        let projected = filtered.project(vec![GraphSetProjection::new("id",GraphSetValue::Column(0))],
+            GraphSetQuantifier::All).unwrap();
+        assert!(projected.incremental_finite_order().is_none());
+        assert!(leaf.clone().with_order_by(&order).unwrap().incremental_window().unwrap().is_none());
+        assert_eq!(first.canonical_bytes(),frozen);
+        assert_eq!(leaf.clone().with_page(0,Some(0)).incremental_window().unwrap().unwrap().1.count(),0);
+        let product = leaf.clone().cross_join(leaf.clone()).unwrap();
+        assert!(product.incremental_window_sequence_compatible());
+        assert!(!product.clone().with_page(0,Some(0)).incremental_window_sequence_compatible());
+        assert!(product.with_page(0,Some(2)).incremental_window().unwrap().is_none());
+        assert!(!leaf.clone().cross_join(leaf.clone().with_page(0,Some(1))).unwrap()
+            .incremental_window_sequence_compatible());
+        let expanded = leaf.unwind("item".into(), GraphSetValue::List(vec![GraphSetValue::Column(0)])).unwrap();
+        assert!(expanded.incremental_window_sequence_compatible());
+        assert!(!expanded.with_page(0,Some(0)).incremental_window_sequence_compatible());
     }
 
     #[test]
