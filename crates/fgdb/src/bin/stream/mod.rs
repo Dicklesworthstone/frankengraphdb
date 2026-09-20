@@ -6,17 +6,16 @@
 //! scratch. No collect, re-execution with larger LIMIT, or eager fallback.
 //! An error after a delivered prefix is terminal and emits no success result.
 //!
-//! Plain global aggregates use the native aggregate cursor. Its first pull
-//! consumes the admitted input and emits ONE completed summary, even when the
-//! input is empty. Counts, wide sums, exact averages and typed extrema retain
-//! their domains. Grouped/DISTINCT/computed or otherwise unsupported aggregate
-//! definitions still refuse through physical preparation, never eager retry.
+//! Aggregate pulls scan once, then deliver completed groups in key order.
+//! Global empty input has one summary; grouped empty input has none. Native
+//! RETURN slots select keys and summaries without payload copies or narrowing.
+//! Unsupported aggregate definitions refuse during preparation, never retry.
 
 use super::{Failure, Options, cell, emit, execution_failure, human_value, policy, quoted, value_cell};
 use asupersync::fs::Vfs;
 use fgdb::{Database, PreparedNativeRead, QueryValue};
-use fgdb_gql::GraphAggregateRow;
-use fgdb_gql::algebra::{GraphValue, GraphValueRow};
+use fgdb_gql::{GraphAggregateRow, GraphAggregateTextSlot};
+use fgdb_gql::algebra::GraphValueRow;
 use fgdb_types::QueryCx;
 use std::io::Write;
 
@@ -42,10 +41,11 @@ pub(super) fn run<V: Vfs + Clone>(
             .stream_aggregate(db, cx, &options.params, policy())
             .map_err(execution_failure)?;
         let columns = cursor.columns().to_vec();
+        let slots = cursor.output_slots().to_vec();
         let seq = cursor.snapshot_seq().0;
-        let result = deliver(&columns, seq, &mut cursor, robot, out, || {
-            cx.checkpoint().map_err(Failure::query)
-        });
+        let result = deliver(&columns, seq, &mut cursor.by_ref().map(|result| {
+            result.map(|row| AggregateDeliveryRow { row, slots: &slots })
+        }), robot, out, || cx.checkpoint().map_err(Failure::query));
         cursor.close();
         return result;
     }
@@ -68,25 +68,20 @@ pub(super) fn run<V: Vfs + Clone>(
 // performs no graph execution, input materialization or aggregate-to-scalar
 // conversion. Both kinds use the same encoders as ordinary eager CLI output.
 trait DeliveryRow {
-    type Cell;
-    fn cells(&self) -> &[Self::Cell];
-    fn encode(value: &Self::Cell, robot: bool) -> Result<String, Failure>;
+    fn width(&self) -> usize;
+    fn encode(&self, column: usize, robot: bool) -> Result<String, Failure>;
 }
 impl DeliveryRow for GraphValueRow {
-    type Cell = GraphValue;
-    fn cells(&self) -> &[GraphValue] {
-        self.values()
-    }
-    fn encode(value: &GraphValue, robot: bool) -> Result<String, Failure> {
+    fn width(&self) -> usize { self.values().len() }
+    fn encode(&self, column: usize, robot: bool) -> Result<String, Failure> {
+        let value = self.values().get(column).ok_or_else(invalid_layout)?;
         if robot { value_cell(value) } else { human_value(value) }
     }
 }
 impl DeliveryRow for GraphAggregateRow {
-    type Cell = QueryValue;
-    fn cells(&self) -> &[QueryValue] {
-        self.values()
-    }
-    fn encode(value: &QueryValue, robot: bool) -> Result<String, Failure> {
+    fn width(&self) -> usize { self.values().len() }
+    fn encode(&self, column: usize, robot: bool) -> Result<String, Failure> {
+        let value = self.values().get(column).ok_or_else(invalid_layout)?;
         if robot {
             return cell(value);
         }
@@ -95,6 +90,27 @@ impl DeliveryRow for GraphAggregateRow {
             QueryValue::Count(value) => Ok(value.to_string()),
             QueryValue::Integer(value) => Ok(value.to_string()),
             QueryValue::Average(value) => Ok(value.to_string()),
+        }
+    }
+}
+
+fn invalid_layout() -> Failure { Failure::query("stream row does not match its native layout") }
+
+// Only the physical result row is owned. Repeated keys and aggregates borrow
+// the same payload, and names/slots are frozen before the first source demand.
+struct AggregateDeliveryRow<'a> {
+    row: GraphAggregateRow,
+    slots: &'a [GraphAggregateTextSlot],
+}
+impl DeliveryRow for AggregateDeliveryRow<'_> {
+    fn width(&self) -> usize { self.slots.len() }
+    fn encode(&self, column: usize, robot: bool) -> Result<String, Failure> {
+        match self.slots.get(column).ok_or_else(invalid_layout)? {
+            GraphAggregateTextSlot::Aggregate(at) => self.row.encode(*at, robot),
+            GraphAggregateTextSlot::GroupKey(at) => {
+                let key = self.row.keys().get(*at).ok_or_else(invalid_layout)?;
+                if robot { value_cell(key) } else { human_value(key) }
+            }
         }
     }
 }
@@ -144,7 +160,7 @@ fn deliver<Row: DeliveryRow, E: std::error::Error + 'static>(
                 break;
             };
             let row = row.map_err(execution_failure)?;
-            if row.cells().len() != columns.len() {
+            if row.width() != columns.len() {
                 return Err(Failure::query(
                     "stream row width does not match native columns",
                 ));
@@ -153,9 +169,9 @@ fn deliver<Row: DeliveryRow, E: std::error::Error + 'static>(
                 .checked_add(1)
                 .ok_or_else(|| Failure::query("stream delivery counter overflow"))?;
             let mut encoded = Vec::with_capacity(columns.len());
-            for value in row.cells() {
+            for column in 0..row.width() {
                 checkpoint()?;
-                encoded.push(Row::encode(value, robot)?);
+                encoded.push(row.encode(column, robot)?);
             }
             let line = if robot {
                 format!(r#"{{"v":1,"event":"row","cells":[{}]}}"#, encoded.join(","))
@@ -191,3 +207,6 @@ mod tests;
 
 #[cfg(test)]
 mod edge_tests;
+
+#[cfg(test)]
+mod grouped_tests;

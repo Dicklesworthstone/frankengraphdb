@@ -217,8 +217,8 @@ fn unsupported_aggregate_clauses_and_future_history_refuse_before_transport() {
         let mut db = Database::open_memory(&contexts.commit(), keys()).await.unwrap();
         db.write(&contexts.commit(), batch(1, 7)).await.unwrap();
         for text in [
-            "MATCH (n) RETURN n.p AS p, COUNT(*) AS total GROUP BY n.p",
-            "MATCH (n) RETURN COUNT(DISTINCT n.p) AS total",
+            "MATCH (n) RETURN n.p AS p, COUNT(*) AS total GROUP BY n.p LIMIT 0",
+            "MATCH (n) RETURN COUNT(DISTINCT n.p) AS total LIMIT 0",
             "MATCH (n) RETURN COLLECT(n.p) AS values",
             "MATCH (n) RETURN COUNT(*) AS total HAVING total > 0",
             "MATCH (n) RETURN COUNT(*) AS total LIMIT 0",
