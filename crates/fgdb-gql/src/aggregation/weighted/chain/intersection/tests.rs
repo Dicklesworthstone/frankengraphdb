@@ -10,13 +10,13 @@ fn resolve(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
         GraphSymbolKind::Label => Some(GraphSymbol::Label(fgdb_delta_types::LabelId(1))),
     }
 }
-fn pattern(text: &str) -> PreparedGraphPattern<GraphValueRow> {
+pub(super) fn pattern(text: &str) -> PreparedGraphPattern<GraphValueRow> {
     PreparedGraphText::prepare(text, resolve).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
 }
-fn aggregate(text: &str) -> PreparedGraphAggregate {
+pub(super) fn aggregate(text: &str) -> PreparedGraphAggregate {
     PreparedGraphAggregateText::prepare(text, resolve).unwrap().bind_parameters(&GqlParameters::new()).unwrap()
 }
-fn wide() -> GqlQueryPolicy { GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX) }
+pub(super) fn wide() -> GqlQueryPolicy { GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX) }
 
 fn projected(columns: &[ValueProjection], bindings: &[Option<VId>]) -> Vec<VId> {
     columns.iter().map(|column| {

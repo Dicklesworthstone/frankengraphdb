@@ -199,3 +199,58 @@ fn every_late_read_and_projection_checkpoint_propagates_and_exact_work_limits_re
         if ok { assert_eq!(result_rows,baseline); assert_eq!(current,stats); }
     }
 }
+
+#[test]
+fn property_aggregates_preserve_parallel_bags_nulls_groups_and_finite_root_pages() {
+    use super::tests::{aggregate,wide};
+    let values = BTreeMap::from([(VId(0),CanonicalScalar::Int(-1)),(VId(1),CanonicalScalar::Null),
+        (VId(2),CanonicalScalar::Int(-1))]);
+    let mut edges = Vec::new();
+    for a in 0..4 { for b in 0..4 { for r in 1..=3 {
+        for _ in 0..((a+b+u128::from(r))%3) { edges.push((VId(a),RelationId(r),VId(b))); }
+    }}}
+    for body in [
+        "(a)-[:R]->(b)-[:S]->(c)-[:T]->(a)",
+        "(a)<-[:R]-(b)<-[:S]-(c)<-[:T]-(a)",
+        "(a)-[:R]-(b)-[:S]-(c)-[:T]-(a)",
+        "(a)-[:R]->(b)-[:S]->(c)-[:T]->(a) WHERE a.p=c.p",
+        "(a)-[:R]->(b)-[:S]->(c)-[:T]->(a) WHERE a.p=c.p OR b.p IS NULL",
+    ] {
+        for (key,page) in [("a.p",""),("a"," LIMIT 2")] {
+            let prefix = format!("MATCH {body} RETURN {key},COUNT(*) AS n,COUNT(c.p) AS c,COUNT(DISTINCT c.p) AS d,MIN(c.p) AS lo,MAX(c.p) AS hi");
+            let fast = aggregate(&format!("{prefix} GROUP BY {key}{page}"));
+            let reference = aggregate(&format!("{prefix},COLLECT(c.p) AS ignored GROUP BY {key}{page}"))
+                .with_aggregate_output_prefix(5).unwrap();
+            assert!(Shape::compile(fast.input_pattern().plan()).is_some());
+            let run = |q: &PreparedGraphAggregate, policy| q.execute_governed(edges.len() as u64,
+                (0..4).map(VId),edges.iter().copied(),|_,_|Ok::<_,()>(true),|id,_|Ok(values.get(&id)),
+                policy,||Ok::<_,()>(()));
+            let result = run(&fast,wide()).unwrap();
+            assert_eq!(result.value,run(&reference,wide()).unwrap().value,"{body} {key}");
+            let exact = GqlQueryPolicy::new(result.rows.snapshot_records,result.rows.result_rows,
+                result.evaluator.work_units,result.evaluator.scratch_entries);
+            assert_eq!(run(&fast,exact).unwrap(),result);
+            assert!(run(&fast,GqlQueryPolicy::new(edges.len() as u64,u64::MAX,
+                result.evaluator.work_units-1,u64::MAX)).is_err());
+        }
+    }
+}
+
+#[test]
+fn late_null_rejection_and_property_support_precede_an_above_count_weight() {
+    use super::tests::aggregate;
+    let body = "(a)-[:R]->(b)-[:S]->(c)-[:T]->(a)".to_owned()+&",(a)-[:R]->(b)".repeat(5);
+    let edges: Vec<_> = [(VId(0),RelationId(1),VId(1)),(VId(1),RelationId(2),VId(2)),
+        (VId(2),RelationId(3),VId(0))].into_iter().flat_map(|edge|std::iter::repeat_n(edge,256)).collect();
+    let run = |q: &PreparedGraphAggregate,value: &CanonicalScalar| q.execute_governed(768,
+        [VId(0),VId(1),VId(2)],edges.iter().copied(),|_,_|Ok::<_,()>(true),|_,_|Ok(Some(value)),
+        GqlQueryPolicy::new(768,1,100_000,100_000),||Ok::<_,()>(()));
+    let support = aggregate(&format!("MATCH {body} RETURN COUNT(DISTINCT c.p) AS n,MIN(c.p) AS lo"));
+    let counted = aggregate(&format!("MATCH {body} RETURN COUNT(c.p) AS n"));
+    let selected = aggregate(&format!("MATCH {body} WHERE a.p=c.p RETURN COUNT(*) AS n"));
+    assert_eq!(run(&support,&CanonicalScalar::Int(i64::MIN)).unwrap().value[0].get(0).unwrap().as_count(),Some(1));
+    assert_eq!(run(&counted,&CanonicalScalar::Null).unwrap().value[0].get(0).unwrap().as_count(),Some(0));
+    assert_eq!(run(&selected,&CanonicalScalar::Null).unwrap().value[0].get(0).unwrap().as_count(),Some(0));
+    assert!(matches!(run(&counted,&CanonicalScalar::Int(1)),
+        Err(GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate:0 }))));
+}

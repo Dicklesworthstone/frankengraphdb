@@ -17,6 +17,7 @@
 
 mod cycle;
 mod intersection;
+pub(super) use intersection::visit_bindings as visit_original_bindings;
 
 use super::*;
 use crate::algebra::{

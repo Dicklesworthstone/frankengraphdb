@@ -145,7 +145,9 @@ pub(super) fn needs_original_bindings<R>(plan: &crate::algebra::GlaPlan<R>) -> b
 }
 
 /// The ordinary edge scan walks a BTreeMap of oriented source identities and
-/// completes every descendant scope before advancing its root. Input edge
+/// completes every descendant scope before advancing its root. Guarded cyclic
+/// intersection keeps the original root as its first ascending variable and
+/// retains all original slots on this property-bearing path. Input edge
 /// order and parallel occurrences do not break that property. Arbitrary node
 /// iterators and transformed weighted/factorized plans claim no such ordering.
 /// Keep this capability beside physical-path selection so future rewrites
@@ -275,9 +277,13 @@ where
     // contributes its multiplicity. Rejected paths cannot cause COUNT overflow.
     let needs_original_bindings = needs_original_bindings(plan);
     if needs_original_bindings {
-        return plan.visit_value_bindings(
+        // Keep all slots and the complete multiplicity/read callback. Only a
+        // topology prefix followed by late reads may use intersection; its
+        // guarded fallback is the original visitor, with no extra events.
+        return chain::visit_original_bindings(
+            plan,
             vertices,
-            topology.keys().copied(),
+            &topology,
             test_vertex,
             property,
             control,

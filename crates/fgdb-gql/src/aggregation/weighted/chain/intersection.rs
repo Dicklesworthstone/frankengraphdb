@@ -239,7 +239,7 @@ fn intersect<E>(tries: &[Trie], variable: usize, assigned: &[Option<VId>], after
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn visit_bindings<'a, E, C, F, R, M, P>(
+pub(in crate::aggregation::weighted) fn visit_bindings<'a, E, C, F, R, M, P>(
     plan: &GlaPlan<GraphValueRow>, vertices: impl IntoIterator<Item = VId>,
     topology: &BTreeMap<TopologyKey, Multiplicity>, test_vertex: F,
     mut property: R, mut control: M, mut visit: P,
