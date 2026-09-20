@@ -235,3 +235,6 @@ mod edge_tests;
 
 #[cfg(test)]
 mod grouped_tests;
+
+#[cfg(test)]
+mod aggregate_edge_tests;
