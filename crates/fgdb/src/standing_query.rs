@@ -7,6 +7,7 @@
 mod aggregate;
 mod components;
 mod kcore;
+mod native;
 mod output;
 mod recursive;
 mod sets;
@@ -28,6 +29,9 @@ use std::sync::Arc;
 pub struct StandingQueryHandle {
     owner: Arc<()>,
     index: usize,
+    // Presentation only. The bound definition and all maintenance state still
+    // have their sole owner in the ordinary registry entry.
+    native: Option<Arc<native::Layout>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -77,6 +81,11 @@ pub enum StandingQueryError {
     UnknownHandle,
     Unsupported,
     SetSchema(fgdb_gql::GraphSetBuildError),
+    NativePrepare(Box<crate::QueryError>),
+    NativeClassUnsupported { facade: crate::NativeReadClass },
+    /// Reading a healthy maintained result exceeded the caller's delivery
+    /// allowance. This does not fence the maintained view or change its policy.
+    Delivery(StandingQueryFailure),
     Unavailable {
         frontier: CommitSeq,
         reason: StandingQueryFailure,
@@ -94,6 +103,11 @@ impl core::fmt::Display for StandingQueryError {
                 f.write_str("standing query kind or definition is unsupported by this operation")
             }
             Self::SetSchema(error) => error.fmt(f),
+            Self::NativePrepare(error) => error.fmt(f),
+            Self::NativeClassUnsupported { facade } => {
+                write!(f, "native {facade:?} has no supported standing-query registration")
+            }
+            Self::Delivery(reason) => write!(f, "standing result delivery refused: {reason:?}"),
             Self::Unavailable { frontier, reason } => write!(
                 f,
                 "standing query unavailable after {frontier:?}: {reason:?}"
@@ -106,7 +120,17 @@ impl core::fmt::Display for StandingQueryError {
         }
     }
 }
-impl core::error::Error for StandingQueryError {}
+impl core::error::Error for StandingQueryError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::NativePrepare(error) => Some(error.as_ref()),
+            Self::SetSchema(error) => Some(error),
+            Self::Read(error) => Some(error),
+            Self::Interrupted(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 /// Borrowed rows from one healthy, current maintained result. Existing GQL
 /// callers retain GraphAggregateRow as the default. Recursive topology views
@@ -379,6 +403,7 @@ impl<V: Vfs + Clone> Database<V> {
         StandingQueryHandle {
             owner: Arc::clone(&self.handle_owner),
             index,
+            native: None,
         }
     }
 
