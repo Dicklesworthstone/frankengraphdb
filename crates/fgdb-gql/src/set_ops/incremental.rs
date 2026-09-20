@@ -46,6 +46,17 @@ impl PreparedGraphSet {
         }
     }
 
+    /// Borrow both complete operands of an unconditional Cartesian product.
+    /// Every child must still be admitted and initialized, even when its peer
+    /// is empty. A wrapper order/page is never discarded, including LIMIT 0.
+    pub fn incremental_cross_join(&self) -> Option<(&Self, &Self)> {
+        if !self.unadorned_incremental_node() { return None; }
+        match &self.node {
+            SetNode::CrossJoin { left, right } => Some((left, right)),
+            _ => None,
+        }
+    }
+
     /// Transparent grouping only. A scope carrying a relational order/page
     /// cannot be peeled away. A projection has its own exact accessor; filters,
     /// UNWIND, singleton values and cross joins have no transparent fallback.
@@ -130,5 +141,22 @@ mod tests {
             assert!(ordered.incremental_projection().is_none());
         }
         assert!(leaf.incremental_projection().is_none());
+    }
+
+    #[test]
+    fn cross_accessor_retains_both_complete_children_and_refuses_wrapper_order_and_pages() {
+        let left = PreparedGraphSet::from(pattern());
+        let right = left.clone().nested().unwrap();
+        let query = left.clone().cross_join(right.clone()).unwrap();
+        let (a, b) = query.incremental_cross_join().unwrap();
+        assert_eq!(a.canonical_bytes(), left.canonical_bytes());
+        assert_eq!(b.canonical_bytes(), right.canonical_bytes());
+        for (offset, count) in [(1, None), (0, Some(0)), (0, Some(2))] {
+            assert!(query.clone().with_page(offset, count).incremental_cross_join().is_none());
+        }
+        let ordered = query.with_order_by(&[GraphValueOrder::descending(0)]).unwrap();
+        assert!(ordered.incremental_cross_join().is_none());
+        assert!(left.incremental_cross_join().is_none());
+        assert!(PreparedGraphSet::singleton().incremental_cross_join().is_none());
     }
 }

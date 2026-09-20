@@ -7,6 +7,7 @@ use super::*;
 use fgdb_delta_types::zset::set::SetOperation;
 use fgdb_gql::{GraphSetOperation, GraphSetQuantifier, PreparedGraphSet};
 use fgdb_gql::row_projection::RowProjectionSpec;
+use fgdb_gql::row_join::RowJoinKind;
 
 struct Staging<'a, V: Vfs + Clone> {
     database: &'a mut Database<V>,
@@ -46,6 +47,14 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             let query = self.database.prepare_standing_projection(cx, input, spec,
                 policy, self.database.standing_queries.len())?;
             self.append(StandingQuery::Projection(Box::new(query)))
+        } else if let Some((left, right)) = query.incremental_cross_join() {
+            // Never short-circuit the other operand when one result is empty:
+            // its schema, definition and failures are still part of the query.
+            let left = self.compile(cx, left, policy, checkpoint)?;
+            let right = self.compile(cx, right, policy, checkpoint)?;
+            let query = self.database.prepare_standing_join(cx, [left, right], &[], RowJoinKind::Inner,
+                policy, self.database.standing_queries.len())?;
+            self.append(StandingQuery::Join(Box::new(query)))
         } else if let Some((operation, quantifier, left, right)) = query.incremental_binary() {
             let left = self.compile(cx, left, policy, checkpoint)?;
             let right = self.compile(cx, right, policy, checkpoint)?;
@@ -126,6 +135,15 @@ fn rebuild_checked<V: Vfs + Clone>(
                 StandingQuery::Set(Box::new(staged.database.prepare_standing_set(cx, inputs,
                     query.operation(), policy, staged.database.standing_queries.len())?))
             }
+            StandingQuery::Join(query) => {
+                let mut inputs = [0; 2];
+                for (next, input) in inputs.iter_mut().zip(query.inputs) {
+                    if input < first || input >= old { return Err(StandingQueryError::Unsupported); }
+                    *next = staged.first.checked_add(input - first).ok_or(StandingQueryError::Unsupported)?;
+                }
+                StandingQuery::Join(Box::new(staged.database.prepare_standing_join(cx, inputs,
+                    query.spec().keys(), query.spec().kind(), policy, staged.database.standing_queries.len())?))
+            }
             StandingQuery::Projection(query) => {
                 if query.input < first || query.input >= old { return Err(StandingQueryError::Unsupported); }
                 let input = staged.first.checked_add(query.input - first)
@@ -143,6 +161,11 @@ fn rebuild_checked<V: Vfs + Clone>(
     for query in &mut staged.database.standing_queries[staged.first..] {
         checkpoint()?;
         if let StandingQuery::Set(query) = query {
+            for input in &mut query.inputs {
+                *input = input.checked_sub(staged.first).and_then(|offset| first.checked_add(offset))
+                    .ok_or(StandingQueryError::Unsupported)?;
+            }
+        } else if let StandingQuery::Join(query) = query {
             for input in &mut query.inputs {
                 *input = input.checked_sub(staged.first).and_then(|offset| first.checked_add(offset))
                     .ok_or(StandingQueryError::Unsupported)?;
@@ -169,3 +192,6 @@ mod projection_tests;
 
 #[cfg(test)]
 mod filter_tests;
+
+#[cfg(test)]
+mod cross_tests;

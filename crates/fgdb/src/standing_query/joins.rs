@@ -1,4 +1,4 @@
-//! Dependency-ordered equijoins of maintained row, set and join bags.
+//! Dependency-ordered equijoins and products of maintained native row bags.
 //!
 //! The native row/schema adapter owns exact join arithmetic and its prepared
 //! sink. This module owns only registry dependencies, source/budget admission,
@@ -127,8 +127,39 @@ impl<V: Vfs + Clone> Database<V> {
                 return Err(StandingQueryError::Unsupported);
             }
         }
+        // Empty keys are an explicit product definition only, never a fallback
+        // for a malformed public equijoin registration.
+        if keys.is_empty() { return Err(StandingQueryError::JoinSchema(RowJoinBuildError::EmptyKeys)); }
         let query = self.prepare_standing_join(cx, [left.index, right.index], keys, kind, policy,
             self.standing_queries.len())?;
+        Ok(self.store_standing_query(StandingQuery::Join(Box::new(query))))
+    }
+
+    /// Maintain every left/right pair after each parent's complete selection.
+    /// NULL and all bounded native payload domains participate unchanged. Exact
+    /// multiplicities multiply; sharing the same parent on both sides preserves
+    /// the simultaneous-change cross term. An empty parent is not a missing or
+    /// failed parent: both must publish the same accepted successor.
+    ///
+    /// Uses the ordinary join rows/delta/columns/total and rebuild APIs. Output
+    /// names are left.<name>, right.<name>; no order/page is introduced. Source
+    /// admission counts both compressed input bags. Final occurrence, work and
+    /// scratch quotas are per view; products may be quadratic and do not spill.
+    pub fn register_standing_cross_join(
+        &mut self, cx: &QueryCx, left: &StandingQueryHandle, right: &StandingQueryHandle,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        if !Arc::ptr_eq(&self.handle_owner, &left.owner) || !Arc::ptr_eq(&self.handle_owner, &right.owner) {
+            return Err(StandingQueryError::ForeignHandle);
+        }
+        for handle in [left, right] {
+            if sets::rows(self.admitted_standing_query(cx, handle)?).is_none() {
+                return Err(StandingQueryError::Unsupported);
+            }
+        }
+        let query = self.prepare_standing_join(cx, [left.index, right.index], &[], RowJoinKind::Inner,
+            policy, self.standing_queries.len())?;
         Ok(self.store_standing_query(StandingQuery::Join(Box::new(query))))
     }
 
@@ -164,7 +195,11 @@ impl<V: Vfs + Clone> Database<V> {
                 return Err(StandingQueryError::JoinSchema(RowJoinBuildError::TooManyKeys));
             }
             meter.units(ZSetEvent::ScratchEntry, width + keys.len()).map_err(StandingQueryError::Maintenance)?;
-            let spec = RowJoinSpec::new(&types[0], &types[1], keys)
+            // Private preparation also restores previously admitted products.
+            // The public equijoin API refuses an empty key list above.
+            let spec = (if keys.is_empty() {
+                RowJoinSpec::cross(&types[0], &types[1])
+            } else { RowJoinSpec::new(&types[0], &types[1], keys) })
                 .map_err(StandingQueryError::JoinSchema)?.with_kind(kind);
             let left_rows = sets::rows(left).ok_or(StandingQueryError::Unsupported)?;
             let right_rows = sets::rows(right).ok_or(StandingQueryError::Unsupported)?;

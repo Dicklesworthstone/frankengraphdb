@@ -37,14 +37,16 @@ impl PreparedNativeRead {
     /// cannot change an accepted definition. Handles remain session-local.
     ///
     /// Ordinary patterns, aggregates, WITH-aggregate pipelines and unadorned
-    /// binary set circuits with computed projections are admitted
+    /// binary set/product circuits with computed projections and filters are admitted
     /// only where the existing standing engines support their bound operators.
     /// Historical selectors refuse: a fixed historical answer is not a current
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
-    /// Set registration owns a bounded tree of row/set/projection nodes; admission and
+    /// Set registration owns a bounded row/set/join/projection tree; admission and
     /// maintenance policies apply PER NODE, not to their aggregate footprint.
     /// Grouping and complete operand semantics are preserved. Relational outer
-    /// order/page/filter stages currently refuse, including LIMIT 0.
+    /// order/page stages currently refuse, including LIMIT 0.
+    /// Compound delivery is canonical bag order, not the snapshot executor's
+    /// implicit left-major enumeration. Input-local selection remains upstream.
     /// The normal rebuild API repairs the complete owned circuit atomically.
     pub fn register_standing<V: Vfs + Clone>(
         &self, database: &mut Database<V>, cx: &QueryCx, params: &GqlParameters,
@@ -110,6 +112,26 @@ impl<V: Vfs + Clone> Database<V> {
         })
     }
 
+    /// Register an already bound relational definition through the SAME circuit
+    /// compiler as native GQL. This permits typed composition of supported
+    /// patterns, projections, filters, sets and Cartesian products without new
+    /// text syntax or resolver callbacks. Accepted definitions are owned by the
+    /// registry; dropping the caller's tree cannot change a live registration.
+    ///
+    /// Read through standing_native_query/standing_native_columns. The one
+    /// returned handle owns an atomically admitted circuit and rebuilds it as a
+    /// unit. Delivery uses canonical bag order, not implicit left-major snapshot
+    /// enumeration. Each node keeps its own allowance. Unsupported descendants
+    /// and wrapper order/pages refuse; no eager per-commit fallback is used.
+    /// Session-local and in-memory, not a durable subscription or spill engine.
+    pub fn register_standing_relation(
+        &mut self, cx: &QueryCx, query: &fgdb_gql::PreparedGraphSet, policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        self.ensure_readable().map_err(StandingQueryError::Read)?;
+        cx.with_restriction(|| set::register(self, cx, query, policy))
+    }
+
     /// The native output names attached at registration, after owner/health/
     /// freshness admission. An ordinary typed-only handle has no native layout.
     pub fn standing_native_columns<'a>(
@@ -142,6 +164,7 @@ impl<V: Vfs + Clone> Database<V> {
                     let mut view = match self.admitted_standing_query(cx, handle)? {
                         StandingQuery::Rows { .. } => self.standing_rows(cx, handle)?,
                         StandingQuery::Set(_) => self.standing_set(cx, handle)?,
+                        StandingQuery::Join(_) => self.standing_join(cx, handle)?,
                         StandingQuery::Projection(_) => self.standing_projection(cx, handle)?,
                         _ => return Err(StandingQueryError::Unsupported),
                     };
