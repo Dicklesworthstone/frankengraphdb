@@ -427,6 +427,9 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(StandingQueryError::ForeignHandle);
         }
         self.ensure_readable().map_err(StandingQueryError::Read)?;
+        if let Some(native::Layout::Circuit { first, .. }) = handle.native.as_deref() {
+            return native::set::rebuild(self, cx, *first, handle.index, policy);
+        }
         let current = self
             .standing_queries
             .get(handle.index)

@@ -9,6 +9,7 @@
 mod aggregate;
 mod execute;
 mod filter;
+mod incremental;
 mod merge;
 mod projection;
 pub use aggregate::PreparedGraphSetAggregate;

@@ -6,13 +6,17 @@ use crate::{PreparedNativeRead, QueryError, QueryResult, QueryValue};
 use fgdb_delta_types::ZWeight;
 use fgdb_gql::{GqlParameters, GraphAggregateTextSlot, GraphSymbolResolver};
 
+pub(super) mod set;
+
 pub(super) enum Layout {
     Rows { columns: Vec<String> },
     Aggregate { columns: Vec<String>, slots: Vec<GraphAggregateTextSlot> },
+    Circuit { columns: Vec<String>, first: usize },
 }
 impl Layout {
     fn columns(&self) -> &[String] {
-        match self { Self::Rows { columns } | Self::Aggregate { columns, .. } => columns }
+        match self { Self::Rows { columns } | Self::Aggregate { columns, .. }
+            | Self::Circuit { columns, .. } => columns }
     }
 }
 impl core::fmt::Debug for Layout {
@@ -32,10 +36,16 @@ impl PreparedNativeRead {
     /// registration. Dropping/changing the text, resolver, template or parameters
     /// cannot change an accepted definition. Handles remain session-local.
     ///
-    /// Ordinary patterns, aggregates and WITH-aggregate pipelines are admitted
+    /// Ordinary patterns, aggregates, WITH-aggregate pipelines and unadorned
+    /// binary set circuits are admitted
     /// only where the existing standing engines support their bound operators.
     /// Historical selectors refuse: a fixed historical answer is not a current
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
+    /// Set registration owns a bounded tree of row/set nodes; admission and
+    /// maintenance policies apply PER NODE, not to their aggregate footprint.
+    /// Grouping and complete operand semantics are preserved. Relational outer
+    /// order/page/projection/filter stages currently refuse, including LIMIT 0.
+    /// The normal rebuild API repairs the complete owned circuit atomically.
     pub fn register_standing<V: Vfs + Clone>(
         &self, database: &mut Database<V>, cx: &QueryCx, params: &GqlParameters,
         policy: GqlQueryPolicy,
@@ -43,6 +53,11 @@ impl PreparedNativeRead {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         database.ensure_readable().map_err(StandingQueryError::Read)?;
         cx.with_restriction(|| {
+            if let Self::Set(prepared) = self {
+                let bound = prepared.bind_parameters(params)
+                    .map_err(|e| prepare_error(QueryError::SetText(e)))?;
+                return set::register(database, cx, &bound, policy);
+            }
             let (query, layout) = match self {
                 Self::Pattern(prepared) => {
                     let bound = prepared.bind_parameters(params)
@@ -123,8 +138,18 @@ impl<V: Vfs + Clone> Database<V> {
             let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
             let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
             let (at, rows) = match layout {
-                Layout::Rows { .. } => {
-                    let view = self.standing_rows(cx, handle)?;
+                Layout::Rows { .. } | Layout::Circuit { .. } => {
+                    let mut view = match self.admitted_standing_query(cx, handle)? {
+                        StandingQuery::Rows { .. } => self.standing_rows(cx, handle)?,
+                        StandingQuery::Set(_) => self.standing_set(cx, handle)?,
+                        _ => return Err(StandingQueryError::Unsupported),
+                    };
+                    if matches!(layout, Layout::Circuit { .. }) {
+                        // PreparedGraphSet canonicalizes a pattern's selected
+                        // bag before set composition. Do not leak the leaf's
+                        // pre-wrapper ordering from a transparent root scope.
+                        view.ordered = None;
+                    }
                     let rows = collect(&view, layout.columns().len(), &mut meter, |row, meter| {
                         let mut cells = Vec::new();
                         for value in row.values() {
