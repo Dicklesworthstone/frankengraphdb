@@ -161,7 +161,7 @@ fn unsupported_aggregate_shapes_are_never_stripped_or_eagerly_retried() {
         let commit = contexts.commit();
         let db = Database::open_memory(&commit, keys()).await.unwrap();
         for text in [
-            "MATCH (n:L) RETURN n.score AS score, COUNT(*) AS count GROUP BY n.score",
+            "MATCH (n:L) RETURN n.score AS score, COUNT(*) AS count GROUP BY n.score LIMIT 0",
             "MATCH (n:L) RETURN COUNT(DISTINCT n.score) AS count",
             "MATCH (n:L) RETURN COUNT(*) AS count LIMIT 0",
             "MATCH (n:L) RETURN COUNT(*) AS count HAVING count > 0",
