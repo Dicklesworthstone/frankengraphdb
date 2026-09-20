@@ -1343,7 +1343,7 @@ pub(crate) fn find_vertex<'a, E>(
     as_of: CommitSeq,
     control: &mut impl FnMut(SourceEvent) -> Result<(), E>,
 ) -> Result<Option<&'a VertexRow>, E> {
-    let mut winner: Option<&VertexRow> = None;
+    let mut winner: Option<&'a VertexRow> = None;
     for patch in patches {
         control(SourceEvent::Work)?;
         let (mut low, mut high) = (0, patch.len());
@@ -1373,6 +1373,29 @@ pub(super) struct BorrowedTables<'a> {
     pub(super) snapshot_records: u64,
 }
 
+/// A root-adjacency closure is complete only for a flat, fixed-hop plan.
+/// Nested scopes may start from another component (including isolated
+/// vertices), and a variable-length atom can consume more than one edge.
+/// Counting only Expand in those plans would silently remove valid witnesses.
+fn bound_edge_hops(operators: &[fgdb_gql::algebra::GlaOperator]) -> Option<usize> {
+    use fgdb_gql::algebra::GlaOperator;
+    let mut hops = 0;
+    for operator in operators {
+        match operator {
+            GlaOperator::Expand { .. } => hops += 1,
+            GlaOperator::ScanVertices
+            | GlaOperator::ScanEdges { .. }
+            | GlaOperator::VarLengthExpand { .. }
+            | GlaOperator::Probe { .. }
+            | GlaOperator::ProbeEnd { .. }
+            | GlaOperator::Optional { .. }
+            | GlaOperator::OptionalEnd { .. } => return None,
+            _ => {}
+        }
+    }
+    Some(hops)
+}
+
 /// Admit a conservative edge closure for a predicate-bound root. The algebra
 /// still evaluates every predicate/join and owns multiplicity and ordering.
 /// Unbound scans retain the original source and its accounting verbatim.
@@ -1391,6 +1414,9 @@ fn bound_edges<'a, E, Row>(
         return Ok(None);
     };
     let prefix = &logical.operators()[1..];
+    let Some(hops) = bound_edge_hops(prefix) else {
+        return Ok(None);
+    };
     let predicate = prefix
         .iter()
         .take_while(|op| {
@@ -1467,10 +1493,6 @@ fn bound_edges<'a, E, Row>(
     // Fixed-hop plans consume at most one new adjacency per Expand. Using
     // both endpoints and both directions is a superset even for correlations
     // and cycle closures; no source-level join can discard a valid witness.
-    let hops = prefix
-        .iter()
-        .filter(|op| matches!(op, GlaOperator::Expand { .. }))
-        .count();
     let mut visited = std::collections::BTreeSet::new();
     for _ in 0..hops {
         let current = std::mem::take(&mut frontier);
@@ -1557,8 +1579,18 @@ pub(super) fn admit<'a, E, Row>(
         None => scan_edges(&snapshot.blocks, &snapshot.block_props, as_of, control)?,
     };
     let mut vertices = Vec::new();
-    // Projection-only properties need admitted vertex rows even with no WHERE.
-    if logical.needs_vertex_values() {
+    let mut vertex_records = 0;
+    // A nested vertex scan needs the full domain, including isolated vertices.
+    // Endpoint hydration alone is insufficient even for identity-only output.
+    if logical
+        .operators()
+        .iter()
+        .any(|operator| matches!(operator, GlaOperator::ScanVertices))
+    {
+        vertices = scan_vertices(&snapshot.patches, as_of, control)?;
+        vertex_records = vertices.len() as u64;
+    } else if logical.needs_vertex_values() {
+        // Projection-only properties need admitted rows even with no WHERE.
         let mut candidates = std::collections::BTreeSet::new();
         for &((_, src, relation, dst), _) in &edges {
             control(SourceEvent::Work)?;
@@ -1567,6 +1599,9 @@ pub(super) fn admit<'a, E, Row>(
                     relation: required, ..
                 }
                 | GlaOperator::Expand {
+                    relation: required, ..
+                }
+                | GlaOperator::VarLengthExpand {
                     relation: required, ..
                 } => *required == relation,
                 _ => false,
@@ -1589,7 +1624,7 @@ pub(super) fn admit<'a, E, Row>(
         }
     }
     Ok(BorrowedTables {
-        snapshot_records: edges.len() as u64,
+        snapshot_records: vertex_records + edges.len() as u64,
         vertices,
         edges,
     })
@@ -1670,6 +1705,67 @@ mod tests {
     use super::*;
     use fgdb_delta_types::{LabelId, PropertyKeyId};
     use fgdb_types::CanonicalScalar;
+
+    #[test]
+    fn nested_scans_and_scopes_never_use_a_root_only_edge_closure() {
+        use fgdb_gql::algebra::{GlaDirection, GlaOperator};
+
+        for operator in [
+            GlaOperator::ScanVertices,
+            GlaOperator::ScanEdges {
+                relation: RelationId(2),
+                direction: GlaDirection::Forward,
+            },
+            GlaOperator::Probe {
+                group: 1,
+                end: 3,
+                anti: false,
+            },
+            GlaOperator::Probe {
+                group: 1,
+                end: 3,
+                anti: true,
+            },
+            GlaOperator::ProbeEnd { group: 1 },
+            GlaOperator::Optional {
+                group: 1,
+                end: 3,
+                slots: 2,
+            },
+            GlaOperator::OptionalEnd { group: 1 },
+        ] {
+            assert_eq!(bound_edge_hops(std::slice::from_ref(&operator)), None);
+            assert_eq!(
+                bound_edge_hops(&[
+                    GlaOperator::Distinct,
+                    operator,
+                    GlaOperator::Limit {
+                        offset: 0,
+                        count: Some(1),
+                    },
+                ]),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_projection_operations_preserve_the_one_hop_fast_path() {
+        use fgdb_gql::algebra::GlaOperator;
+
+        assert_eq!(bound_edge_hops(&[]), Some(0));
+        assert_eq!(
+            bound_edge_hops(&[
+                GlaOperator::Distinct,
+                GlaOperator::OrderByVertexId,
+                GlaOperator::Limit {
+                    offset: 2,
+                    count: Some(3),
+                },
+            ]),
+            Some(0)
+        );
+    }
 
     fn row(id: u128, created: u64, retired: Option<u64>, value: i64) -> VertexRow {
         VertexRow {
