@@ -6,6 +6,7 @@
 
 mod aggregate;
 mod components;
+mod kcore;
 mod output;
 mod recursive;
 mod sets;
@@ -32,7 +33,7 @@ pub struct StandingQueryHandle {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StandingQueryStats {
     pub delta_rows: u64,
-    /// Component views report the vertices in the rederived component region.
+    /// Component/core-number views report vertices in the rederived region.
     pub affected_vertices: u64,
     /// Distinct retained/new edge identities examined for a one-hop tick.
     /// Parallel edges count separately; a self-loop counts once.
@@ -157,6 +158,7 @@ pub(crate) enum StandingQuery {
     Reachability(Box<recursive::State>),
     Triangles(Box<triangles::State>),
     Components(Box<components::State>),
+    CoreNumbers(Box<kcore::State>),
     /// Dependencies name only earlier registry entries, so the append order
     /// is a topological order without a second scheduler or recursive walk.
     Set(Box<sets::State>),
@@ -172,6 +174,7 @@ impl StandingQuery {
             Self::Reachability(query) => (query.policy, query.frontier, query.failure),
             Self::Triangles(query) => (query.policy, query.frontier, query.failure),
             Self::Components(query) => (query.policy, query.frontier, query.failure),
+            Self::CoreNumbers(query) => (query.policy, query.frontier, query.failure),
             Self::Set(query) => (query.policy, query.frontier, query.failure),
         }
     }
@@ -194,6 +197,9 @@ impl StandingQuery {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
             Self::Components(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
+            Self::CoreNumbers(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
             Self::Set(query) => {
@@ -419,6 +425,9 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Components(query) => StandingQuery::Components(Box::new(
                 self.prepare_standing_components(cx, query.relation, policy)?,
             )),
+            StandingQuery::CoreNumbers(query) => StandingQuery::CoreNumbers(Box::new(
+                self.prepare_standing_core_numbers(cx, query.relation, policy)?,
+            )),
             StandingQuery::Set(query) => StandingQuery::Set(Box::new(
                 self.prepare_standing_set(cx, query.inputs, query.operation(), policy, handle.index)?,
             )),
@@ -471,7 +480,7 @@ impl<V: Vfs + Clone> Database<V> {
             }
             StandingQuery::Reachability(_) | StandingQuery::Rows { .. }
             | StandingQuery::Triangles(_) | StandingQuery::Components(_)
-            | StandingQuery::Set(_) => return Err(StandingQueryError::Unsupported),
+            | StandingQuery::CoreNumbers(_) | StandingQuery::Set(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
             rows,
@@ -547,6 +556,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Components(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::CoreNumbers(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Set(query) => query.maintain(batch, prior, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);

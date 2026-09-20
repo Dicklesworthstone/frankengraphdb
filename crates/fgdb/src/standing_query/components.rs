@@ -21,29 +21,29 @@ pub(crate) struct State {
     pub(super) stats: StandingQueryStats,
     pub(super) failure: Option<StandingQueryFailure>,
 }
-fn input_error(error: EdgeInputError<StandingQueryFailure>) -> StandingQueryFailure {
+pub(super) fn input_error(error: EdgeInputError<StandingQueryFailure>) -> StandingQueryFailure {
     match error { EdgeInputError::Delta(error) => zset_error(error),
         _ => StandingQueryFailure::InvalidDelta }
 }
-fn component_error(error: ComponentError<StandingQueryFailure>) -> StandingQueryFailure {
+pub(super) fn component_error(error: ComponentError<StandingQueryFailure>) -> StandingQueryFailure {
     match error { ComponentError::Delta(error) => zset_error(error),
         ComponentError::CardinalityOverflow => StandingQueryFailure::Arithmetic,
         _ => StandingQueryFailure::InvalidDelta }
 }
-fn result_bound(count: usize, policy: GqlQueryPolicy) -> Result<(), StandingQueryFailure> {
+pub(super) fn result_bound(count: usize, policy: GqlQueryPolicy) -> Result<(), StandingQueryFailure> {
     if policy.rows.max_result_rows().is_some_and(|limit| count as u128 > u128::from(limit)) {
         return Err(StandingQueryFailure::ResultBudget);
     }
     Ok(())
 }
-fn project(input: &ZSet<EdgeTuple>, relation: RelationId, meter: &mut Meter<'_>)
+pub(super) fn project(input: &ZSet<EdgeTuple>, relation: RelationId, meter: &mut Meter<'_>)
     -> Result<ZSet<Pair>, StandingQueryFailure> {
     input.filter(|(r, _, _)| Ok(*r == relation), LIMBS, &mut |event| meter.charge(event))
         .map_err(zset_error)?
         .map(|(_, a, b)| Ok((*a, *b)), LIMBS, &mut |event| meter.charge(event))
         .map_err(zset_error)
 }
-fn vertex_delta(batch: &LogicalDeltaBatch, meter: &mut Meter<'_>)
+pub(super) fn vertex_delta(batch: &LogicalDeltaBatch, meter: &mut Meter<'_>)
     -> Result<ZSet<VId>, StandingQueryFailure> {
     let mut updates = Vec::new();
     for coordinate in batch.coordinate_entries() {
@@ -100,6 +100,30 @@ impl State {
 
     fn from_snapshot(snapshot: &crate::Snapshot, relation: RelationId, meter: &mut Meter<'_>)
         -> Result<Self, StandingQueryFailure> {
+        let TopologyInput { input, vertices, edges } = topology_input(snapshot, relation, meter)?;
+        let mut components = IncrementalComponents::new();
+        let pending = components.prepare(&vertices, &edges, LIMBS,
+            &mut |event| meter.charge(event)).map_err(component_error)?;
+        result_bound(pending.vertex_count(), meter.policy)?;
+        meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
+            .map_err(|_| StandingQueryFailure::Arithmetic)?;
+        (meter.checkpoint)()?;
+        // From empty state the exact derivative IS the initial membership set.
+        let rows = pending.commit();
+        Ok(Self { input, components, rows, relation,
+            policy: meter.policy, frontier: snapshot.frontier, stats: meter.stats, failure: None })
+    }
+}
+
+/// Shared authenticated, governed vertex/edge bootstrap for topology analytics.
+/// This is private preparation, never a new source or cursor authority.
+pub(super) struct TopologyInput {
+    pub(super) input: CommittedEdgeInput,
+    pub(super) vertices: ZSet<VId>,
+    pub(super) edges: ZSet<Pair>,
+}
+pub(super) fn topology_input(snapshot: &crate::Snapshot, relation: RelationId, meter: &mut Meter<'_>)
+    -> Result<TopologyInput, StandingQueryFailure> {
         // Admit physical vertex AND edge history before either borrowed scan.
         // Compacted versions/tombstones cost source admission too. The shared
         // topology bootstrap's own edge admission remains unchanged.
@@ -125,18 +149,7 @@ impl State {
             Ok(())
         })?;
         let vertices = ZSet::from_updates(vertices, LIMBS, &mut |event| meter.charge(event)).map_err(zset_error)?;
-        let mut components = IncrementalComponents::new();
-        let pending = components.prepare(&vertices, &edges, LIMBS,
-            &mut |event| meter.charge(event)).map_err(component_error)?;
-        result_bound(pending.vertex_count(), meter.policy)?;
-        meter.stats.affected_vertices = u64::try_from(pending.affected_vertices())
-            .map_err(|_| StandingQueryFailure::Arithmetic)?;
-        (meter.checkpoint)()?;
-        // From empty state the exact derivative IS the initial membership set.
-        let rows = pending.commit();
-        Ok(Self { input: baseline.into_input(), components, rows, relation,
-            policy: meter.policy, frontier: snapshot.frontier, stats: meter.stats, failure: None })
-    }
+        Ok(TopologyInput { input: baseline.into_input(), vertices, edges })
 }
 
 impl<V: Vfs + Clone> Database<V> {
