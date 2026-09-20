@@ -1,4 +1,4 @@
-//! Typed incremental inner equijoins over complete native row bags.
+//! Typed incremental inner, left outer, semi and anti equijoins of row bags.
 //!
 //! This is the row/schema adapter for the existing Z-set join derivative, not
 //! a second matcher, parser, scheduler or graph store. Equality uses canonical
@@ -8,10 +8,12 @@
 
 use crate::algebra::{GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::GraphSetColumnType;
-use fgdb_delta_types::zset::incremental::{IncrementalJoin, JoinUpdate};
 use fgdb_delta_types::zset::ZSetUpdate;
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
 use std::sync::Arc;
+
+mod input;
+use input::{Input, InputUpdate};
 
 // Side-specific NULL domains retain and validate unmatched input counts without
 // ever joining two NULLs. An ordinary key always has tag zero.
@@ -36,14 +38,32 @@ impl core::fmt::Display for RowJoinBuildError {
 }
 impl core::error::Error for RowJoinBuildError {}
 
-/// Immutable positional schema. Output is all left columns followed by all
-/// right columns. At least one equality key is required; this is not CROSS
-/// JOIN, outer/semi/anti join, projection, or an arbitrary predicate program.
+/// Fixed relational semantics, independent of a tick's signed changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowJoinKind {
+    Inner,
+    /// All matches, or one null extension per left occurrence when unmatched.
+    Left,
+    /// Preserve left multiplicity when at least one matching right row exists.
+    Semi,
+    /// Preserve left multiplicity when no matching right row exists.
+    Anti,
+}
+impl RowJoinKind {
+    fn includes_right(self) -> bool {
+        matches!(self, Self::Inner | Self::Left)
+    }
+}
+
+/// Immutable positional schema. Inner/left output concatenates both inputs;
+/// semi/anti output contains only the left columns. At least one equality key
+/// is required. This is not CROSS JOIN or an arbitrary ON predicate program.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RowJoinSpec {
     left: Box<[GraphSetColumnType]>,
     right: Box<[GraphSetColumnType]>,
     keys: Box<[(usize, usize)]>,
+    kind: RowJoinKind,
 }
 impl RowJoinSpec {
     pub fn new(
@@ -68,19 +88,29 @@ impl RowJoinSpec {
             let r = right.get(r).ok_or(RowJoinBuildError::KeyColumn { side: 1, column: r })?;
             if l != r { return Err(RowJoinBuildError::KeyType { key }); }
         }
-        Ok(Self { left: left.into(), right: right.into(), keys: keys.into() })
+        Ok(Self { left: left.into(), right: right.into(), keys: keys.into(), kind: RowJoinKind::Inner })
     }
+    /// Choose semantics before constructing the operator. Input schemas and
+    /// key admission are identical for all kinds; a live operator cannot switch.
+    pub fn with_kind(mut self, kind: RowJoinKind) -> Self {
+        self.kind = kind;
+        self
+    }
+    pub fn kind(&self) -> RowJoinKind { self.kind }
     pub fn left_types(&self) -> &[GraphSetColumnType] { &self.left }
     pub fn right_types(&self) -> &[GraphSetColumnType] { &self.right }
     pub fn keys(&self) -> &[(usize, usize)] { &self.keys }
-    pub fn width(&self) -> usize { self.left.len() + self.right.len() }
+    pub fn width(&self) -> usize {
+        self.left.len() + if self.kind.includes_right() { self.right.len() } else { 0 }
+    }
     pub fn column_types(&self) -> impl Iterator<Item = GraphSetColumnType> + '_ {
-        self.left.iter().chain(self.right.iter()).copied()
+        let right = if self.kind.includes_right() { self.right.len() } else { 0 };
+        self.left.iter().chain(self.right.iter().take(right)).copied()
     }
 }
 impl core::fmt::Debug for RowJoinSpec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RowJoinSpec").field("columns", &self.width())
+        f.debug_struct("RowJoinSpec").field("kind", &self.kind).field("columns", &self.width())
             .field("keys", &self.keys.len()).field("definition", &"[REDACTED]").finish()
     }
 }
@@ -161,18 +191,20 @@ fn arrange<E>(spec: &RowJoinSpec, side: usize, rows: &ZSet<GraphValueRow>, limbs
 /// One exact in-memory row-join circuit. Work/scratch count logical events and
 /// payload units, not allocator bytes or key-comparison costs. Arc-owned keys
 /// and input rows avoid repeated payload cloning in the generic join products.
-/// Output can be quadratic and is admitted by work/scratch and final-row limits;
-/// this is not a spill engine or a worst-case-optimal multiway join.
+/// Inner/left output can be quadratic. Semi/anti use counted witnesses without
+/// producing that Cartesian bag. All kinds share work/scratch and final-row
+/// admission; this is not spill or a worst-case-optimal multiway join.
 #[derive(PartialEq, Eq)]
 pub struct IncrementalRowJoin {
     spec: RowJoinSpec,
-    input: IncrementalJoin<Key, Row, Row>,
+    input: Input,
     rows: ZSet<GraphValueRow>,
     total: ZWeight,
 }
 impl IncrementalRowJoin {
     pub fn new(spec: RowJoinSpec) -> Self {
-        Self { spec, input: IncrementalJoin::new(), rows: ZSet::new(), total: ZWeight::ZERO }
+        let input = Input::new(spec.kind);
+        Self { spec, input, rows: ZSet::new(), total: ZWeight::ZERO }
     }
     pub fn spec(&self) -> &RowJoinSpec { &self.spec }
     pub fn rows(&self) -> &ZSet<GraphValueRow> { &self.rows }
@@ -204,22 +236,7 @@ impl IncrementalRowJoin {
             }
         }
         let input = self.input.prepare(&left, &right, limbs, control)?;
-        let mut updates = Vec::new();
-        for ((_, left, right), weight) in input.delta().iter() {
-            charge(control, ZSetEvent::Work)?;
-            charge(control, ZSetEvent::ScratchEntry)?;
-            let mut values = Vec::with_capacity(self.spec.width());
-            for value in left.values().iter().chain(right.values()) {
-                reserve_cell(value, control)?;
-                values.push(value.clone());
-            }
-            let row = GraphValueRow::from_owned_values(values);
-            charge(control, ZSetEvent::Work)?;
-            let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
-            charge(control, ZSetEvent::ScratchEntry)?;
-            updates.push((row, weight));
-        }
-        let delta = ZSet::from_updates(updates, limbs, control)?;
+        let delta = input.project_delta(&self.spec, limbs, control)?;
         let change = delta.total_weight(limbs, control)?;
         charge(control, ZSetEvent::Work)?;
         let next_total = self.total.checked_add(&change, limbs).map_err(ZSetError::Arithmetic)?;
@@ -250,7 +267,7 @@ impl core::fmt::Debug for IncrementalRowJoin {
 
 #[must_use = "dropping a row join update preserves its input and output arrangements"]
 pub struct RowJoinUpdate<'a> {
-    input: JoinUpdate<'a, Key, Row, Row>,
+    input: InputUpdate<'a>,
     sink: ZSetUpdate<'a, GraphValueRow>,
     total: &'a mut ZWeight,
     next_total: ZWeight,
@@ -262,7 +279,7 @@ impl RowJoinUpdate<'_> {
     /// Publish without recoverable callbacks between input, output and total.
     pub fn commit(self) -> ZSet<GraphValueRow> {
         let Self { input, sink, total, next_total, delta } = self;
-        let _ = input.commit();
+        input.commit();
         sink.commit();
         *total = next_total;
         delta
@@ -277,3 +294,6 @@ impl core::fmt::Debug for RowJoinUpdate<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod mode_tests;
