@@ -37,7 +37,7 @@ impl PreparedNativeRead {
     /// cannot change an accepted definition. Handles remain session-local.
     ///
     /// Ordinary patterns, aggregates, WITH-aggregate pipelines and unadorned
-    /// binary set/product circuits with computed projections and filters are admitted
+    /// binary set/product circuits with projections, filters and UNWIND are admitted
     /// only where the existing standing engines support their bound operators.
     /// Historical selectors refuse: a fixed historical answer is not a current
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
@@ -114,7 +114,7 @@ impl<V: Vfs + Clone> Database<V> {
 
     /// Register an already bound relational definition through the SAME circuit
     /// compiler as native GQL. This permits typed composition of supported
-    /// patterns, projections, filters, sets and Cartesian products without new
+    /// patterns, projections, filters, UNWIND, sets and Cartesian products without new
     /// text syntax or resolver callbacks. Accepted definitions are owned by the
     /// registry; dropping the caller's tree cannot change a live registration.
     ///

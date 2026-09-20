@@ -47,6 +47,14 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             let query = self.database.prepare_standing_projection(cx, input, spec,
                 policy, self.database.standing_queries.len())?;
             self.append(StandingQuery::Projection(Box::new(query)))
+        } else if let Some((input, name, value)) = query.incremental_unwind() {
+            let spec = RowProjectionSpec::unwind(input.column_types().to_vec(),
+                input.columns().to_vec(), name.to_owned(), value.clone())
+                .map_err(StandingQueryError::ProjectionSchema)?;
+            let input = self.compile(cx, input, policy, checkpoint)?;
+            let query = self.database.prepare_standing_projection(cx, input, spec,
+                policy, self.database.standing_queries.len())?;
+            self.append(StandingQuery::Projection(Box::new(query)))
         } else if let Some((left, right)) = query.incremental_cross_join() {
             // Never short-circuit the other operand when one result is empty:
             // its schema, definition and failures are still part of the query.
@@ -195,3 +203,6 @@ mod filter_tests;
 
 #[cfg(test)]
 mod cross_tests;
+
+#[cfg(test)]
+mod unwind_tests;

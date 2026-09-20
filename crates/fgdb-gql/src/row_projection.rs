@@ -2,6 +2,7 @@
 //!
 //! Expressions use the existing relational evaluator, not another interpreter.
 //! Each changed input tuple is evaluated once, independent of its multiplicity.
+//! UNWIND expands list elements, never input occurrences, through the same sink.
 //! DISTINCT thresholds integrated projected support, never signed delta values.
 //! Complete input counts remain available to reject invalid retractions even
 //! when their projected images cancel or a predicate hides them. Selection
@@ -16,6 +17,8 @@ use fgdb_delta_types::zset::ZSetUpdate;
 use fgdb_delta_types::zset::incremental::{DistinctUpdate, IncrementalDistinct};
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
 use std::collections::BTreeSet;
+
+mod unwind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowProjectionBuildError {
@@ -48,6 +51,8 @@ pub struct RowProjectionSpec {
     types: Box<[GraphSetColumnType]>,
     quantifier: GraphSetQuantifier,
     filter: Box<[GraphSetPredicateOp]>,
+    // Only the checked UNWIND constructor expands the last evaluated cell.
+    expand_last: bool,
 }
 impl RowProjectionSpec {
     pub fn new(input: Vec<GraphSetColumnType>, projection: Vec<GraphSetProjection>,
@@ -71,7 +76,7 @@ impl RowProjectionSpec {
             types.push(GraphSetProjection::admit_output(output.value(), &input, column)?);
         }
         Ok(Self { input: input.into(), projection: projection.into(), types: types.into(),
-            quantifier, filter: Box::new([]) })
+            quantifier, filter: Box::new([]), expand_last: false })
     }
 
     /// Select complete input rows without renaming, deduplicating or changing
@@ -97,7 +102,7 @@ impl RowProjectionSpec {
             .map(|(column, name)| GraphSetProjection::new(name, GraphSetValue::Column(column)))
             .collect::<Vec<_>>().into_boxed_slice();
         Ok(Self { types: input.clone().into(), input: input.into(), projection,
-            quantifier: GraphSetQuantifier::All, filter: code.to_vec().into_boxed_slice() })
+            quantifier: GraphSetQuantifier::All, filter: code.to_vec().into_boxed_slice(), expand_last: false })
     }
 
     /// Set the input predicate, replacing any earlier selection. It sees the
@@ -160,7 +165,7 @@ fn reserve_row<E>(row: &GraphValueRow, control: &mut impl FnMut(ZSetEvent) -> Re
     Ok(())
 }
 
-/// One in-memory exact map/DISTINCT stage. Source tuples, projected support,
+/// One in-memory exact selection/map/UNWIND/DISTINCT stage. Source tuples, projected support,
 /// final rows and occurrence total publish together. Only changed keys are
 /// visited; no repeated occurrence expansion or full-result differencing.
 /// Logical events/payload units are not allocator-byte or spill bounds.
@@ -227,9 +232,13 @@ impl IncrementalRowProjection {
                     GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => ZSetEvent::Work,
                 }).map_err(RowProjectionError::Delta),
                 |column, error| RowProjectionError::Expression { column, error })?;
-            let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
-            charge(control, ZSetEvent::ScratchEntry)?;
-            updates.push((row, weight));
+            if self.spec.expand_last {
+                unwind::append(&row, weight, limbs, control, &mut updates)?;
+            } else {
+                let weight = weight.checked_clone(limbs).map_err(ZSetError::Arithmetic)?;
+                charge(control, ZSetEvent::ScratchEntry)?;
+                updates.push((row, weight));
+            }
         }
         let mapped = ZSet::from_updates(updates, limbs, control)?;
         // DISTINCT can clone a mapped key into counts, its derivative and the

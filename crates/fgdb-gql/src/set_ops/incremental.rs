@@ -57,6 +57,17 @@ impl PreparedGraphSet {
         }
     }
 
+    /// Borrow a list-expansion stage with its original input and appended alias.
+    /// No element is evaluated here. Every wrapper order/page still refuses;
+    /// the caller must admit the complete child and native expression schema.
+    pub fn incremental_unwind(&self) -> Option<(&Self, &str, &GraphSetValue)> {
+        if !self.unadorned_incremental_node() { return None; }
+        match &self.node {
+            SetNode::Unwind { input, value } => Some((input, self.columns.last()?.as_str(), value)),
+            _ => None,
+        }
+    }
+
     /// Transparent grouping only. A scope carrying a relational order/page
     /// cannot be peeled away. A projection has its own exact accessor; filters,
     /// UNWIND, singleton values and cross joins have no transparent fallback.
@@ -159,4 +170,21 @@ mod tests {
         assert!(left.incremental_cross_join().is_none());
         assert!(PreparedGraphSet::singleton().incremental_cross_join().is_none());
     }
+
+    #[test]
+    fn unwind_accessor_keeps_original_input_expression_alias_and_wrapper_refusals() {
+        let leaf = PreparedGraphSet::from(pattern());
+        let value = GraphSetValue::List(vec![GraphSetValue::Column(0), GraphSetValue::Column(0)]);
+        let query = leaf.clone().unwind("element".into(), value.clone()).unwrap();
+        let (input, alias, expression) = query.incremental_unwind().unwrap();
+        assert_eq!(input.canonical_bytes(), leaf.canonical_bytes());
+        assert_eq!(alias, "element"); assert_eq!(expression, &value);
+        assert_eq!(query.column_types(), &[GraphSetColumnType::Vertex, GraphSetColumnType::Any]);
+        for (offset, count) in [(1, None), (0, Some(0)), (0, Some(2))] {
+            assert!(query.clone().with_page(offset, count).incremental_unwind().is_none());
+        }
+        assert!(query.with_order_by(&[GraphValueOrder::descending(0)]).unwrap().incremental_unwind().is_none());
+        assert!(leaf.incremental_unwind().is_none());
+    }
+
 }
