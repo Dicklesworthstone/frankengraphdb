@@ -1,4 +1,5 @@
 use super::*;
+use crate::algebra::GraphValue;
 use crate::{
     GqlParameters, GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,
 };
@@ -439,8 +440,8 @@ fn ordinary_row_profile_is_not_relaxed_and_unsupported_aggregate_shapes_refuse()
     assert!(EdgeAggregatePlan::compile(&q).is_ok());
     for text in [
         "MATCH (a)-[r:R]->(b) RETURN b,COUNT(*) AS n GROUP BY b",
-        "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT b) AS n",
-        "MATCH (a)-[r:R]->(b) RETURN MIN(r.p) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT b) AS n",
+        "MATCH (a)-[r:R]->(b) RETURN MIN(r.p+1) AS n",
         "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n LIMIT 0",
         "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:S]->(c) RETURN COUNT(*) AS n",
     ] {
@@ -497,3 +498,5 @@ fn many_input_rows_need_only_one_result_allowance_and_wide_sums_are_exact() {
         ))
     ));
 }
+
+mod statistics;

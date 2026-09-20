@@ -8,6 +8,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 mod aggregates;
+mod edge_aggregates;
 
 fn okay<T>(value: Result<T, Failure>) -> T {
     value.unwrap_or_else(|error| panic!("{}: {}", error.class, error.message))

@@ -161,7 +161,6 @@ fn output_failure_and_predemand_cancellation_do_not_start_or_repeat_aggregation(
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
-
 #[test]
 fn late_sum_and_quota_failures_never_encode_partial_summaries() {
     let ((), report) = run_async_under_lab(0x636c_e604, |root| async move {
@@ -204,8 +203,8 @@ fn edge_admission_precedes_headers_and_io_errors_keep_their_cause() {
         let cx = contexts.query(); let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap(); seed(&mut db, &commit).await;
         for text in [
-            "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r) AS n",
-            "MATCH (a)-[r:R]->(b) RETURN AVG(r.p) AS n",
+            "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r) AS n",
+            "MATCH (a)-[r:R]->(b) RETURN AVG(r.p+1) AS n",
             "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n HAVING n>0",
             "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n LIMIT 0",
             "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS n",

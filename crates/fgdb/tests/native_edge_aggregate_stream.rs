@@ -14,6 +14,9 @@ use fgdb_types::{
     CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId,
 };
 
+#[path = "native_edge_aggregate_stream/statistics.rs"]
+mod statistics;
+
 const L: LabelId = LabelId(3);
 const R: RelationId = RelationId(1);
 const P: PropertyKeyId = PropertyKeyId(7);
@@ -373,7 +376,7 @@ fn unsupported_edge_shapes_and_bad_arguments_never_switch_to_vertex_or_eager_exe
         let commit = contexts.commit();
         let db = Database::open_memory(&commit, keys()).await.unwrap();
         for text in [
-            "MATCH (a)-[r:R]->(b) RETURN COUNT(DISTINCT r.score) AS total",
+            "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r.score) AS total",
             "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS total LIMIT 0",
             "MATCH (a)-[r:R]->(b) RETURN b.score AS score, COUNT(*) AS total GROUP BY b.score",
             "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS total HAVING total>0",

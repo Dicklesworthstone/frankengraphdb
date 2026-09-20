@@ -227,7 +227,7 @@ fn unsupported_aggregate_shapes_are_never_stripped_or_eagerly_retried() {
             "MATCH (n:L) RETURN COLLECT(n.score) AS values",
             "MATCH (n:L) RETURN COUNT(*) AS count LIMIT 0",
             "MATCH (n:L) RETURN COUNT(*) AS count HAVING count > 0",
-            "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(DISTINCT b.score) AS count",
+            "MATCH (a:L)-[:R]->(b:L) RETURN COLLECT(DISTINCT b.score) AS count",
         ] {
             // Ensure a valid native definition, not a vacuous syntax refusal.
             let prepared =
