@@ -1,4 +1,4 @@
-//! Governed global and grouped COUNT/SUM/AVG/MIN/MAX over a vertex source.
+//! Governed global and grouped exact aggregates over a vertex source.
 //!
 //! The ordinary vertex GLA compiler owns predicates and existence probes. The
 //! source is driven once, without a projected input bag. Global aggregation
@@ -7,6 +7,11 @@
 //! completed groups
 //! in key order. Group storage is governed but not spill-backed; source residency
 //! is independent of this operator's live-state bound.
+//! Argument DISTINCT retains canonical support per aggregate and group under
+//! the same meter. Its state grows with unique values, not row occurrences.
+
+mod distinct;
+use distinct::DistinctState;
 
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow, ValueProjection};
@@ -25,7 +30,7 @@ impl core::fmt::Display for VertexAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::RequiresPlainGlobalAggregate => {
-                f.write_str("vertex aggregate stream requires plain COUNT/SUM/AVG/MIN/MAX")
+                f.write_str("vertex aggregate stream requires plain exact aggregates")
             }
             Self::Scan(error) => error.fmt(f),
         }
@@ -41,10 +46,11 @@ impl core::error::Error for VertexAggregateBuildError {
 }
 
 /// An immutable physical specialization, not a second query language. Grouping
-/// keys may be scalar properties or native vertex identities. DISTINCT,
+/// keys may be scalar properties or native vertex identities. Output DISTINCT,
 /// computed/relational input, HAVING, ordering and pagination still refuse
 /// before opening a source. The underlying row stream's leading-identity order
 /// requirement is relaxed only because this operator owns result grouping.
+/// Argument DISTINCT is independent of the unsupported output-DISTINCT stage.
 #[derive(Clone)]
 pub struct VertexAggregatePlan {
     input: VertexScanPlan<GraphValueRow>,
@@ -62,6 +68,9 @@ impl VertexAggregatePlan {
                         | GraphAggregateFunction::AverageInt
                         | GraphAggregateFunction::Min
                         | GraphAggregateFunction::Max
+                        | GraphAggregateFunction::CountDistinct
+                        | GraphAggregateFunction::SumIntDistinct
+                        | GraphAggregateFunction::AverageIntDistinct
                 )
             })
         {
@@ -255,6 +264,11 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
     {
         let mut values = Vec::new();
         for state in states {
+            // Membership changes admission, never the numeric result domain.
+            let state = match state {
+                NumericState::Distinct(state) => (*state).into_numeric(),
+                state => state,
+            };
             self.meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
             values.push(match state {
                 NumericState::Count(value) => GraphAggregateValue::Count(value),
@@ -273,6 +287,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 NumericState::Extreme { value, .. } => GraphAggregateValue::Value(
                     value.unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
                 ),
+                NumericState::Distinct(_) => unreachable!("DISTINCT cannot contain DISTINCT"),
             });
         }
         let row = if keys.is_empty() {
@@ -329,6 +344,12 @@ where F: FnMut() -> Result<(), C>,
                 maximum: spec.function() == GraphAggregateFunction::Max,
                 payload_units: 0,
             },
+            GraphAggregateFunction::CountDistinct
+            | GraphAggregateFunction::SumIntDistinct
+            | GraphAggregateFunction::AverageIntDistinct => {
+                meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
+                NumericState::Distinct(Box::new(DistinctState::new(spec.function())))
+            }
             _ => unreachable!("only scalar aggregates admitted"),
         });
     }
@@ -338,6 +359,7 @@ fn lift<E, C>(error: GqlQueryError<VertexScanError<E>, C>) -> VertexAggregateErr
     error.map_source(GraphAggregateError::Source)
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum Input<'a> {
     Identity,
     Vertex(VId),
@@ -352,6 +374,7 @@ impl Input<'_> {
     }
 }
 pub(crate) enum NumericState {
+    Distinct(Box<DistinctState>),
     Count(u64),
     Sum(Option<i128>),
     Average { sum: i128, count: u64 },
@@ -375,6 +398,9 @@ impl NumericState {
         aggregate: usize,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), VertexAggregateError<E, C>>,
     ) -> Result<(), VertexAggregateError<E, C>> {
+        if let Self::Distinct(state) = self {
+            return state.update(input, aggregate, control);
+        }
         let Self::Extreme { value, maximum, payload_units } = self else {
             return self.update(input, aggregate);
         };
@@ -432,7 +458,9 @@ impl NumericState {
                 *sum = next_sum;
                 *count = next_count;
             }
-            Self::Extreme { .. } => unreachable!("extrema use governed comparison and ownership"),
+            Self::Extreme { .. } | Self::Distinct(_) => {
+                unreachable!("value support and ownership require governed updates")
+            }
         }
         Ok(())
     }

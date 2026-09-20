@@ -6,6 +6,8 @@ use fgdb_gql::stream::{VertexScanError, VertexScanState};
 use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError, RelationBind};
 use fgdb_types::{CanonicalScalar, CommitSeq, DatabaseSecurityNamespaceId, PurposeContexts, VId};
 
+mod extended;
+
 const LABEL: LabelId = LabelId(3);
 const SCORE: PropertyKeyId = PropertyKeyId(7);
 const TAG: PropertyKeyId = PropertyKeyId(8);
@@ -162,7 +164,7 @@ fn unsupported_aggregate_shapes_are_never_stripped_or_eagerly_retried() {
         let db = Database::open_memory(&commit, keys()).await.unwrap();
         for text in [
             "MATCH (n:L) RETURN n.score AS score, COUNT(*) AS count GROUP BY n.score LIMIT 0",
-            "MATCH (n:L) RETURN COUNT(DISTINCT n.score) AS count",
+            "MATCH (n:L) RETURN COLLECT(n.score) AS values",
             "MATCH (n:L) RETURN COUNT(*) AS count LIMIT 0",
             "MATCH (n:L) RETURN COUNT(*) AS count HAVING count > 0",
             "MATCH (a:L)-[:R]->(b:L) RETURN COUNT(DISTINCT b.score) AS count",

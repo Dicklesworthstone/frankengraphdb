@@ -4,6 +4,8 @@ use crate::GraphAggregate;
 use std::cell::Cell;
 use std::rc::Rc;
 
+mod distinct_tests;
+
 const KEY: PropertyKeyId = PropertyKeyId(7);
 const LABEL: LabelId = LabelId(3);
 
@@ -364,9 +366,6 @@ fn cancellation_at_every_checkpoint_is_terminal_and_close_never_scans() {
 #[test]
 fn unsupported_definitions_refuse_before_source_construction() {
     for function in [
-        GraphAggregate::count_distinct("a", 0),
-        GraphAggregate::sum_int_distinct("a", 0),
-        GraphAggregate::average_int_distinct("a", 0),
         GraphAggregate::collect("a", 0),
         GraphAggregate::collect_distinct("a", 0),
     ] {
