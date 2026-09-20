@@ -92,6 +92,28 @@ impl<V: Vfs + Clone> Database<V> {
         Ok(self.store_standing_query(StandingQuery::Projection(Box::new(state))))
     }
 
+    /// Register a frozen selection/projection definition over an existing view.
+    /// `RowProjectionSpec::selection` preserves the input bag's columns, while
+    /// `RowProjectionSpec::with_filter` selects before evaluating output values
+    /// and DISTINCT. FALSE/UNKNOWN skip expressions, but their input counts
+    /// remain checked so hidden over-retractions cannot pass unnoticed.
+    ///
+    /// The declared input types must exactly match the admitted parent's schema,
+    /// including for empty inputs. Registration is atomic; subsequent failures
+    /// fence this view and its dependents without undoing durable graph writes.
+    /// Use the ordinary `standing_projection*` accessors and rebuild API. Parent
+    /// paging is upstream; this stage returns an unordered compressed bag.
+    /// Session-local, in-memory, and governed by the same per-view allowances as
+    /// `register_standing_projection`, not a durable feed or circuit-wide quota.
+    pub fn register_standing_projection_spec(&mut self, cx: &QueryCx, input: &StandingQueryHandle,
+        spec: RowProjectionSpec, policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        self.admitted_standing_query(cx, input)?;
+        let state = self.prepare_standing_projection(cx, input.index, spec,
+            policy, self.standing_queries.len())?;
+        Ok(self.store_standing_query(StandingQuery::Projection(Box::new(state))))
+    }
+
     pub(super) fn prepare_standing_projection(&self, cx: &QueryCx, input: usize,
         spec: RowProjectionSpec, policy: GqlQueryPolicy, before: usize,
     ) -> Result<State, StandingQueryError> {

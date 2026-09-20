@@ -37,6 +37,15 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
             let query = self.database.prepare_standing_projection(cx, input, spec,
                 policy, self.database.standing_queries.len())?;
             self.append(StandingQuery::Projection(Box::new(query)))
+        } else if let Some((input, predicate)) = query.incremental_filter() {
+            // Keep the complete child scope upstream, including DISTINCT and
+            // source paging. Identity projection preserves all native cells.
+            let spec = RowProjectionSpec::selection(input.column_types().to_vec(),
+                input.columns().to_vec(), predicate).map_err(StandingQueryError::ProjectionSchema)?;
+            let input = self.compile(cx, input, policy, checkpoint)?;
+            let query = self.database.prepare_standing_projection(cx, input, spec,
+                policy, self.database.standing_queries.len())?;
+            self.append(StandingQuery::Projection(Box::new(query)))
         } else if let Some((operation, quantifier, left, right)) = query.incremental_binary() {
             let left = self.compile(cx, left, policy, checkpoint)?;
             let right = self.compile(cx, right, policy, checkpoint)?;
@@ -157,3 +166,6 @@ mod tests;
 
 #[cfg(test)]
 mod projection_tests;
+
+#[cfg(test)]
+mod filter_tests;
