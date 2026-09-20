@@ -1,4 +1,4 @@
-//! Ordered multiway intersection for cyclic, topology-only aggregate cores.
+//! Ordered multiway intersection for cyclic aggregate support bindings.
 //!
 //! At each canonical variable position, intersect every incident factor's
 //! current trie level before extending the binding. A closing edge therefore
@@ -6,6 +6,13 @@
 //! Equality aliases are one variable; distinct variables may share a VId. Each
 //! complete support binding reaches the existing multiplicity/forest callback.
 //! This does not merge multiplicities or invent another aggregate evaluator.
+//!
+//! Property projection and a trailing property/Boolean selection phase are
+//! supported without assuming pure or infallible readers. ALL topology and
+//! identity constraints must precede the first read. The surviving complete
+//! bindings retain native lexicographic order; each read occurs in its original
+//! phase and order. A filter before a later expansion/identity stays on GLA:
+//! moving it could suppress its errors on an ultimately rejected prefix.
 //!
 //! The tries are private, metered in-memory arrangements of the already admitted
 //! topology. They do not claim a persisted Strata trie order, spill, allocator-
@@ -30,6 +37,7 @@ struct Shape<'a> {
     edges: usize,
     columns: &'a [ValueProjection],
     operators: &'a [GlaOperator],
+    selections: &'a [GlaOperator],
 }
 
 fn root(parents: &[usize], mut at: usize) -> usize {
@@ -39,9 +47,9 @@ fn root(parents: &[usize], mut at: usize) -> usize {
 
 impl<'a> Shape<'a> {
     /// Pure bounded definition inspection. No source or catalog is consulted.
-    /// Keep the cheaper existing tree/chain path and all effectful predicates
-    /// unchanged. Only a genuine cycle after equality/parallel-edge reduction
-    /// selects this path; loops or duplicated constraints alone do not do so.
+    /// Keep the cheaper existing tree/chain path. No topology constraint may
+    /// move across a property read. Only a genuine cycle after equality and
+    /// parallel-edge reduction selects this path; loops alone do not do so.
     fn compile(plan: &'a GlaPlan<GraphValueRow>) -> Option<Self> {
         let operators = plan.operators();
         let GlaOperator::ScanEdges { relation, direction } = operators.first()? else { return None; };
@@ -54,18 +62,20 @@ impl<'a> Shape<'a> {
         let mut projected = false;
         let mut ordered = false;
         let mut finished = false;
-        for op in &operators[1..] {
+        let mut first_selection = None;
+        let mut projection_at = None;
+        for (at, op) in operators.iter().enumerate().skip(1) {
             if finished { return None; }
             match op {
                 GlaOperator::Expand { source, relation, direction }
-                    if !projected && edges < atoms.len() && width < MAX_PATTERN_VERTICES
+                    if !projected && first_selection.is_none() && edges < atoms.len() && width < MAX_PATTERN_VERTICES
                         && (source.ordinal() as usize) < width => {
                     atoms[edges] = Some(Atom { left: source.ordinal() as usize, right: width,
                         relation: *relation, direction: *direction });
                     edges += 1;
                     width += 1;
                 }
-                GlaOperator::VertexIdentity { left, right, equal } if !projected => {
+                GlaOperator::VertexIdentity { left, right, equal } if !projected && first_selection.is_none() => {
                     let (left, right) = (left.ordinal() as usize, right.ordinal() as usize);
                     if left >= width || right >= width { return None; }
                     if *equal {
@@ -73,10 +83,26 @@ impl<'a> Shape<'a> {
                         parents[left.max(right)] = left.min(right);
                     }
                 }
+                GlaOperator::CompareProperties { left, right, .. } if !projected => {
+                    if (left.ordinal() as usize) >= width || (right.ordinal() as usize) >= width { return None; }
+                    first_selection.get_or_insert(at);
+                }
+                GlaOperator::SelectBoolean { expression } if !projected => {
+                    let mut valid = true;
+                    let mut captured = false;
+                    let _ = expression.remap_elements(
+                        |slot| { valid &= (slot.ordinal() as usize) < width; slot },
+                        |path| { captured = true; path },
+                    );
+                    if !valid || captured { return None; }
+                    first_selection.get_or_insert(at);
+                }
                 GlaOperator::ProjectValues { columns: output } if !projected => {
                     if output.iter().any(|column| !matches!(column,
-                        ValueProjection::Vertex { slot } if (slot.ordinal() as usize) < width)) { return None; }
+                        ValueProjection::Vertex { slot } | ValueProjection::Property { slot, .. }
+                            if (slot.ordinal() as usize) < width)) { return None; }
                     columns = Some(output.as_slice());
+                    projection_at = Some(at);
                     projected = true;
                 }
                 GlaOperator::OrderByValues if projected && !ordered => ordered = true,
@@ -107,8 +133,10 @@ impl<'a> Shape<'a> {
         for (at, representative) in parents[..width].iter().enumerate() {
             if at == *representative { order[variables] = at; variables += 1; }
         }
+        let projection_at = projection_at?;
         Some(Self { representatives: parents, order, variables, width, atoms, edges,
-            columns: columns?, operators })
+            columns: columns?, operators,
+            selections: &operators[first_selection.unwrap_or(projection_at)..projection_at] })
     }
 }
 
@@ -245,7 +273,19 @@ where
                 control(GlaExecutionEvent::Work)?;
                 bindings[at] = assigned[shape.representatives[at]];
             }
-            visit(shape.columns, &bindings[..shape.width], &mut property, &mut control)?;
+            // The guard proves every ordinary topology/identity test has
+            // already succeeded before these reads would occur. Do not cache,
+            // pre-read, reorder, or swallow a fallible property lookup.
+            let mut accepted = true;
+            for selection in shape.selections {
+                control(GlaExecutionEvent::Work)?;
+                if !crate::algebra_exec::compare_properties(
+                    selection, &bindings[..shape.width], &mut property, &mut control,
+                )? { accepted = false; break; }
+            }
+            if accepted {
+                visit(shape.columns, &bindings[..shape.width], &mut property, &mut control)?;
+            }
             depth -= 1;
             assigned[shape.order[depth]] = None;
             continue;
@@ -278,3 +318,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod properties;

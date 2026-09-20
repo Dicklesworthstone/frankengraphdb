@@ -107,7 +107,6 @@ fn only_pure_cyclic_support_uses_intersection_and_fallback_keeps_its_event_trace
         "MATCH (a)-[:R]->(b)-[:R]->(a) RETURN a,b",
         "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN DISTINCT a,b,c",
         "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) WHERE a.p=1 RETURN a,b,c",
-        "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN a.p,b,c",
         "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN a,b,c LIMIT 0",
     ] { assert!(Shape::compile(pattern(input).plan()).is_none(), "{input}"); }
     let q = pattern("MATCH (a)-[:R]->(b)-[:R]->(c) RETURN a,b,c");
