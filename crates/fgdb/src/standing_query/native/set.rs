@@ -23,41 +23,29 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         self.database.store_standing_query(query).index
     }
 
-    // Keep explicit terminal ordering over unwindowed products/UNWIND. Their
-    // enumeration no longer matters once the terminal order is explicit. The
-    // recursive extension below is deliberately restricted to product-free
-    // window trees, where inherited scope/filter order has a finite bound.
+    // Internal consumers need the selected bag; native delivery also needs
+    // inherited rank after scopes/filters. Restore that rank with an ordinary
+    // compressed window only when a finite occurrence bound is proved.
     fn compile_root(
         &mut self, cx: &QueryCx, query: &PreparedGraphSet, policy: GqlQueryPolicy,
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
         checkpoint()?;
-        let Some((input, order, offset, count)) = query.incremental_ordered_window() else {
-            if !query.incremental_window_sequence_compatible() {
-                return Err(StandingQueryError::Unsupported);
-            }
-            let index = self.compile(cx, query, policy, checkpoint)?;
-            if matches!(&self.database.standing_queries[index], StandingQuery::Window(_)) {
-                return Ok(index);
-            }
-            let Some((order, count)) = query.incremental_finite_order() else { return Ok(index); };
-            // Filters retain a child's order semantically but publish a bag.
-            // Restore only that already-selected finite sequence for delivery.
-            let spec = RowWindowSpec::new(query.column_types().to_vec(), order.to_vec(),
-                GraphSetQuantifier::All, 0, count).map_err(StandingQueryError::WindowSchema)?;
-            let state = self.database.prepare_standing_window(cx, index, spec, policy,
-                self.database.standing_queries.len())?;
-            let index = self.append(StandingQuery::Window(Box::new(state)));
-            checkpoint()?;
-            return Ok(index);
-        };
-        if !input.incremental_window_sequence_compatible() {
+        // Keep the existing refusal for an implicitly ordered positional root
+        // mixed with pages. Explicit/proved ordering can safely consume those
+        // bags; every internal page must independently prove its own rank.
+        if query.incremental_result_order().is_none()
+            && !query.incremental_window_sequence_compatible() {
             return Err(StandingQueryError::Unsupported);
         }
-        let spec = RowWindowSpec::new(input.column_types().to_vec(), order.to_vec(),
-            GraphSetQuantifier::All, offset, count).map_err(StandingQueryError::WindowSchema)?;
-        let input = self.compile(cx, &input, policy, checkpoint)?;
-        let query = self.database.prepare_standing_window(cx, input, spec, policy,
+        let index = self.compile(cx, query, policy, checkpoint)?;
+        let Some((order, Some(bound))) = query.incremental_result_order() else { return Ok(index); };
+        if order.is_empty() || matches!(&self.database.standing_queries[index], StandingQuery::Window(_)) {
+            return Ok(index);
+        }
+        let spec = RowWindowSpec::new(query.column_types().to_vec(), order.to_vec(),
+            GraphSetQuantifier::All, 0, bound).map_err(StandingQueryError::WindowSchema)?;
+        let query = self.database.prepare_standing_window(cx, index, spec, policy,
             self.database.standing_queries.len())?;
         let index = self.append(StandingQuery::Window(Box::new(query)));
         checkpoint()?;
@@ -68,7 +56,16 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
         checkpoint()?;
-        let index = if let Some((input, spec)) = query.incremental_window()
+        let index = if let Some((input, order, offset, count)) = query.incremental_ordered_window() {
+            // Peel just this scope. Never move a page across DISTINCT, a
+            // filter, or an expression, including when the page is empty.
+            let spec = RowWindowSpec::new(input.column_types().to_vec(), order.to_vec(),
+                GraphSetQuantifier::All, offset, count).map_err(StandingQueryError::WindowSchema)?;
+            let input = self.compile(cx, &input, policy, checkpoint)?;
+            let state = self.database.prepare_standing_window(cx, input, spec, policy,
+                self.database.standing_queries.len())?;
+            self.append(StandingQuery::Window(Box::new(state)))
+        } else if let Some((input, spec)) = query.incremental_window()
             .map_err(StandingQueryError::WindowSchema)? {
             let input = self.compile(cx, &input, policy, checkpoint)?;
             let state = self.database.prepare_standing_window(cx, input, spec, policy,
@@ -276,3 +273,6 @@ mod window_tests;
 
 #[cfg(test)]
 mod nested_window_tests;
+
+#[cfg(test)]
+mod ranked_pipeline_tests;

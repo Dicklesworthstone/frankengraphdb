@@ -43,14 +43,14 @@ impl PreparedNativeRead {
     /// maintained view. There is no new SUBSCRIBE grammar or durable delivery.
     /// Set registration owns a bounded row/set/join/projection tree; admission and
     /// maintenance policies apply PER NODE, not to their aggregate footprint.
-    /// Grouping and complete operand semantics are preserved. Finite windows
-    /// may be nested through product/UNWIND-free trees. Bare LIMIT with optional
-    /// OFFSET inherits scope/filter order; projection and set nodes canonicalize.
-    /// Filters preserve a finite child's selected sequence at delivery too.
-    /// Explicit terminal ORDER BY with finite LIMIT also remains available over
-    /// unwindowed products/UNWIND. Bare pages over those positional sources and
-    /// mixing them with nested relational windows refuse. Unbounded ORDER BY or
-    /// OFFSET still refuses. LIMIT 0 never bypasses child admission or quotas.
+    /// Ranked windows compose at any depth, including around products and
+    /// UNWIND when each selected scope proves its comparator. ORDER BY/OFFSET
+    /// without LIMIT is admitted only with a proven finite upstream bound.
+    /// Scopes/filters preserve inherited rank; projections and sets follow the
+    /// snapshot canonicalization rules. The existing product-free finite-page
+    /// profile also admits canonical bare pages. Unknown positional paging or
+    /// a positional unranked root mixed with pages still refuses. Genuinely
+    /// unbounded sorting and unsupported descendants refuse even under LIMIT 0.
     /// Unwindowed compound delivery is canonical bag order, not implicit
     /// left-major enumeration. Policies still apply per node.
     /// The normal rebuild API repairs the complete owned circuit atomically.
@@ -128,9 +128,12 @@ impl<V: Vfs + Clone> Database<V> {
     /// returned handle owns an atomically admitted circuit and rebuilds it as a
     /// unit. Explicit terminal ORDER BY with finite LIMIT is ranked; otherwise
     /// delivery uses canonical bag order, not implicit left-major enumeration.
-    /// Nested finite windows and inherited scope/filter order are supported on
-    /// product/UNWIND-free trees. Bare pages over positional sources, nested
-    /// windows mixed with those sources, and unbounded ordering/pages refuse.
+    /// Nested ranked windows keep complete child selection before later stages.
+    /// A comparator and finite bound may be inherited through prior scopes.
+    /// Explicitly ranked product/UNWIND trees may contain nested ranked pages;
+    /// unknown implicit enumeration never substitutes for a proved comparator.
+    /// Bare finite pages remain available in the product-free profile. Unknown
+    /// positional pages and genuinely unbounded sorting still refuse.
     /// Each node keeps its own allowance; no eager per-commit fallback is used,
     /// including for a zero terminal limit.
     /// Session-local and in-memory, not a durable subscription or spill engine.
