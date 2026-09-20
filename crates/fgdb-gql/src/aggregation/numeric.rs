@@ -199,6 +199,20 @@ impl NumericAccumulator {
     }
 }
 
+impl GraphAggregateRow {
+    /// Internal result assembly for a checked global physical operator. The
+    /// closed accumulator family has already enforced result domains and the
+    /// caller must admit every owned cell before invoking this constructor.
+    /// Unlike maintained-row admission, an empty AVG/SUM of a vertex expression
+    /// must remain NULL: no nonnumeric value was evaluated on that empty input.
+    pub(crate) fn from_global_values(values: Vec<GraphAggregateValue>) -> Self {
+        Self {
+            keys: Box::new([]),
+            values: values.into_boxed_slice(),
+        }
+    }
+}
+
 impl PreparedGraphAggregate {
     /// Materialize one complete maintained group with its exact result domains.
     /// The caller owns aggregation, resource admission and atomic publication;

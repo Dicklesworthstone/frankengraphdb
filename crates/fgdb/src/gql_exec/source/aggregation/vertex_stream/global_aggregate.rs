@@ -1,4 +1,4 @@
-//! Global numeric aggregate cursors over the existing pinned MVCC source.
+//! Global scalar aggregate cursors over the existing pinned MVCC source.
 
 use super::*;
 use fgdb_gql::GraphAggregateError;
@@ -42,17 +42,20 @@ fn open_global<'q>(
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Open an exact global COUNT/SUM pull query without admitting a full
-    /// projected snapshot or result bag. Build the immutable physical definition
+    /// Open exact global COUNT/SUM/AVG/MIN/MAX without collecting a projected
+    /// snapshot or result bag. Build the immutable physical definition
     /// with `VertexAggregatePlan::compile` from a `PreparedGraphAggregate`.
     /// Unsupported aggregate/GLA shapes fail at compilation, never by retrying
     /// an eager executor. The returned cursor owns the generation and definition
     /// and borrows only `cx`, so the writer and definition may change or drop.
     ///
     /// The first pull consumes the supported source and releases one exact
-    /// `GraphAggregateRow`; earlier partial numeric states never escape. Empty
-    /// input still returns zero counts and null sums. Execution state is bounded
-    /// by the aggregate width; the shared pinned generation remains in memory.
+    /// `GraphAggregateRow`; no partial aggregate escapes. Empty input returns
+    /// zero counts and null non-count aggregates. AVG retains an exact reduced
+    /// fraction; MIN/MAX retain their scalar or 128-bit vertex domains. Live
+    /// state is one numeric cell or selected extremum per aggregate, not an
+    /// input bag. Extremum comparison/copy costs and cumulative replacements
+    /// remain governed; the shared pinned generation is still in memory.
     pub fn stream_global_aggregate_governed<'q>(
         &self,
         cx: &'q QueryCx,

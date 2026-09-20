@@ -1,10 +1,12 @@
-//! Constant-state global COUNT/SUM over an admitted vertex source.
+//! Bounded-state global COUNT/SUM/AVG/MIN/MAX over an admitted vertex source.
 //!
 //! The checked input reuses the ordinary vertex GLA compiler and predicate /
 //! probe executor. Its order is not exposed: only order-independent, exact
-//! global COUNT(*) / COUNT(value) / SUM(Int64) definitions are admitted. It
-//! retains one numeric cell per aggregate, never a projected input bag or a
-//! property payload. This bounds execution state, not source residency.
+//! global scalar aggregates are admitted. COUNT/SUM/AVG retain numeric cells;
+//! each MIN/MAX retains at most one selected scalar or vertex value. Comparisons
+//! and replacement payload copies are charged before work or ownership growth.
+//! There is no projected input bag. This bounds state, not source residency;
+//! cumulative scratch still counts every admitted extremum replacement.
 
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow, ValueProjection};
@@ -15,14 +17,14 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VertexAggregateBuildError {
-    RequiresPlainGlobalCountOrSum,
+    RequiresPlainGlobalAggregate,
     Scan(VertexScanBuildError),
 }
 impl core::fmt::Display for VertexAggregateBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::RequiresPlainGlobalCountOrSum => {
-                f.write_str("vertex aggregate stream requires plain global COUNT or SUM")
+            Self::RequiresPlainGlobalAggregate => {
+                f.write_str("vertex aggregate stream requires plain global COUNT/SUM/AVG/MIN/MAX")
             }
             Self::Scan(error) => error.fmt(f),
         }
@@ -56,10 +58,13 @@ impl VertexAggregatePlan {
                     GraphAggregateFunction::CountRows
                         | GraphAggregateFunction::Count
                         | GraphAggregateFunction::SumInt
+                        | GraphAggregateFunction::AverageInt
+                        | GraphAggregateFunction::Min
+                        | GraphAggregateFunction::Max
                 )
             })
         {
-            return Err(VertexAggregateBuildError::RequiresPlainGlobalCountOrSum);
+            return Err(VertexAggregateBuildError::RequiresPlainGlobalAggregate);
         }
         let input = VertexScanPlan::compile_with_projection(
             aggregate.input_pattern().plan(),
@@ -171,7 +176,15 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                     NumericState::Count(0)
                 }
                 GraphAggregateFunction::SumInt => NumericState::Sum(None),
-                _ => unreachable!("the immutable physical plan admitted only COUNT/SUM"),
+                GraphAggregateFunction::AverageInt => NumericState::Average { sum: 0, count: 0 },
+                GraphAggregateFunction::Min | GraphAggregateFunction::Max => NumericState::Extreme {
+                    value: None,
+                    maximum: spec.function() == GraphAggregateFunction::Max,
+                    payload_units: 0,
+                },
+                _ => {
+                    unreachable!("the immutable physical plan admitted only global scalar aggregates")
+                }
             });
         }
         let GlaOperator::ProjectValues { columns } = self.plan.input.projection.as_ref() else {
@@ -221,13 +234,13 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 .enumerate()
             {
                 meter.event(VertexScanEvent::Work).map_err(lift)?;
-                // Identity is nonnull but never an integer SUM operand. A
+                // Identity is nonnull but never an integer SUM/AVG operand. A
                 // missing property and canonical null have the same aggregate
-                // null behavior; incompatible nonnull SUM inputs must refuse.
+                // null behavior; incompatible nonnull numeric inputs refuse.
                 let value = match spec.argument_column() {
                     None => Input::Identity,
                     Some(column) => match &columns[column] {
-                        ValueProjection::Vertex { .. } => Input::Identity,
+                        ValueProjection::Vertex { .. } => Input::Vertex(vid),
                         ValueProjection::Property { key, .. } => {
                             let found = seek(row.properties, key, |entry| entry.0, &mut |event| {
                                 meter.event(event)
@@ -238,12 +251,13 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         _ => unreachable!("projection profile was checked before source access"),
                     },
                 };
-                state.update(value, aggregate)?;
+                state.update_governed(value, aggregate, &mut |event| {
+                    meter.event(event).map_err(lift)
+                })?;
             }
         }
-        // Own only the final numeric cells, never source payloads. The plan's
-        // existing exact-domain constructor supplies the same public row shape
-        // as ordinary and incrementally maintained aggregates.
+        // Move the selected extrema into the output without cloning them again.
+        // AVG uses the existing exact-fraction normalizer, never float division.
         let mut values = Vec::new();
         for state in states {
             meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
@@ -253,13 +267,19 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 NumericState::Sum(None) => {
                     GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
                 }
+                NumericState::Average { sum, count } => {
+                    meter.event(VertexScanEvent::Work).map_err(lift)?;
+                    crate::GraphExactAverage::new(sum, count).map_or_else(
+                        || GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null)),
+                        GraphAggregateValue::Average,
+                    )
+                }
+                NumericState::Extreme { value, .. } => GraphAggregateValue::Value(
+                    value.unwrap_or(GraphValue::Scalar(CanonicalScalar::Null)),
+                ),
             });
         }
-        let row = self
-            .plan
-            .aggregate
-            .incremental_global_row(values)
-            .expect("the checked global numeric definition fixes the exact output domains");
+        let row = GraphAggregateRow::from_global_values(values);
         meter.emit().map_err(lift)?;
         Ok(row)
     }
@@ -271,13 +291,98 @@ fn lift<E, C>(error: GqlQueryError<VertexScanError<E>, C>) -> VertexAggregateErr
 
 enum Input<'a> {
     Identity,
+    Vertex(VId),
     Scalar(Option<&'a CanonicalScalar>),
+}
+impl Input<'_> {
+    // Same payload units as the ordinary scalar aggregate path. Read lengths
+    // from borrowed fields; never encode/clone a candidate merely to meter it.
+    fn payload_units(&self) -> usize {
+        let bytes = match self {
+            Self::Scalar(Some(CanonicalScalar::Bytes(value))) => value.as_slice().len(),
+            Self::Scalar(Some(CanonicalScalar::Text(value))) => {
+                value
+                    .len()
+                    .saturating_add(value.canonical_sort_key().map_or(0, <[u8]>::len))
+            }
+            Self::Scalar(Some(CanonicalScalar::Timestamp(value))) => {
+                value.zone().map_or(0, |zone| zone.identifier().len())
+            }
+            _ => 0,
+        };
+        bytes.div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES)
+    }
 }
 enum NumericState {
     Count(u64),
     Sum(Option<i128>),
+    Average {
+        sum: i128,
+        count: u64,
+    },
+    Extreme {
+        value: Option<GraphValue>,
+        maximum: bool,
+        payload_units: usize,
+    },
 }
 impl NumericState {
+    fn update_governed<E, C>(
+        &mut self,
+        input: Input<'_>,
+        aggregate: usize,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), VertexAggregateError<E, C>>,
+    ) -> Result<(), VertexAggregateError<E, C>> {
+        let Self::Extreme {
+            value,
+            maximum,
+            payload_units,
+        } = self
+        else {
+            return self.update(input, aggregate);
+        };
+        if matches!(input, Input::Scalar(None | Some(CanonicalScalar::Null))) {
+            return Ok(());
+        }
+        let units = input.payload_units();
+        // Compare canonical values only after charging both operands' payloads.
+        for _ in 0..units.saturating_add(*payload_units) {
+            control(VertexScanEvent::Work)?;
+        }
+        let replace = match (value.as_ref(), &input) {
+            (None, _) => true,
+            (Some(GraphValue::Vertex(old)), Input::Vertex(next)) => {
+                if *maximum {
+                    next > old
+                } else {
+                    next < old
+                }
+            }
+            (Some(GraphValue::Scalar(old)), Input::Scalar(Some(next))) => {
+                if *maximum {
+                    *next > old
+                } else {
+                    *next < old
+                }
+            }
+            _ => unreachable!("a checked aggregate has one immutable argument domain"),
+        };
+        if replace {
+            control(VertexScanEvent::ScratchEntry)?;
+            for _ in 0..units {
+                control(VertexScanEvent::ScratchEntry)?;
+            }
+            let owned = match input {
+                Input::Vertex(vid) => GraphValue::Vertex(vid),
+                Input::Scalar(Some(scalar)) => GraphValue::Scalar(scalar.clone()),
+                _ => unreachable!("MIN/MAX has a checked nonnull argument"),
+            };
+            *value = Some(owned);
+            *payload_units = units;
+        }
+        Ok(())
+    }
+
     fn update<E, C>(
         &mut self,
         input: Input<'_>,
@@ -302,6 +407,18 @@ impl NumericState {
                         .ok_or_else(overflow)?,
                 );
             }
+            Self::Average { sum, count } => {
+                let Input::Scalar(Some(CanonicalScalar::Int(value))) = input else {
+                    return Err(GqlQueryError::Source(
+                        GraphAggregateError::NonIntegerAverage { aggregate },
+                    ));
+                };
+                let next_count = count.checked_add(1).ok_or_else(overflow)?;
+                let next_sum = sum.checked_add(i128::from(*value)).ok_or_else(overflow)?;
+                *sum = next_sum;
+                *count = next_count;
+            }
+            Self::Extreme { .. } => unreachable!("extrema use governed comparison and ownership"),
         }
         Ok(())
     }
