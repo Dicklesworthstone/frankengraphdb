@@ -1,4 +1,4 @@
-//! Typed incremental inner, left outer, semi and anti equijoins of row bags.
+//! Typed incremental equijoins and Cartesian products of exact row bags.
 //!
 //! This is the row/schema adapter for the existing Z-set join derivative, not
 //! a second matcher, parser, scheduler or graph store. Equality uses canonical
@@ -56,8 +56,9 @@ impl RowJoinKind {
 }
 
 /// Immutable positional schema. Inner/left output concatenates both inputs;
-/// semi/anti output contains only the left columns. At least one equality key
-/// is required. This is not CROSS JOIN or an arbitrary ON predicate program.
+/// semi/anti output contains only the left columns. `new` requires equality
+/// keys; `cross` explicitly chooses unconditional matching. Neither accepts
+/// an arbitrary ON predicate program.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RowJoinSpec {
     left: Box<[GraphSetColumnType]>,
@@ -90,6 +91,29 @@ impl RowJoinSpec {
         }
         Ok(Self { left: left.into(), right: right.into(), keys: keys.into(), kind: RowJoinKind::Inner })
     }
+    /// An unconditional Cartesian product, using the existing exact join
+    /// derivative with one shared empty key. NULL is ordinary payload here:
+    /// it never suppresses a pair. All bounded native value domains are valid
+    /// because no payload is interpreted as an equality key. A zero-column
+    /// relation is valid; a unit tuple multiplies counts, not column widths.
+    ///
+    /// The default kind is Inner. With Left/Semi/Anti, every right occurrence
+    /// is a witness regardless of its values. Source counts are still checked
+    /// when the opposite bag is empty. Products can be quadratic in support;
+    /// this constructor promises neither a selective index nor spill.
+    pub fn cross(
+        left: &[GraphSetColumnType], right: &[GraphSetColumnType],
+    ) -> Result<Self, RowJoinBuildError> {
+        let width = left.len().checked_add(right.len()).unwrap_or(usize::MAX);
+        if width > MAX_PATTERN_VERTICES {
+            return Err(RowJoinBuildError::TooManyColumns { observed: width });
+        }
+        Ok(Self { left: left.into(), right: right.into(), keys: Box::new([]),
+            kind: RowJoinKind::Inner })
+    }
+    /// True only for the explicitly constructed unconditional definition.
+    pub fn is_cross(&self) -> bool { self.keys.is_empty() }
+
     /// Choose semantics before constructing the operator. Input schemas and
     /// key admission are identical for all kinds; a live operator cannot switch.
     pub fn with_kind(mut self, kind: RowJoinKind) -> Self {
@@ -146,7 +170,7 @@ fn charge<E>(control: &mut impl FnMut(ZSetEvent) -> Result<(), E>, event: ZSetEv
 fn reserve_cell<E>(value: &GraphValue, control: &mut impl FnMut(ZSetEvent) -> Result<(), E>)
     -> Result<(), ZSetError<E>> {
     charge(control, ZSetEvent::Work)?;
-    // Admitted rows contain only scalar/vertex cells, not recursive payloads.
+    // Bounds are checked before this reservation, including recursive payloads.
     for _ in 0..=value.payload_units() { charge(control, ZSetEvent::ScratchEntry)?; }
     Ok(())
 }
@@ -165,7 +189,9 @@ fn arrange<E>(spec: &RowJoinSpec, side: usize, rows: &ZSet<GraphValueRow>, limbs
         if row.len() != schema.len() { return Err(RowJoinError::InputSchema { side }); }
         for (value, kind) in row.values().iter().zip(schema.iter()) {
             charge(control, ZSetEvent::Work)?;
-            if !kind.accepts(value) { return Err(RowJoinError::InputSchema { side }); }
+            if !kind.accepts(value) || !value.validate_bounds() {
+                return Err(RowJoinError::InputSchema { side });
+            }
         }
         charge(control, ZSetEvent::ScratchEntry)?;
         let mut values = Vec::with_capacity(spec.keys.len());
@@ -211,7 +237,8 @@ impl IncrementalRowJoin {
     pub fn total(&self) -> &ZWeight { &self.total }
 
     /// Prepare both complete derivatives against the OLD input arrangements.
-    /// NULL-key rows are retained for count validation but never match. Negative
+    /// Equijoin NULL keys never match; cross definitions have no key columns.
+    /// All rows remain retained for count validation. Negative
     /// final counts refuse even when the opposite side currently has no match.
     /// The output bound tests final occurrences, not support or a transient
     /// insertion-first prefix. Dropping the guard leaves all state unchanged.
@@ -297,3 +324,6 @@ mod tests;
 
 #[cfg(test)]
 mod mode_tests;
+
+#[cfg(test)]
+mod cross_tests;
