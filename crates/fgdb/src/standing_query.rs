@@ -8,6 +8,7 @@ mod aggregate;
 mod components;
 mod output;
 mod recursive;
+mod sets;
 mod triangles;
 // Reuse the concurrently introduced row-output file as one registry sink.
 #[path = "standing_query/output/values.rs"]
@@ -52,6 +53,9 @@ pub enum StandingQueryFailure {
     Arithmetic,
     NonIntegerSum,
     NonIntegerHaving,
+    /// An input view did not publish the same complete successor. Never
+    /// interpret an unavailable input or a new baseline as an empty delta.
+    DependencyUnavailable,
     /// Computed input column and value-independent scalar failure. A source
     /// binding identity or payload is never included in the diagnostic.
     InputExpression {
@@ -71,6 +75,7 @@ pub enum StandingQueryError {
     ForeignHandle,
     UnknownHandle,
     Unsupported,
+    SetSchema(fgdb_gql::GraphSetBuildError),
     Unavailable {
         frontier: CommitSeq,
         reason: StandingQueryFailure,
@@ -87,6 +92,7 @@ impl core::fmt::Display for StandingQueryError {
             Self::Unsupported => {
                 f.write_str("standing query kind or definition is unsupported by this operation")
             }
+            Self::SetSchema(error) => error.fmt(f),
             Self::Unavailable { frontier, reason } => write!(
                 f,
                 "standing query unavailable after {frontier:?}: {reason:?}"
@@ -151,6 +157,9 @@ pub(crate) enum StandingQuery {
     Reachability(Box<recursive::State>),
     Triangles(Box<triangles::State>),
     Components(Box<components::State>),
+    /// Dependencies name only earlier registry entries, so the append order
+    /// is a topological order without a second scheduler or recursive walk.
+    Set(Box<sets::State>),
 }
 
 impl StandingQuery {
@@ -163,6 +172,7 @@ impl StandingQuery {
             Self::Reachability(query) => (query.policy, query.frontier, query.failure),
             Self::Triangles(query) => (query.policy, query.frontier, query.failure),
             Self::Components(query) => (query.policy, query.frontier, query.failure),
+            Self::Set(query) => (query.policy, query.frontier, query.failure),
         }
     }
 
@@ -184,6 +194,9 @@ impl StandingQuery {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
             Self::Components(query) => {
+                (&mut query.frontier, &mut query.failure, &mut query.stats)
+            }
+            Self::Set(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
         };
@@ -370,6 +383,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// the old rows, frontier, policy and failure untouched. Successful repair
     /// replaces all state together and resumes ordinary commit maintenance.
     /// An already durable write is never rolled back by a maintenance failure.
+    /// Set compositions rebuild from their current healthy operand views;
+    /// repair unavailable dependencies first, then rebuild their dependents.
     pub fn rebuild_standing_query(
         &mut self,
         cx: &QueryCx,
@@ -403,6 +418,9 @@ impl<V: Vfs + Clone> Database<V> {
             )),
             StandingQuery::Components(query) => StandingQuery::Components(Box::new(
                 self.prepare_standing_components(cx, query.relation, policy)?,
+            )),
+            StandingQuery::Set(query) => StandingQuery::Set(Box::new(
+                self.prepare_standing_set(cx, query.inputs, query.operation(), policy, handle.index)?,
             )),
         };
         let frontier = replacement.status().1;
@@ -452,7 +470,8 @@ impl<V: Vfs + Clone> Database<V> {
                 (source.as_ref(), &output.rows, output.ordered_rows())
             }
             StandingQuery::Reachability(_) | StandingQuery::Rows { .. }
-            | StandingQuery::Triangles(_) | StandingQuery::Components(_) => return Err(StandingQueryError::Unsupported),
+            | StandingQuery::Triangles(_) | StandingQuery::Components(_)
+            | StandingQuery::Set(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
             rows,
@@ -499,7 +518,11 @@ impl<V: Vfs + Clone> Database<V> {
 /// One publication lifecycle. A failed derived view never rejects a durable
 /// database commit or prevents independently admitted sibling views advancing.
 pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &LogicalDeltaBatch) {
-    for query in queries {
+    for index in 0..queries.len() {
+        // Every dependency precedes its consumer. Borrow already published
+        // operands and one exclusive consumer; no cursor can skip a tick.
+        let (prior, remaining) = queries.split_at_mut(index);
+        let query = &mut remaining[0];
         let (policy, _, failure) = query.status();
         if failure.is_some() {
             continue;
@@ -524,6 +547,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Components(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::Set(query) => query.maintain(batch, prior, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);
     }
