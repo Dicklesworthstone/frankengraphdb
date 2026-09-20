@@ -16,6 +16,7 @@
 //! Tables are metered, in-memory preprocessing, not spill or a byte-memory cap.
 
 mod cycle;
+mod intersection;
 
 use super::*;
 use crate::algebra::{
@@ -347,9 +348,10 @@ where
     } else {
         (plan, topology, accesses)
     };
-    execution.visit_value_bindings(
+    intersection::visit_bindings(
+        execution,
         vertices,
-        topology.keys().copied(),
+        topology,
         test_vertex,
         property,
         control,
