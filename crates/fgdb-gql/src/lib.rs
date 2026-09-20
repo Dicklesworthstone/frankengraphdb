@@ -35,6 +35,7 @@ mod prepared;
 pub mod row_aggregate;
 pub mod row_join;
 pub mod row_projection;
+pub mod row_window;
 pub mod scan_stream;
 mod set_ops;
 mod set_text;

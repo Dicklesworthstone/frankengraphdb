@@ -231,6 +231,19 @@ impl ProjectedRows<GraphValueRow> {
     }
 }
 
+impl GraphValueRow {
+    /// Shared with the incremental native-row window. Callers first validate
+    /// both complete rows and all ordering positions against one frozen schema.
+    /// This preserves ordinary GLA NULL placement and complete-row tie breaks.
+    pub(crate) fn compare_incremental_window_order(
+        &self,
+        other: &Self,
+        order: &[GraphValueOrder],
+    ) -> Ordering {
+        compare_rows(&Lookup { key: self, order }, &Lookup { key: other, order })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
