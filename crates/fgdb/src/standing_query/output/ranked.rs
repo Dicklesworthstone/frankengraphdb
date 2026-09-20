@@ -176,7 +176,7 @@ impl State {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare<'a>(
         &'a mut self,
-        definition: &PreparedGraphAggregate,
+        definition: &impl GroupDefinition,
         delta: &ZSet<GraphAggregateRow>,
         rows: &'a mut ZSet<GraphAggregateRow>,
         row_count: &'a mut u128,
@@ -381,6 +381,7 @@ impl State {
             count,
             row_count,
             sink,
+            delta: output,
         })
     }
 }
@@ -396,6 +397,7 @@ pub(super) struct Update<'a> {
     count: u128,
     row_count: &'a mut u128,
     sink: ZSetUpdate<'a, GraphAggregateRow>,
+    delta: ZSet<GraphAggregateRow>,
 }
 
 fn publish_ranked(base: &mut Ranked, patch: RankPatch) {
@@ -408,7 +410,7 @@ fn publish_ranked(base: &mut Ranked, patch: RankPatch) {
 }
 
 impl Update<'_> {
-    pub(super) fn commit(self) {
+    pub(super) fn commit(self) -> ZSet<GraphAggregateRow> {
         let Self {
             owner,
             order,
@@ -419,6 +421,7 @@ impl Update<'_> {
             count,
             row_count,
             sink,
+            delta,
         } = self;
         for (key, rank) in groups {
             match rank {
@@ -454,6 +457,7 @@ impl Update<'_> {
         }
         *row_count = count;
         sink.commit();
+        delta
     }
 }
 

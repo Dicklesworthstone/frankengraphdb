@@ -13,6 +13,7 @@ use super::{Meter, StandingQueryFailure, zset_error};
 use fgdb_delta_types::zset::ZSetUpdate;
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetEvent, ZWeight};
 use fgdb_gql::algebra::GraphValue;
+use fgdb_gql::row_aggregate::definition::GroupDefinition;
 use fgdb_gql::{
     GlaExecutionEvent, GqlQueryError, GraphAggregateError, GraphAggregateRow,
     PreparedGraphAggregate,
@@ -25,15 +26,15 @@ type Members = BTreeMap<GroupKey, Arc<GraphAggregateRow>>;
 type Classes = BTreeMap<GraphAggregateRow, Members>;
 type Changes = BTreeMap<GraphAggregateRow, BTreeMap<GroupKey, Option<Arc<GraphAggregateRow>>>>;
 
-pub(crate) struct State {
-    definition: PreparedGraphAggregate,
+pub(crate) struct State<D: GroupDefinition = PreparedGraphAggregate> {
+    definition: D,
     classes: Classes,
     ranked: Option<ranked::State>,
     pub(super) rows: ZSet<GraphAggregateRow>,
     row_count: u128,
 }
 
-impl core::fmt::Debug for State {
+impl<D: GroupDefinition> core::fmt::Debug for State<D> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("StandingOutput")
             .field("rows", &self.row_count)
@@ -83,8 +84,8 @@ fn reserve_row(row: &GraphAggregateRow, meter: &mut Meter<'_>) -> Result<(), Sta
     Ok(())
 }
 
-impl State {
-    pub(super) fn new(definition: PreparedGraphAggregate) -> Self {
+impl<D: GroupDefinition> State<D> {
+    pub(super) fn new(definition: D) -> Self {
         let ranked = definition
             .has_incremental_ranking()
             .then(ranked::State::default);
@@ -97,7 +98,7 @@ impl State {
         }
     }
 
-    pub(super) fn definition(&self) -> &PreparedGraphAggregate {
+    pub(super) fn definition(&self) -> &D {
         &self.definition
     }
 
@@ -278,6 +279,7 @@ impl State {
                 changes,
                 row_count,
                 sink,
+                delta: output,
             }),
         })
     }
@@ -294,7 +296,10 @@ enum Transition<'a> {
 }
 
 impl Update<'_> {
-    pub(super) fn commit(self) {
+    /// The already consolidated final-output derivative, not complete groups.
+    /// No copy, additional evaluation or new failure point is needed to retain
+    /// it alongside a database-owned relational aggregate.
+    pub(super) fn commit(self) -> ZSet<GraphAggregateRow> {
         match self.transition {
             Transition::Plain(update) => update.commit(),
             Transition::Ranked(update) => update.commit(),
@@ -308,6 +313,7 @@ struct PlainUpdate<'a> {
     changes: Changes,
     row_count: u128,
     sink: ZSetUpdate<'a, GraphAggregateRow>,
+    delta: ZSet<GraphAggregateRow>,
 }
 
 fn publish_members(
@@ -327,13 +333,14 @@ fn publish_members(
 }
 
 impl PlainUpdate<'_> {
-    fn commit(self) {
+    fn commit(self) -> ZSet<GraphAggregateRow> {
         let Self {
             classes,
             count,
             changes,
             row_count,
             sink,
+            delta,
         } = self;
         for (identity, changes) in changes {
             match classes.entry(identity) {
@@ -354,8 +361,12 @@ impl PlainUpdate<'_> {
         }
         *count = row_count;
         sink.commit();
+        delta
     }
 }
+
+#[cfg(test)]
+mod relational_tests;
 
 #[cfg(test)]
 mod tests {
