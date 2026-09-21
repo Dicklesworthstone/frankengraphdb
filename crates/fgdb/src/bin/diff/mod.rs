@@ -14,6 +14,8 @@ use fgdb_gql::result_diff::GraphResultDiff;
 use fgdb_types::{CommitSeq, QueryCx};
 use std::io::Write;
 
+const DEFAULT_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Default)]
 pub(super) struct DiffOptions {
     before: Option<u64>,
@@ -22,6 +24,7 @@ pub(super) struct DiffOptions {
     rows: Option<u64>,
     work: Option<u64>,
     scratch: Option<u64>,
+    output_bytes: Option<u64>,
 }
 impl DiffOptions {
     pub(super) fn set(&mut self, flag: &str, raw: &str) -> Result<(), Failure> {
@@ -32,6 +35,7 @@ impl DiffOptions {
             "--max-result-rows" => &mut self.rows,
             "--max-work-units" => &mut self.work,
             "--max-scratch-entries" => &mut self.scratch,
+            "--max-output-bytes" => &mut self.output_bytes,
             _ => return Err(Failure::usage("unknown diff flag")),
         };
         if target.is_some() {
@@ -77,7 +81,8 @@ pub(super) fn run<V: Vfs + Clone>(
     // or intermediate event stream is acquired by this command.
     let result = db.query_diff(cx, &options.text, &options.params, options, before, after,
         options.diff.policy()).map_err(execution_failure)?;
-    render(&result, robot, out, &mut || cx.checkpoint().map_err(Failure::query))
+    render(&result, robot, options.diff.output_bytes.unwrap_or(DEFAULT_OUTPUT_BYTES), out,
+        &mut || cx.checkpoint().map_err(Failure::query))
 }
 
 fn signed(weight: &ZWeight) -> Result<i128, Failure> {
@@ -88,7 +93,7 @@ fn signed(weight: &ZWeight) -> Result<i128, Failure> {
 }
 
 fn render(
-    result: &GraphResultDiff, robot: bool, out: &mut impl Write,
+    result: &GraphResultDiff, robot: bool, max_output_bytes: u64, out: &mut impl Write,
     checkpoint: &mut impl FnMut() -> Result<(), Failure>,
 ) -> Result<(), Failure> {
     let (before, after) = (result.before().0, result.after().0);
@@ -107,6 +112,7 @@ fn render(
             .ok_or_else(|| Failure::query("diff delivery occurrence total overflow"))?;
     }
     let mut sent = 0_u64;
+    let mut bytes = 0_u64;
     let delivery = (|| {
         checkpoint()?;
         let mut names = Vec::new();
@@ -121,8 +127,7 @@ fn render(
             format!("diff {before} -> {after} (net occurrence changes)\nweight\t{}", names.join("\t"))
         };
         checkpoint()?;
-        emit(out, &header)?;
-        out.flush().map_err(Failure::io)?;
+        frame(out, &header, &mut bytes, max_output_bytes)?;
         for (row, weight) in result.changes().iter() {
             checkpoint()?;
             let weight = signed(weight)?;
@@ -145,8 +150,7 @@ fn render(
             };
             let next = sent.checked_add(1).ok_or_else(|| Failure::query("diff delivery count overflow"))?;
             checkpoint()?;
-            emit(out, &line)?;
-            out.flush().map_err(Failure::io)?;
+            frame(out, &line, &mut bytes, max_output_bytes)?;
             sent = next; // Count only a fully flushed change record.
         }
         checkpoint()?;
@@ -158,13 +162,29 @@ fn render(
         } else {
             format!("{sent} changed tuple(s): +{inserted} / -{retracted} occurrence(s) (diff complete {before} -> {after})")
         };
-        emit(out, &summary)?;
-        out.flush().map_err(Failure::io)
+        frame(out, &summary, &mut bytes, max_output_bytes)
     })();
     delivery.map_err(|error: Failure| Failure::new(error.code, error.class, format!(
         "diff incomplete after {sent} fully flushed change(s); output may contain a partial final frame: {}",
         error.message,
     )))
+}
+
+// Count actual UTF-8 transport bytes, including every newline and the final
+// summary. Invocation/error records are emitted by main, outside this budget.
+// Reject a whole frame before writing any of it; transport errors can still
+// leave a partial frame. Encoding scratch and source residency are NOT bounded
+// by this delivery cap. A failed flush is terminal, not an invitation to retry.
+fn frame(out: &mut impl Write, line: &str, used: &mut u64, limit: u64) -> Result<(), Failure> {
+    let next = u64::try_from(line.len()).ok()
+        .and_then(|len| len.checked_add(1))
+        .and_then(|len| used.checked_add(len))
+        .filter(|next| *next <= limit)
+        .ok_or_else(|| Failure::query(format!("diff encoded output exceeds {limit} bytes")))?;
+    emit(out, line)?;
+    out.flush().map_err(Failure::io)?;
+    *used = next;
+    Ok(())
 }
 
 #[cfg(test)]
