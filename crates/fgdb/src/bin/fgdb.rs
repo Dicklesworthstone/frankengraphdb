@@ -2,6 +2,7 @@
 //! symbol IDs remain explicit until the library supplies a durable catalog.
 #![forbid(unsafe_code)]
 
+mod diff;
 mod load;
 mod stream;
 mod transaction;
@@ -26,7 +27,7 @@ use std::{
 };
 
 const ROBOT_SCHEMA: &str = concat!(
-    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns","statement","stream","seq"],"row":["v","event","cells","statement"],"statement":["v","event","index","kind","view","basis","count","statements"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements","basis","stream"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds","transaction","streaming"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded","committed","read_closed","rolled_back"],"transaction":{"steps":"Ordered --write/--query; each --param belongs to its preceding step. Statement indexes are one-based. Statement/columns/row records describe intermediate transaction-local workspaces, not durable historical snapshots. Only the final result records completion; unknown completion emits an error, never rolled_back. --rollback discards effects and rows.","optional_fields":"statement on columns/row, basis on result; count only on query statements, statements only on write statements","max_statements":64,"max_query_rows":100000,"max_buffered_output_bytes":16777216,"execution_budgets":"per native read or write program; buffered rows/output limits are transaction-wide, not execution byte-memory bounds"},"streaming":{"flag":"query --stream; incompatible with --certify-to","profile":"native single-vertex scan with leading vertex identity, or one-edge scan with leading edge/source identities; canonical order, supported filters and SKIP/LIMIT; temporal cuts supported; no eager fallback or spill","delivery":"columns includes stream=true and the exact selected seq; each row is flushed before pulling another; result with stream=true is emitted only at successful exhaustion; error or EOF without result means an incomplete result, even after rows","memory":"one encoded row, not a collected result; the native source may retain an entire decoded generation","optional_fields":"stream and seq on columns, stream on result; absent on ordinary eager reads"}}"##,
+    r##"{"v":1,"event":"schema","events":{"invocation":["v","event"],"columns":["v","event","columns","statement","stream","seq"],"row":["v","event","cells","statement"],"diff_columns":["v","event","before","after","semantics","columns"],"change":["v","event","weight","cells"],"statement":["v","event","index","kind","view","basis","count","statements"],"progress":["v","event","rows","seq"],"result":["v","event","kind","seq","count","statements","basis","stream","before","after","changed_rows","inserted","retracted","snapshot_records","work_units","scratch_entries"],"error":["v","event","class","diagnostics"],"schema":["v","event","events","exit_codes","key_file","bindings","cell_types","result_kinds","transaction","streaming","diff"]},"exit_codes":{"success":0,"usage":2,"query":3,"open":4,"io":5},"key_file":"Three nonempty lines of 64 hexadecimal characters: object-id key, security namespace, encryption key; # starts a comment. Keys are never printed.","bindings":"Repeat --label name=u32, --relation name=u32, --property name=u32 on each invocation; --write-relation u32 defaults to 1. No implicit catalog.","cell_types":["null","bool","int","text","list","count","wideint","average","decimal","float","timestamp","bytes","vertex","edge","path","vertices","edges"],"result_kinds":["created","written","rows","replayed","help","schema","loaded","committed","read_closed","rolled_back","diff"],"transaction":{"steps":"Ordered --write/--query; each --param belongs to its preceding step. Statement indexes are one-based. Statement/columns/row records describe intermediate transaction-local workspaces, not durable historical snapshots. Only the final result records completion; unknown completion emits an error, never rolled_back. --rollback discards effects and rows.","optional_fields":"statement on columns/row, basis on result; count only on query statements, statements only on write statements","max_statements":64,"max_query_rows":100000,"max_buffered_output_bytes":16777216,"execution_budgets":"per native read or write program; buffered rows/output limits are transaction-wide, not execution byte-memory bounds"},"streaming":{"flag":"query --stream; incompatible with --certify-to","profile":"native single-vertex scan with leading vertex identity, or one-edge scan with leading edge/source identities; canonical order, supported filters and SKIP/LIMIT; temporal cuts supported; no eager fallback or spill","delivery":"columns includes stream=true and the exact selected seq; each row is flushed before pulling another; result with stream=true is emitted only at successful exhaustion; error or EOF without result means an incomplete result, even after rows","memory":"one encoded row, not a collected result; the native source may retain an entire decoded generation","optional_fields":"stream and seq on columns, stream on result; absent on ordinary eager reads"},"diff":{"command":"diff --before <seq> --after <seq> <gql>; both endpoints required, reverse/equal/zero legal","semantics":"after_minus_before_bag: complete native result net changes in one admitted history; positive weight adds occurrences, negative retracts; not write events, ordering changes, cross-branch comparison or DIFF syntax","encoding":"diff_columns then canonical change records then result kind=diff; revisions, weights and all diff counters are decimal strings; cells retain native types","delivery":"both queries and consolidation finish before diff_columns; each change is flushed; only final result plus successful exit and no error establishes complete delivery; a write/flush error may leave a partial final frame","limits":"diff-only --max-snapshot-records, --max-result-rows, --max-work-units, --max-scratch-entries; decimal u64 including zero; defaults 100000/100000/10000000/10000000; cumulative across both queries and consolidation; result rows count changed tuples","memory":"endpoint and consolidated results are in memory; one encoded change at a time; not spill or an allocator-byte bound","refusals":"explicit temporal selectors, writes, --stream, --certify-to and --certificate are not supported"}}"##,
     "\n"
 );
 const HELP: &str = "fgdb - embedded graph database
@@ -34,6 +35,7 @@ Usage: fgdb [--robot] <command>
   create --db <dir> --key-file <file>
   write --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
   query --db <dir> --key-file <file> [bindings] [--param name=value]... [--stream] <gql>
+  diff --db <dir> --key-file <file> [bindings] [--param name=value]... --before <seq> --after <seq> <gql>
   transaction --db <dir> --key-file <file> [bindings] --write <gql> --query <gql> ... [--rollback]
   replay --db <dir> --key-file <file> [bindings] [--param name=value]... --certificate <file>
   load --db <dir> --key-file <file> [bindings] --input <file.ndjson> [--rows-per-chunk N] [--checkpoint <file>]
@@ -51,6 +53,18 @@ Both use canonical order, supported filters and SKIP/LIMIT, including temporal c
 Unsupported plans refuse; no eager fallback. --stream cannot use --certify-to.
 An error can follow delivered rows; only the terminal result marks a complete stream.
 The stream pins decoded source state, not out-of-core storage or a resumable cursor.
+diff compares complete results of the same native query at two committed revisions.
+Positive weights add occurrences; negative weights retract them. This is a NET bag
+difference, not a write log, order-change report, cross-branch diff or DIFF syntax.
+Both exact endpoints are required; zero, reverse and equal cuts are legal.
+Explicit historical selectors, writes, --stream and --certify-to are refused.
+Optional diff-only limits: --max-snapshot-records, --max-result-rows,
+--max-work-units, --max-scratch-entries (decimal u64, including zero).
+Defaults: 100000 source records, 100000 changed tuples, 10000000 work/scratch units.
+One budget covers both endpoint queries and consolidation; results are in memory.
+Robot diff output uses diff_columns, signed change records, then result kind=diff.
+Revisions, weights and diff counters are decimal strings, never lossy JSON numbers.
+Only a final result AND successful exit confirm complete delivery; EOF/error is incomplete.
 transaction executes ordered --write/--query steps in one native transaction.
 Each --param belongs to the preceding step; parameter maps do not leak between steps.
 Success commits once; --rollback discards all effects and results. Errors abort before commit.
@@ -153,6 +167,7 @@ struct Options {
     steps: Vec<transaction::Step>,
     rollback: bool,
     stream: bool,
+    diff: diff::DiffOptions,
 }
 impl Options {
     fn resolve(&self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -239,6 +254,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut steps: Vec<transaction::Step> = Vec::new();
     let mut rollback = false;
     let mut stream = false;
+    let mut diff = diff::DiffOptions::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg == "--stream" {
@@ -260,6 +276,10 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 "--db" if db.is_none() => db = Some(PathBuf::from(value)),
                 "--key-file" if key.is_none() => key = Some(PathBuf::from(value)),
                 "--tzdb-file" if tzdb_file.is_none() => tzdb_file = Some(PathBuf::from(value)),
+                "--before" | "--after" | "--max-snapshot-records" | "--max-result-rows"
+                | "--max-work-units" | "--max-scratch-entries" if command == "diff" => {
+                    diff.set(arg, value)?;
+                }
                 "--input" if command == "load" && input.is_none() => {
                     input = Some(PathBuf::from(value))
                 }
@@ -325,7 +345,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     }
                     map.insert(name.to_owned(), id);
                 }
-                "--write-relation" => {
+                "--write-relation" if command != "diff" => {
                     let id: u32 = value
                         .parse()
                         .map_err(|_| Failure::usage("write relation must be u32"))?;
@@ -340,7 +360,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
             || text.replace(arg.clone()).is_some()
         {
             return Err(Failure::usage(
-                "expected exactly one GQL argument for query/write, none for create",
+                "expected exactly one GQL argument for query/write/diff, none for create",
             ));
         }
     }
@@ -352,6 +372,9 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     }
     if command == "transaction" {
         transaction::validate_input(&steps)?;
+    }
+    if command == "diff" {
+        diff.validate()?;
     }
     if stream && certify_to.is_some() {
         return Err(Failure::usage(
@@ -381,6 +404,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         steps,
         rollback,
         stream,
+        diff,
     })
 }
 fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
@@ -552,7 +576,7 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             }
             Ok(())
         }
-        Some(command @ ("create" | "query" | "write" | "replay" | "load" | "transaction")) => {
+        Some(command @ ("create" | "query" | "write" | "replay" | "load" | "transaction" | "diff")) => {
             let mut options = parse(&args[1..], command)?;
             let runtime = RuntimeBuilder::new().build().map_err(Failure::io)?;
             let root = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -579,6 +603,9 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 }
                 if command == "transaction" {
                     return transaction::run(&mut db, &contexts, &options, artifact.as_deref(), robot, out).await;
+                }
+                if command == "diff" {
+                    return diff::run(&db, &contexts.query(), &options, robot, out);
                 }
                 if command == "write" {
                     let declarations: Vec<_> = options.params.parameter_types().filter(|(_, kind)| matches!(kind, GqlParameterType::Scalar(_))).collect();
