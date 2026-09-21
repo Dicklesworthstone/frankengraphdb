@@ -1,6 +1,7 @@
 use super::*;
 mod groups;
 mod grouped;
+mod output;
 mod computed;
 use crate::algebra::GraphValue;
 use crate::{
@@ -442,10 +443,10 @@ fn ordinary_row_profile_is_not_relaxed_and_unsupported_aggregate_shapes_refuse()
     assert!(EdgeScanPlan::compile(q.input_pattern().plan()).is_err());
     assert!(EdgeAggregatePlan::compile(&q).is_ok());
     for text in [
-        "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n HAVING n > 0",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n ORDER BY n",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT b) AS n",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p+1) AS n",
-        "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n LIMIT 0",
+        "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n ORDER BY n LIMIT 0",
         "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:S]->(c) RETURN COUNT(*) AS n",
     ] {
         assert!(

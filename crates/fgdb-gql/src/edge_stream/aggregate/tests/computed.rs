@@ -228,8 +228,8 @@ fn projection_grouping_and_delivery_share_exact_budgets_and_terminal_cancellatio
 #[test]
 fn transformed_input_does_not_admit_result_modifiers_or_weaken_maintenance_or_row_scans() {
     for text in [
-        "MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total LIMIT 0",
-        "MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total HAVING total>0",
+        "MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total ORDER BY total LIMIT 0",
+        "MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total HAVING total>0 ORDER BY total",
         "MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total ORDER BY total",
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p+1) AS values",
         "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:S]->(c) RETURN SUM(r.p+1) AS total",

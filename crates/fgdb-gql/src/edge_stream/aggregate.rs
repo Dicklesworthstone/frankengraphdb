@@ -3,6 +3,8 @@
 //! The first pull consumes joined bindings once, retaining group keys and the
 //! SAME numeric/DISTINCT cells as vertex aggregation, not an input or result
 //! table. Subsequent pulls move completed groups out in canonical key order.
+//! HAVING/output expressions are validated on all completed groups before a
+//! selected page can escape. Page selection never suppresses input failures.
 //! Group and DISTINCT support are metered in-memory state, not spill storage.
 
 use super::*;
@@ -42,7 +44,8 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// preserve match multiplicity; null and lazy-branch semantics remain native.
 /// Only the current source/projected binding is transient, never an input bag.
 ///
-/// Relational input, output DISTINCT, HAVING, result ordering/pages
+/// HAVING, hidden/repeated output columns, output expressions and canonical-key
+/// SKIP/LIMIT are supported. Relational input, output DISTINCT, explicit ordering
 /// and COLLECT remain outside this physical profile. Every child operator and
 /// column is checked before opening the source; a failed plan is never retried
 /// as another source or an eager query. The ordinary row stream's identity
@@ -54,13 +57,14 @@ pub struct EdgeAggregatePlan {
 }
 impl EdgeAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, EdgeAggregateBuildError> {
-        if !aggregate.supports_row_local_aggregate_stream()
-            || !aggregate.aggregates().iter().all(|spec| NumericState::supports(spec.function())) {
+        if !aggregate.aggregates().iter().all(|spec| NumericState::supports(spec.function())) {
             return Err(EdgeAggregateBuildError::RequiresPlainGlobalAggregate);
         }
+        let aggregate = aggregate.prepare_streamed_output()
+            .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let input = join::compile_aggregate(aggregate.input_pattern().plan())
             .map_err(EdgeAggregateBuildError::Scan)?;
-        Ok(Self { input, aggregate: aggregate.clone() })
+        Ok(Self { input, aggregate })
     }
     #[must_use]
     pub fn columns(&self) -> &[String] { self.aggregate.aggregate_columns() }
@@ -80,7 +84,10 @@ type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
 /// Global empty input yields one zero/null row; grouped empty input yields none.
 /// Every match/probe/source examination and group-state operation shares the
 /// original cumulative policy. ResultRows bounds complete groups, not matched
-/// occurrences. Group-count and source/data failures precede ALL output.
+/// occurrences. With output clauses, only selected qualified groups count
+/// against ResultRows, not groups rejected by HAVING or the result window.
+/// Raw group storage remains subject to work/scratch admission. Source/data,
+/// HAVING, output-expression and selected-result-count failures precede ALL output.
 /// Delivery work/cancellation can fail after earlier complete groups; one error
 /// fuses the cursor. Close/drop frees the pin and pending groups without demand.
 ///
@@ -93,11 +100,12 @@ pub struct EdgeAggregateCursor<S, F> {
     aggregate: PreparedGraphAggregate,
     state: EdgeScanState,
     pending: Option<PendingGroups>,
+    completed: Option<std::vec::IntoIter<GraphAggregateRow>>,
 }
 impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
     pub fn new(source: S, plan: EdgeAggregatePlan, policy: GqlQueryPolicy, checkpoint: F) -> Self {
         Self { input: EdgeScanCursor::new(source, plan.input, policy, checkpoint),
-            aggregate: plan.aggregate, state: EdgeScanState::Open, pending: None }
+            aggregate: plan.aggregate, state: EdgeScanState::Open, pending: None, completed: None }
     }
     #[must_use]
     pub fn columns(&self) -> &[String] { self.aggregate.aggregate_columns() }
@@ -115,6 +123,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         if self.state == EdgeScanState::Open { self.state = EdgeScanState::Closed; }
         self.input.close();
         self.pending = None;
+        self.completed = None;
     }
 
     fn accumulate<C>(&mut self) -> Result<Groups, EdgeAggregateError<S::Error, C>>
@@ -124,7 +133,9 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         let global = self.aggregate.group_key_columns().is_empty();
         if global {
             // Preserve global zero-budget refusal before driving any source.
-            self.input.meter.increment(GqlBudgetDimension::ResultRows, 0).map_err(lift)?;
+            if !self.aggregate.has_streamed_output_stage() {
+                self.input.meter.increment(GqlBudgetDimension::ResultRows, 0).map_err(lift)?;
+            }
             self.input.meter.event(GlaExecutionEvent::ScratchEntry).map_err(lift)?;
             groups.insert(Vec::new(), states(&self.aggregate, &mut self.input.meter)?);
         }
@@ -161,8 +172,10 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
                 match groups.entry(key) {
                     btree_map::Entry::Occupied(entry) => entry.into_mut(),
                     btree_map::Entry::Vacant(entry) => {
-                        meter.policy.rows.check(GqlBudgetDimension::ResultRows, next)
-                            .map_err(GqlQueryError::Rows)?;
+                        if !self.aggregate.has_streamed_output_stage() {
+                            meter.policy.rows.check(GqlBudgetDimension::ResultRows, next)
+                                .map_err(GqlQueryError::Rows)?;
+                        }
                         meter.event(GlaExecutionEvent::ScratchEntry).map_err(lift)?;
                         entry.insert(states(&self.aggregate, meter)?)
                     }
@@ -179,7 +192,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
         Ok(groups)
     }
 
-    fn deliver<C>(&mut self, keys: Vec<GraphValue>, states: Vec<NumericState>)
+    fn finalize<C>(&mut self, keys: Vec<GraphValue>, states: Vec<NumericState>)
         -> Result<GraphAggregateRow, EdgeAggregateError<S::Error, C>>
     where F: FnMut() -> Result<(), C> {
         let meter = &mut self.input.meter;
@@ -194,7 +207,39 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             };
             values.push(value);
         }
-        let row = GraphAggregateRow::from_group_values(keys, values);
+        Ok(GraphAggregateRow::from_group_values(keys, values))
+    }
+
+    // Move the raw group map; finalize each state once and release it. Retain
+    // at most the requested number of selected rows, not skipped/off-page rows
+    // or a second matched-input bag. Even a full page cannot hide an error in
+    // a later qualified output expression or HAVING comparison.
+    fn select_output<C>(&mut self, groups: Groups)
+        -> Result<Vec<GraphAggregateRow>, EdgeAggregateError<S::Error, C>>
+    where F: FnMut() -> Result<(), C> {
+        let (offset, count) = self.aggregate.incremental_result_window();
+        let mut skipped = 0_u64;
+        let mut selected = Vec::new();
+        for (keys, states) in groups {
+            let row = self.finalize(keys, states)?;
+            let meter = &mut self.input.meter;
+            let Some(row) = self.aggregate.evaluate_streamed_output(row,
+                &mut |event| meter.event(event).map_err(lift))? else { continue; };
+            if skipped < offset { skipped += 1; continue; }
+            if count.is_some_and(|count| selected.len() as u64 >= count) { continue; }
+            let next = meter.increment(GqlBudgetDimension::ResultRows, selected.len() as u64).map_err(lift)?;
+            meter.event(GlaExecutionEvent::ScratchEntry).map_err(lift)?;
+            selected.push(row);
+            debug_assert_eq!(selected.len() as u64, next);
+        }
+        self.input.meter.event(GlaExecutionEvent::Work).map_err(lift)?;
+        Ok(selected)
+    }
+
+    fn deliver<C>(&mut self, row: GraphAggregateRow)
+        -> Result<GraphAggregateRow, EdgeAggregateError<S::Error, C>>
+    where F: FnMut() -> Result<(), C> {
+        let meter = &mut self.input.meter;
         let next = meter.increment(GqlBudgetDimension::ResultRows, meter.rows.result_rows).map_err(lift)?;
         meter.event(GlaExecutionEvent::ResultRow).map_err(lift)?;
         meter.rows.result_rows = next;
@@ -225,33 +270,50 @@ impl<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C> Iterator for EdgeAggrega
     type Item = Result<GraphAggregateRow, EdgeAggregateError<S::Error, C>>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.state != EdgeScanState::Open { return None; }
-        if self.pending.is_none() {
+        if self.pending.is_none() && self.completed.is_none() {
             let result = self.accumulate();
             // All retained keys/witnesses/extrema are owned; source release is
             // independent of whether any output has yet been requested.
             self.input.close();
             match result {
+                Ok(groups) if self.aggregate.has_streamed_output_stage() => {
+                    match self.select_output(groups) {
+                        Ok(rows) => self.completed = Some(rows.into_iter()),
+                        Err(error) => { self.state = EdgeScanState::Failed; return Some(Err(error)); }
+                    }
+                }
                 Ok(groups) => self.pending = Some(groups.into_iter()),
                 Err(error) => { self.state = EdgeScanState::Failed; return Some(Err(error)); }
             }
         }
-        let Some((keys, states)) = self.pending.as_mut().and_then(Iterator::next) else {
+        let row = if let Some(rows) = &mut self.completed {
+            rows.next().map(Ok)
+        } else {
+            self.pending.as_mut().and_then(Iterator::next)
+                .map(|(keys, states)| self.finalize(keys, states))
+        };
+        let Some(row) = row else {
             self.state = EdgeScanState::Exhausted;
             self.pending = None;
+            self.completed = None;
             return None;
         };
-        let result = self.deliver(keys, states);
+        let result = row.and_then(|row| self.deliver(row));
         if result.is_err() {
             self.state = EdgeScanState::Failed;
             self.pending = None;
-        } else if self.pending.as_ref().is_some_and(|groups| groups.len() == 0) {
+            self.completed = None;
+        } else if self.pending.as_ref().is_some_and(|groups| groups.len() == 0)
+            || self.completed.as_ref().is_some_and(|rows| rows.len() == 0) {
             self.state = EdgeScanState::Exhausted;
             self.pending = None;
+            self.completed = None;
         }
         Some(result)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.state != EdgeScanState::Open { return (0, Some(0)); }
+        if let Some(rows) = &self.completed { return (0, Some(rows.len())); }
         match &self.pending {
             Some(groups) => (0, Some(groups.len())),
             None if self.aggregate.group_key_columns().is_empty() => (0, Some(1)),

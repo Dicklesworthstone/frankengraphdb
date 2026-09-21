@@ -5,6 +5,7 @@
 //! complete groups to select the first ranked representative after deletes.
 
 mod ranking;
+mod pull;
 
 use super::*;
 use core::convert::Infallible;
@@ -93,6 +94,17 @@ impl PreparedGraphAggregate {
         if !self.accepts_incremental_row(&row.keys, &row.values) {
             return Ok(None);
         }
+        self.project_complete_output(row, &mut govern).map(Some)
+    }
+
+    // Both consumers validate their own complete-group source contract before
+    // entering this single projection/ownership path. No maintenance admission
+    // is widened to admit graph-stream edge or path input schemas.
+    fn project_complete_output<E, C>(
+        &self,
+        row: &GraphAggregateRow,
+        govern: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
+    ) -> Result<GraphAggregateRow, QueryError<E, C>> {
         let input = |column: usize| {
             if column < row.keys.len() {
                 Ok(Cell::Value(value_ref(&row.keys[column])))
@@ -110,32 +122,32 @@ impl PreparedGraphAggregate {
             for (column, output) in projection.iter().enumerate() {
                 govern(GlaExecutionEvent::ScratchEntry)?;
                 values.push(
-                    expression(output.value(), input, column, &mut govern)?
-                        .into_owned(&mut govern)?,
+                    expression(output.value(), input, column, govern)?
+                        .into_owned(govern)?,
                 );
             }
         } else {
             if let Some(projection) = &self.key_output {
                 for &column in &projection.columns {
                     govern(GlaExecutionEvent::Work)?;
-                    keys.push(row.keys[column].copy_with_control(&mut govern)?);
+                    keys.push(row.keys[column].copy_with_control(govern)?);
                 }
             } else {
                 for key in &row.keys {
                     govern(GlaExecutionEvent::Work)?;
-                    keys.push(key.copy_with_control(&mut govern)?);
+                    keys.push(key.copy_with_control(govern)?);
                 }
             }
             for value in &row.values[..self.output_aggregates] {
                 govern(GlaExecutionEvent::Work)?;
-                values.push(OutputValue::Borrowed(result_cell(value)).into_owned(&mut govern)?);
+                values.push(OutputValue::Borrowed(result_cell(value)).into_owned(govern)?);
             }
         }
         govern(GlaExecutionEvent::Work)?;
-        Ok(Some(GraphAggregateRow {
+        Ok(GraphAggregateRow {
             keys: keys.into_boxed_slice(),
             values: values.into_boxed_slice(),
-        }))
+        })
     }
 }
 
