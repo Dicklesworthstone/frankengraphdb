@@ -7,6 +7,7 @@ use fgdb_delta_types::ZWeight;
 use fgdb_gql::{GqlParameters, GraphAggregateTextSlot, GraphSymbolResolver};
 
 pub(super) mod set;
+mod changes;
 mod cursor;
 pub use cursor::{StandingNativeCursor, StandingNativeDeltaCursor};
 
@@ -254,7 +255,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// be the immediate predecessor of the accepted frontier, even for an
     /// empty tick. A missed tick returns DeltaGap, never an incomplete delta.
     /// None is an initialization/rebuild baseline, not an unchanged successor.
-    /// Direct graph-source aggregates do not retain this derivative and refuse.
+    /// Direct graph-source aggregate cursors remain unsupported; use
+    /// standing_native_delta for their consolidated final-result changes.
     ///
     /// Stage changes privately and integrate only after cursor exhaustion;
     /// early close or failure is incomplete delivery. This reports bag changes,

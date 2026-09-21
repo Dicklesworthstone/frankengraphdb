@@ -103,6 +103,12 @@ pub enum StandingQueryError {
     /// Reading a healthy maintained result exceeded the caller's delivery
     /// allowance. This does not fence the maintained view or change its policy.
     Delivery(StandingQueryFailure),
+    /// There is no retained one-tick change from this consumer frontier.
+    /// The view may be healthy: a gap or rebuild requires a fresh baseline.
+    DeltaUnavailable {
+        from: CommitSeq,
+        frontier: CommitSeq,
+    },
     /// Only the latest accepted tick is retained. The requested previous
     /// frontier is not its predecessor; take a new snapshot instead of
     /// integrating a partial history. This never fences the maintained view.
@@ -141,6 +147,10 @@ impl core::fmt::Display for StandingQueryError {
                 )
             }
             Self::Delivery(reason) => write!(f, "standing result delivery refused: {reason:?}"),
+            Self::DeltaUnavailable { from, frontier } => write!(
+                f,
+                "standing delta from {from:?} to {frontier:?} is unavailable; refresh the baseline"
+            ),
             Self::DeltaGap { after, frontier } => write!(
                 f,
                 "standing delta after {after:?} cannot reach {frontier:?} in one retained tick"
