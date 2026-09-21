@@ -397,3 +397,6 @@ fn native_selected_pages_share_one_allowance_without_charging_rejected_groups_as
 
 #[path = "native_computed_edge_stream/ordered.rs"]
 mod ordered;
+
+#[path = "native_computed_edge_stream/distinct.rs"]
+mod distinct;
