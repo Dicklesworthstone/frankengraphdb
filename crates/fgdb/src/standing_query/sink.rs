@@ -9,7 +9,11 @@ use fgdb_delta_types::ZSet;
 use fgdb_gql::GraphAggregateRow;
 
 pub(super) trait PreparedSink {
-    fn commit(self);
+    /// Return an owned final aggregate derivative when this sink has that row
+    /// domain. Other sinks retain their native derivative themselves. Moving
+    /// the prepared delta adds no clone or fallible callback; collection
+    /// publication retains its ordinary allocator/panic boundary.
+    fn commit(self) -> Option<ZSet<GraphAggregateRow>>;
 }
 
 pub(super) trait GroupSink {
@@ -37,8 +41,8 @@ impl GroupSink for output::State {
 }
 
 impl PreparedSink for output::Update<'_> {
-    fn commit(self) {
-        output::Update::commit(self);
+    fn commit(self) -> Option<ZSet<GraphAggregateRow>> {
+        Some(output::Update::commit(self))
     }
 }
 
@@ -55,7 +59,8 @@ impl GroupSink for row::State {
 }
 
 impl PreparedSink for row::Update<'_> {
-    fn commit(self) {
+    fn commit(self) -> Option<ZSet<GraphAggregateRow>> {
         row::Update::commit(self);
+        None
     }
 }

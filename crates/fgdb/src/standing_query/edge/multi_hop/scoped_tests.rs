@@ -125,6 +125,7 @@ fn seeded(batches: &[LogicalDeltaBatch], mode: Mode) -> StandingQuery {
         vertices: BTreeMap::new(),
         aggregate: IncrementalAggregate::new(),
         rows: ZSet::new(),
+        last_delta: None,
         frontier: CommitSeq::ORIGIN,
         stats: StandingQueryStats::default(),
         failure: None,
@@ -135,6 +136,9 @@ fn seeded(batches: &[LogicalDeltaBatch], mode: Mode) -> StandingQuery {
     query
 }
 
+// A fresh bootstrap and an incrementally advanced query have the same accepted
+// state but intentionally different delta availability. Rollback checks below
+// compare last_delta separately; never equate a new baseline with a successor.
 fn same(actual: &StandingQuery, expected: &StandingQuery) {
     assert_eq!(actual.vertices, expected.vertices);
     assert_eq!(actual.edges, expected.edges); // every complete-path witness count
@@ -214,6 +218,8 @@ fn only_complete_paths_suppress_null_rows_and_bootstrap_matches_committed_witnes
                 .prepare_standing_query(&query, definition(mode), policy())
                 .unwrap();
             same(&state, &rebuilt);
+            assert!(state.last_delta.is_some());
+            assert!(rebuilt.last_delta.is_none());
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -281,8 +287,10 @@ fn every_multi_hop_scope_checkpoint_and_budget_refusal_preserves_all_state() {
                 );
                 assert_eq!(seen, stop);
                 same(&candidate, &before);
+                assert_eq!(candidate.last_delta, before.last_delta);
                 advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
                 same(&candidate, &successful);
+                assert_eq!(candidate.last_delta, successful.last_delta);
             }
             for reason in [
                 StandingQueryFailure::WorkBudget,
@@ -301,9 +309,11 @@ fn every_multi_hop_scope_checkpoint_and_budget_refusal_preserves_all_state() {
                 }
                 assert_eq!(advance(&mut candidate, &delta, &mut || Ok(())), Err(reason));
                 same(&candidate, &before);
+                assert_eq!(candidate.last_delta, before.last_delta);
                 candidate.policy = policy();
                 advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
                 same(&candidate, &successful);
+                assert_eq!(candidate.last_delta, successful.last_delta);
             }
         }
     });
@@ -357,6 +367,7 @@ fn incomplete_cascade_refuses_even_when_every_child_has_only_a_partial_path() {
                 Err(StandingQueryFailure::InvalidDelta)
             );
             same(&candidate, &before);
+            assert_eq!(candidate.last_delta, before.last_delta);
             advance(&mut candidate, &delta, &mut || Ok(())).unwrap();
             assert_eq!(candidate.vertices.len(), 1);
         }
