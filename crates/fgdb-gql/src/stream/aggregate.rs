@@ -46,8 +46,10 @@ impl core::error::Error for VertexAggregateBuildError {
 }
 
 /// An immutable physical specialization, not a second query language. Grouping
-/// keys may be scalar properties or native vertex identities. Output DISTINCT,
-/// computed/relational input, HAVING, ordering and pagination still refuse
+/// keys may be scalar properties, native vertex identities or checked computed
+/// values. Row-local expressions use the shared projection VM before grouping
+/// and argument DISTINCT. Plain operands retain their direct borrowed path.
+/// Output DISTINCT, relational input, HAVING, ordering and pagination still refuse
 /// before opening a source. The underlying row stream's leading-identity order
 /// requirement is relaxed only because this operator owns result grouping.
 /// Argument DISTINCT is independent of the unsupported output-DISTINCT stage.
@@ -58,7 +60,7 @@ pub struct VertexAggregatePlan {
 }
 impl VertexAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, VertexAggregateBuildError> {
-        if !aggregate.supports_incremental_maintenance()
+        if !aggregate.supports_row_local_aggregate_stream()
             || !aggregate
                 .aggregates()
                 .iter()
@@ -203,6 +205,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             .as_mut()
             .expect("uninitialized cursor owns a source");
         let mut last = None;
+        let mut largest_computed_key = 0_usize;
         if !self.plan.input.empty {
             loop {
                 let next =
@@ -239,6 +242,22 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 if !accepted {
                     continue;
                 }
+                // Only computed definitions own a transient source projection.
+                // The sealed collector retains ordinary property/null behavior
+                // and charges every copy; the shared VM then completes ALL
+                // computed columns before a group can see this occurrence.
+                let computed = if self.plan.aggregate.input_projection().is_some() {
+                    let input = project_input_row::<GraphValueRow, _>(
+                        vid, row, &self.plan.input.projection,
+                        &mut |event| meter.event(event).map_err(lift),
+                    )?;
+                    Some(self.plan.aggregate.evaluate_streamed_input(
+                        input,
+                        &mut |event| meter.event(input_event(event)).map_err(lift),
+                    )?)
+                } else {
+                    None
+                };
                 let state = if global {
                     groups
                         .get_mut(&Vec::<GraphValue>::new())
@@ -248,11 +267,14 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                     let mut key = Vec::new();
                     for &column in self.plan.aggregate.group_key_columns() {
                         meter.event(VertexScanEvent::Work).map_err(lift)?;
-                        let value = match argument(&columns[column], vid, row, meter)? {
+                        let value = match projected_argument(
+                            column, computed.as_ref(), columns, vid, row, meter,
+                        )? {
                             Input::Vertex(vid) => GraphValue::Vertex(vid),
-                            Input::Identity | Input::Value(_) => {
-                                unreachable!("vertex keys have a scalar/vertex column")
-                            }
+                            Input::Identity => unreachable!("a key has a checked input column"),
+                            Input::Value(value) => value.copy_with_control(&mut |event| {
+                                meter.event(input_event(event)).map_err(lift)
+                            })?,
                             Input::Scalar(value) => {
                                 let value = value.unwrap_or(&CanonicalScalar::Null);
                                 // Charge the actual borrowed payload before cloning it.
@@ -267,6 +289,21 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         };
                         meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
                         key.push(value);
+                    }
+                    if computed.is_some() {
+                        // Computed keys may own recursive native values. Reserve
+                        // comparison work for this logical lookup/insertion;
+                        // this is not std::BTreeMap allocator accounting.
+                        let units = key.iter().fold(0_usize, |total, value| {
+                            total.saturating_add(value.payload_units()).saturating_add(1)
+                        });
+                        largest_computed_key = largest_computed_key.max(units);
+                        let levels = groups.len().saturating_add(1).ilog2() as usize + 1;
+                        for _ in 0..levels.saturating_mul(24)
+                            .saturating_mul(largest_computed_key.saturating_add(1))
+                        {
+                            meter.event(VertexScanEvent::Work).map_err(lift)?;
+                        }
                     }
                     // The number of groups is monotone during this read. Admit a
                     // new group's final output BEFORE allocating its numeric state.
@@ -303,7 +340,9 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                     meter.event(VertexScanEvent::Work).map_err(lift)?;
                     let input = match spec.argument_column() {
                         None => Input::Identity,
-                        Some(column) => argument(&columns[column], vid, row, meter)?,
+                        Some(column) => projected_argument(
+                            column, computed.as_ref(), columns, vid, row, meter,
+                        )?,
                     };
                     state.update_governed(input, aggregate, &mut |event| {
                         meter.event(event).map_err(lift)
@@ -337,6 +376,11 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             // Preserve empty global SUM/AVG over a nonnumeric static domain:
             // no nonnull operand was encountered, so its answer is NULL.
             GraphAggregateRow::from_global_values(values)
+        } else if self.plan.aggregate.input_projection().is_some() {
+            // The projection compiler checked every column and the shared
+            // exact cells checked every consumed value. Preserve native key
+            // domains without weakening public maintained-row admission.
+            GraphAggregateRow::from_group_values(keys, values)
         } else {
             self.plan
                 .aggregate
@@ -345,6 +389,42 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         };
         self.meter.emit().map_err(lift)?;
         Ok(row)
+    }
+}
+
+// A bounded transient row, using the same sealed GLA collector as row streams.
+// The generic bound exposes its inherited projection without a second encoder.
+fn project_input_row<Row: VertexScanOutput, E>(
+    vid: VId,
+    row: VertexScanRow<'_>,
+    projection: &GlaOperator,
+    control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
+) -> Result<Row, E> {
+    Row::project(vid, row, projection, control)
+}
+
+fn input_event(event: GlaExecutionEvent) -> VertexScanEvent {
+    match event {
+        GlaExecutionEvent::ScratchEntry => VertexScanEvent::ScratchEntry,
+        // A private projection cannot spend the public result-row allowance.
+        GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => VertexScanEvent::Work,
+    }
+}
+
+fn projected_argument<'a, F, E, C>(
+    column: usize,
+    computed: Option<&'a GraphValueRow>,
+    columns: &[ValueProjection],
+    vid: VId,
+    row: VertexScanRow<'a>,
+    meter: &mut Meter<F>,
+) -> Result<Input<'a>, VertexAggregateError<E, C>>
+where
+    F: FnMut() -> Result<(), C>,
+{
+    match computed {
+        Some(values) => Ok(Input::from_value(&values.values()[column])),
+        None => argument(&columns[column], vid, row, meter),
     }
 }
 
@@ -722,3 +802,6 @@ mod tests;
 
 #[cfg(test)]
 mod value_tests;
+
+#[cfg(test)]
+mod computed_tests;

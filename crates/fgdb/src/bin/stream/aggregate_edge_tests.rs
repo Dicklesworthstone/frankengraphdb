@@ -204,7 +204,7 @@ fn edge_admission_precedes_headers_and_io_errors_keep_their_cause() {
         let mut db = Database::open_memory(&commit, keys()).await.unwrap(); seed(&mut db, &commit).await;
         for text in [
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r) AS n",
-            "MATCH (a)-[r:R]->(b) RETURN AVG(r.p+1) AS n",
+            "MATCH (a)-[r:R]->(b) RETURN SUM(r.p)+1 AS n",
             "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n HAVING n>0",
             "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n LIMIT 0",
             "MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 2 RETURN COUNT(*) AS n",
@@ -220,4 +220,31 @@ fn edge_admission_precedes_headers_and_io_errors_keep_their_cause() {
     let error = GqlQueryError::<GraphAggregateError<ScanError<std::io::Error>>, std::io::Error>::Source(
         GraphAggregateError::Source(ScanError::Edge(fgdb_gql::edge_stream::EdgeScanError::Source(io))));
     assert_eq!(execution_failure(error).code, 5);
+}
+
+#[test]
+fn computed_group_inputs_reach_robot_and_human_delivery_without_narrowing() {
+    let ((), report) = run_async_under_lab(0x636c_ec01, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        seed(&mut db, &commit).await;
+        let text = "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n, COALESCE(r.p,0)/2 AS bucket, SUM(r.p-1) AS total, AVG(r.p-1) AS average, COUNT(DISTINCT r.p-1) AS support GROUP BY COALESCE(r.p,0)/2";
+        let opts = options(text);
+        let eager = db.query(&cx, text, &opts.params, &opts, policy()).unwrap();
+        let mut expected = Vec::new();
+        okay(crate::render(eager, 1, "rows", true, &mut expected));
+        let mut robot = Vec::new();
+        okay(run(&db, &cx, &opts, true, &mut robot));
+        let robot = String::from_utf8(robot).unwrap();
+        assert_eq!(row_lines(&robot), row_lines(&String::from_utf8(expected).unwrap()));
+        assert_eq!(row_lines(&robot).len(), 3);
+        assert!(robot.contains("\"columns\":[\"n\",\"bucket\",\"total\",\"average\",\"support\"]"));
+        assert!(robot.contains(&(2 * (i128::from(i64::MAX) - 1)).to_string()));
+        let mut human = Vec::new();
+        okay(run(&db, &cx, &opts, false, &mut human));
+        assert!(String::from_utf8(human).unwrap().contains("3 row(s) (stream complete at seq 1)"));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }

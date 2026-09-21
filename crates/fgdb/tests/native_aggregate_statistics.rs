@@ -175,7 +175,7 @@ fn native_extrema_keep_scalar_domains_and_full_width_identities_under_one_budget
 }
 
 #[test]
-fn native_average_reports_late_type_errors_and_does_not_admit_computed_inputs() {
+fn native_average_reports_late_type_errors_and_does_not_discard_result_clauses() {
     let ((), report) = run_async_under_lab(0xa66e_2003, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
         let cx = contexts.query();
@@ -202,8 +202,8 @@ fn native_average_reports_late_type_errors_and_does_not_admit_computed_inputs() 
         assert_eq!(cursor.row_stats().result_rows, 0);
         assert!(cursor.next().is_none());
         for text in [
-            "MATCH (n:L) RETURN AVG(DISTINCT n.score + 1) AS avg",
-            "MATCH (n:L) RETURN MIN(n.score + 1) AS min",
+            "MATCH (n:L) RETURN AVG(DISTINCT n.score + 1) AS avg LIMIT 0",
+            "MATCH (n:L) RETURN MIN(n.score + 1) AS min HAVING min>0",
         ] {
             let prepared = fgdb::PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
             assert!(matches!(

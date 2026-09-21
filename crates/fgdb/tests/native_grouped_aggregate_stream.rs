@@ -395,7 +395,7 @@ fn empty_grouped_input_differs_from_global_input_and_unsupported_clauses_stay_in
             "MATCH (n:L) RETURN n.a AS key, COUNT(*) AS total GROUP BY n.a ORDER BY key",
             "MATCH (n:L) RETURN n.a AS key, COUNT(*) AS total GROUP BY n.a LIMIT 0",
             "MATCH (n:L) RETURN n.a AS key, COLLECT(n.score) AS values GROUP BY n.a",
-            "MATCH (n:L) RETURN n.a + 1 AS key, COUNT(*) AS total GROUP BY n.a + 1",
+            "MATCH (n:L) RETURN n.a + 1 AS key, COUNT(*) AS total GROUP BY n.a + 1 LIMIT 0",
         ] {
             let prepared = PreparedNativeRead::prepare(statement, &args, symbols()).unwrap();
             assert!(

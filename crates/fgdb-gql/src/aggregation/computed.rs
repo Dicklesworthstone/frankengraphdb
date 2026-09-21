@@ -7,6 +7,9 @@
 
 mod incremental;
 
+#[cfg(test)]
+mod stream_tests;
+
 use super::*;
 use crate::{GraphSetProjection, GraphSetQuantifier, PreparedGraphSet};
 use fgdb_types::EId;
