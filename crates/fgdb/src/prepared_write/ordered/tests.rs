@@ -339,3 +339,282 @@ fn ordered_programs_recover_all_or_none_at_the_existing_marker_boundary() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+fn program_symbols(
+    kind: fgdb_gql::GraphSymbolKind,
+    name: &str,
+) -> Option<fgdb_gql::GraphSymbol> {
+    use fgdb_gql::{GraphSymbol, GraphSymbolKind};
+    match (kind, name) {
+        (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(9))),
+        (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+        (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(P)),
+        _ => None,
+    }
+}
+
+fn native_dependent_program() -> fgdb_gql::PreparedGraphWriteProgram {
+    use fgdb_gql::{
+        GqlParameters, GraphWriteStatement, PreparedGraphInsertText,
+        PreparedGraphMutationText, PreparedGraphWriteProgram,
+    };
+    let insert = |relation, text| -> GraphWriteStatement {
+        PreparedGraphInsertText::prepare(text, RelationId(relation), program_symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .into()
+    };
+    let mutation = |relation, text| -> GraphWriteStatement {
+        PreparedGraphMutationText::prepare(text, RelationId(relation), program_symbols)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .into()
+    };
+    PreparedGraphWriteProgram::prepare(vec![
+        insert(9, "CREATE (n {p:10})"),
+        insert(2, "CREATE (n {p:20})"),
+        mutation(2, "MATCH (n) WHERE n.p=10 SET n.p=11"),
+        insert(9, "MATCH (a),(b) WHERE a.p=11 AND b.p=20 CREATE (a)-[:R]->(b)"),
+        mutation(2, "MATCH (n) WHERE n.p=20 SET n.p=21"),
+        insert(2, "MATCH (a),(b) WHERE a.p=21 AND b.p=11 CREATE (a)-[:S]->(b)"),
+        mutation(9, "MATCH (n) WHERE n.p=11 SET n.p=12"),
+    ])
+    .unwrap()
+}
+
+fn native_policy() -> fgdb_gql::GraphWriteProgramPolicy {
+    fgdb_gql::GraphWriteProgramPolicy::new(
+        fgdb_gql::GqlQueryPolicy::new(100_000, 100_000, 10_000_000, 10_000_000),
+        20,
+        10,
+        10,
+    )
+}
+
+fn program_identity(request: fgdb_gql::GraphWriteIdentityRequest) -> ElementId {
+    use fgdb_gql::insertion::GraphInsertRequest;
+    match (request.statement, request.request) {
+        (0, GraphInsertRequest::Vertex { row: 0, vertex: 0 }) => ElementId::Vertex(VId(5)),
+        (1, GraphInsertRequest::Vertex { row: 0, vertex: 0 }) => ElementId::Vertex(VId(6)),
+        (3, GraphInsertRequest::Edge { row: 0, edge: 0 }) => ElementId::Edge(EId(50)),
+        (5, GraphInsertRequest::Edge { row: 0, edge: 0 }) => ElementId::Edge(EId(60)),
+        _ => panic!("unexpected native program allocation"),
+    }
+}
+
+#[test]
+fn ordered_transaction_suffixes_and_savepoints_share_one_overlay_and_one_commit() {
+    let ((), report) = run_async_under_lab(0x6f72_1001, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let mut db = seeded(&commit).await;
+        let basis = db.frontier().unwrap();
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut program = dependent_program();
+        let last = program.pop().unwrap();
+        txn.write_ordered(&mut db, program).unwrap();
+        let prefix = txn.staged_effect_digest().unwrap();
+        txn.savepoint(&db, "mixed").unwrap();
+        assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().props, vec![(P, int(2))]);
+        assert!(txn.edge(&db, EId(60)).unwrap().is_some());
+        assert!(db.vertex(VId(5)).unwrap().is_none());
+        // Ordinary write after explicit mixed staging must use the same order.
+        txn.write(&mut db, last).unwrap();
+        assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().props, vec![(P, int(3))]);
+        assert_eq!(txn.edge(&db, EId(50)).unwrap().unwrap().props, vec![(P, int(11))]);
+        txn.rollback_to_savepoint(&db, "mixed").unwrap();
+        assert_eq!(txn.staged_effect_digest().unwrap(), prefix);
+        assert!(txn.edge(&db, EId(70)).unwrap().is_none());
+        let mut suffix = WriteBatch::new(RelationId(7));
+        suffix.set_vertex_property(VId(6), P, Some(int(8)));
+        suffix.add_edge(EId(80), VId(6), VId(1), vec![]);
+        txn.write(&mut db, suffix).unwrap();
+        txn.release_savepoint(&db, "mixed").unwrap();
+        assert_eq!(db.frontier().unwrap(), basis);
+        txn.finish(&mut db, &commit).await.unwrap();
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert!(db.edge(EId(70)).unwrap().is_none());
+        assert_eq!(db.edge(EId(80)).unwrap().unwrap().entry.relation, RelationId(7));
+        assert_eq!(db.vertex(VId(5)).unwrap().unwrap().props, vec![(P, int(2))]);
+        assert_eq!(db.vertex(VId(6)).unwrap().unwrap().props, vec![(P, int(8))]);
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn switching_from_independent_groups_never_renumbers_observed_births() {
+    let ((), report) = run_async_under_lab(0x6f72_1002, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        let mut db = seeded(&commit).await;
+        let mut txn = db.begin(&txcx).unwrap();
+        let mut first = WriteBatch::new(RelationId(9));
+        first.create_vertex(VId(5), vec![], vec![(P, int(1))]);
+        let mut second = WriteBatch::new(RelationId(2));
+        second.create_vertex(VId(6), vec![], vec![(P, int(2))]);
+        txn.write_atomic(&mut db, vec![first, second]).unwrap();
+        let births = [5, 6].map(|id| txn.vertex(&db, VId(id)).unwrap().unwrap().birth_ordinal);
+        assert_eq!(births, [2, 1], "independent relation order is intentionally different");
+        let saved = txn.staged_effect_digest().unwrap();
+        txn.savepoint(&db, "independent").unwrap();
+        let mut suffix = WriteBatch::new(RelationId(1));
+        suffix.set_vertex_property(VId(5), P, Some(int(3)));
+        suffix.add_edge(EId(50), VId(5), VId(6), vec![]);
+        txn.write_ordered(&mut db, vec![suffix.clone()]).unwrap();
+        for (id, birth) in [5, 6].into_iter().zip(births) {
+            assert_eq!(txn.vertex(&db, VId(id)).unwrap().unwrap().birth_ordinal, birth);
+        }
+        txn.rollback_to_savepoint(&db, "independent").unwrap();
+        assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+        txn.write_ordered(&mut db, vec![suffix]).unwrap();
+        let mut later = WriteBatch::new(RelationId(9));
+        later.create_vertex(VId(7), vec![], vec![]);
+        txn.write(&mut db, later).unwrap();
+        assert_eq!(txn.vertex(&db, VId(7)).unwrap().unwrap().birth_ordinal, 5);
+        txn.finish(&mut db, &commit).await.unwrap();
+        for (id, birth) in [(5, 2), (6, 1), (7, 5)] {
+            assert_eq!(db.vertex(VId(id)).unwrap().unwrap().birth_ordinal, birth);
+        }
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn failed_ordered_suffix_keeps_effects_savepoints_and_before_image_observations() {
+    let ((), report) = run_async_under_lab(0x6f72_1003, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let txcx = contexts.txn();
+        for concurrent in [false, true] {
+            let mut db = seeded(&commit).await;
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut prefix = WriteBatch::new(RelationId(9));
+            prefix.create_vertex(VId(5), vec![], vec![]);
+            txn.write(&mut db, prefix).unwrap();
+            let saved = txn.staged_effect_digest().unwrap();
+            txn.savepoint(&db, "prior").unwrap();
+            let mut bad = WriteBatch::new(RelationId(2));
+            bad.create_vertex(VId(6), vec![], vec![]);
+            bad.compare_and_set_vertex_property(
+                VId(4), P, Some(int(99)), int(1), WriteMismatchPolicy::AbortWrite,
+            );
+            assert!(matches!(txn.write_ordered(&mut db, vec![bad]),
+                Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(_)))));
+            assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+            assert!(txn.vertex(&db, VId(6)).unwrap().is_none());
+            txn.rollback_to_savepoint(&db, "prior").unwrap();
+            assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+            if concurrent {
+                let mut winner = WriteBatch::new(RelationId(2));
+                winner.set_vertex_property(VId(4), P, Some(int(7)));
+                db.write(&commit, winner).await.unwrap();
+                assert!(txn.finish(&mut db, &commit).await.is_err());
+                assert!(db.vertex(VId(5)).unwrap().is_none());
+            } else {
+                let mut accepted = WriteBatch::new(RelationId(2));
+                accepted.add_edge(EId(50), VId(1), VId(5), vec![]);
+                txn.write_ordered(&mut db, vec![accepted]).unwrap();
+                txn.finish(&mut db, &commit).await.unwrap();
+                assert!(db.vertex(VId(5)).unwrap().is_some());
+                assert!(db.edge(EId(50)).unwrap().is_some());
+            }
+            assert!(db.vertex(VId(6)).unwrap().is_none());
+            assert_eq!(txcx.outstanding_obligations(), 0);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_mixed_program_reads_earlier_cross_type_writes_and_autocommits_once() {
+    let ((), report) = run_async_under_lab(0x6f72_1004, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        let mut db = seeded(&commit).await;
+        let basis = db.frontier().unwrap();
+        let pinned = db.read_session().unwrap();
+        let (receipt, _) = db.execute_graph_write_program_returning_autocommit_governed(
+            &txcx, &query, &commit, &native_dependent_program(), native_policy(),
+            |request| Ok::<_, ()>(program_identity(request)),
+        ).await.unwrap();
+        assert_eq!(receipt.stats().completed_statements, 7);
+        assert_eq!(receipt.stats().created_vertices, 2);
+        assert_eq!(receipt.stats().created_edges, 2);
+        assert_eq!(receipt.steps()[3].created_edges(), Some(&[EId(50)][..]));
+        assert_eq!(receipt.steps()[5].created_edges(), Some(&[EId(60)][..]));
+        assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+        assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        assert_eq!(db.vertex(VId(5)).unwrap().unwrap().props, vec![(P, int(12))]);
+        assert_eq!(db.vertex(VId(6)).unwrap().unwrap().props, vec![(P, int(21))]);
+        for (id, relation, src, dst) in [(50, 9, 5, 6), (60, 2, 6, 5)] {
+            let edge = db.edge(EId(id)).unwrap().unwrap();
+            assert_eq!((edge.entry.relation, edge.entry.src, edge.entry.dst),
+                (RelationId(relation), VId(src), VId(dst)));
+        }
+        assert!(pinned.vertex(VId(5)).unwrap().is_none());
+        assert_eq!(txcx.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_suffix_allocation_failure_and_unwind_restore_the_complete_outer_workspace() {
+    let ((), report) = run_async_under_lab(0x6f72_1005, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let txcx = contexts.txn();
+        for stop in [0, 1, 3, 5] {
+            for unwind in [false, true] {
+                let mut db = seeded(&commit).await;
+                let basis = db.frontier().unwrap();
+                let mut txn = db.begin(&txcx).unwrap();
+                let mut prefix = WriteBatch::new(RelationId(9));
+                prefix.create_vertex(VId(99), vec![], vec![]);
+                txn.write(&mut db, prefix).unwrap();
+                txn.savepoint(&db, "prefix").unwrap();
+                let saved = txn.staged_effect_digest().unwrap();
+                let mut reached = false;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    txn.execute_graph_write_program_returning_governed(
+                        &mut db, &query, &native_dependent_program(), native_policy(),
+                        |request| {
+                            if request.statement == stop {
+                                reached = true;
+                                assert!(!unwind, "injected caller allocator unwind");
+                                Err(stop)
+                            } else {
+                                Ok(program_identity(request))
+                            }
+                        },
+                    )
+                }));
+                assert!(reached, "the refusal must occur after the requested native prefix");
+                if unwind { assert!(result.is_err()); }
+                else { assert!(result.unwrap().is_err()); }
+                assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+                txn.rollback_to_savepoint(&db, "prefix").unwrap();
+                assert_eq!(txn.staged_effect_digest().unwrap(), saved);
+                assert!(txn.vertex(&db, VId(5)).unwrap().is_none());
+                assert!(txn.vertex(&db, VId(6)).unwrap().is_none());
+                assert!(txn.edge(&db, EId(50)).unwrap().is_none());
+                assert!(txn.edge(&db, EId(60)).unwrap().is_none());
+                txn.finish(&mut db, &commit).await.unwrap();
+                assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 1));
+                assert!(db.vertex(VId(99)).unwrap().is_some());
+                assert!(db.vertex(VId(5)).unwrap().is_none());
+                assert_eq!(txcx.outstanding_obligations(), 0);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

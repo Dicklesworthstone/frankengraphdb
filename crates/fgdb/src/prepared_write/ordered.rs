@@ -243,5 +243,64 @@ impl<V: Vfs + Clone> Database<V> {
     }
 }
 
+impl PreparedWrite {
+    /// Re-entering ordered staging must not renumber births already visible
+    /// through the transaction's canonical overlay. This also permits a
+    /// previously independent prefix to enter ordered composition: its effects
+    /// commute, but its original relation-group birth ordering may differ.
+    /// New ordered births occur after all previous raw visits, so retaining old
+    /// ordinals cannot collide with a newly appended instruction's ordinal.
+    pub(crate) fn retain_birth_ordinals(
+        mut self,
+        previous: Option<&Self>,
+    ) -> Result<Self, WriteTxnError> {
+        let Some(previous) = previous else { return Ok(self); };
+        if !Arc::ptr_eq(&self.handle_owner, &previous.handle_owner) {
+            return Err(WriteTxnError::WrongDatabase);
+        }
+        if self.basis != previous.basis {
+            return Err(WriteTxnError::SnapshotAdvanced {
+                pinned: previous.basis,
+                live: self.basis,
+            });
+        }
+        let births: BTreeMap<_, _> = previous.template.coordinate_entries().iter()
+            .flat_map(|coordinate| &coordinate.rows)
+            .filter_map(|row| match row {
+                DeltaRow::CreateVertex { vid, birth_ordinal, .. } =>
+                    Some((ElementId::Vertex(*vid), *birth_ordinal)),
+                DeltaRow::CreateEdge { eid, birth_ordinal, .. } =>
+                    Some((ElementId::Edge(*eid), *birth_ordinal)),
+                _ => None,
+            }).collect();
+        if births.is_empty() { return Ok(self); }
+        let mut coordinates = self.template.coordinate_entries().to_vec();
+        let mut changed = false;
+        for coordinate in &mut coordinates {
+            for row in &mut coordinate.rows {
+                let (identity, ordinal) = match row {
+                    DeltaRow::CreateVertex { vid, birth_ordinal, .. } =>
+                        (ElementId::Vertex(*vid), birth_ordinal),
+                    DeltaRow::CreateEdge { eid, birth_ordinal, .. } =>
+                        (ElementId::Edge(*eid), birth_ordinal),
+                    _ => continue,
+                };
+                if let Some(retained) = births.get(&identity) {
+                    changed |= *ordinal != *retained;
+                    *ordinal = *retained;
+                }
+            }
+        }
+        if changed {
+            // This method is private to staging ordinary engine-built writes;
+            // both inputs use the same existing intent semantics and source.
+            self.template = LogicalDeltaTemplate::build(
+                crate::intent_semantics_oid(), [0_u8; 32], coordinates,
+            ).map_err(WriteError::Canonical)?;
+        }
+        Ok(self)
+    }
+}
+
 #[cfg(test)]
 mod tests;

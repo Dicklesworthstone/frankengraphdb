@@ -49,12 +49,12 @@ impl WriteTxn {
         Ok(())
     }
 
-    /// Stage a same-relation batch against this transaction's pinned snapshot.
-    /// Once `write_atomic` has explicitly staged several relation groups,
-    /// subsequent writes re-enter that same composition check, including the
-    /// immutable shared-initializer prefix when one is present.
-    /// Mixed write programs may enter this composition check when their next
-    /// statement first changes relation, under their whole-program rollback guard.
+    /// Stage a batch against this transaction's pinned snapshot.
+    /// An initially single-relation transaction keeps its explicit relation
+    /// boundary. Use write_ordered to enter mixed-relation composition. Once
+    /// multiple relations are staged, ordinary suffix writes retain source
+    /// order and the prefix's already-observed birth ordinals. Native mixed
+    /// programs select that same path under their whole-program rollback guard.
     pub fn write<V: Vfs + Clone>(
         &mut self,
         database: &mut Database<V>,
@@ -69,11 +69,10 @@ impl WriteTxn {
                 live,
             });
         }
-        if let Some(first) = self.staged.first()
-            && (self.staged.iter().any(|staged| staged.relation != first.relation)
-                || (self.program_multi_relation && batch.relation != first.relation))
-        {
-            return self.write_atomic(database, vec![batch]);
+        if self.program_multi_relation || self.staged.first().is_some_and(|first| {
+            self.staged.iter().any(|staged| staged.relation != first.relation)
+        }) {
+            return self.write_ordered(database, vec![batch]);
         }
         if let Some(expected) = self.staged.first().map(|staged| staged.relation)
             && batch.relation != expected
@@ -105,6 +104,60 @@ impl WriteTxn {
         Ok(())
     }
 
+    /// Append a dependent ordered program to this transaction's exact overlay.
+    /// Later instructions see all earlier vertex/edge mutations across relation
+    /// boundaries. All batches and prior staged work prepare together; no step
+    /// commits. Previously visible staged birth ordinals are retained, including
+    /// when an independent prefix first enters ordered composition.
+    ///
+    /// Preparation uses a private candidate. Failure leaves the prior effects,
+    /// prepared bytes and savepoints unchanged, but keeps failed before-image
+    /// observations. Ordinary savepoint/program rollback restores this same
+    /// prepared value without rebuilding it or discarding conflict witnesses.
+    /// Allocation IDs remain spent according to the existing allocator rules.
+    /// This is the bounded prepare_ordered_writes contract, not full SSI.
+    pub fn write_ordered<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        batches: Vec<WriteBatch>,
+    ) -> Result<(), WriteTxnError> {
+        self.ensure_database(database)?;
+        let live = database.frontier()?;
+        if live != self.basis {
+            return Err(WriteTxnError::SnapshotAdvanced { pinned: self.basis, live });
+        }
+        if batches.is_empty() || batches.iter().any(WriteBatch::is_empty) {
+            return Err(WriteError::EmptyBatch.into());
+        }
+        if batches.iter().flat_map(|batch| &batch.rows)
+            .any(|row| matches!(row, PendingRow::Edge { ensure: true, .. }))
+        {
+            drop(self.edges(database)?);
+        }
+        let previous_len = self.staged.len();
+        let mut candidate = self.staged.clone();
+        candidate.extend(batches);
+        let prepared = match database.prepare_ordered_writes(candidate.clone())
+            .and_then(|prepared| prepared.retain_birth_ordinals(self.prepared.as_ref()))
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let mut observations = self.read_set.borrow_mut();
+                for batch in &candidate[previous_len..] {
+                    crate::prepared_write::PreparedDependencies::capture(&database.writer, batch)
+                        .retain_observations(&mut observations);
+                }
+                return Err(error);
+            }
+        };
+        debug_assert_eq!(prepared.basis(), self.basis);
+        // Candidate construction and every fallible operation precede this
+        // single acceptance boundary. No second transaction state is retained.
+        self.staged = candidate;
+        self.prepared = Some(prepared);
+        Ok(())
+    }
+
     /// Atomically stage relation groups, including all prior staged batches.
     ///
     /// Independent groups share the pinned basis. A leading vertex-create or
@@ -113,7 +166,8 @@ impl WriteTxn {
     /// The prefix can come from an earlier `write` call; it must precede every
     /// other intent in the complete staged input. Suffix groups remain
     /// independent and may not change the shared initialized vertex contents.
-    /// This is not arbitrary ordered cross-relation statement execution.
+    /// Inside a native mixed program, use its ordered composition instead;
+    /// standalone callers choose write_ordered for dependent relation groups.
     /// A refusal preserves the prior staged effects and prepared write; any
     /// observations already made still participate in conflict validation.
     /// No capsule or marker is published until the ordinary `commit` method.
@@ -122,6 +176,9 @@ impl WriteTxn {
         database: &mut Database<V>,
         batches: Vec<WriteBatch>,
     ) -> Result<(), WriteTxnError> {
+        if self.program_multi_relation {
+            return self.write_ordered(database, batches);
+        }
         self.ensure_database(database)?;
         let live = database.frontier()?;
         if live != self.basis {
