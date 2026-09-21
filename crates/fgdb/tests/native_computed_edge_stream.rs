@@ -197,8 +197,6 @@ fn computed_source_admission_and_unsupported_relational_children_never_fall_back
         let cx=contexts.query(); let commit=contexts.commit();
         let mut db=Database::open_memory(&commit,keys()).await.unwrap(); db.write(&commit,seed()).await.unwrap();
         for statement in [
-            "MATCH (a)-[r:R]->(b) RETURN SUM(r.quantity+1) AS total ORDER BY total LIMIT 0",
-            "MATCH (a)-[r:R]->(b) RETURN SUM(r.quantity+1) AS total HAVING total>0 ORDER BY total",
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.quantity+1) AS values",
             "MATCH (a)-[r:R]->(b) WITH DISTINCT r.quantity AS q RETURN SUM(q+1) AS total",
             "MATCH (a)-[r:R]->(b) WITH r.quantity AS q LIMIT 1 RETURN SUM(q+1) AS total",
@@ -396,3 +394,6 @@ fn native_selected_pages_share_one_allowance_without_charging_rejected_groups_as
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[path = "native_computed_edge_stream/ordered.rs"]
+mod ordered;
