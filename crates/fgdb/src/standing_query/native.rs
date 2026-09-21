@@ -76,6 +76,11 @@ impl PreparedNativeRead {
     /// Relational aggregate inputs use that same circuit before exact grouping,
     /// HAVING and output selection. Final group quotas do not limit private
     /// pre-group occurrences; work/scratch remain per-node allowances.
+    /// Source-free row subtrees evaluate once through the ordinary relation
+    /// executor, then publish empty deltas. A fully source-free root retains
+    /// its exact selected sequence, including implicit list/product ordering.
+    /// Static folding never admits a graph-containing subtree or relaxes the
+    /// ordering rules of a dynamic positional page.
     pub fn register_standing<V: Vfs + Clone>(
         &self,
         database: &mut Database<V>,
@@ -199,6 +204,9 @@ impl<V: Vfs + Clone> Database<V> {
     /// Each node keeps its own allowance; no eager per-commit fallback is used,
     /// including for a zero terminal limit.
     /// Session-local and in-memory, not a durable subscription or spill engine.
+    /// Source-free subtrees retain all original expression/page semantics and
+    /// become immutable inputs. A fully source-free root preserves its exact
+    /// sequence, rather than canonicalizing implicit list enumeration.
     pub fn register_standing_relation(
         &mut self,
         cx: &QueryCx,
@@ -277,13 +285,17 @@ impl<V: Vfs + Clone> Database<V> {
                 match layout {
                     Layout::Rows { .. } | Layout::Circuit { .. } => {
                         let mut view = match self.admitted_standing_query(cx, handle)? {
-                            StandingQuery::Rows { .. } => self.standing_rows(cx, handle)?,
+                            StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {
+                                self.standing_rows(cx, handle)?
+                            }
                             StandingQuery::Set(_) => self.standing_set(cx, handle)?,
                             StandingQuery::Join(_) => self.standing_join(cx, handle)?,
                             StandingQuery::Projection(_) => self.standing_projection(cx, handle)?,
                             _ => return Err(StandingQueryError::Unsupported),
                         };
-                        if matches!(layout, Layout::Circuit { .. }) {
+                        if matches!(layout, Layout::Circuit { .. })
+                            && !matches!(root, StandingQuery::Constant(_))
+                        {
                             // PreparedGraphSet canonicalizes a pattern's selected
                             // bag before set composition. Do not leak the leaf's
                             // pre-wrapper ordering from a transparent root scope.

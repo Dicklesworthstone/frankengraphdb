@@ -39,6 +39,12 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
         checkpoint()?;
+        // A source-free root has an exact, immutable sequence. Freeze the
+        // complete subtree before any rank/page decomposition; its positional
+        // selection never needs a dynamic canonical-order approximation.
+        if query.operand_count() == 0 {
+            return self.compile(cx, query, policy, checkpoint);
+        }
         // Keep the existing refusal for an implicitly ordered positional root
         // mixed with pages. Explicit/proved ordering can safely consume those
         // bags; every internal page must independently prove its own rank.
@@ -86,7 +92,10 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
     ) -> Result<usize, StandingQueryError> {
         checkpoint()?;
-        let index = if let Some((input, order, offset, count)) = query.incremental_ordered_window()
+        let index = if query.operand_count() == 0 {
+            let state = self.database.prepare_standing_constant(cx, query.clone(), policy)?;
+            self.append(StandingQuery::Constant(Box::new(state)))
+        } else if let Some((input, order, offset, count)) = query.incremental_ordered_window()
         {
             // Peel just this scope. Never move a page across DISTINCT, a
             // filter, or an expression, including when the page is empty.
@@ -354,6 +363,9 @@ fn rebuild_checked<V: Vfs + Clone>(
         checkpoint()?;
         let policy = if old == root { policy } else { input_policy };
         let replacement = match &staged.database.standing_queries[old] {
+            StandingQuery::Constant(query) => StandingQuery::Constant(Box::new(
+                staged.database.prepare_standing_constant(cx, query.definition.clone(), policy)?,
+            )),
             StandingQuery::Rows { output, .. } => {
                 staged
                     .database
@@ -519,3 +531,6 @@ mod ranked_pipeline_tests;
 
 #[cfg(test)]
 mod group_tests;
+
+#[cfg(test)]
+mod constant_tests;

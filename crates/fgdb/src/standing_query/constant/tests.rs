@@ -104,7 +104,8 @@ fn constant_registry_advances_without_evaluation_and_rebuild_is_atomic() {
             [11; 32], DatabaseSecurityNamespaceId([12; 32]), [13; 32],
         )).await.unwrap();
         let handle = db.register_standing_constant(&cx, relation(), policy(4)).unwrap();
-        let old_rows = db.standing_rows(&cx, &handle).unwrap().rows().clone();
+        let old_rows = db.standing_rows(&cx, &handle).unwrap().rows()
+            .checked_clone(LimbLimit::new(4), &mut |_| Ok::<_, ()>(())).unwrap();
         let len = db.standing_queries.len();
         for id in 1..=3 {
             let mut batch = crate::WriteBatch::new(RelationId(1));
