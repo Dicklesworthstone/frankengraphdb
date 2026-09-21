@@ -7,6 +7,8 @@ use fgdb_delta_types::ZWeight;
 use fgdb_gql::{GqlParameters, GraphAggregateTextSlot, GraphSymbolResolver};
 
 pub(super) mod set;
+mod cursor;
+pub use cursor::StandingNativeCursor;
 
 pub(super) enum Layout {
     Rows {
@@ -233,6 +235,20 @@ impl<V: Vfs + Clone> Database<V> {
             .columns())
     }
 
+    /// Open a pull cursor over the already accepted native result. Owner,
+    /// database health and freshness are admitted before creating traversal
+    /// state. The shared database borrow pins that generation without cloning
+    /// rows or keeping a graph snapshot. Metadata stays available after close.
+    /// Separate cursors have separate cumulative delivery allowances.
+    pub fn standing_native_cursor<'a>(
+        &'a self,
+        cx: &'a QueryCx,
+        handle: &StandingQueryHandle,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingNativeCursor<'a>, StandingQueryError> {
+        cursor::open(self, cx, handle, policy)
+    }
+
     /// Materialize the current maintained answer in the SAME lossless cells and
     /// column order as Database::query, together with its exact commit frontier.
     /// Reads no graph records and reruns no query. Ordered occurrences take
@@ -270,14 +286,7 @@ impl<V: Vfs + Clone> Database<V> {
                     query.ordered().map(|(row, count)| (row, Some(count))),
                     layout.columns().len(),
                     &mut meter,
-                    |row, meter| {
-                        let mut cells = Vec::new();
-                        for value in row.values() {
-                            reserve_value(value, meter)?;
-                            cells.push(QueryValue::Value(value.clone()));
-                        }
-                        Ok(cells)
-                    },
+                    copy_values,
                 )
                 .map_err(StandingQueryError::Delivery)?;
                 (query.frontier, rows)
@@ -302,14 +311,7 @@ impl<V: Vfs + Clone> Database<V> {
                             view.ordered = None;
                         }
                         let rows =
-                            collect(&view, layout.columns().len(), &mut meter, |row, meter| {
-                                let mut cells = Vec::new();
-                                for value in row.values() {
-                                    reserve_value(value, meter)?;
-                                    cells.push(QueryValue::Value(value.clone()));
-                                }
-                                Ok(cells)
-                            })
+                            collect(&view, layout.columns().len(), &mut meter, copy_values)
                             .map_err(StandingQueryError::Delivery)?;
                         (view.frontier(), rows)
                     }
@@ -317,36 +319,7 @@ impl<V: Vfs + Clone> Database<V> {
                         let view = self.standing_query(cx, handle)?;
                         let rows =
                             collect(&view, layout.columns().len(), &mut meter, |row, meter| {
-                                let mut cells = Vec::new();
-                                for slot in slots {
-                                    match *slot {
-                                        GraphAggregateTextSlot::GroupKey(at) => {
-                                            let value = row
-                                                .keys()
-                                                .get(at)
-                                                .ok_or(StandingQueryFailure::InvalidDelta)?;
-                                            reserve_value(value, meter)?;
-                                            cells.push(QueryValue::Value(value.clone()));
-                                        }
-                                        GraphAggregateTextSlot::Aggregate(at) => {
-                                            let value = row
-                                                .values()
-                                                .get(at)
-                                                .ok_or(StandingQueryFailure::InvalidDelta)?;
-                                            match value {
-                                                QueryValue::Value(value) => {
-                                                    reserve_value(value, meter)?
-                                                }
-                                                _ => {
-                                                    meter.charge(ZSetEvent::Work)?;
-                                                    meter.charge(ZSetEvent::ScratchEntry)?;
-                                                }
-                                            }
-                                            cells.push(value.clone());
-                                        }
-                                    }
-                                }
-                                Ok(cells)
+                                copy_group(row, slots, meter)
                             })
                             .map_err(StandingQueryError::Delivery)?;
                         (view.frontier(), rows)
@@ -379,6 +352,42 @@ fn reserve_value(
         .checked_add(1)
         .ok_or(StandingQueryFailure::ScratchBudget)?;
     meter.units(ZSetEvent::ScratchEntry, units)
+}
+
+// Eager and pull delivery use the same native cell mapping and payload meter.
+fn copy_values(row: &GraphValueRow, meter: &mut Meter<'_>) -> Result<Vec<QueryValue>, StandingQueryFailure> {
+    let mut cells = Vec::new();
+    for value in row.values() {
+        reserve_value(value, meter)?;
+        cells.push(QueryValue::Value(value.clone()));
+    }
+    Ok(cells)
+}
+
+fn copy_group(row: &GraphAggregateRow, slots: &[GraphAggregateTextSlot], meter: &mut Meter<'_>)
+    -> Result<Vec<QueryValue>, StandingQueryFailure> {
+    let mut cells = Vec::new();
+    for slot in slots {
+        match *slot {
+            GraphAggregateTextSlot::GroupKey(at) => {
+                let value = row.keys().get(at).ok_or(StandingQueryFailure::InvalidDelta)?;
+                reserve_value(value, meter)?;
+                cells.push(QueryValue::Value(value.clone()));
+            }
+            GraphAggregateTextSlot::Aggregate(at) => {
+                let value = row.values().get(at).ok_or(StandingQueryFailure::InvalidDelta)?;
+                match value {
+                    QueryValue::Value(value) => reserve_value(value, meter)?,
+                    _ => {
+                        meter.charge(ZSetEvent::Work)?;
+                        meter.charge(ZSetEvent::ScratchEntry)?;
+                    }
+                }
+                cells.push(value.clone());
+            }
+        }
+    }
+    Ok(cells)
 }
 
 fn collect<Row: Ord>(
