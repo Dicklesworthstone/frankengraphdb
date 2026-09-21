@@ -47,7 +47,9 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// HAVING, hidden/repeated output columns, output expressions, exact ORDER BY
 /// and SKIP/LIMIT are supported. Finite ordered pages retain at most SKIP+LIMIT
 /// completed candidates; full ordering retains at most the completed groups.
-/// Relational input, output DISTINCT and COLLECT remain outside this profile.
+/// Output DISTINCT retains one best-ranked representative per projected class,
+/// then applies the window. Its class support is not bounded by SKIP+LIMIT.
+/// Relational input and COLLECT remain outside this profile.
 /// Every child operator and
 /// column is checked before opening the source; a failed plan is never retried
 /// as another source or an eager query. The ordinary row stream's identity
@@ -219,7 +221,7 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
     fn select_output<C>(&mut self, groups: Groups)
         -> Result<Vec<GraphAggregateRow>, EdgeAggregateError<S::Error, C>>
     where F: FnMut() -> Result<(), C> {
-        if !self.aggregate.ordering().is_empty() {
+        if self.aggregate.incremental_output_is_distinct() || !self.aggregate.ordering().is_empty() {
             return self.select_ordered_output(groups);
         }
         let (offset, count) = self.aggregate.incremental_result_window();

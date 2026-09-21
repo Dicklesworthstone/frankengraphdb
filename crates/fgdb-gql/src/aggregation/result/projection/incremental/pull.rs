@@ -7,6 +7,8 @@
 use super::*;
 use super::super::super::having::GroupCells;
 
+mod distinct;
+
 #[derive(Clone, Copy)]
 struct CompleteGroup<'a>(&'a GraphAggregateRow);
 impl<'a> GroupCells<'a> for CompleteGroup<'a> {
@@ -26,7 +28,7 @@ impl PreparedGraphAggregate {
     /// This private gate does not widen any incremental-maintenance contract.
     pub(crate) fn prepare_streamed_output(&self) -> Option<Self> {
         if self.supports_row_local_aggregate_stream() { return Some(self.clone()); }
-        if self.relational_input.is_some() || self.output_distinct {
+        if self.relational_input.is_some() {
             return None;
         }
         let mut physical = self.clone();
@@ -57,6 +59,7 @@ impl PreparedGraphAggregate {
             || self.output_projection.is_some()
             || self.key_output.is_some()
             || self.output_aggregates != self.aggregates.len()
+            || self.output_distinct
             || !self.ordering.is_empty()
             || self.offset != 0
             || self.count.is_some()
@@ -101,7 +104,9 @@ impl PreparedGraphAggregate {
     /// Physical ranking over finalized groups, never over matched bindings.
     /// The caller supplies the exact number of complete groups before HAVING;
     /// the finite prefix cannot exceed it. No allocation depends on a huge
-    /// numeric LIMIT alone. This does not widen maintenance or DISTINCT gates.
+    /// numeric LIMIT alone. DISTINCT retains one best complete representative
+    /// per output class before feeding the existing heap. Maintenance admission
+    /// is unchanged; source matching remains the physical compiler's job.
     pub(crate) fn streamed_group_ranking(&self, groups: usize) -> StreamedGroupRanking {
         let offset = usize::try_from(self.offset).unwrap_or(usize::MAX);
         let count = self.count.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::MAX);
@@ -110,7 +115,8 @@ impl PreparedGraphAggregate {
         } else {
             offset.saturating_add(count).min(groups)
         };
-        StreamedGroupRanking { offset, count, prefix, heap: Vec::new() }
+        StreamedGroupRanking { offset, count, prefix, heap: Vec::new(),
+            distinct: self.output_distinct.then(distinct::Classes::new) }
     }
 }
 
@@ -127,11 +133,14 @@ struct RankedGroup {
 /// worst-first and holds at most min(groups, SKIP + LIMIT) complete candidates,
 /// plus one transient candidate being validated. Group accumulation upstream
 /// is still separately governed in-memory state, not a spill implementation.
+/// DISTINCT additionally retains one normalized output key and best complete
+/// representative per output class. LIMIT does not bound that support state.
 pub(crate) struct StreamedGroupRanking {
     offset: usize,
     count: usize,
     prefix: usize,
     heap: Vec<RankedGroup>,
+    distinct: Option<distinct::Classes>,
 }
 
 impl StreamedGroupRanking {
@@ -151,6 +160,20 @@ impl StreamedGroupRanking {
         };
         if self.prefix == 0 { return Ok(()); }
         let candidate = RankedGroup { complete: row, projected };
+        if let Some(classes) = &mut self.distinct {
+            return classes.insert(query, candidate, control);
+        }
+        self.push_candidate(query, candidate, control)
+    }
+
+    // Qualification/projection ran exactly once, before DISTINCT or ranking.
+    // ALL and DISTINCT representatives use the identical bounded heap.
+    fn push_candidate<E>(
+        &mut self,
+        query: &PreparedGraphAggregate,
+        candidate: RankedGroup,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
         if self.heap.len() < self.prefix {
             control(GlaExecutionEvent::ScratchEntry)?;
             self.heap.push(candidate);
@@ -215,6 +238,12 @@ impl StreamedGroupRanking {
         query: &PreparedGraphAggregate,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<GraphAggregateRow>, E> {
+        if let Some(classes) = self.distinct.take() {
+            for candidate in classes.into_candidates() {
+                control(GlaExecutionEvent::Work)?;
+                self.push_candidate(query, candidate, control)?;
+            }
+        }
         // Fallible, governed in-place heap sort: no comparator can ignore a
         // cancellation/budget refusal, and no second sort buffer is allocated.
         for end in (1..self.heap.len()).rev() {
@@ -232,6 +261,9 @@ impl StreamedGroupRanking {
         Ok(output)
     }
 }
+
+#[cfg(test)]
+mod distinct_tests;
 
 #[cfg(test)]
 mod tests {
