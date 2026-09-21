@@ -108,7 +108,8 @@ impl<V: Vfs + Clone> Database<V> {
     /// zero-based (left column, right column) pairs. All key components must
     /// match canonically and none may be NULL; scalar and vertex domains never
     /// coerce. Output concatenates left then right columns, named `left.<name>`
-    /// and `right.<name>`. At most 64 total scalar/vertex columns are admitted.
+    /// and `right.<name>`. At most 64 total columns are admitted. Keys must be
+    /// scalar/vertex; non-key payloads may use any bounded native value domain.
     /// This is explicit canonical-key equality, not arbitrary WHERE predicates.
     ///
     /// Both complete input derivatives must name the same immediate successor.
@@ -137,19 +138,22 @@ impl<V: Vfs + Clone> Database<V> {
         self.register_standing_join_with_kind(cx, left, right, keys, RowJoinKind::Inner, policy)
     }
 
-    /// Maintain an inner, left outer, semi or anti equijoin through the same
+    /// Maintain an inner, left/right/full outer, semi or anti equijoin in the
     /// dependency-ordered registry. `kind` is fixed for the handle's lifetime,
     /// including rebuild. The existing registration method defaults to Inner.
     ///
     /// Left emits every matching pair or a NULL right frame for each unmatched
-    /// left occurrence. Semi emits the left bag when any witness exists; Anti
+    /// left occurrence. Right instead null-extends unmatched right occurrences.
+    /// Full keeps unmatched occurrences from both sides and emits matched pairs
+    /// exactly once. Semi emits the left bag when any witness exists; Anti
     /// emits it when none exists. Neither multiplies by the right witness count.
     /// Losing one of several witnesses does not change presence; first/last
     /// witness changes and simultaneous left/right updates form one atomic tick.
     /// NULL in ANY key component never matches, even another NULL. Thus a NULL
-    /// left key survives Anti and is null-extended by Left, but never enters Semi.
+    /// left key survives Anti and is null-extended by Left/Full, but never enters
+    /// Semi. A NULL right key is null-extended by Right/Full.
     ///
-    /// Inner/Left columns are `left.<name>` followed by `right.<name>`;
+    /// Inner/Left/Right/Full columns are `left.<name>` followed by `right.<name>`;
     /// Semi/Anti have only `left.<name>` columns. All kinds can feed later joins
     /// and sets. NULL extensions keep column types, including full-width VIds.
     /// Input schemas, source admission, final-result quotas and failure fencing
@@ -209,6 +213,29 @@ impl<V: Vfs + Clone> Database<V> {
         right: &StandingQueryHandle,
         policy: GqlQueryPolicy,
     ) -> Result<StandingQueryHandle, StandingQueryError> {
+        self.register_standing_cross_join_with_kind(cx, left, right, RowJoinKind::Inner, policy)
+    }
+
+    /// Maintain an unconditional join with fixed inner, outer or presence
+    /// semantics. Every row on the opposite side is a witness, including NULL
+    /// payloads. Left/Right/Full preserve unmatched occurrences from the named
+    /// sides when the opposite bag is empty. Semi/Anti return the left bag
+    /// according to whether the right bag is nonempty/empty, without multiplying
+    /// by its count. Inner and all outer modes keep left-then-right columns;
+    /// Semi/Anti keep only left columns.
+    ///
+    /// Shares source admission, dependency ordering, exact deltas, quota fencing
+    /// and rebuild with keyed joins. Kind and unconditional matching survive
+    /// rebuild. An unavailable parent is still an error, never an empty witness
+    /// bag. This does not make empty-key equijoin registration valid.
+    pub fn register_standing_cross_join_with_kind(
+        &mut self,
+        cx: &QueryCx,
+        left: &StandingQueryHandle,
+        right: &StandingQueryHandle,
+        kind: RowJoinKind,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         if !Arc::ptr_eq(&self.handle_owner, &left.owner)
             || !Arc::ptr_eq(&self.handle_owner, &right.owner)
@@ -224,7 +251,7 @@ impl<V: Vfs + Clone> Database<V> {
             cx,
             [left.index, right.index],
             &[],
-            RowJoinKind::Inner,
+            kind,
             policy,
             self.standing_queries.len(),
         )?;
@@ -430,3 +457,6 @@ impl<V: Vfs + Clone> Database<V> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod outer_tests;
