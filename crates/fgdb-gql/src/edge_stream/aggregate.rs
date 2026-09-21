@@ -2,7 +2,7 @@
 //!
 //! The first pull consumes joined bindings once, retaining group keys and the
 //! SAME numeric/DISTINCT cells as vertex aggregation, not an input or result
-//! table. Subsequent pulls move completed groups out in canonical key order.
+//! table. Subsequent pulls move completed groups out in canonical result order.
 //! HAVING/output expressions are validated on all completed groups before a
 //! selected page can escape. Page selection never suppresses input failures.
 //! Group and DISTINCT support are metered in-memory state, not spill storage.
@@ -44,9 +44,11 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// preserve match multiplicity; null and lazy-branch semantics remain native.
 /// Only the current source/projected binding is transient, never an input bag.
 ///
-/// HAVING, hidden/repeated output columns, output expressions and canonical-key
-/// SKIP/LIMIT are supported. Relational input, output DISTINCT, explicit ordering
-/// and COLLECT remain outside this physical profile. Every child operator and
+/// HAVING, hidden/repeated output columns, output expressions, exact ORDER BY
+/// and SKIP/LIMIT are supported. Finite ordered pages retain at most SKIP+LIMIT
+/// completed candidates; full ordering retains at most the completed groups.
+/// Relational input, output DISTINCT and COLLECT remain outside this profile.
+/// Every child operator and
 /// column is checked before opening the source; a failed plan is never retried
 /// as another source or an eager query. The ordinary row stream's identity
 /// prefix remains mandatory there, but is not required for private group input.
@@ -217,6 +219,9 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
     fn select_output<C>(&mut self, groups: Groups)
         -> Result<Vec<GraphAggregateRow>, EdgeAggregateError<S::Error, C>>
     where F: FnMut() -> Result<(), C> {
+        if !self.aggregate.ordering().is_empty() {
+            return self.select_ordered_output(groups);
+        }
         let (offset, count) = self.aggregate.incremental_result_window();
         let mut skipped = 0_u64;
         let mut selected = Vec::new();
@@ -233,6 +238,25 @@ impl<S: EdgeScanSource, F> EdgeAggregateCursor<S, F> {
             debug_assert_eq!(selected.len() as u64, next);
         }
         self.input.meter.event(GlaExecutionEvent::Work).map_err(lift)?;
+        Ok(selected)
+    }
+
+    fn select_ordered_output<C>(&mut self, groups: Groups)
+        -> Result<Vec<GraphAggregateRow>, EdgeAggregateError<S::Error, C>>
+    where F: FnMut() -> Result<(), C> {
+        let mut ranking = self.aggregate.streamed_group_ranking(groups.len());
+        for (keys, states) in groups {
+            let row = self.finalize(keys, states)?;
+            let meter = &mut self.input.meter;
+            ranking.push(&self.aggregate, row, &mut |event| meter.event(event).map_err(lift))?;
+        }
+        let meter = &mut self.input.meter;
+        let selected = ranking.finish(&self.aggregate, &mut |event| meter.event(event).map_err(lift))?;
+        // The rank prefix includes skipped groups; those must not consume the
+        // output allowance. Validate the whole selected page before delivery.
+        let count = u64::try_from(selected.len())
+            .map_err(|_| GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
+        meter.policy.rows.check(GqlBudgetDimension::ResultRows, count).map_err(GqlQueryError::Rows)?;
         Ok(selected)
     }
 
