@@ -108,7 +108,7 @@ fn duplicate_groups_retain_one_class_and_do_not_crowd_a_distinct_page() {
     for key in (0..4096).rev() {
         state.push(&query, row(key, Some(7)), &mut allow).unwrap();
         assert_eq!(state.distinct.as_ref().unwrap().len(), 1);
-        assert!(state.heap.is_empty());
+        assert_eq!(state.heap.len(), 1);
     }
     state.push(&query, row(4096, Some(-1)), &mut allow).unwrap();
     assert_eq!(state.distinct.as_ref().unwrap().len(), 2);

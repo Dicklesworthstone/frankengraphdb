@@ -8,6 +8,7 @@ use super::*;
 use super::super::super::having::GroupCells;
 
 mod distinct;
+use distinct::{DistinctIndex, DistinctKey};
 
 #[derive(Clone, Copy)]
 struct CompleteGroup<'a>(&'a GraphAggregateRow);
@@ -104,9 +105,9 @@ impl PreparedGraphAggregate {
     /// Physical ranking over finalized groups, never over matched bindings.
     /// The caller supplies the exact number of complete groups before HAVING;
     /// the finite prefix cannot exceed it. No allocation depends on a huge
-    /// numeric LIMIT alone. DISTINCT retains one best complete representative
-    /// per output class before feeding the existing heap. Maintenance admission
-    /// is unchanged; source matching remains the physical compiler's job.
+    /// numeric LIMIT alone. DISTINCT tracks only the retained prefix's output
+    /// classes; the representative of each class is its best-ranked full group.
+    /// This does not widen any incremental-maintenance or input-source gate.
     pub(crate) fn streamed_group_ranking(&self, groups: usize) -> StreamedGroupRanking {
         let offset = usize::try_from(self.offset).unwrap_or(usize::MAX);
         let count = self.count.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::MAX);
@@ -115,8 +116,10 @@ impl PreparedGraphAggregate {
         } else {
             offset.saturating_add(count).min(groups)
         };
-        StreamedGroupRanking { offset, count, prefix, heap: Vec::new(),
-            distinct: self.output_distinct.then(distinct::Classes::new) }
+        StreamedGroupRanking {
+            offset, count, prefix, heap: Vec::new(),
+            distinct: self.output_distinct.then(DistinctIndex::default),
+        }
     }
 }
 
@@ -126,21 +129,24 @@ impl PreparedGraphAggregate {
 struct RankedGroup {
     complete: GraphAggregateRow,
     projected: Option<GraphAggregateRow>,
+    distinct_key: Option<DistinctKey>,
 }
 
 /// One-query, fail-stop physical selection state. A failed push/finish must be
 /// discarded by its owning cursor; no tentative page has escaped. The heap is
 /// worst-first and holds at most min(groups, SKIP + LIMIT) complete candidates,
-/// plus one transient candidate being validated. Group accumulation upstream
+/// plus one transient candidate being validated. DISTINCT membership is indexed
+/// only for those retained candidates, not for every output class ever visited.
+/// A previously evicted class may re-enter with a better representative; its
+/// discarded representative cannot beat the monotonically improving cutoff.
+/// Group accumulation upstream
 /// is still separately governed in-memory state, not a spill implementation.
-/// DISTINCT additionally retains one normalized output key and best complete
-/// representative per output class. LIMIT does not bound that support state.
 pub(crate) struct StreamedGroupRanking {
     offset: usize,
     count: usize,
     prefix: usize,
     heap: Vec<RankedGroup>,
-    distinct: Option<distinct::Classes>,
+    distinct: Option<DistinctIndex>,
 }
 
 impl StreamedGroupRanking {
@@ -159,39 +165,66 @@ impl StreamedGroupRanking {
             None
         };
         if self.prefix == 0 { return Ok(()); }
-        let candidate = RankedGroup { complete: row, projected };
-        if let Some(classes) = &mut self.distinct {
-            return classes.insert(query, candidate, control);
+        let mut candidate = RankedGroup { complete: row, projected, distinct_key: None };
+        if let Some(index) = &mut self.distinct {
+            // Normalize equality only. The chosen representative keeps its
+            // original count/integer/fraction/scalar variants for delivery.
+            let key = DistinctIndex::key(candidate.projected.as_ref().unwrap_or(&candidate.complete), control)?;
+            if let Some(at) = index.position(&key, control)? {
+                if Self::compare(query, &candidate, &self.heap[at], control)? == Ordering::Less {
+                    control(GlaExecutionEvent::Work)?;
+                    // Share the resident key; do not retain a second equal
+                    // payload merely because this representative improved.
+                    candidate.distinct_key = self.heap[at].distinct_key.clone();
+                    self.heap[at] = candidate;
+                    // Rank improved: only the children may violate max-heap
+                    // order. The class's slot is repaired on every swap.
+                    self.sift_down(query, at, self.heap.len(), control)?;
+                }
+                return Ok(());
+            }
+            candidate.distinct_key = Some(key);
         }
-        self.push_candidate(query, candidate, control)
-    }
-
-    // Qualification/projection ran exactly once, before DISTINCT or ranking.
-    // ALL and DISTINCT representatives use the identical bounded heap.
-    fn push_candidate<E>(
-        &mut self,
-        query: &PreparedGraphAggregate,
-        candidate: RankedGroup,
-        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
-    ) -> Result<(), E> {
         if self.heap.len() < self.prefix {
             control(GlaExecutionEvent::ScratchEntry)?;
+            let mut child = self.heap.len();
+            if let Some(index) = &mut self.distinct {
+                index.insert(candidate.distinct_key.as_ref().expect("distinct candidate key").clone(), child, control)?;
+            }
             self.heap.push(candidate);
-            let mut child = self.heap.len() - 1;
             while child > 0 {
                 let parent = (child - 1) / 2;
                 if Self::compare(query, &self.heap[parent], &self.heap[child], control)?
                     != Ordering::Less {
                     break;
                 }
-                control(GlaExecutionEvent::Work)?;
-                self.heap.swap(parent, child);
+                self.swap(parent, child, control)?;
                 child = parent;
             }
         } else if Self::compare(query, &candidate, &self.heap[0], control)? == Ordering::Less {
             control(GlaExecutionEvent::Work)?;
+            if let Some(index) = &mut self.distinct {
+                index.remove(self.heap[0].distinct_key.as_ref().expect("resident distinct key"), control)?;
+                index.insert(candidate.distinct_key.as_ref().expect("distinct candidate key").clone(), 0, control)?;
+            }
             self.heap[0] = candidate;
             self.sift_down(query, 0, self.heap.len(), control)?;
+        }
+        Ok(())
+    }
+
+    fn swap<E>(
+        &mut self,
+        left: usize,
+        right: usize,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        control(GlaExecutionEvent::Work)?;
+        self.heap.swap(left, right);
+        if let Some(index) = &mut self.distinct {
+            for at in [left, right] {
+                index.move_to(self.heap[at].distinct_key.as_ref().expect("resident distinct key"), at, control)?;
+            }
         }
         Ok(())
     }
@@ -226,8 +259,7 @@ impl StreamedGroupRanking {
                 != Ordering::Less {
                 break;
             }
-            control(GlaExecutionEvent::Work)?;
-            self.heap.swap(root, child);
+            self.swap(root, child, control)?;
             root = child;
         }
         Ok(())
@@ -238,12 +270,9 @@ impl StreamedGroupRanking {
         query: &PreparedGraphAggregate,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Vec<GraphAggregateRow>, E> {
-        if let Some(classes) = self.distinct.take() {
-            for candidate in classes.into_candidates() {
-                control(GlaExecutionEvent::Work)?;
-                self.push_candidate(query, candidate, control)?;
-            }
-        }
+        // Membership serves admission only; sorting no longer needs positions.
+        // Heap entries share the key payloads, so this releases just the index.
+        self.distinct = None;
         // Fallible, governed in-place heap sort: no comparator can ignore a
         // cancellation/budget refusal, and no second sort buffer is allocated.
         for end in (1..self.heap.len()).rev() {
@@ -264,6 +293,9 @@ impl StreamedGroupRanking {
 
 #[cfg(test)]
 mod distinct_tests;
+
+#[cfg(test)]
+mod bounded_distinct_tests;
 
 #[cfg(test)]
 mod tests {

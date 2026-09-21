@@ -47,8 +47,9 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// HAVING, hidden/repeated output columns, output expressions, exact ORDER BY
 /// and SKIP/LIMIT are supported. Finite ordered pages retain at most SKIP+LIMIT
 /// completed candidates; full ordering retains at most the completed groups.
-/// Output DISTINCT retains one best-ranked representative per projected class,
-/// then applies the window. Its class support is not bounded by SKIP+LIMIT.
+/// Output DISTINCT retains only the best SKIP+LIMIT projected classes and
+/// their best-ranked complete representatives. Both rank and class support
+/// obey this prefix bound; upstream group accumulation is separately resident.
 /// Relational input and COLLECT remain outside this profile.
 /// Every child operator and
 /// column is checked before opening the source; a failed plan is never retried
