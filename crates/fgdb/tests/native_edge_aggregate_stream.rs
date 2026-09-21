@@ -377,9 +377,9 @@ fn unsupported_edge_shapes_and_bad_arguments_never_switch_to_vertex_or_eager_exe
         let db = Database::open_memory(&commit, keys()).await.unwrap();
         for text in [
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r.score) AS total",
-            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS total LIMIT 0",
-            "MATCH (a)-[r:R]->(b) RETURN b.score AS score, COUNT(*) AS total GROUP BY b.score HAVING total>0",
-            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS total HAVING total>0",
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS total ORDER BY total LIMIT 0",
+            "MATCH (a)-[r:R]->(b) RETURN b.score AS score, COUNT(*) AS total GROUP BY b.score HAVING total>0 ORDER BY total",
+            "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS total HAVING total>0 ORDER BY total",
         ] {
             let prepared =
                 PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();

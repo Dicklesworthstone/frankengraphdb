@@ -197,8 +197,8 @@ fn computed_source_admission_and_unsupported_relational_children_never_fall_back
         let cx=contexts.query(); let commit=contexts.commit();
         let mut db=Database::open_memory(&commit,keys()).await.unwrap(); db.write(&commit,seed()).await.unwrap();
         for statement in [
-            "MATCH (a)-[r:R]->(b) RETURN SUM(r.quantity+1) AS total LIMIT 0",
-            "MATCH (a)-[r:R]->(b) RETURN SUM(r.quantity+1) AS total HAVING total>0",
+            "MATCH (a)-[r:R]->(b) RETURN SUM(r.quantity+1) AS total ORDER BY total LIMIT 0",
+            "MATCH (a)-[r:R]->(b) RETURN SUM(r.quantity+1) AS total HAVING total>0 ORDER BY total",
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.quantity+1) AS values",
             "MATCH (a)-[r:R]->(b) WITH DISTINCT r.quantity AS q RETURN SUM(q+1) AS total",
             "MATCH (a)-[r:R]->(b) WITH r.quantity AS q LIMIT 1 RETURN SUM(q+1) AS total",
@@ -219,4 +219,180 @@ fn computed_source_admission_and_unsupported_relational_children_never_fall_back
         assert!(cursor.next().is_none());
     });
     assert!(report.lab_test_passed(),"{report:?}");
+}
+
+fn output_arguments(cut: u64, scale: i64, floor: i64, skip: u64, limit: u64) -> GqlParameters {
+    arguments(cut, scale).with_int64("floor", floor).unwrap()
+        .with_uint64("skip", skip).unwrap().with_uint64("limit", limit).unwrap()
+}
+fn output_text(direction: usize, hops: usize, grouped: bool) -> String {
+    text(direction, hops, grouped) + " HAVING COUNT(*)>0 AND (average>$floor OR total IS NULL) SKIP $skip LIMIT $limit"
+}
+// Start with the independent complete-occurrence arithmetic above. Only final
+// groups enter this predicate/window, so neither is a pre-aggregate row filter.
+#[allow(clippy::too_many_arguments)]
+fn output_oracle(cut: u64, scale: i64, direction: usize, hops: usize, grouped: bool,
+    floor: i64, skip: usize, limit: usize) -> Vec<Vec<GraphAggregateValue>> {
+    let (count, average) = if grouped { (2, 3) } else { (1, 2) };
+    oracle(cut, scale, direction, hops, grouped).into_iter().filter(|row| {
+        row[count].as_count().unwrap() > 0 && (row[0].is_null() || row[average].as_average()
+            .is_some_and(|value| value.numerator() > i128::from(floor) * i128::from(value.denominator())))
+    }).skip(skip).take(limit).collect()
+}
+
+#[test]
+fn native_completed_output_clauses_preserve_history_parameters_and_textual_layouts() {
+    let ((), report) = run_async_under_lab(0xc0a5_5101, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query(); let commit = contexts.commit();
+        let vfs = MemVfs::new().unwrap(); let path = vfs.database_dir();
+        let mut db = Database::create_with_vfs(&commit, vfs.clone(), &path, keys()).await.unwrap();
+        let basis = db.write(&commit, seed()).await.unwrap();
+        let view = db.read_session().unwrap();
+        let mut paused = Vec::new();
+        for direction in 0..3 { for hops in 1..=2 { for grouped in [false, true] {
+            let statement = output_text(direction, hops, grouped);
+            let args = output_arguments(1, 2, -99, 0, 2);
+            let prepared = PreparedNativeRead::prepare(&statement, &args, symbols()).unwrap();
+            let mut cursor = prepared.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+            assert_eq!(cursor.kind(), ScanKind::Edge);
+            assert_eq!(cursor.row_stats().snapshot_records, 0);
+            let slots = cursor.output_slots().to_vec();
+            let first = cursor.next().transpose().unwrap().map(|row| {
+                slots.iter().map(|slot| match *slot {
+                    GraphAggregateTextSlot::Aggregate(at) => row.values()[at].clone(),
+                    GraphAggregateTextSlot::GroupKey(at) => GraphAggregateValue::Value(row.keys()[at].clone()),
+                }).collect::<Vec<_>>()
+            });
+            paused.push((direction, hops, grouped, first, cursor));
+            drop(prepared); drop(args);
+        }}}
+        let mut edit = WriteBatch::new(R);
+        edit.set_edge_property(EId(10), Q, Some(CanonicalScalar::Int(4)));
+        edit.delete_edge(EId(11)); db.write(&commit, edit).await.unwrap();
+        let mut cascade = WriteBatch::new(R); cascade.delete_vertex(VId(1));
+        db.write(&commit, cascade).await.unwrap();
+        db.compact(&commit).await.unwrap(); drop(db);
+        let db = Database::open_with_vfs(&commit, vfs, &path, keys()).await.unwrap();
+        for (direction, hops, grouped, first, mut cursor) in paused {
+            let mut rows: Vec<_> = first.into_iter().collect(); rows.extend(drain(&mut cursor));
+            assert_eq!(rows, output_oracle(1, 2, direction, hops, grouped, -99, 0, 2));
+            assert_eq!(cursor.snapshot_seq(), basis);
+            assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);
+            let statement = output_text(direction, hops, grouped);
+            let template = PreparedNativeRead::prepare(&statement, &output_arguments(1, 1, 0, 0, 1), symbols()).unwrap();
+            for cut in 0..=3 { for scale in [1, 2] { for floor in [-1, 10] {
+                for (skip, limit) in [(0, 0), (0, 1), (1, 2)] {
+                    let args = output_arguments(cut, scale, floor, skip, limit);
+                    let QueryResult::Rows { columns, rows } = template.execute(&db, &cx, &args, wide()).unwrap()
+                        else { panic!("read rows"); };
+                    let mut stream = template.stream_aggregate(&db, &cx, &args, wide()).unwrap();
+                    assert_eq!(stream.columns(), columns);
+                    assert_eq!(drain(&mut stream), rows);
+                    assert_eq!(rows, output_oracle(cut, scale, direction, hops, grouped, floor, skip as usize, limit as usize));
+                    assert_eq!(stream.row_stats().result_rows, rows.len() as u64);
+                    assert_eq!(stream.snapshot_seq(), CommitSeq(cut));
+                }
+            }}}
+            let args = output_arguments(1, 2, -99, 0, 2);
+            let mut pinned = template.stream_aggregate_in_view(&view, &cx, &args, wide()).unwrap();
+            assert_eq!(drain(&mut pinned), output_oracle(1, 2, direction, hops, grouped, -99, 0, 2));
+            let future = output_arguments(2, 2, 0, 0, 0);
+            assert!(matches!(template.stream_aggregate_in_view(&view, &cx, &future, GqlQueryPolicy::new(0,0,0,0)),
+                Err(QueryError::EdgeAggregateStream(_))));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_hidden_having_cells_and_output_expressions_remain_exact_and_ordered() {
+    let ((), report) = run_async_under_lab(0xc0a5_5102, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query(); let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap(); db.write(&commit, seed()).await.unwrap();
+        let cases = [
+            ("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n GROUP BY b HAVING AVG(r.quantity*r.price)>0 SKIP 1 LIMIT 1",
+                vec![vec![GraphAggregateValue::Count(3)]]),
+            ("MATCH (a)-[r:R]->(b) RETURN b, SUM(r.quantity*r.price)+COUNT(*) AS adjusted GROUP BY b HAVING COUNT(*)>0 LIMIT 2",
+                vec![vec![GraphAggregateValue::Value(GraphValue::Vertex(VId(0))),GraphAggregateValue::Integer(-7)],
+                     vec![GraphAggregateValue::Value(GraphValue::Vertex(VId(1))),GraphAggregateValue::Integer(22)]]),
+            ("MATCH (a)-[r:R]->(b) RETURN SUM(r.quantity*r.price)/0 AS never GROUP BY b HAVING COUNT(*)<0 LIMIT 1", vec![]),
+            ("MATCH (a)-[r:R]->(b) FOR SYSTEM_TIME AS OF SEQ 0 RETURN COUNT(*) AS n HAVING n=0 LIMIT 1",
+                vec![vec![GraphAggregateValue::Count(0)]]),
+        ];
+        for (statement, expected) in cases {
+            let params = GqlParameters::new();
+            let QueryResult::Rows { rows, .. } = db.query(&cx, statement, &params, symbols(), wide()).unwrap()
+                else { panic!("read rows"); };
+            let mut stream = db.query_aggregate_stream(&cx, statement, &params, symbols(), wide()).unwrap();
+            assert_eq!(drain(&mut stream), expected);
+            assert_eq!(rows, expected);
+            assert_eq!(stream.row_stats().result_rows, expected.len() as u64);
+        }
+        let mut later = WriteBatch::new(R);
+        later.set_edge_property(EId(12), Q, Some(CanonicalScalar::ucs_basic_text("private having value").unwrap()));
+        later.set_edge_property(EId(15), Q, None); db.write(&commit, later).await.unwrap();
+        for limit in [0, 1] {
+            let statement = format!("MATCH (a)-[r:R]->(b) RETURN b,MIN(r.quantity) AS m GROUP BY b HAVING m>0 OR TRUE LIMIT {limit}");
+            let mut stream = db.query_aggregate_stream(&cx, &statement, &GqlParameters::new(), symbols(), wide()).unwrap();
+            let error = stream.next().unwrap().unwrap_err();
+            assert!(matches!(&error, GqlQueryError::Source(GraphAggregateError::NonIntegerHaving { .. })));
+            assert!(!error.to_string().contains("private having value"));
+            assert_eq!(stream.row_stats().result_rows, 0); assert!(stream.next().is_none());
+        }
+        // Complete later-group division errors must still be reached, even
+        // after the requested prefix could have been filled by earlier groups.
+        for limit in [0, 1] {
+            let statement = format!("MATCH (a)-[r:R]->(b) RETURN b,1/(COUNT(*)-3) AS bad GROUP BY b LIMIT {limit}");
+            let mut stream = db.query_aggregate_stream(&cx, &statement, &GqlParameters::new(), symbols(), wide()).unwrap();
+            assert!(matches!(stream.next(), Some(Err(GqlQueryError::Source(GraphAggregateError::OutputExpression { .. })))));
+            assert_eq!(stream.row_stats().result_rows, 0); assert!(stream.next().is_none());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_selected_pages_share_one_allowance_without_charging_rejected_groups_as_results() {
+    let ((), report) = run_async_under_lab(0xc0a5_5103, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query(); let commit = contexts.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(R);
+        for id in 0..1024 { batch.create_vertex(VId(id), vec![], vec![]); }
+        for id in 0..1024 { batch.add_edge(EId(id), VId(0), VId(id), vec![(Q,CanonicalScalar::Int(2)),(P,CanonicalScalar::Int(3))]); }
+        db.write(&commit, batch).await.unwrap();
+        let statement = "MATCH (a)-[r:R]->(b) RETURN b,COUNT(*) AS n,SUM(r.quantity*r.price)+COUNT(*) AS adjusted GROUP BY b HAVING n=1 SKIP 1023 LIMIT 1";
+        let params = GqlParameters::new();
+        let prepared = PreparedNativeRead::prepare(statement, &params, symbols()).unwrap();
+        let mut baseline = prepared.stream_aggregate(&db, &cx, &params,
+            GqlQueryPolicy::new(1024,1,u64::MAX,u64::MAX)).unwrap();
+        let expected = drain(&mut baseline);
+        assert_eq!(expected, vec![vec![GraphAggregateValue::Value(GraphValue::Vertex(VId(1023))),
+            GraphAggregateValue::Count(1), GraphAggregateValue::Integer(7)]]);
+        let r = baseline.row_stats(); let e = baseline.evaluator_stats();
+        assert_eq!(r.result_rows, 1);
+        let exact = GqlQueryPolicy::new(r.snapshot_records,1,e.work_units,e.scratch_entries);
+        assert_eq!(drain(&mut prepared.stream_aggregate(&db,&cx,&params,exact).unwrap()), expected);
+        for allowance in [GqlQueryPolicy::new(r.snapshot_records-1,1,u64::MAX,u64::MAX),
+            GqlQueryPolicy::new(u64::MAX,0,u64::MAX,u64::MAX),
+            GqlQueryPolicy::new(u64::MAX,1,e.work_units-1,u64::MAX),
+            GqlQueryPolicy::new(u64::MAX,1,u64::MAX,e.scratch_entries-1)] {
+            let mut stream = prepared.stream_aggregate(&db,&cx,&params,allowance).unwrap();
+            assert!(stream.next().unwrap().is_err());
+            assert_eq!(stream.row_stats().result_rows,0);
+            assert_eq!(stream.state(),VertexScanState::Failed);
+            assert!(stream.next().is_none());
+        }
+        let empty = "MATCH (a)-[r:R]->(b) RETURN b,COUNT(*) AS n GROUP BY b HAVING n>1 LIMIT 1";
+        let mut stream = db.query_aggregate_stream(&cx,empty,&params,symbols(),
+            GqlQueryPolicy::new(1024,0,u64::MAX,u64::MAX)).unwrap();
+        assert!(stream.next().is_none()); assert_eq!(stream.row_stats().result_rows,0);
+        let mut closed = prepared.stream_aggregate(&db,&cx,&params,exact).unwrap();
+        closed.close(); closed.close(); assert!(closed.next().is_none());
+        assert_eq!(closed.row_stats().snapshot_records,0);
+        assert_eq!(closed.evaluator_stats().work_units,0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
 }
