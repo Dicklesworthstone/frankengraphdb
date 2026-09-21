@@ -4,8 +4,8 @@
 //! source is driven once, without a projected input bag. Global aggregation
 //! retains a fixed number of numeric cells. Grouped aggregation retains one
 //! owned canonical key, numeric state and selected extrema per group, then yields
-//! completed groups
-//! in key order. Group storage is governed but not spill-backed; source residency
+//! completed groups in canonical result order. Group storage is governed but
+//! not spill-backed; source residency
 //! is independent of this operator's live-state bound.
 //! Argument DISTINCT retains canonical support per aggregate and group under
 //! the same meter. Its state grows with unique values, not row occurrences.
@@ -49,10 +49,12 @@ impl core::error::Error for VertexAggregateBuildError {
 /// keys may be scalar properties, native vertex identities or checked computed
 /// values. Row-local expressions use the shared projection VM before grouping
 /// and argument DISTINCT. Plain operands retain their direct borrowed path.
-/// Output DISTINCT, relational input, HAVING, ordering and pagination still refuse
-/// before opening a source. The underlying row stream's leading-identity order
-/// requirement is relaxed only because this operator owns result grouping.
-/// Argument DISTINCT is independent of the unsupported output-DISTINCT stage.
+/// HAVING, hidden/repeated columns, output expressions, output DISTINCT,
+/// ORDER BY and SKIP/LIMIT use the same completed-group stage as edge streams.
+/// Relational input and COLLECT still refuse before opening a source. The
+/// underlying row stream's leading-identity order requirement is relaxed only
+/// because this operator owns result grouping. Argument DISTINCT and output
+/// DISTINCT remain separate stages on opposite sides of aggregation.
 #[derive(Clone)]
 pub struct VertexAggregatePlan {
     input: VertexScanPlan<GraphValueRow>,
@@ -60,14 +62,16 @@ pub struct VertexAggregatePlan {
 }
 impl VertexAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, VertexAggregateBuildError> {
-        if !aggregate.supports_row_local_aggregate_stream()
-            || !aggregate
+        if !aggregate
                 .aggregates()
                 .iter()
                 .all(|spec| NumericState::supports(spec.function()))
         {
             return Err(VertexAggregateBuildError::RequiresPlainGlobalAggregate);
         }
+        let aggregate = aggregate
+            .prepare_streamed_output()
+            .ok_or(VertexAggregateBuildError::RequiresPlainGlobalAggregate)?;
         let input = VertexScanPlan::compile_with_projection(
             aggregate.input_pattern().plan(),
             |projection, ordering| {
@@ -83,10 +87,7 @@ impl VertexAggregatePlan {
             },
         )
         .map_err(VertexAggregateBuildError::Scan)?;
-        Ok(Self {
-            input,
-            aggregate: aggregate.clone(),
-        })
+        Ok(Self { input, aggregate })
     }
 
     /// Names addressing GraphAggregateRow::values(), not grouping keys.
@@ -111,13 +112,18 @@ type Groups = BTreeMap<Vec<GraphValue>, Vec<NumericState>>;
 type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
 
 /// The first demand consumes the source; subsequent demands move completed
-/// groups out in canonical key order without constructing a result-row vector.
+/// groups out in canonical result order. Plain reductions move group state;
+/// result clauses finish and validate all groups before exposing a selected page.
 /// Global empty input has one zero/null row. Grouped empty input has no rows.
 /// No partial group escapes. Source/data and group-count refusals precede ANY
 /// output; cancellation/work/scratch refusal during delivery may follow earlier
 /// complete rows, as for other pull cursors. One typed error permanently fuses
 /// the cursor. Close releases both the source and undelivered groups, without
 /// draining. Every phase uses the same cumulative meter.
+/// Only selected post-HAVING/DISTINCT/window rows spend the result allowance.
+/// Ordered ALL retains at most min(groups, SKIP+LIMIT) ranked candidates;
+/// DISTINCT also retains one representative per output class. Neither LIMIT
+/// nor a delivery quota bounds upstream group/support memory or source residency.
 pub struct VertexAggregateCursor<S, F> {
     source: Option<S>,
     plan: VertexAggregatePlan,
@@ -125,6 +131,7 @@ pub struct VertexAggregateCursor<S, F> {
     snapshot_seq: CommitSeq,
     state: VertexScanState,
     pending: Option<PendingGroups>,
+    completed: Option<std::vec::IntoIter<GraphAggregateRow>>,
 }
 impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
     pub fn new(
@@ -148,6 +155,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             },
             state: VertexScanState::Open,
             pending: None,
+            completed: None,
         }
     }
     #[must_use]
@@ -180,6 +188,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         }
         self.source = None;
         self.pending = None;
+        self.completed = None;
     }
 
     fn accumulate<C>(&mut self) -> Result<Groups, VertexAggregateError<S::Error, C>>
@@ -193,7 +202,9 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         if global {
             // Preserve constant-state global aggregation and its early output
             // admission, including a zero output budget on empty input.
-            let _ = meter.next_result_count().map_err(lift)?;
+            if !self.plan.aggregate.has_streamed_output_stage() {
+                let _ = meter.next_result_count().map_err(lift)?;
+            }
             meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
             groups.insert(Vec::new(), states(&self.plan.aggregate, meter)?);
         }
@@ -305,9 +316,9 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                             meter.event(VertexScanEvent::Work).map_err(lift)?;
                         }
                     }
-                    // The number of groups is monotone during this read. Admit a
-                    // new group's final output BEFORE allocating its numeric state.
-                    // This does not increment delivered result_rows.
+                    // Only a plain reduction emits every group. Result clauses
+                    // may reject, collapse or skip groups, so their quota is
+                    // checked after selection, not on private support counts.
                     let next = groups
                         .len()
                         .checked_add(1)
@@ -319,11 +330,13 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                     match groups.entry(key) {
                         btree_map::Entry::Occupied(entry) => entry.into_mut(),
                         btree_map::Entry::Vacant(entry) => {
-                            meter
-                                .policy
-                                .rows
-                                .check(GqlBudgetDimension::ResultRows, next)
-                                .map_err(GqlQueryError::Rows)?;
+                            if !self.plan.aggregate.has_streamed_output_stage() {
+                                meter
+                                    .policy
+                                    .rows
+                                    .check(GqlBudgetDimension::ResultRows, next)
+                                    .map_err(GqlQueryError::Rows)?;
+                            }
                             meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
                             entry.insert(states(&self.plan.aggregate, meter)?)
                         }
@@ -355,7 +368,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         Ok(groups)
     }
 
-    fn deliver<C>(
+    fn finalize<C>(
         &mut self,
         keys: Vec<GraphValue>,
         states: Vec<NumericState>,
@@ -376,7 +389,9 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             // Preserve empty global SUM/AVG over a nonnumeric static domain:
             // no nonnull operand was encountered, so its answer is NULL.
             GraphAggregateRow::from_global_values(values)
-        } else if self.plan.aggregate.input_projection().is_some() {
+        } else if self.plan.aggregate.input_projection().is_some()
+            || self.plan.aggregate.has_streamed_output_stage()
+        {
             // The projection compiler checked every column and the shared
             // exact cells checked every consumed value. Preserve native key
             // domains without weakening public maintained-row admission.
@@ -387,8 +402,53 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 .materialize_incremental_row(keys, values)
                 .expect("checked aggregate fixes key and result domains")
         };
-        self.meter.emit().map_err(lift)?;
         Ok(row)
+    }
+
+    fn select_output<C>(&mut self, groups: Groups)
+        -> Result<Vec<GraphAggregateRow>, VertexAggregateError<S::Error, C>>
+    where F: FnMut() -> Result<(), C> {
+        if !self.plan.aggregate.ordering().is_empty()
+            || self.plan.aggregate.incremental_output_is_distinct()
+        {
+            let mut ranking = self.plan.aggregate.streamed_group_ranking(groups.len());
+            for (keys, states) in groups {
+                let row = self.finalize(keys, states)?;
+                let meter = &mut self.meter;
+                ranking.push(&self.plan.aggregate, row,
+                    &mut |event| meter.event(input_event(event)).map_err(lift))?;
+            }
+            let meter = &mut self.meter;
+            let rows = ranking.finish(&self.plan.aggregate,
+                &mut |event| meter.event(input_event(event)).map_err(lift))?;
+            let count = u64::try_from(rows.len()).map_err(|_|
+                GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
+            meter.policy.rows.check(GqlBudgetDimension::ResultRows, count)
+                .map_err(GqlQueryError::Rows)?;
+            return Ok(rows);
+        }
+        // Canonical unordered pages need no second ranked collection. Retire
+        // each raw group once, but evaluate even off-page qualified expressions.
+        let (offset, count) = self.plan.aggregate.incremental_result_window();
+        let mut skipped = 0_u64;
+        let mut selected = Vec::new();
+        for (keys, states) in groups {
+            let row = self.finalize(keys, states)?;
+            let meter = &mut self.meter;
+            let Some(row) = self.plan.aggregate.evaluate_streamed_output(row,
+                &mut |event| meter.event(input_event(event)).map_err(lift))?
+            else { continue; };
+            if skipped < offset { skipped += 1; continue; }
+            if count.is_some_and(|count| selected.len() as u64 >= count) { continue; }
+            let next = selected.len().checked_add(1).and_then(|n| u64::try_from(n).ok())
+                .ok_or(GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
+            meter.policy.rows.check(GqlBudgetDimension::ResultRows, next)
+                .map_err(GqlQueryError::Rows)?;
+            meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
+            selected.push(row);
+        }
+        self.meter.event(VertexScanEvent::Work).map_err(lift)?;
+        Ok(selected)
     }
 }
 
@@ -736,11 +796,20 @@ where
         if self.state != VertexScanState::Open {
             return None;
         }
-        if self.pending.is_none() {
+        if self.pending.is_none() && self.completed.is_none() {
             let result = self.accumulate();
             // Every retained key is owned. Release the snapshot before delivery.
             self.source = None;
             match result {
+                Ok(groups) if self.plan.aggregate.has_streamed_output_stage() => {
+                    match self.select_output(groups) {
+                        Ok(rows) => self.completed = Some(rows.into_iter()),
+                        Err(error) => {
+                            self.state = VertexScanState::Failed;
+                            return Some(Err(error));
+                        }
+                    }
+                }
                 Ok(groups) => self.pending = Some(groups.into_iter()),
                 Err(error) => {
                     self.state = VertexScanState::Failed;
@@ -748,22 +817,35 @@ where
                 }
             }
         }
-        let Some((keys, states)) = self.pending.as_mut().and_then(Iterator::next) else {
+        let row = if let Some(rows) = &mut self.completed {
+            rows.next().map(Ok)
+        } else {
+            self.pending.as_mut().and_then(Iterator::next)
+                .map(|(keys, states)| self.finalize(keys, states))
+        };
+        let Some(row) = row else {
             self.state = VertexScanState::Exhausted;
             self.pending = None;
+            self.completed = None;
             return None;
         };
-        let result = self.deliver(keys, states);
+        let result = row.and_then(|row| {
+            self.meter.emit().map_err(lift)?;
+            Ok(row)
+        });
         if result.is_err() {
             self.state = VertexScanState::Failed;
             self.pending = None;
+            self.completed = None;
         } else if self
             .pending
             .as_ref()
             .is_some_and(|groups| groups.len() == 0)
+            || self.completed.as_ref().is_some_and(|rows| rows.len() == 0)
         {
             self.state = VertexScanState::Exhausted;
             self.pending = None;
+            self.completed = None;
         }
         Some(result)
     }
@@ -771,6 +853,7 @@ where
         if self.state != VertexScanState::Open {
             return (0, Some(0));
         }
+        if let Some(rows) = &self.completed { return (0, Some(rows.len())); }
         match &self.pending {
             Some(groups) => (0, Some(groups.len())),
             None if self.plan.aggregate.group_key_columns().is_empty() => (0, Some(1)),
@@ -805,3 +888,6 @@ mod value_tests;
 
 #[cfg(test)]
 mod computed_tests;
+
+#[cfg(test)]
+mod output_tests;
