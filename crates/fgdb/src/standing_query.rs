@@ -6,6 +6,7 @@
 
 mod aggregate;
 mod components;
+mod constant;
 mod filter;
 mod group;
 mod joins;
@@ -224,6 +225,8 @@ pub(crate) enum StandingQuery {
     Window(Box<window::State>),
     /// Complete selected row input, then native groups and the shared output sink.
     Group(Box<group::State>),
+    /// An immutable source-free relation, evaluated once at registration/rebuild.
+    Constant(Box<constant::State>),
 }
 
 impl StandingQuery {
@@ -243,6 +246,7 @@ impl StandingQuery {
             Self::Reduction(query) => (query.policy, query.frontier, query.failure),
             Self::Window(query) => (query.policy, query.frontier, query.failure),
             Self::Group(query) => (query.policy, query.frontier, query.failure),
+            Self::Constant(query) => (query.policy, query.frontier, query.failure),
         }
     }
 
@@ -271,6 +275,7 @@ impl StandingQuery {
             Self::Reduction(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Window(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Group(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Constant(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
         };
         match result {
             Ok(()) => *frontier = at,
@@ -495,6 +500,9 @@ impl<V: Vfs + Clone> Database<V> {
             .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
         let replacement = match current {
+            StandingQuery::Constant(query) => StandingQuery::Constant(Box::new(
+                self.prepare_standing_constant(cx, query.definition.clone(), policy)?,
+            )),
             StandingQuery::Aggregate(query) => {
                 self.prepare_registered_aggregate(cx, query.definition.clone(), policy)?
             }
@@ -623,6 +631,7 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Group(query) => (query.rows(), query.ordered_rows(), query.frontier, &query.stats),
             StandingQuery::Reachability(_)
             | StandingQuery::Rows { .. }
+            | StandingQuery::Constant(_)
             | StandingQuery::Triangles(_)
             | StandingQuery::Components(_)
             | StandingQuery::CoreNumbers(_)
@@ -641,7 +650,7 @@ impl<V: Vfs + Clone> Database<V> {
         })
     }
 
-    /// Borrow the ordinary MATCH value rows at the current published frontier.
+    /// Borrow ordinary MATCH or constant value rows at the published frontier.
     /// ordered_rows() is always Some, including empty and canonical-order
     /// results. Wrong-kind and foreign handles never expose private carriers.
     pub fn standing_rows<'a>(
@@ -649,15 +658,20 @@ impl<V: Vfs + Clone> Database<V> {
         cx: &QueryCx,
         handle: &StandingQueryHandle,
     ) -> Result<StandingQueryView<'a, GraphValueRow>, StandingQueryError> {
-        let StandingQuery::Rows { source, output } = self.admitted_standing_query(cx, handle)?
-        else {
-            return Err(StandingQueryError::Unsupported);
+        let (rows, ordered, frontier, stats) = match self.admitted_standing_query(cx, handle)? {
+            StandingQuery::Rows { source, output } => {
+                (&output.rows, output.ordered.as_slice(), source.frontier, &source.stats)
+            }
+            StandingQuery::Constant(query) => {
+                (&query.rows, query.ordered.as_slice(), query.frontier, &query.stats)
+            }
+            _ => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
-            rows: &output.rows,
-            ordered: Some(&output.ordered),
-            frontier: source.frontier,
-            stats: &source.stats,
+            rows,
+            ordered: Some(ordered),
+            frontier,
+            stats,
         })
     }
 
@@ -720,6 +734,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Reduction(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Window(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Group(query) => query.maintain(batch, prior, &mut meter),
+            StandingQuery::Constant(query) => query.maintain(batch, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);
     }

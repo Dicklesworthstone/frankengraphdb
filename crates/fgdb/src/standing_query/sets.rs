@@ -31,6 +31,7 @@ pub(crate) struct State {
 pub(super) fn columns(query: &StandingQuery) -> Option<&[String]> {
     match query {
         StandingQuery::Rows { output, .. } => Some(output.definition().columns()),
+        StandingQuery::Constant(query) => Some(query.definition.columns()),
         StandingQuery::Set(query) => Some(&query.columns),
         StandingQuery::Join(query) => Some(query.columns()),
         StandingQuery::Projection(query) => Some(query.columns()),
@@ -51,12 +52,14 @@ pub(super) fn column_type(query: &StandingQuery, column: usize) -> Option<GraphS
         StandingQuery::Projection(query) => query.spec().column_types().get(column).copied(),
         StandingQuery::Filter(query) => query.spec().column_types().get(column).copied(),
         StandingQuery::Window(query) => query.spec().input_types().get(column).copied(),
+        StandingQuery::Constant(query) => query.definition.column_types().get(column).copied(),
         _ => None,
     }
 }
 pub(super) fn rows(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
     match query {
         StandingQuery::Rows { output, .. } => Some(&output.rows),
+        StandingQuery::Constant(query) => Some(&query.rows),
         StandingQuery::Set(query) => Some(&query.rows),
         StandingQuery::Join(query) => Some(query.rows()),
         StandingQuery::Projection(query) => Some(query.rows()),
@@ -68,6 +71,7 @@ pub(super) fn rows(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
 pub(super) fn delta(query: &StandingQuery) -> Option<&ZSet<GraphValueRow>> {
     match query {
         StandingQuery::Rows { output, .. } => output.last_delta.as_ref(),
+        StandingQuery::Constant(query) => query.last_delta.as_ref(),
         StandingQuery::Set(query) => query.last_delta.as_ref(),
         StandingQuery::Join(query) => query.delta(),
         StandingQuery::Projection(query) => query.delta(),
