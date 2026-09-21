@@ -44,6 +44,11 @@ pub enum RowJoinKind {
     Inner,
     /// All matches, or one null extension per left occurrence when unmatched.
     Left,
+    /// All matches, or one null extension per right occurrence when unmatched.
+    /// Output columns remain left followed by right, never swapped.
+    Right,
+    /// All matches plus null extensions for unmatched occurrences on BOTH sides.
+    Full,
     /// Preserve left multiplicity when at least one matching right row exists.
     Semi,
     /// Preserve left multiplicity when no matching right row exists.
@@ -51,11 +56,11 @@ pub enum RowJoinKind {
 }
 impl RowJoinKind {
     fn includes_right(self) -> bool {
-        matches!(self, Self::Inner | Self::Left)
+        matches!(self, Self::Inner | Self::Left | Self::Right | Self::Full)
     }
 }
 
-/// Immutable positional schema. Inner/left output concatenates both inputs;
+/// Immutable positional schema. Inner/outer output concatenates both inputs;
 /// semi/anti output contains only the left columns. `new` requires equality
 /// keys; `cross` explicitly chooses unconditional matching. Neither accepts
 /// an arbitrary ON predicate program. Equijoin keys must be scalar or vertex
@@ -129,8 +134,9 @@ impl RowJoinSpec {
     /// because no payload is interpreted as an equality key. A zero-column
     /// relation is valid; a unit tuple multiplies counts, not column widths.
     ///
-    /// The default kind is Inner. With Left/Semi/Anti, every right occurrence
-    /// is a witness regardless of its values. Source counts are still checked
+    /// The default kind is Inner. Every occurrence on the opposite side is a
+    /// witness regardless of its values, including for outer and presence
+    /// joins. Source counts are still checked
     /// when the opposite bag is empty. Products can be quadratic in support;
     /// this constructor promises neither a selective index nor spill.
     pub fn cross(
@@ -307,7 +313,7 @@ fn arrange<E>(
 /// One exact in-memory row-join circuit. Work/scratch count logical events and
 /// payload units, not allocator bytes or key-comparison costs. Arc-owned keys
 /// and input rows avoid repeated payload cloning in the generic join products.
-/// Inner/left output can be quadratic. Semi/anti use counted witnesses without
+/// Inner/outer output can be quadratic. Semi/anti use counted witnesses without
 /// producing that Cartesian bag. All kinds share work/scratch and final-row
 /// admission; this is not spill or a worst-case-optimal multiway join.
 #[derive(PartialEq, Eq)]
@@ -470,6 +476,9 @@ mod mode_tests;
 mod cross_tests;
 
 #[cfg(test)]
+mod outer_tests;
+
+#[cfg(test)]
 mod payload_tests {
     use super::*;
     use fgdb_types::{CanonicalScalar, VId};
@@ -532,6 +541,8 @@ mod payload_tests {
         for kind in [
             RowJoinKind::Inner,
             RowJoinKind::Left,
+            RowJoinKind::Right,
+            RowJoinKind::Full,
             RowJoinKind::Semi,
             RowJoinKind::Anti,
         ] {
@@ -540,14 +551,16 @@ mod payload_tests {
                 .unwrap()
                 .commit();
             let matched = match kind {
-                RowJoinKind::Inner | RowJoinKind::Left => bag(&joined, 6),
+                RowJoinKind::Inner | RowJoinKind::Left | RowJoinKind::Right | RowJoinKind::Full => {
+                    bag(&joined, 6)
+                }
                 RowJoinKind::Semi => bag(&left, 2),
                 RowJoinKind::Anti => ZSet::new(),
             };
             assert_eq!(join.rows(), &matched);
             let expected = match kind {
-                RowJoinKind::Inner | RowJoinKind::Semi => ZSet::new(),
-                RowJoinKind::Left => bag(&null_extended, 2),
+                RowJoinKind::Inner | RowJoinKind::Right | RowJoinKind::Semi => ZSet::new(),
+                RowJoinKind::Left | RowJoinKind::Full => bag(&null_extended, 2),
                 RowJoinKind::Anti => bag(&left, 2),
             };
             let delta = join
@@ -586,6 +599,8 @@ mod payload_tests {
         for kind in [
             RowJoinKind::Inner,
             RowJoinKind::Left,
+            RowJoinKind::Right,
+            RowJoinKind::Full,
             RowJoinKind::Semi,
             RowJoinKind::Anti,
         ] {
