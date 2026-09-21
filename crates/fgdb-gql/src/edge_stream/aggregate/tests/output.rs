@@ -213,7 +213,10 @@ fn close_discards_validated_pages_without_more_demand_and_other_profiles_remain_
     assert_eq!((cursor.row_stats(),cursor.evaluator_stats()),before);
     let s=source(63);let reads=s.reads.clone();let mut cursor=run(&q,s,wide());cursor.close();
     assert_eq!(reads.load(Ordering::SeqCst),0);
-    assert!(EdgeAggregatePlan::compile(&q.with_distinct_output(true)).is_err());
+    let distinct = q.with_distinct_output(true);
+    let s = source(63); let expected = eager(&distinct, &s);
+    assert_eq!(run(&distinct, s, wide()).collect::<Result<Vec<_>, _>>().unwrap(), expected);
+    assert!(EdgeAggregatePlan::compile(&prepare("MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values")).is_err());
     assert!(EdgeAggregatePlan::compile(&prepare("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n ORDER BY n")).is_ok());
 }
 
@@ -308,7 +311,7 @@ fn ranked_cursor_refusals_drop_the_source_and_unpublished_page_at_every_checkpoi
     let mut cursor = run(&q, source(63), exact); cursor.next().unwrap().unwrap();
     let stats = (cursor.row_stats(), cursor.evaluator_stats()); cursor.close(); cursor.close();
     assert!(cursor.completed.is_none()); assert!(cursor.next().is_none());
-    assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), stats);
+    assert_eq!((cursor.row_stats(),cursor.evaluator_stats()),stats);
 }
 
 #[test]
@@ -349,5 +352,66 @@ fn ordered_rank_prefix_and_rejected_groups_do_not_consume_the_selected_row_allow
         }
         assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);
         assert_eq!(drops.load(Ordering::SeqCst), 1); assert!(cursor.next().is_none());
+    }
+}
+
+#[test]
+fn distinct_visible_tuples_keep_hidden_order_and_ranked_pages_for_all_small_graphs() {
+    for mask in 0..64 { for direction in 0..3 { for hops in 1..=2 {
+        let atom = |name, relation, end| match direction {
+            0 => format!("-[{name}:{relation}]->({end})"),
+            1 => format!("<-[{name}:{relation}]-({end})"),
+            _ => format!("-[{name}:{relation}]-({end})"),
+        };
+        let mut pattern = format!("(a){}",atom("r","R","b"));
+        if hops == 2 { pattern += &atom("s","S","c"); }
+        let end = if hops == 1 { "b" } else { "c" };
+        for projection in ["COUNT(*) AS n", "AVG(r.p) AS n", "COALESCE(SUM(r.p),COUNT(*)) AS n"] {
+            for ordering in ["", " ORDER BY n DESC NULLS LAST", " ORDER BY COUNT(*) DESC"] {
+                for window in ["", " LIMIT 0", " SKIP 1 LIMIT 2"] {
+                    let text = format!("MATCH {pattern} RETURN DISTINCT {projection} GROUP BY {end}{ordering}{window}");
+                    let q = prepare(&text); let before = q.canonical_bytes(); let s = source(mask);
+                    let expected = eager(&q,&s);
+                    let mut cursor = run(&q,s,wide());
+                    assert_eq!(cursor.by_ref().collect::<Result<Vec<_>,_>>().unwrap(),expected,"{text}");
+                    assert_eq!(cursor.row_stats().result_rows,expected.len() as u64);
+                    assert_eq!(q.canonical_bytes(),before); assert!(cursor.next().is_none());
+                }
+            }
+        }
+    }}}
+}
+
+#[test]
+fn distinct_cursor_refusals_release_classes_source_and_undelivered_page() {
+    let q = prepare("MATCH (a)-[r:R]-(b) RETURN DISTINCT COUNT(*) AS n GROUP BY b ORDER BY n DESC");
+    let mut calls = 0;
+    let mut full = EdgeAggregateCursor::new(source(63),EdgeAggregatePlan::compile(&q).unwrap(),wide(),
+        || { calls += 1; Ok::<_,usize>(()) });
+    let expected = full.by_ref().collect::<Result<Vec<_>,_>>().unwrap();
+    let rows = full.row_stats(); let work = full.evaluator_stats(); drop(full);
+    assert!(expected.len() >= 2);
+    let exact = GqlQueryPolicy::new(rows.snapshot_records,rows.result_rows,work.work_units,work.scratch_entries);
+    assert_eq!(run(&q,source(63),exact).collect::<Result<Vec<_>,_>>().unwrap(),expected);
+    for stop in 1..=calls {
+        let s = source(63); let drops = s.drops.clone(); let mut seen = 0;
+        let mut cursor = EdgeAggregateCursor::new(s,EdgeAggregatePlan::compile(&q).unwrap(),exact,
+            || { seen += 1; if seen == stop { Err(stop) } else { Ok(()) } });
+        let mut prefix = Vec::new();
+        loop { match cursor.next().expect("the selected checkpoint is reached") {
+            Ok(row) => prefix.push(row),
+            Err(GqlQueryError::Interrupted(at)) => { assert_eq!(at,stop); break; }
+            Err(error) => panic!("unexpected refusal: {error:?}"),
+        }}
+        assert!(expected.starts_with(&prefix)); assert_eq!(cursor.row_stats().result_rows,prefix.len() as u64);
+        assert_eq!(cursor.state(),EdgeScanState::Failed); assert!(cursor.pending.is_none() && cursor.completed.is_none());
+        assert_eq!(drops.load(Ordering::SeqCst),1); assert!(cursor.next().is_none()); drop(cursor);
+        assert_eq!(seen,stop);
+    }
+    for limit in [0,1] {
+        let q = prepare(&format!("MATCH (a)-[r:R]->(b) RETURN DISTINCT SUM(r.p) AS total GROUP BY b ORDER BY total LIMIT {limit}"));
+        let mut s = source(63); s.fail = Some(EId(6)); let mut cursor = run(&q,s,wide());
+        assert!(cursor.next().unwrap().is_err()); assert_eq!(cursor.row_stats().result_rows,0);
+        assert_eq!(cursor.state(),EdgeScanState::Failed); assert!(cursor.next().is_none());
     }
 }
