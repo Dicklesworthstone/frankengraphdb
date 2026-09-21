@@ -5,6 +5,10 @@ use super::*;
 use fgdb_gql::stream::VertexScanState;
 use fgdb_gql::{GlaExecutionStats, GqlExecutionStats};
 
+mod delta;
+pub use delta::StandingNativeDeltaCursor;
+pub(super) use delta::open as open_delta;
+
 #[derive(Clone, Copy)]
 enum NativeRow<'a> {
     Values(&'a GraphValueRow),
@@ -171,6 +175,22 @@ impl<'a> Pull<'a> {
         &mut self,
         checkpoint: &mut impl FnMut() -> Result<(), StandingQueryFailure>,
     ) -> Option<Result<Vec<QueryValue>, StandingQueryFailure>> {
+        self.advance(checkpoint, pull_row)
+    }
+
+    // Occurrence and compressed-delta cursors share the same publication and
+    // failure lifecycle. The step admits one complete item before returning it.
+    fn advance<T>(
+        &mut self,
+        checkpoint: &mut impl FnMut() -> Result<(), StandingQueryFailure>,
+        step: impl FnOnce(
+            &mut Runs<'a>,
+            &mut Option<Pending<'a>>,
+            &Layout,
+            u64,
+            &mut Meter<'_>,
+        ) -> Result<Option<T>, StandingQueryFailure>,
+    ) -> Option<Result<T, StandingQueryFailure>> {
         if self.state != VertexScanState::Open {
             return None;
         }
@@ -185,7 +205,7 @@ impl<'a> Pull<'a> {
             stats: self.stats,
             checkpoint,
         };
-        let result = pull_row(&mut runs, &mut pending, &self.layout, self.delivered, &mut meter);
+        let result = step(&mut runs, &mut pending, &self.layout, self.delivered, &mut meter);
         self.stats = meter.stats;
         match result {
             Err(error) => Some(Err(error)),
@@ -194,7 +214,7 @@ impl<'a> Pull<'a> {
                 None
             }
             Ok(Some(row)) => {
-                // pull_row checked the successor before projecting the row.
+                // The step checked the successor before constructing the item.
                 self.delivered += 1;
                 self.runs = Some(runs);
                 self.pending = pending;

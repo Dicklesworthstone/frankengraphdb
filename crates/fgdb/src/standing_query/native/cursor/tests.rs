@@ -19,7 +19,7 @@ fn layout(width: usize) -> Arc<Layout> {
 fn make<'a>(rows: &'a ZSet<GraphValueRow>, order: Option<&'a [Arc<GraphValueRow>]>, width: usize,
     policy: GqlQueryPolicy) -> Pull<'a> {
     Pull::new(view_runs(rows, order, NativeRow::Values), layout(width), CommitSeq(7), policy,
-        StandingQueryStats { work_units: 2, scratch_entries: 1, ..StandingQueryStats::default() })
+        StandingQueryStats { work_units: 1, scratch_entries: 1, ..StandingQueryStats::default() })
 }
 fn drain(pull: &mut Pull<'_>) -> Result<Vec<Vec<QueryValue>>, StandingQueryFailure> {
     let mut rows = Vec::new();

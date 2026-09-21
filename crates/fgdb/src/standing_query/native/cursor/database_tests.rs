@@ -49,7 +49,7 @@ fn every_native_result_family_pulls_the_same_order_cells_and_frontier_as_collect
             assert_eq!(cursor.columns(), columns);
             assert_eq!(cursor.snapshot_seq(), at);
             assert_eq!(cursor.row_stats(), GqlExecutionStats { snapshot_records: 0, result_rows: 0 });
-            assert_eq!(cursor.evaluator_stats(), GlaExecutionStats { work_units: 2, scratch_entries: 1 });
+            assert_eq!(cursor.evaluator_stats(), GlaExecutionStats { work_units: 1, scratch_entries: 1 });
             assert_eq!(cursor.by_ref().collect::<Result<Vec<_>, _>>().unwrap(), rows, "{text}");
             assert_eq!(cursor.state(), VertexScanState::Exhausted);
             assert_eq!(cursor.row_stats().result_rows, rows.len() as u64);

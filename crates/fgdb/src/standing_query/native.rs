@@ -8,7 +8,7 @@ use fgdb_gql::{GqlParameters, GraphAggregateTextSlot, GraphSymbolResolver};
 
 pub(super) mod set;
 mod cursor;
-pub use cursor::StandingNativeCursor;
+pub use cursor::{StandingNativeCursor, StandingNativeDeltaCursor};
 
 pub(super) enum Layout {
     Rows {
@@ -247,6 +247,28 @@ impl<V: Vfs + Clone> Database<V> {
         policy: GqlQueryPolicy,
     ) -> Result<StandingNativeCursor<'a>, StandingQueryError> {
         cursor::open(self, cx, handle, policy)
+    }
+
+    /// Pull the latest signed changes for a native row circuit or relational
+    /// group circuit, retaining compressed exact multiplicities. `after` must
+    /// be the immediate predecessor of the accepted frontier, even for an
+    /// empty tick. A missed tick returns DeltaGap, never an incomplete delta.
+    /// None is an initialization/rebuild baseline, not an unchanged successor.
+    /// Direct graph-source aggregates do not retain this derivative and refuse.
+    ///
+    /// Stage changes privately and integrate only after cursor exhaustion;
+    /// early close or failure is incomplete delivery. This reports bag changes,
+    /// not rank moves, sequence edits, ACKs, durable subscriptions or a backlog.
+    /// ResultRows counts changed frames, not expanded occurrences. Both signs
+    /// preserve the native result layout and exact weight without narrowing.
+    pub fn standing_native_delta_cursor<'a>(
+        &'a self,
+        cx: &'a QueryCx,
+        handle: &StandingQueryHandle,
+        after: CommitSeq,
+        policy: GqlQueryPolicy,
+    ) -> Result<Option<StandingNativeDeltaCursor<'a>>, StandingQueryError> {
+        cursor::open_delta(self, cx, handle, after, policy)
     }
 
     /// Materialize the current maintained answer in the SAME lossless cells and
