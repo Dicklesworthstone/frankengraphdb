@@ -27,6 +27,7 @@ members = [
     "crates/fgdb-order",
     "crates/fgdb-policy",
     "crates/fgdb-prism",
+    "crates/fgdb-protocol",
     "crates/fgdb-reference",
     "crates/fgdb-resource",
     "crates/fgdb-sim",

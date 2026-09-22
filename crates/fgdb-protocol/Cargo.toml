@@ -1,0 +1,9 @@
+[package]
+name = "fgdb-protocol"
+version = "0.0.1"
+edition = "2024"
+description = "Bounded FGP framing, connection binding, flow credit, and drain state machines"
+publish = false
+
+[lints]
+workspace = true
