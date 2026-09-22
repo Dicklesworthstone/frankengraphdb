@@ -87,12 +87,23 @@ impl PreparedNativeRead {
                 ))
             }
             Self::PipelineAggregate(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::PipelineText)?;
-                let result = transaction
-                    .execute_graph_aggregate_governed(database, cx, &query, policy)
-                    .map_err(|error| QueryError::TransactionAggregate(Box::new(error)))?;
+                // Source-free does not mean owner-free. The existing adapter
+                // still validates the transaction even when no leaf is read.
+                let result = if prepared.is_source_free() {
+                    let query = prepared
+                        .bind_relation_parameters(params)
+                        .map_err(QueryError::PipelineText)?;
+                    transaction
+                        .execute_graph_set_aggregate_governed(database, cx, &query, policy)
+                        .map_err(|error| QueryError::TransactionAggregate(Box::new(error)))?
+                } else {
+                    let query = prepared
+                        .bind_parameters(params)
+                        .map_err(QueryError::PipelineText)?;
+                    transaction
+                        .execute_graph_aggregate_governed(database, cx, &query, policy)
+                        .map_err(|error| QueryError::TransactionAggregate(Box::new(error)))?
+                };
                 Ok(aggregates(
                     prepared.columns().to_vec(),
                     prepared.output_slots(),

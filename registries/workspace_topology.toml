@@ -49,7 +49,7 @@
 #      a residue token and fails, so "duplicate a foundation subsystem" cannot
 #      pass by omission.
 #   5. Unsafe-policy exactness. Exactly the three named `fgdb-unsafe-*` islands
-#      may carry `deny_ledgered`; every other crate carries `forbid`, the
+#      may carry `deny_ledgered`; every other row carries `forbid`, the
 #      workspace default is `forbid`, and every ACTIVE forbid-crate root is
 #      scanned for the attribute and for `unsafe` usage.
 #
@@ -108,8 +108,8 @@ embedded_source_blocks = [
 # without moving these is schema drift, not an edit.
 layer_count = 14
 crate_count = 70
-active_crate_count = 21
-planned_crate_count = 48
+active_crate_count = 22
+planned_crate_count = 47
 reserved_crate_count = 1
 owner_scope_count = 14
 foundation_project_count = 3
@@ -129,7 +129,7 @@ dependency_narrowing_count = 1
 posture_count = 3
 source_block_count = 11
 id_table_hash = "fnv1a64:b422bc59c3da23ca"
-semantic_contract_hash = "fnv1a64:f179230f0b176d73"
+semantic_contract_hash = "fnv1a64:fdba88692eb86d36"
 
 # -----------------------------------------------------------------------------
 # Checked source blocks. The generated document embeds these plan line ranges
@@ -1419,12 +1419,12 @@ layer_position = 1
 role = "FGP state machine"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "all"
 posture_basis = "product_shape"
 owner = "W10"
-owner_bead = ""
-manifest_dir = ""
+owner_bead = "fgdb-w10-fgp-core-5b1"
+manifest_dir = "crates/fgdb-protocol"
 
 [[crate]]
 name = "fgdb-bolt"

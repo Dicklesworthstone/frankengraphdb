@@ -10,6 +10,9 @@
 use super::{GlaDirection, GlaExecutionEvent, GlaOperator, Index, RelationId, VId};
 use crate::algebra::{BindingSlot, MAX_PATTERN_EDGES};
 
+#[cfg(test)]
+mod loom_access_tests;
+
 #[derive(Clone, Copy)]
 struct IntersectionAccess {
     candidate: usize,
@@ -304,6 +307,27 @@ impl<'a> Candidates<'a> {
         }
     }
 
+    /// Choose the smallest available membership domain for the pair seek.
+    /// The primary slice is NEVER swapped: its occurrences define the bag.
+    /// This is construction-time only, before any cursor position advances.
+    fn add_membership<E>(
+        &mut self,
+        mut values: &'a [VId],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<(), E> {
+        debug_assert_eq!(self.left, 0);
+        debug_assert_eq!(self.right, 0);
+        control(GlaExecutionEvent::Work)?;
+        control(GlaExecutionEvent::ScratchEntry)?;
+        if let Some(membership) = &mut self.membership {
+            if values.len() < membership.len() {
+                core::mem::swap(membership, &mut values);
+            }
+        }
+        self.additional.push(Membership { values, position: 0 });
+        Ok(())
+    }
+
     pub(super) fn next<E>(
         &mut self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
@@ -405,11 +429,7 @@ pub(super) fn candidates<'a, E>(
             break;
         };
         let values = adjacency.get(anchor).map_or(&[][..], Vec::as_slice);
-        control(GlaExecutionEvent::ScratchEntry)?;
-        cursor.additional.push(Membership {
-            values,
-            position: 0,
-        });
+        cursor.add_membership(values, control)?;
     }
     Ok(cursor)
 }

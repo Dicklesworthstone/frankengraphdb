@@ -194,7 +194,7 @@ fn scoped_any_aggregation_counts_pairs_and_existence_never_multiplies_outer_rows
 #[test]
 fn malformed_any_selectors_and_compound_paths_refuse_before_catalog_access() {
     for text in [
-        "MATCH ANY WALK (a)-[:R*1..3]->(b) RETURN a",
+        "MATCH ANY 2 WALK (a)-[:R*1..3]->(b) RETURN a",
         "MATCH ANY ALL SHORTEST WALK (a)-[:R*1..3]->(b) RETURN a",
         "MATCH ANY SHORTEST WALK (a) RETURN a",
         "MATCH ANY SHORTEST WALK (a)-[:R]->(b) RETURN a",
@@ -284,5 +284,24 @@ fn any_binding_errors_preserve_utf8_offsets_and_reject_unrecognized_arguments() 
     );
     for at in (0..=text.len()).filter(|at| text.is_char_boundary(*at)) {
         let _ = PreparedGraphText::prepare(&text[..at], symbols);
+    }
+}
+
+#[test]
+fn single_path_selector_spellings_have_the_same_public_compiled_plan() {
+    let expected = prepare("MATCH ANY SHORTEST WALK (a)-[:R*0..3]->(b) RETURN ALL a,b");
+    for selector in [
+        "ANY",
+        "ANY 1",
+        "ANY WALK",
+        "ANY 1 PATHS",
+        "ANY SHORTEST",
+        "SHORTEST WALK",
+        "SHORTEST 1",
+    ] {
+        let text = format!("MATCH {selector} (a)-[:R]->{{0,3}}(b) RETURN ALL a,b");
+        let actual = prepare(&text);
+        assert_eq!(actual, expected, "{selector}");
+        assert_eq!(actual.canonical_bytes(), expected.canonical_bytes());
     }
 }

@@ -15,11 +15,13 @@
 pub mod bitpack;
 pub mod block;
 pub mod delta_varint;
+pub mod ef_payload;
 pub mod elias_fano;
 pub mod evidence;
 pub mod identity;
 pub mod kernel;
 pub mod logical;
+pub mod multigraph;
 pub mod neighbor;
 pub mod roaring;
 pub mod run;

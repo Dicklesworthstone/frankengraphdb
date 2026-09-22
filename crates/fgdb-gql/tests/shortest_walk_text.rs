@@ -224,9 +224,9 @@ fn each_match_scope_retains_its_own_explicit_search_selector() {
 #[test]
 fn unsupported_shortest_shapes_refuse_even_with_limit_zero_and_before_catalog() {
     for text in [
-        "MATCH SHORTEST WALK (a)-[:R*1..3]->(b) RETURN a",
+        "MATCH SHORTEST 2 WALK (a)-[:R*1..3]->(b) RETURN a",
         "MATCH ANY CHEAPEST WALK (a)-[:R*1..3]->(b) RETURN a",
-        "MATCH ALL SHORTEST (a)-[:R*1..3]->(b) RETURN a",
+        "MATCH ALL SHORTEST TRAIL (a)-[:R*1..3]->(b) RETURN a",
         "MATCH ALL SHORTEST WALK (a) RETURN a",
         "MATCH ALL SHORTEST WALK (a)-[:R]->(b) RETURN a",
         "MATCH ALL SHORTEST WALK (a)-[:R*]->(b) RETURN a",
@@ -338,4 +338,20 @@ fn aggregation_counts_shortest_occurrences_instead_of_all_walks_or_distinct_endp
         })
         .collect::<Vec<_>>();
     assert_eq!(counts, vec![(VId(1), 2, 2), (VId(2), 1, 0)]);
+}
+
+#[test]
+fn shortest_group_spellings_have_the_same_public_compiled_plan() {
+    let expected = prepare("MATCH ALL SHORTEST WALK (a)-[:R*0..3]->(b) RETURN ALL a,b");
+    for selector in [
+        "ALL SHORTEST",
+        "ALL SHORTEST PATHS",
+        "SHORTEST GROUP",
+        "SHORTEST 1 GROUPS",
+    ] {
+        let text = format!("MATCH {selector} (a)-[:R]->{{0,3}}(b) RETURN ALL a,b");
+        let actual = prepare(&text);
+        assert_eq!(actual, expected, "{selector}");
+        assert_eq!(actual.canonical_bytes(), expected.canonical_bytes());
+    }
 }

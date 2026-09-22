@@ -3,6 +3,9 @@
 //! expressions, alias scopes, filters, pages and parameter registration share
 //! the existing parser; execution receives the ordinary aggregate plan.
 
+mod inputs;
+mod rows;
+
 use super::*;
 use crate::pipeline_aggregate_text::{
     GraphPipelineAggregateTextError as Error, GraphPipelineAggregateTextErrorKind as Kind,
@@ -30,6 +33,7 @@ fn build(at: usize, kind: GraphAggregateBuildError) -> Error {
     }
 }
 
+#[derive(Clone, Copy)]
 enum ReturnedValue {
     Key(usize),
     Summary(usize),
@@ -37,6 +41,18 @@ enum ReturnedValue {
 struct Returned<'a> {
     name: Name<'a>,
     value: ReturnedValue,
+}
+
+fn summary_name(function: GraphAggregateFunction) -> &'static str {
+    use GraphAggregateFunction as F;
+    match function {
+        F::CountRows | F::Count | F::CountDistinct => "count",
+        F::SumInt | F::SumIntDistinct => "sum",
+        F::AverageInt | F::AverageIntDistinct => "avg",
+        F::Min => "min",
+        F::Max => "max",
+        F::Collect | F::CollectDistinct => "collect",
+    }
 }
 
 fn declaration(summary: &PipelineSummary) -> GraphAggregate<'_> {
@@ -104,20 +120,17 @@ fn bind_having(
 }
 
 impl<'a> Parser<'a> {
-    fn pipeline_column(
-        &mut self,
-        schema: &[(Name<'a>, GraphSetColumnType)],
-    ) -> Result<usize, Error> {
-        let name = self.name()?;
-        schema
-            .iter()
-            .position(|(alias, _)| alias.text == name.text)
-            .ok_or_else(|| expected(name.at, "an alias from the completed WITH stage"))
+    fn starts_pipeline_summary(&self) -> Result<bool, Error> {
+        Ok(matches!(self.current.kind, TokenKind::Word(word)
+            if ["COUNT", "SUM", "SUM_INT", "AVG", "AVG_INT", "MIN", "MAX", "COLLECT"]
+                .iter().any(|name| word.eq_ignore_ascii_case(name)))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'(')))
     }
 
     fn pipeline_summary(
         &mut self,
         schema: &[(Name<'a>, GraphSetColumnType)],
+        inputs: &mut inputs::Inputs,
     ) -> Result<(GraphAggregateFunction, Option<usize>), Error> {
         use GraphAggregateFunction as F;
         let name = self.name()?;
@@ -139,27 +152,27 @@ impl<'a> Parser<'a> {
             return Err(expected(name.at, "COUNT, SUM, AVG, MIN, MAX or COLLECT"));
         };
         self.punct(b'(', "(")?;
-        if self.take(b'*')? {
-            if function != F::Count {
-                return Err(expected(name.at, "COUNT(*) or a row-alias argument"));
-            }
-            self.punct(b')', ")")?;
-            return Ok((F::CountRows, None));
-        }
         let distinct = self.take_word("DISTINCT")?;
         if !distinct {
             self.take_word("ALL")?;
         }
+        if self.take(b'*')? {
+            if function != F::Count || distinct {
+                return Err(expected(name.at, "COUNT(*) without DISTINCT, or a row expression"));
+            }
+            self.punct(b')', ")")?;
+            return Ok((F::CountRows, None));
+        }
         let at = self.current.at;
-        let column = self.pipeline_column(schema)?;
-        self.punct(b')', "one projected row alias as the aggregate argument")?;
+        let column = inputs.read(self, schema)?;
+        self.punct(b')', "one row expression as the aggregate argument")?;
         if matches!(function, F::SumInt | F::AverageInt)
             && !matches!(
-                schema[column].1,
+                inputs.kind(column, schema),
                 GraphSetColumnType::Scalar | GraphSetColumnType::Any
             )
         {
-            return Err(expected(at, "a scalar WITH alias for a numeric aggregate"));
+            return Err(expected(at, "a scalar row expression for a numeric aggregate"));
         }
         let function = if distinct {
             match function {
@@ -184,25 +197,17 @@ impl PreparedGraphPipelineAggregateText {
         Self::prepare_with_parameter_types(statement, &[], resolve)
     }
 
-    /// Check all WITH stages, final grouping, output aliases and HAVING shape
-    /// before entering the catalog. There is one original token/parameter table
-    /// for graph predicates, row expressions, input pages and group clauses.
+    /// Check graph-backed or source-free row stages, final grouping, output
+    /// aliases and HAVING before catalog access. The shared parser owns one
+    /// token/parameter table for the entire statement. Source-free definitions
+    /// bind through bind_relation_parameters, not the single-graph binder.
     pub fn prepare_with_parameter_types(
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, Error> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
-        parser.parse_match_prefix()?;
-        if !parser.is_word("WITH") && !parser.is_word("UNWIND") {
-            return Err(expected(
-                parser.current.at,
-                "WITH or UNWIND before a pipeline aggregate RETURN",
-            ));
-        }
-        let head = parser.graph_projection_head()?;
-        let (stages, schema, depth) =
-            parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
+        let (head, mut stages, schema, depth) = rows::prefix(&mut parser)?;
         let aggregate_at = parser.current.at;
         if depth >= crate::MAX_GRAPH_SET_DEPTH {
             return Err(build(
@@ -220,6 +225,7 @@ impl PreparedGraphPipelineAggregateText {
         }
         let mut returned: Vec<Returned<'_>> = Vec::new();
         let mut summaries = Vec::new();
+        let mut inputs = inputs::Inputs::new(schema.len());
         loop {
             parser.capacity(
                 returned.len(),
@@ -227,12 +233,13 @@ impl PreparedGraphPipelineAggregateText {
                 crate::algebra::PatternLimitDimension::Columns,
             )?;
             let at = parser.current.at;
-            let call = matches!(parser.current.kind, TokenKind::Word(_))
-                && matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'('));
-            let (name, value) = if call {
-                let (function, column) = parser.pipeline_summary(&schema)?;
-                parser.word("AS")?;
-                let name = parser.name()?;
+            let (name, value) = if parser.starts_pipeline_summary()? {
+                let (function, column) = parser.pipeline_summary(&schema, &mut inputs)?;
+                let name = if parser.take_word("AS")? {
+                    parser.name()?
+                } else {
+                    Name { text: summary_name(function), at }
+                };
                 let index = summaries.len();
                 summaries.push(PipelineSummary {
                     name: name.text.to_owned(),
@@ -241,9 +248,11 @@ impl PreparedGraphPipelineAggregateText {
                 });
                 (name, ReturnedValue::Summary(index))
             } else {
-                let column = parser.pipeline_column(&schema)?;
+                let column = inputs.read(&mut parser, &schema)?;
                 let name = if parser.take_word("AS")? {
                     parser.name()?
+                } else if inputs.is_computed(column) {
+                    return Err(expected(at, "AS alias for a computed grouping expression"));
                 } else {
                     schema[column].0
                 };
@@ -276,20 +285,59 @@ impl PreparedGraphPipelineAggregateText {
                     MAX_PATTERN_VERTICES,
                     crate::algebra::PatternLimitDimension::Columns,
                 )?;
-                let column = parser.pipeline_column(&schema)?;
+                // A renamed RETURN key is an alias only as a complete GROUP
+                // item. In x+1 or x[0], x still belongs to the input schema.
+                let standalone = match parser.lexer.clone().next()?.kind {
+                    TokenKind::End | TokenKind::Punct(b',') => true,
+                    TokenKind::Word(word) => ["HAVING", "ORDER", "SKIP", "OFFSET", "LIMIT"]
+                        .iter()
+                        .any(|keyword| word.eq_ignore_ascii_case(keyword)),
+                    _ => false,
+                };
+                let alias = if standalone
+                    && let TokenKind::Word(word) = parser.current.kind
+                    && !schema.iter().any(|(alias, _)| alias.text == word)
+                {
+                    returned.iter().find_map(|item| match item.value {
+                        ReturnedValue::Key(column) if item.name.text == word => Some(column),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                let column = if let Some(column) = alias {
+                    parser.advance()?;
+                    column
+                } else {
+                    inputs.read(&mut parser, &schema)?
+                };
                 if keys.contains(&column) {
                     return Err(build(at, GraphAggregateBuildError::DuplicateKey { column }));
-                }
-                if summaries
-                    .iter()
-                    .any(|summary| summary.name == schema[column].0.text)
-                {
-                    return Err(build(at, GraphAggregateBuildError::DuplicateName));
                 }
                 keys.push(column);
                 if !parser.take(b',')? {
                     break;
                 }
+            }
+        } else {
+            for item in &returned {
+                if let ReturnedValue::Key(column) = item.value
+                    && !keys.contains(&column)
+                {
+                    parser.capacity(
+                        keys.len() + summaries.len(),
+                        MAX_PATTERN_VERTICES,
+                        crate::algebra::PatternLimitDimension::Columns,
+                    )?;
+                    keys.push(column);
+                }
+            }
+        }
+        for &column in &keys {
+            if !inputs.is_computed(column)
+                && summaries.iter().any(|summary| summary.name == schema[column].0.text)
+            {
+                return Err(build(aggregate_at, GraphAggregateBuildError::DuplicateName));
             }
         }
         let mut names = Vec::new();
@@ -306,9 +354,15 @@ impl PreparedGraphPipelineAggregateText {
                         .ok_or_else(|| {
                             expected(item.name.at, "every nonaggregate RETURN alias in GROUP BY")
                         })?;
-                    let slot = GraphAggregateTextSlot::GroupKey(output_keys.len());
-                    output_keys.push(key);
-                    (slot, GraphAggregateColumn::GroupKey(key), schema[input].1)
+                    let public = if let Some(index) = output_keys.iter().position(|at| *at == key) {
+                        index
+                    } else {
+                        let index = output_keys.len();
+                        output_keys.push(key);
+                        index
+                    };
+                    let slot = GraphAggregateTextSlot::GroupKey(public);
+                    (slot, GraphAggregateColumn::GroupKey(key), inputs.kind(input, &schema))
                 }
                 ReturnedValue::Summary(at) => {
                     let summary = &summaries[at];
@@ -316,7 +370,7 @@ impl PreparedGraphPipelineAggregateText {
                         summary.function,
                         GraphAggregateFunction::Min | GraphAggregateFunction::Max
                     ) {
-                        schema[summary.column.expect("extrema have one argument")].1
+                        inputs.kind(summary.column.expect("extrema have one argument"), &schema)
                     } else if matches!(
                         summary.function,
                         GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
@@ -380,9 +434,10 @@ impl PreparedGraphPipelineAggregateText {
             count = limit;
         }
         parser.end()?;
-        let input = parser
-            .finish_graph_projection(statement, head, stages)?
-            .resolve(resolve)?;
+        inputs.append_projection(
+            &parser, &schema, &mut keys, &mut summaries, &mut stages, depth, aggregate_at,
+        )?;
+        let input = rows::finish(parser, statement, head, stages)?.resolve(resolve)?;
         Ok(Self {
             statement: statement.to_owned(),
             input,
@@ -402,8 +457,9 @@ impl PreparedGraphPipelineAggregateText {
         })
     }
 
-    /// Lower every original parameter occurrence before any query executes.
-    /// Returned group values keep their exact count/sum/average result domains.
+    /// Bind exactly one graph-backed pipeline for iterator-based source APIs.
+    /// Source-free pipelines use bind_relation_parameters instead: they must
+    /// never manufacture a graph leaf to satisfy this source contract.
     pub fn bind_parameters(
         &self,
         arguments: &GqlParameters,

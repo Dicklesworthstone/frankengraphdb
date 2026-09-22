@@ -243,7 +243,7 @@ fn input_distinct_and_output_distinct_have_separate_grouping_boundaries() {
     ];
     for (quantifier, expected) in [("", 2), ("DISTINCT ", 1)] {
         let bound = query(&format!(
-            "MATCH (n) WITH {quantifier}n.p AS x WHERE x IS NOT NULL RETURN x AS key,COUNT(*) AS occurrences GROUP BY x ORDER BY key"
+            "MATCH (n) WITH {quantifier}n.p AS x WHERE x IS NOT NULL RETURN x AS key,COUNT(*) AS occurrences ORDER BY key"
         ));
         let result = run(&bound, &input, wide());
         assert_eq!(result.value.len(), 2);
@@ -272,7 +272,7 @@ fn nullable_optional_and_shortest_bags_survive_the_row_aggregate_boundary() {
         ("ANY SHORTEST WALK ", ":R*1..3", 1),
     ] {
         let bound = query(&format!(
-            "MATCH (a) OPTIONAL MATCH {mode}(a)-[{atom}]->(b) WITH a AS owner,b AS peer RETURN owner,COUNT(*) AS rows,COUNT(peer) AS matched GROUP BY owner ORDER BY owner"
+            "MATCH (a) OPTIONAL MATCH {mode}(a)-[{atom}]->(b) WITH a AS owner,b AS peer RETURN owner,COUNT(*) AS rows,COUNT(peer) AS matched ORDER BY owner"
         ));
         let result = bound
             .execute_governed(
@@ -314,10 +314,10 @@ fn malformed_grouped_tails_and_definition_limits_refuse_before_catalog_access() 
         "MATCH (n) RETURN COUNT(*) AS n",
         "MATCH (n) WITH n.p AS x RETURN SUM(n.p) AS s",
         "MATCH (n) WITH n AS v RETURN AVG(v) AS mean",
-        "MATCH (n) WITH n.p AS x RETURN SUM(x+1) AS s",
+        "MATCH (n) WITH n.p AS x RETURN SUM(x+) AS s",
         "MATCH (n) WITH n.p AS x RETURN MEDIAN(x) AS s",
         "MATCH (n) WITH n.p AS x RETURN COUNT(DISTINCT *) AS n",
-        "MATCH (n) WITH n.p AS x RETURN x,COUNT(*) AS n",
+        "MATCH (n) WITH n.p AS x RETURN x,COUNT(*) AS n GROUP BY x+1",
         "MATCH (n) WITH n.p AS x RETURN SUM(x) AS x GROUP BY x",
         "MATCH (n) WITH n.p AS x WITH x AS y RETURN SUM(x) AS s",
         "MATCH (n) WITH n.p AS x RETURN SUM(x) AS s HAVING missing=1",
@@ -452,7 +452,7 @@ fn later_arithmetic_observes_surviving_rows_but_failures_are_never_partial_succe
 #[test]
 fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
     let bound = query(
-        "MATCH (n) WITH n.p AS x WHERE x > 0 RETURN x AS key,COUNT(*) AS n GROUP BY x HAVING n > 0 ORDER BY key DESC",
+        "MATCH (n) WITH n.p AS x WHERE x > 0 RETURN x AS key,SUM(x+1) AS n HAVING n > 0 ORDER BY key DESC",
     );
     let input = [1, 1, 2].map(CanonicalScalar::Int);
     let mut calls = 0;
@@ -518,4 +518,240 @@ fn native_complete_pipeline_uses_one_query_allowance_and_every_checkpoint() {
         assert!(matches!(result, Err(GqlQueryError::Interrupted(value)) if value == stop));
         assert_eq!(at, stop);
     }
+}
+
+#[test]
+fn terminal_expressions_share_one_compact_projection_without_recounting_parameters() {
+    let text = "MATCH (n) WITH n.p AS x,n AS unused \
+        RETURN SUM(x*$step) AS total,x*$step AS bucket,AVG(x*$step) AS mean,COUNT(*) AS rows \
+        ORDER BY bucket NULLS FIRST";
+    let mut resolutions = 0;
+    let template = PreparedGraphPipelineAggregateText::prepare(text, |kind, name| {
+        resolutions += 1;
+        symbols(kind, name)
+    })
+    .unwrap();
+    assert_eq!(resolutions, 1);
+    assert_eq!(template.parameter_schema().len(), 1);
+    assert_eq!(template.parameter_schema()[0].occurrences, 3);
+    assert_eq!(template.columns(), &["total", "bucket", "mean", "rows"]);
+    let args = GqlParameters::new().with_int64("step", 2).unwrap();
+    let bound = template.bind_parameters(&args).unwrap();
+    // The explicit equivalent drops the unused input and computes one column.
+    // All three terminal occurrences must share that exact relational input.
+    let explicit = PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (n) WITH n.p AS x,n AS unused \
+         WITH x*$step AS __fgdb_pipeline_input_0 \
+         RETURN SUM(__fgdb_pipeline_input_0) AS total,__fgdb_pipeline_input_0 AS bucket, \
+         AVG(__fgdb_pipeline_input_0) AS mean,COUNT(*) AS rows \
+         GROUP BY __fgdb_pipeline_input_0 ORDER BY bucket NULLS FIRST",
+        symbols,
+    )
+    .unwrap()
+    .bind_parameters(&args)
+    .unwrap();
+    assert_eq!(bound.canonical_bytes(), explicit.canonical_bytes());
+    let values = [
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Int(2),
+        CanonicalScalar::Int(3),
+    ];
+    let result = run(&bound, &values, wide());
+    assert_eq!(result.value.len(), 3);
+    for (row, (key, total, mean, count)) in result.value.iter().zip([
+        (CanonicalScalar::Null, None, None, 1),
+        (CanonicalScalar::Int(4), Some(8), GraphExactAverage::new(4, 1), 2),
+        (CanonicalScalar::Int(6), Some(6), GraphExactAverage::new(6, 1), 1),
+    ]) {
+        assert_eq!(row.keys()[0].as_scalar(), Some(&key));
+        assert_eq!(row.values()[0].as_integer(), total);
+        assert_eq!(row.values()[1].as_average(), mean);
+        assert_eq!(row.values()[2].as_count(), Some(count));
+    }
+    let frozen = bound.canonical_bytes();
+    let rebound = template
+        .bind_parameters(&GqlParameters::new().with_int64("step", 3).unwrap())
+        .unwrap();
+    assert_ne!(frozen, rebound.canonical_bytes());
+    assert_eq!(bound.canonical_bytes(), frozen);
+    assert_eq!(resolutions, 1);
+    assert!(template.bind_parameters(&GqlParameters::new()).is_err());
+    assert!(
+        template
+            .bind_parameters(&args.with_int64("unused", 7).unwrap())
+            .is_err()
+    );
+}
+
+#[test]
+fn whole_expression_grouping_supports_explicit_aliases_and_repeated_output_keys() {
+    let base = "MATCH (n) WITH n.p AS x \
+        RETURN x AS original,x+1 AS next,x+1 AS repeated,COUNT(*) AS rows";
+    let inferred = query(base);
+    for group in ["x,x+1", "original,next"] {
+        assert_eq!(
+            inferred.canonical_bytes(),
+            query(&format!("{base} GROUP BY {group}")).canonical_bytes()
+        );
+    }
+    let template = PreparedGraphPipelineAggregateText::prepare(base, symbols).unwrap();
+    assert_eq!(
+        template.output_slots(),
+        &[
+            GraphAggregateTextSlot::GroupKey(0),
+            GraphAggregateTextSlot::GroupKey(1),
+            GraphAggregateTextSlot::GroupKey(1),
+            GraphAggregateTextSlot::Aggregate(0),
+        ]
+    );
+    let input = [1, 1, 2].map(CanonicalScalar::Int);
+    let result = run(&inferred, &input, wide());
+    assert_eq!(result.value.len(), 2);
+    for (row, (key, count)) in result.value.iter().zip([(1, 2), (2, 1)]) {
+        assert_eq!(row.keys().len(), 2);
+        assert_eq!(row.keys()[0].as_scalar(), Some(&CanonicalScalar::Int(key)));
+        assert_eq!(row.keys()[1].as_scalar(), Some(&CanonicalScalar::Int(key + 1)));
+        assert_eq!(row.values()[0].as_count(), Some(count));
+    }
+    let compact = query("MATCH (n) WITH n.p AS x RETURN x+1 AS key,COUNT(*) AS rows");
+    assert!(run(&compact, &[], wide()).value.is_empty());
+}
+
+#[test]
+fn optional_summary_aliases_and_all_star_keep_native_default_names() {
+    let implicit = PreparedGraphPipelineAggregateText::prepare(
+        "MATCH (n) WITH n.p AS x RETURN COUNT(ALL *),SUM(x+1),AVG(x+1),MIN(x+1),MAX(x+1),COLLECT(x+1)",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(implicit.columns(), &["count", "sum", "avg", "min", "max", "collect"]);
+    let explicit = query(
+        "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS count,SUM(ALL x+1) AS sum, \
+         AVG(x+1) AS avg,MIN(DISTINCT x+1) AS min,MAX(DISTINCT x+1) AS max, \
+         COLLECT(x+1) AS collect",
+    );
+    let bound = implicit.bind_parameters(&GqlParameters::new()).unwrap();
+    assert_eq!(bound.canonical_bytes(), explicit.canonical_bytes());
+    let input = [1, 1, 3].map(CanonicalScalar::Int);
+    let rows = run(&bound, &input, wide()).value;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values()[0].as_count(), Some(3));
+    assert_eq!(rows[0].values()[1].as_integer(), Some(8));
+    assert_eq!(rows[0].values()[2].as_average(), GraphExactAverage::new(8, 3));
+}
+
+#[test]
+fn terminal_projection_stays_after_filters_input_pages_and_distinct() {
+    let input = [-1, 0, 2, 5].map(CanonicalScalar::Int);
+    let filtered = query(
+        "MATCH (n) WITH n.p AS x WHERE x <> 0 WITH x ORDER BY x LIMIT 2 \
+         RETURN SUM(10/x) AS total",
+    );
+    assert_eq!(run(&filtered, &input, wide()).value[0].values()[0].as_integer(), Some(-5));
+    let input = [1, 1, 2].map(CanonicalScalar::Int);
+    for (quantifier, sum) in [("ALL", 7), ("DISTINCT", 5)] {
+        let bound = query(&format!(
+            "MATCH (n) WITH {quantifier} n.p AS x RETURN SUM(x+1) AS total"
+        ));
+        assert_eq!(run(&bound, &input, wide()).value[0].values()[0].as_integer(), Some(sum));
+    }
+    // Output LIMIT is NOT an input short-circuit. Arithmetic remains typed
+    // failure rather than a successful empty result, even inside an aggregate.
+    for text in [
+        "MATCH (n) WITH n.p AS x RETURN SUM(10/x) AS total LIMIT 0",
+        "MATCH (n) WITH n.p AS x RETURN COUNT(10/x) AS rows LIMIT 0",
+        "MATCH (n) WITH n.p AS x RETURN 10/x AS key,COUNT(*) AS rows LIMIT 0",
+    ] {
+        let bound = query(text);
+        let zero = CanonicalScalar::Int(0);
+        assert!(matches!(
+            bound.execute_governed(
+                1,
+                [VId(0)],
+                [],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(Some(&zero)),
+                wide(),
+                || Ok::<_, ()>(()),
+            ),
+            Err(GqlQueryError::Source(_))
+        ));
+    }
+}
+
+#[test]
+fn computed_arguments_preserve_wide_aggregate_domains_and_empty_input() {
+    let bound = query("MATCH (n) WITH n.p AS x RETURN SUM(x+0) AS total,AVG(x+0) AS mean");
+    let large = [CanonicalScalar::Int(i64::MAX), CanonicalScalar::Int(i64::MAX)];
+    let row = run(&bound, &large, wide()).value.remove(0);
+    assert_eq!(row.values()[0].as_integer(), Some(i128::from(i64::MAX) * 2));
+    assert_eq!(row.values()[1].as_average(), GraphExactAverage::new(i128::from(i64::MAX), 1));
+    let empty = query("MATCH (n) WITH n.p AS x RETURN COUNT(1/0) AS rows,SUM(1/0) AS total");
+    let row = run(&empty, &[], wide()).value.remove(0);
+    assert_eq!(row.values()[0].as_count(), Some(0));
+    assert!(row.values()[1].is_null());
+    // Literal/list/scalar argument types reuse the ordinary row compiler;
+    // lists are nonnull values even when their elements are null.
+    let list = query("MATCH (n) WITH n.p AS x RETURN COUNT(DISTINCT [x,x+1]) AS rows");
+    let input = [CanonicalScalar::Null, CanonicalScalar::Int(1), CanonicalScalar::Int(1)];
+    assert_eq!(run(&list, &input, wide()).value[0].values()[0].as_count(), Some(2));
+}
+
+#[test]
+fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resolution() {
+    let too_deep = format!(
+        "MATCH (n) WITH n.p AS x{} RETURN SUM(x+1) AS s",
+        " WITH x".repeat(fgdb_gql::MAX_GRAPH_SET_DEPTH - 3)
+    );
+    let valid_depth = format!(
+        "MATCH (n) WITH n.p AS x{} RETURN SUM(x+1) AS s",
+        " WITH x".repeat(fgdb_gql::MAX_GRAPH_SET_DEPTH - 4)
+    );
+    query(&valid_depth);
+    for text in [
+        "MATCH (n) WITH n.p AS x RETURN SUM(SUM(x)) AS total",
+        "MATCH (n) WITH n.p AS x RETURN SUM([x]) AS total",
+        "MATCH (n) WITH n.p AS x RETURN x+1,COUNT(*) AS rows",
+        "MATCH (n) WITH n.p AS x RETURN x+1 AS key,COUNT(*) AS rows GROUP BY x+2",
+        "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS rows GROUP BY x+1,x+1",
+        "MATCH (n) WITH n.p AS x RETURN SUM(x),SUM(x+1)",
+        "MATCH (n) WITH n.p AS x WITH x AS y RETURN SUM(x+1) AS total",
+        "MATCH (n) WITH n.p AS x RETURN SUM(x+$p) AS total LIMIT $p",
+        "MATCH (n) WITH n.p AS x RETURN COUNT(DISTINCT *)",
+        "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS rows,SUM(x)+1 AS total",
+        &too_deep,
+    ] {
+        let mut calls = 0;
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls, 0, "{text}");
+    }
+}
+
+#[test]
+fn existing_group_names_and_private_projection_names_cannot_be_captured() {
+    // Swapping public output aliases must not reinterpret a previously valid
+    // GROUP BY that names the completed WITH schema in its original order.
+    let bound = query(
+        "MATCH (n) WITH n.p AS x,n AS y RETURN x AS y,y AS x,COUNT(*) AS rows GROUP BY x,y",
+    );
+    assert_eq!(bound.group_key_columns(), &[0, 1]);
+    let row = run(&bound, &[CanonicalScalar::Int(7)], wide()).value.remove(0);
+    assert_eq!(row.keys()[0].as_scalar(), Some(&CanonicalScalar::Int(7)));
+    assert_eq!(row.keys()[1].as_vertex(), Some(VId(0)));
+    let bound = query(
+        "MATCH (n) WITH n.p AS __fgdb_pipeline_input_0 \
+         RETURN __fgdb_pipeline_input_0+1 AS key, \
+         SUM(__fgdb_pipeline_input_0+1) AS __fgdb_pipeline_input_1",
+    );
+    let row = run(&bound, &[CanonicalScalar::Int(7)], wide()).value.remove(0);
+    assert_eq!(row.keys()[0].as_scalar(), Some(&CanonicalScalar::Int(8)));
+    assert_eq!(row.values()[0].as_integer(), Some(8));
 }

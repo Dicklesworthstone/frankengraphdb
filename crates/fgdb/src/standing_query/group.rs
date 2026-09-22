@@ -59,6 +59,9 @@ impl State {
     pub(super) fn rows(&self) -> &ZSet<GraphAggregateRow> {
         &self.output.rows
     }
+    pub(super) fn delta(&self) -> Option<&ZSet<GraphAggregateRow>> {
+        self.last_delta.as_ref()
+    }
     pub(super) fn ordered_rows(&self) -> Option<&[Arc<GraphAggregateRow>]> {
         self.output.ordered_rows()
     }

@@ -1,4 +1,4 @@
-//! Typed incremental equijoins and Cartesian products of exact row bags.
+//! Typed incremental equality, theta and outer/presence joins of exact row bags.
 //!
 //! This is the row/schema adapter for the existing Z-set join derivative, not
 //! a second matcher, parser, scheduler or graph store. Equality uses canonical
@@ -6,7 +6,7 @@
 //! Input and output multiplicities stay exact and compressed. Only changed key
 //! groups are probed, including the simultaneous-input cross term.
 
-use crate::GraphSetColumnType;
+use crate::{GlaExecutionEvent, GraphSetColumnType, GraphSetFilterError, GraphSetPredicateOp};
 use crate::algebra::{GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
 use fgdb_delta_types::zset::ZSetUpdate;
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
@@ -30,6 +30,7 @@ pub enum RowJoinBuildError {
     KeyColumn { side: usize, column: usize },
     KeyType { key: usize },
     UnsupportedColumn { side: usize, column: usize },
+    Predicate(GraphSetFilterError),
 }
 impl core::fmt::Display for RowJoinBuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -62,8 +63,8 @@ impl RowJoinKind {
 
 /// Immutable positional schema. Inner/outer output concatenates both inputs;
 /// semi/anti output contains only the left columns. `new` requires equality
-/// keys; `cross` explicitly chooses unconditional matching. Neither accepts
-/// an arbitrary ON predicate program. Equijoin keys must be scalar or vertex
+/// keys; `cross` chooses an unrestricted candidate domain. `with_predicate`
+/// adds a checked ON predicate to either, for every join kind. Keys are scalar or vertex
 /// columns; non-key payloads may use any bounded native value domain.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RowJoinSpec {
@@ -71,6 +72,7 @@ pub struct RowJoinSpec {
     right: Box<[GraphSetColumnType]>,
     keys: Box<[(usize, usize)]>,
     kind: RowJoinKind,
+    predicate: Option<Box<[GraphSetPredicateOp]>>,
 }
 impl RowJoinSpec {
     pub fn new(
@@ -126,6 +128,7 @@ impl RowJoinSpec {
             right: right.into(),
             keys: keys.into(),
             kind: RowJoinKind::Inner,
+            predicate: None,
         })
     }
     /// An unconditional Cartesian product, using the existing exact join
@@ -152,11 +155,54 @@ impl RowJoinSpec {
             right: right.into(),
             keys: Box::new([]),
             kind: RowJoinKind::Inner,
+            predicate: None,
         })
     }
     /// True only for the explicitly constructed unconditional definition.
     pub fn is_cross(&self) -> bool {
-        self.keys.is_empty()
+        self.keys.is_empty() && self.predicate.is_none()
+    }
+
+    /// Bind a fixed ON predicate over LEFT columns followed by RIGHT columns.
+    /// This full input schema also applies to semi/anti joins, whose output is
+    /// left-only. Equality keys, when present, remain an additional condition.
+    /// `cross(...).with_predicate(...)` therefore expresses a theta join.
+    /// Only TRUE matches; FALSE and UNKNOWN do not create a witness. The
+    /// ordinary eager row-predicate IR owns comparison, NULL and Boolean rules.
+    /// Null extension happens AFTER matching, never before predicate evaluation.
+    ///
+    /// Definitions are frozen into the operator. This does not add ON text
+    /// parsing, a selective range index, authorization or external-memory spill.
+    pub fn with_predicate(
+        mut self,
+        code: &[GraphSetPredicateOp],
+    ) -> Result<Self, RowJoinBuildError> {
+        let types: Vec<_> = self.left.iter().chain(self.right.iter()).copied().collect();
+        GraphSetPredicateOp::validate_schema(&types, code)
+            .map_err(RowJoinBuildError::Predicate)?;
+        self.predicate = Some(code.to_vec().into_boxed_slice());
+        Ok(self)
+    }
+
+    pub fn predicate(&self) -> Option<&[GraphSetPredicateOp]> {
+        self.predicate.as_deref()
+    }
+
+    fn matches<E>(
+        &self,
+        left: &GraphValueRow,
+        right: &GraphValueRow,
+        control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<bool, ZSetError<E>> {
+        let Some(code) = self.predicate() else {
+            return Ok(true);
+        };
+        GraphSetPredicateOp::evaluate_pair_with_control(code, left, right, &mut |event| {
+            charge(control, match event {
+                GlaExecutionEvent::ScratchEntry => ZSetEvent::ScratchEntry,
+                _ => ZSetEvent::Work,
+            })
+        })
     }
 
     /// Choose semantics before constructing the operator. Input schemas and
@@ -316,6 +362,10 @@ fn arrange<E>(
 /// Inner/outer output can be quadratic. Semi/anti use counted witnesses without
 /// producing that Cartesian bag. All kinds share work/scratch and final-row
 /// admission; this is not spill or a worst-case-optimal multiway join.
+/// With a residual predicate, matched pairs use the exact selected derivative;
+/// outer/presence witnesses are recomputed per row within changed key groups.
+/// That fallback can scan a group's Cartesian candidate domain but never
+/// materializes matched products for semi/anti or visits unrelated groups.
 #[derive(PartialEq, Eq)]
 pub struct IncrementalRowJoin {
     spec: RowJoinSpec,
@@ -325,7 +375,7 @@ pub struct IncrementalRowJoin {
 }
 impl IncrementalRowJoin {
     pub fn new(spec: RowJoinSpec) -> Self {
-        let input = Input::new(spec.kind);
+        let input = Input::new(&spec);
         Self {
             spec,
             input,
@@ -378,7 +428,7 @@ impl IncrementalRowJoin {
                 }
             }
         }
-        let input = self.input.prepare(&left, &right, limbs, control)?;
+        let input = self.input.prepare(&self.spec, &left, &right, limbs, control)?;
         let delta = input.project_delta(&self.spec, limbs, control)?;
         let change = delta.total_weight(limbs, control)?;
         charge(control, ZSetEvent::Work)?;
@@ -477,6 +527,9 @@ mod cross_tests;
 
 #[cfg(test)]
 mod outer_tests;
+
+#[cfg(test)]
+mod predicate_tests;
 
 #[cfg(test)]
 mod payload_tests {

@@ -1,0 +1,16 @@
+[package]
+name = "fgdb-protocol"
+version = "0.0.1"
+edition = "2024"
+description = "Bounded FGP framing, connection binding, flow credit, and drain state machines"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+transport = ["dep:asupersync"]
+
+[dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "78b64636e99fea4ea2d868096576021dd3b8e519", version = "=0.5.0", default-features = false, optional = true }

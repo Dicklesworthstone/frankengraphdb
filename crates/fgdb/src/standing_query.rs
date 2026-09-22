@@ -5,6 +5,7 @@
 //! Registrations are not durable subscriptions and do not survive reopening.
 
 mod aggregate;
+mod closure;
 mod components;
 mod constant;
 mod filter;
@@ -16,6 +17,7 @@ mod output;
 mod projection;
 mod recursive;
 mod reduction;
+mod replay;
 mod sets;
 mod triangles;
 mod window;
@@ -93,6 +95,8 @@ pub enum StandingQueryError {
     Unsupported,
     SetSchema(fgdb_gql::GraphSetBuildError),
     JoinSchema(fgdb_gql::row_join::RowJoinBuildError),
+    /// A checked join definition belongs to a different complete input schema.
+    JoinInputSchema { side: usize },
     ProjectionSchema(fgdb_gql::row_projection::RowProjectionBuildError),
     FilterSchema(fgdb_gql::row_filter::RowFilterBuildError),
     ReductionSchema(fgdb_gql::row_aggregate::RowAggregateBuildError),
@@ -118,6 +122,14 @@ pub enum StandingQueryError {
         after: CommitSeq,
         frontier: CommitSeq,
     },
+    /// The requested cut is outside a bounded replay sink's complete history.
+    /// No suffix is delivered as though it were the missing prefix.
+    ReplayGap {
+        after: CommitSeq,
+        retained_after: CommitSeq,
+        frontier: CommitSeq,
+    },
+    InvalidReplayLimits,
     Unavailable {
         frontier: CommitSeq,
         reason: StandingQueryFailure,
@@ -136,6 +148,9 @@ impl core::fmt::Display for StandingQueryError {
             }
             Self::SetSchema(error) => error.fmt(f),
             Self::JoinSchema(error) => error.fmt(f),
+            Self::JoinInputSchema { side } => {
+                write!(f, "standing join input {side} does not match its bound schema")
+            }
             Self::ProjectionSchema(error) => error.fmt(f),
             Self::FilterSchema(error) => error.fmt(f),
             Self::ReductionSchema(error) => error.fmt(f),
@@ -157,6 +172,11 @@ impl core::fmt::Display for StandingQueryError {
                 f,
                 "standing delta after {after:?} cannot reach {frontier:?} in one retained tick"
             ),
+            Self::ReplayGap { after, retained_after, frontier } => write!(
+                f,
+                "replay cut {after:?} is outside retained cuts {retained_after:?}..={frontier:?}"
+            ),
+            Self::InvalidReplayLimits => f.write_str("replay requires nonzero tick and payload limits"),
             Self::Unavailable { frontier, reason } => write!(
                 f,
                 "standing query unavailable after {frontier:?}: {reason:?}"
@@ -235,6 +255,8 @@ pub(crate) enum StandingQuery {
         output: Box<row::State>,
     },
     Reachability(Box<recursive::State>),
+    /// Recursive endpoint closure of a complete maintained row relation.
+    Closure(Box<closure::State>),
     Triangles(Box<triangles::State>),
     Components(Box<components::State>),
     CoreNumbers(Box<kcore::State>),
@@ -250,6 +272,8 @@ pub(crate) enum StandingQuery {
     Group(Box<group::State>),
     /// An immutable source-free relation, evaluated once at registration/rebuild.
     Constant(Box<constant::State>),
+    /// Derived final-output delivery history, not another result evaluator.
+    Replay(Box<replay::State>),
 }
 
 impl StandingQuery {
@@ -259,6 +283,7 @@ impl StandingQuery {
             | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => (query.policy, query.frontier, query.failure),
             Self::Reachability(query) => (query.policy, query.frontier, query.failure),
+            Self::Closure(query) => (query.policy, query.frontier, query.failure),
             Self::Triangles(query) => (query.policy, query.frontier, query.failure),
             Self::Components(query) => (query.policy, query.frontier, query.failure),
             Self::CoreNumbers(query) => (query.policy, query.frontier, query.failure),
@@ -270,6 +295,7 @@ impl StandingQuery {
             Self::Window(query) => (query.policy, query.frontier, query.failure),
             Self::Group(query) => (query.policy, query.frontier, query.failure),
             Self::Constant(query) => (query.policy, query.frontier, query.failure),
+            Self::Replay(query) => (query.policy, query.frontier, query.failure),
         }
     }
 
@@ -288,6 +314,7 @@ impl StandingQuery {
             Self::Reachability(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
+            Self::Closure(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Triangles(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Components(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::CoreNumbers(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
@@ -299,6 +326,7 @@ impl StandingQuery {
             Self::Window(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Group(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Constant(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Replay(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
         };
         match result {
             Ok(()) => *frontier = at,
@@ -524,6 +552,9 @@ impl<V: Vfs + Clone> Database<V> {
             .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
         let replacement = match current {
+            StandingQuery::Replay(query) => StandingQuery::Replay(Box::new(
+                self.prepare_standing_replay(cx, &query.source, query.limits, policy)?,
+            )),
             StandingQuery::Constant(query) => StandingQuery::Constant(Box::new(
                 self.prepare_standing_constant(cx, query.definition.clone(), policy)?,
             )),
@@ -538,6 +569,9 @@ impl<V: Vfs + Clone> Database<V> {
             }
             StandingQuery::Reachability(query) => StandingQuery::Reachability(Box::new(
                 self.prepare_standing_reachability(cx, query.relation(), policy)?,
+            )),
+            StandingQuery::Closure(query) => StandingQuery::Closure(Box::new(
+                self.prepare_standing_closure(cx, query.input, query.endpoints, policy, handle.index)?,
             )),
             StandingQuery::Triangles(query) => StandingQuery::Triangles(Box::new(
                 self.prepare_standing_triangles(cx, query.relation(), query.quantifier(), policy)?,
@@ -556,11 +590,10 @@ impl<V: Vfs + Clone> Database<V> {
                 handle.index,
             )?)),
             StandingQuery::Join(query) => {
-                StandingQuery::Join(Box::new(self.prepare_standing_join(
+                StandingQuery::Join(Box::new(self.prepare_standing_join_spec(
                     cx,
                     query.inputs,
-                    query.spec().keys(),
-                    query.spec().kind(),
+                    query.spec(),
                     policy,
                     handle.index,
                 )?))
@@ -668,6 +701,7 @@ impl<V: Vfs + Clone> Database<V> {
                 &query.stats,
             ),
             StandingQuery::Reachability(_)
+            | StandingQuery::Closure(_)
             | StandingQuery::Rows { .. }
             | StandingQuery::Constant(_)
             | StandingQuery::Triangles(_)
@@ -678,6 +712,7 @@ impl<V: Vfs + Clone> Database<V> {
             | StandingQuery::Projection(_)
             | StandingQuery::Filter(_)
             | StandingQuery::Reduction(_)
+            | StandingQuery::Replay(_)
             | StandingQuery::Window(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
@@ -768,6 +803,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
                 source.maintain_with_output(batch, &mut meter, Some(output.as_mut()))
             }
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::Closure(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Components(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::CoreNumbers(query) => query.maintain(cx, batch, &mut meter),
@@ -779,6 +815,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Window(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Group(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Constant(query) => query.maintain(batch, &mut meter),
+            StandingQuery::Replay(query) => query.maintain(batch, prior, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);
     }

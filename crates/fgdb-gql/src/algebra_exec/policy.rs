@@ -1,5 +1,7 @@
 //! Composition of admission, output, evaluator limits and interruption.
-//! All sealed row shapes use the same evaluator and policy counters.
+//! All sealed row shapes share admission, terminal collection and policy counters.
+
+mod topology;
 
 use super::{GlaExecutionEvent, GlaExecutionLimits, GlaExecutionStats, GlaLimitExceeded, charge};
 use crate::algebra::{GlaIdentityOutput, GlaOutput, GlaPlan, VertexPredicate};
@@ -170,12 +172,21 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
             snapshot_records,
             result_rows: 0,
         };
-        let value = self.execute_with_control(
-            vertices,
-            edges,
-            |vid, predicates| test_vertex(vid, predicates).map_err(BudgetedGqlError::Execution),
-            |event| charge_result_row(&mut stats, budget, event).map_err(BudgetedGqlError::Budget),
-        )?;
+        let value = {
+            let mut control = |event| {
+                charge_result_row(&mut stats, budget, event).map_err(BudgetedGqlError::Budget)
+            };
+            if let Some(physical) = topology::compile(self.operators(), &mut control)? {
+                physical.execute(self, edges, &mut control)?
+            } else {
+                self.execute_with_control(
+                    vertices,
+                    edges,
+                    |vid, predicates| test_vertex(vid, predicates).map_err(BudgetedGqlError::Execution),
+                    &mut control,
+                )?
+            }
+        };
         debug_assert_eq!(u64::try_from(value.len()).ok(), Some(stats.result_rows));
         Ok(BudgetedGqlExecution { value, stats })
     }
@@ -193,6 +204,9 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
+            if let Some(physical) = topology::compile(self.operators(), &mut |event| meter.observe(event))? {
+                return physical.execute(self, edges, &mut |event| meter.observe(event));
+            }
             self.execute_with_control(
                 vertices,
                 edges,
@@ -223,6 +237,9 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             if self.requires_identified_edges() || self.projects_edge_properties() {
                 return Err(GqlQueryError::IdentifiedEdgesRequired);
             }
+            if let Some(physical) = topology::compile(self.operators(), &mut |event| meter.observe(event))? {
+                return physical.execute(self, edges, &mut |event| meter.observe(event));
+            }
             self.execute_with_properties_control(
                 vertices,
                 edges,
@@ -249,6 +266,13 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
+            if let Some(physical) = topology::compile(self.operators(), &mut |event| meter.observe(event))? {
+                return physical.execute(
+                    self,
+                    edges.into_iter().map(|(_, source, relation, destination)| (source, relation, destination)),
+                    &mut |event| meter.observe(event),
+                );
+            }
             self.execute_with_element_properties_control(
                 vertices,
                 edges,
@@ -306,6 +330,13 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         governed(snapshot_records, policy, checkpoint, |meter| {
             if self.projects_edge_properties() {
                 return Err(GqlQueryError::IdentifiedEdgesRequired);
+            }
+            if let Some(physical) = topology::compile(self.operators(), &mut |event| meter.observe(event))? {
+                return physical.execute(
+                    self,
+                    edges.into_iter().map(|(_, source, relation, destination)| (source, relation, destination)),
+                    &mut |event| meter.observe(event),
+                );
             }
             self.execute_with_identified_properties_control(
                 vertices,

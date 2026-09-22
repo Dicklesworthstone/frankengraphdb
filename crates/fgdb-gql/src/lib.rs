@@ -7,9 +7,12 @@
 mod aggregation;
 pub mod algebra;
 mod algebra_exec;
+mod branch_text;
 mod cheapest_path;
 mod cheapest_path_stream;
 mod cheapest_path_text;
+pub mod csv_parameters;
+pub mod csv_write_script;
 mod deletion;
 mod edge_merge;
 pub mod edge_stream;
@@ -19,6 +22,7 @@ mod evidence_artifact;
 mod evidence_cursor;
 mod evidence_limits;
 mod evidence_page;
+pub mod free_join;
 mod graph_text;
 pub mod insertion;
 mod insertion_text;
@@ -53,6 +57,10 @@ mod walk;
 mod write_receipt;
 mod write_script;
 
+pub use branch_text::{
+    BoundGraphBranchText, GraphBranchTextError, GraphBranchTextErrorKind,
+    MAX_GRAPH_BRANCH_NAME_BYTES, PreparedGraphBranchText,
+};
 pub use cheapest_path::{
     GraphCheapestPathCursor, GraphCheapestPathError, GraphCheapestPathMode, GraphCostPath,
     GraphPathCostError, PreparedGraphCheapestPath,

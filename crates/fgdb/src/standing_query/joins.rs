@@ -1,4 +1,4 @@
-//! Dependency-ordered equijoins and products of maintained native row bags.
+//! Dependency-ordered joins of maintained native row bags, including checked ON.
 //!
 //! The native row/schema adapter owns exact join arithmetic and its prepared
 //! sink. This module owns only registry dependencies, source/budget admission,
@@ -12,6 +12,79 @@ use fgdb_gql::row_join::{
 };
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
+
+/// Rebuild preserves the complete checked definition, never just keys/kind.
+enum Definition<'a> {
+    Inferred { keys: &'a [(usize, usize)], kind: RowJoinKind },
+    Prepared(&'a RowJoinSpec),
+}
+impl Definition<'_> {
+    fn keys(&self) -> &[(usize, usize)] {
+        match self {
+            Self::Inferred { keys, .. } => keys,
+            Self::Prepared(spec) => spec.keys(),
+        }
+    }
+    fn kind(&self) -> RowJoinKind {
+        match self {
+            Self::Inferred { kind, .. } => *kind,
+            Self::Prepared(spec) => spec.kind(),
+        }
+    }
+    fn bind(
+        &self,
+        types: &[Vec<fgdb_gql::GraphSetColumnType>; 2],
+        meter: &mut Meter<'_>,
+    ) -> Result<RowJoinSpec, StandingQueryError> {
+        match self {
+            Self::Inferred { keys, kind } => (if keys.is_empty() {
+                RowJoinSpec::cross(&types[0], &types[1])
+            } else {
+                RowJoinSpec::new(&types[0], &types[1], keys)
+            })
+            .map(|spec| spec.with_kind(*kind))
+            .map_err(StandingQueryError::JoinSchema),
+            Self::Prepared(spec) => {
+                // Both COMPLETE schemas, even for empty inputs and semi/anti
+                // output. Any is not permission to widen the bound definition.
+                for (side, declared) in [spec.left_types(), spec.right_types()]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if declared != types[side].as_slice() {
+                        return Err(StandingQueryError::JoinInputSchema { side });
+                    }
+                }
+                // Admit literal copies before cloning. These are the registry's
+                // logical payload units, not allocator-byte or spill bounds.
+                use fgdb_gql::{GraphSetOperand, GraphSetPredicateOp};
+                for op in spec.predicate().unwrap_or_default() {
+                    meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Maintenance)?;
+                    meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Maintenance)?;
+                    let mut admit = |operand: &GraphSetOperand| {
+                        if let GraphSetOperand::Literal(value) = operand {
+                            let units = value.canonical_bytes().len().div_ceil(64);
+                            meter.units(ZSetEvent::Work, units)?;
+                            meter.units(ZSetEvent::ScratchEntry, units)?;
+                        }
+                        Ok::<_, StandingQueryFailure>(())
+                    };
+                    match op {
+                        GraphSetPredicateOp::Compare { left, right, .. } => {
+                            admit(left).map_err(StandingQueryError::Maintenance)?;
+                            admit(right).map_err(StandingQueryError::Maintenance)?;
+                        }
+                        GraphSetPredicateOp::IsNull { operand, .. } => {
+                            admit(operand).map_err(StandingQueryError::Maintenance)?;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(RowJoinSpec::clone(spec))
+            }
+        }
+    }
+}
 
 pub(crate) struct State {
     pub(super) inputs: [usize; 2],
@@ -104,6 +177,47 @@ impl State {
 }
 
 impl<V: Vfs + Clone> Database<V> {
+    /// Maintain a complete typed join definition over two current row views.
+    /// `RowJoinSpec::new(...).with_predicate(...)` combines equality keys and
+    /// a residual ON condition; `cross(...).with_predicate(...)` is a theta
+    /// join. All six kinds use the existing eager three-valued predicate:
+    /// only TRUE matches, and outer NULL extension happens AFTER matching.
+    ///
+    /// Both declared input schemas must exactly match their bound parents,
+    /// including empty inputs and left-only semi/anti output. The definition
+    /// is frozen across rebuild. Shared parents and downstream joins, sets,
+    /// projections, aggregates and replay sinks use the ordinary registry.
+    ///
+    /// Registration/rebuild and each tick are atomic for this view. Failure
+    /// fences it without undoing a durable write or blocking healthy siblings.
+    /// Residual outer/presence joins may scan quadratic candidate domains in
+    /// changed key groups. This adds no textual ON grammar, range index, spill
+    /// or durable subscription. All existing join reads/deltas remain usable.
+    pub fn register_standing_join_spec(
+        &mut self,
+        cx: &QueryCx,
+        left: &StandingQueryHandle,
+        right: &StandingQueryHandle,
+        spec: &RowJoinSpec,
+        policy: GqlQueryPolicy,
+    ) -> Result<StandingQueryHandle, StandingQueryError> {
+        cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+        if !Arc::ptr_eq(&self.handle_owner, &left.owner)
+            || !Arc::ptr_eq(&self.handle_owner, &right.owner)
+        {
+            return Err(StandingQueryError::ForeignHandle);
+        }
+        for handle in [left, right] {
+            if sets::rows(self.admitted_standing_query(cx, handle)?).is_none() {
+                return Err(StandingQueryError::Unsupported);
+            }
+        }
+        let query = self.prepare_standing_join_spec(
+            cx, [left.index, right.index], spec, policy, self.standing_queries.len(),
+        )?;
+        Ok(self.store_standing_query(StandingQuery::Join(Box::new(query))))
+    }
+
     /// Maintain an inner equijoin of current row/set/join views. Keys are
     /// zero-based (left column, right column) pairs. All key components must
     /// match canonically and none may be NULL; scalar and vertex domains never
@@ -267,6 +381,32 @@ impl<V: Vfs + Clone> Database<V> {
         policy: GqlQueryPolicy,
         before: usize,
     ) -> Result<State, StandingQueryError> {
+        self.prepare_standing_join_definition(
+            cx, inputs, Definition::Inferred { keys, kind }, policy, before,
+        )
+    }
+
+    pub(super) fn prepare_standing_join_spec(
+        &self,
+        cx: &QueryCx,
+        inputs: [usize; 2],
+        spec: &RowJoinSpec,
+        policy: GqlQueryPolicy,
+        before: usize,
+    ) -> Result<State, StandingQueryError> {
+        self.prepare_standing_join_definition(
+            cx, inputs, Definition::Prepared(spec), policy, before,
+        )
+    }
+
+    fn prepare_standing_join_definition(
+        &self,
+        cx: &QueryCx,
+        inputs: [usize; 2],
+        definition: Definition<'_>,
+        policy: GqlQueryPolicy,
+        before: usize,
+    ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         let sources = self
@@ -314,6 +454,8 @@ impl<V: Vfs + Clone> Database<V> {
                     );
                 }
             }
+            let keys = definition.keys();
+            let kind = definition.kind();
             if keys.len() > MAX_PATTERN_VERTICES {
                 return Err(StandingQueryError::JoinSchema(
                     RowJoinBuildError::TooManyKeys,
@@ -322,15 +464,7 @@ impl<V: Vfs + Clone> Database<V> {
             meter
                 .units(ZSetEvent::ScratchEntry, width + keys.len())
                 .map_err(StandingQueryError::Maintenance)?;
-            // Private preparation also restores previously admitted products.
-            // The public equijoin API refuses an empty key list above.
-            let spec = (if keys.is_empty() {
-                RowJoinSpec::cross(&types[0], &types[1])
-            } else {
-                RowJoinSpec::new(&types[0], &types[1], keys)
-            })
-            .map_err(StandingQueryError::JoinSchema)?
-            .with_kind(kind);
+            let spec = definition.bind(&types, &mut meter)?;
             let left_rows = sets::rows(left).ok_or(StandingQueryError::Unsupported)?;
             let right_rows = sets::rows(right).ok_or(StandingQueryError::Unsupported)?;
             let records = (left_rows.len() as u128) + (right_rows.len() as u128);
@@ -442,6 +576,18 @@ impl<V: Vfs + Clone> Database<V> {
         };
         Ok(query.spec().kind())
     }
+    /// Explicit definition access after ordinary owner/frontier/health checks.
+    /// Debug remains redacted; no mutable access to the definition is exposed.
+    pub fn standing_join_spec<'a>(
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
+    ) -> Result<&'a RowJoinSpec, StandingQueryError> {
+        let StandingQuery::Join(query) = self.admitted_standing_query(cx, handle)? else {
+            return Err(StandingQueryError::Unsupported);
+        };
+        Ok(query.spec())
+    }
     /// Exact accepted occurrence total, without scanning or expanding rows.
     pub fn standing_join_total<'a>(
         &'a self,
@@ -460,3 +606,6 @@ mod tests;
 
 #[cfg(test)]
 mod outer_tests;
+
+#[cfg(test)]
+mod predicate_tests;

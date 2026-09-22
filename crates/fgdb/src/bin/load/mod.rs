@@ -1,4 +1,9 @@
 //! NDJSON adaptation and durable continuation; all writes use the bulk engine.
+//! Source bytes are replayed from a sealed file handle; decoded payloads are
+//! retained for only one bounded engine chunk (one row during reconciliation).
+//! Key maps and block digests still scale with the admitted input. This is not
+//! a claim that the database itself has an external-memory execution engine.
+mod input;
 use super::{Failure, Options, emit, hex, parameter, quoted};
 use asupersync::fs::Vfs;
 use fgdb::{
@@ -29,62 +34,65 @@ pub(super) async fn run<V: Vfs + Clone>(
     out: &mut impl Write,
 ) -> Result<(), Failure> {
     let cx = contexts.query();
-    cx.checkpoint().map_err(Failure::io)?;
-    let bytes = asupersync::fs::read(options.input.as_ref().expect("required input"))
-        .await
-        .map_err(Failure::io)?;
-    let text = std::str::from_utf8(&bytes).map_err(|e| {
-        let line = bytes[..e.valid_up_to()]
-            .iter()
-            .filter(|&&b| b == b'\n')
-            .count()
-            + 1;
-        line_error(line, "MalformedRow", "input must be UTF-8")
-    })?;
-    let mut rows = Vec::new();
-    let mut keys = BTreeSet::new();
-    let mut vertices = BTreeSet::new();
-    for (index, line) in text.lines().enumerate() {
-        cx.checkpoint().map_err(Failure::io)?;
-        let row = parse_row(line, options, resolver)
-            .map_err(|e| line_error(index + 1, "MalformedRow", e))?;
-        let key = match &row {
-            BulkRow::Vertex(v) => &v.key,
-            BulkRow::Edge(e) => &e.key,
-        };
-        if !keys.insert(key.clone()) {
-            return Err(line_error(index + 1, "DuplicateCallerKey", key));
-        }
-        match &row {
-            BulkRow::Vertex(v) => {
-                fgdb_strata::vertex::admit_row_content(&v.labels, &v.props)
-                    .map_err(|e| line_error(index + 1, "InvalidVertex", format!("{e:?}")))?;
-                vertices.insert(v.key.clone());
-            }
-            BulkRow::Edge(e) => {
-                for endpoint in [&e.source, &e.destination] {
-                    if !vertices.contains(endpoint) {
-                        return Err(line_error(index + 1, "DanglingEndpointKey", endpoint));
-                    }
-                }
-                fgdb_strata::edge_props::admitted_row_bytes(&e.props)
-                    .map_err(|e| line_error(index + 1, "InvalidEdge", format!("{e:?}")))?;
-            }
-        }
-        rows.push(row);
+    let mut policy = BulkLoadPolicy::new(options.rows_per_chunk, options.coordinate);
+    if policy.rows_per_chunk == 0 || policy.rows_per_chunk > BulkLoadPolicy::MAX_ROWS_PER_CHUNK {
+        return Err(Failure::usage("invalid rows-per-chunk"));
     }
-    // The source and bindings identify this import, not the checkpoint maps.
-    // Full-source pinning is intentionally stricter than prefix-only pinning.
-    let mut digest = fgdb_crypto::blake3::Hasher::new();
-    digest.update(&bytes);
-    digest.update(
-        format!(
-            "\n{:?}\n{:?}\n{:?}\n{}",
-            options.labels, options.relations, options.properties, options.coordinate.0
-        )
-        .as_bytes(),
-    );
-    let source_hash = hex(&digest.finalize().0);
+    // Preserve Saved V1's full raw source/binding identity while sealing it
+    // without keeping the entire source file or its decoded rows resident.
+    let binding = format!("\n{:?}\n{:?}\n{:?}\n{}",
+        options.labels, options.relations, options.properties, options.coordinate.0);
+    let source = input::Input::open(&cx, options.input.as_ref().expect("required input"),
+        binding.as_bytes(), policy.max_source_rows).map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidData {
+                Failure::query(error.to_string())
+            } else { Failure::io(error) }
+        })?;
+    let rows = Rows::new(source.reader(), &cx, options, resolver);
+    // Validate all format/shape/key failures before touching a checkpoint. Drop
+    // these temporary key sets before recovery maps or the engine's preflight.
+    {
+        let mut keys = BTreeSet::new();
+        let mut vertices = BTreeSet::new();
+        let mut key_bytes = 0usize;
+        for (index, row) in rows.clone().enumerate() {
+            let row = row.map_err(|e| e.failure())?;
+            let key = match &row {
+                BulkRow::Vertex(v) => &v.key,
+                BulkRow::Edge(e) => &e.key,
+            };
+            if key.len() > policy.max_key_bytes {
+                return Err(line_error(index + 1, "SourceLimit", "key_bytes"));
+            }
+            if keys.contains(key) {
+                return Err(line_error(index + 1, "DuplicateCallerKey", key));
+            }
+            key_bytes = key_bytes.checked_add(key.len())
+                .filter(|&bytes| bytes <= policy.max_total_key_bytes)
+                .ok_or_else(|| line_error(index + 1, "SourceLimit", "total_key_bytes"))?;
+            keys.insert(key.clone());
+            match &row {
+                BulkRow::Vertex(v) => {
+                    fgdb_strata::vertex::admit_row_content(&v.labels, &v.props)
+                        .map_err(|e| line_error(index + 1, "InvalidVertex", format!("{e:?}")))?;
+                    vertices.insert(v.key.clone());
+                }
+                BulkRow::Edge(e) => {
+                    for endpoint in [&e.source, &e.destination] {
+                        if endpoint.len() > policy.max_key_bytes {
+                            return Err(line_error(index + 1, "SourceLimit", "key_bytes"));
+                        }
+                        if !vertices.contains(endpoint) {
+                            return Err(line_error(index + 1, "DanglingEndpointKey", endpoint));
+                        }
+                    }
+                    fgdb_strata::edge_props::admitted_row_bytes(&e.props)
+                        .map_err(|e| line_error(index + 1, "InvalidEdge", format!("{e:?}")))?;
+                }
+            }
+        }
+    }
+    let source_hash = hex(&source.source_hash().0);
     let current = db.frontier().map_err(Failure::io)?;
     let saved = if let Some(path) = &options.checkpoint {
         cx.checkpoint().map_err(Failure::io)?;
@@ -120,9 +128,10 @@ pub(super) async fn run<V: Vfs + Clone>(
         }
         // Reconstruct maps from authenticated creation effects, including the
         // commit -> checkpoint crash window. No checkpoint guesses an identity.
+        let mut replay = rows.clone();
         for batch in db.delta_since(base).map_err(invalid)? {
             cx.checkpoint().map_err(Failure::io)?;
-            reconcile(batch, &rows, options.rows_per_chunk, &mut checkpoint)?;
+            reconcile(batch, &mut replay, source.records(), options.rows_per_chunk, &mut checkpoint)?;
             if checkpoint.frontier == saved.checkpoint.frontier {
                 same_checkpoint(&saved.checkpoint, &checkpoint)?;
             }
@@ -151,7 +160,7 @@ pub(super) async fn run<V: Vfs + Clone>(
         for chunk in saved.checkpoint.committed_chunks..checkpoint.committed_chunks {
             let count = (chunk + 1)
                 .saturating_mul(options.rows_per_chunk)
-                .min(rows.len());
+                .min(source.records());
             let seq = base.0 + chunk as u64 + 1;
             if robot {
                 emit(
@@ -182,13 +191,9 @@ pub(super) async fn run<V: Vfs + Clone>(
         Err(std::env::VarError::NotPresent) => None,
         Err(_) => return Err(Failure::usage("invalid FGDB_LOAD_CRASH_CHUNK")),
     };
-    let policy = BulkLoadPolicy {
-        rows_per_chunk: options.rows_per_chunk,
-        vertex_relation: options.coordinate,
-        resume: Some(checkpoint),
-    };
+    policy.resume = Some(checkpoint);
     let result = db
-        .bulk_load_with_checkpoint(&cx, &contexts.commit(), rows, policy, crash, |cp| {
+        .try_bulk_load_with_checkpoint(&cx, &contexts.commit(), rows, policy, crash, |cp| {
             save(cp)?;
             if robot {
                 writeln!(
@@ -205,6 +210,18 @@ pub(super) async fn run<V: Vfs + Clone>(
         .map_err(|e| match e.kind {
             BulkLoadErrorKind::Checkpoint(error) => Failure::io(error),
             BulkLoadErrorKind::Write(error) => super::execution_failure(error),
+            BulkLoadErrorKind::Source { row, source } => {
+                if let Some(source) = source.downcast_ref::<RowError>() {
+                    source.failure()
+                } else {
+                    line_error(row.saturating_add(1), "Source", source)
+                }
+            }
+            BulkLoadErrorKind::SourceChanged { row } =>
+                line_error(row.saturating_add(1), "SourceChanged", "source replay differs"),
+            BulkLoadErrorKind::SourceLimit { row, dimension, limit, observed } =>
+                line_error(row.saturating_add(1), "SourceLimit",
+                    format!("{dimension}: observed {observed}, limit {limit}")),
             kind => line_error(e.committed.next_row + 1, "BulkLoad", format!("{kind:?}")),
         })?;
     if robot {
@@ -224,6 +241,60 @@ pub(super) async fn run<V: Vfs + Clone>(
         .map_err(Failure::io)
     }
 }
+
+/// Cloneable decoder over independently positioned, verified input blocks.
+/// Only the owned row/error escapes next(); no borrowed source payload reaches
+/// an await. A decoder or read error is terminal, never translated into EOF.
+#[derive(Clone)]
+struct Rows<'a> {
+    reader: input::Reader,
+    cx: &'a fgdb_types::QueryCx,
+    options: &'a Options,
+    resolver: Option<&'a fgdb::PinnedTzdb>,
+    failed: bool,
+}
+impl<'a> Rows<'a> {
+    fn new(reader: input::Reader, cx: &'a fgdb_types::QueryCx, options: &'a Options,
+        resolver: Option<&'a fgdb::PinnedTzdb>) -> Self {
+        Self { reader, cx, options, resolver, failed: false }
+    }
+}
+#[derive(Debug)]
+struct RowError { line: usize, detail: RowErrorDetail }
+#[derive(Debug)]
+enum RowErrorDetail { Read(io::Error), Decode(String) }
+impl std::fmt::Display for RowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.detail {
+            RowErrorDetail::Read(error) => std::fmt::Display::fmt(error, f),
+            RowErrorDetail::Decode(error) => f.write_str(error),
+        }
+    }
+}
+impl std::error::Error for RowError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.detail { RowErrorDetail::Read(error) => Some(error), _ => None }
+    }
+}
+impl RowError {
+    fn failure(&self) -> Failure { line_error(self.line, "MalformedRow", self) }
+}
+impl Iterator for Rows<'_> {
+    type Item = Result<BulkRow, RowError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed { return None; }
+        let line = self.reader.line();
+        let result = match self.reader.next_line(self.cx) {
+            Ok(None) => return None,
+            Err(error) => Err(RowError { line, detail: RowErrorDetail::Read(error) }),
+            Ok(Some(text)) => parse_row(&text, self.options, self.resolver)
+                .map_err(|error| RowError { line, detail: RowErrorDetail::Decode(error) }),
+        };
+        self.failed = result.is_err();
+        Some(result)
+    }
+}
+impl std::iter::FusedIterator for Rows<'_> {}
 
 fn marker<V: Vfs + Clone>(db: &Database<V>, seq: CommitSeq) -> Result<String, Failure> {
     if seq.0 == 0 {
@@ -252,15 +323,17 @@ fn same_checkpoint(a: &BulkLoadCheckpoint, b: &BulkLoadCheckpoint) -> Result<(),
 }
 fn reconcile(
     batch: &fgdb_delta_types::LogicalDeltaBatch,
-    rows: &[BulkRow],
+    rows: &mut Rows<'_>,
+    source_rows: usize,
     size: usize,
     cp: &mut BulkLoadCheckpoint,
 ) -> Result<(), Failure> {
-    let end = cp.next_row.saturating_add(size).min(rows.len());
-    let chunk = rows
-        .get(cp.next_row..end)
-        .ok_or_else(|| invalid("source shorter than history"))?;
-    if chunk.is_empty() || batch.commit_seq().0 != cp.frontier.0 + 1 {
+    let count = source_rows.checked_sub(cp.next_row)
+        .ok_or_else(|| invalid("source shorter than history"))?.min(size);
+    let end = cp.next_row.checked_add(count).ok_or_else(|| invalid("row counter overflow"))?;
+    let next_chunk = cp.committed_chunks.checked_add(1)
+        .ok_or_else(|| invalid("chunk counter overflow"))?;
+    if count == 0 || Some(batch.commit_seq().0) != cp.frontier.0.checked_add(1) {
         return Err(invalid("unexpected history after import"));
     }
     let mut vs = BTreeMap::new();
@@ -275,7 +348,9 @@ fn reconcile(
                     valid_time: None,
                     ..
                 } => {
-                    vs.insert(*vid, (labels, props));
+                    if vs.insert(*vid, (labels, props)).is_some() {
+                        return Err(invalid("duplicate vertex creation"));
+                    }
                 }
                 DeltaRow::CreateEdge {
                     eid,
@@ -287,19 +362,23 @@ fn reconcile(
                     valid_time: None,
                     ..
                 } => {
-                    es.insert(*eid, (*src, *dst, *relation, props));
+                    if es.insert(*eid, (*src, *dst, *relation, props)).is_some() {
+                        return Err(invalid("duplicate edge creation"));
+                    }
                 }
                 _ => return Err(invalid("history is not a bulk creation chunk")),
             }
         }
     }
-    if vs.len() + es.len() != chunk.len() {
+    if vs.len() + es.len() != count {
         return Err(invalid("history chunk row count changed"));
     }
     // Native identities are allocated monotonically per kind, in source order.
     let mut vs = vs.into_iter();
     let mut es = es.into_iter();
-    for row in chunk {
+    for _ in 0..count {
+        let row = rows.next().ok_or_else(|| invalid("source shorter than history"))?
+            .map_err(|error| error.failure())?;
         match row {
             BulkRow::Vertex(v) => {
                 let (id, (labels, props)) = vs
@@ -325,7 +404,7 @@ fn reconcile(
         }
     }
     cp.next_row = end;
-    cp.committed_chunks += 1;
+    cp.committed_chunks = next_chunk;
     cp.frontier = batch.commit_seq();
     Ok(())
 }

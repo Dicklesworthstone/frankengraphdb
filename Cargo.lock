@@ -582,6 +582,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgdb-protocol"
+version = "0.0.1"
+
+[[package]]
 name = "fgdb-reference"
 version = "0.0.1"
 dependencies = [

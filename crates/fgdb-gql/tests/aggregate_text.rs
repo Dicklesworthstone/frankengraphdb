@@ -233,9 +233,11 @@ fn summaries_match_independent_oriented_edge_enumeration_and_paginate_groups() {
         }
         for (direction, arrow) in [(0, "-[:R]->"), (1, "<-[:R]-"), (2, "-[:R]-")] {
             let text = format!(
-                "MATCH (a){arrow}(b) RETURN a,COUNT(*) AS paths,COUNT(b.n) AS present,COUNT(DISTINCT b.n) AS different,SUM_INT(b.n) AS total GROUP BY a"
+                "MATCH (a){arrow}(b) RETURN a,COUNT(*) AS paths,COUNT(b.n) AS present,COUNT(DISTINCT b.n) AS different,SUM_INT(b.n) AS total"
             );
             let aggregate = prepare(&text);
+            let explicit = prepare(&format!("{text} GROUP BY a"));
+            assert_eq!(aggregate.canonical_bytes(), explicit.canonical_bytes());
             let result = aggregate
                 .execute_governed(
                     edges.len() as u64,
@@ -342,7 +344,7 @@ fn group_by_projected_vertex_alias_returns_exact_groups() {
 fn malformed_ungrouped_and_unsupported_aggregates_never_resolve_names() {
     for text in [
         "MATCH (a) RETURN a",
-        "MATCH (a) RETURN a,COUNT(*)",
+        "MATCH (a) RETURN a,COUNT(*) GROUP BY a.n",
         "MATCH (a) RETURN COUNT(*) GROUP BY missing",
         "MATCH (a) RETURN a,COUNT(*) GROUP BY a,a",
         "MATCH (a) RETURN COUNT(DISTINCT *)",
@@ -437,7 +439,12 @@ fn shared_argument_errors_and_definition_caps_keep_their_domains() {
 
 #[test]
 fn text_aggregates_observe_every_checkpoint_limits_and_noninteger_sum_refusal() {
-    let t = prepare("MATCH (a)-[:R]->(b) RETURN a,COUNT(*) AS paths,SUM(b.n) AS total GROUP BY a");
+    let text = "MATCH (a)-[:R]->(b) RETURN a,COUNT(*) AS paths,SUM(b.n) AS total";
+    let t = prepare(text);
+    assert_eq!(
+        t.canonical_bytes(),
+        prepare(&format!("{text} GROUP BY a")).canonical_bytes()
+    );
     let edges = [
         (VId(1), RelationId(1), VId(2)),
         (VId(1), RelationId(1), VId(2)),
@@ -521,4 +528,209 @@ fn text_aggregates_observe_every_checkpoint_limits_and_noninteger_sum_refusal() 
             aggregate: 1
         }))
     ));
+}
+
+#[test]
+fn implicit_keys_preserve_first_use_order_repeated_aliases_and_template_identity() {
+    let text = "MATCH (a)-[:R]->(b) RETURN SUM(b.n) AS total, \
+        b.n AS key,a AS owner,b.n AS repeated,COUNT(*) AS paths";
+    let implicit = PreparedGraphAggregateText::prepare(text, symbols).unwrap();
+    let explicit =
+        PreparedGraphAggregateText::prepare(&format!("{text} GROUP BY b.n,a"), symbols).unwrap();
+    assert_eq!(implicit.statement(), text);
+    assert_eq!(
+        implicit.columns(),
+        &["total", "key", "owner", "repeated", "paths"]
+    );
+    assert_eq!(
+        implicit.output_slots(),
+        &[
+            GraphAggregateTextSlot::Aggregate(0),
+            GraphAggregateTextSlot::GroupKey(0),
+            GraphAggregateTextSlot::GroupKey(1),
+            GraphAggregateTextSlot::GroupKey(0),
+            GraphAggregateTextSlot::Aggregate(1),
+        ]
+    );
+    assert_eq!(
+        implicit.canonical_template_bytes(),
+        explicit.canonical_template_bytes()
+    );
+    let args = GqlParameters::new();
+    let implicit = implicit.bind_parameters(&args).unwrap();
+    let explicit = explicit.bind_parameters(&args).unwrap();
+    assert_eq!(implicit, explicit);
+    assert_eq!(implicit.group_key_columns(), &[0, 1]);
+    assert_eq!(implicit.input_pattern().columns(), &["key", "owner"]);
+}
+
+#[test]
+fn implicit_computed_keys_do_not_duplicate_parameter_occurrences_or_resolve_on_bind() {
+    let text = "MATCH (a) RETURN a.n+$step AS bucket,COUNT(*) AS rows \
+        HAVING rows >= $minimum ORDER BY bucket SKIP $page LIMIT $page";
+    let mut calls = 0;
+    let template = PreparedGraphAggregateText::prepare(text, |kind, name| {
+        calls += 1;
+        symbols(kind, name)
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+    let schema: Vec<_> = template
+        .parameter_schema()
+        .iter()
+        .map(|spec| (spec.name.as_str(), spec.occurrences))
+        .collect();
+    assert_eq!(schema, vec![("step", 1), ("minimum", 1), ("page", 2)]);
+    let explicit = PreparedGraphAggregateText::prepare(
+        "MATCH (a) RETURN a.n+$step AS bucket,COUNT(*) AS rows GROUP BY bucket \
+         HAVING rows >= $minimum ORDER BY bucket SKIP $page LIMIT $page",
+        symbols,
+    )
+    .unwrap();
+    assert_eq!(
+        template.canonical_template_bytes(),
+        explicit.canonical_template_bytes()
+    );
+    let arguments = |step| {
+        GqlParameters::new()
+            .with_int64("step", step)
+            .unwrap()
+            .with_int64("minimum", 1)
+            .unwrap()
+            .with_uint64("page", 1)
+            .unwrap()
+    };
+    let first = template.bind_parameters(&arguments(7)).unwrap();
+    let frozen = first.canonical_bytes();
+    assert_eq!(first, explicit.bind_parameters(&arguments(7)).unwrap());
+    assert_ne!(
+        frozen,
+        template.bind_parameters(&arguments(8)).unwrap().canonical_bytes()
+    );
+    assert_eq!(first.canonical_bytes(), frozen);
+    assert_eq!(calls, 1);
+    assert_eq!(
+        template.bind_parameters(&GqlParameters::new()).unwrap_err().kind,
+        GraphPatternTextErrorKind::MissingParameter
+    );
+    assert_eq!(
+        template
+            .bind_parameters(&arguments(7).with_int64("unused", 9).unwrap())
+            .unwrap_err()
+            .kind,
+        GraphPatternTextErrorKind::UnexpectedArguments
+    );
+}
+
+#[test]
+fn implicit_property_groups_merge_missing_and_null_and_preserve_native_sum_semantics() {
+    let properties = BTreeMap::from([
+        (VId(1), CanonicalScalar::Null),
+        (VId(3), CanonicalScalar::Int(7)),
+        (VId(4), CanonicalScalar::Int(7)),
+        (VId(5), CanonicalScalar::Int(9)),
+    ]);
+    let result = prepare(
+        "MATCH (a) RETURN a.n AS key,COUNT(*) AS rows,COUNT(a.n) AS present, \
+         SUM(a.n) AS total ORDER BY key NULLS FIRST",
+    )
+    .execute_governed(
+        5,
+        (1..=5).map(VId),
+        [],
+        |_, _| Ok::<_, ()>(true),
+        |vid, _| Ok(properties.get(&vid)),
+        policy(),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    assert_eq!(result.value.len(), 3);
+    for (row, (key, count, present, total)) in result.value.iter().zip([
+        (CanonicalScalar::Null, 2, 0, None),
+        (CanonicalScalar::Int(7), 2, 2, Some(14)),
+        (CanonicalScalar::Int(9), 1, 1, Some(9)),
+    ]) {
+        assert_eq!(row.keys(), &[GraphValue::Scalar(key)]);
+        assert_eq!(row.get(0).unwrap().as_count(), Some(count));
+        assert_eq!(row.get(1).unwrap().as_count(), Some(present));
+        assert_eq!(row.get(2).unwrap().as_integer(), total);
+    }
+    let empty = prepare("MATCH (a) RETURN a.n AS key,COUNT(*) AS rows")
+        .execute_governed(
+            0,
+            [],
+            [],
+            |_, _| Ok::<_, ()>(true),
+            |_, _| Ok(None),
+            policy(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert!(empty.value.is_empty());
+}
+
+#[test]
+fn implicit_optional_grouping_keeps_null_extended_rows() {
+    let result = prepare(
+        "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) \
+         RETURN a,COUNT(*) AS rows,COUNT(b) AS matched",
+    )
+    .execute_governed(
+        4,
+        [VId(1), VId(2), VId(3)],
+        [(VId(1), RelationId(1), VId(2))],
+        |_, _| Ok::<_, ()>(true),
+        |_, _| Ok(None),
+        policy(),
+        || Ok::<_, ()>(()),
+    )
+    .unwrap();
+    assert_eq!(result.value.len(), 3);
+    for (row, (owner, matched)) in result.value.iter().zip([(1, 1), (2, 0), (3, 0)]) {
+        assert_eq!(row.keys(), &[GraphValue::Vertex(VId(owner))]);
+        assert_eq!(row.get(0).unwrap().as_count(), Some(1));
+        assert_eq!(row.get(1).unwrap().as_count(), Some(matched));
+    }
+}
+
+#[test]
+fn implicit_keys_are_whole_return_expressions_not_hidden_aggregate_operands() {
+    for text in [
+        "MATCH (a) RETURN a.n AS key,a.n+COUNT(*) AS total",
+        "MATCH (a) RETURN a.n+1 AS key,SUM(a.n) AS total",
+        "MATCH (a) RETURN a.n AS key HAVING COUNT(*) > 1 ORDER BY SUM(a.n)",
+    ] {
+        let (head, suffix) = text.split_once(" HAVING ").unwrap_or((text, ""));
+        let key = if text.contains("a.n+1 AS key") {
+            "key"
+        } else {
+            "a.n"
+        };
+        let explicit = if suffix.is_empty() {
+            format!("{head} GROUP BY {key}")
+        } else {
+            format!("{head} GROUP BY {key} HAVING {suffix}")
+        };
+        assert_eq!(
+            prepare(text).canonical_bytes(),
+            prepare(&explicit).canonical_bytes()
+        );
+    }
+    for text in [
+        "MATCH (a:L) RETURN a.n+COUNT(*) AS total",
+        "MATCH (a:L) RETURN a.n+1 AS key,a.n+COUNT(*) AS total",
+        "MATCH (a:L) RETURN a.n AS key,COUNT(*) AS rows GROUP BY a",
+        "MATCH (a:L) RETURN a.n AS key,COUNT(*) AS rows GROUP BY missing LIMIT 0",
+    ] {
+        let mut calls = 0;
+        assert!(
+            PreparedGraphAggregateText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            })
+            .is_err(),
+            "{text}"
+        );
+        assert_eq!(calls, 0, "invalid grouping resolved symbols: {text}");
+    }
 }

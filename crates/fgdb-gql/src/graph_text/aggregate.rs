@@ -1,4 +1,4 @@
-//! Aggregate RETURN and explicit GROUP BY over the shared graph text parser.
+//! Aggregate RETURN with implicit or explicit grouping over the shared parser.
 //! No source rewriting, second lexer or catalog re-resolution. Ordinary inputs
 //! keep streaming; computed input uses the existing bounded projection path.
 //! Group pagination is never pushed into the matching child.
@@ -87,10 +87,14 @@ impl Summary {
 }
 
 /// Parse-once grouped text definition. Binding returns the existing aggregate
-/// with one shared governed source at execution time. The explicit profile
-/// requires every nonaggregate RETURN expression in GROUP BY, but grouping
-/// expressions may be omitted from RETURN. Projected aliases resolve to their
-/// original grouping expression, preserving its canonical identity.
+/// with one shared governed source at execution time. Without GROUP BY, each
+/// distinct nonaggregate RETURN expression is a grouping key, in first-use
+/// order. An explicit GROUP BY remains authoritative: every nonaggregate
+/// RETURN expression must occur in it, but its keys may be omitted from RETURN.
+/// Projected aliases resolve to the original expression, not a new key.
+/// Operands occurring only inside aggregate output expressions never create
+/// implicit grouping keys. The bounded profile still requires an aggregate
+/// somewhere in RETURN, HAVING or ORDER BY, not a grouping-only statement.
 /// SUM/SUM_INT and AVG/AVG_INT accept integer/null arguments; argument DISTINCT
 /// follows expression evaluation. AVG returns an exact reduced fraction.
 ///
@@ -222,6 +226,19 @@ impl PreparedGraphAggregateText {
                 groups.push(expression);
                 if !parser.take(b',')? {
                     break;
+                }
+            }
+        } else {
+            // Reuse parsed expressions, not source text or individual property
+            // leaves. Inference must not register parameter occurrences twice.
+            // RETURN admission bounds this set. Repeated expressions under
+            // different aliases retain distinct output slots but share one key.
+            for item in &returned {
+                if item.function.is_none() && item.output.is_none() {
+                    let expression = item.expression.expect("nonaggregate RETURN expression");
+                    if !groups.iter().any(|group| group.same(expression)) {
+                        groups.push(expression);
+                    }
                 }
             }
         }

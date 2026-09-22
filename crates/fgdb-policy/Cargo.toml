@@ -1,0 +1,13 @@
+[package]
+name = "fgdb-policy"
+version = "0.0.1"
+edition = "2024"
+description = "Bounded, non-widening capability policy compiler for FrankenGraphDB"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fgdb-delta-types = { path = "../fgdb-delta-types" }
+fgdb-types = { path = "../fgdb-types" }
