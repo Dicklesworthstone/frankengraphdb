@@ -164,3 +164,22 @@ fn changing_source_after_a_completed_load_does_not_relabel_checkpoint_identity()
     assert_eq!(fixture.frontier(), frontier);
     assert_eq!(std::fs::read(fixture.home.join("checkpoint")).unwrap(), saved);
 }
+
+#[test]
+fn a_checkpoint_cannot_expand_its_own_read_budget_or_erase_valid_database_state() {
+    let fixture = Fixture::new();
+    fixture.source();
+    let basis = fixture.frontier();
+    // The actual ten-row source requires only a small V1 checkpoint. A hostile
+    // sparse file must be refused from metadata, not materialized and decoded.
+    let path = fixture.home.join("checkpoint");
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(2 * 1024 * 1024).unwrap();
+    drop(file);
+    let refused = fixture.load().output().unwrap();
+    assert_eq!(refused.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("InvalidResume"));
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 2 * 1024 * 1024);
+    assert_eq!(fixture.frontier(), basis);
+    assert_eq!(fixture.inspect(|db| db.vertices().unwrap().len()), 0);
+}

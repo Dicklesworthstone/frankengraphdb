@@ -3,8 +3,9 @@
 //! retained for only one bounded engine chunk (one row during reconciliation).
 //! Key maps and block digests still scale with the admitted input. This is not
 //! a claim that the database itself has an external-memory execution engine.
+mod checkpoint;
 mod input;
-use super::{Failure, Options, emit, hex, parameter, quoted};
+use super::{Failure, Options, emit, hex, parameter};
 use asupersync::fs::Vfs;
 use fgdb::{
     BulkEdge, BulkLoadCheckpoint, BulkLoadErrorKind, BulkLoadPolicy, BulkRow, BulkVertex, Database,
@@ -15,7 +16,6 @@ use fgdb_types::{CanonicalScalar, CommitSeq, EId, PurposeContexts, VId};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Write},
-    path::Path,
 };
 
 fn invalid(message: impl std::fmt::Display) -> Failure {
@@ -51,7 +51,7 @@ pub(super) async fn run<V: Vfs + Clone>(
     let rows = Rows::new(source.reader(), &cx, options, resolver);
     // Validate all format/shape/key failures before touching a checkpoint. Drop
     // these temporary key sets before recovery maps or the engine's preflight.
-    {
+    let key_bytes = {
         let mut keys = BTreeSet::new();
         let mut vertices = BTreeSet::new();
         let mut key_bytes = 0usize;
@@ -91,14 +91,17 @@ pub(super) async fn run<V: Vfs + Clone>(
                 }
             }
         }
-    }
+        key_bytes
+    };
+    let checkpoint_limits = checkpoint::Limits::new(source.records(), key_bytes, policy.max_key_bytes)
+        .map_err(invalid)?;
     let source_hash = hex(&source.source_hash().0);
     let current = db.frontier().map_err(Failure::io)?;
     let saved = if let Some(path) = &options.checkpoint {
-        cx.checkpoint().map_err(Failure::io)?;
-        match asupersync::fs::read_to_string(path).await {
-            Ok(text) => Some(Saved::decode(&text).map_err(invalid)?),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        match checkpoint::read(&cx, path, checkpoint_limits) {
+            Ok(Some(text)) => Some(Saved::decode(&text, checkpoint_limits).map_err(invalid)?),
+            Ok(None) => None,
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => return Err(invalid(e)),
             Err(e) => return Err(Failure::io(e)),
         }
     } else {
@@ -140,14 +143,14 @@ pub(super) async fn run<V: Vfs + Clone>(
     let save = |cp: &BulkLoadCheckpoint| -> io::Result<()> {
         if let Some(path) = &options.checkpoint {
             cx.checkpoint().map_err(io::Error::other)?;
-            let saved = Saved {
-                checkpoint: cp.clone(),
+            let saved = checkpoint::View {
+                checkpoint: cp,
                 base,
-                base_marker: base_marker.clone(),
-                source_hash: source_hash.clone(),
+                base_marker: &base_marker,
+                source_hash: &source_hash,
                 rows_per_chunk: options.rows_per_chunk,
             };
-            persist(&contexts.commit(), path, &saved.encode())?;
+            checkpoint::persist(&contexts.commit(), path, saved, checkpoint_limits)?;
         }
         Ok(())
     };
@@ -173,6 +176,9 @@ pub(super) async fn run<V: Vfs + Clone>(
             out.flush().map_err(Failure::io)?;
         }
     }
+    // The old checkpoint's maps are no longer needed once authenticated
+    // recovery/progress is complete; do not retain a second map through ingest.
+    drop(saved);
     let crash = match std::env::var("FGDB_LOAD_CRASH_CHUNK") {
         Ok(value) => {
             let index = value
@@ -417,35 +423,16 @@ struct Saved {
     rows_per_chunk: usize,
 }
 impl Saved {
-    fn encode(&self) -> String {
-        let cp = &self.checkpoint;
-        let vertices = cp
-            .vertices
-            .iter()
-            .map(|(k, v)| format!("{}:{}", quoted(k), quoted(&v.0.to_string())))
-            .collect::<Vec<_>>()
-            .join(",");
-        let edges = cp
-            .edges
-            .iter()
-            .map(|(k, v)| format!("{}:{}", quoted(k), quoted(&v.0.to_string())))
-            .collect::<Vec<_>>()
-            .join(",");
-        format!(
-            "{{\"v\":1,\"vertices\":{{{vertices}}},\"edges\":{{{edges}}},\"next_row\":{},\"frontier\":{},\"committed_chunks\":{},\"base_frontier\":{},\"base_marker\":{},\"source_hash\":{},\"rows_per_chunk\":{}}}\n",
-            cp.next_row,
-            cp.frontier.0,
-            cp.committed_chunks,
-            self.base.0,
-            quoted(&self.base_marker),
-            quoted(&self.source_hash),
-            self.rows_per_chunk
-        )
+    fn view(&self) -> checkpoint::View<'_> {
+        checkpoint::View { checkpoint: &self.checkpoint, base: self.base,
+            base_marker: &self.base_marker, source_hash: &self.source_hash,
+            rows_per_chunk: self.rows_per_chunk }
     }
-    fn decode(text: &str) -> Result<Self, String> {
-        let json = JsonParser::parse(text)?;
-        let fields = object(&json)?;
-        if number(field(fields, "v")?)? != 1 || fields.len() != 10 {
+    fn decode(text: &str, limits: checkpoint::Limits) -> Result<Self, String> {
+        if text.len() > limits.bytes { return Err("checkpoint file exceeds source admission".into()); }
+        let json = JsonParser::parse_limited(text, limits.values(), limits.token_bytes())?;
+        let Json::Object(mut fields) = json else { return Err("expected object".into()); };
+        if number(field(&fields, "v")?)? != 1 || fields.len() != 10 {
             return Err("unknown checkpoint format".into());
         }
         let id = |value: &Json| -> Result<u128, String> {
@@ -456,58 +443,38 @@ impl Saved {
             }
             Ok(value)
         };
-        let vertices = object(field(fields, "vertices")?)?
-            .iter()
-            .map(|(k, v)| Ok((k.clone(), VId(id(v)?))))
-            .collect::<Result<_, String>>()?;
-        let edges = object(field(fields, "edges")?)?
-            .iter()
-            .map(|(k, v)| Ok((k.clone(), EId(id(v)?))))
-            .collect::<Result<_, String>>()?;
         let usize_field = |name| {
-            usize::try_from(number(field(fields, name)?)?)
+            usize::try_from(number(field(&fields, name)?)?)
                 .map_err(|_| "checkpoint counter overflow".to_owned())
         };
-        Ok(Self {
+        let next_row = usize_field("next_row")?;
+        let committed_chunks = usize_field("committed_chunks")?;
+        let rows_per_chunk = usize_field("rows_per_chunk")?;
+        let frontier = CommitSeq(number(field(&fields, "frontier")?)?);
+        let base = CommitSeq(number(field(&fields, "base_frontier")?)?);
+        let base_marker = string(field(&fields, "base_marker")?)?.to_owned();
+        let source_hash = string(field(&fields, "source_hash")?)?.to_owned();
+        // Consume decoded object keys instead of cloning the complete map's
+        // String payload while the JSON tree still owns another full copy.
+        let mut take_object = |name: &str| match fields.remove(name) {
+            Some(Json::Object(map)) => Ok(map),
+            _ => Err("expected checkpoint identity map".to_owned()),
+        };
+        let vertices = take_object("vertices")?.into_iter()
+            .map(|(k, v)| Ok((k, VId(id(&v)?))))
+            .collect::<Result<_, String>>()?;
+        let edges = take_object("edges")?.into_iter()
+            .map(|(k, v)| Ok((k, EId(id(&v)?))))
+            .collect::<Result<_, String>>()?;
+        let saved = Self {
             checkpoint: BulkLoadCheckpoint {
-                vertices,
-                edges,
-                next_row: usize_field("next_row")?,
-                frontier: CommitSeq(number(field(fields, "frontier")?)?),
-                committed_chunks: usize_field("committed_chunks")?,
+                vertices, edges, next_row, frontier, committed_chunks,
             },
-            base: CommitSeq(number(field(fields, "base_frontier")?)?),
-            base_marker: string(field(fields, "base_marker")?)?.to_owned(),
-            source_hash: string(field(fields, "source_hash")?)?.to_owned(),
-            rows_per_chunk: usize_field("rows_per_chunk")?,
-        })
+            base, base_marker, source_hash, rows_per_chunk,
+        };
+        saved.view().validate(limits).map_err(|e| e.to_string())?;
+        Ok(saved)
     }
-}
-fn persist(cx: &fgdb_types::CommitCx, path: &Path, text: &str) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::other("checkpoint needs a file name"))?;
-    let mut temp_name = name.to_os_string();
-    temp_name.push(format!(".tmp.{}", std::process::id()));
-    let temp = parent.join(temp_name);
-    cx.checkpoint().map_err(io::Error::other)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temp)?;
-    cx.checkpoint().map_err(io::Error::other)?;
-    file.write_all(text.as_bytes())?;
-    cx.checkpoint().map_err(io::Error::other)?;
-    file.sync_all()?;
-    cx.checkpoint().map_err(io::Error::other)?;
-    std::fs::rename(&temp, path)?;
-    cx.checkpoint().map_err(io::Error::other)?;
-    std::fs::File::open(parent)?.sync_all()
 }
 
 fn parse_row(
@@ -632,13 +599,20 @@ struct JsonParser<'a> {
     input: &'a str,
     offset: usize,
     depth: usize,
+    remaining_values: usize,
+    max_token_bytes: usize,
 }
 impl<'a> JsonParser<'a> {
     fn parse(input: &'a str) -> Result<Json, String> {
+        Self::parse_limited(input, usize::MAX, input.len())
+    }
+    fn parse_limited(input: &'a str, values: usize, token_bytes: usize) -> Result<Json, String> {
         let mut parser = Self {
             input,
             offset: 0,
             depth: 0,
+            remaining_values: values,
+            max_token_bytes: token_bytes,
         };
         let value = parser.value()?;
         parser.whitespace();
@@ -676,6 +650,8 @@ impl<'a> JsonParser<'a> {
     }
     fn value(&mut self) -> Result<Json, String> {
         self.whitespace();
+        if self.remaining_values == 0 { return Err("JSON value limit exceeded".into()); }
+        self.remaining_values -= 1;
         if self.depth >= 32 {
             return Err("JSON nesting limit exceeded".into());
         }
@@ -765,7 +741,7 @@ impl<'a> JsonParser<'a> {
                     self.offset += 1;
                     let escape = self.peek().ok_or("unterminated JSON escape")?;
                     self.offset += 1;
-                    text.push(match escape {
+                    let ch = match escape {
                         b'"' => '"',
                         b'\\' => '\\',
                         b'/' => '/',
@@ -790,7 +766,8 @@ impl<'a> JsonParser<'a> {
                             char::from_u32(scalar).ok_or("invalid Unicode scalar")?
                         }
                         _ => return Err("invalid JSON escape".into()),
-                    });
+                    };
+                    self.push_character(&mut text, ch)?;
                 }
                 Some(0..=0x1f) => return Err("unescaped control character".into()),
                 Some(_) => {
@@ -799,10 +776,17 @@ impl<'a> JsonParser<'a> {
                         .next()
                         .expect("remaining character");
                     self.offset += ch.len_utf8();
-                    text.push(ch);
+                    self.push_character(&mut text, ch)?;
                 }
             }
         }
+    }
+    fn push_character(&self, text: &mut String, ch: char) -> Result<(), String> {
+        if text.len().checked_add(ch.len_utf8()).is_none_or(|n| n > self.max_token_bytes) {
+            return Err("JSON string limit exceeded".into());
+        }
+        text.push(ch);
+        Ok(())
     }
     fn digits(&mut self) -> Result<(), String> {
         let start = self.offset;
@@ -830,6 +814,7 @@ impl<'a> JsonParser<'a> {
             }
             self.digits()?;
         }
+        if self.offset - start > self.max_token_bytes { return Err("JSON number limit exceeded".into()); }
         Ok(Json::Number(self.input[start..self.offset].to_owned()))
     }
 }
