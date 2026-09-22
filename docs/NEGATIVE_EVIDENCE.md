@@ -520,6 +520,16 @@ be a commit reachable in this repository.
 - **caught_by**: building `git archive HEAD` under the pinned toolchain during the 2026-09-02 reality check
 - **signature**: an honesty paragraph standing in for a verdict. A statement that a check was not run is not a weaker verdict; it is no verdict, and a gate that is always cancelled enforces nothing — NE-0012's family, at the level of the whole chain.
 
+### NE-0046 — NE-0045 recurred at 4.7×: 662 uncompiled commits reached `main`, and the one cited green proof was of a commit `main` never contained
+
+- **doctrine**: FG-CON-11
+- **bead**: fgdb-verified-landing-queue-kqglu
+- **repair**: b36d556a
+- **claimed**: per commit, a disclosure paragraph ("Rust compilation/tests, rustfmt, Clippy and full gates remain UNRUN"); in docs/REALITY_CHECK_AND_BRIDGE_PLAN.md, a "latest verified green" at `9adf484d`
+- **actual**: 662 of 912 non-merge commits between 2026-09-08 and 2026-09-22 came from an identity with no toolchain and were pushed straight to `main`: 479 declared their checks UNRUN, 138 said cargo was absent, and none claimed a compile. HEAD `ec7be218` failed rustfmt on 21 files, clippy in two crates, and compilation of the `fgdb-gql` lib-test target, so `cargo test --workspace` executed zero tests. A branch sync then merged two August deliberate-red CI probes into `main`. `scripts/merge_train.sh audit` counted 607 first-parent commits since 09-08, 0 of them proven, with 628 toolchain-less commits outside any proven merge. `9adf484d` is not an ancestor of `main`: the proof certified a commit that was later rebased away.
+- **caught_by**: the 2026-09-22 reality check. It combined a raw cargo census in a private clone, a per-author-email provenance count, and the new train's audit over live history.
+- **signature**: a verdict bound to a commit that is not on the path to `main` certifies nothing. That covers a disclosure paragraph and equally a proof of a SHA later rebased away. A remote pusher never meets a local hook. The only enforcement that reaches it makes the verified path the only path: `staging`, then a proved `--no-ff` merge, then `main`.
+
 ---
 
 ## Reverts
