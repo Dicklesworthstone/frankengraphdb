@@ -5,6 +5,7 @@
 //! Registrations are not durable subscriptions and do not survive reopening.
 
 mod aggregate;
+mod closure;
 mod components;
 mod constant;
 mod filter;
@@ -249,6 +250,8 @@ pub(crate) enum StandingQuery {
         output: Box<row::State>,
     },
     Reachability(Box<recursive::State>),
+    /// Recursive endpoint closure of a complete maintained row relation.
+    Closure(Box<closure::State>),
     Triangles(Box<triangles::State>),
     Components(Box<components::State>),
     CoreNumbers(Box<kcore::State>),
@@ -275,6 +278,7 @@ impl StandingQuery {
             | Self::ProjectedAggregate { source: query, .. }
             | Self::Rows { source: query, .. } => (query.policy, query.frontier, query.failure),
             Self::Reachability(query) => (query.policy, query.frontier, query.failure),
+            Self::Closure(query) => (query.policy, query.frontier, query.failure),
             Self::Triangles(query) => (query.policy, query.frontier, query.failure),
             Self::Components(query) => (query.policy, query.frontier, query.failure),
             Self::CoreNumbers(query) => (query.policy, query.frontier, query.failure),
@@ -305,6 +309,7 @@ impl StandingQuery {
             Self::Reachability(query) => {
                 (&mut query.frontier, &mut query.failure, &mut query.stats)
             }
+            Self::Closure(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Triangles(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Components(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::CoreNumbers(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
@@ -560,6 +565,9 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Reachability(query) => StandingQuery::Reachability(Box::new(
                 self.prepare_standing_reachability(cx, query.relation(), policy)?,
             )),
+            StandingQuery::Closure(query) => StandingQuery::Closure(Box::new(
+                self.prepare_standing_closure(cx, query.input, query.endpoints, policy, handle.index)?,
+            )),
             StandingQuery::Triangles(query) => StandingQuery::Triangles(Box::new(
                 self.prepare_standing_triangles(cx, query.relation(), query.quantifier(), policy)?,
             )),
@@ -689,6 +697,7 @@ impl<V: Vfs + Clone> Database<V> {
                 &query.stats,
             ),
             StandingQuery::Reachability(_)
+            | StandingQuery::Closure(_)
             | StandingQuery::Rows { .. }
             | StandingQuery::Constant(_)
             | StandingQuery::Triangles(_)
@@ -790,6 +799,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
                 source.maintain_with_output(batch, &mut meter, Some(output.as_mut()))
             }
             StandingQuery::Reachability(query) => query.maintain(cx, batch, &mut meter),
+            StandingQuery::Closure(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Triangles(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::Components(query) => query.maintain(cx, batch, &mut meter),
             StandingQuery::CoreNumbers(query) => query.maintain(cx, batch, &mut meter),

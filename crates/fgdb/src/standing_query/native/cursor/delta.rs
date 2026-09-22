@@ -195,7 +195,7 @@ pub(in crate::standing_query::native) fn open<'a, V: Vfs + Clone>(
             (Layout::Rows { .. } | Layout::Circuit { .. },
                 StandingQuery::Rows { .. } | StandingQuery::Constant(_)
                 | StandingQuery::Set(_) | StandingQuery::Join(_) | StandingQuery::Projection(_)
-                | StandingQuery::Filter(_) | StandingQuery::Window(_)) => {
+                | StandingQuery::Filter(_) | StandingQuery::Window(_) | StandingQuery::Closure(_)) => {
                 sets::delta(root).map(Changes::Rows)
             }
             (Layout::Aggregate { .. } | Layout::GroupCircuit { .. }, StandingQuery::Group(_)) => {

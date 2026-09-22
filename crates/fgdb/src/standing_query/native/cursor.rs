@@ -328,21 +328,22 @@ pub(super) fn open<'a, V: Vfs + Clone>(
         } else {
             match layout.as_ref() {
                 Layout::Rows { .. } | Layout::Circuit { .. } => {
-                    let mut view = match root {
+                    let (rows, mut ordered) = match root {
                         StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {
-                            database.standing_rows(cx, handle)?
+                            let view = database.standing_rows(cx, handle)?;
+                            (view.rows, view.ordered)
                         }
-                        StandingQuery::Set(_) => database.standing_set(cx, handle)?,
-                        StandingQuery::Join(_) => database.standing_join(cx, handle)?,
-                        StandingQuery::Projection(_) => database.standing_projection(cx, handle)?,
-                        _ => return Err(StandingQueryError::Unsupported),
+                        // All other native row circuits share the same complete
+                        // selected bag. Ranked windows are handled above; do not
+                        // lose filters or recursive outputs in an adapter whitelist.
+                        _ => (sets::rows(root).ok_or(StandingQueryError::Unsupported)?, None),
                     };
                     if matches!(layout.as_ref(), Layout::Circuit { .. })
                         && !matches!(root, StandingQuery::Constant(_))
                     {
-                        view.ordered = None;
+                        ordered = None;
                     }
-                    view_runs(view.rows, view.ordered, NativeRow::Values)
+                    view_runs(rows, ordered, NativeRow::Values)
                 }
                 Layout::Aggregate { .. } | Layout::GroupCircuit { .. } => {
                     let view = database.standing_query(cx, handle)?;
