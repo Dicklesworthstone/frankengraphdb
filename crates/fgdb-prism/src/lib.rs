@@ -46,8 +46,8 @@ pub use execute::{
     ComplexityWitness, FnxCertificate, FnxExecutionError, FnxExecutionLimits, FnxResult, FnxValue,
 };
 pub use input::{
-    FnxReadError, FnxReadOptions, FnxReadResult, FnxSelection, FnxSourceLimits, FnxWeightError,
-    FnxWeightSpec, MissingWeightPolicy,
+    FnxReadError, FnxReadOptions, FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits,
+    FnxWeightError, FnxWeightSpec, MissingWeightPolicy,
 };
 pub use sealed::{
     SealedGraphView, SealedNeighborCursor, SealedProjectionError, SealedProjectionSpec,

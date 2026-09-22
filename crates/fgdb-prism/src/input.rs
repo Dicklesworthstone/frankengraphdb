@@ -195,6 +195,46 @@ impl<S: core::error::Error + 'static, C: core::error::Error + 'static> core::err
     }
 }
 
+/// Trusted-host composition errors, distinct from low-level compressed kernel
+/// failures. A sealed image's opaque Strata anchor must match the admitted
+/// read view before the host derives its vertex directory. This check is not
+/// capability authorization or a cross-process retention lease.
+#[derive(Debug)]
+pub enum FnxSealedReadError<S, C> {
+    Input(FnxReadError<S, C>),
+    Seal(fgdb_strata::tiered::sealed::SealedError),
+    Projection(crate::SealedProjectionError),
+    Execution(crate::FnxSealedExecutionError),
+    /// A different root, graph, branch, partition or publication was offered.
+    /// Even an empty selection cannot make that source admissible.
+    SourceMismatch,
+}
+impl<S, C> From<FnxReadError<S, C>> for FnxSealedReadError<S, C> {
+    fn from(error: FnxReadError<S, C>) -> Self { Self::Input(error) }
+}
+impl<S: core::fmt::Display, C: core::fmt::Display> core::fmt::Display for FnxSealedReadError<S, C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Input(error) => error.fmt(f),
+            Self::Seal(error) => error.fmt(f),
+            Self::Projection(error) => error.fmt(f),
+            Self::Execution(error) => error.fmt(f),
+            Self::SourceMismatch => f.write_str("Prism sealed source does not match the admitted read view"),
+        }
+    }
+}
+impl<S: core::error::Error + 'static, C: core::error::Error + 'static> core::error::Error for FnxSealedReadError<S, C> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Input(error) => Some(error),
+            Self::Seal(error) => Some(error),
+            Self::Projection(error) => Some(error),
+            Self::Execution(error) => Some(error),
+            Self::SourceMismatch => None,
+        }
+    }
+}
+
 /// Bind the frozen selection recipe as well as the actual projected data,
 /// compiled call, returned rows and upstream witness. This is provenance, not
 /// a signed authorization proof or a completed CGSE ledger publication.
