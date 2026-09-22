@@ -69,7 +69,7 @@ impl PreparedCliWrite {
                 }
                 let declarations = parameters.parameter_types().collect::<Vec<_>>();
                 let script = PreparedGraphWriteScript::prepare_with_parameter_types(
-                    statement, write.relation, &declarations, symbols,
+                    statement, write.relation, &declarations, |kind, name| symbols.resolve(kind, name),
                 ).map_err(|_| Error::Input)?;
                 if script.statements().len() > write.max_statements {
                     return Err(Error::Input);
@@ -82,7 +82,7 @@ impl PreparedCliWrite {
                 }
                 let declarations = parse_types(types.unwrap_or(""))?;
                 let script = PreparedGraphWriteScript::prepare_with_parameter_types(
-                    statement, write.relation, &declarations, symbols,
+                    statement, write.relation, &declarations, |kind, name| symbols.resolve(kind, name),
                 ).map_err(|_| Error::Input)?;
                 let batch = script.bind_csv_with_statement_limit(
                     csv.ok_or(Error::Usage)?,
