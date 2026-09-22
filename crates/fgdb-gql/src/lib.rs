@@ -7,6 +7,7 @@
 mod aggregation;
 pub mod algebra;
 mod algebra_exec;
+mod branch_text;
 mod cheapest_path;
 mod cheapest_path_stream;
 mod cheapest_path_text;
@@ -54,6 +55,10 @@ mod walk;
 mod write_receipt;
 mod write_script;
 
+pub use branch_text::{
+    BoundGraphBranchText, GraphBranchTextError, GraphBranchTextErrorKind,
+    MAX_GRAPH_BRANCH_NAME_BYTES, PreparedGraphBranchText,
+};
 pub use cheapest_path::{
     GraphCheapestPathCursor, GraphCheapestPathError, GraphCheapestPathMode, GraphCostPath,
     GraphPathCostError, PreparedGraphCheapestPath,
