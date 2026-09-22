@@ -22,6 +22,8 @@ allow = [
 ]
 exceptions = [
   { crate = "asupersync", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
+  { crate = "fnx-algorithms", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
+  { crate = "fnx-cgse", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
   { crate = "fnx-classes", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
   { crate = "fnx-generators", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
   { crate = "fnx-runtime", allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"] },
@@ -48,6 +50,19 @@ crate = "fnx-runtime"
 expression = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 license-files = [{ path = "../../LICENSE", hash = 0x3e2e0c66 }]
 
+# fnx-algorithms and fnx-cgse joined the graph with fgdb-prism (same pinned
+# franken_networkx revision, same LICENSE bytes). They are listed after
+# fnx-classes so the license-mismatch control keeps mutating fnx-classes.
+[[licenses.clarify]]
+crate = "fnx-algorithms"
+expression = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+license-files = [{ path = "../../LICENSE", hash = 0x3e2e0c66 }]
+
+[[licenses.clarify]]
+crate = "fnx-cgse"
+expression = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+license-files = [{ path = "../../LICENSE", hash = 0x3e2e0c66 }]
+
 [licenses.private]
 # Every workspace package is publish=false. Their distribution policy belongs
 # to the product-release workstream; this gate judges third-party inputs.
@@ -60,6 +75,35 @@ multiple-versions = "warn"
 # and permits only the two foundation repositories.
 wildcards = "allow"
 highlight = "all"
+# Doctrine #1 (AGENTS.md): "No serde, no tokio, no rocksdb, no arrow, no
+# tantivy, no hnswlib. Ever." topology-check already refuses any new DIRECT
+# third-party dependency in a first-party crate. These bans close the
+# transitive route: a foundation bump that pulls one of these crates in.
+#
+# Crates absent from Cargo.lock today are denied outright; any appearance
+# fails. The serde family is present today only through the foundations and
+# their own dependencies, so each carries `wrappers`: the exact set of crates
+# that depend on it directly as of this lockfile. A new direct dependent,
+# first-party or reached through a foundation bump, fails and must be reviewed
+# rather than absorbed (fgdb-deny-transitive-bans-wzw0x).
+deny = [
+  { crate = "tokio", reason = "doctrine #1: no tokio; asupersync is the runtime" },
+  { crate = "rocksdb", reason = "doctrine #1: no rocksdb; Strata is the storage engine" },
+  { crate = "librocksdb-sys", reason = "doctrine #1: no rocksdb" },
+  { crate = "arrow", reason = "doctrine #1: no arrow; columnar readers are built in-house" },
+  { crate = "arrow2", reason = "doctrine #1: no arrow" },
+  { crate = "tantivy", reason = "doctrine #1: no tantivy; Beacon builds FTS in-house" },
+  { crate = "hnsw", reason = "doctrine #1: no hnswlib; Beacon builds ANN in-house" },
+  { crate = "hnsw_rs", reason = "doctrine #1: no hnswlib" },
+  { crate = "serde", wrappers = [
+    "asupersync", "bincode-next", "fnx-algorithms", "fnx-cgse", "fnx-classes",
+    "fnx-runtime", "franken-decision", "franken-evidence", "franken-kernel",
+    "rmp-serde", "semver", "serde_json",
+  ], reason = "doctrine #1: no serde in first-party code; foundation-transitive only" },
+  { crate = "serde_derive", wrappers = ["serde", "serde_core"], reason = "doctrine #1: serde family, foundation-transitive only" },
+  { crate = "serde_core", wrappers = ["semver", "serde", "serde_json"], reason = "doctrine #1: serde family, foundation-transitive only" },
+  { crate = "serde_json", wrappers = ["asupersync", "fnx-cgse", "fnx-runtime", "franken-evidence"], reason = "doctrine #1: serde family, foundation-transitive only" },
+]
 
 [sources]
 unknown-registry = "deny"

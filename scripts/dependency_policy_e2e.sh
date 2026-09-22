@@ -197,4 +197,37 @@ else
   esac
 fi
 
+# fgdb-deny-transitive-bans-wzw0x: the doctrine-#1 bans are load-bearing only
+# if a wrapper list is enforced. Remove asupersync from serde's wrappers; the
+# real graph (asupersync -> serde) must then be refused as a banned crate.
+awk '
+  BEGIN { changed = 0 }
+  changed == 0 && $0 == "    \"asupersync\", \"bincode-next\", \"fnx-algorithms\", \"fnx-cgse\", \"fnx-classes\"," {
+    print "    \"bincode-next\", \"fnx-algorithms\", \"fnx-cgse\", \"fnx-classes\","
+    changed = 1
+    next
+  }
+  { print }
+' "$POLICY" >"$RUN_DIR/deny.ban-mutant.toml"
+if cmp -s "$POLICY" "$RUN_DIR/deny.ban-mutant.toml"; then
+  gate_fail "control: the serde-wrapper mutation did not apply"
+elif cargo deny -L error --locked check bans \
+    --config "$RUN_DIR/deny.ban-mutant.toml" \
+    >"$RUN_DIR/ban.stdout" 2>"$RUN_DIR/ban.stderr"; then
+  gate_fail "control: cargo-deny accepted serde through asupersync with asupersync removed from its wrappers"
+elif grep -q "crate 'serde = .*' is explicitly banned" "$RUN_DIR/ban.stdout" \
+    "$RUN_DIR/ban.stderr"; then
+  gate_pass "control: cargo-deny refused serde once its asupersync wrapper was removed"
+else
+  case "$(gate_env_failure_class "$RUN_DIR/ban.stdout" "$RUN_DIR/ban.stderr")" in
+    rch-refusal|cargo-offline)
+      gate_diag "  transcripts: $RUN_DIR/ban.stdout $RUN_DIR/ban.stderr"
+      gate_abort_unrun "control: cargo-deny bans check did not execute ($(gate_env_failure_class "$RUN_DIR/ban.stdout" "$RUN_DIR/ban.stderr")); retryable environment refusal, not a product regression"
+      ;;
+    *)
+      gate_fail "control: cargo-deny failed for a reason other than the planted serde ban"
+      ;;
+  esac
+fi
+
 gate_verdict
