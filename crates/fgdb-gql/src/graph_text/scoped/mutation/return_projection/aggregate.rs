@@ -4,6 +4,7 @@
 //! the existing parser; execution receives the ordinary aggregate plan.
 
 mod inputs;
+mod rows;
 
 use super::*;
 use crate::pipeline_aggregate_text::{
@@ -196,25 +197,17 @@ impl PreparedGraphPipelineAggregateText {
         Self::prepare_with_parameter_types(statement, &[], resolve)
     }
 
-    /// Check all WITH stages, final grouping, output aliases and HAVING shape
-    /// before entering the catalog. There is one original token/parameter table
-    /// for graph predicates, row expressions, input pages and group clauses.
+    /// Check graph-backed or source-free row stages, final grouping, output
+    /// aliases and HAVING before catalog access. The shared parser owns one
+    /// token/parameter table for the entire statement. Source-free definitions
+    /// bind through bind_relation_parameters, not the single-graph binder.
     pub fn prepare_with_parameter_types(
         statement: &str,
         declarations: &[(&str, GqlParameterType)],
         resolve: impl FnMut(GraphSymbolKind, &str) -> Option<GraphSymbol>,
     ) -> Result<Self, Error> {
         let mut parser = Parser::new_with_parameter_types(statement, declarations)?;
-        parser.parse_match_prefix()?;
-        if !parser.is_word("WITH") && !parser.is_word("UNWIND") {
-            return Err(expected(
-                parser.current.at,
-                "WITH or UNWIND before a pipeline aggregate RETURN",
-            ));
-        }
-        let head = parser.graph_projection_head()?;
-        let (mut stages, schema, depth) =
-            parser.row_pipeline_prefix(head.schema(&parser.syntax.parameters))?;
+        let (head, mut stages, schema, depth) = rows::prefix(&mut parser)?;
         let aggregate_at = parser.current.at;
         if depth >= crate::MAX_GRAPH_SET_DEPTH {
             return Err(build(
@@ -444,9 +437,7 @@ impl PreparedGraphPipelineAggregateText {
         inputs.append_projection(
             &parser, &schema, &mut keys, &mut summaries, &mut stages, depth, aggregate_at,
         )?;
-        let input = parser
-            .finish_graph_projection(statement, head, stages)?
-            .resolve(resolve)?;
+        let input = rows::finish(parser, statement, head, stages)?.resolve(resolve)?;
         Ok(Self {
             statement: statement.to_owned(),
             input,
@@ -466,8 +457,9 @@ impl PreparedGraphPipelineAggregateText {
         })
     }
 
-    /// Lower every original parameter occurrence before any query executes.
-    /// Returned group values keep their exact count/sum/average result domains.
+    /// Bind exactly one graph-backed pipeline for iterator-based source APIs.
+    /// Source-free pipelines use bind_relation_parameters instead: they must
+    /// never manufacture a graph leaf to satisfy this source contract.
     pub fn bind_parameters(
         &self,
         arguments: &GqlParameters,
