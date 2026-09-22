@@ -31,9 +31,11 @@ mod execute;
 mod input;
 mod projection;
 mod sealed;
+mod sealed_execute;
 mod shortest_path;
 mod traversal;
 
+pub use sealed_execute::{FnxMemoryLimits, FnxSealedExecutionError};
 pub use sealed::{SealedGraphView, SealedNeighborCursor, SealedProjectionError, SealedProjectionSpec};
 pub use clustering::{TriangleStatistics, triangle_statistics};
 pub use shortest_path::{

@@ -12,11 +12,14 @@ pub const PROJECTED_WEIGHT_ATTRIBUTE: &str = "__fgdb_prism_weight";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdapterPath {
     DecodedCache,
+    /// Fallible native kernels borrowing compressed Strata rows.
+    CompressedCursor,
 }
 impl AdapterPath {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::DecodedCache => "DECODED_CACHE",
+            Self::CompressedCursor => "COMPRESSED_CURSOR",
         }
     }
 }
