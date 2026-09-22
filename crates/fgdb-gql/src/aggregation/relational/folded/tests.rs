@@ -171,7 +171,7 @@ fn exact_and_one_less_allowances_and_every_checkpoint_are_atomic() {
 }
 
 #[test]
-fn preflight_retains_sorting_collect_and_mixed_domain_extrema_on_the_general_path() {
+fn preflight_retains_value_sensitive_barriers_but_counts_can_elide_terminal_order() {
     let relation = leaf().unwind("x".into(), GraphSetValue::List(vec![
         GraphSetValue::Value(value(Some(7))), GraphSetValue::Value(GraphValue::Vertex(VId(9))),
         GraphSetValue::List(vec![GraphSetValue::Value(value(Some(2)))]),
@@ -186,7 +186,10 @@ fn preflight_retains_sorting_collect_and_mixed_domain_extrema_on_the_general_pat
     }
     let relation = relation.with_order_by(&[GraphValueOrder::descending(0)]).unwrap();
     let query = PreparedGraphAggregate::prepare_relation(relation, &[], &[GraphAggregate::count_rows("n")], 0, None).unwrap();
-    assert!(query.folded_definition().is_none());
+    assert!(query.uses_factorized_cardinality());
+    assert!(query.folded_definition().is_some());
+    assert_eq!(execute(&query, &[Some(0)], wide()).unwrap().value,
+        materialized(&query, &[Some(0)]).unwrap().value);
     let simple = leaf().project(vec![GraphSetProjection::new("p", GraphSetValue::Column(0))],
         GraphSetQuantifier::All).unwrap();
     assert!(!simple.has_foldable_expansion());

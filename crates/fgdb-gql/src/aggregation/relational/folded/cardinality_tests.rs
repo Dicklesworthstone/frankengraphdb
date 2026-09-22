@@ -127,3 +127,63 @@ fn grouped_or_value_dependent_aggregates_keep_row_execution() {
             q.execute_relational_materialized(wide(), no_source, || Ok(())).unwrap().value);
     }
 }
+
+#[test]
+fn constant_unwind_pipeline_with_with_aliases_uses_the_integrated_count_path() {
+    let mut input = PreparedGraphSet::singleton();
+    for at in 0..8 {
+        input = input.unwind(format!("x{at}"), GraphSetValue::List(
+            (0..32).map(|i| GraphSetValue::Value(GraphValue::Scalar(
+                CanonicalScalar::Int(i),
+            ))).collect(),
+        )).unwrap();
+    }
+    let input = input.project(vec![GraphSetProjection::new("last", GraphSetValue::Column(7))],
+        crate::GraphSetQuantifier::All).unwrap();
+    let q = query(input, None);
+    assert!(q.uses_factorized_cardinality());
+    let result = q.execute_relational_with_source(
+        GqlQueryPolicy::new(0, 1, 20_000, 5_000), no_source, || Ok(()),
+    ).unwrap();
+    assert_eq!(result.value[0].values()[0].as_count(), Some(1_u64 << 40));
+    assert_eq!(result.rows.result_rows, 1);
+}
+
+#[test]
+fn graph_backed_constant_expansions_admit_the_source_once_and_keep_snapshot_limits() {
+    let mut builder = crate::algebra::GraphPatternBuilder::new();
+    builder.vertex("n").unwrap();
+    let leaf = PreparedGraphSet::from(builder.prepare_values(
+        &[crate::algebra::GraphColumn::vertex("n", "n")], 0, None,
+    ).unwrap());
+    let input = leaf.unwind("a".into(), GraphSetValue::List(vec![
+        GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1))),
+        GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Int(2))),
+    ])).unwrap();
+    let q = PreparedGraphAggregate::prepare_relation(input, &[],
+        &[GraphAggregate::count_rows("n")], 0, None).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let source = |_: &PreparedGraphPattern<GraphValueRow>, _: GqlQueryPolicy| {
+        calls.set(calls.get() + 1);
+        Ok::<_, GqlQueryError<&'static str, usize>>(GqlQueryExecution {
+            value: vec![
+                GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(1))]),
+                GraphValueRow::from_owned_values(vec![GraphValue::Vertex(VId(2))]),
+            ],
+            rows: GqlExecutionStats { snapshot_records: 2, result_rows: 2 },
+            evaluator: GlaExecutionStats::default(),
+        })
+    };
+    let result = q.execute_relational_with_source(
+        GqlQueryPolicy::new(2, 1, 100_000, 10_000), source, || Ok(()),
+    ).unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(result.rows.snapshot_records, 2);
+    assert_eq!(result.value[0].values()[0].as_count(), Some(4));
+    let result = q.execute_relational_with_source(
+        GqlQueryPolicy::new(1, 1, 100_000, 10_000), source, || Ok(()),
+    );
+    assert_eq!(calls.get(), 2);
+    assert!(matches!(result, Err(GqlQueryError::Rows(error))
+        if error.dimension == GqlBudgetDimension::SnapshotRecords));
+}

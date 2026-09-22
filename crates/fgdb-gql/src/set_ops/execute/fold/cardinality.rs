@@ -8,6 +8,28 @@
 
 use super::*;
 
+// Admission follows the checked expression, never query text or bound values
+// from an earlier execution. A constant can still FAIL, so this is permission
+// to evaluate it once after input completion, not permission to skip it.
+fn constant(value: &GraphSetValue) -> bool {
+    match value {
+        GraphSetValue::Column(_) => false,
+        GraphSetValue::Literal(_) | GraphSetValue::Value(_) => true,
+        GraphSetValue::Integer(expression) => {
+            expression.referenced_columns().into_iter().next().is_none()
+        }
+        GraphSetValue::List(values) => values.iter().all(constant),
+        GraphSetValue::Index { list, index } => constant(list) && constant(index),
+        GraphSetValue::Size(list) => constant(list),
+    }
+}
+
+fn total_projection(projection: &[GraphSetProjection]) -> bool {
+    projection.iter().all(|column| matches!(column.value(),
+        GraphSetValue::Column(_) | GraphSetValue::Literal(_) | GraphSetValue::Value(_)
+    ))
+}
+
 impl PreparedGraphSet {
     pub(crate) fn has_factorized_cardinality(&self) -> bool {
         match &self.node {
@@ -17,6 +39,10 @@ impl PreparedGraphSet {
                 quantifier: GraphSetQuantifier::All,
                 ..
             } => true,
+            SetNode::Unwind { value, .. } => constant(value),
+            SetNode::Project {
+                input, projection, quantifier: GraphSetQuantifier::All,
+            } => total_projection(projection) && input.has_factorized_cardinality(),
             SetNode::Scope(input) => input.has_factorized_cardinality(),
             _ => false,
         }
@@ -73,6 +99,7 @@ where
 {
     meter.event(GlaExecutionEvent::Work)?;
     let size = match &query.node {
+        SetNode::Values => 1,
         SetNode::CrossJoin { left, right } => {
             let left = count(left, source, meter, operand)?;
             // Do not short-circuit zero, overflow or a parent LIMIT 0. The
@@ -91,6 +118,38 @@ where
             left.saturating_add(right)
         }
         SetNode::Scope(input) => count(input, source, meter, operand)?,
+        SetNode::Unwind { input, value } if constant(value) => {
+            let input_size = count(input, source, meter, operand)?;
+            if input_size == 0 {
+                0 // An empty input never evaluates a downstream expression.
+            } else {
+                let column = input.types.len();
+                let value = projection::evaluate_value(
+                    value, &GraphValueRow::unit(), column, &mut |event| meter.event(event),
+                ).map_err(|error| projected(error, 0))?;
+                let elements = match value {
+                    GraphValue::List(values) => values.len() as u128,
+                    value if value.is_null() => 0,
+                    _ => return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                        row: 0, column,
+                        error: crate::GraphIntegerError {
+                            instruction: 0,
+                            kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+                        },
+                    })),
+                };
+                input_size.saturating_mul(elements)
+            }
+        }
+        SetNode::Project {
+            input, projection, quantifier: GraphSetQuantifier::All,
+        } if total_projection(projection) => {
+            // Checked aliases and already-admitted literal values cannot fail
+            // semantically. Their unused copies and sort may be eliminated.
+            // Arithmetic, indexing and list construction remain barriers:
+            // even wrapping a column in a list can exceed runtime depth bounds.
+            count(input, source, meter, operand)?
+        }
         _ => {
             // Existing visit/run owns every value-sensitive barrier, including
             // DISTINCT, filters, computed projections and dynamic UNWIND.
@@ -111,3 +170,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pipeline_tests;
