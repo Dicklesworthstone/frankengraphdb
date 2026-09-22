@@ -1,4 +1,4 @@
-//! Governed DISTINCT membership feeding the existing exact numeric cells.
+//! Governed DISTINCT membership feeding exact numeric and collection cells.
 //!
 //! The source's row borrow ends on the next pull. Store a canonical value only
 //! on its first occurrence, after admission, never a projected input bag or a
@@ -8,7 +8,7 @@ use super::*;
 use std::collections::BTreeSet;
 
 pub(crate) struct DistinctState {
-    // Only Count, Sum and Average are constructed here, never a nested DISTINCT.
+    // Only plain cells are constructed here, never a nested DISTINCT.
     pub(super) accumulator: NumericState,
     pub(super) scalars: BTreeSet<CanonicalScalar>,
     pub(super) vertices: BTreeSet<VId>,
@@ -23,6 +23,7 @@ impl DistinctState {
             GraphAggregateFunction::AverageIntDistinct => {
                 NumericState::Average { sum: 0, count: 0 }
             }
+            GraphAggregateFunction::CollectDistinct => NumericState::Collect(Vec::new()),
             _ => unreachable!("the physical compiler checked the DISTINCT function"),
         };
         Self {
@@ -71,14 +72,20 @@ impl DistinctState {
         if present {
             return Ok(());
         }
-        // All callbacks precede mutation and payload cloning. The existing
-        // numeric update checks overflow/domain failures before changing its
-        // fields; an error cannot leave a witness without its contribution.
+        // Membership reservation precedes contribution. Numeric cells check
+        // errors before mutation; collection cells additionally govern their
+        // separately owned list entry before appending it. No fallible work
+        // follows the contribution, so a refusal leaves both sides unchanged.
         control(VertexScanEvent::ScratchEntry)?;
         for _ in 0..units {
             control(VertexScanEvent::ScratchEntry)?;
         }
-        self.accumulator.update(input, aggregate)?;
+        if let NumericState::Collect(values) = &mut self.accumulator {
+            collection::push(values, input, control)?;
+        } else {
+            // Keep the existing numeric path's event sequence unchanged.
+            self.accumulator.update(input, aggregate)?;
+        }
         match input {
             Input::Vertex(vid) => {
                 self.vertices.insert(vid);
@@ -95,7 +102,7 @@ impl DistinctState {
         Ok(())
     }
 
-    /// Drop owned membership and move the numeric cell to ordinary finalization.
+    /// Drop owned membership and move the result cell to ordinary finalization.
     /// SUM/AVG retain exactly the same empty, overflow and fraction semantics.
     pub(super) fn into_numeric(self) -> NumericState {
         self.accumulator

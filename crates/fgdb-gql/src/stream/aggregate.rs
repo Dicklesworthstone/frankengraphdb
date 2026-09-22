@@ -9,7 +9,10 @@
 //! is independent of this operator's live-state bound.
 //! Argument DISTINCT retains canonical support per aggregate and group under
 //! the same meter. Its state grows with unique values, not row occurrences.
+//! COLLECT retains nonnull occurrences in the admitted visitation order;
+//! COLLECT DISTINCT retains the first occurrence, not sorted support.
 
+mod collection;
 mod distinct;
 use distinct::DistinctState;
 
@@ -51,27 +54,41 @@ impl core::error::Error for VertexAggregateBuildError {
 /// and argument DISTINCT. Plain operands retain their direct borrowed path.
 /// HAVING, hidden/repeated columns, output expressions, output DISTINCT,
 /// ORDER BY and SKIP/LIMIT use the same completed-group stage as edge streams.
-/// Relational input and COLLECT still refuse before opening a source. The
-/// underlying row stream's leading-identity order requirement is relaxed only
-/// because this operator owns result grouping. Argument DISTINCT and output
-/// DISTINCT remain separate stages on opposite sides of aggregation.
+/// COLLECT preserves the ordinary vertex visitor's ascending-identity order.
+/// Computed collection inputs must also satisfy the ordinary row-stream order
+/// proof: their batch child sorts rows before evaluating expressions. A child
+/// with a different order refuses rather than silently reordering a list.
+/// Relational inputs still refuse. Argument DISTINCT and output DISTINCT remain
+/// separate stages on opposite sides of aggregation. Collections are metered
+/// owned results, not constant-state numeric summaries or spill-backed values.
 #[derive(Clone)]
 pub struct VertexAggregatePlan {
     input: VertexScanPlan<GraphValueRow>,
     aggregate: PreparedGraphAggregate,
+    collects: bool,
 }
 impl VertexAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, VertexAggregateBuildError> {
         if !aggregate
                 .aggregates()
                 .iter()
-                .all(|spec| NumericState::supports(spec.function()))
+                .all(|spec| NumericState::supports(spec.function())
+                    || NumericState::collects(spec.function()))
         {
             return Err(VertexAggregateBuildError::RequiresPlainGlobalAggregate);
         }
         let aggregate = aggregate
             .prepare_streamed_output()
             .ok_or(VertexAggregateBuildError::RequiresPlainGlobalAggregate)?;
+        let collects = aggregate.aggregates().iter()
+            .any(|spec| NumericState::collects(spec.function()));
+        if collects && aggregate.input_projection().is_some() {
+            // Batch computed inputs consume the child's canonical sorted rows.
+            // Reuse the sealed identity-leading proof rather than assuming that
+            // a commutative numeric reducer's relaxed projection is ordered.
+            VertexScanPlan::compile(aggregate.input_pattern().plan())
+                .map_err(VertexAggregateBuildError::Scan)?;
+        }
         let input = VertexScanPlan::compile_with_projection(
             aggregate.input_pattern().plan(),
             |projection, ordering| {
@@ -87,7 +104,7 @@ impl VertexAggregatePlan {
             },
         )
         .map_err(VertexAggregateBuildError::Scan)?;
-        Ok(Self { input, aggregate })
+        Ok(Self { input, aggregate, collects })
     }
 
     /// Names addressing GraphAggregateRow::values(), not grouping keys.
@@ -124,6 +141,9 @@ type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
 /// Ordered ALL retains at most min(groups, SKIP+LIMIT) ranked candidates;
 /// DISTINCT also retains one representative per output class. Neither LIMIT
 /// nor a delivery quota bounds upstream group/support memory or source residency.
+/// Each COLLECT list entry and owned payload is charged before retention. A
+/// DISTINCT collection also retains separately charged equality support until
+/// finalization. No result-row budget is spent on individual list elements.
 pub struct VertexAggregateCursor<S, F> {
     source: Option<S>,
     plan: VertexAggregatePlan,
@@ -391,6 +411,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             GraphAggregateRow::from_global_values(values)
         } else if self.plan.aggregate.input_projection().is_some()
             || self.plan.aggregate.has_streamed_output_stage()
+            || self.plan.collects
         {
             // The projection compiler checked every column and the shared
             // exact cells checked every consumed value. Preserve native key
@@ -575,6 +596,7 @@ impl<'a> Input<'a> {
 }
 pub(crate) enum NumericState {
     Distinct(Box<DistinctState>),
+    Collect(Vec<GraphValue>),
     Count(u64),
     Sum(Option<i128>),
     Average {
@@ -588,6 +610,12 @@ pub(crate) enum NumericState {
     },
 }
 impl NumericState {
+    // Order-sensitive cells need an additional physical source-order proof;
+    // keep them out of supports(), the commutative reducer admission contract.
+    pub(crate) fn collects(function: GraphAggregateFunction) -> bool {
+        matches!(function, GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct)
+    }
+
     pub(crate) fn supports(function: GraphAggregateFunction) -> bool {
         matches!(
             function,
@@ -613,6 +641,7 @@ impl NumericState {
             GraphAggregateFunction::CountRows | GraphAggregateFunction::Count => Self::Count(0),
             GraphAggregateFunction::SumInt => Self::Sum(None),
             GraphAggregateFunction::AverageInt => Self::Average { sum: 0, count: 0 },
+            GraphAggregateFunction::Collect => Self::Collect(Vec::new()),
             GraphAggregateFunction::Min | GraphAggregateFunction::Max => Self::Extreme {
                 value: None,
                 maximum: function == GraphAggregateFunction::Max,
@@ -620,11 +649,11 @@ impl NumericState {
             },
             GraphAggregateFunction::CountDistinct
             | GraphAggregateFunction::SumIntDistinct
-            | GraphAggregateFunction::AverageIntDistinct => {
+            | GraphAggregateFunction::AverageIntDistinct
+            | GraphAggregateFunction::CollectDistinct => {
                 control(VertexScanEvent::ScratchEntry)?;
                 Self::Distinct(Box::new(DistinctState::new(function)))
             }
-            _ => unreachable!("the physical compiler admits only registered exact aggregates"),
         })
     }
 
@@ -640,6 +669,15 @@ impl NumericState {
         };
         Ok(match state {
             Self::Count(value) => GraphAggregateValue::Count(value),
+            Self::Collect(values) => {
+                // Retire membership before moving the list. Account for the
+                // shallow Vec-to-box compaction, without recopying payloads.
+                control(VertexScanEvent::ScratchEntry)?;
+                for _ in &values {
+                    control(VertexScanEvent::Work)?;
+                }
+                GraphAggregateValue::Value(GraphValue::List(values.into_boxed_slice()))
+            }
             Self::Sum(Some(value)) => GraphAggregateValue::Integer(value),
             Self::Average { sum, count } if count != 0 => {
                 for _ in 0..128 {
@@ -682,6 +720,9 @@ impl NumericState {
         let input = input.normalized();
         if let Self::Distinct(state) = self {
             return state.update(input, aggregate, control);
+        }
+        if let Self::Collect(values) = self {
+            return collection::push(values, input, control);
         }
         let Self::Extreme {
             value,
@@ -778,7 +819,7 @@ impl NumericState {
                 *sum = next_sum;
                 *count = next_count;
             }
-            Self::Extreme { .. } | Self::Distinct(_) => {
+            Self::Extreme { .. } | Self::Distinct(_) | Self::Collect(_) => {
                 unreachable!("value support and ownership require governed updates")
             }
         }
