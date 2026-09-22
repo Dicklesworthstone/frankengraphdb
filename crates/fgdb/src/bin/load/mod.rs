@@ -103,8 +103,9 @@ pub(super) async fn run<V: Vfs + Clone>(
         }
         key_bytes
     };
-    let checkpoint_limits = checkpoint::Limits::new(source.records(), key_bytes, policy.max_key_bytes)
-        .map_err(invalid)?;
+    let checkpoint_limits =
+        checkpoint::Limits::new(source.records(), key_bytes, policy.max_key_bytes)
+            .map_err(invalid)?;
     let source_hash = hex(&source.source_hash().0);
     let current = db.frontier().map_err(Failure::io)?;
     let saved = if let Some(path) = &options.checkpoint {
@@ -489,14 +490,22 @@ struct Saved {
 }
 impl Saved {
     fn view(&self) -> checkpoint::View<'_> {
-        checkpoint::View { checkpoint: &self.checkpoint, base: self.base,
-            base_marker: &self.base_marker, source_hash: &self.source_hash,
-            rows_per_chunk: self.rows_per_chunk }
+        checkpoint::View {
+            checkpoint: &self.checkpoint,
+            base: self.base,
+            base_marker: &self.base_marker,
+            source_hash: &self.source_hash,
+            rows_per_chunk: self.rows_per_chunk,
+        }
     }
     fn decode(text: &str, limits: checkpoint::Limits) -> Result<Self, String> {
-        if text.len() > limits.bytes { return Err("checkpoint file exceeds source admission".into()); }
+        if text.len() > limits.bytes {
+            return Err("checkpoint file exceeds source admission".into());
+        }
         let json = JsonParser::parse_limited(text, limits.values(), limits.token_bytes())?;
-        let Json::Object(mut fields) = json else { return Err("expected object".into()); };
+        let Json::Object(mut fields) = json else {
+            return Err("expected object".into());
+        };
         if number(field(&fields, "v")?)? != 1 || fields.len() != 10 {
             return Err("unknown checkpoint format".into());
         }
@@ -525,17 +534,26 @@ impl Saved {
             Some(Json::Object(map)) => Ok(map),
             _ => Err("expected checkpoint identity map".to_owned()),
         };
-        let vertices = take_object("vertices")?.into_iter()
+        let vertices = take_object("vertices")?
+            .into_iter()
             .map(|(k, v)| Ok((k, VId(id(&v)?))))
             .collect::<Result<_, String>>()?;
-        let edges = take_object("edges")?.into_iter()
+        let edges = take_object("edges")?
+            .into_iter()
             .map(|(k, v)| Ok((k, EId(id(&v)?))))
             .collect::<Result<_, String>>()?;
         let saved = Self {
             checkpoint: BulkLoadCheckpoint {
-                vertices, edges, next_row, frontier, committed_chunks,
+                vertices,
+                edges,
+                next_row,
+                frontier,
+                committed_chunks,
             },
-            base, base_marker, source_hash, rows_per_chunk,
+            base,
+            base_marker,
+            source_hash,
+            rows_per_chunk,
         };
         saved.view().validate(limits).map_err(|e| e.to_string())?;
         Ok(saved)
@@ -715,7 +733,9 @@ impl<'a> JsonParser<'a> {
     }
     fn value(&mut self) -> Result<Json, String> {
         self.whitespace();
-        if self.remaining_values == 0 { return Err("JSON value limit exceeded".into()); }
+        if self.remaining_values == 0 {
+            return Err("JSON value limit exceeded".into());
+        }
         self.remaining_values -= 1;
         if self.depth >= 32 {
             return Err("JSON nesting limit exceeded".into());
@@ -847,7 +867,11 @@ impl<'a> JsonParser<'a> {
         }
     }
     fn push_character(&self, text: &mut String, ch: char) -> Result<(), String> {
-        if text.len().checked_add(ch.len_utf8()).is_none_or(|n| n > self.max_token_bytes) {
+        if text
+            .len()
+            .checked_add(ch.len_utf8())
+            .is_none_or(|n| n > self.max_token_bytes)
+        {
             return Err("JSON string limit exceeded".into());
         }
         text.push(ch);
@@ -879,7 +903,9 @@ impl<'a> JsonParser<'a> {
             }
             self.digits()?;
         }
-        if self.offset - start > self.max_token_bytes { return Err("JSON number limit exceeded".into()); }
+        if self.offset - start > self.max_token_bytes {
+            return Err("JSON number limit exceeded".into());
+        }
         Ok(Json::Number(self.input[start..self.offset].to_owned()))
     }
 }
