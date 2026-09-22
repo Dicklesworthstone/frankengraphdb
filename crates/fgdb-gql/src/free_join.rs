@@ -18,6 +18,7 @@
 
 mod execute;
 mod factor;
+mod graph;
 mod plan;
 mod trie;
 
@@ -25,5 +26,6 @@ pub use execute::{FreeJoin, JoinBinding, MultiplicityOverflow};
 pub use factor::{
     FactorNodeKind, FactorizedBatch, FactorizedColumns, FactorizedCursor, FactorizedReadError,
 };
+pub use graph::{GraphTrie, GraphTrieCursor, GraphTrieError};
 pub use plan::{FreeJoinPlan, JoinPlanError, JoinVariable, MAX_JOIN_RELATIONS, MAX_JOIN_VARIABLES};
 pub use trie::{ColumnarCursor, ColumnarTrie, TrieBuildError, TrieCursor, TrieRelation};
