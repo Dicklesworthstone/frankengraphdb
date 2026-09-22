@@ -11,6 +11,7 @@ mod branch_text;
 mod cheapest_path;
 mod cheapest_path_stream;
 mod cheapest_path_text;
+pub mod csv_parameters;
 mod deletion;
 mod edge_merge;
 pub mod edge_stream;
