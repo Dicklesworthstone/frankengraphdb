@@ -15,6 +15,9 @@ use fgdb_gql::stream::{VertexScanError, VertexScanSource};
 use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbolResolver};
 use fgdb_types::{CommitSeq, QueryCx};
 
+#[path = "query_branch.rs"]
+mod branch;
+
 impl EmbeddedReadView {
     /// Execute a native read at this view's immutable frontier. The same native
     /// classification, parameter binding, GLA engines, lossless result columns
