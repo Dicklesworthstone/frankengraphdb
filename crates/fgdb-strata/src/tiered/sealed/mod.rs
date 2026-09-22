@@ -20,6 +20,8 @@
 //! but does not authorize the image under an unrelated branch.
 
 mod image;
+mod incoming;
+pub use incoming::{IncomingIndexLimits, IncomingIndexStats, SealedIncomingCursor, SealedIncomingIndex};
 #[cfg(test)]
 mod tests;
 mod wire;
