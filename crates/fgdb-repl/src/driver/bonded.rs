@@ -96,16 +96,17 @@ fn validate_replies<E>(
     }
     let expected: BTreeMap<_, _> = requests
         .iter()
-        .map(|request| (request.esi, request))
+        .map(|request| ((request.source_block, request.esi), request))
         .collect();
     let mut answered = BTreeSet::new();
     // Validate the entire envelope before admitting any bytes. A malformed
     // batch cannot partially mutate the authenticated reconstruction state.
     for reply in replies {
-        if expected.get(&reply.request.esi).copied() != Some(&reply.request) {
+        let coordinate = (reply.request.source_block, reply.request.esi);
+        if expected.get(&coordinate).copied() != Some(&reply.request) {
             return Err(PullDriveError::ForeignReply);
         }
-        if !answered.insert(reply.request.esi) {
+        if !answered.insert(coordinate) {
             return Err(PullDriveError::DuplicateReply);
         }
     }
@@ -222,6 +223,27 @@ mod tests {
             },
         ];
         assert!(validate_replies::<()>(&requests, &replies).is_ok());
+    }
+
+    #[test]
+    fn equal_esis_in_independent_blocks_are_distinct_requests() {
+        let mut other = request(0);
+        other.source_block = 1;
+        let requests = [request(0), other];
+        let replies = [
+            PullReply { request: other, outcome: ReplyOutcome::TimedOut },
+            PullReply { request: requests[0], outcome: ReplyOutcome::TimedOut },
+        ];
+        assert!(validate_replies::<()>(&requests, &replies).is_ok());
+        let duplicate = [
+            PullReply { request: other, outcome: ReplyOutcome::TimedOut },
+            PullReply { request: other, outcome: ReplyOutcome::TimedOut },
+        ];
+        assert!(matches!(validate_replies::<()>(&requests, &duplicate), Err(PullDriveError::DuplicateReply)));
+        other.source_block = 2;
+        assert!(matches!(validate_replies::<()>(&requests, &[PullReply {
+            request: other, outcome: ReplyOutcome::TimedOut,
+        }]), Err(PullDriveError::ForeignReply)));
     }
 
     #[test]

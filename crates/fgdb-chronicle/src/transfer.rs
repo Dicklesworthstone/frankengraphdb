@@ -12,6 +12,7 @@ use crate::symbol::{HEADER_LEN_V1, SYMBOL_MAC_LEN_V1, SymbolError, SymbolRecord}
 use crate::symbolize::{
     MAX_SOURCE_SYMBOLS_PER_BLOCK, RecoveryTarget, SymbolizeError, decode_object,
 };
+use crate::symbolize::blocks::{Layout, MAX_SOURCE_BLOCKS};
 use asupersync::net::atp::channel_bonding::{DonorEsiStream, MAX_STATIC_RESIDUE_DONORS, owns_esi};
 use fgdb_crypto::Digest;
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
@@ -21,7 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct DonorId(pub u128);
 
 /// Per-object resource bounds. Stored wire bytes do not include the decoder's
-/// workspace: `max_source_symbols` bounds its shape independently.
+/// workspace: `max_source_symbols` bounds the total source-symbol population
+/// across all blocks, not a separate allowance for every block. Each block
+/// additionally obeys the foundation decoder's 56,403-source-symbol ceiling.
 #[derive(Clone, Copy, Debug)]
 pub struct PullLimits {
     pub max_source_symbols: usize,
@@ -146,9 +149,11 @@ impl core::fmt::Debug for VerifiedObject {
 
 struct Donor {
     id: DonorId,
-    stream: DonorEsiStream,
+    // Each source block is an independent code, with the SAME stable donor
+    // residues. Flattening ESI across blocks would skip original equations.
+    streams: Vec<Option<DonorEsiStream>>,
+    next_block: usize,
     available: bool,
-    exhausted: bool,
 }
 
 pub struct BondedPull<'a> {
@@ -157,11 +162,13 @@ pub struct BondedPull<'a> {
     dek: &'a [u8; 32],
     limits: PullLimits,
     source_symbols: usize,
+    block_sources: Vec<usize>,
+    block_received: Vec<usize>,
     record_len: usize,
     donors: Vec<Donor>,
     next_donor: usize,
-    pending: BTreeMap<u32, DonorId>,
-    seen: BTreeMap<u32, usize>,
+    pending: BTreeMap<(u32, u32), DonorId>,
+    seen: BTreeMap<(u32, u32), usize>,
     records: Vec<Vec<u8>>,
     stored_bytes: usize,
     requests: u64,
@@ -205,11 +212,6 @@ impl<'a> BondedPull<'a> {
         limits: PullLimits,
     ) -> Result<Self, PullError> {
         let descriptor = encoding.descriptor();
-        if descriptor.source_block_count != 1 {
-            // The current Chronicle decoder is a one-block decoder. Never
-            // mix source blocks into a system that discards the block number.
-            return Err(PullError::UnsupportedSourceBlocks);
-        }
         let symbol_size = usize::from(descriptor.symbol_size);
         let declared_len = encoding
             .cipher_descriptor()
@@ -223,10 +225,19 @@ impl<'a> BondedPull<'a> {
         {
             return Err(PullError::InvalidTarget);
         }
+        let layout = Layout::new(encoding, target.protected_len).map_err(|_| {
+            if descriptor.source_block_count == 1 {
+                PullError::InvalidLimits
+            } else {
+                // Invalid, contradictory or unsupported multi-block OTI is not
+                // a second interpretation of this authenticated descriptor.
+                PullError::UnsupportedSourceBlocks
+            }
+        })?;
         let source_symbols = target.protected_len.div_ceil(symbol_size);
         let record_len = usize::from(HEADER_LEN_V1) + symbol_size + usize::from(SYMBOL_MAC_LEN_V1);
         if limits.max_source_symbols == 0
-            || limits.max_source_symbols > MAX_SOURCE_SYMBOLS_PER_BLOCK
+            || limits.max_source_symbols > MAX_SOURCE_SYMBOLS_PER_BLOCK * MAX_SOURCE_BLOCKS
             || source_symbols > limits.max_source_symbols
             || limits.max_symbols < source_symbols
             || limits.max_in_flight == 0
@@ -237,7 +248,8 @@ impl<'a> BondedPull<'a> {
             || limits.max_verifications < source_symbols as u64
             || limits.max_decode_attempts == 0
             || limits.max_esi > 0x00ff_ffff
-            || u64::from(limits.max_esi) + 1 < source_symbols as u64
+            || u64::from(limits.max_esi) + 1
+                < layout.source_symbols(0).ok_or(PullError::InvalidTarget)? as u64
         {
             return Err(PullError::InvalidLimits);
         }
@@ -248,17 +260,30 @@ impl<'a> BondedPull<'a> {
         if unique.len() != donor_ids.len() || unique.contains(&DonorId(0)) {
             return Err(PullError::InvalidDonors);
         }
+        let mut block_sources = Vec::new();
+        let mut block_received = Vec::new();
+        block_sources.try_reserve_exact(layout.blocks()).map_err(|_| PullError::AllocationFailed)?;
+        block_received.try_reserve_exact(layout.blocks()).map_err(|_| PullError::AllocationFailed)?;
+        for block in 0..layout.blocks() {
+            block_sources.push(layout.source_symbols(block as u32).ok_or(PullError::InvalidTarget)?);
+            block_received.push(0);
+        }
         let mut donors = Vec::new();
         donors
             .try_reserve_exact(donor_ids.len())
             .map_err(|_| PullError::AllocationFailed)?;
         for (index, id) in donor_ids.iter().enumerate() {
+            let mut streams = Vec::new();
+            streams.try_reserve_exact(layout.blocks()).map_err(|_| PullError::AllocationFailed)?;
+            for _ in 0..layout.blocks() {
+                streams.push(Some(DonorEsiStream::new(index as u32, donor_ids.len() as u32)
+                    .map_err(|_| PullError::InvalidDonors)?));
+            }
             donors.push(Donor {
                 id: *id,
-                stream: DonorEsiStream::new(index as u32, donor_ids.len() as u32)
-                    .map_err(|_| PullError::InvalidDonors)?,
+                streams,
+                next_block: 0,
                 available: true,
-                exhausted: false,
             });
         }
         Ok(Self {
@@ -267,6 +292,8 @@ impl<'a> BondedPull<'a> {
             dek,
             limits,
             source_symbols,
+            block_sources,
+            block_received,
             record_len,
             donors,
             next_donor: 0,
@@ -296,6 +323,21 @@ impl<'a> BondedPull<'a> {
 
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Authenticated equations retained for one independent source block.
+    /// This count is diagnostic, not decoding-rank or durability evidence.
+    pub fn block_symbol_count(&self, block: u32) -> Option<usize> {
+        self.block_received.get(block as usize).copied()
+    }
+
+    fn block_targets(&self) -> Result<Vec<usize>, PullError> {
+        let mut targets = Vec::new();
+        targets.try_reserve_exact(self.block_sources.len()).map_err(|_| PullError::AllocationFailed)?;
+        for sources in &self.block_sources {
+            targets.push(sources.checked_add(self.decode_attempts as usize).ok_or(PullError::DecodeBudget)?);
+        }
+        Ok(targets)
     }
 
     pub fn decode_attempts(&self) -> u32 {
@@ -343,6 +385,13 @@ impl<'a> BondedPull<'a> {
         window: Option<usize>,
     ) -> Result<Vec<PullRequest>, PullError> {
         self.open()?;
+        let multiple = self.block_sources.len() > 1;
+        let targets = self.block_targets()?;
+        if multiple && self.block_received.iter().zip(&targets).all(|(count, target)| count >= target) {
+            // Give the caller a chance to decode before spending its remaining
+            // object-wide storage on already satisfied blocks.
+            return Ok(Vec::new());
+        }
         // Every pending request reserves one symbol slot and one complete wire
         // record. Admission exchanges that reservation for owned bytes, so all
         // three differences remain nonnegative even when replies are reordered.
@@ -379,8 +428,12 @@ impl<'a> BondedPull<'a> {
         // Derived once per refill; no second persistent credit ledger can drift
         // from pending during admission, expiration or donor quarantine.
         let mut outstanding = BTreeMap::<DonorId, usize>::new();
-        for donor in self.pending.values() {
+        let mut reserved = Vec::new();
+        reserved.try_reserve_exact(self.block_received.len()).map_err(|_| PullError::AllocationFailed)?;
+        reserved.extend_from_slice(&self.block_received);
+        for ((block, _), donor) in &self.pending {
             *outstanding.entry(*donor).or_default() += 1;
+            reserved[*block as usize] += 1;
         }
         let mut caps = BTreeMap::new();
         if let Some(window) = window {
@@ -402,11 +455,15 @@ impl<'a> BondedPull<'a> {
         for _ in 0..count {
             let mut selected = None;
             let mut throttled = false;
-            for _ in 0..self.donors.len() {
-                let slot = self.next_donor;
-                self.next_donor = (slot + 1) % self.donors.len();
+            // First reserve every block's deficit, so smaller blocks cannot
+            // consume the exact total-K storage budget with extra equations.
+            // Once deficits are reserved, healthy donors MAY replace pending
+            // equations from silent donors. Pending bytes are not received bytes.
+            let deficit = multiple && reserved.iter().zip(&targets).any(|(count, target)| count < target);
+            'select: for offset in 0..self.donors.len() {
+                let slot = (self.next_donor + offset) % self.donors.len();
                 let donor = &mut self.donors[slot];
-                if !donor.available || donor.exhausted {
+                if !donor.available {
                     continue;
                 }
                 let cap = caps.get(&donor.id).copied().unwrap_or(usize::MAX);
@@ -414,15 +471,32 @@ impl<'a> BondedPull<'a> {
                     throttled = true;
                     continue;
                 }
-                match donor.stream.next() {
-                    Some(esi) if esi <= self.limits.max_esi => {
-                        selected = Some((donor.id, esi));
-                        break;
+                for offset in 0..donor.streams.len() {
+                    let block = (donor.next_block + offset) % donor.streams.len();
+                    let needs_equation = !multiple || if deficit {
+                        reserved[block] < targets[block]
+                    } else {
+                        self.block_received[block] < targets[block]
+                    };
+                    if !needs_equation { continue; }
+                    // Peek via the foundation's small Clone value; only the
+                    // selected stream advances. Prefer original source symbols
+                    // when their owners have credit, but never wait for a silent
+                    // donor merely because it owns a lower source ESI.
+                    let next = donor.streams[block].as_ref().and_then(|stream| stream.clone().next());
+                    match next {
+                        Some(esi) if esi <= self.limits.max_esi => {
+                            if !multiple || (esi as usize) < self.block_sources[block] {
+                                selected = Some((slot, block, esi));
+                                break 'select;
+                            }
+                            if selected.is_none() { selected = Some((slot, block, esi)); }
+                        }
+                        _ => donor.streams[block] = None,
                     }
-                    _ => donor.exhausted = true,
                 }
             }
-            let Some((donor, esi)) = selected else {
+            let Some((slot, block, esi)) = selected else {
                 if !out.is_empty() || throttled {
                     break;
                 }
@@ -432,14 +506,21 @@ impl<'a> BondedPull<'a> {
                     PullError::NoAvailableDonor
                 });
             };
-            self.pending.insert(esi, donor);
-            *outstanding.entry(donor).or_default() += 1;
+            let donor = &mut self.donors[slot];
+            let advanced = donor.streams[block].as_mut().and_then(Iterator::next);
+            debug_assert_eq!(advanced, Some(esi));
+            donor.next_block = (block + 1) % donor.streams.len();
+            let id = donor.id;
+            self.next_donor = (slot + 1) % self.donors.len();
+            self.pending.insert((block as u32, esi), id);
+            reserved[block] += 1;
+            *outstanding.entry(id).or_default() += 1;
             self.requests += 1;
             out.push(PullRequest {
-                donor,
+                donor: id,
                 object_id: self.encoding.object_id(),
                 encoding_id: self.encoding.encoding_id(),
-                source_block: 0,
+                source_block: block as u32,
                 esi,
             });
         }
@@ -477,12 +558,11 @@ impl<'a> BondedPull<'a> {
         self.open()?;
         if request.object_id != self.encoding.object_id()
             || request.encoding_id != self.encoding.encoding_id()
-            || request.source_block != 0
-            || self.pending.get(&request.esi) != Some(&request.donor)
+            || self.pending.get(&(request.source_block, request.esi)) != Some(&request.donor)
         {
             return Err(PullError::UnrequestedSymbol);
         }
-        self.pending.remove(&request.esi);
+        self.pending.remove(&(request.source_block, request.esi));
         Ok(())
     }
 
@@ -514,17 +594,17 @@ impl<'a> BondedPull<'a> {
         self.open()?;
         if request.object_id != self.encoding.object_id()
             || request.encoding_id != self.encoding.encoding_id()
-            || request.source_block != 0
+            || request.source_block as usize >= self.block_sources.len()
         {
             return Err(PullError::UnrequestedSymbol);
         }
-        self.accept_inner(request.donor, Some(request.esi), bytes, verification)
+        self.accept_inner(request.donor, Some((request.source_block, request.esi)), bytes, verification)
     }
 
     fn accept_inner(
         &mut self,
         donor: DonorId,
-        expected_esi: Option<u32>,
+        expected: Option<(u32, u32)>,
         bytes: &[u8],
         verification: &mut dyn CryptoVerificationSink,
     ) -> Result<SymbolAdmission, PullError> {
@@ -543,21 +623,22 @@ impl<'a> BondedPull<'a> {
         self.verifications += 1;
         let record = SymbolRecord::verify(bytes, self.encoding, self.dek, verification)
             .map_err(PullError::Symbol)?;
-        if record.source_block != 0
+        let coordinate = (record.source_block, record.esi);
+        if record.source_block as usize >= self.block_sources.len()
             || record.esi > self.limits.max_esi
-            || expected_esi.is_some_and(|expected| expected != record.esi)
+            || expected.is_some_and(|expected| expected != coordinate)
             || !owns_esi(slot as u32, self.donors.len() as u32, record.esi)
         {
             return Err(PullError::UnrequestedSymbol);
         }
-        if let Some(index) = self.seen.get(&record.esi) {
+        if let Some(index) = self.seen.get(&coordinate) {
             return if self.records[*index].as_slice() == bytes {
                 Ok(SymbolAdmission::Duplicate)
             } else {
                 Err(PullError::ConflictingSymbol)
             };
         }
-        if self.pending.get(&record.esi) != Some(&donor) {
+        if self.pending.get(&coordinate) != Some(&donor) {
             return Err(PullError::UnrequestedSymbol);
         }
         if self.records.len() >= self.limits.max_symbols
@@ -573,10 +654,11 @@ impl<'a> BondedPull<'a> {
         self.records
             .try_reserve(1)
             .map_err(|_| PullError::AllocationFailed)?;
-        self.seen.insert(record.esi, self.records.len());
+        self.seen.insert(coordinate, self.records.len());
         self.records.push(owned);
+        self.block_received[record.source_block as usize] += 1;
         self.stored_bytes += bytes.len();
-        self.pending.remove(&record.esi);
+        self.pending.remove(&coordinate);
         Ok(SymbolAdmission::Added)
     }
 
@@ -591,6 +673,15 @@ impl<'a> BondedPull<'a> {
         if self.records.len() < self.source_symbols || self.records.len() == self.last_decode_count
         {
             return Ok(None);
+        }
+        if self.block_sources.len() > 1 {
+            let targets = self.block_targets()?;
+            if self.block_received.iter().zip(&targets).any(|(count, target)| count < target) {
+                // Another block's surplus cannot repeatedly burn decoder work
+                // while this block still lacks its first K equations. After a
+                // rank failure ask each block for another distinct equation.
+                return Ok(None);
+            }
         }
         if self.decode_attempts >= self.limits.max_decode_attempts {
             return Err(PullError::DecodeBudget);
