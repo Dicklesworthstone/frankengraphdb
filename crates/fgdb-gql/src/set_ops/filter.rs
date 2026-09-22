@@ -69,7 +69,7 @@ impl GraphSetPredicateOp {
         row: &GraphValueRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
-        Self::evaluate_cells_with_control(code, row.values(), &[], control)
+        Self::evaluate_cells_with_control(code, row.values(), &[], None, control)
     }
 
     /// Evaluate the same checked IR over a borrowed concatenation. Join ON
@@ -82,13 +82,27 @@ impl GraphSetPredicateOp {
         right: &GraphValueRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
-        Self::evaluate_cells_with_control(code, left.values(), right.values(), control)
+        Self::evaluate_cells_with_control(code, left.values(), right.values(), None, control)
+    }
+
+    /// The same eager interpreter over a column-only projection of a borrowed
+    /// pair. The physical caller proves each mapping index and the projected
+    /// schema at preparation; literal payloads stay borrowed, never rebound.
+    pub(crate) fn evaluate_projected_pair_with_control<E>(
+        code: &[Self],
+        left: &GraphValueRow,
+        right: &GraphValueRow,
+        columns: Option<&[usize]>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        Self::evaluate_cells_with_control(code, left.values(), right.values(), columns, control)
     }
 
     fn evaluate_cells_with_control<E>(
         code: &[Self],
         left_cells: &[GraphValue],
         right_cells: &[GraphValue],
+        columns: Option<&[usize]>,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
         let mut stack: [Option<bool>; MAX_PATTERN_PREDICATES] = [None; MAX_PATTERN_PREDICATES];
@@ -101,8 +115,8 @@ impl GraphSetPredicateOp {
                     comparison,
                     right,
                 } => {
-                    let left = resolve(left, left_cells, right_cells, control)?;
-                    let right = resolve(right, left_cells, right_cells, control)?;
+                    let left = resolve(left, left_cells, right_cells, columns, control)?;
+                    let right = resolve(right, left_cells, right_cells, columns, control)?;
                     for value in [left, right] {
                         if let Cell::Scalar(value) = value {
                             crate::algebra_exec::charge_payload(value, control)?;
@@ -111,7 +125,7 @@ impl GraphSetPredicateOp {
                     compare(left, right, *comparison)
                 }
                 GraphSetPredicateOp::IsNull { operand, is_null } => {
-                    Some(resolve(operand, left_cells, right_cells, control)?.is_null() == *is_null)
+                    Some(resolve(operand, left_cells, right_cells, columns, control)?.is_null() == *is_null)
                 }
                 GraphSetPredicateOp::Truth(value) => *value,
                 GraphSetPredicateOp::Not => {
@@ -326,14 +340,14 @@ fn resolve<'a, E>(
     operand: &'a GraphSetOperand,
     left: &'a [GraphValue],
     right: &'a [GraphValue],
+    columns: Option<&[usize]>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Cell<'a>, E> {
     control(GlaExecutionEvent::Work)?;
     Ok(match operand {
-        GraphSetOperand::Column(column) => match if *column < left.len() {
-            &left[*column]
-        } else {
-            &right[*column - left.len()]
+        GraphSetOperand::Column(column) => match {
+            let column = columns.map_or(*column, |columns| columns[*column]);
+            if column < left.len() { &left[column] } else { &right[column - left.len()] }
         } {
             GraphValue::Vertex(value) => Cell::Vertex(*value),
             GraphValue::Scalar(value) => Cell::Scalar(value),
@@ -378,7 +392,49 @@ fn append_operand(operand: &GraphSetOperand, bytes: &mut Vec<u8>) {
     }
 }
 
+pub(crate) type FilteredCrossInputs<'a> = (
+    &'a PreparedGraphSet,
+    &'a PreparedGraphSet,
+    &'a [GraphSetPredicateOp],
+    Option<&'a [super::GraphSetProjection]>,
+);
+
 impl PreparedGraphSet {
+    /// Physical selection/product seam. Only transparent, unpaged scopes and
+    /// one column-only ALL projection may disappear between these nodes. The
+    /// latter preserves the product sequence and cannot raise expression errors.
+    /// A product's own ORDER BY or LIMIT (including zero) remains a barrier.
+    /// The caller applies THIS filter node's order/page after matching.
+    pub(crate) fn filtered_cross_inputs(
+        &self,
+    ) -> Option<FilteredCrossInputs<'_>> {
+        let SetNode::Filter { input, predicate } = &self.node else {
+            return None;
+        };
+        let mut input = input.as_ref();
+        let mut selected = None;
+        loop {
+            if !input.order.is_empty() || input.offset != 0 || input.count.is_some() {
+                return None;
+            }
+            match &input.node {
+                SetNode::Scope(child) => input = child,
+                SetNode::Project { input: child, projection, quantifier }
+                    if selected.is_none()
+                        && *quantifier == super::GraphSetQuantifier::All
+                        && projection.iter().all(|column| matches!(column.value(), super::GraphSetValue::Column(_))) =>
+                {
+                    selected = Some(projection.as_slice());
+                    input = child;
+                }
+                SetNode::CrossJoin { left, right } => {
+                    return Some((left, right, &predicate.code, selected));
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// Borrow a checked selection and its complete input for maintained circuits.
     /// An outer relational order or page, including LIMIT 0, is never erased.
     /// The input remains subject to independent derivative admission.

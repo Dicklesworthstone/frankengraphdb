@@ -1,6 +1,7 @@
 //! One cumulative allowance for GLA operands and relational set execution.
 
 mod fold;
+mod selected_cross;
 
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow};
@@ -219,7 +220,59 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
-    let mut rows = match &query.node {
+    let mut rows = if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+        // Admit and finish both original children once, even if the left bag
+        // is empty. Do not allocate rejected Cartesian candidate rows.
+        let left = run(left, source, meter, operand)?;
+        let right = run(right, source, meter, operand)?;
+        let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
+        selected_cross::collect(&left, &right, code, columns.as_deref(), &mut |event| meter.event(event))?
+    } else {
+        run_node(query, source, meter, operand)?
+    };
+    if !query.order.is_empty() {
+        merge::sort(
+            &mut rows,
+            &mut |event| meter.event(event),
+            &mut |a, b, control| compare_rows(a, b, &query.order, control),
+        )?;
+    }
+    if query.offset == 0 && query.count.is_none() {
+        return Ok(rows);
+    }
+    let mut output = Vec::new();
+    let mut skip = query.offset;
+    let mut remaining = query.count.unwrap_or(u64::MAX);
+    for row in rows {
+        meter.event(GlaExecutionEvent::Work)?;
+        if skip != 0 {
+            skip -= 1;
+            continue;
+        }
+        if remaining == 0 {
+            continue;
+        }
+        meter.event(GlaExecutionEvent::ScratchEntry)?;
+        output.push(row);
+        remaining -= 1;
+    }
+    Ok(output)
+}
+
+fn run_node<E, C, S, Checkpoint>(
+    query: &PreparedGraphSet,
+    source: &mut S,
+    meter: &mut Meter<Checkpoint>,
+    operand: &mut usize,
+) -> SetResult<Vec<GraphValueRow>, E, C>
+where
+    S: FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    Ok(match &query.node {
         SetNode::Values => {
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             vec![GraphValueRow::unit()]
@@ -411,34 +464,7 @@ where
                 &mut |a, b, control| compare_rows(a, b, &[], control),
             )?
         }
-    };
-    if !query.order.is_empty() {
-        merge::sort(
-            &mut rows,
-            &mut |event| meter.event(event),
-            &mut |a, b, control| compare_rows(a, b, &query.order, control),
-        )?;
-    }
-    if query.offset == 0 && query.count.is_none() {
-        return Ok(rows);
-    }
-    let mut output = Vec::new();
-    let mut skip = query.offset;
-    let mut remaining = query.count.unwrap_or(u64::MAX);
-    for row in rows {
-        meter.event(GlaExecutionEvent::Work)?;
-        if skip != 0 {
-            skip -= 1;
-            continue;
-        }
-        if remaining == 0 {
-            continue;
-        }
-        meter.event(GlaExecutionEvent::ScratchEntry)?;
-        output.push(row);
-        remaining -= 1;
-    }
-    Ok(output)
+    })
 }
 
 fn compare_value<E>(
