@@ -84,6 +84,13 @@ scan = [
   "docs/atomic_relation_writes.md",
   "docs/bounded_gla_execution.md",
   "docs/graph_patterns.md",
+  "docs/FABRIC_PROTOCOL.md",
+  "crates/fgdb-beacon/README.md",
+  "crates/fgdb-cli/README.md",
+  "crates/fgdb-order/README.md",
+  "crates/fgdb-prism/README.md",
+  "crates/fgdb-repl/README.md",
+  "crates/fgdb-warden/README.md",
   "scratchpad/agent-bootstrap-downloads.md",
 ]
 

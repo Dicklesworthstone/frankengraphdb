@@ -314,7 +314,7 @@ mod tests {
             if count == 0 && !bytes.is_empty() {
                 return Poll::Ready(Err(io::Error::other("injected partial write failure")));
             }
-            let written = self.data.write(&bytes[..count]);
+            let written = std::io::Write::write(&mut self.data, &bytes[..count]);
             if let (Some(remaining), Ok(count)) = (self.write_limit.as_mut(), &written) {
                 *remaining -= *count;
             }

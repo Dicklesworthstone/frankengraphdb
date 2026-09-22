@@ -465,7 +465,8 @@ coverage_of() {
     # an isolated source copy. This covers marker resolution, not prose truth.
     docs/atomic_relation_writes.md|\
     docs/bounded_gla_execution.md|\
-    docs/graph_patterns.md)             echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
+    docs/graph_patterns.md|\
+    docs/FABRIC_PROTOCOL.md)             echo "registry-check lint (prose-closure membership + claim markers resolve; NOT contract content)" ;;
     # Mutation-proven 2026-09-13: registered prose passes; appending an
     # unregistered claim marker in an isolated copy fails at this exact path.
     scratchpad/agent-bootstrap-downloads.md) echo "registry-check lint (prose-closure membership + claim markers resolve; NOT download availability)" ;;
@@ -483,7 +484,7 @@ coverage_of() {
     # 2026-08-20: an appended FG-ZZZ-99 made `registry-check lint` exit 1 with
     # `unregistered_marker`; restoring the file returned it to exit 0.
     CHANGELOG.md)                        echo "registry-check lint (prose-closure membership + claim markers resolve; NOT changelog content)" ;;
-    README.md)                           echo "registry-check lint (claim markers, + every §Performance gate row must cite one)" ;;
+    README.md|crates/*/README.md)        echo "registry-check lint (claim markers, + every §Performance gate row must cite one)" ;;
     AGENTS.md)                           echo "registry-check lint (claim markers only, not content)" ;;
     *)                                   echo "" ;;
   esac

@@ -59,6 +59,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "asupersync"
 version = "0.5.0"
 source = "git+https://github.com/Dicklesworthstone/asupersync?rev=78b64636e99fea4ea2d868096576021dd3b8e519#78b64636e99fea4ea2d868096576021dd3b8e519"
@@ -160,6 +166,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
+name = "blake3"
+version = "1.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+dependencies = [
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.0",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -189,6 +208,16 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
+name = "cc"
+version = "1.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54413ede23c2daf518f35156dfde027feb2374004d63bd497f983c8db9c0e313"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
 
 [[package]]
 name = "cfg-if"
@@ -265,6 +294,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -295,6 +330,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -486,7 +540,15 @@ dependencies = [
  "fgdb-crypto",
  "fgdb-delta-types",
  "fgdb-gql",
+ "fgdb-prism",
  "fgdb-strata",
+ "fgdb-types",
+]
+
+[[package]]
+name = "fgdb-beacon"
+version = "0.0.1"
+dependencies = [
  "fgdb-types",
 ]
 
@@ -529,6 +591,17 @@ dependencies = [
 [[package]]
 name = "fgdb-claim"
 version = "0.0.1"
+
+[[package]]
+name = "fgdb-cli"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fgdb",
+ "fgdb-delta-types",
+ "fgdb-gql",
+ "fgdb-types",
+]
 
 [[package]]
 name = "fgdb-codec"
@@ -582,8 +655,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "fgdb-order"
+version = "0.0.1"
+
+[[package]]
+name = "fgdb-policy"
+version = "0.0.1"
+dependencies = [
+ "fgdb-delta-types",
+ "fgdb-types",
+]
+
+[[package]]
+name = "fgdb-prism"
+version = "0.0.1"
+dependencies = [
+ "fgdb-crypto",
+ "fgdb-delta-types",
+ "fgdb-strata",
+ "fgdb-types",
+ "fnx-algorithms",
+ "fnx-classes",
+]
+
+[[package]]
 name = "fgdb-protocol"
 version = "0.0.1"
+dependencies = [
+ "asupersync",
+]
 
 [[package]]
 name = "fgdb-reference"
@@ -591,6 +691,15 @@ version = "0.0.1"
 dependencies = [
  "fgdb-crypto",
  "fgdb-delta-types",
+ "fgdb-types",
+]
+
+[[package]]
+name = "fgdb-repl"
+version = "0.0.1"
+dependencies = [
+ "fgdb-chronicle",
+ "fgdb-order",
  "fgdb-types",
 ]
 
@@ -665,10 +774,51 @@ name = "fgdb-unsafe-vfs"
 version = "0.0.1"
 
 [[package]]
+name = "fgdb-warden"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fgdb-delta-types",
+ "fgdb-types",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "find-msvc-tools"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
+
+[[package]]
+name = "fnx-algorithms"
+version = "0.2.0"
+source = "git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=9d710b1c33e99412c94de7fa4de2f7ce4954110f#9d710b1c33e99412c94de7fa4de2f7ce4954110f"
+dependencies = [
+ "fnx-cgse",
+ "fnx-classes",
+ "fnx-runtime",
+ "mt19937",
+ "mwmatching",
+ "rand_core 0.10.1",
+ "rayon",
+ "serde",
+]
+
+[[package]]
+name = "fnx-cgse"
+version = "0.2.0"
+source = "git+https://github.com/Dicklesworthstone/franken_networkx.git?rev=9d710b1c33e99412c94de7fa4de2f7ce4954110f#9d710b1c33e99412c94de7fa4de2f7ce4954110f"
+dependencies = [
+ "blake3",
+ "hex",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "fnx-classes"
@@ -972,6 +1122,12 @@ checksum = "25b4ab1a6f4b7820876af86b84adf545d53a52f59c5374856225aad9562d903e"
 dependencies = [
  "rand_core 0.10.1",
 ]
+
+[[package]]
+name = "mwmatching"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f13b50448d988736cc2c938a76ae336241fcb31a225017c0e3121bd349e7dc06"
 
 [[package]]
 name = "nix"
@@ -1319,6 +1475,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1501,6 +1677,12 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-hook"

@@ -304,7 +304,7 @@ impl CanonicalScalar {
     }
 
     /// Returns the complete canonical byte length without allocating.
-    pub(crate) fn canonical_encoded_len(&self) -> Result<usize, ScalarEncodeError> {
+    pub fn canonical_encoded_len(&self) -> Result<usize, ScalarEncodeError> {
         let payload_len = match self {
             Self::Null => 0,
             Self::Bool(_) => 1,
