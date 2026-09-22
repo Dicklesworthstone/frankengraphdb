@@ -29,6 +29,11 @@ pub trait GroupDefinition: sealed::Sealed + Clone {
         &self,
     ) -> impl ExactSizeIterator<Item = (GraphAggregateFunction, Option<usize>)> + '_;
     fn incremental_input_column_type(&self, column: usize) -> Option<GraphSetColumnType>;
+    /// A proven comparator for the COMPLETE selected input sequence. Empty
+    /// keys mean canonical whole-row order, not unknown positional order.
+    /// None refuses order-sensitive collection maintenance; it does not grant
+    /// permission to sort by the collection argument or by change arrival.
+    fn incremental_collection_order(&self) -> Option<&[crate::algebra::GraphValueOrder]>;
     fn supports_incremental_maintenance_with_having(&self) -> bool;
     fn having(&self) -> &[GraphAggregateFilter];
     fn having_expression(&self) -> Option<&GraphHavingExpression>;
@@ -84,6 +89,13 @@ macro_rules! delegate_group_definition {
             ) -> Option<$crate::GraphSetColumnType> {
                 let $this = self;
                 ($inner).incremental_input_column_type(column)
+            }
+            fn incremental_collection_order(&self) -> Option<&[$crate::algebra::GraphValueOrder]> {
+                let $this = self;
+                ($inner)
+                    .input_relation()?
+                    .incremental_result_order()
+                    .map(|(order, _)| order)
             }
             fn supports_incremental_maintenance_with_having(&self) -> bool {
                 let $this = self;

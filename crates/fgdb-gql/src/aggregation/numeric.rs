@@ -295,7 +295,18 @@ impl PreparedGraphAggregate {
                     GraphAggregateValue::Value(value) => accepts(argument, value),
                     _ => false,
                 },
-                _ => false,
+                GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => {
+                    match value {
+                        GraphAggregateValue::Value(list @ GraphValue::List(items)) => {
+                            list.validate_bounds()
+                                && argument.is_some()
+                                && items.iter().all(|item| {
+                                    !item.is_null() && accepts(argument, item)
+                                })
+                        }
+                        _ => false,
+                    }
+                }
             };
             if !accepted {
                 return false;

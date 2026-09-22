@@ -1,6 +1,8 @@
 //! Native complete groups over exact row changes, using the shared Z-set
 //! aggregate kernel. This adapter owns no graph source or expression evaluator.
 
+mod collection;
+
 use super::GroupDefinition;
 use crate::algebra::{GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
 use crate::{
@@ -60,7 +62,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GroupError<E> {
             Self::NonInteger { column } => {
                 write!(f, "aggregate input {column} requires Int64 or NULL")
             }
-            Self::Arithmetic => f.write_str("native aggregate result is outside its exact domain"),
+            Self::Arithmetic => f.write_str("native aggregate result is outside its bounded exact domain"),
             Self::NonIntegerHaving => f.write_str("incompatible numeric HAVING operands"),
             Self::InvalidResult => f.write_str("invalid native aggregate result"),
             Self::ResultBudget { limit } => {
@@ -172,6 +174,11 @@ fn render<'a, D: GroupDefinition, E>(
         bool,
         &mut dyn FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<Option<Arc<GraphValue>>, GroupError<E>>,
+    mut collect: impl FnMut(
+        usize,
+        bool,
+        &mut dyn FnMut(ZSetEvent) -> Result<(), E>,
+    ) -> Result<GraphValue, GroupError<E>>,
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<Option<GraphAggregateRow>, GroupError<E>> {
     let mut keys = Vec::new();
@@ -181,7 +188,7 @@ fn render<'a, D: GroupDefinition, E>(
         keys.push(key.clone());
     }
     let mut values = Vec::new();
-    for (index, (function, _)) in definition.aggregate_specs().enumerate() {
+    for (index, (function, column)) in definition.aggregate_specs().enumerate() {
         charge(control, ZSetEvent::Work)?;
         charge(control, ZSetEvent::ScratchEntry)?;
         let state = get(index);
@@ -227,7 +234,11 @@ fn render<'a, D: GroupDefinition, E>(
                     }
                 }
             }
-            _ => return Err(GroupError::InvalidResult),
+            Function::Collect | Function::CollectDistinct => Value::Value(collect(
+                column.ok_or(GroupError::InvalidResult)?,
+                function == Function::CollectDistinct,
+                control,
+            )?),
         };
         values.push(value);
     }
@@ -253,8 +264,15 @@ fn render<'a, D: GroupDefinition, E>(
 /// The immutable native definition retains the full relational source contract.
 /// Raw counts, typed argument support, summaries and visible groups publish as
 /// one prepared update. Only changed tuples/groups and invalidated extrema are
-/// visited; occurrences are never expanded. Logical payload/event quotas are
-/// not allocator-byte or spill bounds. Unsupported output transforms refuse.
+/// visited. COLLECT and COLLECT DISTINCT additionally retain one shared ordered
+/// tuple arrangement, and rerender only affected groups. Only emitted collection
+/// elements expand multiplicities; DISTINCT never expands duplicate occurrences.
+/// Input order must be proved by the complete relational definition. Unknown
+/// positional order and ordinary graph visitation refuse rather than invent an
+/// ordering. Result lists obey GraphValue depth/node bounds; exceeding them is
+/// an Arithmetic refusal, even beneath HAVING or a later output LIMIT 0.
+/// Logical payload/event quotas are not allocator-byte or spill bounds.
+/// Unsupported output transforms refuse.
 /// Completed relational rows may contain any bounded native value: keys,
 /// COUNT/DISTINCT and extrema retain canonical typed equality/order. Numeric
 /// reducers admit Scalar or Any and check every changed operand for Int64/NULL.
@@ -264,6 +282,7 @@ pub struct IncrementalGroupAggregate<D: GroupDefinition> {
     schema: Box<[GraphSetColumnType]>,
     input: ZSet<GraphValueRow>,
     aggregate: IncrementalAggregate<Key>,
+    collections: Option<collection::State>,
     rows: ZSet<GraphAggregateRow>,
     initialized: bool,
 }
@@ -303,17 +322,30 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                         Some(GraphSetColumnType::Scalar | GraphSetColumnType::Any)
                     )
                 }),
-                _ => false,
+                Function::Collect | Function::CollectDistinct => {
+                    column.is_some() && definition.incremental_collection_order().is_some()
+                }
             };
             if !valid {
                 return Err(GroupBuildError::UnsupportedAggregate { aggregate });
             }
         }
+        let collections = if definition.aggregate_specs().any(|(function, _)| {
+            matches!(function, Function::Collect | Function::CollectDistinct)
+        }) {
+            let order = definition
+                .incremental_collection_order()
+                .ok_or(GroupBuildError::UnsupportedDefinition)?;
+            Some(collection::State::new(order))
+        } else {
+            None
+        };
         Ok(Self {
             definition,
             schema: schema.into(),
             input: ZSet::new(),
             aggregate: IncrementalAggregate::new(),
+            collections,
             rows: ZSet::new(),
             initialized: false,
         })
@@ -393,7 +425,10 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                     let value = match value {
                         None => Some(0),
                         Some(v) if v.is_null() => None,
-                        Some(_) if function == Function::Count => Some(0),
+                        Some(_) if matches!(
+                            function,
+                            Function::Count | Function::Collect | Function::CollectDistinct
+                        ) => Some(0),
                         Some(GraphValue::Scalar(CanonicalScalar::Int(n))) => Some(i128::from(*n)),
                         _ => {
                             return Err(GroupError::NonInteger {
@@ -437,7 +472,20 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
         }
         let crossings = ZSet::from_updates(crossings, limbs, control)?;
         delta.integrate(&crossings, limbs, control)?;
+        let collections = self.collections.as_mut().map(|state| {
+            state.prepare(changes, self.definition.group_key_columns(), limbs, control)
+        }).transpose()?;
         let mut groups = BTreeSet::new();
+        // Argument replacements and sort-key changes can leave COUNT exactly
+        // unchanged. The collection index, not count crossings, invalidates
+        // those groups, including a new first representative for DISTINCT.
+        if let Some(collections) = &collections {
+            for group in collections.changed_groups() {
+                charge(control, ZSetEvent::Work)?;
+                charge(control, ZSetEvent::ScratchEntry)?;
+                groups.insert(Arc::clone(group));
+            }
+        }
         for (((group, _, _), _), _) in delta.iter() {
             charge(control, ZSetEvent::Work)?;
             if !groups.contains(group) {
@@ -462,6 +510,11 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                     |index| self.aggregate.get(&primary(&group, index)),
                     |index, maximum, c| {
                         current_extremum(&self.aggregate, &group, index, maximum, &mut |e| c(e))
+                    },
+                    |column, distinct, c| {
+                        collections.as_ref().ok_or(GroupError::InvalidResult)?.render(
+                            &group, column, distinct, false, &mut |event| c(event),
+                        )
                     },
                     control,
                 )?
@@ -490,6 +543,11 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                     |index| aggregate.get(&primary(&group, index)),
                     |index, maximum, c| {
                         pending_extremum(&aggregate, &group, index, maximum, &mut |e| c(e))
+                    },
+                    |column, distinct, c| {
+                        collections.as_ref().ok_or(GroupError::InvalidResult)?.render(
+                            &group, column, distinct, true, &mut |event| c(event),
+                        )
                     },
                     control,
                 )?
@@ -538,6 +596,7 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
         Ok(GroupUpdate {
             input,
             aggregate,
+            collections,
             output,
             initialized: &mut self.initialized,
             delta,
@@ -557,6 +616,7 @@ impl<D: GroupDefinition> core::fmt::Debug for IncrementalGroupAggregate<D> {
 pub struct GroupUpdate<'a> {
     input: ZSetUpdate<'a, GraphValueRow>,
     aggregate: AggregateUpdate<'a, Key>,
+    collections: Option<collection::Update<'a>>,
     output: ZSetUpdate<'a, GraphAggregateRow>,
     initialized: &'a mut bool,
     delta: ZSet<GraphAggregateRow>,
@@ -569,12 +629,16 @@ impl GroupUpdate<'_> {
         let Self {
             input,
             aggregate,
+            collections,
             output,
             initialized,
             delta,
         } = self;
         input.commit();
         let _ = aggregate.commit();
+        if let Some(collections) = collections {
+            collections.commit();
+        }
         output.commit();
         *initialized = true;
         delta
