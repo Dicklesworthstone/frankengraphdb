@@ -6,4 +6,5 @@
 //! durable object kind, or graph visibility authority is invented by this layer.
 
 pub mod buffer;
+pub mod inline;
 pub mod memory;
