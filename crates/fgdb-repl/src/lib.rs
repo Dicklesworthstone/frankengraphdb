@@ -6,13 +6,17 @@
 //! durably owned objects permit SnapshotReady. The resulting application and
 //! Raft state are then supplied as ONE publication, never sequentially activated.
 //!
+//! [`driver::sequence`] drives durability-gated Raft transitions, while
+//! [`SnapshotCatchup::install`] owns the complete object-to-root installation.
 //! This crate introduces no sockets, file formats, FEC implementation or service
-//! authority. The ReplCx/ATP driver, canonical verifier, retention pins, exclusive
-//! destination writer fence and real Chronicle publisher remain mandatory.
-//! Use an offline/non-serving catch-up target, not an unfenced live query engine.
+//! authority. The ReplCx/ATP transport, canonical verifier, retention pins,
+//! exclusive destination writer fence and real Chronicle publisher remain
+//! mandatory. Use an offline/non-serving target, not an unfenced query engine.
 
 #![forbid(unsafe_code)]
 #![cfg(not(target_arch = "wasm32"))]
+
+pub mod driver;
 
 use fgdb_chronicle::seed::{
     ObjectPublication, ReplicaSeed, SeedError, SeedInstallation, SeedObjectSpec,
@@ -148,6 +152,21 @@ impl<'r, C: Clone + Eq> SnapshotCatchup<'r, C> {
             publication: None,
             consensus: None,
         })
+    }
+
+    /// Own the session across cancellable I/O and drive its complete installation.
+    /// This consumes the session so cancellation cannot leave an ambiguously
+    /// published root attached to a reusable live voter.
+    pub async fn install<S, P>(
+        self,
+        source: &mut S,
+        publisher: &mut P,
+    ) -> Result<Output<C>, driver::SeedDriveError<S::Error, P::Error>>
+    where
+        S: driver::SeedObjectSource,
+        P: driver::SeedPublisher<C>,
+    {
+        driver::install_snapshot(self, source, publisher).await
     }
 
     pub fn phase(&self) -> CatchupPhase {
