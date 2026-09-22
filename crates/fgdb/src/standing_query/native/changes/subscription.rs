@@ -1,11 +1,11 @@
 //! Acknowledged, session-local pull delivery over the maintained native bag.
 //!
-//! No second evaluator, commit hook, graph scan, thread or mutable primary
-//! storage is introduced. One immutable unacknowledged frame is retained; the
-//! source still retains one tick. A slow consumer is told to rebaseline rather
-//! than receiving a silently incomplete history. Durable registration, a
-//! retention lease, historical SINCE and transport ACK persistence are not
-//! claimed by this in-process lane.
+//! A consumer retains one immutable unacknowledged frame. Optional bounded
+//! replay is a shared dependent sink in the SAME maintained circuit: commits
+//! are captured automatically, without polling a query or adding another log
+//! authority. Without replay the source retains one tick. Expired histories
+//! refuse explicitly; no consumer silently skips a missing prefix. Durable
+//! registration, retention leases and transport ACK persistence are not claimed.
 
 use super::*;
 
@@ -26,7 +26,7 @@ pub struct SubscriptionBatch {
     receipt: SubscriptionReceipt,
     from: Option<CommitSeq>,
     frontier: CommitSeq,
-    rows: ZSet<Vec<QueryValue>>,
+    rows: Arc<ZSet<Vec<QueryValue>>>,
 }
 impl core::fmt::Debug for SubscriptionBatch {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -64,6 +64,7 @@ pub enum SubscriptionError {
     InvalidReceipt,
     Unacknowledged,
     ReceiptExhausted,
+    ReplayAlreadyEnabled,
 }
 impl core::fmt::Display for SubscriptionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -73,6 +74,7 @@ impl core::fmt::Display for SubscriptionError {
             Self::InvalidReceipt => f.write_str("receipt does not acknowledge this delivery"),
             Self::Unacknowledged => f.write_str("subscription already has an unacknowledged frame"),
             Self::ReceiptExhausted => f.write_str("subscription receipt sequence exhausted"),
+            Self::ReplayAlreadyEnabled => f.write_str("subscription already has a replay sink"),
         }
     }
 }
@@ -102,6 +104,7 @@ impl From<StandingQueryError> for SubscriptionError {
 #[derive(Debug)]
 pub struct NativeSubscription {
     handle: StandingQueryHandle,
+    replay: Option<StandingQueryHandle>,
     owner: Arc<()>,
     acknowledged: Option<CommitSeq>,
     last_ack: Option<u64>,
@@ -124,6 +127,7 @@ impl<V: Vfs + Clone> Database<V> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         Ok(NativeSubscription {
             handle: handle.clone(),
+            replay: None,
             owner: Arc::new(()),
             acknowledged: None,
             last_ack: None,
@@ -146,17 +150,84 @@ impl NativeSubscription {
     pub fn is_closed(&self) -> bool {
         self.closed
     }
+    /// The shared replay sink for window inspection or explicit rebuild.
+    /// Rebuilding this sink alone never repairs an unavailable source view.
+    pub fn replay_handle(&self) -> Option<&StandingQueryHandle> {
+        self.replay.as_ref()
+    }
 
-    /// Return a complete replacement baseline, a complete successor delta, or
-    /// None when the acknowledged source is current. An accepted empty tick
-    /// is still a frame and must be acknowledged. Polling is never an ACK.
+    /// Enable automatic bounded replay before the first poll, or while caught
+    /// up with no pending frame. An old acknowledged cut cannot be backfilled:
+    /// consume its available delta or explicitly restart before enabling replay.
+    /// All refusal paths leave the consumer and registry unchanged.
+    ///
+    /// The sink retains final native BAG deltas with independent tick, support
+    /// and logical payload limits. Its per-commit maintenance policy is fixed
+    /// here and independent of future poll allowances. `fork` shares this one
+    /// sink instead of copying or re-evaluating a circuit for each consumer.
+    pub fn enable_replay<V: Vfs + Clone>(
+        &mut self,
+        database: &mut Database<V>,
+        cx: &QueryCx,
+        max_ticks: usize,
+        max_rows: usize,
+        max_payload_units: usize,
+        policy: GqlQueryPolicy,
+    ) -> Result<CommitSeq, SubscriptionError> {
+        if self.closed {
+            return Err(SubscriptionError::Closed);
+        }
+        let current = database.admitted_standing_query(cx, &self.handle)?.status().1;
+        if self.replay.is_some() {
+            return Err(SubscriptionError::ReplayAlreadyEnabled);
+        }
+        if self.pending.is_some() {
+            return Err(SubscriptionError::Unacknowledged);
+        }
+        if let Some(from) = self.acknowledged {
+            if from != current {
+                return Err(StandingQueryError::DeltaUnavailable { from, frontier: current }.into());
+            }
+        }
+        let replay = database.register_standing_replay(
+            cx, &self.handle, max_ticks, max_rows, max_payload_units, policy,
+        )?;
+        // Exclusive database access spans admission and linking. Nothing
+        // fallible follows registry publication, so no orphan sink can escape.
+        self.replay = Some(replay);
+        Ok(current)
+    }
+
+    /// Create an independent consumer sharing this circuit and replay sink.
+    /// Its first poll is a current baseline, NOT a copy of this consumer's ACK
+    /// or pending transaction. Receipts, ACKs, restart and close are isolated.
+    /// Creating a fork neither appends registry nodes nor copies result rows.
+    pub fn fork<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+    ) -> Result<Self, SubscriptionError> {
+        if self.closed {
+            return Err(SubscriptionError::Closed);
+        }
+        if let Some(replay) = &self.replay {
+            database.standing_replay_window(cx, replay)?;
+        }
+        let mut consumer = database.open_standing_subscription(cx, &self.handle)?;
+        consumer.replay = self.replay.clone();
+        Ok(consumer)
+    }
+
+    /// Return a complete replacement baseline, the FIRST unacknowledged
+    /// successor, or None when caught up. With replay, later commits may be
+    /// buffered behind this frame. Empty ticks still require acknowledgement.
     ///
     /// Redelivery checks source ownership/health/cancellation, then shares the
-    /// previously admitted frame; it does not copy or re-admit its payload.
-    /// New deliveries use the ordinary native bag's cumulative row/work/scratch
-    /// limits. Refusal leaves both the ACK and pending frame untouched.
-    /// DeltaUnavailable/DeltaGap are never converted to empty output: call
-    /// restart_from_current explicitly and REPLACE the consumer's old bag.
+    /// previously admitted frame, even if that frame has since left retention.
+    /// New frames also require a healthy replay sink when enabled. A snapshot
+    /// or legacy one-tick delta uses native bag copy allowances; retained replay
+    /// shares its payload and charges only the handle and compressed row quota.
+    /// A refusal never changes ACK/pending state. Gaps never become empty deltas.
     pub fn poll<V: Vfs + Clone>(
         &mut self,
         database: &Database<V>,
@@ -170,13 +241,22 @@ impl NativeSubscription {
         if let Some(pending) = &self.pending {
             return Ok(Some(Arc::clone(pending)));
         }
+        if let Some(replay) = &self.replay {
+            database.standing_replay_window(cx, replay)?;
+        }
         if self.acknowledged == Some(current) {
             return Ok(None);
         }
-        // Refuse exhaustion before doing any potentially expensive delivery.
-        self.serial
-            .checked_add(1)
-            .ok_or(SubscriptionError::ReceiptExhausted)?;
+        self.serial.checked_add(1).ok_or(SubscriptionError::ReceiptExhausted)?;
+        if let (Some(from), Some(replay)) = (self.acknowledged, self.replay.as_ref()) {
+            let frame = database.standing_replay_next(cx, replay, from, policy)?
+                .ok_or(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
+            if frame.from() != from || from.checked_successor().ok() != Some(frame.frontier()) {
+                return Err(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta).into());
+            }
+            cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
+            return self.publish_shared(frame.frontier(), frame.shared_rows()).map(Some);
+        }
         let (frontier, rows) = match self.acknowledged {
             Some(from) => database.standing_native_delta(cx, &self.handle, from, policy)?,
             None => database.standing_native_bag(cx, &self.handle, policy)?,
@@ -190,21 +270,23 @@ impl NativeSubscription {
         frontier: CommitSeq,
         rows: ZSet<Vec<QueryValue>>,
     ) -> Result<Arc<SubscriptionBatch>, SubscriptionError> {
+        self.publish_shared(frontier, Arc::new(rows))
+    }
+
+    fn publish_shared(
+        &mut self,
+        frontier: CommitSeq,
+        rows: Arc<ZSet<Vec<QueryValue>>>,
+    ) -> Result<Arc<SubscriptionBatch>, SubscriptionError> {
         if self.closed {
             return Err(SubscriptionError::Closed);
         }
         if self.pending.is_some() {
             return Err(SubscriptionError::Unacknowledged);
         }
-        let serial = self
-            .serial
-            .checked_add(1)
-            .ok_or(SubscriptionError::ReceiptExhausted)?;
+        let serial = self.serial.checked_add(1).ok_or(SubscriptionError::ReceiptExhausted)?;
         let frame = Arc::new(SubscriptionBatch {
-            receipt: SubscriptionReceipt {
-                owner: Arc::clone(&self.owner),
-                serial,
-            },
+            receipt: SubscriptionReceipt { owner: Arc::clone(&self.owner), serial },
             from: self.acknowledged,
             frontier,
             rows,
@@ -229,13 +311,9 @@ impl NativeSubscription {
             return Err(SubscriptionError::InvalidReceipt);
         }
         if self.last_ack == Some(receipt.serial) {
-            return self
-                .acknowledged
-                .ok_or(SubscriptionError::InvalidReceipt);
+            return self.acknowledged.ok_or(SubscriptionError::InvalidReceipt);
         }
-        let pending = self
-            .pending
-            .as_ref()
+        let pending = self.pending.as_ref()
             .filter(|frame| frame.receipt.serial == receipt.serial)
             .ok_or(SubscriptionError::InvalidReceipt)?;
         let frontier = pending.frontier;
@@ -247,8 +325,8 @@ impl NativeSubscription {
 
     /// Explicitly abandon old delivery state after a gap or consumer reset.
     /// All old receipts become invalid. The next successful poll is a full
-    /// replacement baseline. This does not repair a fenced producer: use the
-    /// underlying handle's rebuild API first when maintenance is unavailable.
+    /// replacement baseline. The configured replay sink is kept. Repair an
+    /// unavailable source/sink with its rebuild API before taking this baseline.
     pub fn restart_from_current(&mut self) -> Result<(), SubscriptionError> {
         if self.closed {
             return Err(SubscriptionError::Closed);
@@ -261,9 +339,8 @@ impl NativeSubscription {
     }
 
     /// Close this delivery position and release its retained frame. Idempotent.
-    /// Like other standing handles, the shared database-owned registration
-    /// lives until the Database is dropped; this does not unregister that view
-    /// or invalidate another consumer. No detached maintenance task is spawned.
+    /// Database-owned view/replay nodes live until the Database is dropped;
+    /// closing does not unregister shared nodes or invalidate another consumer.
     pub fn close(&mut self) {
         self.closed = true;
         self.pending = None;
@@ -271,6 +348,9 @@ impl NativeSubscription {
         self.last_ack = None;
     }
 }
+
+#[cfg(test)]
+mod replay_tests;
 
 #[cfg(test)]
 mod tests {
@@ -283,6 +363,7 @@ mod tests {
                 index: 0,
                 native: None,
             },
+            replay: None,
             owner: Arc::new(()),
             acknowledged: None,
             last_ack: None,
