@@ -1,11 +1,12 @@
 //! Frozen, typed CALL programs. Only implemented in-core signatures enter this
 //! registry; none of these entries claims external-memory execution support.
 
+use crate::{DijkstraComparison, DijkstraOptions};
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 use std::collections::BTreeMap;
 
-pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 2;
+pub const FNX_SIGNATURE_REGISTRY_VERSION: u16 = 3;
 pub const MAX_FNX_CALL_BYTES: usize = 16 * 1024;
 pub const FNX_NUMERIC_PROFILE: &str = "fnx-f64-canonical-node-order-v1";
 pub const FNX_DISCRETE_PROFILE: &str = "fgdb-exact-integer-canonical-vid-order-v1";
@@ -28,6 +29,7 @@ pub enum FnxParameterType {
     Boolean,
     Vertex,
     OptionalNonNegativeInteger,
+    OptionalNonNegativeFloat,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FnxParameterSpec {
@@ -43,6 +45,7 @@ pub enum FnxOutput {
     Score = 1,
     Distance = 2,
     Component = 3,
+    Triangles = 4,
 }
 impl FnxOutput {
     pub const fn name(self) -> &'static str {
@@ -51,6 +54,7 @@ impl FnxOutput {
             Self::Score => "score",
             Self::Distance => "distance",
             Self::Component => "component",
+            Self::Triangles => "triangles",
         }
     }
 }
@@ -88,6 +92,11 @@ const PAGERANK_PARAMETERS: &[FnxParameterSpec] = &[
 const BFS_PARAMETERS: &[FnxParameterSpec] = &[
     FnxParameterSpec { name: "source", value_type: FnxParameterType::Vertex, default: None },
     FnxParameterSpec { name: "cutoff", value_type: FnxParameterType::OptionalNonNegativeInteger, default: Some(FnxArgument::Null) },
+];
+const DIJKSTRA_PARAMETERS: &[FnxParameterSpec] = &[
+    FnxParameterSpec { name: "source", value_type: FnxParameterType::Vertex, default: None },
+    FnxParameterSpec { name: "cutoff", value_type: FnxParameterType::OptionalNonNegativeFloat, default: Some(FnxArgument::Null) },
+    FnxParameterSpec { name: "strict", value_type: FnxParameterType::Boolean, default: Some(FnxArgument::Boolean(false)) },
 ];
 const SIGNATURES: &[FnxSignature] = &[
     FnxSignature {
@@ -130,12 +139,35 @@ const SIGNATURES: &[FnxSignature] = &[
         graph_laws: "explicit directed projection; unweighted mutual reachability; component label is minimum member VId",
         complexity: "O(|V| + |E|)", execution_kernel: "fgdb-prism/kosaraju-row-cursor-v1",
     },
+    FnxSignature {
+        name: "fnx.single_source_dijkstra_path_length", graph_input_arity: 1, parameters: DIJKSTRA_PARAMETERS,
+        outputs: &[FnxOutput::Vertex, FnxOutput::Distance],
+        implementation: FnxImplementationClass::InCoreDecodedCache, graph_kind: FnxGraphKind::Any,
+        numeric_profile: "dijkstra-f64-policy-selected-by-strict-v1", rng_policy: "none",
+        graph_laws: "explicit projection; finite nonnegative weights; inclusive cost cutoff; FIFO ties; fnx 1e-12 relaxation unless strict; reachable rows in VId order",
+        complexity: "O((|V| + |E|) * log(1 + |V|))", execution_kernel: "fgdb-prism/dijkstra-indexed-heap-v1",
+    },
+    FnxSignature {
+        name: "fnx.triangles", graph_input_arity: 1, parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Triangles],
+        implementation: FnxImplementationClass::InCoreDecodedCache, graph_kind: FnxGraphKind::Undirected,
+        numeric_profile: FNX_DISCRETE_PROFILE, rng_policy: "none",
+        graph_laws: "explicit undirected simple projection; unweighted; self-loops ignored; exact per-vertex counts; isolates retained",
+        complexity: "O(|V| + |E| + sum_edges min(deg(u), deg(v)))", execution_kernel: "fgdb-prism/triangles-degree-mark-v1",
+    },
+    FnxSignature {
+        name: "fnx.clustering_coefficient", graph_input_arity: 1, parameters: &[],
+        outputs: &[FnxOutput::Vertex, FnxOutput::Score],
+        implementation: FnxImplementationClass::InCoreDecodedCache, graph_kind: FnxGraphKind::Undirected,
+        numeric_profile: "fgdb-unweighted-clustering-exact-count-f64-ratio-v1", rng_policy: "none",
+        graph_laws: "explicit undirected simple projection; unweighted; self-loops ignored; 2*t/(d*(d-1)); degree below two yields zero",
+        complexity: "O(|V| + |E| + sum_edges min(deg(u), deg(v)))", execution_kernel: "fgdb-prism/clustering-degree-mark-v1",
+    },
 ];
-
 pub struct FnxSignatureRegistry;
 impl FnxSignatureRegistry {
     pub const fn version() -> u16 { FNX_SIGNATURE_REGISTRY_VERSION }
-    pub fn signatures() -> &'static [FnxSignature] { SIGNATURES }
+    pub const fn signatures() -> &'static [FnxSignature] { SIGNATURES }
     pub fn lookup(name: &str) -> Option<&'static FnxSignature> {
         SIGNATURES.iter().find(|signature| signature.name == name)
     }
@@ -199,6 +231,9 @@ pub enum FnxAlgorithm {
     ConnectedComponents,
     WeaklyConnectedComponents,
     StronglyConnectedComponents,
+    SingleSourceDijkstraPathLength(DijkstraOptions),
+    Triangles,
+    ClusteringCoefficient,
 }
 impl FnxAlgorithm {
     pub fn signature(self) -> &'static FnxSignature {
@@ -208,6 +243,9 @@ impl FnxAlgorithm {
             Self::ConnectedComponents => 2,
             Self::WeaklyConnectedComponents => 3,
             Self::StronglyConnectedComponents => 4,
+            Self::SingleSourceDijkstraPathLength(_) => 5,
+            Self::Triangles => 6,
+            Self::ClusteringCoefficient => 7,
         }]
     }
 }
@@ -230,11 +268,26 @@ impl FnxCallSpec {
     pub fn connected_components() -> Self { Self::new(FnxAlgorithm::ConnectedComponents) }
     pub fn weakly_connected_components() -> Self { Self::new(FnxAlgorithm::WeaklyConnectedComponents) }
     pub fn strongly_connected_components() -> Self { Self::new(FnxAlgorithm::StronglyConnectedComponents) }
+    pub fn single_source_dijkstra_path_length(options: DijkstraOptions) -> Self {
+        Self::new(FnxAlgorithm::SingleSourceDijkstraPathLength(options))
+    }
+    pub fn triangles() -> Self { Self::new(FnxAlgorithm::Triangles) }
+    pub fn clustering_coefficient() -> Self { Self::new(FnxAlgorithm::ClusteringCoefficient) }
     fn new(algorithm: FnxAlgorithm) -> Self {
         Self::compiled(algorithm, default_outputs(algorithm.signature()))
     }
     pub fn algorithm(&self) -> FnxAlgorithm { self.algorithm }
     pub fn signature(&self) -> &'static FnxSignature { self.algorithm.signature() }
+    /// Numeric policy of this frozen call, not merely the parameterized signature.
+    pub fn numeric_profile(&self) -> &'static str {
+        match self.algorithm {
+            FnxAlgorithm::SingleSourceDijkstraPathLength(options) => match options.comparison() {
+                DijkstraComparison::Strict => "fgdb-f64-dijkstra-strict-fifo-v1",
+                DijkstraComparison::FnxEpsilon => "fnx-f64-dijkstra-epsilon-1e-12-fifo-v1",
+            },
+            _ => self.signature().numeric_profile,
+        }
+    }
     pub fn options(&self) -> Option<PageRankOptions> {
         match self.algorithm { FnxAlgorithm::PageRank(options) => Some(options), _ => None }
     }
@@ -305,9 +358,29 @@ impl FnxCallSpec {
                 };
                 FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff }
             }
+            "fnx.single_source_dijkstra_path_length" => {
+                let source = match arguments[0] {
+                    FnxArgument::Vertex(vertex) => vertex,
+                    FnxArgument::Integer(value) if value >= 0 => VId(value as u128),
+                    _ => return Err(invalid(0, "VId or nonnegative integer source required")),
+                };
+                let cutoff = if arguments[1] == FnxArgument::Null {
+                    None
+                } else {
+                    Some(float_argument(arguments[1]).filter(|&value| value >= 0.0)
+                        .ok_or_else(|| invalid(1, "finite nonnegative exact cost or NULL required"))?)
+                };
+                let FnxArgument::Boolean(strict) = arguments[2] else {
+                    return Err(invalid(2, "boolean strict required"));
+                };
+                let comparison = if strict { DijkstraComparison::Strict } else { DijkstraComparison::FnxEpsilon };
+                FnxAlgorithm::SingleSourceDijkstraPathLength(DijkstraOptions::new(source, cutoff)?.with_comparison(comparison))
+            }
             "fnx.connected_components" => FnxAlgorithm::ConnectedComponents,
             "fnx.weakly_connected_components" => FnxAlgorithm::WeaklyConnectedComponents,
             "fnx.strongly_connected_components" => FnxAlgorithm::StronglyConnectedComponents,
+            "fnx.triangles" => FnxAlgorithm::Triangles,
+            "fnx.clustering_coefficient" => FnxAlgorithm::ClusteringCoefficient,
             _ => return Err(parser.error(FnxBindErrorKind::UnknownProcedure)),
         };
         let mut outputs = default_outputs(signature);
@@ -335,7 +408,7 @@ impl FnxCallSpec {
 
     fn compiled(algorithm: FnxAlgorithm, outputs: Vec<FnxOutputColumn>) -> Self {
         let mut hash = Hasher::new();
-        hash.update(b"fgdb:prism:bound-call:v2");
+        hash.update(b"fgdb:prism:bound-call:v3");
         hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
         let name = algorithm.signature().name;
         hash.update(&(name.len() as u128).to_le_bytes());
@@ -353,6 +426,14 @@ impl FnxCallSpec {
                     None => { hash.update(&[0]); }
                     Some(cutoff) => { hash.update(&[1]); hash.update(&(cutoff as u128).to_le_bytes()); }
                 }
+            }
+            FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+                hash.update(&options.source().0.to_le_bytes());
+                match options.cutoff() {
+                    None => { hash.update(&[0]); }
+                    Some(cutoff) => { hash.update(&[1]); hash.update(&cutoff.to_bits().to_le_bytes()); }
+                }
+                hash.update(&[options.comparison() as u8]);
             }
             _ => {}
         }

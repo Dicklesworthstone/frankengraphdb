@@ -30,7 +30,10 @@ pub(crate) fn run<C>(
         FnxAlgorithm::ConnectedComponents => components(graph, false, checkpoint),
         FnxAlgorithm::WeaklyConnectedComponents => components(graph, true, checkpoint),
         FnxAlgorithm::StronglyConnectedComponents => strongly_connected(graph, checkpoint),
-        FnxAlgorithm::PageRank(_) => Err(FnxExecutionError::InvalidUpstreamResult),
+        FnxAlgorithm::PageRank(_)
+        | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+        | FnxAlgorithm::Triangles
+        | FnxAlgorithm::ClusteringCoefficient => Err(FnxExecutionError::InvalidUpstreamResult),
     }
 }
 

@@ -29,7 +29,9 @@ mod shortest_path;
 mod traversal;
 
 pub use clustering::{TriangleStatistics, triangle_statistics};
-pub use shortest_path::{DijkstraOptions, DijkstraOutput, dijkstra};
+pub use shortest_path::{
+    DijkstraComparison, DijkstraOptions, DijkstraOutput, FNX_DIJKSTRA_EPSILON, dijkstra,
+};
 pub use call::{
     FNX_DISCRETE_PROFILE, FNX_NUMERIC_PROFILE, FNX_SIGNATURE_REGISTRY_VERSION, MAX_FNX_CALL_BYTES,
     FnxAlgorithm, FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallSpec, FnxGraphKind,

@@ -2,7 +2,7 @@
 //!
 //! The indexed min-heap contains at most one entry per unsettled vertex. This
 //! avoids the O(m) duplicate queue of lazy-deletion Dijkstra implementations.
-//! Equal costs use the projection's canonical VId order. Only finite,
+//! Equal costs use FIFO discovery from canonical VId-ordered rows. Only finite,
 //! nonnegative projected weights are accepted, including zero-weight cycles.
 
 use crate::execute::{admit, reserve};
@@ -12,12 +12,25 @@ use crate::{
 };
 use fgdb_types::VId;
 
+/// The pinned foundation's relaxation threshold (not a convergence tolerance).
+pub const FNX_DIJKSTRA_EPSILON: f64 = 1e-12;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DijkstraComparison {
+    /// Accept every representable improvement. This is the primitive default.
+    Strict = 0,
+    /// Match fnx's `candidate < previous - 1e-12` relaxation and FIFO ties.
+    FnxEpsilon = 1,
+}
+
 /// Validated weighted-distance parameters. The cutoff is inclusive and is a
 /// cost, not a hop count. Negative zero is normalized for canonical binding.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DijkstraOptions {
     source: VId,
     cutoff: Option<f64>,
+    comparison: DijkstraComparison,
 }
 
 impl DijkstraOptions {
@@ -33,6 +46,7 @@ impl DijkstraOptions {
         Ok(Self {
             source,
             cutoff: cutoff.map(|value| if value == 0.0 { 0.0 } else { value }),
+            comparison: DijkstraComparison::Strict,
         })
     }
 
@@ -42,6 +56,15 @@ impl DijkstraOptions {
 
     pub const fn cutoff(self) -> Option<f64> {
         self.cutoff
+    }
+
+    pub const fn with_comparison(mut self, comparison: DijkstraComparison) -> Self {
+        self.comparison = comparison;
+        self
+    }
+
+    pub const fn comparison(self) -> DijkstraComparison {
+        self.comparison
     }
 }
 
@@ -101,16 +124,19 @@ pub(crate) fn workspace_bytes<C>(n: usize) -> Result<usize, FnxExecutionError<C>
 struct Entry {
     node: usize,
     cost: f64,
+    sequence: u64,
 }
 
 struct IndexedHeap {
     entries: Vec<Entry>,
     positions: Vec<usize>,
+    sequence: u64,
+    comparison: DijkstraComparison,
 }
 
 impl IndexedHeap {
     fn before(left: Entry, right: Entry) -> bool {
-        left.cost.total_cmp(&right.cost).then(left.node.cmp(&right.node)).is_lt()
+        left.cost.total_cmp(&right.cost).then(left.sequence.cmp(&right.sequence)).is_lt()
     }
 
     fn swap(&mut self, left: usize, right: usize) {
@@ -126,15 +152,22 @@ impl IndexedHeap {
         checkpoint: &mut impl FnMut() -> Result<(), C>,
     ) -> Result<(), FnxExecutionError<C>> {
         let mut position = self.positions[node];
+        if position != usize::MAX {
+            let previous = self.entries[position].cost;
+            let threshold = match self.comparison {
+                DijkstraComparison::Strict => previous,
+                DijkstraComparison::FnxEpsilon => previous - FNX_DIJKSTRA_EPSILON,
+            };
+            if cost >= threshold { return Ok(()); }
+        }
+        self.sequence = self.sequence.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?;
+        let entry = Entry { node, cost, sequence: self.sequence };
         if position == usize::MAX {
             position = self.entries.len();
             self.positions[node] = position;
-            self.entries.push(Entry { node, cost });
+            self.entries.push(entry);
         } else {
-            if cost >= self.entries[position].cost {
-                return Ok(());
-            }
-            self.entries[position].cost = cost;
+            self.entries[position] = entry;
         }
         while position > 0 {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
@@ -213,7 +246,9 @@ pub(crate) fn run<C>(
     }
     let mut distances = reserve(n)?;
     let mut overflowed = reserve(n)?;
-    let mut heap = IndexedHeap { entries: reserve(n)?, positions: reserve(n)? };
+    let mut heap = IndexedHeap {
+        entries: reserve(n)?, positions: reserve(n)?, sequence: 0, comparison: options.comparison,
+    };
     for _ in 0..n {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
         distances.push(None);
@@ -231,7 +266,7 @@ pub(crate) fn run<C>(
     };
     loop {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        let Some(Entry { node, cost }) = heap.pop(checkpoint)? else { break; };
+        let Some(Entry { node, cost, .. }) = heap.pop(checkpoint)? else { break; };
         distances[node] = Some(cost);
         witness.nodes_touched = witness.nodes_touched.checked_add(1)
             .ok_or(FnxExecutionError::SizeOverflow)?;
