@@ -26,6 +26,8 @@ use std::collections::{BTreeSet, BinaryHeap};
 use fgdb_order::{Domain, MemberId};
 use fgdb_types::ObjectId;
 
+pub mod proposal;
+
 // RFC 6330 §5.3: the systematic source-block bound, NOT the 24-bit ESI bound.
 const MAX_SYSTEMATIC_SYMBOLS: u32 = 56_403;
 
