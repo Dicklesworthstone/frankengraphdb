@@ -8,7 +8,7 @@ use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_prism::{
     FnxCallSpec, FnxParameters, FnxReadError, FnxReadOptions, FnxReadResult,
-    FnxSelection, FnxSourceLimits, ParallelEdgePolicy, ProjectionEdge,
+    FnxSelection, FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge,
     ProjectionError, ProjectionLimits, ProjectionSpec, SelfLoopPolicy,
     SnapshotBinding, SnapshotGraphView,
 };
@@ -82,6 +82,9 @@ impl EmbeddedReadView {
     /// Prepare a clone-shared graph once and reuse it for several bound calls.
     /// Only selected VIds and scalar edge weights are staged. Properties stay
     /// borrowed in the admitted snapshot; no vertex or property row is cloned.
+    /// Staged buffers transfer into the builder instead of being copied again;
+    /// their full capacities enter projection admission. Projection sorting and
+    /// assembly checkpoint under this same query context and pinned read view.
     /// The cache owns its decoded data and can outlive this read-view handle.
     /// The source's work/scratch counters are separate from the cache budget;
     /// neither the source nor fnx is presented as a spill-capable operator.
@@ -115,11 +118,12 @@ impl EmbeddedReadView {
                 if selection.vertex_label.is_some_and(|label| row.labels.binary_search(&label).is_err()) {
                     return Ok(());
                 }
+                // Check the visitor's ordered-emission invariant incrementally,
+                // not in an uninterruptible post-scan debug assertion.
+                debug_assert!(vertices.last().is_none_or(|last| *last < row.vid));
                 push_staged(&mut vertices, row.vid, "vertices", limits.max_vertices,
                     &mut staging_bytes, source_limits.max_staging_bytes)
             })?;
-            // The existing merge visitor emits each winning VId in order.
-            debug_assert!(vertices.windows(2).all(|pair| pair[0] < pair[1]));
             let mut edges = Vec::new();
             source::visit_edges_with_properties(&self.snapshot, as_of, &mut control, |entry, props, control| {
                 control(SourceEvent::Work)?;
@@ -148,10 +152,13 @@ impl EmbeddedReadView {
                 }, "input edges", limits.max_input_edges, &mut staging_bytes, source_limits.max_staging_bytes)
             })?;
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
-            let graph = SnapshotGraphView::build(
+            let graph = SnapshotGraphView::build_owned_with_checkpoint(
                 SnapshotBinding { root: self.partition_root().0, as_of },
-                &vertices, &edges, spec, limits,
-            ).map_err(FnxReadError::Projection)?;
+                vertices, edges, spec, limits, || cx.checkpoint(),
+            ).map_err(|error| match error {
+                ProjectionBuildError::Cancelled(error) => FnxReadError::Cancelled(error),
+                ProjectionBuildError::Projection(error) => FnxReadError::Projection(error),
+            })?;
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
             Ok(graph)
         })
