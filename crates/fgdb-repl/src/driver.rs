@@ -416,6 +416,42 @@ mod tests {
     fn volatile_heartbeat_does_not_publish_again() {
         let mut raft = node();
         let mut store = MemoryPublisher::default();
-        immediate(sequence(&mut raft, &mut raft_store_placeholder, Event::ElectionTimeout));
+        immediate(sequence(&mut raft, &mut store, Event::ElectionTimeout)).unwrap();
+        let writes = store.writes;
+        immediate(sequence(&mut raft, &mut store, Event::Heartbeat)).unwrap();
+        assert_eq!(store.writes, writes);
+    }
+
+    #[test]
+    fn publication_error_requires_recovery_even_if_root_was_written() {
+        let mut raft = node();
+        let mut store = MemoryPublisher { fail: true, ..MemoryPublisher::default() };
+        assert!(matches!(immediate(sequence(&mut raft, &mut store, Event::ElectionTimeout)), Err(SequenceError::Publication(_))));
+        assert!(store.state.is_some());
+        assert_eq!(raft.role(), Err(RaftError::RecoveryRequired));
+        let reopened = Raft::recover(MemberId(1), store.state.take().unwrap(), Limits::default()).unwrap();
+        assert_eq!(reopened.durable_state().unwrap().term(), 1);
+    }
+
+    #[test]
+    fn cancellation_during_publication_fences_member() {
+        let mut raft = node();
+        let mut store = SuspendedPublisher;
+        {
+            let mut future = pin!(sequence(&mut raft, &mut store, Event::ElectionTimeout));
+            let waker = Waker::from(Arc::new(NoopWake));
+            let mut cx = Context::from_waker(&waker);
+            assert!(future.as_mut().poll(&mut cx).is_pending());
+        }
+        assert_eq!(raft.role(), Err(RaftError::RecoveryRequired));
+    }
+
+    #[test]
+    fn invalid_proposal_does_not_poison_or_publish() {
+        let mut raft = node();
+        let mut store = MemoryPublisher::default();
+        assert!(matches!(immediate(sequence(&mut raft, &mut store, Event::Propose(1))), Err(SequenceError::Raft(RaftError::NotLeader))));
+        assert_eq!(raft.role(), Ok(Role::Follower));
+        assert_eq!(store.writes, 0);
     }
 }
