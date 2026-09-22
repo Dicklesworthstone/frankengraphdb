@@ -1,8 +1,10 @@
 //! Bounded online ingestion through ordinary prepared Chronicle commits.
 //!
-//! The source must be replayable: clones yield identical rows. Preflight walks
-//! it without buffering payloads, so malformed input anywhere leaves the graph
-//! unchanged. Payload memory is bounded by one chunk; caller-key maps grow with
+//! The source must be replayable. Preflight seals every chunk's complete source
+//! transcript; replay verifies it before allocating identities or preparing a
+//! write. Malformed preflight input leaves the graph unchanged. A changed replay
+//! returns only the already committed prefix. Payload memory is one chunk plus
+//! one scalar encoding; caller-key maps and chunk seals grow with
 //! the load. Edges name preceding vertices. Keys are unique across both kinds.
 //!
 //! Resume supplies the same source and policy plus a checkpoint. After an
@@ -19,6 +21,8 @@ use fgdb_gql::insertion::GraphInsertRequest;
 use fgdb_strata::{edge_props::EdgePropertyPatchError, vertex::VertexPatchError};
 use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, EId, QueryCx, VId};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod source;
 
 #[derive(Clone, Debug)]
 pub struct BulkVertex {
@@ -68,6 +72,11 @@ pub struct BulkLoadCheckpoint {
 pub enum BulkLoadErrorKind {
     InvalidPolicy,
     InvalidResume,
+    /// Replay differs from preflight; this chunk has not entered publication.
+    /// The row is the chunk start for content drift, or the first missing/extra row.
+    SourceChanged { row: usize },
+    SourceEncoding { row: usize, source: fgdb_types::ScalarEncodeError },
+    CounterOverflow,
     DuplicateCallerKey {
         key: String,
     },
@@ -182,10 +191,18 @@ impl<V: Vfs + Clone> Database<V> {
             let mut prefix_vertices = BTreeSet::new();
             let mut prefix_edges = BTreeSet::new();
             let mut count = 0;
+            let mut seals = Vec::new();
+            let mut transcript = source::ChunkHasher::new(0, &policy);
             for (index, row) in source.clone().enumerate() {
                 cx.checkpoint()
                     .map_err(|e| BulkLoadErrorKind::Write(WriteTxnError::Interrupted(e)))?;
-                count = index + 1;
+                count = index.checked_add(1).ok_or(BulkLoadErrorKind::CounterOverflow)?;
+                source::admit_row(&row)?;
+                transcript.push(cx, &row)?;
+                if count.is_multiple_of(policy.rows_per_chunk) {
+                    seals.push(transcript.finish());
+                    transcript = source::ChunkHasher::new(count, &policy);
+                }
                 let key = match &row {
                     BulkRow::Vertex(v) => &v.key,
                     BulkRow::Edge(e) => &e.key,
@@ -195,12 +212,6 @@ impl<V: Vfs + Clone> Database<V> {
                 }
                 match row {
                     BulkRow::Vertex(v) => {
-                        fgdb_strata::vertex::admit_row_content(&v.labels, &v.props).map_err(
-                            |source| BulkLoadErrorKind::InvalidVertex {
-                                key: v.key.clone(),
-                                source,
-                            },
-                        )?;
                         if index < committed.next_row {
                             let id = committed
                                 .vertices
@@ -228,12 +239,6 @@ impl<V: Vfs + Clone> Database<V> {
                                 });
                             }
                         }
-                        fgdb_strata::edge_props::admitted_row_bytes(&e.props).map_err(
-                            |source| BulkLoadErrorKind::InvalidEdge {
-                                key: e.key.clone(),
-                                source,
-                            },
-                        )?;
                         if index < committed.next_row {
                             let id = committed
                                 .edges
@@ -264,38 +269,47 @@ impl<V: Vfs + Clone> Database<V> {
             {
                 return Err(BulkLoadErrorKind::InvalidResume);
             }
-            Ok(())
+            if !count.is_multiple_of(policy.rows_per_chunk) {
+                seals.push(transcript.finish());
+            }
+            Ok(seals)
         })();
-        if let Err(kind) = preflight {
-            return Err(BulkLoadError {
-                kind,
-                committed,
-                pending: None,
-            });
-        }
-        for _ in 0..committed.next_row {
-            source.next();
-        }
-        loop {
-            let mut chunk = Vec::new();
-            for row in source.by_ref().take(policy.rows_per_chunk) {
-                chunk.push(row);
+        let seals = match preflight {
+            Ok(seals) => seals,
+            Err(kind) => return Err(BulkLoadError { kind, committed, pending: None }),
+        };
+        if seals.is_empty() {
+            if let Err(kind) = source::expect_end(cx, &mut source, 0) {
+                return Err(BulkLoadError { kind, committed, pending: None });
             }
-            if chunk.is_empty() {
-                return Ok(committed);
-            }
+        }
+        for (index, seal) in seals.iter().enumerate() {
+            let skip = seal.end() <= committed.next_row;
+            let chunk = match source::read_verified(
+                cx, &mut source, seal, &policy, !skip, index + 1 == seals.len(),
+            ) {
+                Ok(chunk) => chunk,
+                Err(kind) => return Err(BulkLoadError { kind, committed, pending: None }),
+            };
+            if skip { continue; }
+            let Some(next_chunks) = committed.committed_chunks.checked_add(1) else {
+                return Err(BulkLoadError {
+                    kind: BulkLoadErrorKind::CounterOverflow, committed, pending: None,
+                });
+            };
             let mut new_vertices = BTreeMap::new();
             let mut new_edges = BTreeMap::new();
             let prepared = (|| {
                 let mut vertex_batch = WriteBatch::new(policy.vertex_relation);
                 let mut edge_batches: BTreeMap<RelationId, WriteBatch> = BTreeMap::new();
                 for row in chunk {
+                    source::checkpoint(cx)?;
                     match row {
                         BulkRow::Vertex(v) => {
                             let ElementId::Vertex(id) = self.allocate_identity(
                                 cx,
                                 GraphInsertRequest::Vertex { row: 0, vertex: 0 },
-                            )?
+                            ).map_err(BulkLoadErrorKind::Write)?
                             else {
                                 unreachable!("typed allocator")
                             };
@@ -306,15 +320,19 @@ impl<V: Vfs + Clone> Database<V> {
                             let src = *new_vertices
                                 .get(&e.source)
                                 .or_else(|| committed.vertices.get(&e.source))
-                                .expect("preflight endpoint");
+                                .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
+                                    edge: e.key.clone(), endpoint: e.source.clone(),
+                                })?;
                             let dst = *new_vertices
                                 .get(&e.destination)
                                 .or_else(|| committed.vertices.get(&e.destination))
-                                .expect("preflight endpoint");
+                                .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
+                                    edge: e.key.clone(), endpoint: e.destination.clone(),
+                                })?;
                             let ElementId::Edge(id) = self.allocate_identity(
                                 cx,
                                 GraphInsertRequest::Edge { row: 0, edge: 0 },
-                            )?
+                            ).map_err(BulkLoadErrorKind::Write)?
                             else {
                                 unreachable!("typed allocator")
                             };
@@ -331,19 +349,18 @@ impl<V: Vfs + Clone> Database<V> {
                     batches.push(vertex_batch);
                 }
                 batches.extend(edge_batches.into_values());
-                self.prepare_atomic_writes(batches)
+                self.prepare_atomic_writes(batches).map_err(BulkLoadErrorKind::Write)
             })();
             let prepared = match prepared {
                 Ok(prepared) => prepared,
-                Err(source) => {
+                Err(kind) => {
                     return Err(BulkLoadError {
-                        kind: BulkLoadErrorKind::Write(source),
+                        kind,
                         committed,
                         pending: None,
                     });
                 }
             };
-            let rows = new_vertices.len() + new_edges.len();
             let fault = crash
                 .filter(|(index, _)| *index == committed.committed_chunks)
                 .map(|(_, point)| point);
@@ -355,8 +372,8 @@ impl<V: Vfs + Clone> Database<V> {
                     committed.vertices.extend(new_vertices);
                     committed.edges.extend(new_edges);
                     committed.frontier = frontier;
-                    committed.next_row += rows;
-                    committed.committed_chunks += 1;
+                    committed.next_row = seal.end();
+                    committed.committed_chunks = next_chunks;
                     if let Err(error) = acknowledged(&committed) {
                         return Err(BulkLoadError {
                             kind: BulkLoadErrorKind::Checkpoint(error),
@@ -369,8 +386,8 @@ impl<V: Vfs + Clone> Database<V> {
                     let mut pending = committed.clone();
                     pending.vertices.extend(new_vertices);
                     pending.edges.extend(new_edges);
-                    pending.next_row += rows;
-                    pending.committed_chunks += 1;
+                    pending.next_row = seal.end();
+                    pending.committed_chunks = next_chunks;
                     // A prepared commit advances exactly one sequence. At
                     // exhaustion no successor exists, hence no candidate.
                     let pending = committed.frontier.0.checked_add(1).map(|next| {
@@ -385,5 +402,6 @@ impl<V: Vfs + Clone> Database<V> {
                 }
             }
         }
+        Ok(committed)
     }
 }
