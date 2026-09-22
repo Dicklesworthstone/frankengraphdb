@@ -17,9 +17,13 @@
 //! A grouped FreeJoin plan does not inherit that bound merely from its name.
 
 mod execute;
+mod factor;
 mod plan;
 mod trie;
 
 pub use execute::{FreeJoin, JoinBinding, MultiplicityOverflow};
+pub use factor::{
+    FactorNodeKind, FactorizedBatch, FactorizedColumns, FactorizedCursor, FactorizedReadError,
+};
 pub use plan::{FreeJoinPlan, JoinPlanError, JoinVariable, MAX_JOIN_RELATIONS, MAX_JOIN_VARIABLES};
 pub use trie::{ColumnarCursor, ColumnarTrie, TrieBuildError, TrieCursor, TrieRelation};
