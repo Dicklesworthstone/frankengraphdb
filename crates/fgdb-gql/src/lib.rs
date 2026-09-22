@@ -12,6 +12,7 @@ mod cheapest_path;
 mod cheapest_path_stream;
 mod cheapest_path_text;
 pub mod csv_parameters;
+pub mod csv_records;
 pub mod csv_write_script;
 mod deletion;
 mod edge_merge;

@@ -294,6 +294,13 @@ where
             }
             output
         }
+        SetNode::Join { left, right, spec } => {
+            // Preserve both complete source scopes and their failure order.
+            // A missing witness or LIMIT 0 never skips the right operand.
+            let left = run(left, source, meter, operand)?;
+            let right = run(right, source, meter, operand)?;
+            join::execute(spec, left, right, &mut |event| meter.event(event))?
+        }
         SetNode::Pattern(pattern) => {
             let at = *operand;
             *operand += 1;

@@ -17,6 +17,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 pub mod application;
+pub mod availability;
 pub mod driver;
 pub mod replica;
 

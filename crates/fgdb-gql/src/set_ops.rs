@@ -10,6 +10,7 @@ mod aggregate;
 mod execute;
 mod filter;
 mod incremental;
+mod join;
 mod merge;
 mod projection;
 pub use aggregate::PreparedGraphSetAggregate;
@@ -90,6 +91,8 @@ impl GraphSetColumnType {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphSetBuildError {
+    /// The complete left (0) or right (1) schema differs from the checked join.
+    JoinInputSchema { side: usize },
     TooManyOperands {
         limit: usize,
         observed: usize,
@@ -118,6 +121,9 @@ impl core::error::Error for GraphSetBuildError {}
 #[derive(Debug, PartialEq, Eq)]
 pub enum GraphSetExecutionError<E> {
     Source(E),
+    /// Native join refusal after source admission; control errors keep their
+    /// original outer GqlQueryError instead of being hidden inside this arm.
+    Join(crate::row_join::RowJoinError<core::convert::Infallible>),
     InputSchema {
         operand: usize,
     },
@@ -138,6 +144,7 @@ impl<E> GraphSetExecutionError<E> {
     pub fn map_source<T>(self, map: impl FnOnce(E) -> T) -> GraphSetExecutionError<T> {
         match self {
             Self::Source(source) => GraphSetExecutionError::Source(map(source)),
+            Self::Join(error) => GraphSetExecutionError::Join(error),
             Self::InputSchema { operand } => GraphSetExecutionError::InputSchema { operand },
             Self::InvalidSourceStatistics { operand } => {
                 GraphSetExecutionError::InvalidSourceStatistics { operand }
@@ -155,6 +162,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GraphSetExecutionError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Source(error) => error.fmt(f),
+            Self::Join(error) => error.fmt(f),
             Self::InputSchema { operand } => {
                 write!(f, "set operand {operand} returned an incompatible row")
             }
@@ -175,6 +183,7 @@ impl<E: core::error::Error + 'static> core::error::Error for GraphSetExecutionEr
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Source(error) => Some(error),
+            Self::Join(error) => Some(error),
             Self::Projection { error, .. } => Some(error),
             _ => None,
         }
@@ -194,6 +203,11 @@ enum SetNode {
     CrossJoin {
         left: Box<PreparedGraphSet>,
         right: Box<PreparedGraphSet>,
+    },
+    Join {
+        left: Box<PreparedGraphSet>,
+        right: Box<PreparedGraphSet>,
+        spec: crate::row_join::RowJoinSpec,
     },
     Scope(Box<PreparedGraphSet>),
     Filter {
@@ -369,7 +383,7 @@ impl PreparedGraphSet {
     fn preserves_row_order(&self) -> bool {
         match &self.node {
             SetNode::Values | SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
-            SetNode::Pattern(_) => false,
+            SetNode::Pattern(_) | SetNode::Join { .. } => false,
             SetNode::Scope(input)
             | SetNode::Project { input, .. }
             | SetNode::Filter { input, .. } => input.preserves_row_order(),
@@ -525,6 +539,12 @@ impl PreparedGraphSet {
                 bytes.push(7);
                 left.append_transcript(bytes);
                 right.append_transcript(bytes);
+            }
+            SetNode::Join { left, right, spec } => {
+                bytes.push(8);
+                left.append_transcript(bytes);
+                right.append_transcript(bytes);
+                join::append_transcript(spec, bytes);
             }
             SetNode::Binary {
                 operation,
