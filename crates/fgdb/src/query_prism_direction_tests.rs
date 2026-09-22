@@ -3,7 +3,7 @@
 //! for the production Chronicle -> Strata -> Prism path.
 
 use super::*;
-use fgdb_prism::{FnxGraphKind, SnapshotGraphView};
+use fgdb_prism::{FnxGraphKind, GraphView, SnapshotGraphView};
 
 const DIRECTIONS: [Directedness; 3] = [
     Directedness::Directed,
