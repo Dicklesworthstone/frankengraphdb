@@ -10,6 +10,7 @@
 //! selected path, including its real ordered edge identities.
 
 mod mutation;
+mod path;
 
 use super::*;
 use crate::algebra::{GraphMatchClause, GraphWalkSearch};
@@ -537,26 +538,14 @@ impl<'a> Parser<'a> {
         Ok(matches!(self.current.kind, TokenKind::Word(_))
             && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'=')))
     }
-    /// One positive-pattern parser, used at the root and in each scope. A
-    /// quantifier requires explicit WALK, TRAIL, ACYCLIC or SIMPLE semantics.
+    /// One positive-pattern parser, used at the root and in each scope. Both
+    /// relationship quantifier spellings retain the native path semantics.
     /// Restricted native patterns contain one finite atom; separate MATCH
     /// clauses keep separate restrictions. Definition-wide counters never reset.
     fn positive_pattern(&mut self) -> Result<(), GraphPatternTextError> {
         use crate::algebra::PatternLimitDimension;
         let selector_at = self.current.at;
-        let search = if self.take_word("ALL")? {
-            GraphWalkSearch::AllShortest
-        } else if self.take_word("ANY")? {
-            GraphWalkSearch::AnyShortest
-        } else if self.take_word("ACYCLIC")? {
-            GraphWalkSearch::Acyclic
-        } else if self.take_word("SIMPLE")? {
-            GraphWalkSearch::Simple
-        } else if self.take_word("TRAIL")? {
-            GraphWalkSearch::Trail
-        } else {
-            GraphWalkSearch::All
-        };
+        let search = self.path_search()?;
         let shortest = matches!(
             search,
             GraphWalkSearch::AllShortest | GraphWalkSearch::AnyShortest
@@ -566,12 +555,6 @@ impl<'a> Parser<'a> {
             GraphWalkSearch::Acyclic | GraphWalkSearch::Simple | GraphWalkSearch::Trail
         );
         let selected = shortest || restricted;
-        if shortest {
-            self.word("SHORTEST")?;
-            self.word("WALK")?;
-        } else if !restricted {
-            self.take_word("WALK")?;
-        }
         let expected_atom = if search == GraphWalkSearch::Trail {
             "one finite quantified TRAIL atom"
         } else if restricted {
@@ -608,6 +591,16 @@ impl<'a> Parser<'a> {
                 let relation = self.name()?;
                 let bound_at = self.current.at;
                 let walk = self.pattern_walk_bounds()?;
+                self.punct(b']', "]")?;
+                self.punct(b'-', "-")?;
+                let outgoing = self.take(b'>')?;
+                if incoming && outgoing {
+                    return Err(error(
+                        relation.at,
+                        GraphPatternTextErrorKind::Expected("one edge direction"),
+                    ));
+                }
+                let walk = self.relationship_walk_bounds(walk)?;
                 if selected && walk.is_none() {
                     return Err(error(
                         bound_at,
@@ -616,15 +609,6 @@ impl<'a> Parser<'a> {
                         } else {
                             "finite quantified atom in shortest WALK"
                         }),
-                    ));
-                }
-                self.punct(b']', "]")?;
-                self.punct(b'-', "-")?;
-                let outgoing = self.take(b'>')?;
-                if incoming && outgoing {
-                    return Err(error(
-                        relation.at,
-                        GraphPatternTextErrorKind::Expected("one edge direction"),
                     ));
                 }
                 let right = self.node()?;
