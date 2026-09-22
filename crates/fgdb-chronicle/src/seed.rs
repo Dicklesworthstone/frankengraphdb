@@ -8,9 +8,13 @@
 //! Verification, durable object ownership, root installation and serving/voting
 //! authority are deliberately four different events. This module supplies the
 //! middle two gates; it never grants configuration membership or read access.
+//! `ReplicaSeed::begin_pull` joins manifest-bound bonded ATP recovery directly
+//! to these publication gates without creating a second durability discipline.
 
+use crate::identity::{CryptoVerificationSink, EncodedObject};
 use crate::store::RootPublicationEvidence;
-use crate::transfer::VerifiedObject;
+use crate::symbolize::RecoveryTarget;
+use crate::transfer::{BondedPull, DonorId, PullError, PullLimits, PullRequest, SymbolAdmission, VerifiedObject};
 use fgdb_crypto::Digest;
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 use std::collections::BTreeMap;
@@ -312,6 +316,51 @@ impl ReplicaSeed {
         Ok(SeedPublicationId { session: Arc::clone(&self.session), serial, kind })
     }
 
+    /// Admit one inventory-bound bonded pull before emitting any ATP requests.
+    /// The exclusive borrow bounds this seed to one active object pull or object
+    /// publication. Donors run concurrently within that pull; their failures do
+    /// not discard authenticated symbols supplied by surviving streams.
+    ///
+    /// Descriptor/target/key material must come from the authenticated closure.
+    /// The transport must recheck donor authorization against this plan's exact
+    /// configuration and current writer fences; donor IDs are not certificates.
+    /// Hold the returned owner across cancellable I/O futures to resume progress.
+    pub fn begin_pull<'seed, 'data>(
+        &'seed mut self,
+        encoding: &'data EncodedObject,
+        target: RecoveryTarget<'data>,
+        dek: &'data [u8; 32],
+        donors: &[DonorId],
+        limits: PullLimits,
+    ) -> Result<SeedObjectPull<'seed, 'data>, SeedPullError> {
+        self.open()?;
+        if self.installing.is_some() {
+            return Err(SeedError::InstallPending.into());
+        }
+        if self.pending_object.is_some() {
+            return Err(SeedError::AwaitingObjectPublication.into());
+        }
+        if target.namespace != self.plan.anchor.namespace {
+            return Err(SeedError::WrongNamespace.into());
+        }
+        let oid = encoding.object_id();
+        if target.object_id != oid {
+            return Err(PullError::InvalidTarget.into());
+        }
+        let spec = self.plan.inventory.get(&oid.0).ok_or(SeedError::UnexpectedObject)?;
+        if self.published.contains_key(&oid.0) {
+            return Err(SeedError::AlreadyPublished.into());
+        }
+        if encoding.cipher_descriptor().object_kind != spec.object_kind {
+            return Err(SeedError::KindMismatch.into());
+        }
+        if encoding.cipher_descriptor().compressed_len != spec.compressed_len {
+            return Err(SeedError::LengthMismatch.into());
+        }
+        let pull = BondedPull::new(encoding, target, dek, donors, limits)?;
+        Ok(SeedObjectPull { seed: self, pull: Some(pull) })
+    }
+
     /// Stage one cryptographically verified object without marking it durable.
     /// Only one object is retained at a time, bounded by the admitted inventory.
     pub fn stage(&mut self, object: VerifiedObject) -> Result<ObjectPublication<'_>, SeedError> {
@@ -415,5 +464,136 @@ impl ReplicaSeed {
         if self.completion.is_none() {
             self.poisoned = true;
         }
+    }
+}
+
+/// Preserve the distinction between closure/publication failures and transport,
+/// authentication, decoding or per-object budget failures.
+#[derive(Debug)]
+pub enum SeedPullError {
+    Seed(SeedError),
+    Pull(PullError),
+}
+
+impl From<SeedError> for SeedPullError {
+    fn from(error: SeedError) -> Self {
+        Self::Seed(error)
+    }
+}
+
+impl From<PullError> for SeedPullError {
+    fn from(error: PullError) -> Self {
+        Self::Pull(error)
+    }
+}
+
+impl core::fmt::Display for SeedPullError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Seed(error) => core::fmt::Display::fmt(error, f),
+            Self::Pull(error) => core::fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl core::error::Error for SeedPullError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Seed(error) => Some(error),
+            Self::Pull(error) => Some(error),
+        }
+    }
+}
+
+/// One admitted object transfer joined to its seed's publication gate.
+///
+/// Keep this owner while driving its bounded requests over authenticated ATP.
+/// Once try_stage returns a publication, its bytes are owned by ReplicaSeed,
+/// not by this handle. Dropping a publication view or this handle cannot mark
+/// them durable or discard that pending publication. Decoder/wire buffers are
+/// released immediately at staging, before storage begins publishing the object.
+pub struct SeedObjectPull<'seed, 'data> {
+    seed: &'seed mut ReplicaSeed,
+    pull: Option<BondedPull<'data>>,
+}
+
+impl core::fmt::Debug for SeedObjectPull<'_, '_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SeedObjectPull")
+            .field("pull", &self.pull)
+            .field("awaiting_publication", &self.seed.pending_object.is_some())
+            .finish()
+    }
+}
+
+impl<'seed, 'data> SeedObjectPull<'seed, 'data> {
+    fn pulling(&mut self) -> Result<&mut BondedPull<'data>, SeedPullError> {
+        self.seed.open()?;
+        if self.seed.pending_object.is_some() {
+            return Err(SeedError::AwaitingObjectPublication.into());
+        }
+        self.pull.as_mut().ok_or_else(|| PullError::Closed.into())
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pull.as_ref().map_or(0, BondedPull::pending_count)
+    }
+
+    pub fn schedule(&mut self, maximum: usize) -> Result<Vec<PullRequest>, SeedPullError> {
+        Ok(self.pulling()?.schedule(maximum)?)
+    }
+
+    pub fn accept(
+        &mut self,
+        donor: DonorId,
+        bytes: &[u8],
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<SymbolAdmission, SeedPullError> {
+        Ok(self.pulling()?.accept(donor, bytes, verification)?)
+    }
+
+    pub fn expire(&mut self, request: PullRequest) -> Result<(), SeedPullError> {
+        Ok(self.pulling()?.expire(request)?)
+    }
+
+    pub fn donor_failed(&mut self, donor: DonorId) -> Result<(), SeedPullError> {
+        Ok(self.pulling()?.donor_failed(donor)?)
+    }
+
+    /// The caller must freshly validate this donor's fenced authorization;
+    /// restoring availability does not itself grant authority to serve bytes.
+    pub fn donor_available(&mut self, donor: DonorId) -> Result<(), SeedPullError> {
+        Ok(self.pulling()?.donor_available(donor)?)
+    }
+
+    /// Recover through the real symbol-MAC/FEC/AEAD/ObjectId verifier, then stage
+    /// exactly once. Repeated calls after staging return the same pending view,
+    /// without decoding again or advancing the durable inventory.
+    pub fn try_stage(
+        &mut self,
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<Option<ObjectPublication<'_>>, SeedPullError> {
+        self.seed.open()?;
+        if self.seed.pending_object.is_some() {
+            return Ok(Some(self.seed.pending_publication()?));
+        }
+        let Some(object) = self.pulling()?.try_recover(verification)? else {
+            return Ok(None);
+        };
+        self.pull = None;
+        Ok(Some(self.seed.stage(object)?))
+    }
+
+    /// Consume this pull after the runtime completes every required object
+    /// ownership/placement publication barrier. A stale ID leaves the seed's
+    /// pending publication intact for recovery through pending_publication.
+    pub fn object_published(self, id: SeedPublicationId) -> Result<ObjectId, SeedPullError> {
+        Ok(self.seed.object_published(id)?)
+    }
+
+    /// An unknown storage-publication outcome poisons the entire seed, not just
+    /// the transport attempt. Reopen the durable destination under its fence.
+    pub fn publication_failed(self) {
+        self.seed.publication_failed();
     }
 }
