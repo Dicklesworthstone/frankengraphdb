@@ -180,13 +180,14 @@ pub async fn recover<T: PullTransport>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fgdb_crypto::Digest;
     use fgdb_types::ObjectId;
 
     fn request(esi: u32) -> PullRequest {
         PullRequest {
             donor: DonorId(1),
             object_id: ObjectId([7; 32]),
-            encoding_id: Default::default(),
+            encoding_id: Digest([0; 32]),
             source_block: 0,
             esi,
         }
