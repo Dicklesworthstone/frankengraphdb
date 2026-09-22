@@ -16,6 +16,7 @@ mod output;
 mod projection;
 mod recursive;
 mod reduction;
+mod replay;
 mod sets;
 mod triangles;
 mod window;
@@ -118,6 +119,14 @@ pub enum StandingQueryError {
         after: CommitSeq,
         frontier: CommitSeq,
     },
+    /// The requested cut is outside a bounded replay sink's complete history.
+    /// No suffix is delivered as though it were the missing prefix.
+    ReplayGap {
+        after: CommitSeq,
+        retained_after: CommitSeq,
+        frontier: CommitSeq,
+    },
+    InvalidReplayLimits,
     Unavailable {
         frontier: CommitSeq,
         reason: StandingQueryFailure,
@@ -157,6 +166,11 @@ impl core::fmt::Display for StandingQueryError {
                 f,
                 "standing delta after {after:?} cannot reach {frontier:?} in one retained tick"
             ),
+            Self::ReplayGap { after, retained_after, frontier } => write!(
+                f,
+                "replay cut {after:?} is outside retained cuts {retained_after:?}..={frontier:?}"
+            ),
+            Self::InvalidReplayLimits => f.write_str("replay requires nonzero tick and payload limits"),
             Self::Unavailable { frontier, reason } => write!(
                 f,
                 "standing query unavailable after {frontier:?}: {reason:?}"
@@ -250,6 +264,8 @@ pub(crate) enum StandingQuery {
     Group(Box<group::State>),
     /// An immutable source-free relation, evaluated once at registration/rebuild.
     Constant(Box<constant::State>),
+    /// Derived final-output delivery history, not another result evaluator.
+    Replay(Box<replay::State>),
 }
 
 impl StandingQuery {
@@ -270,6 +286,7 @@ impl StandingQuery {
             Self::Window(query) => (query.policy, query.frontier, query.failure),
             Self::Group(query) => (query.policy, query.frontier, query.failure),
             Self::Constant(query) => (query.policy, query.frontier, query.failure),
+            Self::Replay(query) => (query.policy, query.frontier, query.failure),
         }
     }
 
@@ -299,6 +316,7 @@ impl StandingQuery {
             Self::Window(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Group(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
             Self::Constant(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
+            Self::Replay(query) => (&mut query.frontier, &mut query.failure, &mut query.stats),
         };
         match result {
             Ok(()) => *frontier = at,
@@ -524,6 +542,9 @@ impl<V: Vfs + Clone> Database<V> {
             .get(handle.index)
             .ok_or(StandingQueryError::UnknownHandle)?;
         let replacement = match current {
+            StandingQuery::Replay(query) => StandingQuery::Replay(Box::new(
+                self.prepare_standing_replay(cx, &query.source, query.limits, policy)?,
+            )),
             StandingQuery::Constant(query) => StandingQuery::Constant(Box::new(
                 self.prepare_standing_constant(cx, query.definition.clone(), policy)?,
             )),
@@ -678,6 +699,7 @@ impl<V: Vfs + Clone> Database<V> {
             | StandingQuery::Projection(_)
             | StandingQuery::Filter(_)
             | StandingQuery::Reduction(_)
+            | StandingQuery::Replay(_)
             | StandingQuery::Window(_) => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {
@@ -779,6 +801,7 @@ pub(crate) fn publish(queries: &mut [StandingQuery], cx: &CommitCx, batch: &Logi
             StandingQuery::Window(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Group(query) => query.maintain(batch, prior, &mut meter),
             StandingQuery::Constant(query) => query.maintain(batch, &mut meter),
+            StandingQuery::Replay(query) => query.maintain(batch, prior, &mut meter),
         };
         query.record(batch.commit_seq(), result, meter.stats);
     }

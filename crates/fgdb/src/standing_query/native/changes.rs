@@ -10,6 +10,38 @@ use fgdb_delta_types::LimbLimit;
 
 const LIMBS: LimbLimit = LimbLimit::new(4);
 
+impl StandingQuery {
+    /// Commit-hook projection shares the ordinary native delivery mapper.
+    /// The caller already checked this source's complete successor/failure.
+    /// An absent derivative denotes a baseline, never an unchanged tick.
+    pub(in crate::standing_query) fn native_delta_for_replay(
+        &self,
+        layout: &Layout,
+        meter: &mut Meter<'_>,
+    ) -> Result<ZSet<Vec<QueryValue>>, StandingQueryFailure> {
+        let width = layout.columns().len();
+        match layout {
+            Layout::Rows { .. } | Layout::Circuit { .. } => {
+                let rows = sets::delta(self)
+                    .ok_or(StandingQueryFailure::DependencyUnavailable)?;
+                collect_bag(rows, true, width, meter, row_cells)
+            }
+            Layout::Aggregate { slots, .. } | Layout::GroupCircuit { slots, .. } => {
+                let rows = match self {
+                    Self::Aggregate(query) | Self::ProjectedAggregate { source: query, .. } => {
+                        query.last_delta.as_ref()
+                    }
+                    Self::Group(query) => query.delta(),
+                    _ => None,
+                }.ok_or(StandingQueryFailure::DependencyUnavailable)?;
+                collect_bag(rows, true, width, meter, |row, meter| {
+                    aggregate_cells(row, slots, meter)
+                })
+            }
+        }
+    }
+}
+
 impl<V: Vfs + Clone> Database<V> {
     /// Copy the current selected native result as an exact compressed bag.
     /// Cell positions and types match standing_native_query; column names are
