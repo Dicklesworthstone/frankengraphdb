@@ -8,7 +8,7 @@ use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_prism::{
     Directedness, FnxCallSpec, FnxMemoryLimits, FnxParameters, FnxReadError, FnxReadOptions,
-    FnxReadResult, FnxSealedExecutionError, FnxSealedReadError, FnxSelection, FnxSourceLimits,
+    FnxReadResult, FnxSealedReadError, FnxSelection, FnxSourceLimits,
     ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits,
     ProjectionSpec, SealedGraphView, SealedProjectionError, SealedProjectionSpec, SelfLoopPolicy,
     SnapshotBinding, SnapshotGraphView,
@@ -16,6 +16,9 @@ use fgdb_prism::{
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::mem::size_of;
+
+#[cfg(test)]
+use fgdb_prism::FnxSealedExecutionError;
 
 type Error = FnxReadError<ReadError, Cancel>;
 type SealedReadError = FnxSealedReadError<ReadError, Cancel>;
@@ -61,7 +64,7 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
         cx.with_restriction_async(async {
             cx.checkpoint().map_err(Error::Cancelled)?;
-            supported_sealed_call(call)?;
+            supported_sealed_call(call, options.projection.directedness)?;
             let graph = self
                 .prism_sealed_projection_at(
                     cx,
@@ -98,7 +101,7 @@ impl<V: Vfs + Clone> Database<V> {
             cx.checkpoint().map_err(Error::Cancelled)?;
             let view = self.read_session().map_err(Error::Read)?;
             let as_of = as_of.unwrap_or(view.frontier());
-            view.check_sealed_request(cx, as_of, selection, spec)?;
+            view.check_sealed_request(cx, as_of, selection)?;
             // Refuse vertex admission before the potentially expensive seal.
             let mut control = source_control(cx, source_limits);
             let mut staging_bytes = 0usize;
@@ -192,7 +195,7 @@ impl EmbeddedReadView {
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Cancelled)?;
-            supported_sealed_call(call)?;
+            supported_sealed_call(call, options.projection.directedness)?;
             let graph = self.prism_sealed_projection_at(
                 cx,
                 partition,
@@ -225,7 +228,7 @@ impl EmbeddedReadView {
             cx.checkpoint().map_err(Error::Cancelled)?;
             self.snapshot.check_frontier(as_of).map_err(Error::Read)?;
             self.check_sealed_source(partition, as_of)?;
-            self.check_sealed_request(cx, as_of, selection, spec)?;
+            self.check_sealed_request(cx, as_of, selection)?;
             let mut control = source_control(cx, source_limits);
             let mut staging_bytes = 0usize;
             let vertices = self.select_prism_vertices(
@@ -256,15 +259,9 @@ impl EmbeddedReadView {
         cx: &QueryCx,
         as_of: CommitSeq,
         selection: FnxSelection,
-        spec: ProjectionSpec,
     ) -> Result<(), SealedReadError> {
         cx.checkpoint().map_err(Error::Cancelled)?;
         self.snapshot.check_frontier(as_of).map_err(Error::Read)?;
-        if spec.directedness != Directedness::Directed {
-            return Err(SealedReadError::Projection(
-                SealedProjectionError::UnsupportedDirectedness(spec.directedness),
-            ));
-        }
         if selection.relation.is_none() {
             return Err(SealedReadError::Projection(
                 SealedProjectionError::RelationRequired,
@@ -480,13 +477,8 @@ impl EmbeddedReadView {
     }
 }
 
-fn supported_sealed_call(call: &FnxCallSpec) -> Result<(), SealedReadError> {
-    if !call.supports_sealed_execution() {
-        return Err(SealedReadError::Execution(
-            FnxSealedExecutionError::UnsupportedAlgorithm(call.algorithm()),
-        ));
-    }
-    Ok(())
+fn supported_sealed_call(call: &FnxCallSpec, direction: Directedness) -> Result<(), SealedReadError> {
+    call.validate_sealed_projection(direction).map_err(SealedReadError::Execution)
 }
 
 fn finish_sealed_read(

@@ -4,6 +4,8 @@
 
 #[path = "query_prism_source_tests.rs"]
 mod source_admission;
+#[path = "query_prism_direction_tests.rs"]
+mod direction;
 
 use super::*;
 use crate::{DatabaseKeys, DatabaseState, MemVfs, WriteBatch};
@@ -721,10 +723,19 @@ fn host_sealing_projection_and_kernel_admissions_do_not_fall_back_to_decoded() {
                 SealedLimits::default()
             )
             .await,
-            Err(SealedReadError::Projection(
-                SealedProjectionError::UnsupportedDirectedness(_)
+            Err(SealedReadError::Execution(
+                FnxSealedExecutionError::Execution(FnxExecutionError::LimitExceeded {
+                    resource: "result rows", ..
+                })
             ))
         ));
+        opt.execution_limits.max_result_rows = 3;
+        assert_eq!(db.execute_fnx_sealed(&query, &dijkstra_call(), opt, memory(),
+            SealedLimits::default()).await.unwrap().analytics.rows, vec![
+                vec![FnxValue::Vertex(VId(1)), FnxValue::Float(0.0)],
+                vec![FnxValue::Vertex(VId(2)), FnxValue::Float(2.0)],
+                vec![FnxValue::Vertex(VId(3)), FnxValue::Float(2.0)],
+            ]);
         opt = options();
         opt.selection.relation = None;
         assert!(matches!(
