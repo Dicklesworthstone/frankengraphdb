@@ -18,6 +18,8 @@ use fgdb_types::ObjectId;
 
 use crate::replica::Replica;
 
+pub mod member;
+
 /// Internal Raft coordinates. These are not public logical-command positions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppliedPosition {
@@ -61,6 +63,14 @@ pub enum ApplicationStateError {
     SnapshotStateMismatch,
     VisibilityRegression,
     InvalidPublication,
+    PendingReadsAtAttach,
+    ReadBackpressure,
+    UnknownRead,
+    ReadHistoryMismatch,
+    LeadershipLost,
+    InvalidReadSnapshot,
+    CompactionNotVisible,
+    AllocationFailed,
 }
 
 impl core::fmt::Display for ApplicationStateError {
@@ -263,20 +273,26 @@ fn validate_progress<C>(
     if progress.applied.index < base || progress.visible_index < base {
         return Err(ApplicationStateError::SnapshotRequired);
     }
-    let term = if progress.applied.index == base {
-        state.snapshot().map_or(0, |cut| cut.term())
-    } else {
-        let offset = usize::try_from(progress.applied.index - base - 1)
-            .map_err(|_| ApplicationStateError::InvalidPosition)?;
-        state.entries().get(offset).ok_or(ApplicationStateError::InvalidPosition)?.term
-    };
-    if progress.applied.term != term { return Err(ApplicationStateError::InvalidPosition); }
+    if position_at(state, progress.applied.index) != Some(progress.applied) {
+        return Err(ApplicationStateError::InvalidPosition);
+    }
     if let Some(cut) = state.snapshot() {
         if progress.applied.index == base && progress.state_root.0 != cut.state_root() {
             return Err(ApplicationStateError::SnapshotStateMismatch);
         }
     }
     Ok(())
+}
+
+fn position_at<C>(state: &PersistentState<C>, index: u64) -> Option<AppliedPosition> {
+    let base = state.snapshot().map_or(0, |cut| cut.index());
+    let term = if index == base {
+        state.snapshot().map_or(0, |cut| cut.term())
+    } else {
+        let offset = usize::try_from(index.checked_sub(base)?.checked_sub(1)?).ok()?;
+        state.entries().get(offset)?.term
+    };
+    Some(AppliedPosition { index, term })
 }
 
 #[cfg(test)]
