@@ -282,7 +282,7 @@ fn persist_controlled(
     control()?;
     view.header(limits)?;
     let (mut file, temp) = create_stage(path, &mut || {
-        NEXT_STAGE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        NEXT_STAGE.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| invalid("checkpoint staging counter exhausted"))
     }, control)?;
     {
