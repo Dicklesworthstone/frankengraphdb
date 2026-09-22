@@ -153,6 +153,33 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 self.database.standing_queries.len(),
             )?;
             self.append(StandingQuery::Projection(Box::new(query)))
+        } else if let Some((left, right, spec, output)) =
+            query.incremental_selected_join_with_control(&mut |_| checkpoint())?
+        {
+            // Use the SAME complete children, but never retain their rejected
+            // Cartesian pairs. ON is part of the join definition from the
+            // first baseline through every committed tick and whole rebuild.
+            let left = self.compile(cx, left, policy, checkpoint)?;
+            let right = self.compile(cx, right, policy, checkpoint)?;
+            let state = self.database.prepare_standing_join_spec(
+                cx,
+                [left, right],
+                &spec,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            let input = self.append(StandingQuery::Join(Box::new(state)));
+            checkpoint()?;
+            // Internal join names are prefixed. Restore the original schema
+            // before any downstream filter/set/group sees the completed bag.
+            let state = self.database.prepare_standing_projection(
+                cx,
+                input,
+                output,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            self.append(StandingQuery::Projection(Box::new(state)))
         } else if let Some((input, predicate)) = query.incremental_filter() {
             // Keep the complete child scope upstream, including DISTINCT and
             // source paging. Identity projection preserves all native cells.
@@ -584,3 +611,6 @@ mod constant_tests;
 
 #[cfg(test)]
 mod join_tests;
+
+#[cfg(test)]
+mod selected_join_tests;

@@ -9,6 +9,8 @@
 use super::*;
 use crate::algebra::{IntegerComparison, MAX_PATTERN_PREDICATES};
 
+mod maintained;
+
 type Key = (usize, usize);
 
 fn equality(op: &GraphSetPredicateOp, width: usize, columns: Option<&[usize]>) -> Option<Key> {
