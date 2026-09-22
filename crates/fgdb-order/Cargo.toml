@@ -1,0 +1,9 @@
+[package]
+name = "fgdb-order"
+version = "0.0.1"
+edition.workspace = true
+description = "Aegis deterministic durability-gated Raft ordering kernel"
+publish = false
+
+[lints]
+workspace = true

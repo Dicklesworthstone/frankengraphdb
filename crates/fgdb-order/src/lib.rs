@@ -1,0 +1,953 @@
+//! Aegis's deterministic Raft transition kernel (plan §14.1).
+//!
+//! This crate performs no I/O and owns no threads, clocks, sockets, or codecs.
+//! A runtime supplies authenticated, configuration-bound messages and seeded
+//! election timeouts. Commands must already name validated, durably owned
+//! payload closures: consensus is NOT a payload-availability certificate.
+//!
+//! Every transition yields a [`Persistence`] view. If it requires a write,
+//! publish that exact state through Chronicle's immutable root closure and
+//! sync the root before calling [`Raft::persisted`]. Otherwise the existing
+//! published root already covers the transition. Only `persisted` releases
+//! messages and committed entries. An unknown/failed publication requires
+//! recovery; cancellation leaves the node blocked, never able to vote or
+//! reply from speculative state.
+//!
+//! These are in-process transition types, NOT an alternate durable/wire format.
+//! The Appendix A serializer, payload certificate verifier, root publisher,
+//! authenticated transport, and application state machine remain separate
+//! integration obligations. No database clustering capability is enabled here.
+
+#![forbid(unsafe_code)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+/// A member coordinate resolved inside the authenticated consensus domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MemberId(pub u128);
+
+/// Full digest of the canonical database/namespace/incarnation/role/group tuple.
+/// Supplied by the domain verifier, never inferred from a group number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Domain(pub [u8; 32]);
+
+/// A fixed stable configuration. Learners replicate but cannot vote or lead.
+/// A configuration digest is required even when the member lists are equal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Configuration {
+    domain: Domain,
+    identity: [u8; 32],
+    voters: BTreeSet<MemberId>,
+    learners: BTreeSet<MemberId>,
+}
+
+impl Configuration {
+    pub fn stable(
+        domain: Domain,
+        identity: [u8; 32],
+        voters: impl IntoIterator<Item = MemberId>,
+        learners: impl IntoIterator<Item = MemberId>,
+    ) -> Result<Self, Error> {
+        let mut voter_set = BTreeSet::new();
+        let mut learner_set = BTreeSet::new();
+        for member in voters {
+            if member.0 == 0 || voter_set.len() >= 1024 || !voter_set.insert(member) {
+                return Err(Error::InvalidConfiguration);
+            }
+        }
+        for member in learners {
+            if member.0 == 0
+                || voter_set.len() + learner_set.len() >= 1024
+                || voter_set.contains(&member)
+                || !learner_set.insert(member)
+            {
+                return Err(Error::InvalidConfiguration);
+            }
+        }
+        if voter_set.is_empty() {
+            return Err(Error::InvalidConfiguration);
+        }
+        Ok(Self {
+            domain,
+            identity,
+            voters: voter_set,
+            learners: learner_set,
+        })
+    }
+
+    pub fn voters(&self) -> &BTreeSet<MemberId> {
+        &self.voters
+    }
+
+    pub fn learners(&self) -> &BTreeSet<MemberId> {
+        &self.learners
+    }
+
+    pub fn domain(&self) -> Domain {
+        self.domain
+    }
+
+    pub fn identity(&self) -> [u8; 32] {
+        self.identity
+    }
+
+    fn members(&self) -> impl Iterator<Item = MemberId> + '_ {
+        self.voters.union(&self.learners).copied()
+    }
+
+    fn contains(&self, member: MemberId) -> bool {
+        self.voters.contains(&member) || self.learners.contains(&member)
+    }
+
+    fn quorum(&self, members: &BTreeSet<MemberId>) -> bool {
+        self.voters.intersection(members).count() > self.voters.len() / 2
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub max_log_entries: usize,
+    pub max_append_entries: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_log_entries: 65_536,
+            max_append_entries: 128,
+        }
+    }
+}
+
+/// A Raft no-op has no command and MUST NOT advance LogicalCommandSeq/CommitSeq.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry<C> {
+    pub term: u64,
+    pub command: Option<C>,
+}
+
+/// Logical contents to encode into the exact Appendix A root closure.
+/// Private fields prevent unchecked mutation of a live node's persistent state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistentState<C> {
+    configuration: Configuration,
+    term: u64,
+    voted_for: Option<MemberId>,
+    commit_index: u64,
+    entries: Vec<Entry<C>>,
+}
+
+impl<C> PersistentState<C> {
+    pub fn term(&self) -> u64 {
+        self.term
+    }
+
+    pub fn voted_for(&self) -> Option<MemberId> {
+        self.voted_for
+    }
+
+    pub fn commit_index(&self) -> u64 {
+        self.commit_index
+    }
+
+    pub fn entries(&self) -> &[Entry<C>] {
+        &self.entries
+    }
+
+    pub fn configuration(&self) -> &Configuration {
+        &self.configuration
+    }
+
+    /// Construct after the durable decoder has authenticated the entire closure.
+    /// Structural validation still occurs in [`Raft::recover`].
+    pub fn from_authenticated_parts(
+        configuration: Configuration,
+        term: u64,
+        voted_for: Option<MemberId>,
+        commit_index: u64,
+        entries: Vec<Entry<C>>,
+    ) -> Self {
+        Self {
+            configuration,
+            term,
+            voted_for,
+            commit_index,
+            entries,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Follower,
+    Candidate,
+    Leader,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Message<C> {
+    RequestVote {
+        term: u64,
+        last_index: u64,
+        last_term: u64,
+    },
+    Vote {
+        term: u64,
+        granted: bool,
+    },
+    Append {
+        term: u64,
+        request: u64,
+        prev_index: u64,
+        prev_term: u64,
+        entries: Vec<Entry<C>>,
+        leader_commit: u64,
+    },
+    Appended {
+        term: u64,
+        request: u64,
+        success: bool,
+        /// Advisory next-index hint; never authority for match_index.
+        conflict_next: u64,
+    },
+}
+
+impl<C> Message<C> {
+    fn term(&self) -> u64 {
+        match self {
+            Self::RequestVote { term, .. }
+            | Self::Vote { term, .. }
+            | Self::Append { term, .. }
+            | Self::Appended { term, .. } => *term,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Envelope<C> {
+    pub domain: Domain,
+    pub configuration: [u8; 32],
+    pub from: MemberId,
+    pub to: MemberId,
+    pub message: Message<C>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Event<C> {
+    ElectionTimeout,
+    Heartbeat,
+    Propose(C),
+    Receive(Envelope<C>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    InvalidConfiguration,
+    InvalidLimits,
+    InvalidRecoveryState,
+    WrongDomain,
+    WrongConfiguration,
+    WrongRecipient,
+    UnknownMember,
+    NotVoter,
+    NotLeader,
+    AwaitingDurability,
+    StalePersistence,
+    RecoveryRequired,
+    LogFull,
+    AppendTooLarge,
+    InvalidMessage,
+    CommittedConflict,
+    EntryIdentityConflict,
+    CounterExhausted,
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Aegis Raft: {self:?}")
+    }
+}
+
+impl core::error::Error for Error {}
+
+/// Publication generation bound to this exact machine incarnation.
+/// Retaining an old token retains its allocation, preventing address reuse from
+/// making a token valid after recovery. No clock, entropy, or global ID is used.
+#[derive(Clone, Debug)]
+pub struct PersistenceId {
+    incarnation: Arc<()>,
+    generation: u64,
+}
+
+impl PartialEq for PersistenceId {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && Arc::ptr_eq(&self.incarnation, &other.incarnation)
+    }
+}
+
+impl Eq for PersistenceId {}
+
+/// Contains no outbound messages or apply-ready commands.
+#[derive(Debug)]
+pub struct Persistence<'a, C> {
+    id: PersistenceId,
+    state: &'a PersistentState<C>,
+    requires_write: bool,
+}
+
+impl<C> Persistence<'_, C> {
+    pub fn id(&self) -> PersistenceId {
+        self.id.clone()
+    }
+
+    pub fn state(&self) -> &PersistentState<C> {
+        self.state
+    }
+
+    /// False means the existing published root already covers this transition.
+    /// Heartbeats, duplicate replies and volatile vote tallies need no new fsync.
+    pub fn requires_write(&self) -> bool {
+        self.requires_write
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Committed<C> {
+    pub index: u64,
+    pub entry: Entry<C>,
+}
+
+/// Released only after the corresponding root publication is acknowledged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Output<C> {
+    pub messages: Vec<Envelope<C>>,
+    pub committed: Vec<Committed<C>>,
+    /// A granted vote, campaign, or non-stale leader append resets the timer.
+    pub reset_election_timer: bool,
+    pub role: Role,
+    pub leader: Option<MemberId>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InFlight {
+    request: u64,
+    prev: u64,
+    last: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Progress {
+    matched: u64,
+    next: u64,
+    in_flight: Option<InFlight>,
+}
+
+/// One owned transition machine. Copying a live voter would duplicate voting
+/// authority, so there is no Clone implementation. Recovery must hold the
+/// runtime's exclusive writer fence and authenticate the published root.
+pub struct Raft<C> {
+    id: MemberId,
+    state: PersistentState<C>,
+    role: Role,
+    leader: Option<MemberId>,
+    votes: BTreeSet<MemberId>,
+    progress: BTreeMap<MemberId, Progress>,
+    limits: Limits,
+    generation: u64,
+    incarnation: Arc<()>,
+    initialized: bool,
+    log_changed: bool,
+    request: u64,
+    pending: Option<(PersistenceId, Output<C>)>,
+    poisoned: bool,
+}
+
+impl<C: Clone + Eq> Raft<C> {
+    pub fn new(id: MemberId, configuration: Configuration, limits: Limits) -> Result<Self, Error> {
+        let mut node = Self::recover(
+            id,
+            PersistentState::from_authenticated_parts(configuration, 0, None, 0, Vec::new()),
+            limits,
+        )?;
+        node.initialized = false;
+        Ok(node)
+    }
+
+    pub fn recover(id: MemberId, state: PersistentState<C>, limits: Limits) -> Result<Self, Error> {
+        if limits.max_log_entries == 0
+            || limits.max_append_entries == 0
+            || limits.max_append_entries > limits.max_log_entries
+        {
+            return Err(Error::InvalidLimits);
+        }
+        if !state.configuration.contains(id) {
+            return Err(Error::UnknownMember);
+        }
+        if state.entries.len() > limits.max_log_entries
+            || state.commit_index > state.entries.len() as u64
+            || (state.term == 0 && state.voted_for.is_some())
+            || state
+                .voted_for
+                .is_some_and(|member| !state.configuration.voters.contains(&member))
+        {
+            return Err(Error::InvalidRecoveryState);
+        }
+        let mut previous = 0;
+        for entry in &state.entries {
+            if entry.term == 0 || entry.term < previous || entry.term > state.term {
+                return Err(Error::InvalidRecoveryState);
+            }
+            previous = entry.term;
+        }
+        Ok(Self {
+            id,
+            state,
+            role: Role::Follower,
+            leader: None,
+            votes: BTreeSet::new(),
+            progress: BTreeMap::new(),
+            limits,
+            generation: 0,
+            incarnation: Arc::new(()),
+            initialized: true,
+            log_changed: false,
+            request: 0,
+            pending: None,
+            poisoned: false,
+        })
+    }
+
+    pub fn id(&self) -> MemberId {
+        self.id
+    }
+
+    /// No speculative state can be mistaken for the published recovery state.
+    pub fn durable_state(&self) -> Result<&PersistentState<C>, Error> {
+        self.available()?;
+        Ok(&self.state)
+    }
+
+    pub fn role(&self) -> Result<Role, Error> {
+        self.available()?;
+        Ok(self.role)
+    }
+
+    /// Replay is bounded by the durable committed prefix. The application owns
+    /// a durable applied cursor and applies entries idempotently.
+    pub fn committed_after(&self, applied: u64) -> Result<Vec<Committed<C>>, Error> {
+        self.available()?;
+        if applied > self.state.commit_index {
+            return Err(Error::InvalidRecoveryState);
+        }
+        Ok(self.committed_range(applied))
+    }
+
+    fn available(&self) -> Result<(), Error> {
+        if self.poisoned {
+            Err(Error::RecoveryRequired)
+        } else if self.pending.is_some() {
+            Err(Error::AwaitingDurability)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// A failed/unknown fsync is not a rollback. Reopen from the durable root.
+    pub fn publication_failed(&mut self) {
+        self.poisoned = true;
+    }
+
+    /// Evaluate one input. No other input can overtake its publication.
+    pub fn step(&mut self, event: Event<C>) -> Result<Persistence<'_, C>, Error> {
+        self.available()?;
+        self.validate_event(&event)?;
+        let generation = self.generation.checked_add(1).ok_or(Error::CounterExhausted)?;
+        let before = self.state.commit_index;
+        let old_hard = (self.state.term, self.state.voted_for, before);
+        self.log_changed = false;
+        let mut output = Output {
+            messages: Vec::new(),
+            committed: Vec::new(),
+            reset_election_timer: false,
+            role: self.role,
+            leader: self.leader,
+        };
+        // Unexpected exhaustion after an internal transition fails closed.
+        self.poisoned = true;
+        match event {
+            Event::ElectionTimeout => self.campaign(&mut output)?,
+            Event::Heartbeat => {
+                if self.role == Role::Leader {
+                    self.broadcast(&mut output)?;
+                }
+            }
+            Event::Propose(command) => {
+                self.log_changed = true;
+                self.state.entries.push(Entry {
+                    term: self.state.term,
+                    command: Some(command),
+                });
+                self.advance_commit();
+                self.broadcast(&mut output)?;
+            }
+            Event::Receive(envelope) => self.receive(envelope, &mut output)?,
+        }
+        output.committed = self.committed_range(before);
+        output.role = self.role;
+        output.leader = self.leader;
+        let requires_write = !self.initialized
+            || self.log_changed
+            || old_hard != (self.state.term, self.state.voted_for, self.state.commit_index);
+        let id = PersistenceId {
+            incarnation: Arc::clone(&self.incarnation),
+            generation,
+        };
+        self.generation = generation;
+        self.pending = Some((id.clone(), output));
+        self.poisoned = false;
+        Ok(Persistence {
+            id,
+            state: &self.state,
+            requires_write,
+        })
+    }
+
+    /// Call after the exact state from `step` has completed root publication,
+    /// or immediately when `requires_write` was false. Stale tokens cannot
+    /// release a later transition, another node, or a recovered incarnation.
+    pub fn persisted(&mut self, id: PersistenceId) -> Result<Output<C>, Error> {
+        if self.poisoned {
+            return Err(Error::RecoveryRequired);
+        }
+        match self.pending.as_ref() {
+            Some((expected, _)) if expected == &id => {}
+            _ => return Err(Error::StalePersistence),
+        }
+        let Some((_, output)) = self.pending.take() else {
+            return Err(Error::StalePersistence);
+        };
+        self.initialized = true;
+        Ok(output)
+    }
+
+    fn validate_event(&self, event: &Event<C>) -> Result<(), Error> {
+        match event {
+            Event::ElectionTimeout if !self.state.configuration.voters.contains(&self.id) => {
+                return Err(Error::NotVoter);
+            }
+            Event::Propose(_) => {
+                if self.role != Role::Leader {
+                    return Err(Error::NotLeader);
+                }
+                if self.state.entries.len() >= self.limits.max_log_entries {
+                    return Err(Error::LogFull);
+                }
+            }
+            Event::Receive(envelope) => {
+                if envelope.domain != self.state.configuration.domain {
+                    return Err(Error::WrongDomain);
+                }
+                if envelope.configuration != self.state.configuration.identity {
+                    return Err(Error::WrongConfiguration);
+                }
+                if envelope.to != self.id || envelope.from == self.id {
+                    return Err(Error::WrongRecipient);
+                }
+                if !self.state.configuration.contains(envelope.from) {
+                    return Err(Error::UnknownMember);
+                }
+                if !matches!(&envelope.message, Message::Appended { .. })
+                    && !self.state.configuration.voters.contains(&envelope.from)
+                {
+                    return Err(Error::NotVoter);
+                }
+                if envelope.message.term() == 0 {
+                    return Err(Error::InvalidMessage);
+                }
+                if let Message::Append {
+                    term,
+                    prev_index,
+                    prev_term,
+                    entries,
+                    ..
+                } = &envelope.message
+                {
+                    if entries.len() > self.limits.max_append_entries {
+                        return Err(Error::AppendTooLarge);
+                    }
+                    if (*prev_index == 0) != (*prev_term == 0) || prev_term > term {
+                        return Err(Error::InvalidMessage);
+                    }
+                    let last = prev_index
+                        .checked_add(entries.len() as u64)
+                        .ok_or(Error::InvalidMessage)?;
+                    if last > self.limits.max_log_entries as u64 {
+                        return Err(Error::LogFull);
+                    }
+                    let mut previous = *prev_term;
+                    for entry in entries {
+                        if entry.term == 0 || entry.term < previous || entry.term > *term {
+                            return Err(Error::InvalidMessage);
+                        }
+                        previous = entry.term;
+                    }
+                    if *term >= self.state.term && self.term_at(*prev_index) == Some(*prev_term) {
+                        for (offset, entry) in entries.iter().enumerate() {
+                            let index = *prev_index + offset as u64 + 1;
+                            if let Some(local) = self.entry_at(index) {
+                                if local.term != entry.term {
+                                    if index <= self.state.commit_index {
+                                        return Err(Error::CommittedConflict);
+                                    }
+                                    break;
+                                }
+                                if local.command != entry.command {
+                                    return Err(Error::EntryIdentityConflict);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Message::RequestVote {
+                    term,
+                    last_index,
+                    last_term,
+                } = &envelope.message
+                {
+                    if (*last_index == 0) != (*last_term == 0) || last_term > term {
+                        return Err(Error::InvalidMessage);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn last_index(&self) -> u64 {
+        self.state.entries.len() as u64
+    }
+
+    fn entry_at(&self, index: u64) -> Option<&Entry<C>> {
+        let position = usize::try_from(index.checked_sub(1)?).ok()?;
+        self.state.entries.get(position)
+    }
+
+    fn term_at(&self, index: u64) -> Option<u64> {
+        if index == 0 {
+            Some(0)
+        } else {
+            self.entry_at(index).map(|entry| entry.term)
+        }
+    }
+
+    fn last_term(&self) -> u64 {
+        self.state.entries.last().map_or(0, |entry| entry.term)
+    }
+
+    fn committed_range(&self, after: u64) -> Vec<Committed<C>> {
+        self.state.entries[after as usize..self.state.commit_index as usize]
+            .iter()
+            .enumerate()
+            .map(|(offset, entry)| Committed {
+                index: after + offset as u64 + 1,
+                entry: entry.clone(),
+            })
+            .collect()
+    }
+
+    fn emit(&self, to: MemberId, message: Message<C>, output: &mut Output<C>) {
+        output.messages.push(Envelope {
+            domain: self.state.configuration.domain,
+            configuration: self.state.configuration.identity,
+            from: self.id,
+            to,
+            message,
+        });
+    }
+
+    fn follow(&mut self, term: u64) {
+        if term > self.state.term {
+            self.state.term = term;
+            self.state.voted_for = None;
+        }
+        self.role = Role::Follower;
+        self.leader = None;
+        self.votes.clear();
+        self.progress.clear();
+    }
+
+    fn campaign(&mut self, output: &mut Output<C>) -> Result<(), Error> {
+        if self.role == Role::Leader {
+            return Ok(());
+        }
+        let term = self.state.term.checked_add(1).ok_or(Error::CounterExhausted)?;
+        self.follow(term);
+        self.role = Role::Candidate;
+        self.state.voted_for = Some(self.id);
+        self.votes.insert(self.id);
+        output.reset_election_timer = true;
+        if self.state.configuration.quorum(&self.votes) {
+            return self.become_leader(output);
+        }
+        for member in &self.state.configuration.voters {
+            if *member != self.id {
+                self.emit(
+                    *member,
+                    Message::RequestVote {
+                        term,
+                        last_index: self.last_index(),
+                        last_term: self.last_term(),
+                    },
+                    output,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn become_leader(&mut self, output: &mut Output<C>) -> Result<(), Error> {
+        self.role = Role::Leader;
+        self.leader = Some(self.id);
+        let next = self.last_index().checked_add(1).ok_or(Error::CounterExhausted)?;
+        for member in self.state.configuration.members() {
+            if member != self.id {
+                self.progress.insert(
+                    member,
+                    Progress {
+                        matched: 0,
+                        next,
+                        in_flight: None,
+                    },
+                );
+            }
+        }
+        // Current-term no-op commits inherited entries. At capacity, never
+        // commit an old term by replica counting; checkpointing must free space.
+        if self.state.entries.len() < self.limits.max_log_entries {
+            self.log_changed = true;
+            self.state.entries.push(Entry {
+                term: self.state.term,
+                command: None,
+            });
+        }
+        self.advance_commit();
+        self.broadcast(output)
+    }
+
+    fn advance_commit(&mut self) -> bool {
+        let mut matched: Vec<u64> = self
+            .state
+            .configuration
+            .voters
+            .iter()
+            .map(|member| {
+                if *member == self.id {
+                    self.last_index()
+                } else {
+                    self.progress.get(member).map_or(0, |progress| progress.matched)
+                }
+            })
+            .collect();
+        matched.sort_unstable();
+        let candidate = matched[(matched.len() - 1) / 2];
+        if candidate > self.state.commit_index && self.term_at(candidate) == Some(self.state.term) {
+            self.state.commit_index = candidate;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn broadcast(&mut self, output: &mut Output<C>) -> Result<(), Error> {
+        let peers: Vec<_> = self.progress.keys().copied().collect();
+        for peer in peers {
+            self.send_append(peer, output)?;
+        }
+        Ok(())
+    }
+
+    fn send_append(&mut self, peer: MemberId, output: &mut Output<C>) -> Result<(), Error> {
+        let Some(progress) = self.progress.get(&peer).copied() else {
+            return Ok(());
+        };
+        let flight = if let Some(flight) = progress.in_flight {
+            flight
+        } else {
+            self.request = self.request.checked_add(1).ok_or(Error::CounterExhausted)?;
+            let prev = progress.next - 1;
+            let last = self
+                .last_index()
+                .min(prev.saturating_add(self.limits.max_append_entries as u64));
+            InFlight {
+                request: self.request,
+                prev,
+                last,
+            }
+        };
+        let prev_term = self.term_at(flight.prev).ok_or(Error::InvalidRecoveryState)?;
+        let entries = self.state.entries[flight.prev as usize..flight.last as usize].to_vec();
+        if let Some(progress) = self.progress.get_mut(&peer) {
+            progress.in_flight = Some(flight);
+        }
+        self.emit(
+            peer,
+            Message::Append {
+                term: self.state.term,
+                request: flight.request,
+                prev_index: flight.prev,
+                prev_term,
+                entries,
+                leader_commit: self.state.commit_index,
+            },
+            output,
+        );
+        Ok(())
+    }
+
+    fn receive(&mut self, envelope: Envelope<C>, output: &mut Output<C>) -> Result<(), Error> {
+        let from = envelope.from;
+        let term = envelope.message.term();
+        if term > self.state.term {
+            self.follow(term);
+        }
+        match envelope.message {
+            Message::RequestVote {
+                last_index,
+                last_term,
+                ..
+            } => {
+                let granted = term == self.state.term
+                    && self.state.configuration.voters.contains(&self.id)
+                    && (self.state.voted_for.is_none() || self.state.voted_for == Some(from))
+                    && (last_term, last_index) >= (self.last_term(), self.last_index());
+                if granted {
+                    self.state.voted_for = Some(from);
+                    output.reset_election_timer = true;
+                }
+                self.emit(
+                    from,
+                    Message::Vote {
+                        term: self.state.term,
+                        granted,
+                    },
+                    output,
+                );
+            }
+            Message::Vote { granted, .. } => {
+                if term == self.state.term && self.role == Role::Candidate && granted {
+                    self.votes.insert(from);
+                    if self.state.configuration.quorum(&self.votes) {
+                        self.become_leader(output)?;
+                    }
+                }
+            }
+            Message::Append {
+                request,
+                prev_index,
+                prev_term,
+                entries,
+                leader_commit,
+                ..
+            } => {
+                if term < self.state.term {
+                    self.emit(
+                        from,
+                        Message::Appended {
+                            term: self.state.term,
+                            request,
+                            success: false,
+                            conflict_next: self.last_index() + 1,
+                        },
+                        output,
+                    );
+                    return Ok(());
+                }
+                self.follow(term);
+                self.leader = Some(from);
+                output.reset_election_timer = true;
+                if self.term_at(prev_index) != Some(prev_term) {
+                    let mut next = self.last_index().saturating_add(1).min(prev_index.max(1));
+                    if let Some(conflict_term) = self.term_at(prev_index) {
+                        while next > 1 && self.term_at(next - 1) == Some(conflict_term) {
+                            next -= 1;
+                        }
+                    }
+                    self.emit(
+                        from,
+                        Message::Appended {
+                            term,
+                            request,
+                            success: false,
+                            conflict_next: next,
+                        },
+                        output,
+                    );
+                    return Ok(());
+                }
+                let matched = prev_index + entries.len() as u64;
+                for (offset, entry) in entries.into_iter().enumerate() {
+                    let position = prev_index as usize + offset;
+                    if self.state.entries.get(position).is_some_and(|local| local.term != entry.term) {
+                        self.log_changed = true;
+                        self.state.entries.truncate(position);
+                    }
+                    if position == self.state.entries.len() {
+                        self.log_changed = true;
+                        self.state.entries.push(entry);
+                    }
+                }
+                // A short append proves only its prefix, not our divergent tail.
+                self.state.commit_index = self.state.commit_index.max(leader_commit.min(matched));
+                self.emit(
+                    from,
+                    Message::Appended {
+                        term,
+                        request,
+                        success: true,
+                        conflict_next: 0,
+                    },
+                    output,
+                );
+            }
+            Message::Appended {
+                request,
+                success,
+                conflict_next,
+                ..
+            } => {
+                if term != self.state.term || self.role != Role::Leader {
+                    return Ok(());
+                }
+                let Some(progress) = self.progress.get(&from).copied() else {
+                    return Ok(());
+                };
+                let Some(flight) = progress.in_flight.filter(|flight| flight.request == request) else {
+                    return Ok(());
+                };
+                if success {
+                    if let Some(progress) = self.progress.get_mut(&from) {
+                        progress.matched = progress.matched.max(flight.last);
+                        progress.next = progress.matched + 1;
+                        progress.in_flight = None;
+                    }
+                    if self.advance_commit() {
+                        self.broadcast(output)?;
+                    } else if flight.last < self.last_index() {
+                        self.send_append(from, output)?;
+                    }
+                } else {
+                    if let Some(progress) = self.progress.get_mut(&from) {
+                        let backoff = flight.prev.max(1);
+                        progress.next = conflict_next.max(1).min(backoff).max(progress.matched + 1);
+                        progress.in_flight = None;
+                    }
+                    self.send_append(from, output)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}

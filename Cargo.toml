@@ -24,6 +24,7 @@ members = [
     "crates/fgdb-delta-types",
     "crates/fgdb-evidence",
     "crates/fgdb-gql",
+    "crates/fgdb-order",
     "crates/fgdb-policy",
     "crates/fgdb-reference",
     "crates/fgdb-resource",
