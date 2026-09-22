@@ -5,12 +5,17 @@
 //! fence and authenticated closure pins throughout their futures. No alternate
 //! durable format, transport, executor, or membership authority is introduced.
 
+pub mod bonded;
+
 use std::future::Future;
 
+use fgdb_chronicle::identity::{CryptoVerificationSink, EncodedObject};
 use fgdb_chronicle::seed::{ObjectPublication, SeedError, SeedObjectSpec};
 use fgdb_chronicle::store::RootPublicationEvidence;
-use fgdb_chronicle::transfer::VerifiedObject;
+use fgdb_chronicle::symbolize::RecoveryTarget;
+use fgdb_chronicle::transfer::{BondedPull, DonorId, PullLimits, VerifiedObject};
 use fgdb_order::{Error as RaftError, Event, Output, PersistentState, Raft};
+use fgdb_types::DatabaseSecurityNamespaceId;
 
 use crate::{CatchupError, CatchupPhase, SnapshotCatchup, SnapshotPublication};
 
@@ -105,6 +110,92 @@ pub trait SeedObjectSource {
         &mut self,
         object: SeedObjectSpec,
     ) -> impl Future<Output = Result<VerifiedObject, Self::Error>>;
+}
+
+/// Borrowed verifier output for one pinned seed-closure object. This is not a
+/// wire descriptor or donor-supplied inventory. The catalog retains the actual
+/// key capability, authenticated descriptor chain and donor authorization.
+pub struct SeedRecovery<'a> {
+    pub encoding: &'a EncodedObject,
+    pub target: RecoveryTarget<'a>,
+    pub dek: &'a [u8; 32],
+    pub donors: &'a [DonorId],
+    pub limits: PullLimits,
+}
+
+pub trait SeedCatalog {
+    type Error;
+
+    fn recovery(&self, object: SeedObjectSpec) -> Result<SeedRecovery<'_>, Self::Error>;
+}
+
+#[derive(Debug)]
+pub enum SeedAcquireError<C, T> {
+    Catalog(C),
+    Pull(bonded::PullDriveError<T>),
+    WrongNamespace,
+    InvalidObject,
+}
+
+impl<C: core::fmt::Debug, T: core::fmt::Debug> core::fmt::Display for SeedAcquireError<C, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Aegis seed object recovery: {self:?}")
+    }
+}
+
+impl<C: core::fmt::Debug, T: core::fmt::Debug> core::error::Error for SeedAcquireError<C, T> {}
+
+/// Concrete bridge from a verifier's seed catalog to concurrent ATP recovery.
+/// No full object is requested until its namespace, logical identity, kind and
+/// length agree with the authenticated seed inventory. Publication remains the
+/// responsibility of SeedPublisher; decoding is never treated as durability.
+pub struct BondedSeedSource<'a, C, T> {
+    namespace: DatabaseSecurityNamespaceId,
+    catalog: &'a C,
+    transport: &'a mut T,
+    verification: &'a mut dyn CryptoVerificationSink,
+    maximum_window: usize,
+}
+
+impl<'a, C: SeedCatalog, T: bonded::PullTransport> BondedSeedSource<'a, C, T> {
+    pub fn new(
+        namespace: DatabaseSecurityNamespaceId,
+        catalog: &'a C,
+        transport: &'a mut T,
+        verification: &'a mut dyn CryptoVerificationSink,
+        maximum_window: usize,
+    ) -> Self {
+        Self { namespace, catalog, transport, verification, maximum_window }
+    }
+}
+
+impl<C: SeedCatalog, T: bonded::PullTransport> SeedObjectSource for BondedSeedSource<'_, C, T> {
+    type Error = SeedAcquireError<C::Error, T::Error>;
+
+    fn recover(
+        &mut self,
+        object: SeedObjectSpec,
+    ) -> impl Future<Output = Result<VerifiedObject, Self::Error>> {
+        async move {
+            let material = self.catalog.recovery(object).map_err(SeedAcquireError::Catalog)?;
+            if material.target.namespace != self.namespace {
+                return Err(SeedAcquireError::WrongNamespace);
+            }
+            if material.encoding.object_id() != object.object_id
+                || material.target.object_id != object.object_id
+                || material.encoding.cipher_descriptor().object_kind != object.object_kind
+                || material.encoding.cipher_descriptor().compressed_len != object.compressed_len
+            {
+                return Err(SeedAcquireError::InvalidObject);
+            }
+            let mut pull = BondedPull::new(
+                material.encoding, material.target, material.dek, material.donors, material.limits,
+            ).map_err(|error| SeedAcquireError::Pull(bonded::PullDriveError::Pull(error)))?;
+            bonded::recover(
+                &mut pull, self.transport, self.verification, self.maximum_window,
+            ).await.map_err(SeedAcquireError::Pull)
+        }
+    }
 }
 
 /// Chronicle publication capabilities held under the destination writer fence.
