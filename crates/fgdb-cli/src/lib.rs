@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod output;
+pub mod write;
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use fgdb_gql::{GqlParameterValue, GqlParameters, GqlScalarParameter, GraphSymbol, GraphSymbolKind,
@@ -23,22 +24,37 @@ pub const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 pub const HELP: &str = "fgdb — local-owner database CLI\n\
-Usage: fgdb <init|query|compact> --db DIR --keys-file FILE [OPTIONS]\n\
+Usage: fgdb <init|query|write|import-csv|compact> --db DIR --keys-file FILE [OPTIONS]\n\
        fgdb --help | --version\n\
 \n\
 Common options:\n\
   --format human|ndjson       Output format (default: human)\n\
   --max-output-bytes N        Complete response cap (default: 8388608)\n\
-Query options:\n\
-  --query-file FILE|-        Required UTF-8 statement; - reads stdin\n\
+Query/write/import options:\n\
+  --query-file FILE|-        Required UTF-8 statement/script; - reads stdin\n\
   --symbols-file FILE        Explicit kind<TAB>name<TAB>id catalog\n\
   --params-file FILE         Typed kind<TAB>name<TAB>value arguments\n\
   --max-rows N               Result row cap (default: 10000)\n\
   --max-work N               Native work and scratch-unit cap (default: 1000000)\n\
+Write/import options:\n\
+  --relation ID              Required explicit vertex-effect relation coordinate\n\
+  --max-changes N            Each of effects/new vertices/new edges (default: 10000)\n\
+  --max-statements N         Whole-program cap (default: 64; import maximum: 65536)\n\
+CSV import options:\n\
+  --csv-file FILE|-          Required CSV with exact parameter-name header\n\
+  --types-file FILE          Optional kind<TAB>name declarations; no value inference\n\
+  --max-input-bytes N        CSV source cap (default: 16777216; maximum: 67108864)\n\
+CSV types: int64, uint64, int (nullable), text, bool, null. Undeclared\n\
+parameters retain native numeric inference. Unquoted \\N is null, not empty text.\n\
+--params-file applies to query/write, not CSV. Only one input may use stdin.\n\
+Each write/import is ONE atomic native program, using engine-owned identities.\n\
+No per-row commits, implicit retries, or query-to-write fallback occur.\n\
 \n\
 The keys file is exactly 96 binary bytes: k_oid[32], namespace[32], dek[32].\n\
 On Unix it must be a regular file with no group/other permission bits.\n\
 query includes native EXPLAIN, but never performs writes or retries.\n\
+commit_outcome_unknown requires recovery; committed_needs_recovery is committed.\n\
+write_completed_output_failed means execution completed; do not blindly retry.\n\
 This binary does not connect to a network server or implement remote RBAC.\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +64,10 @@ pub enum Error {
     Keys,
     Database,
     Query,
+    Write,
+    CommitOutcomeUnknown,
+    CommittedNeedsRecovery,
+    WriteOutput,
     OutputLimit,
     Output,
     Context,
@@ -60,6 +80,10 @@ impl Error {
             Self::Keys => "keys_refused",
             Self::Database => "database_refused",
             Self::Query => "query_refused",
+            Self::Write => "write_failed",
+            Self::CommitOutcomeUnknown => "commit_outcome_unknown",
+            Self::CommittedNeedsRecovery => "committed_needs_recovery",
+            Self::WriteOutput => "write_completed_output_failed",
             Self::OutputLimit => "output_limit",
             Self::Output => "output_failed",
             Self::Context => "context_stopped",
@@ -68,8 +92,9 @@ impl Error {
     pub const fn exit_code(self) -> u8 {
         match self {
             Self::Usage | Self::Input | Self::Keys => 2,
-            Self::Query | Self::OutputLimit => 3,
-            Self::Database | Self::Output | Self::Context => 1,
+            Self::Query | Self::Write | Self::OutputLimit => 3,
+            Self::Database | Self::Output | Self::Context | Self::CommitOutcomeUnknown
+            | Self::CommittedNeedsRecovery | Self::WriteOutput => 1,
         }
     }
 }
@@ -81,7 +106,12 @@ impl core::fmt::Display for Error {
 impl core::error::Error for Error {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Command { Init, Query, Compact }
+pub enum Command { Init, Query, Write, ImportCsv, Compact }
+impl Command {
+    pub const fn is_write(self) -> bool {
+        matches!(self, Self::Write | Self::ImportCsv)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format { Human, Ndjson }
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +128,18 @@ pub struct Options {
     pub max_rows: u64,
     pub max_work: u64,
     pub max_output_bytes: usize,
+    pub write: Option<WriteOptions>,
+}
+
+/// Explicit local-owner write admission. These are not remote capabilities.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WriteOptions {
+    pub relation: RelationId,
+    pub csv_file: Option<PathBuf>,
+    pub types_file: Option<PathBuf>,
+    pub max_statements: usize,
+    pub max_input_bytes: usize,
+    pub max_changes: u64,
 }
 
 /// Parse bounded argv without displaying a path, statement or argument value.
@@ -107,7 +149,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Invocation, 
     let mut bytes = 0usize;
     for arg in args {
         bytes = bytes.checked_add(arg.len()).ok_or(Error::Usage)?;
-        if bytes > MAX_INPUT_BYTES || words.len() == 32 { return Err(Error::Usage); }
+        if bytes > MAX_INPUT_BYTES || words.len() == 64 { return Err(Error::Usage); }
         words.push(arg);
     }
     if words.as_slice() == ["--help"] { return Ok(Invocation::Help); }
@@ -115,6 +157,8 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Invocation, 
     let command = match words.first().map(String::as_str) {
         Some("init") => Command::Init,
         Some("query") => Command::Query,
+        Some("write") => Command::Write,
+        Some("import-csv") => Command::ImportCsv,
         Some("compact") => Command::Compact,
         _ => return Err(Error::Usage),
     };
@@ -123,7 +167,9 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Invocation, 
         if pair.len() != 2 || pair[1].is_empty() { return Err(Error::Usage); }
         let key = pair[0].as_str();
         if !matches!(key, "--db" | "--keys-file" | "--query-file" | "--symbols-file"
-            | "--params-file" | "--format" | "--max-rows" | "--max-work" | "--max-output-bytes")
+            | "--params-file" | "--format" | "--max-rows" | "--max-work" | "--max-output-bytes"
+            | "--relation" | "--csv-file" | "--types-file" | "--max-statements"
+            | "--max-input-bytes" | "--max-changes")
             || values.insert(key, pair[1].as_str()).is_some() {
             return Err(Error::Usage);
         }
@@ -138,17 +184,50 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Invocation, 
         "ndjson" => Format::Ndjson,
         _ => return Err(Error::Usage),
     };
-    if (command == Command::Query) != query_file.is_some()
-        || (command != Command::Query && (symbols_file.is_some() || params_file.is_some()
+    let has_statement = command == Command::Query || command.is_write();
+    if has_statement != query_file.is_some()
+        || (!has_statement && (symbols_file.is_some() || params_file.is_some()
             || values.contains_key("--max-rows") || values.contains_key("--max-work"))) {
         return Err(Error::Usage);
     }
+    let write = if command.is_write() {
+        let number = values.remove("--relation").ok_or(Error::Usage)?;
+        if !number.bytes().all(|b| b.is_ascii_digit()) { return Err(Error::Usage); }
+        let relation = RelationId(number.parse().map_err(|_| Error::Usage)?);
+        let csv_file = values.remove("--csv-file").map(PathBuf::from);
+        let types_file = values.remove("--types-file").map(PathBuf::from);
+        if (command == Command::ImportCsv) != csv_file.is_some()
+            || (command == Command::ImportCsv && params_file.is_some())
+            || (command == Command::Write && (types_file.is_some()
+                || values.contains_key("--max-input-bytes")))
+            || (query_file.as_deref() == Some(std::path::Path::new("-"))
+                && csv_file.as_deref() == Some(std::path::Path::new("-"))) {
+            return Err(Error::Usage);
+        }
+        let ceiling = if command == Command::ImportCsv {
+            fgdb_gql::PreparedGraphWriteScript::MAX_BATCH_STATEMENTS
+        } else {
+            fgdb_gql::MAX_GRAPH_MUTATION_STATEMENTS
+        };
+        let max_statements = bounded_number(values.remove("--max-statements"), 64, ceiling as u64)? as usize;
+        let max_input_bytes = bounded_number(values.remove("--max-input-bytes"),
+            16 * 1024 * 1024, fgdb_gql::csv_parameters::CsvParameterLimits::HARD.max_input_bytes as u64)? as usize;
+        let max_changes = bounded_number(values.remove("--max-changes"), 10_000, 1_000_000)?;
+        Some(WriteOptions { relation, csv_file, types_file, max_statements,
+            max_input_bytes, max_changes })
+    } else {
+        if ["--relation", "--csv-file", "--types-file", "--max-statements",
+            "--max-input-bytes", "--max-changes"].iter().any(|key| values.contains_key(key)) {
+            return Err(Error::Usage);
+        }
+        None
+    };
     let max_rows = bounded_number(values.remove("--max-rows"), 10_000, 1_000_000)?;
     let max_work = bounded_number(values.remove("--max-work"), 1_000_000, 100_000_000)?;
     let max_output_bytes = bounded_number(values.remove("--max-output-bytes"),
         8 * 1024 * 1024, MAX_OUTPUT_BYTES as u64)? as usize;
     Ok(Invocation::Run(Options { command, db, keys_file, query_file, symbols_file,
-        params_file, format, max_rows, max_work, max_output_bytes }))
+        params_file, format, max_rows, max_work, max_output_bytes, write }))
 }
 
 fn bounded_number(value: Option<&str>, default: u64, limit: u64) -> Result<u64, Error> {
@@ -293,5 +372,37 @@ mod tests {
             "int64\tx\t1\ntext\tx\tsecret", "text\tbad name\tx", "null\tx\tfalse"] {
             assert_eq!(parse_parameters(text).err().unwrap(), Error::Input);
         }
+    }
+
+    #[test]
+    fn write_and_import_options_require_explicit_unambiguous_inputs() {
+        for args in [
+            "write --db db --keys-file keys --query-file q",
+            "import-csv --db db --keys-file keys --query-file q --relation 1",
+            "import-csv --db db --keys-file keys --query-file - --csv-file - --relation 1",
+            "import-csv --db db --keys-file keys --query-file q --csv-file c --relation 1 --params-file p",
+            "write --db db --keys-file keys --query-file q --relation 1 --csv-file c",
+            "write --db db --keys-file keys --query-file q --relation 1 --types-file t",
+            "write --db db --keys-file keys --query-file q --relation 1 --max-input-bytes 100",
+            "query --db db --keys-file keys --query-file q --relation 1",
+            "init --db db --keys-file keys --max-changes 3",
+            "write --db db --keys-file keys --query-file q --relation -1",
+            "write --db db --keys-file keys --query-file q --relation 1 --relation 2",
+            "write --db db --keys-file keys --query-file q --relation 1 --max-statements 65",
+            "import-csv --db db --keys-file keys --query-file q --csv-file c --relation 1 --max-statements 65537",
+            "import-csv --db db --keys-file keys --query-file q --csv-file c --relation 1 --max-input-bytes 67108865",
+            "write --db db --keys-file keys --query-file q --relation 1 --max-changes 0",
+        ] {
+            assert_eq!(parse(args), Err(Error::Usage), "{args}");
+        }
+        let Invocation::Run(options) = parse("import-csv --db db --keys-file keys --query-file q --csv-file - --relation 7 --max-statements 65536").unwrap()
+            else { panic!("run") };
+        assert_eq!(options.command, Command::ImportCsv);
+        let write = options.write.unwrap();
+        assert_eq!(write.relation, RelationId(7));
+        assert_eq!(write.max_statements, 65_536);
+        assert_eq!(write.max_changes, 10_000);
+        assert_eq!(write.max_input_bytes, 16 * 1024 * 1024);
+        assert!(matches!(parse("write --db db --keys-file keys --query-file - --relation 1 --params-file p"), Ok(Invocation::Run(_))));
     }
 }
