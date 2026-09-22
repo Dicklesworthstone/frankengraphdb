@@ -293,16 +293,54 @@ impl<S: core::fmt::Debug, P: core::fmt::Debug> core::fmt::Display for SeedDriveE
 
 impl<S: core::fmt::Debug, P: core::fmt::Debug> core::error::Error for SeedDriveError<S, P> {}
 
+// A borrowed session outlives its future. Fence ambiguous root publication
+// here, rather than waiting for the caller to drop the session itself.
+struct CatchupGuard<'a, 'r, C: Clone + Eq> {
+    catchup: &'a mut SnapshotCatchup<'r, C>,
+}
+
+impl<C: Clone + Eq> Drop for CatchupGuard<'_, '_, C> {
+    fn drop(&mut self) {
+        if matches!(self.catchup.phase(), CatchupPhase::Publishing | CatchupPhase::Failed) {
+            self.catchup.publication_failed();
+        }
+    }
+}
+
 /// Transfer missing objects, durably publish them, and atomically install a cut.
 ///
-/// Only one object is staged at a time; bonded donors can run concurrently within
-/// that object's bounded pull. An already staged object is published rather than
-/// fetched again. The owned catch-up session is essential: cancelling during root
-/// publication drops it and fences the Raft member until recovery. Cancelling
-/// immutable object staging neither acknowledges an install nor grants authority.
-/// This function never promotes learners or opens a target for serving reads.
+/// This owns the session for callers that do not need to retain partial staging.
+/// Use `resume_snapshot` with a caller-owned session to retry transfer or object
+/// publication without discarding staged and already-published inventory objects.
+/// Neither entry point promotes learners or opens a target for serving reads.
 pub async fn install_snapshot<C, S, P>(
     mut catchup: SnapshotCatchup<'_, C>,
+    source: &mut S,
+    publisher: &mut P,
+) -> Result<Output<C>, SeedDriveError<S::Error, P::Error>>
+where
+    C: Clone + Eq,
+    S: SeedObjectSource,
+    P: SeedPublisher<C>,
+{
+    resume_snapshot(&mut catchup, source, publisher).await
+}
+
+/// Resume a caller-owned, pinned snapshot installation.
+///
+/// Transfer errors and cancellation during immutable object publication leave
+/// the session in Transferring. Retry this function on the SAME session: staged
+/// objects are republished without another ATP pull, and acknowledged objects
+/// are skipped. Keep the same BondedSeedSource to retain partial equations too.
+/// The object publisher must tolerate retrying the same publication identity.
+///
+/// Once atomic root publication starts, an error, panic or dropped future marks
+/// the session Failed and fences its Raft member immediately, even though the
+/// caller still owns the session. Such a session is never retryable: recover the
+/// authenticated destination root. Success releases only the installed-cut
+/// notification and consensus acknowledgement, not read or voting authority.
+pub async fn resume_snapshot<C, S, P>(
+    catchup: &mut SnapshotCatchup<'_, C>,
     source: &mut S,
     publisher: &mut P,
 ) -> Result<Output<C>, SeedDriveError<S::Error, P::Error>>
@@ -314,35 +352,31 @@ where
     if catchup.phase() != CatchupPhase::Transferring {
         return Err(SeedDriveError::Catchup(CatchupError::WrongPhase));
     }
+    let guard = CatchupGuard { catchup };
     loop {
-        match catchup.pending_object() {
+        match guard.catchup.pending_object() {
             Ok(publication) => {
                 let id = publication.id();
                 publisher
                     .publish_object(publication)
                     .await
                     .map_err(SeedDriveError::Publication)?;
-                catchup.object_published(id).map_err(SeedDriveError::Catchup)?;
+                guard.catchup.object_published(id).map_err(SeedDriveError::Catchup)?;
                 continue;
             }
             Err(CatchupError::Seed(SeedError::StalePublication)) => {}
             Err(error) => return Err(SeedDriveError::Catchup(error)),
         }
-        let missing = catchup.missing_objects().next().copied();
+        let missing = guard.catchup.missing_objects().next().copied();
         let Some(spec) = missing else { break };
         let object = source.recover(spec).await.map_err(SeedDriveError::Source)?;
-        catchup.stage(object).map_err(SeedDriveError::Catchup)?;
+        guard.catchup.stage(object).map_err(SeedDriveError::Catchup)?;
     }
-    let publication = catchup.begin_publication().map_err(SeedDriveError::Catchup)?;
+    let publication = guard.catchup.begin_publication().map_err(SeedDriveError::Catchup)?;
     let id = publication.id();
-    let evidence = match publisher.publish_snapshot(publication).await {
-        Ok(evidence) => evidence,
-        Err(error) => {
-            catchup.publication_failed();
-            return Err(SeedDriveError::Publication(error));
-        }
-    };
-    catchup.published(id, &evidence).map_err(SeedDriveError::Catchup)
+    let evidence = publisher.publish_snapshot(publication).await
+        .map_err(SeedDriveError::Publication)?;
+    guard.catchup.published(id, &evidence).map_err(SeedDriveError::Catchup)
 }
 
 #[cfg(test)]
