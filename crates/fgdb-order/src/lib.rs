@@ -4,6 +4,9 @@
 //! A runtime supplies authenticated, configuration-bound messages and seeded
 //! election timeouts. Commands must already name validated, durably owned
 //! payload closures: consensus is NOT a payload-availability certificate.
+//! Autonomous election deadlines use [`Event::LivenessTimeout`]'s pre-vote;
+//! [`Event::ElectionTimeout`] remains the explicit unconditional campaign input.
+//! Neither suspicion nor pre-votes change configuration or grant read authority.
 //!
 //! Every transition yields a [`Persistence`] view. If it requires a write,
 //! publish that exact state through Chronicle's immutable root closure and
@@ -31,6 +34,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+mod liveness;
 
 /// A member coordinate resolved inside the authenticated consensus domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -362,12 +367,28 @@ impl<C> PersistentState<C> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     Follower,
+    /// Volatile quorum discovery; no term or durable vote has changed yet.
+    PreCandidate,
     Candidate,
     Leader,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message<C> {
+    /// Prospective terms are not evidence that a higher actual term exists.
+    PreVoteRequest {
+        prospective_term: u64,
+        round: u64,
+        last_index: u64,
+        last_term: u64,
+    },
+    /// `term` is the responder's ACTUAL term, which may still be zero.
+    PreVoteReply {
+        term: u64,
+        prospective_term: u64,
+        round: u64,
+        granted: bool,
+    },
     RequestVote {
         term: u64,
         last_index: u64,
@@ -408,7 +429,10 @@ pub enum Message<C> {
 impl<C> Message<C> {
     fn term(&self) -> u64 {
         match self {
-            Self::RequestVote { term, .. }
+            // Never follow a term that a pre-candidate has not entered.
+            Self::PreVoteRequest { .. } => 0,
+            Self::PreVoteReply { term, .. }
+            | Self::RequestVote { term, .. }
             | Self::Vote { term, .. }
             | Self::Append { term, .. }
             | Self::Appended { term, .. }
@@ -429,7 +453,13 @@ pub struct Envelope<C> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event<C> {
+    /// Direct, unconditional campaign. Intended for explicitly coordinated
+    /// elections and protocol tests; autonomous actors use LivenessTimeout.
     ElectionTimeout,
+    /// The runtime's seeded election deadline expired without a leader reset.
+    /// Discover a voter quorum before incrementing the term. Pre-vote traffic
+    /// itself never refreshes a receiver's election deadline.
+    LivenessTimeout,
     Heartbeat,
     Propose(C),
     Receive(Envelope<C>),
@@ -611,6 +641,7 @@ pub struct Raft<C> {
     incoming_snapshot: Option<IncomingSnapshot>,
     pending: Option<(PersistenceId, Output<C>)>,
     poisoned: bool,
+    liveness: liveness::LivenessState,
 }
 
 impl<C: Clone + Eq> Raft<C> {
@@ -677,6 +708,7 @@ impl<C: Clone + Eq> Raft<C> {
             incoming_snapshot: None,
             pending: None,
             poisoned: false,
+            liveness: liveness::LivenessState::default(),
         })
     }
 
@@ -754,6 +786,7 @@ impl<C: Clone + Eq> Raft<C> {
         self.generation = generation;
         match event {
             Event::ElectionTimeout => self.campaign(&mut output)?,
+            Event::LivenessTimeout => self.pre_campaign(&mut output)?,
             Event::Heartbeat => {
                 if self.role == Role::Leader {
                     self.broadcast(&mut output)?;
@@ -838,8 +871,12 @@ impl<C: Clone + Eq> Raft<C> {
 
     fn validate_event(&self, event: &Event<C>) -> Result<(), Error> {
         match event {
-            Event::ElectionTimeout if !self.state.configuration.voters.contains(&self.id) => {
+            Event::ElectionTimeout | Event::LivenessTimeout
+                if !self.state.configuration.voters.contains(&self.id) => {
                 return Err(Error::NotVoter);
+            }
+            Event::LivenessTimeout if self.role != Role::Leader && self.state.term == u64::MAX => {
+                return Err(Error::CounterExhausted);
             }
             Event::Propose(_) => {
                 if self.role != Role::Leader {
@@ -891,9 +928,13 @@ impl<C: Clone + Eq> Raft<C> {
                 {
                     return Err(Error::NotVoter);
                 }
-                if envelope.message.term() == 0 {
+                if envelope.message.term() == 0 && !matches!(
+                    &envelope.message,
+                    Message::PreVoteRequest { .. } | Message::PreVoteReply { .. }
+                ) {
                     return Err(Error::InvalidMessage);
                 }
+                liveness::validate(&envelope.message)?;
                 match &envelope.message {
                     Message::Append {
                         term,
@@ -1046,6 +1087,7 @@ impl<C: Clone + Eq> Raft<C> {
         self.leader = None;
         self.votes.clear();
         self.progress.clear();
+        self.liveness.reset();
     }
 
     fn accept_leader(&mut self, from: MemberId, term: u64, output: &mut Output<C>) {
@@ -1344,6 +1386,12 @@ impl<C: Clone + Eq> Raft<C> {
             self.follow(term);
         }
         match envelope.message {
+            Message::PreVoteRequest { prospective_term, round, last_index, last_term } => {
+                self.pre_vote_request(from, prospective_term, round, last_index, last_term, output);
+            }
+            Message::PreVoteReply { prospective_term, round, granted, .. } => {
+                self.pre_vote_reply(from, prospective_term, round, granted, output)?;
+            }
             Message::RequestVote {
                 last_index,
                 last_term,
@@ -1354,6 +1402,9 @@ impl<C: Clone + Eq> Raft<C> {
                     && (self.state.voted_for.is_none() || self.state.voted_for == Some(from))
                     && (last_term, last_index) >= (self.last_term(), self.last_index());
                 if granted {
+                    if self.role == Role::PreCandidate {
+                        self.follow(term);
+                    }
                     self.state.voted_for = Some(from);
                     output.reset_election_timer = true;
                 }
