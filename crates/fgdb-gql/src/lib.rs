@@ -19,6 +19,7 @@ mod evidence_artifact;
 mod evidence_cursor;
 mod evidence_limits;
 mod evidence_page;
+pub mod free_join;
 mod graph_text;
 pub mod insertion;
 mod insertion_text;
