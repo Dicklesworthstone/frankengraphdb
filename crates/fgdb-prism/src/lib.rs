@@ -22,6 +22,7 @@
 
 mod call;
 mod execute;
+mod input;
 mod projection;
 
 pub use call::{
@@ -33,6 +34,10 @@ pub use call::{
 pub use execute::{
     ComplexityWitness, FnxCertificate, FnxExecutionError, FnxExecutionLimits,
     FnxResult, FnxValue,
+};
+pub use input::{
+    FnxReadError, FnxReadOptions, FnxReadResult, FnxSelection, FnxSourceLimits,
+    FnxWeightError, FnxWeightSpec, MissingWeightPolicy,
 };
 
 pub use fnx_algorithms::GraphView;

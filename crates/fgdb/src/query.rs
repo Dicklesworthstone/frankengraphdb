@@ -16,6 +16,8 @@ mod aggregate_stream;
 mod diff;
 #[path = "query_explain.rs"]
 mod explain;
+#[path = "query_prism.rs"]
+mod prism;
 #[path = "query_view.rs"]
 mod view;
 pub use crate::gql_cert::NativeResultCertificate;

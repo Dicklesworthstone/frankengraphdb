@@ -17,5 +17,9 @@ fgdb-delta-types = { path = "../fgdb-delta-types" }
 # executor consumes the BoundPlan only, so no parse-tree type crosses into
 # the execute path.
 fgdb-gql = { path = "../fgdb-gql" }
+fgdb-prism = { path = "../fgdb-prism" }
 fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }
+
+[dev-dependencies]
+fgdb-types = { path = "../fgdb-types", features = ["simulation-checkpoints"] }
