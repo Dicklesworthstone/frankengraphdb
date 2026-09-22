@@ -41,30 +41,54 @@ pub struct MemberId(pub u128);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Domain(pub [u8; 32]);
 
-/// A fixed stable configuration. Learners replicate but cannot vote or lead.
+/// A verified stable or joint configuration. Learners cannot vote or lead.
+/// A joint configuration requires separate majorities of its old and new
+/// voter sets. Their union is for routing, never a replacement quorum rule.
 /// A configuration digest is required even when the member lists are equal.
+///
+/// This is one fixed, authenticated configuration per machine incarnation.
+/// Constructing a different configuration does not authorize a live membership
+/// change: the ordered transition, payload floor and retirement protocol must
+/// first publish it as the authoritative configuration before recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Configuration {
     domain: Domain,
     identity: [u8; 32],
     voters: BTreeSet<MemberId>,
     learners: BTreeSet<MemberId>,
+    joint: Option<JointVoters>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JointVoters {
+    old: BTreeSet<MemberId>,
+    new: BTreeSet<MemberId>,
 }
 
 impl Configuration {
+    fn collect_voters(
+        voters: impl IntoIterator<Item = MemberId>,
+    ) -> Result<BTreeSet<MemberId>, Error> {
+        let mut members = BTreeSet::new();
+        for member in voters {
+            if member.0 == 0 || members.len() >= 1024 || !members.insert(member) {
+                return Err(Error::InvalidConfiguration);
+            }
+        }
+        if members.is_empty() {
+            return Err(Error::InvalidConfiguration);
+        }
+        Ok(members)
+    }
+
     pub fn stable(
         domain: Domain,
         identity: [u8; 32],
         voters: impl IntoIterator<Item = MemberId>,
         learners: impl IntoIterator<Item = MemberId>,
     ) -> Result<Self, Error> {
-        let mut voter_set = BTreeSet::new();
+        let voter_set = Self::collect_voters(voters)?;
         let mut learner_set = BTreeSet::new();
-        for member in voters {
-            if member.0 == 0 || voter_set.len() >= 1024 || !voter_set.insert(member) {
-                return Err(Error::InvalidConfiguration);
-            }
-        }
         for member in learners {
             if member.0 == 0
                 || voter_set.len() + learner_set.len() >= 1024
@@ -74,23 +98,45 @@ impl Configuration {
                 return Err(Error::InvalidConfiguration);
             }
         }
-        if voter_set.is_empty() {
-            return Err(Error::InvalidConfiguration);
-        }
         Ok(Self {
             domain,
             identity,
             voters: voter_set,
             learners: learner_set,
+            joint: None,
         })
     }
 
+    /// Construct from the exact authenticated joint configuration. Overlap
+    /// between old/new voters is legal and counts once within each group;
+    /// duplicates inside a group or overlap with learners are invalid.
+    /// The limit of 1024 applies to the unique union including learners.
+    pub fn joint(
+        domain: Domain,
+        identity: [u8; 32],
+        old_voters: impl IntoIterator<Item = MemberId>,
+        new_voters: impl IntoIterator<Item = MemberId>,
+        learners: impl IntoIterator<Item = MemberId>,
+    ) -> Result<Self, Error> {
+        let old = Self::collect_voters(old_voters)?;
+        let new = Self::collect_voters(new_voters)?;
+        let mut configuration = Self::stable(domain, identity, old.union(&new).copied(), learners)?;
+        configuration.joint = Some(JointVoters { old, new });
+        Ok(configuration)
+    }
+
+    /// Routing/election-candidate universe, NOT a pooled joint quorum.
     pub fn voters(&self) -> &BTreeSet<MemberId> {
         &self.voters
     }
 
     pub fn learners(&self) -> &BTreeSet<MemberId> {
         &self.learners
+    }
+
+    /// The exact independent voter groups, or None for a stable configuration.
+    pub fn joint_voters(&self) -> Option<(&BTreeSet<MemberId>, &BTreeSet<MemberId>)> {
+        self.joint.as_ref().map(|joint| (&joint.old, &joint.new))
     }
 
     pub fn domain(&self) -> Domain {
@@ -110,7 +156,27 @@ impl Configuration {
     }
 
     fn quorum(&self, members: &BTreeSet<MemberId>) -> bool {
-        self.voters.intersection(members).count() > self.voters.len() / 2
+        let majority = |voters: &BTreeSet<MemberId>| {
+            voters.intersection(members).count() > voters.len() / 2
+        };
+        match &self.joint {
+            None => majority(&self.voters),
+            Some(joint) => majority(&joint.old) && majority(&joint.new),
+        }
+    }
+
+    fn quorum_index(&self, matched: impl Fn(MemberId) -> u64) -> u64 {
+        let majority_index = |voters: &BTreeSet<MemberId>| {
+            // Every admitted group is nonempty. Select the strict-majority
+            // order statistic without sorting the entire membership vector.
+            let mut indices: Vec<_> = voters.iter().copied().map(&matched).collect();
+            let rank = (indices.len() - 1) / 2;
+            *indices.select_nth_unstable(rank).1
+        };
+        match &self.joint {
+            None => majority_index(&self.voters),
+            Some(joint) => majority_index(&joint.old).min(majority_index(&joint.new)),
+        }
     }
 }
 
@@ -1013,21 +1079,13 @@ impl<C: Clone + Eq> Raft<C> {
     }
 
     fn advance_commit(&mut self) -> bool {
-        let mut matched: Vec<u64> = self
-            .state
-            .configuration
-            .voters
-            .iter()
-            .map(|member| {
-                if *member == self.id {
-                    self.last_index()
-                } else {
-                    self.progress.get(member).map_or(0, |progress| progress.matched)
-                }
-            })
-            .collect();
-        matched.sort_unstable();
-        let candidate = matched[(matched.len() - 1) / 2];
+        let candidate = self.state.configuration.quorum_index(|member| {
+            if member == self.id {
+                self.last_index()
+            } else {
+                self.progress.get(&member).map_or(0, |progress| progress.matched)
+            }
+        });
         if candidate > self.state.commit_index && self.term_at(candidate) == Some(self.state.term) {
             self.state.commit_index = candidate;
             true
@@ -1311,3 +1369,6 @@ impl<C: Clone + Eq> Raft<C> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod quorum_tests;

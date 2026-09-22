@@ -3,11 +3,19 @@
 Workstream: `fgdb-w11-raft-multi-aqw`; plan §14.1.
 
 This is the deterministic transition layer of `fgdb-order`, not a second
-storage engine. It implements fixed-configuration Raft elections, bounded
-AppendEntries replication, conflicting-suffix reconciliation, learner
-replication, current-term quorum commitment and committed-prefix replay.
-Quorum one uses the same implementation. Commands should be bounded canonical
-command references, not unbounded payload byte vectors.
+storage engine. It implements stable and joint-configuration elections,
+bounded AppendEntries replication, conflicting-suffix reconciliation, learner
+replication, current-term quorum commitment, snapshot catch-up, bounded log
+compaction and absolute-index committed-prefix replay. Quorum one uses the
+same implementation. Commands should be bounded canonical references, not
+unbounded payload byte vectors.
+
+Joint configurations keep old and new voter sets separately. Elections require
+both majorities, and commitment uses the lower of their independent majority
+match indexes, still subject to the current-term rule. The union is only the
+routing/candidate universe. Learners never count toward either majority.
+This supports a fixed authenticated joint configuration, not the live ordered
+membership-transition/payload-floor/retirement ladder.
 
 ## Integration contract
 
@@ -28,23 +36,40 @@ command references, not unbounded payload byte vectors.
    lost. A dropped persistence view leaves the machine blocked. Tokens cannot
    cross nodes, generations, or recovered machine incarnations.
 
-The deterministic test driver models published disk state separately and checks
-committed-prefix agreement after every delivered input. It exercises one,
-three and five voters, learners, partitions, leader replacement, stale and
-malformed messages, duplicate votes and replies, failed/cancelled publication,
-recovery, bounded append batches, and seeded loss/reordering/duplication.
+An `InstallSnapshot` message is only an offer. Its persisted output requests an
+exact `SnapshotTransfer`; the runtime must acquire, authenticate and durably own
+that complete closure before submitting its `SnapshotReady` token. Publication
+of the resulting persistence view must atomically install the application cut
+and Raft state before releasing a successful response. Chronicle's manifest-
+bound `ReplicaSeed::begin_pull` joins bonded object recovery to the object/root
+publication gates, but wiring those gates to the Raft runtime remains explicit.
+
+`Compact` requires the generated state-at-cut proof, locally applied/audit-visible
+position and complete retention floor. A committed index is not enough. Recovery
+uses the installed snapshot plus the retained suffix; replay below that cut
+returns `SnapshotRequired`, never incomplete history. Neither snapshots nor
+compaction grant membership, read access or permission to retire obligations.
+
+The deterministic tests exercise ordinary and joint groups, partitions, stale
+votes/replies, learner exclusion, donor/installation failure boundaries,
+snapshot transfer cancellation, absolute-index bounds and crash/restart. The
+private quorum tests enumerate 30,752 vote subsets and 18,225 match vectors
+against independent counting oracles. Snapshot and joint integration drivers
+check publication before output and committed-prefix agreement.
 
 ## Deliberate capability boundary
 
 The kernel alone does not enable database clustering. Exact Appendix A durable
-codecs/root publication, signed payload certificates, the asupersync runtime and
-transport driver, snapshot/retention-floor installation, joint reconfiguration,
-linearizable read/audit visibility contracts and database apply integration are
-not supplied by this increment. No alternate on-disk or wire format is minted.
-The full W11 bead remains open until its integration and fault gates pass.
+codecs/root publication, signed payload certificates, the authenticated
+asupersync ATP/Raft runtime driver, live membership changes, linearizable
+read/audit visibility contracts and database apply integration remain required.
+No alternate on-disk or wire format is minted. The full W11 bead remains open
+until its integration and fault gates pass.
 
-Verification at authoring: Rust tests, rustfmt, clippy, UBS and the full local
-proof gate were **UNRUN**, because the editing environment had no Rust toolchain
-or repository checkout and could not reach the dependency hosts. This note is
-not a passing verdict. Run `cargo test -p fgdb-order`, then the repository's
-normal exact-tree proof workflow in the configured build environment.
+Verification at authoring: the independent Python quorum arithmetic model
+passed 48,977 cases; this is not execution of the Rust implementation. Rust
+compilation/tests, rustfmt, clippy, UBS and the full local proof gate were
+**UNRUN**, because this editing environment has no Rust toolchain or complete
+checkout and cannot reach dependency hosts. Run `cargo test -p fgdb-order`,
+then the repository's normal exact-tree proof workflow in the configured build
+environment. Chronicle's bonded-seed tests also require its normal crate tests.
