@@ -17,9 +17,12 @@ impl PreparedGraphSet {
     /// A terminal expansion can be folded even if its children need a sort.
     /// Never elide a projection's implicit canonicalization or explicit order.
     pub(crate) fn has_foldable_expansion(&self) -> bool {
-        if !self.order.is_empty() {
-            return false;
-        }
+        self.order.is_empty() && self.has_foldable_node()
+    }
+
+    /// Ignore ONLY this node's tail when a caller owns its exact ordering/page.
+    /// Every descendant must still retain its own sequence boundaries.
+    pub(super) fn has_foldable_node(&self) -> bool {
         match &self.node {
             SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
             SetNode::Scope(input) | SetNode::Filter { input, .. } => input.has_foldable_expansion(),
@@ -173,8 +176,52 @@ where
         return forward.finish();
     }
 
+    visit_expansion(
+        query,
+        source,
+        meter,
+        operand,
+        Window::new(query.offset, query.count),
+        consume,
+    )
+}
+
+/// Feed this node's complete output into a separately owned ranked page. No
+/// definition is cloned or mutated and no child sort/page is peeled away.
+pub(super) fn visit_unwindowed<E, C, S, Checkpoint>(
+    query: &PreparedGraphSet,
+    source: &mut S,
+    meter: &mut Meter<Checkpoint>,
+    operand: &mut usize,
+    consume: &mut Consumer<'_, Checkpoint, E, C>,
+) -> SetResult<(), E, C>
+where
+    S: FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    debug_assert!(query.has_foldable_node());
+    visit_expansion(query, source, meter, operand, Window::new(0, None), consume)
+}
+
+fn visit_expansion<E, C, S, Checkpoint>(
+    query: &PreparedGraphSet,
+    source: &mut S,
+    meter: &mut Meter<Checkpoint>,
+    operand: &mut usize,
+    mut window: Window<E>,
+    consume: &mut Consumer<'_, Checkpoint, E, C>,
+) -> SetResult<(), E, C>
+where
+    S: FnMut(
+        &PreparedGraphPattern<GraphValueRow>,
+        GqlQueryPolicy,
+    ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+    Checkpoint: FnMut() -> Result<(), C>,
+{
     meter.event(GlaExecutionEvent::Work)?;
-    let mut window = Window::new(query.offset, query.count);
     if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
         // The materialized and folded paths share the exact selected-pair walk.
         // Complete both original children first; even LIMIT 0 cannot hide a

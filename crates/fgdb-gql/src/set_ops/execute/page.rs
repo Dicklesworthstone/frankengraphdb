@@ -7,8 +7,10 @@
 
 use super::*;
 
+mod topk;
+
 pub(super) fn supports(query: &PreparedGraphSet) -> bool {
-    query.count.is_some() && query.order.is_empty() && query.has_foldable_expansion()
+    query.count.is_some() && query.has_foldable_node()
 }
 
 /// Consume an occurrence interval without ever forming offset + count, which
@@ -42,6 +44,9 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     debug_assert!(supports(query));
+    if !query.order.is_empty() {
+        return topk::collect(query, source, meter, operand);
+    }
     let mut selection = Selection {
         skip: query.offset,
         remaining: query.count.expect("finite page admitted"),
