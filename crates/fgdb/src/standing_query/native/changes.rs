@@ -151,8 +151,8 @@ fn collect_bag<Row: Ord>(
     // RETURN slots may permute, repeat or omit cells. Consolidate the delivered
     // identity before quota admission: opposite images must cancel even with a
     // zero changed-row allowance. Negative tuples are never thresholded away.
-    let rows = ZSet::from_updates(updates, LIMBS, &mut |event| meter.charge(event))
-        .map_err(zset_error)?;
+    let rows =
+        ZSet::from_updates(updates, LIMBS, &mut |event| meter.charge(event)).map_err(zset_error)?;
     if meter
         .policy
         .rows

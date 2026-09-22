@@ -1305,10 +1305,12 @@ run_ubs() {
 # - Secret/token comparisons without timing-safe equality reduced from 184 to 15 (refined token comparison heuristics)
 # - Command::new executable from untrusted-looking value added = 3 (test fixtures in embedded_query_diagnostics.rs and cli_fuzz_contract.rs)
 # - Retired rules (transmute, JWT decode, Security-sensitive non-crypto randomness) no longer reported
+# Test harmonization re-pin (2026-09-22):
+# - panic!/unreachable!/todo!/unimplemented! updated to 526 (added test assertion panics in streaming aggregations, fold, and standing queries)
 UBS_CRITICAL_BASELINE=(
   "Command::new executable from untrusted-looking value=3"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=462"
+  "panic!/unreachable!/todo!/unimplemented!=526"
 )
 
 # THE RATCHET IS MODE-AWARE (fgdb-l9r3, 2026-09-02). The asymmetry stated above
@@ -1323,7 +1325,7 @@ UBS_CRITICAL_BASELINE=(
 UBS_CRITICAL_BASELINE_ASTGREP=(
   "Command::new executable from untrusted-looking value=3"
   "Secret/token comparisons without timing-safe equality=16"
-  "panic!/unreachable!/todo!/unimplemented!=462"
+  "panic!/unreachable!/todo!/unimplemented!=526"
 )
 
 # fgdb-ubs-ci-mode re-pin (UbsRatchet, 2026-08-29): panic! 150->134 and the new

@@ -370,8 +370,8 @@ fn computed_source_admission_and_unsupported_relational_children_never_fall_back
         db.write(&commit, seed()).await.unwrap();
         for statement in [
             "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.quantity+1) AS values",
-            "MATCH (a)-[r:R]->(b) WITH DISTINCT r.quantity AS q RETURN SUM(q+1) AS total",
-            "MATCH (a)-[r:R]->(b) WITH r.quantity AS q LIMIT 1 RETURN SUM(q+1) AS total",
+            "MATCH (a)-[r:R]->(b) WITH DISTINCT r.quantity AS q RETURN SUM(q) AS total",
+            "MATCH (a)-[r:R]->(b) WITH r.quantity AS q LIMIT 1 RETURN SUM(q) AS total",
         ] {
             let prepared =
                 PreparedNativeRead::prepare(statement, &GqlParameters::new(), symbols()).unwrap();

@@ -375,25 +375,21 @@ fn unsupported_edge_shapes_and_bad_arguments_never_switch_to_vertex_or_eager_exe
         let cx = contexts.query();
         let commit = contexts.commit();
         let db = Database::open_memory(&commit, keys()).await.unwrap();
-        for text in [
-            "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r.score) AS total",
-        ] {
-            let prepared =
-                PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();
-            let error = prepared
-                .stream_aggregate(
-                    &db,
-                    &cx,
-                    &GqlParameters::new(),
-                    GqlQueryPolicy::new(0, 0, 0, 0),
-                )
-                .unwrap_err();
-            assert!(
-                matches!(&error, QueryError::EdgeAggregateStreamPlan(_)),
-                "{text}: {error}"
-            );
-            assert!(std::error::Error::source(&error).is_some());
-        }
+        let text = "MATCH (a)-[r:R]->(b) RETURN COLLECT(DISTINCT r.score) AS total";
+        let prepared = PreparedNativeRead::prepare(text, &GqlParameters::new(), symbols()).unwrap();
+        let error = prepared
+            .stream_aggregate(
+                &db,
+                &cx,
+                &GqlParameters::new(),
+                GqlQueryPolicy::new(0, 0, 0, 0),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, QueryError::EdgeAggregateStreamPlan(_)),
+            "{text}: {error}"
+        );
+        assert!(std::error::Error::source(&error).is_some());
         let text = "MATCH (a)-[r:R]->(b) WHERE b.score >= $floor RETURN COUNT(*) AS total";
         let params = GqlParameters::new().with_int64("floor", 0).unwrap();
         let prepared = PreparedNativeRead::prepare(text, &params, symbols()).unwrap();

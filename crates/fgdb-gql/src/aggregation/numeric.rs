@@ -204,10 +204,8 @@ impl GraphAggregateRow {
     /// definition, admitted payloads and finished the shared numeric states.
     /// This does not evaluate or bypass public maintained-row admission; that
     /// path separately validates every value against its completed input schema.
-    pub(crate) fn from_group_values(
-        keys: Vec<GraphValue>,
-        values: Vec<GraphAggregateValue>,
-    ) -> Self {
+    #[must_use]
+    pub fn from_group_values(keys: Vec<GraphValue>, values: Vec<GraphAggregateValue>) -> Self {
         debug_assert!(keys.len() + values.len() <= MAX_PATTERN_VERTICES);
         Self {
             keys: keys.into_boxed_slice(),

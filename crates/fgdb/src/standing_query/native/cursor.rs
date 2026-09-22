@@ -112,7 +112,8 @@ impl Iterator for StandingNativeCursor<'_> {
         cx.with_restriction(|| {
             self.pull
                 .next_checked(&mut || {
-                    cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted)
+                    cx.checkpoint()
+                        .map_err(|_| StandingQueryFailure::Interrupted)
                 })
                 .map(|row| row.map_err(StandingQueryError::Delivery))
         })
@@ -205,7 +206,13 @@ impl<'a> Pull<'a> {
             stats: self.stats,
             checkpoint,
         };
-        let result = step(&mut runs, &mut pending, &self.layout, self.delivered, &mut meter);
+        let result = step(
+            &mut runs,
+            &mut pending,
+            &self.layout,
+            self.delivered,
+            &mut meter,
+        );
         self.stats = meter.stats;
         match result {
             Err(error) => Some(Err(error)),
@@ -248,7 +255,12 @@ fn pull_row<'a>(
     let next = delivered
         .checked_add(1)
         .ok_or(StandingQueryFailure::ResultBudget)?;
-    if meter.policy.rows.max_result_rows().is_some_and(|limit| next > limit) {
+    if meter
+        .policy
+        .rows
+        .max_result_rows()
+        .is_some_and(|limit| next > limit)
+    {
         return Err(StandingQueryFailure::ResultBudget);
     }
     meter.charge(ZSetEvent::ScratchEntry)?;
@@ -273,9 +285,10 @@ fn pull_row<'a>(
         .ok_or(StandingQueryFailure::ResultBudget)?;
     // Compare borrowed exact support to a small emitted counter. Do not narrow
     // the run to u64/i128, copy a bigint, or subtract/expand its whole weight.
-    let exhausted = current.run.weight.is_none_or(|weight| {
-        weight == &ZWeight::from_i128(i128::from(emitted))
-    });
+    let exhausted = current
+        .run
+        .weight
+        .is_none_or(|weight| weight == &ZWeight::from_i128(i128::from(emitted)));
     (meter.checkpoint)()?;
     if exhausted {
         *pending = None;
@@ -309,17 +322,27 @@ pub(super) fn open<'a, V: Vfs + Clone>(
     policy: GqlQueryPolicy,
 ) -> Result<StandingNativeCursor<'a>, StandingQueryError> {
     let root = database.admitted_standing_query(cx, handle)?;
-    let layout = handle.native.as_ref().ok_or(StandingQueryError::Unsupported)?;
+    let layout = handle
+        .native
+        .as_ref()
+        .ok_or(StandingQueryError::Unsupported)?;
     cx.with_restriction(|| {
-        let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
+        let mut checkpoint = || {
+            cx.checkpoint()
+                .map_err(|_| StandingQueryFailure::Interrupted)
+        };
         let mut meter = Meter {
             policy,
             stats: StandingQueryStats::default(),
             checkpoint: &mut checkpoint,
         };
-        meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Delivery)?;
+        meter
+            .charge(ZSetEvent::Work)
+            .map_err(StandingQueryError::Delivery)?;
         // One fixed-size iterator box; no column, row or support traversal.
-        meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Delivery)?;
+        meter
+            .charge(ZSetEvent::ScratchEntry)
+            .map_err(StandingQueryError::Delivery)?;
         let runs: Runs<'a> = if let StandingQuery::Window(query) = root {
             Box::new(query.ordered().map(|(row, weight)| Run {
                 row: NativeRow::Values(row),
@@ -352,7 +375,13 @@ pub(super) fn open<'a, V: Vfs + Clone>(
         };
         (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
         Ok(StandingNativeCursor {
-            pull: Pull::new(runs, Arc::clone(layout), root.status().1, policy, meter.stats),
+            pull: Pull::new(
+                runs,
+                Arc::clone(layout),
+                root.status().1,
+                policy,
+                meter.stats,
+            ),
             cx,
         })
     })

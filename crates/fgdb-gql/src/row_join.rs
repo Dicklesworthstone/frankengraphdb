@@ -533,7 +533,11 @@ mod payload_tests {
     fn all_join_kinds_preserve_nested_payloads_and_exact_witness_transitions() {
         let (left, right) = inputs();
         let joined = GraphValueRow::from_owned_values(
-            left.values().iter().chain(right.values()).cloned().collect(),
+            left.values()
+                .iter()
+                .chain(right.values())
+                .cloned()
+                .collect(),
         );
         let mut null_extended = left.values().to_vec();
         null_extended.extend((0..2).map(|_| GraphValue::Scalar(CanonicalScalar::Null)));
@@ -606,8 +610,14 @@ mod payload_tests {
         ] {
             let mut join = operator(kind);
             assert_eq!(
-                join.prepare(&bag(&invalid_left, 1), &ZSet::new(), LIMBS, None, &mut allow)
-                    .unwrap_err(),
+                join.prepare(
+                    &bag(&invalid_left, 1),
+                    &ZSet::new(),
+                    LIMBS,
+                    None,
+                    &mut allow
+                )
+                .unwrap_err(),
                 RowJoinError::InputSchema { side: 0 }
             );
             assert_eq!(join, operator(kind));

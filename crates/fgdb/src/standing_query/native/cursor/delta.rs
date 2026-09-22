@@ -80,7 +80,10 @@ impl Iterator for StandingNativeDeltaCursor<'_> {
         cx.with_restriction(|| {
             self.pull
                 .advance(
-                    &mut || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted),
+                    &mut || {
+                        cx.checkpoint()
+                            .map_err(|_| StandingQueryFailure::Interrupted)
+                    },
                     pull_change,
                 )
                 .map(|change| change.map_err(StandingQueryError::Delivery))
@@ -131,8 +134,15 @@ fn pull_change<'a>(
     if weight.is_zero() {
         return Err(StandingQueryFailure::InvalidDelta);
     }
-    let next = delivered.checked_add(1).ok_or(StandingQueryFailure::ResultBudget)?;
-    if meter.policy.rows.max_result_rows().is_some_and(|limit| next > limit) {
+    let next = delivered
+        .checked_add(1)
+        .ok_or(StandingQueryFailure::ResultBudget)?;
+    if meter
+        .policy
+        .rows
+        .max_result_rows()
+        .is_some_and(|limit| next > limit)
+    {
         return Err(StandingQueryFailure::ResultBudget);
     }
     // Retained operators use this same bounded exact-weight domain. Reserve a
@@ -141,7 +151,8 @@ fn pull_change<'a>(
     meter.charge(ZSetEvent::ScratchEntry)?;
     meter.charge(ZSetEvent::Work)?;
     meter.charge(ZSetEvent::ScratchEntry)?;
-    let weight = weight.checked_clone(LimbLimit::new(4))
+    let weight = weight
+        .checked_clone(LimbLimit::new(4))
         .map_err(|_| StandingQueryFailure::Arithmetic)?;
     let cells = match run.row {
         NativeRow::Values(row) => copy_values(row, meter)?,
@@ -175,15 +186,23 @@ pub(in crate::standing_query::native) fn open<'a, V: Vfs + Clone>(
     policy: GqlQueryPolicy,
 ) -> Result<Option<StandingNativeDeltaCursor<'a>>, StandingQueryError> {
     let root = database.admitted_standing_query(cx, handle)?;
-    let layout = handle.native.as_ref().ok_or(StandingQueryError::Unsupported)?;
+    let layout = handle
+        .native
+        .as_ref()
+        .ok_or(StandingQueryError::Unsupported)?;
     cx.with_restriction(|| {
-        let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
+        let mut checkpoint = || {
+            cx.checkpoint()
+                .map_err(|_| StandingQueryFailure::Interrupted)
+        };
         let mut meter = Meter {
             policy,
             stats: StandingQueryStats::default(),
             checkpoint: &mut checkpoint,
         };
-        meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Delivery)?;
+        meter
+            .charge(ZSetEvent::Work)
+            .map_err(StandingQueryError::Delivery)?;
         let frontier = root.status().1;
         // Do not turn an unsupported producer into a baseline. Only these
         // complete-result owners retain the final derivative for their output.
@@ -192,14 +211,20 @@ pub(in crate::standing_query::native) fn open<'a, V: Vfs + Clone>(
             Groups(&'a ZSet<GraphAggregateRow>),
         }
         let changes = match (layout.as_ref(), root) {
-            (Layout::Rows { .. } | Layout::Circuit { .. },
-                StandingQuery::Rows { .. } | StandingQuery::Constant(_)
-                | StandingQuery::Set(_) | StandingQuery::Join(_) | StandingQuery::Projection(_)
-                | StandingQuery::Filter(_) | StandingQuery::Window(_)) => {
-                sets::delta(root).map(Changes::Rows)
-            }
+            (
+                Layout::Rows { .. } | Layout::Circuit { .. },
+                StandingQuery::Rows { .. }
+                | StandingQuery::Constant(_)
+                | StandingQuery::Set(_)
+                | StandingQuery::Join(_)
+                | StandingQuery::Projection(_)
+                | StandingQuery::Filter(_)
+                | StandingQuery::Window(_),
+            ) => sets::delta(root).map(Changes::Rows),
             (Layout::Aggregate { .. } | Layout::GroupCircuit { .. }, StandingQuery::Group(_)) => {
-                database.standing_group_delta(cx, handle)?.map(|view| Changes::Groups(view.rows))
+                database
+                    .standing_group_delta(cx, handle)?
+                    .map(|view| Changes::Groups(view.rows))
             }
             _ => return Err(StandingQueryError::Unsupported),
         };
@@ -210,7 +235,9 @@ pub(in crate::standing_query::native) fn open<'a, V: Vfs + Clone>(
         // Even an empty derivative represents a specific accepted successor.
         // Never let emptiness erase a gap, reversal, or exhausted sequence.
         require_predecessor(after, frontier)?;
-        meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Delivery)?;
+        meter
+            .charge(ZSetEvent::ScratchEntry)
+            .map_err(StandingQueryError::Delivery)?;
         let runs = match changes {
             Changes::Rows(rows) => view_runs(rows, None, NativeRow::Values),
             Changes::Groups(rows) => view_runs(rows, None, NativeRow::Group),

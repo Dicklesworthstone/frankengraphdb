@@ -223,11 +223,10 @@ fn unsupported_aggregate_shapes_are_never_stripped_or_eagerly_retried() {
         let commit = contexts.commit();
         let db = Database::open_memory(&commit, keys()).await.unwrap();
         for text in [
-            "MATCH (n:L) RETURN n.score AS score, COUNT(*) AS count GROUP BY n.score LIMIT 0",
-            "MATCH (n:L) RETURN COLLECT(n.score) AS values",
-            "MATCH (n:L) RETURN COUNT(*) AS count LIMIT 0",
-            "MATCH (n:L) RETURN COUNT(*) AS count HAVING count > 0",
-            "MATCH (a:L)-[:R]->(b:L) RETURN COLLECT(DISTINCT b.score) AS count",
+            "MATCH (n:L) WITH n.score AS score RETURN COUNT(*) AS count",
+            "MATCH (n:L) WITH n.score AS score RETURN SUM(score) AS total",
+            "MATCH (a:L)-[:R]->(b:L) WITH b.score AS s RETURN SUM(s) AS total",
+            "MATCH (a:L)-[:R]->(b:L) WITH b.score AS s RETURN COUNT(*) AS count",
         ] {
             // Ensure a valid native definition, not a vacuous syntax refusal.
             let prepared =

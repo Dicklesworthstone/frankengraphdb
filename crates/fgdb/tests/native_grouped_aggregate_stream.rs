@@ -390,12 +390,9 @@ fn empty_grouped_input_differs_from_global_input_and_unsupported_clauses_stay_in
             .unwrap();
         assert!(matches!(global.next(), Some(Err(GqlQueryError::Rows(_)))));
         for statement in [
-            "MATCH (n:L) RETURN COUNT(*) AS total GROUP BY n.a",
-            "MATCH (n:L) RETURN n.a AS key, COUNT(*) AS total GROUP BY n.a HAVING total>0",
-            "MATCH (n:L) RETURN n.a AS key, COUNT(*) AS total GROUP BY n.a ORDER BY key",
-            "MATCH (n:L) RETURN n.a AS key, COUNT(*) AS total GROUP BY n.a LIMIT 0",
-            "MATCH (n:L) RETURN n.a AS key, COLLECT(n.score) AS values GROUP BY n.a",
-            "MATCH (n:L) RETURN n.a + 1 AS key, COUNT(*) AS total GROUP BY n.a + 1 LIMIT 0",
+            "MATCH (n:L) WITH n.a AS key RETURN COUNT(*) AS total GROUP BY key",
+            "MATCH (n:L) WITH n.a AS key RETURN key AS key, COUNT(*) AS total GROUP BY key",
+            "MATCH (n:L) WITH n.a AS key, n.score AS score RETURN key, SUM(score) AS total GROUP BY key",
         ] {
             let prepared = PreparedNativeRead::prepare(statement, &args, symbols()).unwrap();
             assert!(

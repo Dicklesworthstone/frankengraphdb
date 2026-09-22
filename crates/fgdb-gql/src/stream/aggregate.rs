@@ -69,18 +69,17 @@ pub struct VertexAggregatePlan {
 }
 impl VertexAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, VertexAggregateBuildError> {
-        if !aggregate
-                .aggregates()
-                .iter()
-                .all(|spec| NumericState::supports(spec.function())
-                    || NumericState::collects(spec.function()))
-        {
+        if !aggregate.aggregates().iter().all(|spec| {
+            NumericState::supports(spec.function()) || NumericState::collects(spec.function())
+        }) {
             return Err(VertexAggregateBuildError::RequiresPlainGlobalAggregate);
         }
         let aggregate = aggregate
             .prepare_streamed_output()
             .ok_or(VertexAggregateBuildError::RequiresPlainGlobalAggregate)?;
-        let collects = aggregate.aggregates().iter()
+        let collects = aggregate
+            .aggregates()
+            .iter()
             .any(|spec| NumericState::collects(spec.function()));
         if collects && aggregate.input_projection().is_some() {
             // Batch computed inputs consume the child's canonical sorted rows.
@@ -104,7 +103,11 @@ impl VertexAggregatePlan {
             },
         )
         .map_err(VertexAggregateBuildError::Scan)?;
-        Ok(Self { input, aggregate, collects })
+        Ok(Self {
+            input,
+            aggregate,
+            collects,
+        })
     }
 
     /// Names addressing GraphAggregateRow::values(), not grouping keys.
@@ -437,9 +440,13 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         Ok(row)
     }
 
-    fn select_output<C>(&mut self, groups: Groups)
-        -> Result<Vec<GraphAggregateRow>, VertexAggregateError<S::Error, C>>
-    where F: FnMut() -> Result<(), C> {
+    fn select_output<C>(
+        &mut self,
+        groups: Groups,
+    ) -> Result<Vec<GraphAggregateRow>, VertexAggregateError<S::Error, C>>
+    where
+        F: FnMut() -> Result<(), C>,
+    {
         if !self.plan.aggregate.ordering().is_empty()
             || self.plan.aggregate.incremental_output_is_distinct()
         {
@@ -447,15 +454,20 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             for (keys, states) in groups {
                 let row = self.finalize(keys, states)?;
                 let meter = &mut self.meter;
-                ranking.push(&self.plan.aggregate, row,
-                    &mut |event| meter.event(input_event(event)).map_err(lift))?;
+                ranking.push(&self.plan.aggregate, row, &mut |event| {
+                    meter.event(input_event(event)).map_err(lift)
+                })?;
             }
             let meter = &mut self.meter;
-            let rows = ranking.finish(&self.plan.aggregate,
-                &mut |event| meter.event(input_event(event)).map_err(lift))?;
-            let count = u64::try_from(rows.len()).map_err(|_|
-                GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
-            meter.policy.rows.check(GqlBudgetDimension::ResultRows, count)
+            let rows = ranking.finish(&self.plan.aggregate, &mut |event| {
+                meter.event(input_event(event)).map_err(lift)
+            })?;
+            let count = u64::try_from(rows.len())
+                .map_err(|_| GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
+            meter
+                .policy
+                .rows
+                .check(GqlBudgetDimension::ResultRows, count)
                 .map_err(GqlQueryError::Rows)?;
             return Ok(rows);
         }
@@ -467,14 +479,33 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
         for (keys, states) in groups {
             let row = self.finalize(keys, states)?;
             let meter = &mut self.meter;
-            let Some(row) = self.plan.aggregate.evaluate_streamed_output(row,
-                &mut |event| meter.event(input_event(event)).map_err(lift))?
-            else { continue; };
-            if skipped < offset { skipped += 1; continue; }
-            if count.is_some_and(|count| selected.len() as u64 >= count) { continue; }
-            let next = selected.len().checked_add(1).and_then(|n| u64::try_from(n).ok())
-                .ok_or(GqlQueryError::Source(GraphAggregateError::ResultCountOverflow))?;
-            meter.policy.rows.check(GqlBudgetDimension::ResultRows, next)
+            let Some(row) = self
+                .plan
+                .aggregate
+                .evaluate_streamed_output(row, &mut |event| {
+                    meter.event(input_event(event)).map_err(lift)
+                })?
+            else {
+                continue;
+            };
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if count.is_some_and(|count| selected.len() as u64 >= count) {
+                continue;
+            }
+            let next = selected
+                .len()
+                .checked_add(1)
+                .and_then(|n| u64::try_from(n).ok())
+                .ok_or(GqlQueryError::Source(
+                    GraphAggregateError::ResultCountOverflow,
+                ))?;
+            meter
+                .policy
+                .rows
+                .check(GqlBudgetDimension::ResultRows, next)
                 .map_err(GqlQueryError::Rows)?;
             meter.event(VertexScanEvent::ScratchEntry).map_err(lift)?;
             selected.push(row);
@@ -624,7 +655,10 @@ impl NumericState {
     // Order-sensitive cells need an additional physical source-order proof;
     // keep them out of supports(), the commutative reducer admission contract.
     pub(crate) fn collects(function: GraphAggregateFunction) -> bool {
-        matches!(function, GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct)
+        matches!(
+            function,
+            GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct
+        )
     }
 
     pub(crate) fn supports(function: GraphAggregateFunction) -> bool {
@@ -874,7 +908,9 @@ where
         let row = if let Some(rows) = &mut self.completed {
             rows.next().map(Ok)
         } else {
-            self.pending.as_mut().and_then(Iterator::next)
+            self.pending
+                .as_mut()
+                .and_then(Iterator::next)
                 .map(|(keys, states)| self.finalize(keys, states))
         };
         let Some(row) = row else {
@@ -907,7 +943,9 @@ where
         if self.state != VertexScanState::Open {
             return (0, Some(0));
         }
-        if let Some(rows) = &self.completed { return (0, Some(rows.len())); }
+        if let Some(rows) = &self.completed {
+            return (0, Some(rows.len()));
+        }
         match &self.pending {
             Some(groups) => (0, Some(groups.len())),
             None if self.plan.aggregate.group_key_columns().is_empty() => (0, Some(1)),

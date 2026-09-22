@@ -1,18 +1,21 @@
 //! Independent public-API regressions for ranked and DISTINCT edge aggregates.
-use fgdb_gql::algebra::{GlaDirection, GraphValue};
-use fgdb_gql::edge_stream::{EdgeScanSource, EdgeScanSourceError, EdgeScanRow,
-    EdgeExpansionSourceError, EdgeScanState};
-use fgdb_gql::edge_stream::aggregate::{EdgeAggregateCursor, EdgeAggregatePlan};
-use fgdb_gql::stream::VertexScanRow;
-use fgdb_gql::{GlaExecutionEvent, GqlParameters, GqlQueryError, GqlQueryPolicy,
-    GraphAggregateError, GraphAggregateRow, GraphAggregateValue, GraphSymbol,
-    GraphSymbolKind, PreparedGraphAggregate, PreparedGraphAggregateText};
-use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use fgdb_delta_types::{PropertyKeyId, RelationId};
+use fgdb_gql::algebra::{GlaDirection, GraphValue};
+use fgdb_gql::edge_stream::aggregate::{EdgeAggregateCursor, EdgeAggregatePlan};
+use fgdb_gql::edge_stream::{
+    EdgeExpansionSourceError, EdgeScanRow, EdgeScanSource, EdgeScanSourceError, EdgeScanState,
+};
+use fgdb_gql::stream::VertexScanRow;
+use fgdb_gql::{
+    GlaExecutionEvent, GqlParameters, GqlQueryError, GqlQueryPolicy, GraphAggregateError,
+    GraphAggregateRow, GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregate,
+    PreparedGraphAggregateText,
+};
+use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 
 mod streamed_edge_rank_distinct {
-    pub(super) mod ranked;
     pub(super) mod distinct_output;
+    pub(super) mod ranked;
 }
 
 use std::collections::{BTreeMap, BTreeSet};

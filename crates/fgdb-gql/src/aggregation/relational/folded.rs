@@ -28,9 +28,10 @@ fn new_states<E, C>(
     let mut states = Vec::new();
     for aggregate in query.aggregates() {
         control(GlaExecutionEvent::ScratchEntry)?;
-        states.push(NumericState::new_governed(aggregate.function(), &mut |event| {
-            control(input_event(event))
-        })?);
+        states.push(NumericState::new_governed(
+            aggregate.function(),
+            &mut |event| control(input_event(event)),
+        )?);
     }
     Ok(states)
 }
@@ -49,7 +50,9 @@ fn push<E, C>(
     for &column in query.group_key_columns() {
         control(GlaExecutionEvent::Work)?;
         let value = &row.values()[column];
-        units = units.saturating_add(value.payload_units()).saturating_add(1);
+        units = units
+            .saturating_add(value.payload_units())
+            .saturating_add(1);
         key.push(value.copy_with_control(control)?);
     }
     *largest_key = (*largest_key).max(units);
@@ -57,7 +60,10 @@ fn push<E, C>(
     // accounts for recursive key payloads, not std allocator bytes or exact
     // B-tree comparator invocations. Groups remain governed in-memory state.
     let levels = groups.len().saturating_add(1).ilog2() as usize + 1;
-    for _ in 0..levels.saturating_mul(24).saturating_mul(largest_key.saturating_add(1)) {
+    for _ in 0..levels
+        .saturating_mul(24)
+        .saturating_mul(largest_key.saturating_add(1))
+    {
         control(GlaExecutionEvent::Work)?;
     }
     let states = match groups.entry(key) {
@@ -69,9 +75,11 @@ fn push<E, C>(
     };
     for (at, (aggregate, state)) in query.aggregates().iter().zip(states).enumerate() {
         control(GlaExecutionEvent::Work)?;
-        let value = aggregate.argument_column().map_or(Input::Identity, |column| {
-            Input::from_value(&row.values()[column])
-        });
+        let value = aggregate
+            .argument_column()
+            .map_or(Input::Identity, |column| {
+                Input::from_value(&row.values()[column])
+            });
         state.update_governed(value, at, &mut |event| control(input_event(event)))?;
     }
     Ok(())
@@ -86,7 +94,9 @@ impl PreparedGraphAggregate {
         if !input.has_foldable_expansion()
             || !self.aggregates().iter().all(|aggregate| {
                 match aggregate.function() {
-                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => false,
+                    GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => {
+                        false
+                    }
                     // The existing owned extremum kernel assumes one checked
                     // GraphValue domain. UNWIND's Any schema may alternate
                     // scalar/vertex/list values; keep that general comparator
@@ -115,20 +125,21 @@ impl PreparedGraphAggregate {
         ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, Failure<E, C>> {
-        let relation = self.relational_input.as_ref().expect("admitted relational fold");
+        let relation = self
+            .relational_input
+            .as_ref()
+            .expect("admitted relational fold");
         let mut groups = Groups::new();
         let mut largest_key = 0;
         let mut deferred = None;
-        let (mut rows, mut evaluator) = relation.fold_governed(
-            policy,
-            source,
-            &mut checkpoint,
-            |row, control| {
+        let (mut rows, mut evaluator) = relation
+            .fold_governed(policy, source, &mut checkpoint, |row, control| {
                 if deferred.is_some() {
                     return Ok(());
                 }
                 let result = push(self, &mut groups, &mut largest_key, row, &mut |event| {
-                    control(event).map_err(|error| error.map_source(GraphAggregateError::InputRelation))
+                    control(event)
+                        .map_err(|error| error.map_source(GraphAggregateError::InputRelation))
                 });
                 match result {
                     // Complete upstream row phases before exposing an aggregate
@@ -138,12 +149,13 @@ impl PreparedGraphAggregate {
                         deferred = Some(error);
                         Ok(())
                     }
-                    Err(error) => Err(error.map_source(|_| unreachable!("source arm handled above"))),
+                    Err(error) => {
+                        Err(error.map_source(|_| unreachable!("source arm handled above")))
+                    }
                     Ok(()) => Ok(()),
                 }
-            },
-        )
-        .map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
+            })
+            .map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
         if let Some(error) = deferred {
             return Err(GqlQueryError::Source(error));
         }
@@ -156,13 +168,17 @@ impl PreparedGraphAggregate {
                 let next = rows.result_rows.checked_add(1).ok_or_else(|| {
                     GqlQueryError::Source(GraphAggregateError::ResultCountOverflow)
                 })?;
-                policy.rows.check(GqlBudgetDimension::ResultRows, next)
+                policy
+                    .rows
+                    .check(GqlBudgetDimension::ResultRows, next)
                     .map_err(GqlQueryError::Rows)?;
                 next
             } else {
                 rows.result_rows
             };
-            evaluator.charge_event(policy.evaluator, event).map_err(GqlQueryError::Evaluator)?;
+            evaluator
+                .charge_event(policy.evaluator, event)
+                .map_err(GqlQueryError::Evaluator)?;
             rows.result_rows = next;
             Ok(())
         };
@@ -177,14 +193,22 @@ impl PreparedGraphAggregate {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 values.push(state.finish_governed(&mut |event| control(input_event(event)))?);
             }
-            ranking.push(self, GraphAggregateRow::from_group_values(keys, values), &mut control)?;
+            ranking.push(
+                self,
+                GraphAggregateRow::from_group_values(keys, values),
+                &mut control,
+            )?;
         }
         let value = ranking.finish(self, &mut control)?;
         for _ in &value {
             control(GlaExecutionEvent::ResultRow)?;
         }
         control(GlaExecutionEvent::Work)?;
-        Ok(GqlQueryExecution { value, rows, evaluator })
+        Ok(GqlQueryExecution {
+            value,
+            rows,
+            evaluator,
+        })
     }
 }
 

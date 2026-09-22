@@ -6,7 +6,11 @@ use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, PurposeContexts, 
 
 const P: PropertyKeyId = PropertyKeyId(1);
 fn keys() -> DatabaseKeys {
-    DatabaseKeys::new([0xd1; 32], DatabaseSecurityNamespaceId([0xd2; 32]), [0xd3; 32])
+    DatabaseKeys::new(
+        [0xd1; 32],
+        DatabaseSecurityNamespaceId([0xd2; 32]),
+        [0xd3; 32],
+    )
 }
 fn int(value: i64) -> CanonicalScalar {
     CanonicalScalar::Int(value)
@@ -34,11 +38,19 @@ fn dependent_program() -> Vec<WriteBatch> {
     second.add_edge(EId(60), VId(5), VId(6), vec![]); // 5
     let mut last = WriteBatch::new(RelationId(1));
     last.compare_and_set_vertex_property(
-        VId(5), P, Some(int(2)), int(3), WriteMismatchPolicy::AbortWrite,
+        VId(5),
+        P,
+        Some(int(2)),
+        int(3),
+        WriteMismatchPolicy::AbortWrite,
     ); // 6
     // An identity-addressed mutation must follow edge 50 to relation 9.
     last.compare_and_set_edge_property(
-        EId(50), P, Some(int(10)), int(11), WriteMismatchPolicy::AbortWrite,
+        EId(50),
+        P,
+        Some(int(10)),
+        int(11),
+        WriteMismatchPolicy::AbortWrite,
     ); // 7
     last.add_edge(EId(70), VId(6), VId(2), vec![]); // 8
     vec![first, second, last]
@@ -57,22 +69,31 @@ fn dependent_relations_keep_source_order_one_publication_and_global_birth_ordina
         assert!(db.prepare_atomic_writes(dependent_program()).is_err());
         let prepared = db.prepare_ordered_writes(dependent_program()).unwrap();
         assert_eq!(prepared.basis(), basis);
-        let births: BTreeMap<_, _> = prepared.template.coordinate_entries().iter()
+        let births: BTreeMap<_, _> = prepared
+            .template
+            .coordinate_entries()
+            .iter()
             .flat_map(|coordinate| &coordinate.rows)
             .filter_map(|row| match row {
-                DeltaRow::CreateVertex { vid, birth_ordinal, .. } =>
-                    Some((ElementId::Vertex(*vid), *birth_ordinal)),
-                DeltaRow::CreateEdge { eid, birth_ordinal, .. } =>
-                    Some((ElementId::Edge(*eid), *birth_ordinal)),
+                DeltaRow::CreateVertex {
+                    vid, birth_ordinal, ..
+                } => Some((ElementId::Vertex(*vid), *birth_ordinal)),
+                DeltaRow::CreateEdge {
+                    eid, birth_ordinal, ..
+                } => Some((ElementId::Edge(*eid), *birth_ordinal)),
                 _ => None,
-            }).collect();
-        assert_eq!(births, BTreeMap::from([
-            (ElementId::Vertex(VId(5)), 1),
-            (ElementId::Vertex(VId(6)), 4),
-            (ElementId::Edge(EId(50)), 2),
-            (ElementId::Edge(EId(60)), 5),
-            (ElementId::Edge(EId(70)), 8),
-        ]));
+            })
+            .collect();
+        assert_eq!(
+            births,
+            BTreeMap::from([
+                (ElementId::Vertex(VId(5)), 1),
+                (ElementId::Vertex(VId(6)), 4),
+                (ElementId::Edge(EId(50)), 2),
+                (ElementId::Edge(EId(60)), 5),
+                (ElementId::Edge(EId(70)), 8),
+            ])
+        );
         assert_eq!(db.frontier().unwrap(), basis);
         assert!(db.vertex(VId(5)).unwrap().is_none());
         let seq = db.commit_prepared(&cx, prepared).await.unwrap();
@@ -106,10 +127,18 @@ fn ensure_is_relation_local_and_noop_visits_still_count() {
         let mut last = WriteBatch::new(RelationId(9));
         last.ensure_edge_by_triple(EId(92), VId(1), VId(2), vec![]); // 5, no effect
         last.add_edge(EId(93), VId(5), VId(2), vec![]); // 6
-        db.write_ordered(&cx, vec![first, second, last]).await.unwrap();
+        db.write_ordered(&cx, vec![first, second, last])
+            .await
+            .unwrap();
         assert_eq!(db.vertex(VId(5)).unwrap().unwrap().birth_ordinal, 4);
-        assert_eq!(db.edge(EId(90)).unwrap().unwrap().entry.relation, RelationId(9));
-        assert_eq!(db.edge(EId(91)).unwrap().unwrap().entry.relation, RelationId(2));
+        assert_eq!(
+            db.edge(EId(90)).unwrap().unwrap().entry.relation,
+            RelationId(9)
+        );
+        assert_eq!(
+            db.edge(EId(91)).unwrap().unwrap().entry.relation,
+            RelationId(2)
+        );
         assert!(db.edge(EId(92)).unwrap().is_none());
         assert!(db.edge(EId(93)).unwrap().is_some());
     });
@@ -138,15 +167,27 @@ fn cross_relation_cascades_absorb_updates_explicit_deletes_and_transient_creatio
                 last.delete_vertex(VId(1));
             }
             last.delete_edge_if_present(EId(30));
-            let prepared = db.prepare_ordered_writes(vec![first, second, last]).unwrap();
+            let prepared = db
+                .prepare_ordered_writes(vec![first, second, last])
+                .unwrap();
             let mut cascaded = Vec::new();
             for coordinate in prepared.template.coordinate_entries() {
                 for row in &coordinate.rows {
-                    if let DeltaRow::DeleteVertex { sorted_retired_incident_edges, .. } = row {
+                    if let DeltaRow::DeleteVertex {
+                        sorted_retired_incident_edges,
+                        ..
+                    } = row
+                    {
                         cascaded.extend_from_slice(sorted_retired_incident_edges);
                     }
                     assert!(!matches!(row, DeltaRow::CreateEdge { eid: EId(30), .. }));
-                    assert!(!matches!(row, DeltaRow::Property { elem: ElementId::Edge(EId(20)), .. }));
+                    assert!(!matches!(
+                        row,
+                        DeltaRow::Property {
+                            elem: ElementId::Edge(EId(20)),
+                            ..
+                        }
+                    ));
                 }
             }
             cascaded.sort();
@@ -154,7 +195,14 @@ fn cross_relation_cascades_absorb_updates_explicit_deletes_and_transient_creatio
             db.commit_prepared(&cx, prepared).await.unwrap();
             assert!(db.vertex(VId(2)).unwrap().is_none());
             assert_eq!(db.vertex(VId(1)).unwrap().is_none(), delete_both);
-            assert_eq!(db.edges().unwrap().iter().map(|edge| edge.entry.eid).collect::<Vec<_>>(), vec![EId(40)]);
+            assert_eq!(
+                db.edges()
+                    .unwrap()
+                    .iter()
+                    .map(|edge| edge.entry.eid)
+                    .collect::<Vec<_>>(),
+                vec![EId(40)]
+            );
             assert_eq!(db.edges_at(basis).unwrap().len(), 2);
         }
     });
@@ -174,27 +222,44 @@ fn source_dependencies_are_not_hoisted_and_any_refusal_leaves_the_database_uncha
         early.add_edge(EId(99), VId(1), VId(5), vec![]);
         let mut late = WriteBatch::new(RelationId(1));
         late.create_vertex(VId(5), vec![], vec![]);
-        assert!(matches!(db.prepare_ordered_writes(vec![early, late]),
-            Err(WriteTxnError::Write(WriteError::DanglingEndpoint { .. }))));
+        assert!(matches!(
+            db.prepare_ordered_writes(vec![early, late]),
+            Err(WriteTxnError::Write(WriteError::DanglingEndpoint { .. }))
+        ));
         let mut program = dependent_program();
         program.last_mut().unwrap().compare_and_set_vertex_property(
-            VId(5), P, Some(int(999)), int(4), WriteMismatchPolicy::AbortWrite,
+            VId(5),
+            P,
+            Some(int(999)),
+            int(4),
+            WriteMismatchPolicy::AbortWrite,
         );
-        assert!(matches!(db.write_ordered(&cx, program).await,
-            Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(_)))));
+        assert!(matches!(
+            db.write_ordered(&cx, program).await,
+            Err(WriteTxnError::Write(WriteError::CompareAndSetMismatch(_)))
+        ));
         let mut first = WriteBatch::new(RelationId(9));
         first.add_edge(EId(99), VId(1), VId(2), vec![]);
         first.delete_edge(EId(99));
         let mut second = WriteBatch::new(RelationId(1));
         second.add_edge(EId(99), VId(3), VId(4), vec![]);
-        assert!(matches!(db.prepare_ordered_writes(vec![first, second]),
-            Err(WriteTxnError::AtomicRelationConflict { element: ElementId::Edge(EId(99)), .. })));
-        assert!(matches!(db.prepare_ordered_writes(vec![]),
-            Err(WriteTxnError::Write(WriteError::EmptyBatch))));
+        assert!(matches!(
+            db.prepare_ordered_writes(vec![first, second]),
+            Err(WriteTxnError::AtomicRelationConflict {
+                element: ElementId::Edge(EId(99)),
+                ..
+            })
+        ));
+        assert!(matches!(
+            db.prepare_ordered_writes(vec![]),
+            Err(WriteTxnError::Write(WriteError::EmptyBatch))
+        ));
         let mut program = dependent_program();
         program.push(WriteBatch::new(RelationId(2)));
-        assert!(matches!(db.prepare_ordered_writes(program),
-            Err(WriteTxnError::Write(WriteError::EmptyBatch))));
+        assert!(matches!(
+            db.prepare_ordered_writes(program),
+            Err(WriteTxnError::Write(WriteError::EmptyBatch))
+        ));
         assert_eq!(db.frontier().unwrap(), basis);
         assert_eq!(db.vertices().unwrap(), original);
         assert_eq!(db.edges().unwrap(), original_edges);
@@ -211,16 +276,28 @@ fn normalized_noop_guards_and_ensure_aliases_remain_external_conflict_dependenci
             let mut db = seeded(&cx).await;
             let mut first = WriteBatch::new(RelationId(1));
             first.ensure_edge_by_triple(EId(99), VId(1), VId(2), vec![]);
-            first.compare_and_set_vertex_property(VId(1), P, Some(int(0)), int(7), WriteMismatchPolicy::AbortWrite);
+            first.compare_and_set_vertex_property(
+                VId(1),
+                P,
+                Some(int(0)),
+                int(7),
+                WriteMismatchPolicy::AbortWrite,
+            );
             let mut second = WriteBatch::new(RelationId(2));
             second.set_vertex_property(VId(1), P, Some(int(0))); // net no-op
             second.create_vertex(VId(5), vec![], vec![]);
             let prepared = db.prepare_ordered_writes(vec![first, second]).unwrap();
             let mut winner = WriteBatch::new(RelationId(9));
             match mode {
-                0 => { winner.set_vertex_property(VId(1), P, Some(int(1))); }
-                1 => { winner.delete_edge(EId(10)); }
-                _ => { winner.set_vertex_property(VId(4), P, Some(int(4))); }
+                0 => {
+                    winner.set_vertex_property(VId(1), P, Some(int(1)));
+                }
+                1 => {
+                    winner.delete_edge(EId(10));
+                }
+                _ => {
+                    winner.set_vertex_property(VId(4), P, Some(int(4)));
+                }
             }
             db.write(&cx, winner).await.unwrap();
             let advanced = db.frontier().unwrap();
@@ -246,19 +323,37 @@ fn single_relation_and_batch_splitting_preserve_exact_canonical_bytes() {
         let mut db = seeded(&cx).await;
         let program = dependent_program();
         let mut combined = WriteBatch::new(RelationId(9));
-        let one_relation: Vec<_> = program.iter().map(|batch| WriteBatch {
-            relation: RelationId(9), rows: batch.rows.clone(),
-        }).collect();
-        for batch in &one_relation { combined.extend(batch.clone()).unwrap(); }
+        let one_relation: Vec<_> = program
+            .iter()
+            .map(|batch| WriteBatch {
+                relation: RelationId(9),
+                rows: batch.rows.clone(),
+            })
+            .collect();
+        for batch in &one_relation {
+            combined.extend(batch.clone()).unwrap();
+        }
         let expected = db.prepare_write(combined).unwrap();
         let actual = db.prepare_ordered_writes(one_relation).unwrap();
-        assert_eq!(expected.template.canonical_bytes().unwrap(), actual.template.canonical_bytes().unwrap());
-        let split: Vec<_> = program.iter().flat_map(|batch| batch.rows.iter().map(move |row| WriteBatch {
-            relation: batch.relation, rows: vec![row.clone()],
-        })).collect();
+        assert_eq!(
+            expected.template.canonical_bytes().unwrap(),
+            actual.template.canonical_bytes().unwrap()
+        );
+        let split: Vec<_> = program
+            .iter()
+            .flat_map(|batch| {
+                batch.rows.iter().map(move |row| WriteBatch {
+                    relation: batch.relation,
+                    rows: vec![row.clone()],
+                })
+            })
+            .collect();
         let whole = db.prepare_ordered_writes(program).unwrap();
         let split = db.prepare_ordered_writes(split).unwrap();
-        assert_eq!(whole.template.canonical_bytes().unwrap(), split.template.canonical_bytes().unwrap());
+        assert_eq!(
+            whole.template.canonical_bytes().unwrap(),
+            split.template.canonical_bytes().unwrap()
+        );
         assert_eq!(whole.dependencies.elements, split.dependencies.elements);
         assert_eq!(whole.dependencies.adjacency, split.dependencies.adjacency);
     });
@@ -272,18 +367,32 @@ fn only_final_cross_relation_vertex_content_faces_storage_admission() {
         let cx = contexts.commit();
         let mut db = seeded(&cx).await;
         let mut first = WriteBatch::new(RelationId(9));
-        first.set_vertex_property(VId(1), P, Some(CanonicalScalar::bytes(vec![1; 8000]).unwrap()));
-        first.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::bytes(vec![2; 9000]).unwrap()));
+        first.set_vertex_property(
+            VId(1),
+            P,
+            Some(CanonicalScalar::bytes(vec![1; 8000]).unwrap()),
+        );
+        first.set_vertex_property(
+            VId(1),
+            PropertyKeyId(2),
+            Some(CanonicalScalar::bytes(vec![2; 9000]).unwrap()),
+        );
         let mut last = WriteBatch::new(RelationId(1));
         last.set_vertex_property(VId(1), P, Some(int(3)));
         last.set_vertex_property(VId(1), PropertyKeyId(2), None);
-        db.write_ordered(&cx, vec![first.clone(), last]).await.unwrap();
+        db.write_ordered(&cx, vec![first.clone(), last])
+            .await
+            .unwrap();
         assert_eq!(db.vertex(VId(1)).unwrap().unwrap().props, vec![(P, int(3))]);
         let before = db.frontier().unwrap();
         let mut other = WriteBatch::new(RelationId(1));
         other.create_vertex(VId(5), vec![], vec![]);
-        assert!(matches!(db.write_ordered(&cx, vec![first, other]).await,
-            Err(WriteTxnError::Write(WriteError::VertexStorageAdmission { .. }))));
+        assert!(matches!(
+            db.write_ordered(&cx, vec![first, other]).await,
+            Err(WriteTxnError::Write(
+                WriteError::VertexStorageAdmission { .. }
+            ))
+        ));
         assert_eq!(db.frontier().unwrap(), before);
         assert!(db.vertex(VId(5)).unwrap().is_none());
     });
@@ -310,17 +419,32 @@ fn ordered_programs_recover_all_or_none_at_the_existing_marker_boundary() {
             let result = db.commit_prepared_with_crash(&cx, prepared, point).await;
             assert_eq!(result.is_ok(), point.is_none());
             if matches!(point, Some(CrashPoint::AfterMarkerBeforeD2)) {
-                assert!(matches!(result, Err(WriteError::CommitOutcomeUnknown { .. })));
+                assert!(matches!(
+                    result,
+                    Err(WriteError::CommitOutcomeUnknown { .. })
+                ));
                 assert!(db.frontier().is_err());
             }
             drop(db);
             // MemVfs retains the written marker in the ambiguous case. This
             // is a surviving-bytes recovery test, not a power-loss simulation.
-            let mut reopened = Database::open_with_vfs(&cx, vfs.clone(), &path, keys()).await.unwrap();
-            assert_eq!(reopened.frontier().unwrap(), CommitSeq(basis.0 + u64::from(committed)));
-            for vid in [5, 6] { assert_eq!(reopened.vertex(VId(vid)).unwrap().is_some(), committed); }
-            for eid in [50, 60, 70] { assert_eq!(reopened.edge(EId(eid)).unwrap().is_some(), committed); }
-            assert_eq!(reopened.delta_since(basis).unwrap().count(), usize::from(committed));
+            let mut reopened = Database::open_with_vfs(&cx, vfs.clone(), &path, keys())
+                .await
+                .unwrap();
+            assert_eq!(
+                reopened.frontier().unwrap(),
+                CommitSeq(basis.0 + u64::from(committed))
+            );
+            for vid in [5, 6] {
+                assert_eq!(reopened.vertex(VId(vid)).unwrap().is_some(), committed);
+            }
+            for eid in [50, 60, 70] {
+                assert_eq!(reopened.edge(EId(eid)).unwrap().is_some(), committed);
+            }
+            assert_eq!(
+                reopened.delta_since(basis).unwrap().count(),
+                usize::from(committed)
+            );
             assert!(view.vertex(VId(5)).unwrap().is_none());
             if committed {
                 let vertices = reopened.vertices().unwrap();
@@ -330,7 +454,9 @@ fn ordered_programs_recover_all_or_none_at_the_existing_marker_boundary() {
                 assert_eq!(reopened.vertices().unwrap(), vertices);
                 assert_eq!(reopened.edges().unwrap(), edges);
                 drop(reopened);
-                let reopened = Database::open_with_vfs(&cx, vfs, &path, keys()).await.unwrap();
+                let reopened = Database::open_with_vfs(&cx, vfs, &path, keys())
+                    .await
+                    .unwrap();
                 assert_eq!(reopened.vertices().unwrap(), vertices);
                 assert_eq!(reopened.edges().unwrap(), edges);
                 assert_eq!(reopened.element_versions().unwrap(), &versions);

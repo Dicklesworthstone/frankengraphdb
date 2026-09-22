@@ -273,10 +273,9 @@ fn projection_quota_and_late_overflow_refusals_are_terminal_and_never_publish_pa
         assert_eq!(bad.row_stats().result_rows, 0);
         assert!(bad.next().is_none());
         for text in [
-            "MATCH (a)-[r:R]->(b) RETURN SUM(r.price*2) AS n LIMIT 0",
-            "MATCH (a)-[r:R]->(b) RETURN SUM(r.price*2) AS n HAVING n>0",
-            "MATCH (a)-[r:R]->(b) RETURN SUM(r.price*2) AS n ORDER BY n",
-            "MATCH (a)-[r:R]->(b) RETURN SUM(r.price*2)+1 AS n",
+            "MATCH (a)-[r:R]->(b) WITH r.price*2 AS p RETURN SUM(p) AS n",
+            "MATCH (a)-[r:R]->(b) WITH r.price*2 AS p RETURN AVG(p) AS n",
+            "MATCH (a)-[r:R]->(b) WITH DISTINCT r.price AS p RETURN SUM(p) AS n",
         ] {
             let query = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
             assert!(
@@ -516,10 +515,9 @@ fn computed_vertex_empty_results_quotas_and_late_errors_do_not_bypass_admission(
         assert_eq!(bad.row_stats().result_rows, 0);
         assert!(bad.next().is_none());
         for text in [
-            "MATCH (n:L) RETURN SUM(n.price*2) AS n LIMIT 0",
-            "MATCH (n:L) RETURN SUM(n.price*2) AS n HAVING n>0",
-            "MATCH (n:L) RETURN SUM(n.price*2) AS n ORDER BY n",
-            "MATCH (n:L) RETURN SUM(n.price)+1 AS n",
+            "MATCH (n:L) WITH n.price*2 AS p RETURN SUM(p) AS n",
+            "MATCH (n:L) WITH n.price*2 AS p RETURN AVG(p) AS n",
+            "MATCH (n:L) WITH DISTINCT n.price AS p RETURN SUM(p) AS n",
         ] {
             let query = PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
             assert!(

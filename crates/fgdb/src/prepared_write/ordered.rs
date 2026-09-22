@@ -33,7 +33,9 @@ fn edge_owners(
         for pending in &batch.rows {
             if let PendingRow::Edge { eid, .. } = pending {
                 let known = writer.live_edge(*eid).map(|(_, relation, _, _)| relation);
-                let owner = owners.entry(*eid).or_insert(known.unwrap_or(batch.relation));
+                let owner = owners
+                    .entry(*eid)
+                    .or_insert(known.unwrap_or(batch.relation));
                 if *owner != batch.relation {
                     return Err(WriteTxnError::AtomicRelationConflict {
                         first: *owner,
@@ -59,14 +61,22 @@ fn route(
     let eid = match pending {
         PendingRow::Edge { .. } => return Some(relation),
         PendingRow::DeleteEdge { eid, .. } | PendingRow::SetEdgeProperty { eid, .. } => *eid,
-        PendingRow::CompareAndSet { elem: ElementId::Edge(eid), .. } => *eid,
+        PendingRow::CompareAndSet {
+            elem: ElementId::Edge(eid),
+            ..
+        } => *eid,
         PendingRow::Vertex { .. }
         | PendingRow::DeleteVertex { .. }
         | PendingRow::SetLabel { .. }
         | PendingRow::SetProperty { .. }
-        | PendingRow::CompareAndSet { elem: ElementId::Vertex(_), .. } => return None,
+        | PendingRow::CompareAndSet {
+            elem: ElementId::Vertex(_),
+            ..
+        } => return None,
     };
-    declarations.get(&eid).copied()
+    declarations
+        .get(&eid)
+        .copied()
         .or_else(|| writer.live_edge(eid).map(|(_, relation, _, _)| relation))
         // Missing targets stay in a real slice, where the existing evaluator
         // distinguishes an optional no-op from UnknownEdge or a failed guard.
@@ -78,10 +88,16 @@ fn vertex_effect(row: &DeltaRow) -> Result<bool, WriteTxnError> {
         DeltaRow::CreateVertex { .. }
         | DeltaRow::DeleteVertex { .. }
         | DeltaRow::LabelMembership { .. }
-        | DeltaRow::Property { elem: ElementId::Vertex(_), .. } => Ok(true),
+        | DeltaRow::Property {
+            elem: ElementId::Vertex(_),
+            ..
+        } => Ok(true),
         DeltaRow::CreateEdge { .. }
         | DeltaRow::DeleteEdge { .. }
-        | DeltaRow::Property { elem: ElementId::Edge(_), .. } => Ok(false),
+        | DeltaRow::Property {
+            elem: ElementId::Edge(_),
+            ..
+        } => Ok(false),
         // A new mutation family needs a decomposition law before admission.
         _ => Err(WriteTxnError::UnsupportedAtomicMutation),
     }
@@ -89,11 +105,15 @@ fn vertex_effect(row: &DeltaRow) -> Result<bool, WriteTxnError> {
 
 fn restore_ordinal(row: &mut DeltaRow, visits: &[u64]) -> Result<(), WriteTxnError> {
     if let DeltaRow::CreateVertex { birth_ordinal, .. }
-    | DeltaRow::CreateEdge { birth_ordinal, .. } = row {
-        let index = birth_ordinal.checked_sub(1)
+    | DeltaRow::CreateEdge { birth_ordinal, .. } = row
+    {
+        let index = birth_ordinal
+            .checked_sub(1)
             .and_then(|ordinal| usize::try_from(ordinal).ok())
             .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
-        *birth_ordinal = *visits.get(index).ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
+        *birth_ordinal = *visits
+            .get(index)
+            .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
     }
     Ok(())
 }
@@ -143,7 +163,9 @@ impl<V: Vfs + Clone> Database<V> {
         for batch in &batches {
             relations.insert(batch.relation);
             for pending in &batch.rows {
-                ordinal = ordinal.checked_add(1).ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
+                ordinal = ordinal
+                    .checked_add(1)
+                    .ok_or(WriteTxnError::AtomicOrdinalOverflow)?;
                 let target = route(&self.writer, &declarations, batch.relation, pending);
                 if let Some(relation) = target {
                     relations.insert(relation);
@@ -206,7 +228,9 @@ impl<V: Vfs + Clone> Database<V> {
             coordinate.rows = edges;
             coordinates.insert(relation, coordinate);
             dependencies.elements.extend(prepared.dependencies.elements);
-            dependencies.adjacency.extend(prepared.dependencies.adjacency);
+            dependencies
+                .adjacency
+                .extend(prepared.dependencies.adjacency);
         }
         // Every new endpoint is born before any later coordinate's edges.
         // Vertex deletes also precede later coordinates; each slice's NENF has
@@ -216,13 +240,17 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(WriteTxnError::UnsupportedAtomicMutation);
         };
         let owner_relation = owner.relation;
-        coordinates.get_mut(&owner_relation).expect("nonempty coordinate map")
-            .rows.extend(shared_vertices.unwrap_or_default());
+        coordinates
+            .get_mut(&owner_relation)
+            .expect("nonempty coordinate map")
+            .rows
+            .extend(shared_vertices.unwrap_or_default());
         let template = LogicalDeltaTemplate::build(
             crate::intent_semantics_oid(),
             [0_u8; 32],
             coordinates.into_values().collect(),
-        ).map_err(WriteError::Canonical)?;
+        )
+        .map_err(WriteError::Canonical)?;
         Ok(PreparedWrite {
             template,
             basis: self.snapshot.frontier,

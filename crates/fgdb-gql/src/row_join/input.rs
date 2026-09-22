@@ -188,7 +188,10 @@ impl InputUpdate<'_> {
                     )?;
                 }
             }
-            Self::Left(input) | Self::Full { left_outer: input, .. } => {
+            Self::Left(input)
+            | Self::Full {
+                left_outer: input, ..
+            } => {
                 for ((_, left, right), weight) in input.delta().iter() {
                     append(
                         &mut updates,
@@ -222,7 +225,15 @@ impl InputUpdate<'_> {
         }
         if let Self::Full { right_anti, .. } = self {
             for ((_, right), weight) in right_anti.delta().iter() {
-                append(&mut updates, spec, None, Some(right), weight, limbs, control)?;
+                append(
+                    &mut updates,
+                    spec,
+                    None,
+                    Some(right),
+                    weight,
+                    limbs,
+                    control,
+                )?;
             }
         }
         // Null-extended payloads from different arms can be identical (including

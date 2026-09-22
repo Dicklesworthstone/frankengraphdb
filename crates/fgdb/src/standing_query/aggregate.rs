@@ -467,12 +467,15 @@ impl<V: Vfs + Clone> Database<V> {
             super::StandingQuery::Group(_) => return self.standing_group_delta(cx, handle),
             _ => return Err(StandingQueryError::Unsupported),
         };
-        Ok(source.last_delta.as_ref().map(|rows| super::StandingQueryView {
-            rows,
-            ordered: None,
-            frontier: source.frontier,
-            stats: &source.stats,
-        }))
+        Ok(source
+            .last_delta
+            .as_ref()
+            .map(|rows| super::StandingQueryView {
+                rows,
+                ordered: None,
+                frontier: source.frontier,
+                stats: &source.stats,
+            }))
     }
 
     pub(super) fn prepare_standing_query(

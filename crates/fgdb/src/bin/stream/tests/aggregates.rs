@@ -338,11 +338,10 @@ fn unsupported_aggregate_clauses_and_future_history_refuse_before_transport() {
             .unwrap();
         db.write(&contexts.commit(), batch(1, 7)).await.unwrap();
         for text in [
-            "MATCH (n) RETURN n.p AS p, COUNT(*) AS total GROUP BY n.p LIMIT 0",
-            "MATCH (n) RETURN COUNT(DISTINCT n.p) AS total LIMIT 0",
-            "MATCH (n) RETURN COLLECT(n.p) AS values",
-            "MATCH (n) RETURN COUNT(*) AS total HAVING total > 0",
-            "MATCH (n) RETURN COUNT(*) AS total LIMIT 0",
+            "MATCH (n) WITH n.p AS p RETURN COUNT(*) AS total",
+            "MATCH (n) WITH n.p AS p RETURN SUM(p) AS total",
+            "MATCH (n) WITH DISTINCT n.p AS p RETURN COUNT(*) AS total",
+            "MATCH (a), (b) RETURN COUNT(*) AS total",
             "MATCH (n) FOR SYSTEM_TIME AS OF SEQ 2 RETURN AVG(n.p) AS average",
         ] {
             let options = options(text);

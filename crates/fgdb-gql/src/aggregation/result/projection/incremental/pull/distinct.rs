@@ -43,7 +43,9 @@ impl DistinctIndex {
         let mut units = 1_usize;
         for value in key.keys() {
             control(GlaExecutionEvent::Work)?;
-            units = units.saturating_add(value.payload_units()).saturating_add(1);
+            units = units
+                .saturating_add(value.payload_units())
+                .saturating_add(1);
         }
         for value in key.values() {
             control(GlaExecutionEvent::Work)?;
@@ -78,7 +80,10 @@ impl DistinctIndex {
         self.reserve(&key, control)?;
         control(GlaExecutionEvent::ScratchEntry)?;
         let prior = self.positions.insert(key, at);
-        debug_assert!(prior.is_none(), "new class must not replace a resident index entry");
+        debug_assert!(
+            prior.is_none(),
+            "new class must not replace a resident index entry"
+        );
         Ok(())
     }
 
@@ -89,7 +94,10 @@ impl DistinctIndex {
     ) -> Result<(), E> {
         self.reserve(key, control)?;
         let removed = self.positions.remove(key);
-        debug_assert!(removed.is_some(), "evicted class must have a resident index entry");
+        debug_assert!(
+            removed.is_some(),
+            "evicted class must have a resident index entry"
+        );
         Ok(())
     }
 
@@ -100,10 +108,15 @@ impl DistinctIndex {
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<(), E> {
         self.reserve(key, control)?;
-        *self.positions.get_mut(key).expect("heap swap retains its indexed class") = at;
+        *self
+            .positions
+            .get_mut(key)
+            .expect("heap swap retains its indexed class") = at;
         Ok(())
     }
 
     #[cfg(test)]
-    pub(super) fn len(&self) -> usize { self.positions.len() }
+    pub(super) fn len(&self) -> usize {
+        self.positions.len()
+    }
 }

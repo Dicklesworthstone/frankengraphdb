@@ -369,6 +369,8 @@ fn zero_window_never_bypasses_child_errors_or_per_node_admission() {
             .with_page(1, None)
             .with_order_by(&order(true))
             .unwrap()
+            .nested()
+            .unwrap()
             .with_page(0, Some(0));
         assert!(register(&mut db, &cx, &unsupported, policy()).is_err());
         assert_eq!(saved(&db.standing_queries), before);

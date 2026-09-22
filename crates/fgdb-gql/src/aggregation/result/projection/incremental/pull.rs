@@ -4,8 +4,8 @@
 //! borrows the exact finalized cells through the existing HAVING interpreter
 //! and the same result-projection evaluator as incremental/batch consumers.
 
-use super::*;
 use super::super::super::having::GroupCells;
+use super::*;
 
 mod distinct;
 use distinct::{DistinctIndex, DistinctKey};
@@ -28,7 +28,9 @@ impl PreparedGraphAggregate {
     /// including hidden keys and summaries, address the full evaluation schema.
     /// This private gate does not widen any incremental-maintenance contract.
     pub(crate) fn prepare_streamed_output(&self) -> Option<Self> {
-        if self.supports_row_local_aggregate_stream() { return Some(self.clone()); }
+        if self.supports_row_local_aggregate_stream() {
+            return Some(self.clone());
+        }
         if self.relational_input.is_some() {
             return None;
         }
@@ -39,20 +41,32 @@ impl PreparedGraphAggregate {
     /// source and accumulator profile. Relational folding may reuse this result
     /// stage without widening vertex/edge pull-source admission above.
     pub(crate) fn prepare_complete_group_output(&self) -> Option<Self> {
-        if self.supports_row_local_aggregate_stream() { return Some(self.clone()); }
+        if self.supports_row_local_aggregate_stream() {
+            return Some(self.clone());
+        }
         let mut physical = self.clone();
         if !self.having.is_empty() {
             let mut program = Vec::new();
             for (at, filter) in self.having.iter().enumerate() {
                 let operand = GraphHavingOperand::Column(filter.column);
                 program.push(match filter.test {
-                    GraphAggregateTest::IsNull => GraphHavingOp::IsNull { operand, is_null: true },
-                    GraphAggregateTest::IsNotNull => GraphHavingOp::IsNull { operand, is_null: false },
+                    GraphAggregateTest::IsNull => GraphHavingOp::IsNull {
+                        operand,
+                        is_null: true,
+                    },
+                    GraphAggregateTest::IsNotNull => GraphHavingOp::IsNull {
+                        operand,
+                        is_null: false,
+                    },
                     GraphAggregateTest::Integer { comparison, value } => GraphHavingOp::Compare {
-                        left: operand, comparison, right: GraphHavingOperand::Integer(value),
+                        left: operand,
+                        comparison,
+                        right: GraphHavingOperand::Integer(value),
                     },
                 });
-                if at != 0 { program.push(GraphHavingOp::And); }
+                if at != 0 {
+                    program.push(GraphHavingOp::And);
+                }
             }
             physical.having_expression = Some(GraphHavingExpression::prepare(&program).ok()?);
             physical.having.clear();
@@ -84,7 +98,9 @@ impl PreparedGraphAggregate {
         row: GraphAggregateRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<Option<GraphAggregateRow>, QueryError<E, C>> {
-        if !self.qualifies_streamed_output(&row, control)? { return Ok(None); }
+        if !self.qualifies_streamed_output(&row, control)? {
+            return Ok(None);
+        }
         if !self.transforms_streamed_columns() {
             return Ok(Some(row));
         }
@@ -92,7 +108,8 @@ impl PreparedGraphAggregate {
     }
 
     fn transforms_streamed_columns(&self) -> bool {
-        self.output_projection.is_some() || self.key_output.is_some()
+        self.output_projection.is_some()
+            || self.key_output.is_some()
             || self.output_aggregates != self.aggregates.len()
     }
 
@@ -118,14 +135,20 @@ impl PreparedGraphAggregate {
     /// This does not widen any incremental-maintenance or input-source gate.
     pub(crate) fn streamed_group_ranking(&self, groups: usize) -> StreamedGroupRanking {
         let offset = usize::try_from(self.offset).unwrap_or(usize::MAX);
-        let count = self.count.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::MAX);
+        let count = self
+            .count
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(usize::MAX);
         let prefix = if count == 0 || offset >= groups {
             0
         } else {
             offset.saturating_add(count).min(groups)
         };
         StreamedGroupRanking {
-            offset, count, prefix, heap: Vec::new(),
+            offset,
+            count,
+            prefix,
+            heap: Vec::new(),
             distinct: self.output_distinct.then(DistinctIndex::default),
         }
     }
@@ -164,7 +187,9 @@ impl StreamedGroupRanking {
         row: GraphAggregateRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), QueryError<E, C>>,
     ) -> Result<(), QueryError<E, C>> {
-        if !query.qualifies_streamed_output(&row, control)? { return Ok(()); }
+        if !query.qualifies_streamed_output(&row, control)? {
+            return Ok(());
+        }
         // Evaluate even a losing, skipped, or LIMIT-0 group's expressions.
         // Early rank elimination must never conceal a later typed failure.
         let projected = if query.transforms_streamed_columns() {
@@ -172,12 +197,21 @@ impl StreamedGroupRanking {
         } else {
             None
         };
-        if self.prefix == 0 { return Ok(()); }
-        let mut candidate = RankedGroup { complete: row, projected, distinct_key: None };
+        if self.prefix == 0 {
+            return Ok(());
+        }
+        let mut candidate = RankedGroup {
+            complete: row,
+            projected,
+            distinct_key: None,
+        };
         if let Some(index) = &mut self.distinct {
             // Normalize equality only. The chosen representative keeps its
             // original count/integer/fraction/scalar variants for delivery.
-            let key = DistinctIndex::key(candidate.projected.as_ref().unwrap_or(&candidate.complete), control)?;
+            let key = DistinctIndex::key(
+                candidate.projected.as_ref().unwrap_or(&candidate.complete),
+                control,
+            )?;
             if let Some(at) = index.position(&key, control)? {
                 if Self::compare(query, &candidate, &self.heap[at], control)? == Ordering::Less {
                     control(GlaExecutionEvent::Work)?;
@@ -197,13 +231,22 @@ impl StreamedGroupRanking {
             control(GlaExecutionEvent::ScratchEntry)?;
             let mut child = self.heap.len();
             if let Some(index) = &mut self.distinct {
-                index.insert(candidate.distinct_key.as_ref().expect("distinct candidate key").clone(), child, control)?;
+                index.insert(
+                    candidate
+                        .distinct_key
+                        .as_ref()
+                        .expect("distinct candidate key")
+                        .clone(),
+                    child,
+                    control,
+                )?;
             }
             self.heap.push(candidate);
             while child > 0 {
                 let parent = (child - 1) / 2;
                 if Self::compare(query, &self.heap[parent], &self.heap[child], control)?
-                    != Ordering::Less {
+                    != Ordering::Less
+                {
                     break;
                 }
                 self.swap(parent, child, control)?;
@@ -212,8 +255,22 @@ impl StreamedGroupRanking {
         } else if Self::compare(query, &candidate, &self.heap[0], control)? == Ordering::Less {
             control(GlaExecutionEvent::Work)?;
             if let Some(index) = &mut self.distinct {
-                index.remove(self.heap[0].distinct_key.as_ref().expect("resident distinct key"), control)?;
-                index.insert(candidate.distinct_key.as_ref().expect("distinct candidate key").clone(), 0, control)?;
+                index.remove(
+                    self.heap[0]
+                        .distinct_key
+                        .as_ref()
+                        .expect("resident distinct key"),
+                    control,
+                )?;
+                index.insert(
+                    candidate
+                        .distinct_key
+                        .as_ref()
+                        .expect("distinct candidate key")
+                        .clone(),
+                    0,
+                    control,
+                )?;
             }
             self.heap[0] = candidate;
             self.sift_down(query, 0, self.heap.len(), control)?;
@@ -231,7 +288,14 @@ impl StreamedGroupRanking {
         self.heap.swap(left, right);
         if let Some(index) = &mut self.distinct {
             for at in [left, right] {
-                index.move_to(self.heap[at].distinct_key.as_ref().expect("resident distinct key"), at, control)?;
+                index.move_to(
+                    self.heap[at]
+                        .distinct_key
+                        .as_ref()
+                        .expect("resident distinct key"),
+                    at,
+                    control,
+                )?;
             }
         }
         Ok(())
@@ -245,7 +309,9 @@ impl StreamedGroupRanking {
     ) -> Result<Ordering, E> {
         // Use the canonical exact comparator, not derived enum Ord, floats,
         // subtraction, or a projected output's possibly missing sort column.
-        Ok(left.complete.compare_incremental_order(&right.complete, query.ordering(), control)?
+        Ok(left
+            .complete
+            .compare_incremental_order(&right.complete, query.ordering(), control)?
             .expect("physical reducer supplied complete groups for its checked definition"))
     }
 
@@ -260,11 +326,12 @@ impl StreamedGroupRanking {
             let mut child = 2 * root + 1;
             if child + 1 < end
                 && Self::compare(query, &self.heap[child], &self.heap[child + 1], control)?
-                    == Ordering::Less {
+                    == Ordering::Less
+            {
                 child += 1;
             }
-            if Self::compare(query, &self.heap[root], &self.heap[child], control)?
-                != Ordering::Less {
+            if Self::compare(query, &self.heap[root], &self.heap[child], control)? != Ordering::Less
+            {
                 break;
             }
             self.swap(root, child, control)?;
@@ -312,54 +379,110 @@ mod tests {
     use crate::{GraphIntegerBinary, GraphIntegerExpression, GraphIntegerOp, GraphSetProjection};
     use fgdb_delta_types::PropertyKeyId;
 
-    fn definition(offset: u64, count: Option<u64>, descending: bool, nulls: GraphNullPlacement)
-        -> PreparedGraphAggregate {
+    fn definition(
+        offset: u64,
+        count: Option<u64>,
+        descending: bool,
+        nulls: GraphNullPlacement,
+    ) -> PreparedGraphAggregate {
         let mut builder = GraphPatternBuilder::new();
         builder.vertex("n").unwrap();
-        let input = builder.prepare_values(&[
-            GraphColumn::property("key", "n", PropertyKeyId(1)),
-            GraphColumn::property("amount", "n", PropertyKeyId(2)),
-        ], 0, None).unwrap().with_duplicates();
-        PreparedGraphAggregate::prepare(input, &[0], &[
-            GraphAggregate::count_rows("count"), GraphAggregate::average_int("average", 1),
-        ], offset, count).unwrap().with_result_clauses(&[], &[
-            GraphAggregateOrder { column: GraphAggregateColumn::Aggregate(1), descending, nulls },
-            GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(0)),
-        ]).unwrap()
+        let input = builder
+            .prepare_values(
+                &[
+                    GraphColumn::property("key", "n", PropertyKeyId(1)),
+                    GraphColumn::property("amount", "n", PropertyKeyId(2)),
+                ],
+                0,
+                None,
+            )
+            .unwrap()
+            .with_duplicates();
+        PreparedGraphAggregate::prepare(
+            input,
+            &[0],
+            &[
+                GraphAggregate::count_rows("count"),
+                GraphAggregate::average_int("average", 1),
+            ],
+            offset,
+            count,
+        )
+        .unwrap()
+        .with_result_clauses(
+            &[],
+            &[
+                GraphAggregateOrder {
+                    column: GraphAggregateColumn::Aggregate(1),
+                    descending,
+                    nulls,
+                },
+                GraphAggregateOrder::descending(GraphAggregateColumn::Aggregate(0)),
+            ],
+        )
+        .unwrap()
     }
 
     fn rows() -> Vec<GraphAggregateRow> {
-        (0..37).map(|i| GraphAggregateRow::from_group_values(
-            vec![GraphValue::Scalar(CanonicalScalar::Int(i))],
-            vec![GraphAggregateValue::Count((i as u64 * 7) % 5 + 1),
-                if i % 7 == 0 {
-                    GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
-                } else {
-                    GraphAggregateValue::Average(GraphExactAverage::new(
-                        i128::from((i * 13) % 23 - 11), (i as u64 * 5) % 3 + 1,
-                    ).unwrap())
-                }],
-        )).collect()
+        (0..37)
+            .map(|i| {
+                GraphAggregateRow::from_group_values(
+                    vec![GraphValue::Scalar(CanonicalScalar::Int(i))],
+                    vec![
+                        GraphAggregateValue::Count((i as u64 * 7) % 5 + 1),
+                        if i % 7 == 0 {
+                            GraphAggregateValue::Value(GraphValue::Scalar(CanonicalScalar::Null))
+                        } else {
+                            GraphAggregateValue::Average(
+                                GraphExactAverage::new(
+                                    i128::from((i * 13) % 23 - 11),
+                                    (i as u64 * 5) % 3 + 1,
+                                )
+                                .unwrap(),
+                            )
+                        },
+                    ],
+                )
+            })
+            .collect()
     }
 
     // Independent small-domain rational order; never call the production
     // comparator or use aggregate enum tags as a surrogate numeric order.
-    fn oracle_order(a: &GraphAggregateRow, b: &GraphAggregateRow, descending: bool,
-        nulls: GraphNullPlacement) -> Ordering {
+    fn oracle_order(
+        a: &GraphAggregateRow,
+        b: &GraphAggregateRow,
+        descending: bool,
+        nulls: GraphNullPlacement,
+    ) -> Ordering {
         let fraction = |row: &GraphAggregateRow| match row.values()[1] {
             GraphAggregateValue::Average(value) => Some((value.numerator(), value.denominator())),
             _ => None,
         };
         let order = match (fraction(a), fraction(b)) {
             (None, None) => Ordering::Equal,
-            (None, Some(_)) => if nulls == GraphNullPlacement::First { Ordering::Less } else { Ordering::Greater },
-            (Some(_), None) => if nulls == GraphNullPlacement::First { Ordering::Greater } else { Ordering::Less },
+            (None, Some(_)) => {
+                if nulls == GraphNullPlacement::First {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (Some(_), None) => {
+                if nulls == GraphNullPlacement::First {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
             (Some((a, da)), Some((b, db))) => {
                 let result = (a * i128::from(db)).cmp(&(b * i128::from(da)));
                 if descending { result.reverse() } else { result }
             }
         };
-        order.then_with(|| b.values()[0].cmp(&a.values()[0])).then_with(|| a.keys().cmp(b.keys()))
+        order
+            .then_with(|| b.values()[0].cmp(&a.values()[0]))
+            .then_with(|| a.keys().cmp(b.keys()))
     }
 
     #[test]
@@ -371,7 +494,11 @@ mod tests {
                         for projection in 0..3 {
                             let q = definition(offset, count, descending, nulls);
                             let q = match projection {
-                                1 => q.with_key_output_columns(&[]).unwrap().with_aggregate_output_prefix(1).unwrap(),
+                                1 => q
+                                    .with_key_output_columns(&[])
+                                    .unwrap()
+                                    .with_aggregate_output_prefix(1)
+                                    .unwrap(),
                                 2 => q.with_key_output_columns(&[0, 0]).unwrap(),
                                 _ => q,
                             };
@@ -380,14 +507,26 @@ mod tests {
                             let rows = rows();
                             let mut expected = rows.clone();
                             expected.sort_by(|a, b| oracle_order(a, b, descending, nulls));
-                            let expected: Vec<_> = expected.into_iter()
+                            let expected: Vec<_> = expected
+                                .into_iter()
                                 .skip(usize::try_from(offset).unwrap_or(usize::MAX))
-                                .take(count.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::MAX))
+                                .take(
+                                    count
+                                        .and_then(|n| usize::try_from(n).ok())
+                                        .unwrap_or(usize::MAX),
+                                )
                                 .map(|row| match projection {
-                                    1 => GraphAggregateRow::from_group_values(vec![], vec![row.values()[0].clone()]),
-                                    2 => GraphAggregateRow::from_group_values(vec![row.keys()[0].clone(); 2], row.values().to_vec()),
+                                    1 => GraphAggregateRow::from_group_values(
+                                        vec![],
+                                        vec![row.values()[0].clone()],
+                                    ),
+                                    2 => GraphAggregateRow::from_group_values(
+                                        vec![row.keys()[0].clone(); 2],
+                                        row.values().to_vec(),
+                                    ),
                                     _ => row,
-                                }).collect();
+                                })
+                                .collect();
                             let mut ranking = physical.streamed_group_ranking(rows.len());
                             let mut control = |event| {
                                 assert_ne!(event, GlaExecutionEvent::ResultRow);
@@ -411,35 +550,61 @@ mod tests {
     fn ordered_off_page_expression_errors_survive_empty_huge_and_full_windows() {
         for (offset, count) in [(0, Some(0)), (0, Some(1)), (u64::MAX, Some(u64::MAX))] {
             let q = definition(offset, count, true, GraphNullPlacement::Last)
-                .with_output_projection(vec![GraphSetProjection::new("reciprocal", GraphSetValue::Integer(
-                    GraphIntegerExpression::prepare(&[
-                        GraphIntegerOp::Literal(Some(1)), GraphIntegerOp::Column(1),
-                        GraphIntegerOp::Literal(Some(1)), GraphIntegerOp::Binary(GraphIntegerBinary::Subtract),
-                        GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
-                    ]).unwrap(),
-                ))]).unwrap().prepare_streamed_output().unwrap();
+                .with_output_projection(vec![GraphSetProjection::new(
+                    "reciprocal",
+                    GraphSetValue::Integer(
+                        GraphIntegerExpression::prepare(&[
+                            GraphIntegerOp::Literal(Some(1)),
+                            GraphIntegerOp::Column(1),
+                            GraphIntegerOp::Literal(Some(1)),
+                            GraphIntegerOp::Binary(GraphIntegerBinary::Subtract),
+                            GraphIntegerOp::Binary(GraphIntegerBinary::Divide),
+                        ])
+                        .unwrap(),
+                    ),
+                )])
+                .unwrap()
+                .prepare_streamed_output()
+                .unwrap();
             let mut control = |_| Ok::<_, QueryError<(), ()>>(());
             let mut ranking = q.streamed_group_ranking(2);
-            let make = |key, count| GraphAggregateRow::from_group_values(
-                vec![GraphValue::Scalar(CanonicalScalar::Int(key))],
-                vec![GraphAggregateValue::Count(count), GraphAggregateValue::Average(GraphExactAverage::new(2, 1).unwrap())],
-            );
+            let make = |key, count| {
+                GraphAggregateRow::from_group_values(
+                    vec![GraphValue::Scalar(CanonicalScalar::Int(key))],
+                    vec![
+                        GraphAggregateValue::Count(count),
+                        GraphAggregateValue::Average(GraphExactAverage::new(2, 1).unwrap()),
+                    ],
+                )
+            };
             ranking.push(&q, make(0, 2), &mut control).unwrap();
-            assert!(matches!(ranking.push(&q, make(1, 1), &mut control),
-                Err(GqlQueryError::Source(GraphAggregateError::OutputExpression { column: 0, .. }))));
+            assert!(matches!(
+                ranking.push(&q, make(1, 1), &mut control),
+                Err(GqlQueryError::Source(
+                    GraphAggregateError::OutputExpression { column: 0, .. }
+                ))
+            ));
         }
     }
 
-    fn interrupted_run(q: &PreparedGraphAggregate, stop: usize)
-        -> (Result<Vec<GraphAggregateRow>, QueryError<(), usize>>, usize) {
+    fn interrupted_run(
+        q: &PreparedGraphAggregate,
+        stop: usize,
+    ) -> (Result<Vec<GraphAggregateRow>, QueryError<(), usize>>, usize) {
         let mut calls = 0;
         let result = (|| {
             let mut control = |_| {
                 calls += 1;
-                if calls == stop { Err(GqlQueryError::Interrupted(stop)) } else { Ok(()) }
+                if calls == stop {
+                    Err(GqlQueryError::Interrupted(stop))
+                } else {
+                    Ok(())
+                }
             };
             let mut ranking = q.streamed_group_ranking(9);
-            for row in rows().into_iter().take(9) { ranking.push(q, row, &mut control)?; }
+            for row in rows().into_iter().take(9) {
+                ranking.push(q, row, &mut control)?;
+            }
             ranking.finish(q, &mut control)
         })();
         (result, calls)
@@ -448,7 +613,10 @@ mod tests {
     #[test]
     fn every_rank_projection_and_sort_checkpoint_can_refuse_and_retry_from_scratch() {
         let q = definition(1, Some(3), true, GraphNullPlacement::First)
-            .with_key_output_columns(&[0, 0]).unwrap().prepare_streamed_output().unwrap();
+            .with_key_output_columns(&[0, 0])
+            .unwrap()
+            .prepare_streamed_output()
+            .unwrap();
         let (expected, calls) = interrupted_run(&q, usize::MAX);
         assert_eq!(expected.as_ref().unwrap().len(), 3);
         for stop in 1..=calls {

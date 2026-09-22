@@ -19,9 +19,7 @@ impl PreparedGraphSet {
         }
         match &self.node {
             SetNode::Unwind { .. } | SetNode::CrossJoin { .. } => true,
-            SetNode::Scope(input) | SetNode::Filter { input, .. } => {
-                input.has_foldable_expansion()
-            }
+            SetNode::Scope(input) | SetNode::Filter { input, .. } => input.has_foldable_expansion(),
             SetNode::Project {
                 input,
                 quantifier: GraphSetQuantifier::All,
@@ -60,9 +58,13 @@ impl PreparedGraphSet {
             evaluator: GlaExecutionStats::default(),
         };
         let mut operand = 0;
-        visit(self, &mut source, &mut meter, &mut operand, &mut |row, meter| {
-            consume(row, &mut |event| meter.event(event))
-        })?;
+        visit(
+            self,
+            &mut source,
+            &mut meter,
+            &mut operand,
+            &mut |row, meter| consume(row, &mut |event| meter.event(event)),
+        )?;
         meter.event(GlaExecutionEvent::Work)?;
         Ok((meter.rows, meter.evaluator))
     }
@@ -183,7 +185,9 @@ where
                     meter.event(GlaExecutionEvent::ScratchEntry)?;
                     let mut values = Vec::new();
                     for value in a.values().iter().chain(b.values()) {
-                        values.push(projection::copy_value(value, &mut |event| meter.event(event))?);
+                        values.push(projection::copy_value(value, &mut |event| {
+                            meter.event(event)
+                        })?);
                     }
                     window.push(GraphValueRow::from_owned_values(values), meter, consume)?;
                 }
@@ -206,14 +210,16 @@ where
                         GraphValue::List(values) => values,
                         value if value.is_null() => return Ok(()),
                         _ => {
-                            return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
-                                row: row_at,
-                                column,
-                                error: crate::GraphIntegerError {
-                                    instruction: 0,
-                                    kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+                            return Err(GqlQueryError::Source(
+                                GraphSetExecutionError::Projection {
+                                    row: row_at,
+                                    column,
+                                    error: crate::GraphIntegerError {
+                                        instruction: 0,
+                                        kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+                                    },
                                 },
-                            }));
+                            ));
                         }
                     };
                     for value in values.into_vec() {
@@ -221,7 +227,9 @@ where
                         meter.event(GlaExecutionEvent::ScratchEntry)?;
                         let mut cells = Vec::new();
                         for cell in row.values() {
-                            cells.push(projection::copy_value(cell, &mut |event| meter.event(event))?);
+                            cells.push(projection::copy_value(cell, &mut |event| {
+                                meter.event(event)
+                            })?);
                         }
                         meter.event(GlaExecutionEvent::ScratchEntry)?;
                         cells.push(value);
@@ -252,7 +260,9 @@ where
                 Ok(())
             })?;
         }
-        SetNode::Project { input, projection, .. } => {
+        SetNode::Project {
+            input, projection, ..
+        } => {
             // Admission proves ALL and order preservation. Implicit canonical
             // projection sorting is never bypassed just because the sink sums.
             let mut row_at = 0_usize;
@@ -261,9 +271,10 @@ where
                     return Ok(());
                 }
                 meter.event(GlaExecutionEvent::Work)?;
-                let result = projection::evaluate(&row, projection, &mut |event| meter.event(event))
-                    .map_err(|error| projected(error, row_at))
-                    .and_then(|row| window.push(row, meter, consume));
+                let result =
+                    projection::evaluate(&row, projection, &mut |event| meter.event(event))
+                        .map_err(|error| projected(error, row_at))
+                        .and_then(|row| window.push(row, meter, consume));
                 remember(result, &mut local)?;
                 row_at = row_at.checked_add(1).ok_or_else(|| {
                     GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow {

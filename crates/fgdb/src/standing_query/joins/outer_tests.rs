@@ -69,7 +69,10 @@ fn bag<const N: usize>(entries: &[([Option<i64>; N], i128)]) -> ZSet<GraphValueR
                     GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
                 })
                 .collect();
-            (GraphValueRow::from_owned_values(values), ZWeight::from_i128(*count))
+            (
+                GraphValueRow::from_owned_values(values),
+                ZWeight::from_i128(*count),
+            )
         }),
         LIMBS,
         &mut |_| Ok::<_, StandingQueryFailure>(()),
@@ -96,12 +99,22 @@ fn right_and_full_equijoins_publish_exact_deltas_to_downstream_joins_and_rebuild
         let (left, right) = sources(&mut db, &cx, false);
         let right_join = db
             .register_standing_join_with_kind(
-                &cx, &left, &right, &[(0, 0)], RowJoinKind::Right, policy(),
+                &cx,
+                &left,
+                &right,
+                &[(0, 0)],
+                RowJoinKind::Right,
+                policy(),
             )
             .unwrap();
         let full = db
             .register_standing_join_with_kind(
-                &cx, &left, &right, &[(0, 0)], RowJoinKind::Full, policy(),
+                &cx,
+                &left,
+                &right,
+                &[(0, 0)],
+                RowJoinKind::Full,
+                policy(),
             )
             .unwrap();
         let child = db
@@ -114,7 +127,9 @@ fn right_and_full_equijoins_publish_exact_deltas_to_downstream_joins_and_rebuild
         ]);
         let before_child = bag(&[([None, None, Some(2), Some(20), Some(2), Some(20)], 1)]);
         for (handle, expected) in [
-            (&right_join, &before_right), (&full, &before_full), (&child, &before_child),
+            (&right_join, &before_right),
+            (&full, &before_full),
+            (&child, &before_child),
         ] {
             assert_eq!(db.standing_join(&cx, handle).unwrap().rows(), expected);
             assert!(db.standing_join_delta(&cx, handle).unwrap().is_none());
@@ -142,14 +157,23 @@ fn right_and_full_equijoins_publish_exact_deltas_to_downstream_joins_and_rebuild
                 db.standing_join_delta(&cx, handle).unwrap().unwrap().rows(),
                 &difference(expected, before)
             );
-            assert_eq!(db.standing_join_total(&cx, handle).unwrap(), &ZWeight::from_i128(1));
+            assert_eq!(
+                db.standing_join_total(&cx, handle).unwrap(),
+                &ZWeight::from_i128(1)
+            );
         }
         for handle in [&right_join, &full, &child] {
             db.rebuild_standing_query(&cx, handle, policy()).unwrap();
             assert!(db.standing_join_delta(&cx, handle).unwrap().is_none());
         }
-        assert_eq!(db.standing_join_kind(&cx, &right_join).unwrap(), RowJoinKind::Right);
-        assert_eq!(db.standing_join_kind(&cx, &full).unwrap(), RowJoinKind::Full);
+        assert_eq!(
+            db.standing_join_kind(&cx, &right_join).unwrap(),
+            RowJoinKind::Right
+        );
+        assert_eq!(
+            db.standing_join_kind(&cx, &full).unwrap(),
+            RowJoinKind::Full
+        );
         assert_eq!(db.standing_join(&cx, &child).unwrap().rows(), &after_child);
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -168,8 +192,12 @@ fn explicit_cross_modes_follow_empty_witness_transitions_without_losing_bag_coun
         db.write(&commit, seed).await.unwrap();
         let (left, right) = sources(&mut db, &cx, true);
         let kinds = [
-            RowJoinKind::Inner, RowJoinKind::Left, RowJoinKind::Right,
-            RowJoinKind::Full, RowJoinKind::Semi, RowJoinKind::Anti,
+            RowJoinKind::Inner,
+            RowJoinKind::Left,
+            RowJoinKind::Right,
+            RowJoinKind::Full,
+            RowJoinKind::Semi,
+            RowJoinKind::Anti,
         ];
         let mut handles = Vec::new();
         let mut baselines = Vec::new();
@@ -185,20 +213,42 @@ fn explicit_cross_modes_follow_empty_witness_transitions_without_losing_bag_coun
                 RowJoinKind::Anti => bag(&[([Some(1), Some(10)], 2)]),
             };
             assert_eq!(db.standing_join(&cx, &handle).unwrap().rows(), &baseline);
-            let width = if matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti) { 2 } else { 4 };
+            let width = if matches!(kind, RowJoinKind::Semi | RowJoinKind::Anti) {
+                2
+            } else {
+                4
+            };
             assert_eq!(db.standing_join_columns(&cx, &handle).unwrap().len(), width);
             handles.push(handle);
             baselines.push(baseline);
         }
-        let default = db.register_standing_cross_join(&cx, &left, &right, policy()).unwrap();
-        assert_eq!(db.standing_join_kind(&cx, &default).unwrap(), RowJoinKind::Inner);
+        let default = db
+            .register_standing_cross_join(&cx, &left, &right, policy())
+            .unwrap();
+        assert_eq!(
+            db.standing_join_kind(&cx, &default).unwrap(),
+            RowJoinKind::Inner
+        );
         assert!(matches!(
-            db.register_standing_join_with_kind(&cx, &left, &right, &[], RowJoinKind::Full, policy()),
+            db.register_standing_join_with_kind(
+                &cx,
+                &left,
+                &right,
+                &[],
+                RowJoinKind::Full,
+                policy()
+            ),
             Err(StandingQueryError::JoinSchema(RowJoinBuildError::EmptyKeys))
         ));
         let mut other = Database::open_memory(&commit, keys(0x83)).await.unwrap();
         assert!(matches!(
-            other.register_standing_cross_join_with_kind(&cx, &left, &right, RowJoinKind::Full, policy()),
+            other.register_standing_cross_join_with_kind(
+                &cx,
+                &left,
+                &right,
+                RowJoinKind::Full,
+                policy()
+            ),
             Err(StandingQueryError::ForeignHandle)
         ));
         assert!(other.standing_queries.is_empty());
@@ -230,14 +280,20 @@ fn explicit_cross_modes_follow_empty_witness_transitions_without_losing_bag_coun
         }
         db.write(&commit, remove).await.unwrap();
         for (index, handle) in handles.iter().enumerate() {
-            assert_eq!(db.standing_join(&cx, handle).unwrap().rows(), &baselines[index]);
+            assert_eq!(
+                db.standing_join(&cx, handle).unwrap().rows(),
+                &baselines[index]
+            );
             assert_eq!(
                 db.standing_join_delta(&cx, handle).unwrap().unwrap().rows(),
                 &difference(&baselines[index], &populated[index])
             );
             db.rebuild_standing_query(&cx, handle, policy()).unwrap();
             assert_eq!(db.standing_join_kind(&cx, handle).unwrap(), kinds[index]);
-            assert_eq!(db.standing_join(&cx, handle).unwrap().rows(), &baselines[index]);
+            assert_eq!(
+                db.standing_join(&cx, handle).unwrap().rows(),
+                &baselines[index]
+            );
             assert!(db.standing_join_delta(&cx, handle).unwrap().is_none());
         }
     });
@@ -257,13 +313,22 @@ fn full_join_quota_failure_fences_only_the_view_and_rebuild_restores_current_sta
         let (left, right) = sources(&mut db, &cx, false);
         let limited = db
             .register_standing_join_with_kind(
-                &cx, &left, &right, &[(0, 0)], RowJoinKind::Full,
+                &cx,
+                &left,
+                &right,
+                &[(0, 0)],
+                RowJoinKind::Full,
                 GqlQueryPolicy::new(1000, 1, 1_000_000, 1_000_000),
             )
             .unwrap();
         let healthy = db
             .register_standing_join_with_kind(
-                &cx, &left, &right, &[(0, 0)], RowJoinKind::Full, policy(),
+                &cx,
+                &left,
+                &right,
+                &[(0, 0)],
+                RowJoinKind::Full,
+                policy(),
             )
             .unwrap();
         let mut insert = WriteBatch::new(RelationId(1));
@@ -283,7 +348,10 @@ fn full_join_quota_failure_fences_only_the_view_and_rebuild_restores_current_sta
         ]);
         assert_eq!(db.standing_join(&cx, &healthy).unwrap().rows(), &expected);
         db.rebuild_standing_query(&cx, &limited, policy()).unwrap();
-        assert_eq!(db.standing_join_kind(&cx, &limited).unwrap(), RowJoinKind::Full);
+        assert_eq!(
+            db.standing_join_kind(&cx, &limited).unwrap(),
+            RowJoinKind::Full
+        );
         assert_eq!(db.standing_join(&cx, &limited).unwrap().rows(), &expected);
         assert!(db.standing_join_delta(&cx, &limited).unwrap().is_none());
     });

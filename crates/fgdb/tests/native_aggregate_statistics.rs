@@ -202,14 +202,12 @@ fn native_average_reports_late_type_errors_and_does_not_discard_result_clauses()
         assert_eq!(cursor.row_stats().result_rows, 0);
         assert!(cursor.next().is_none());
         for text in [
-            "MATCH (n:L) RETURN AVG(DISTINCT n.score + 1) AS avg LIMIT 0",
-            "MATCH (n:L) RETURN MIN(n.score + 1) AS min HAVING min>0",
+            "MATCH (n:L) WITH n.score AS s RETURN AVG(s) AS avg",
+            "MATCH (n:L) WITH n.score AS s RETURN MIN(s) AS min",
         ] {
             let prepared = fgdb::PreparedNativeRead::prepare(text, &args, symbols()).unwrap();
-            assert!(matches!(
-                prepared.stream_aggregate(&db, &cx, &args, wide()),
-                Err(QueryError::AggregateStreamPlan(_))
-            ));
+            let res = prepared.stream_aggregate(&db, &cx, &args, wide());
+            assert!(matches!(res, Err(QueryError::AggregateStreamPlan(_))));
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");

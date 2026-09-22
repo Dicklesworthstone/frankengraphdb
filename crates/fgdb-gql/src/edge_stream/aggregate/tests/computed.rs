@@ -452,7 +452,11 @@ fn transformed_input_keeps_supported_result_modifiers_and_maintenance_and_row_sc
         let q = prepare(text);
         let s = source(63);
         let expected = eager(&q, &s);
-        assert_eq!(run(&q, s, wide()).collect::<Result<Vec<_>, _>>().unwrap(), expected, "{text}");
+        assert_eq!(
+            run(&q, s, wide()).collect::<Result<Vec<_>, _>>().unwrap(),
+            expected,
+            "{text}"
+        );
     }
     for text in [
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p+1) AS values",

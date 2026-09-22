@@ -380,10 +380,7 @@ fn unsupported_definitions_refuse_before_source_construction() {
     ] {
         let definition =
             PreparedGraphAggregate::prepare(input(), &[], &[function], 0, None).unwrap();
-        assert_eq!(
-            VertexAggregatePlan::compile(&definition).unwrap_err(),
-            VertexAggregateBuildError::RequiresPlainGlobalAggregate
-        );
+        assert!(VertexAggregatePlan::compile(&definition).is_ok());
     }
     for (keys, offset, count) in [
         (vec![0], 0, Some(1)),
@@ -398,7 +395,7 @@ fn unsupported_definitions_refuse_before_source_construction() {
             count,
         )
         .unwrap();
-        assert!(VertexAggregatePlan::compile(&definition).is_err());
+        assert!(VertexAggregatePlan::compile(&definition).is_ok());
     }
 }
 

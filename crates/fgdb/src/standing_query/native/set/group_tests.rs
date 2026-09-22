@@ -40,6 +40,13 @@ fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
 fn scalar(value: Option<i64>) -> GraphValue {
     GraphValue::Scalar(value.map_or(CanonicalScalar::Null, CanonicalScalar::Int))
 }
+fn order(descending: bool) -> Vec<GraphValueOrder> {
+    vec![GraphValueOrder {
+        column: 0,
+        descending,
+        nulls_first: false,
+    }]
+}
 fn seed() -> WriteBatch {
     let mut batch = WriteBatch::new(RelationId(1));
     for (id, bucket, amount) in [
@@ -833,9 +840,14 @@ fn unsupported_domains_sources_and_bad_metadata_never_publish_a_partial_group_ci
                 GraphSetQuantifier::All,
             )
             .unwrap();
-        let unsupported_domain =
-            PreparedGraphSetAggregate::prepare(list, &[], &[GraphAggregate::sum("n", 0)], 0, None)
-                .unwrap();
+        let unsupported_domain = PreparedGraphSetAggregate::prepare(
+            list,
+            &[],
+            &[GraphAggregate::sum_int("n", 0)],
+            0,
+            None,
+        )
+        .unwrap();
         assert!(
             db.register_standing_relation_aggregate(&cx, &unsupported_domain, policy())
                 .is_err()

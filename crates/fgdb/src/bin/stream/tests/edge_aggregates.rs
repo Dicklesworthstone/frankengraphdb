@@ -431,39 +431,76 @@ fn output_page_flush_failure_never_demands_another_completed_group() {
 fn cli_ranked_pages_preserve_exact_return_order_and_complete_empty_windows() {
     let ((), report) = run_async_under_lab(0x636c_e121, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let cx = contexts.query(); let commit = contexts.commit();
+        let cx = contexts.query();
+        let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, fixture()).await.unwrap();
         let text = "MATCH (a)-[r:R]-(b) RETURN COUNT(*) AS n,b AS destination,SUM(r.p)+COUNT(*) AS adjusted,AVG(r.p) AS average,b AS again GROUP BY b HAVING n>0 ORDER BY n DESC LIMIT 1";
-        let opts = edge_options(text); let mut bytes = Vec::new();
-        okay(run(&db,&cx,&opts,true,&mut bytes));
+        let opts = edge_options(text);
+        let mut bytes = Vec::new();
+        okay(run(&db, &cx, &opts, true, &mut bytes));
         let output = String::from_utf8(bytes).unwrap();
-        assert_eq!(row_lines(&output), vec![concat!("{\"v\":1,\"event\":\"row\",\"cells\":[",
-            "{\"type\":\"count\",\"value\":\"3\"},",
-            "{\"type\":\"vertex\",\"value\":\"1\"},",
-            "{\"type\":\"wideint\",\"value\":\"11\"},",
-            "{\"type\":\"average\",\"value\":\"4/1\"},",
-            "{\"type\":\"vertex\",\"value\":\"1\"}]}")]);
+        assert_eq!(
+            row_lines(&output),
+            vec![concat!(
+                "{\"v\":1,\"event\":\"row\",\"cells\":[",
+                "{\"type\":\"count\",\"value\":\"3\"},",
+                "{\"type\":\"vertex\",\"value\":\"1\"},",
+                "{\"type\":\"wideint\",\"value\":\"11\"},",
+                "{\"type\":\"average\",\"value\":\"4/1\"},",
+                "{\"type\":\"vertex\",\"value\":\"1\"}]}"
+            )]
+        );
         assert!(output.ends_with("\"seq\":1,\"count\":1}\n"));
-        let eager = db.query(&cx,text,&opts.params,&opts,policy()).unwrap();
-        let mut expected = Vec::new(); okay(crate::render(eager,1,"rows",true,&mut expected));
-        assert_eq!(row_lines(&output),row_lines(&String::from_utf8(expected).unwrap()));
-        let mut human = Vec::new(); okay(run(&db,&cx,&opts,false,&mut human));
-        assert!(String::from_utf8(human).unwrap().ends_with("1 row(s) (stream complete at seq 1)\n"));
+        let eager = db.query(&cx, text, &opts.params, &opts, policy()).unwrap();
+        let mut expected = Vec::new();
+        okay(crate::render(eager, 1, "rows", true, &mut expected));
+        assert_eq!(
+            row_lines(&output),
+            row_lines(&String::from_utf8(expected).unwrap())
+        );
+        let mut human = Vec::new();
+        okay(run(&db, &cx, &opts, false, &mut human));
+        assert!(
+            String::from_utf8(human)
+                .unwrap()
+                .ends_with("1 row(s) (stream complete at seq 1)\n")
+        );
         for (text, count) in [
-            ("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n ORDER BY n",1),
-            ("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n HAVING n>0 ORDER BY n",1),
-            ("MATCH (a)-[r:R]->(b) RETURN SUM(r.p)+1 AS n ORDER BY n",1),
-            ("MATCH (a)-[r:R]-(b) RETURN COUNT(*)+1 AS n GROUP BY b ORDER BY COUNT(*) DESC LIMIT 1",1),
-            ("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n ORDER BY n LIMIT 0",0),
-            ("MATCH (a)-[r:R]->(b) RETURN 1/(COUNT(*)-3) AS bad HAVING COUNT(*)<0 ORDER BY COUNT(*) LIMIT 1",0),
+            ("MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n ORDER BY n", 1),
+            (
+                "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n HAVING n>0 ORDER BY n",
+                1,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) RETURN SUM(r.p)+1 AS n ORDER BY SUM(r.p)",
+                1,
+            ),
+            (
+                "MATCH (a)-[r:R]-(b) RETURN COUNT(*)+1 AS n GROUP BY b ORDER BY COUNT(*) DESC LIMIT 1",
+                1,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) RETURN COUNT(*) AS n ORDER BY n LIMIT 0",
+                0,
+            ),
+            (
+                "MATCH (a)-[r:R]->(b) RETURN 1/(COUNT(*)-3) AS bad HAVING COUNT(*)<0 ORDER BY COUNT(*) LIMIT 1",
+                0,
+            ),
         ] {
-            let opts = edge_options(text); let mut bytes = Vec::new();
-            okay(run(&db,&cx,&opts,true,&mut bytes)); let output = String::from_utf8(bytes).unwrap();
-            assert_eq!(row_lines(&output).len(),count);
-            let eager = db.query(&cx,text,&opts.params,&opts,policy()).unwrap();
-            let mut expected = Vec::new(); okay(crate::render(eager,1,"rows",true,&mut expected));
-            assert_eq!(row_lines(&output),row_lines(&String::from_utf8(expected).unwrap()));
+            let opts = edge_options(text);
+            let mut bytes = Vec::new();
+            okay(run(&db, &cx, &opts, true, &mut bytes));
+            let output = String::from_utf8(bytes).unwrap();
+            assert_eq!(row_lines(&output).len(), count);
+            let eager = db.query(&cx, text, &opts.params, &opts, policy()).unwrap();
+            let mut expected = Vec::new();
+            okay(crate::render(eager, 1, "rows", true, &mut expected));
+            assert_eq!(
+                row_lines(&output),
+                row_lines(&String::from_utf8(expected).unwrap())
+            );
             assert!(output.ends_with(&format!("\"seq\":1,\"count\":{count}}}\n")));
         }
     });
@@ -474,35 +511,67 @@ fn cli_ranked_pages_preserve_exact_return_order_and_complete_empty_windows() {
 fn cli_ordered_late_failures_and_backpressure_never_emit_a_success_marker() {
     let ((), report) = run_async_under_lab(0x636c_e122, |root| async move {
         let contexts = PurposeContexts::narrow_runtime_root(&root);
-        let cx = contexts.query(); let commit = contexts.commit();
+        let cx = contexts.query();
+        let commit = contexts.commit();
         let mut db = Database::open_memory(&commit, keys()).await.unwrap();
         db.write(&commit, fixture()).await.unwrap();
-        for limit in [0,1] {
-            let text = format!("MATCH (a)-[r:R]-(b) RETURN b,1/(COUNT(*)-3) AS bad GROUP BY b ORDER BY COUNT(*) DESC LIMIT {limit}");
+        for limit in [0, 1] {
+            let text = format!(
+                "MATCH (a)-[r:R]-(b) RETURN b,1/(COUNT(*)-3) AS bad GROUP BY b ORDER BY COUNT(*) DESC LIMIT {limit}"
+            );
             let mut bytes = Vec::new();
-            let error = run(&db,&cx,&edge_options(&text),true,&mut bytes).err().expect("late output failure");
-            assert_eq!(error.code,3);
+            let error = run(&db, &cx, &edge_options(&text), true, &mut bytes)
+                .err()
+                .expect("late output failure");
+            assert_eq!(error.code, 3);
             let output = String::from_utf8(bytes).unwrap();
-            assert_eq!(output.lines().count(),1); assert!(row_lines(&output).is_empty());
+            assert_eq!(output.lines().count(), 1);
+            assert!(row_lines(&output).is_empty());
             assert!(!output.contains("\"event\":\"result\""));
         }
         let text = "MATCH (a)-[r:R]-(b) RETURN b,COUNT(*) AS n GROUP BY b ORDER BY n DESC LIMIT 2";
-        let opts = edge_options(text); let prepared = PreparedNativeRead::prepare(text,&opts.params,&opts).unwrap();
-        for fail in [1,2,3] {
-            let mut cursor = prepared.stream_aggregate(&db,&cx,&opts.params,policy()).unwrap();
-            let columns = cursor.columns().to_vec(); let slots = cursor.output_slots().to_vec();
+        let opts = edge_options(text);
+        let prepared = PreparedNativeRead::prepare(text, &opts.params, &opts).unwrap();
+        for fail in [1, 2, 3] {
+            let mut cursor = prepared
+                .stream_aggregate(&db, &cx, &opts.params, policy())
+                .unwrap();
+            let columns = cursor.columns().to_vec();
+            let slots = cursor.output_slots().to_vec();
             let pulls = Rc::new(Cell::new(0));
-            let mut output = ObservedOutput { bytes:Vec::new(),pulls:pulls.clone(),
-                flushed:Rc::new(Cell::new(0)),fail_on_flush:Some(fail) };
-            let result = deliver(&columns,cursor.snapshot_seq().0,
-                &mut cursor.by_ref().inspect(|_|pulls.set(pulls.get()+1)).map(|row|
-                    row.map(|row|super::super::AggregateDeliveryRow{row,slots:&slots})),
-                true,&mut output,||cx.checkpoint().map_err(Failure::query));
-            assert_eq!(result.err().expect("broken output").code,5); assert_eq!(pulls.get(),fail-1);
-            if fail==1 { assert_eq!(cursor.row_stats().snapshot_records,0); }
-            let stats = (cursor.row_stats(),cursor.evaluator_stats()); cursor.close();
-            assert!(cursor.next().is_none()); assert_eq!((cursor.row_stats(),cursor.evaluator_stats()),stats);
-            assert!(!String::from_utf8(output.bytes).unwrap().contains("\"event\":\"result\""));
+            let mut output = ObservedOutput {
+                bytes: Vec::new(),
+                pulls: pulls.clone(),
+                flushed: Rc::new(Cell::new(0)),
+                fail_on_flush: Some(fail),
+            };
+            let result = deliver(
+                &columns,
+                cursor.snapshot_seq().0,
+                &mut cursor
+                    .by_ref()
+                    .inspect(|_| pulls.set(pulls.get() + 1))
+                    .map(|row| {
+                        row.map(|row| super::super::AggregateDeliveryRow { row, slots: &slots })
+                    }),
+                true,
+                &mut output,
+                || cx.checkpoint().map_err(Failure::query),
+            );
+            assert_eq!(result.err().expect("broken output").code, 5);
+            assert_eq!(pulls.get(), fail - 1);
+            if fail == 1 {
+                assert_eq!(cursor.row_stats().snapshot_records, 0);
+            }
+            let stats = (cursor.row_stats(), cursor.evaluator_stats());
+            cursor.close();
+            assert!(cursor.next().is_none());
+            assert_eq!((cursor.row_stats(), cursor.evaluator_stats()), stats);
+            assert!(
+                !String::from_utf8(output.bytes)
+                    .unwrap()
+                    .contains("\"event\":\"result\"")
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
