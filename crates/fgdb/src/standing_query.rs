@@ -95,6 +95,8 @@ pub enum StandingQueryError {
     Unsupported,
     SetSchema(fgdb_gql::GraphSetBuildError),
     JoinSchema(fgdb_gql::row_join::RowJoinBuildError),
+    /// A checked join definition belongs to a different complete input schema.
+    JoinInputSchema { side: usize },
     ProjectionSchema(fgdb_gql::row_projection::RowProjectionBuildError),
     FilterSchema(fgdb_gql::row_filter::RowFilterBuildError),
     ReductionSchema(fgdb_gql::row_aggregate::RowAggregateBuildError),
@@ -146,6 +148,9 @@ impl core::fmt::Display for StandingQueryError {
             }
             Self::SetSchema(error) => error.fmt(f),
             Self::JoinSchema(error) => error.fmt(f),
+            Self::JoinInputSchema { side } => {
+                write!(f, "standing join input {side} does not match its bound schema")
+            }
             Self::ProjectionSchema(error) => error.fmt(f),
             Self::FilterSchema(error) => error.fmt(f),
             Self::ReductionSchema(error) => error.fmt(f),
@@ -585,11 +590,10 @@ impl<V: Vfs + Clone> Database<V> {
                 handle.index,
             )?)),
             StandingQuery::Join(query) => {
-                StandingQuery::Join(Box::new(self.prepare_standing_join(
+                StandingQuery::Join(Box::new(self.prepare_standing_join_spec(
                     cx,
                     query.inputs,
-                    query.spec().keys(),
-                    query.spec().kind(),
+                    query.spec(),
                     policy,
                     handle.index,
                 )?))
