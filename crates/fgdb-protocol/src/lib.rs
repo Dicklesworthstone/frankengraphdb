@@ -18,6 +18,11 @@ mod connection;
 mod flow;
 mod frame;
 
+/// Asupersync-backed, cancellation-resumable stream I/O. The pure codec and
+/// state machines remain usable without enabling a runtime dependency.
+#[cfg(feature = "transport")]
+pub mod transport;
+
 pub use connection::{ChildKind, ChildTerminus, Connection, Phase, SendTicket, SendTerminus};
 pub use flow::{CreditUpdate, FlowWindow, Reservation, SendCost, SendState, WindowStatus};
 pub use frame::{
