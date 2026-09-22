@@ -892,7 +892,8 @@ impl<C: Clone + Eq> Raft<C> {
     fn validate_event(&self, event: &Event<C>) -> Result<(), Error> {
         match event {
             Event::ElectionTimeout | Event::LivenessTimeout
-                if !self.state.configuration.voters.contains(&self.id) => {
+                if !self.state.configuration.voters.contains(&self.id) =>
+            {
                 return Err(Error::NotVoter);
             }
             Event::LivenessTimeout if self.role != Role::Leader && self.state.term == u64::MAX => {
@@ -948,10 +949,12 @@ impl<C: Clone + Eq> Raft<C> {
                 {
                     return Err(Error::NotVoter);
                 }
-                if envelope.message.term() == 0 && !matches!(
-                    &envelope.message,
-                    Message::PreVoteRequest { .. } | Message::PreVoteReply { .. }
-                ) {
+                if envelope.message.term() == 0
+                    && !matches!(
+                        &envelope.message,
+                        Message::PreVoteRequest { .. } | Message::PreVoteReply { .. }
+                    )
+                {
                     return Err(Error::InvalidMessage);
                 }
                 liveness::validate(&envelope.message)?;
@@ -1410,10 +1413,20 @@ impl<C: Clone + Eq> Raft<C> {
             self.follow(term);
         }
         match envelope.message {
-            Message::PreVoteRequest { prospective_term, round, last_index, last_term } => {
+            Message::PreVoteRequest {
+                prospective_term,
+                round,
+                last_index,
+                last_term,
+            } => {
                 self.pre_vote_request(from, prospective_term, round, last_index, last_term, output);
             }
-            Message::PreVoteReply { prospective_term, round, granted, .. } => {
+            Message::PreVoteReply {
+                prospective_term,
+                round,
+                granted,
+                ..
+            } => {
                 self.pre_vote_reply(from, prospective_term, round, granted, output)?;
             }
             Message::QuorumProbe { round, .. } => {

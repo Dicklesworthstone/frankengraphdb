@@ -98,14 +98,26 @@ fn create_update_delete_vertices_and_edges_share_one_permit() {
         properties: &[P],
     };
     with_permit(&grant(), |permit| {
-        permit.check_vertex_write_at(NOW, None, Some(a), fields).unwrap();
-        permit.check_vertex_write_at(NOW, Some(a), Some(b), fields).unwrap();
-        permit.check_vertex_write_at(NOW, Some(b), None, fields).unwrap();
+        permit
+            .check_vertex_write_at(NOW, None, Some(a), fields)
+            .unwrap();
+        permit
+            .check_vertex_write_at(NOW, Some(a), Some(b), fields)
+            .unwrap();
+        permit
+            .check_vertex_write_at(NOW, Some(b), None, fields)
+            .unwrap();
         let a = edge(&[L], &[L], &one);
         let b = edge(&[L], &[L], &two);
-        permit.check_edge_write_at(NOW, None, Some(a), &[P]).unwrap();
-        permit.check_edge_write_at(NOW, Some(a), Some(b), &[P]).unwrap();
-        permit.check_edge_write_at(NOW, Some(b), None, &[P]).unwrap();
+        permit
+            .check_edge_write_at(NOW, None, Some(a), &[P])
+            .unwrap();
+        permit
+            .check_edge_write_at(NOW, Some(a), Some(b), &[P])
+            .unwrap();
+        permit
+            .check_edge_write_at(NOW, Some(b), None, &[P])
+            .unwrap();
         assert_eq!(permit.usage().nodes, 12);
         assert_eq!(permit.usage().rows, 0);
         assert!(permit.usage().work > 12);
@@ -116,37 +128,82 @@ fn create_update_delete_vertices_and_edges_share_one_permit() {
 
 #[test]
 fn unchanged_hidden_fields_survive_but_cannot_be_written_or_deleted() {
-    let old = [(P, CanonicalScalar::Int(1)), (SECRET, CanonicalScalar::Int(9))];
-    let new = [(P, CanonicalScalar::Int(2)), (SECRET, CanonicalScalar::Int(9))];
+    let old = [
+        (P, CanonicalScalar::Int(1)),
+        (SECRET, CanonicalScalar::Int(9)),
+    ];
+    let new = [
+        (P, CanonicalScalar::Int(2)),
+        (SECRET, CanonicalScalar::Int(9)),
+    ];
     let before = vertex(&[L, HIDDEN], &old);
     let after = vertex(&[L, HIDDEN], &new);
-    let permitted = VertexWriteFields { labels: &[], properties: &[P] };
+    let permitted = VertexWriteFields {
+        labels: &[],
+        properties: &[P],
+    };
     with_permit(&grant(), |permit| {
-        permit.check_vertex_write_at(NOW, Some(before), Some(after), permitted).unwrap();
+        permit
+            .check_vertex_write_at(NOW, Some(before), Some(after), permitted)
+            .unwrap();
     });
     for fields in [
-        VertexWriteFields { labels: &[], properties: &[SECRET] },
-        VertexWriteFields { labels: &[HIDDEN], properties: &[] },
+        VertexWriteFields {
+            labels: &[],
+            properties: &[SECRET],
+        },
+        VertexWriteFields {
+            labels: &[HIDDEN],
+            properties: &[],
+        },
     ] {
         with_permit(&grant(), |permit| {
             // The two images are IDENTICAL: forbidden no-op writes still fail.
-            assert_eq!(permit.check_vertex_write_at(NOW, Some(before), Some(before), fields), Err(Error::ScopeDenied));
+            assert_eq!(
+                permit.check_vertex_write_at(NOW, Some(before), Some(before), fields),
+                Err(Error::ScopeDenied)
+            );
             assert_eq!(permit.checkpoint_at(NOW), Err(Error::ExecutionStopped));
         });
     }
     with_permit(&grant(), |permit| {
-        assert_eq!(permit.check_vertex_write_at(NOW, Some(before), None,
-            VertexWriteFields { labels: &[L, HIDDEN], properties: &[P, SECRET] }), Err(Error::ScopeDenied));
+        assert_eq!(
+            permit.check_vertex_write_at(
+                NOW,
+                Some(before),
+                None,
+                VertexWriteFields {
+                    labels: &[L, HIDDEN],
+                    properties: &[P, SECRET]
+                }
+            ),
+            Err(Error::ScopeDenied)
+        );
     });
     with_permit(&grant(), |permit| {
         // Omitting the hidden fields cannot turn deletion into authorization.
-        assert_eq!(permit.check_vertex_write_at(NOW, Some(before), None,
-            VertexWriteFields { labels: &[L], properties: &[P] }), Err(Error::InvalidWriteImage));
+        assert_eq!(
+            permit.check_vertex_write_at(
+                NOW,
+                Some(before),
+                None,
+                VertexWriteFields {
+                    labels: &[L],
+                    properties: &[P]
+                }
+            ),
+            Err(Error::InvalidWriteImage)
+        );
     });
     let old_edge = edge(&[L], &[L], &old);
     with_permit(&grant(), |permit| {
-        permit.check_edge_write_at(NOW, Some(old_edge), Some(edge(&[L], &[L], &new)), &[P]).unwrap();
-        assert_eq!(permit.check_edge_write_at(NOW, Some(old_edge), Some(old_edge), &[SECRET]), Err(Error::ScopeDenied));
+        permit
+            .check_edge_write_at(NOW, Some(old_edge), Some(edge(&[L], &[L], &new)), &[P])
+            .unwrap();
+        assert_eq!(
+            permit.check_edge_write_at(NOW, Some(old_edge), Some(old_edge), &[SECRET]),
+            Err(Error::ScopeDenied)
+        );
     });
 }
 
@@ -164,14 +221,27 @@ fn changed_or_absent_fields_cannot_escape_touched_field_admission() {
         (Some(vertex(&[L], &[])), None),
     ] {
         with_permit(&grant(), |permit| {
-            assert_eq!(permit.check_vertex_write_at(NOW, before, after, NONE), Err(Error::InvalidWriteImage));
+            assert_eq!(
+                permit.check_vertex_write_at(NOW, before, after, NONE),
+                Err(Error::InvalidWriteImage)
+            );
         });
     }
     with_permit(&grant(), |permit| {
         let empty = vertex(&[L], &[]);
         // REMOVE missing.secret still names a forbidden property.
-        assert_eq!(permit.check_vertex_write_at(NOW, Some(empty), Some(empty),
-            VertexWriteFields { labels: &[], properties: &[SECRET] }), Err(Error::ScopeDenied));
+        assert_eq!(
+            permit.check_vertex_write_at(
+                NOW,
+                Some(empty),
+                Some(empty),
+                VertexWriteFields {
+                    labels: &[],
+                    properties: &[SECRET]
+                }
+            ),
+            Err(Error::ScopeDenied)
+        );
     });
 }
 
@@ -180,25 +250,43 @@ fn original_before_and_after_scope_are_both_mandatory() {
     let mut grant = grant();
     grant.labels = Scope::only([L, HIDDEN]);
     let authority = issuer();
-    let token = authority.issue_at(&grant, NOW).unwrap()
-        .attenuate(Restriction::Labels(Scope::only([HIDDEN, LabelId(3)]))).unwrap();
+    let token = authority
+        .issue_at(&grant, NOW)
+        .unwrap()
+        .attenuate(Restriction::Labels(Scope::only([HIDDEN, LabelId(3)])))
+        .unwrap();
     let verified = authority.verify_at(&token, BRANCH, NOW).unwrap();
     // Separate labels satisfy separate conjuncts. Their intersection is empty
     // in this row, but the ORIGINAL vertex is still inside both any-of scopes.
     let labels = [L, LabelId(3)];
     let original = vertex(&labels, &[]);
     let mut permit = verified.begin_write_at(BRANCH, NOW).unwrap();
-    permit.check_vertex_write_at(NOW, Some(original), Some(original), NONE).unwrap();
+    permit
+        .check_vertex_write_at(NOW, Some(original), Some(original), NONE)
+        .unwrap();
     for (before, after) in [
         (Some(vertex(&[L], &[])), Some(original)),
         (Some(original), Some(vertex(&[L], &[]))),
     ] {
         let mut permit = verified.begin_write_at(BRANCH, NOW).unwrap();
-        assert_eq!(permit.check_vertex_write_at(NOW, before, after, NONE), Err(Error::ScopeDenied));
+        assert_eq!(
+            permit.check_vertex_write_at(NOW, before, after, NONE),
+            Err(Error::ScopeDenied)
+        );
     }
     let mut permit = verified.begin_write_at(BRANCH, NOW).unwrap();
-    assert_eq!(permit.check_vertex_write_at(NOW, Some(original), Some(original),
-        VertexWriteFields { labels: &[L], properties: &[] }), Err(Error::ScopeDenied));
+    assert_eq!(
+        permit.check_vertex_write_at(
+            NOW,
+            Some(original),
+            Some(original),
+            VertexWriteFields {
+                labels: &[L],
+                properties: &[]
+            }
+        ),
+        Err(Error::ScopeDenied)
+    );
 }
 
 #[test]
@@ -214,14 +302,23 @@ fn edge_relation_and_both_endpoint_states_are_checked() {
             (Some(good), Some(hidden)),
         ] {
             with_permit(&grant(), |permit| {
-                assert_eq!(permit.check_edge_write_at(NOW, before, after, &[]), Err(Error::ScopeDenied));
+                assert_eq!(
+                    permit.check_edge_write_at(NOW, before, after, &[]),
+                    Err(Error::ScopeDenied)
+                );
             });
         }
     }
-    let hidden = EdgeWriteImage { relation: RelationId(2), ..good };
+    let hidden = EdgeWriteImage {
+        relation: RelationId(2),
+        ..good
+    };
     for (before, after) in [(None, Some(hidden)), (Some(hidden), None)] {
         with_permit(&grant(), |permit| {
-            assert_eq!(permit.check_edge_write_at(NOW, before, after, &[]), Err(Error::ScopeDenied));
+            assert_eq!(
+                permit.check_edge_write_at(NOW, before, after, &[]),
+                Err(Error::ScopeDenied)
+            );
             assert_eq!(permit.usage().nodes, 0);
         });
     }
@@ -232,38 +329,76 @@ fn identities_and_topology_cannot_be_rewritten_under_an_update_check() {
     let good = edge(&[L], &[L], &[]);
     for changed in [
         EdgeWriteImage { id: EId(0), ..good },
-        EdgeWriteImage { relation: RelationId(2), ..good },
-        EdgeWriteImage { source: WriteEndpoint { id: VId(2), labels: &[L] }, ..good },
-        EdgeWriteImage { destination: WriteEndpoint { id: VId(2), labels: &[L] }, ..good },
+        EdgeWriteImage {
+            relation: RelationId(2),
+            ..good
+        },
+        EdgeWriteImage {
+            source: WriteEndpoint {
+                id: VId(2),
+                labels: &[L],
+            },
+            ..good
+        },
+        EdgeWriteImage {
+            destination: WriteEndpoint {
+                id: VId(2),
+                labels: &[L],
+            },
+            ..good
+        },
     ] {
         with_permit(&grant(), |permit| {
-            assert_eq!(permit.check_edge_write_at(NOW, Some(good), Some(changed), &[]), Err(Error::InvalidWriteImage));
+            assert_eq!(
+                permit.check_edge_write_at(NOW, Some(good), Some(changed), &[]),
+                Err(Error::InvalidWriteImage)
+            );
         });
     }
     with_permit(&grant(), |permit| {
         let before = vertex(&[L], &[]);
-        let after = VertexWriteImage { id: VId(0), ..before };
-        assert_eq!(permit.check_vertex_write_at(NOW, Some(before), Some(after), NONE), Err(Error::InvalidWriteImage));
+        let after = VertexWriteImage {
+            id: VId(0),
+            ..before
+        };
+        assert_eq!(
+            permit.check_vertex_write_at(NOW, Some(before), Some(after), NONE),
+            Err(Error::InvalidWriteImage)
+        );
     });
 }
 
 #[test]
 fn inconsistent_self_loops_and_noncanonical_images_are_rejected_not_repaired() {
     let good = edge(&[L], &[L], &[]);
-    let self_loop = EdgeWriteImage { destination: good.source, ..good };
+    let self_loop = EdgeWriteImage {
+        destination: good.source,
+        ..good
+    };
     with_permit(&grant(), |permit| {
-        permit.check_edge_write_at(NOW, None, Some(self_loop), &[]).unwrap();
+        permit
+            .check_edge_write_at(NOW, None, Some(self_loop), &[])
+            .unwrap();
         assert_eq!(permit.usage().nodes, 2);
     });
     let inconsistent = EdgeWriteImage {
-        destination: WriteEndpoint { id: good.source.id, labels: &[L, HIDDEN] },
+        destination: WriteEndpoint {
+            id: good.source.id,
+            labels: &[L, HIDDEN],
+        },
         ..self_loop
     };
     with_permit(&grant(), |permit| {
-        assert_eq!(permit.check_edge_write_at(NOW, None, Some(inconsistent), &[]), Err(Error::InvalidWriteImage));
+        assert_eq!(
+            permit.check_edge_write_at(NOW, None, Some(inconsistent), &[]),
+            Err(Error::InvalidWriteImage)
+        );
     });
     let duplicate = [(P, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(2))];
-    let reversed = [(SECRET, CanonicalScalar::Int(1)), (P, CanonicalScalar::Int(2))];
+    let reversed = [
+        (SECRET, CanonicalScalar::Int(1)),
+        (P, CanonicalScalar::Int(2)),
+    ];
     for image in [
         vertex(&[L, L], &[]),
         vertex(&[HIDDEN, L], &[]),
@@ -271,14 +406,23 @@ fn inconsistent_self_loops_and_noncanonical_images_are_rejected_not_repaired() {
         vertex(&[L], &reversed),
     ] {
         with_permit(&grant(), |permit| {
-            assert_eq!(permit.check_vertex_write_at(NOW, Some(image), Some(image), NONE), Err(Error::InvalidWriteImage));
+            assert_eq!(
+                permit.check_vertex_write_at(NOW, Some(image), Some(image), NONE),
+                Err(Error::InvalidWriteImage)
+            );
         });
     }
     with_permit(&grant(), |permit| {
-        assert_eq!(permit.check_vertex_write_at(NOW, None, None, NONE), Err(Error::InvalidWriteImage));
+        assert_eq!(
+            permit.check_vertex_write_at(NOW, None, None, NONE),
+            Err(Error::InvalidWriteImage)
+        );
     });
     with_permit(&grant(), |permit| {
-        assert_eq!(permit.check_edge_write_at(NOW, None, None, &[]), Err(Error::InvalidWriteImage));
+        assert_eq!(
+            permit.check_edge_write_at(NOW, None, None, &[]),
+            Err(Error::InvalidWriteImage)
+        );
     });
 }
 
@@ -288,13 +432,28 @@ fn malformed_touched_fields_stop_before_target_admission() {
     grant.labels = Scope::All;
     grant.properties = Scope::All;
     for fields in [
-        VertexWriteFields { labels: &[L, L], properties: &[] },
-        VertexWriteFields { labels: &[HIDDEN, L], properties: &[] },
-        VertexWriteFields { labels: &[], properties: &[P, P] },
-        VertexWriteFields { labels: &[], properties: &[SECRET, P] },
+        VertexWriteFields {
+            labels: &[L, L],
+            properties: &[],
+        },
+        VertexWriteFields {
+            labels: &[HIDDEN, L],
+            properties: &[],
+        },
+        VertexWriteFields {
+            labels: &[],
+            properties: &[P, P],
+        },
+        VertexWriteFields {
+            labels: &[],
+            properties: &[SECRET, P],
+        },
     ] {
         with_permit(&grant, |permit| {
-            assert_eq!(permit.check_vertex_write_at(NOW, None, Some(vertex(&[L], &[])), fields), Err(Error::InvalidWriteImage));
+            assert_eq!(
+                permit.check_vertex_write_at(NOW, None, Some(vertex(&[L], &[])), fields),
+                Err(Error::InvalidWriteImage)
+            );
             assert_eq!(permit.usage().nodes, 0);
             assert_eq!(permit.checkpoint_at(NOW), Err(Error::ExecutionStopped));
         });
@@ -320,10 +479,17 @@ fn untouched_scalars_use_exact_canonical_equality_not_encoding_length() {
             let a = [(SECRET, old.clone())];
             let b = [(SECRET, new.clone())];
             with_permit(&grant(), |permit| {
-                let result = permit.check_vertex_write_at(NOW,
-                    Some(vertex(&[L], &a)), Some(vertex(&[L], &b)), NONE);
+                let result = permit.check_vertex_write_at(
+                    NOW,
+                    Some(vertex(&[L], &a)),
+                    Some(vertex(&[L], &b)),
+                    NONE,
+                );
                 // Independent canonical encoding is the test oracle.
-                assert_eq!(result.is_ok(), old.encode().unwrap() == new.encode().unwrap());
+                assert_eq!(
+                    result.is_ok(),
+                    old.encode().unwrap() == new.encode().unwrap()
+                );
             });
         }
     }
@@ -331,10 +497,15 @@ fn untouched_scalars_use_exact_canonical_equality_not_encoding_length() {
 
 #[test]
 fn exact_limits_succeed_one_below_fails_and_checks_do_not_refresh_allowances() {
-    let properties = [(SECRET, CanonicalScalar::ucs_basic_text(&"s".repeat(4096)).unwrap())];
+    let properties = [(
+        SECRET,
+        CanonicalScalar::ucs_basic_text(&"s".repeat(4096)).unwrap(),
+    )];
     let image = vertex(&[L, HIDDEN], &properties);
     let measured = with_permit(&grant(), |permit| {
-        permit.check_vertex_write_at(NOW, Some(image), Some(image), NONE).unwrap();
+        permit
+            .check_vertex_write_at(NOW, Some(image), Some(image), NONE)
+            .unwrap();
         permit.usage()
     });
     assert_eq!(measured.nodes, 2);
@@ -344,10 +515,14 @@ fn exact_limits_succeed_one_below_fails_and_checks_do_not_refresh_allowances() {
     exact.limits.max_nodes = measured.nodes;
     exact.limits.max_work = measured.work;
     with_permit(&exact, |permit| {
-        permit.check_vertex_write_at(NOW, Some(image), Some(image), NONE).unwrap();
+        permit
+            .check_vertex_write_at(NOW, Some(image), Some(image), NONE)
+            .unwrap();
         assert_eq!(permit.usage(), measured);
-        assert_eq!(permit.check_vertex_write_at(NOW, Some(image), Some(image), NONE),
-            Err(Error::LimitExceeded(LimitDimension::Nodes)));
+        assert_eq!(
+            permit.check_vertex_write_at(NOW, Some(image), Some(image), NONE),
+            Err(Error::LimitExceeded(LimitDimension::Nodes))
+        );
         assert_eq!(permit.usage(), measured);
     });
     for dimension in [LimitDimension::Nodes, LimitDimension::Work] {
@@ -358,8 +533,10 @@ fn exact_limits_succeed_one_below_fails_and_checks_do_not_refresh_allowances() {
             LimitDimension::Rows => unreachable!(),
         }
         with_permit(&small, |permit| {
-            assert_eq!(permit.check_vertex_write_at(NOW, Some(image), Some(image), NONE),
-                Err(Error::LimitExceeded(dimension)));
+            assert_eq!(
+                permit.check_vertex_write_at(NOW, Some(image), Some(image), NONE),
+                Err(Error::LimitExceeded(dimension))
+            );
             let stopped = permit.usage();
             assert_eq!(permit.checkpoint_at(NOW), Err(Error::ExecutionStopped));
             assert_eq!(permit.usage(), stopped);
@@ -373,14 +550,26 @@ fn retirement_expiry_and_backwards_time_fence_write_checks() {
     let token = authority.issue_at(&grant(), NOW).unwrap();
     let verified = authority.verify_at(&token, BRANCH, NOW).unwrap();
     let image = vertex(&[L], &[]);
-    let fields = VertexWriteFields { labels: &[L], properties: &[] };
+    let fields = VertexWriteFields {
+        labels: &[L],
+        properties: &[],
+    };
     let mut retired = verified.begin_write_at(BRANCH, NOW).unwrap();
     let mut expired = verified.begin_write_at(BRANCH, NOW).unwrap();
     let mut backwards = verified.begin_write_at(BRANCH, NOW + 1).unwrap();
-    assert_eq!(expired.check_vertex_write_at(1000, None, Some(image), fields), Err(Error::Expired));
-    assert_eq!(backwards.check_vertex_write_at(NOW, None, Some(image), fields), Err(Error::ClockWentBackwards));
+    assert_eq!(
+        expired.check_vertex_write_at(1000, None, Some(image), fields),
+        Err(Error::Expired)
+    );
+    assert_eq!(
+        backwards.check_vertex_write_at(NOW, None, Some(image), fields),
+        Err(Error::ClockWentBackwards)
+    );
     authority.retire();
-    assert_eq!(retired.check_edge_write_at(NOW, None, Some(edge(&[L], &[L], &[])), &[]), Err(Error::AuthorityRetired));
+    assert_eq!(
+        retired.check_edge_write_at(NOW, None, Some(edge(&[L], &[L], &[])), &[]),
+        Err(Error::AuthorityRetired)
+    );
     for permit in [&mut retired, &mut expired, &mut backwards] {
         assert_eq!(permit.usage(), Usage::default());
         assert_eq!(permit.checkpoint_at(NOW), Err(Error::ExecutionStopped));
@@ -394,9 +583,18 @@ fn write_only_is_sufficient_read_only_is_not_and_debug_is_redacted() {
     read.rights = Rights::Read;
     let token = authority.issue_at(&read, NOW).unwrap();
     let verified = authority.verify_at(&token, BRANCH, NOW).unwrap();
-    assert!(matches!(verified.begin_write_at(BRANCH, NOW), Err(Error::PermissionDenied)));
-    let secret = [(SECRET, CanonicalScalar::ucs_basic_text("do-not-print").unwrap())];
-    assert_eq!(format!("{:?}", vertex(&[L, HIDDEN], &secret)), "VertexWriteImage([REDACTED])");
+    assert!(matches!(
+        verified.begin_write_at(BRANCH, NOW),
+        Err(Error::PermissionDenied)
+    ));
+    let secret = [(
+        SECRET,
+        CanonicalScalar::ucs_basic_text("do-not-print").unwrap(),
+    )];
+    assert_eq!(
+        format!("{:?}", vertex(&[L, HIDDEN], &secret)),
+        "VertexWriteImage([REDACTED])"
+    );
     let edge = edge(&[L], &[L], &secret);
     assert_eq!(format!("{edge:?}"), "EdgeWriteImage([REDACTED])");
     assert_eq!(format!("{:?}", edge.source), "WriteEndpoint([REDACTED])");
@@ -408,39 +606,56 @@ fn all_small_property_transitions_match_independent_field_authority_oracle() {
     let authority = issuer();
     for allowed in 0_u8..4 {
         let mut grant = grant();
-        grant.properties = Scope::only((0..2).filter(|bit| allowed & (1 << bit) != 0)
-            .map(|bit| PropertyKeyId(bit + 1)));
+        grant.properties = Scope::only(
+            (0..2)
+                .filter(|bit| allowed & (1 << bit) != 0)
+                .map(|bit| PropertyKeyId(bit + 1)),
+        );
         let token = authority.issue_at(&grant, NOW).unwrap();
         let verified = authority.verify_at(&token, BRANCH, NOW).unwrap();
         // A property has four states: absent, null, zero, one.
         let state = |bits: u8| -> Vec<(PropertyKeyId, CanonicalScalar)> {
-            (0..2).filter_map(|bit| {
-                let value = match (bits >> (2 * bit)) & 3 {
-                    0 => return None,
-                    1 => CanonicalScalar::Null,
-                    2 => CanonicalScalar::Int(0),
-                    _ => CanonicalScalar::Int(1),
-                };
-                Some((PropertyKeyId(bit + 1), value))
-            }).collect()
+            (0..2)
+                .filter_map(|bit| {
+                    let value = match (bits >> (2 * bit)) & 3 {
+                        0 => return None,
+                        1 => CanonicalScalar::Null,
+                        2 => CanonicalScalar::Int(0),
+                        _ => CanonicalScalar::Int(1),
+                    };
+                    Some((PropertyKeyId(bit + 1), value))
+                })
+                .collect()
         };
         for old in 0..16 {
             for new in 0..16 {
                 let a = state(old);
                 let b = state(new);
                 for touched in 0_u8..4 {
-                    let keys: Vec<_> = (0..2).filter(|bit| touched & (1 << bit) != 0)
-                        .map(|bit| PropertyKeyId(bit + 1)).collect();
-                    let expected = touched & !allowed == 0 && (0..2).all(|bit| {
-                        ((old >> (2 * bit)) & 3) == ((new >> (2 * bit)) & 3)
-                            || touched & (1 << bit) != 0
-                    });
+                    let keys: Vec<_> = (0..2)
+                        .filter(|bit| touched & (1 << bit) != 0)
+                        .map(|bit| PropertyKeyId(bit + 1))
+                        .collect();
+                    let expected = touched & !allowed == 0
+                        && (0..2).all(|bit| {
+                            ((old >> (2 * bit)) & 3) == ((new >> (2 * bit)) & 3)
+                                || touched & (1 << bit) != 0
+                        });
                     let mut permit = verified.begin_write_at(BRANCH, NOW).unwrap();
-                    let actual = permit.check_vertex_write_at(NOW,
-                        Some(vertex(&[L], &a)), Some(vertex(&[L], &b)),
-                        VertexWriteFields { labels: &[], properties: &keys });
-                    assert_eq!(actual.is_ok(), expected,
-                        "allow={allowed} before={old} after={new} touched={touched}");
+                    let actual = permit.check_vertex_write_at(
+                        NOW,
+                        Some(vertex(&[L], &a)),
+                        Some(vertex(&[L], &b)),
+                        VertexWriteFields {
+                            labels: &[],
+                            properties: &keys,
+                        },
+                    );
+                    assert_eq!(
+                        actual.is_ok(),
+                        expected,
+                        "allow={allowed} before={old} after={new} touched={touched}"
+                    );
                 }
             }
         }
@@ -451,8 +666,10 @@ fn all_small_property_transitions_match_independent_field_authority_oracle() {
 fn all_small_label_transitions_preserve_conjunction_and_field_masks() {
     let authority = issuer();
     let labels = |bits: u8| -> Vec<LabelId> {
-        (0..3).filter(|bit| bits & (1 << bit) != 0)
-            .map(|bit| LabelId(bit + 1)).collect()
+        (0..3)
+            .filter(|bit| bits & (1 << bit) != 0)
+            .map(|bit| LabelId(bit + 1))
+            .collect()
     };
     let mut admitted = 0;
     let mut refused = 0;
@@ -460,8 +677,11 @@ fn all_small_label_transitions_preserve_conjunction_and_field_masks() {
         for second in 0_u8..8 {
             let mut grant = grant();
             grant.labels = Scope::only(labels(first));
-            let token = authority.issue_at(&grant, NOW).unwrap()
-                .attenuate(Restriction::Labels(Scope::only(labels(second)))).unwrap();
+            let token = authority
+                .issue_at(&grant, NOW)
+                .unwrap()
+                .attenuate(Restriction::Labels(Scope::only(labels(second))))
+                .unwrap();
             let verified = authority.verify_at(&token, BRANCH, NOW).unwrap();
             for old in 0_u8..8 {
                 for new in 0_u8..8 {
@@ -469,18 +689,33 @@ fn all_small_label_transitions_preserve_conjunction_and_field_masks() {
                     let b = labels(new);
                     for touched in 0_u8..8 {
                         let changed = old ^ new;
-                        let expected = old & first != 0 && old & second != 0
-                            && new & first != 0 && new & second != 0
+                        let expected = old & first != 0
+                            && old & second != 0
+                            && new & first != 0
+                            && new & second != 0
                             && touched & !(first & second) == 0
                             && changed & !touched == 0;
                         let fields = labels(touched);
                         let mut permit = verified.begin_write_at(BRANCH, NOW).unwrap();
-                        let result = permit.check_vertex_write_at(NOW,
-                            Some(vertex(&a, &[])), Some(vertex(&b, &[])),
-                            VertexWriteFields { labels: &fields, properties: &[] });
-                        assert_eq!(result.is_ok(), expected,
-                            "first={first} second={second} old={old} new={new} touched={touched}");
-                        if expected { admitted += 1; } else { refused += 1; }
+                        let result = permit.check_vertex_write_at(
+                            NOW,
+                            Some(vertex(&a, &[])),
+                            Some(vertex(&b, &[])),
+                            VertexWriteFields {
+                                labels: &fields,
+                                properties: &[],
+                            },
+                        );
+                        assert_eq!(
+                            result.is_ok(),
+                            expected,
+                            "first={first} second={second} old={old} new={new} touched={touched}"
+                        );
+                        if expected {
+                            admitted += 1;
+                        } else {
+                            refused += 1;
+                        }
                     }
                 }
             }
@@ -495,18 +730,39 @@ fn explicit_property_denials_survive_later_wildcards_for_both_row_kinds() {
     let authority = issuer();
     let mut grant = grant();
     grant.properties = Scope::All;
-    let token = authority.issue_at(&grant, NOW).unwrap()
-        .attenuate(Restriction::DenyProperties([SECRET].into_iter().collect())).unwrap()
-        .attenuate(Restriction::Properties(Scope::All)).unwrap();
+    let token = authority
+        .issue_at(&grant, NOW)
+        .unwrap()
+        .attenuate(Restriction::DenyProperties([SECRET].into_iter().collect()))
+        .unwrap()
+        .attenuate(Restriction::Properties(Scope::All))
+        .unwrap();
     let verified = authority.verify_at(&token, BRANCH, NOW).unwrap();
     let props = [(SECRET, CanonicalScalar::Int(5))];
     let image = vertex(&[L], &props);
     let mut permit = verified.begin_write_at(BRANCH, NOW).unwrap();
-    permit.check_vertex_write_at(NOW, Some(image), Some(image), NONE).unwrap();
-    assert_eq!(permit.check_vertex_write_at(NOW, Some(image), Some(image),
-        VertexWriteFields { labels: &[], properties: &[SECRET] }), Err(Error::ScopeDenied));
+    permit
+        .check_vertex_write_at(NOW, Some(image), Some(image), NONE)
+        .unwrap();
+    assert_eq!(
+        permit.check_vertex_write_at(
+            NOW,
+            Some(image),
+            Some(image),
+            VertexWriteFields {
+                labels: &[],
+                properties: &[SECRET]
+            }
+        ),
+        Err(Error::ScopeDenied)
+    );
     let mut permit = verified.begin_write_at(BRANCH, NOW).unwrap();
     let image = edge(&[L], &[L], &props);
-    permit.check_edge_write_at(NOW, Some(image), Some(image), &[]).unwrap();
-    assert_eq!(permit.check_edge_write_at(NOW, Some(image), Some(image), &[SECRET]), Err(Error::ScopeDenied));
+    permit
+        .check_edge_write_at(NOW, Some(image), Some(image), &[])
+        .unwrap();
+    assert_eq!(
+        permit.check_edge_write_at(NOW, Some(image), Some(image), &[SECRET]),
+        Err(Error::ScopeDenied)
+    );
 }

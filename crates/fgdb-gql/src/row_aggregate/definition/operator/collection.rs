@@ -20,7 +20,8 @@ struct OrderedRow {
 impl Ord for OrderedRow {
     fn cmp(&self, other: &Self) -> Ordering {
         self.order.cmp(&other.order).then_with(|| {
-            self.row.compare_incremental_window_order(&other.row, &self.order)
+            self.row
+                .compare_incremental_window_order(&other.row, &self.order)
         })
     }
 }
@@ -43,7 +44,10 @@ pub(super) struct State {
 }
 impl State {
     pub(super) fn new(order: &[GraphValueOrder]) -> Self {
-        Self { order: order.into(), groups: BTreeMap::new() }
+        Self {
+            order: order.into(),
+            groups: BTreeMap::new(),
+        }
     }
 
     // The enclosing operator has already checked EVERY raw row, payload and
@@ -102,7 +106,10 @@ impl State {
             staged.insert(group, next);
         }
         charge(control, ZSetEvent::Work)?;
-        Ok(Update { owner: self, staged })
+        Ok(Update {
+            owner: self,
+            staged,
+        })
     }
 }
 
@@ -125,7 +132,9 @@ impl Update<'_> {
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<GraphValue, GroupError<E>> {
         let rows = if after {
-            self.staged.get(group).or_else(|| self.owner.groups.get(group))
+            self.staged
+                .get(group)
+                .or_else(|| self.owner.groups.get(group))
         } else {
             self.owner.groups.get(group)
         };
@@ -136,7 +145,11 @@ impl Update<'_> {
         charge(control, ZSetEvent::ScratchEntry)?;
         for (row, weight) in rows.into_iter().flat_map(|rows| rows.iter()) {
             charge(control, ZSetEvent::Work)?;
-            let value = row.row.values().get(column).ok_or(GroupError::InputSchema)?;
+            let value = row
+                .row
+                .values()
+                .get(column)
+                .ok_or(GroupError::InputSchema)?;
             if value.is_null() {
                 continue;
             }
@@ -146,7 +159,10 @@ impl Update<'_> {
                 // narrowed when only presence is needed.
                 max_payload = max_payload.max(value.payload_units());
                 let levels = (seen.len().saturating_add(1)).ilog2() as usize + 1;
-                for _ in 0..levels.saturating_mul(24).saturating_mul(max_payload.saturating_add(1)) {
+                for _ in 0..levels
+                    .saturating_mul(24)
+                    .saturating_mul(max_payload.saturating_add(1))
+                {
                     charge(control, ZSetEvent::Work)?;
                 }
                 if seen.contains(value) {
@@ -188,10 +204,13 @@ fn copy<E>(
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<GraphValue, GroupError<E>> {
     value.copy_with_control(&mut |event| {
-        charge(control, match event {
-            GlaExecutionEvent::ScratchEntry => ZSetEvent::ScratchEntry,
-            GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => ZSetEvent::Work,
-        })
+        charge(
+            control,
+            match event {
+                GlaExecutionEvent::ScratchEntry => ZSetEvent::ScratchEntry,
+                GlaExecutionEvent::Work | GlaExecutionEvent::ResultRow => ZSetEvent::Work,
+            },
+        )
     })
 }
 
@@ -210,7 +229,8 @@ fn nested_nodes<E>(
     let mut nodes = 1_usize;
     if let GraphValue::List(values) = value {
         for value in values.iter() {
-            nodes = nodes.checked_add(nested_nodes(value, depth + 1, control)?)
+            nodes = nodes
+                .checked_add(nested_nodes(value, depth + 1, control)?)
                 .filter(|&nodes| nodes <= GraphValue::MAX_LIST_NODES)
                 .ok_or(GroupError::Arithmetic)?;
         }

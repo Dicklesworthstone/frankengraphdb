@@ -300,9 +300,9 @@ impl PreparedGraphAggregate {
                         GraphAggregateValue::Value(list @ GraphValue::List(items)) => {
                             list.validate_bounds()
                                 && argument.is_some()
-                                && items.iter().all(|item| {
-                                    !item.is_null() && accepts(argument, item)
-                                })
+                                && items
+                                    .iter()
+                                    .all(|item| !item.is_null() && accepts(argument, item))
                         }
                         _ => false,
                     }

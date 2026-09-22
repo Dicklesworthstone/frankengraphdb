@@ -62,7 +62,9 @@ impl<E: core::fmt::Display> core::fmt::Display for GroupError<E> {
             Self::NonInteger { column } => {
                 write!(f, "aggregate input {column} requires Int64 or NULL")
             }
-            Self::Arithmetic => f.write_str("native aggregate result is outside its bounded exact domain"),
+            Self::Arithmetic => {
+                f.write_str("native aggregate result is outside its bounded exact domain")
+            }
             Self::NonIntegerHaving => f.write_str("incompatible numeric HAVING operands"),
             Self::InvalidResult => f.write_str("invalid native aggregate result"),
             Self::ResultBudget { limit } => {
@@ -330,9 +332,10 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                 return Err(GroupBuildError::UnsupportedAggregate { aggregate });
             }
         }
-        let collections = if definition.aggregate_specs().any(|(function, _)| {
-            matches!(function, Function::Collect | Function::CollectDistinct)
-        }) {
+        let collections = if definition
+            .aggregate_specs()
+            .any(|(function, _)| matches!(function, Function::Collect | Function::CollectDistinct))
+        {
             let order = definition
                 .incremental_collection_order()
                 .ok_or(GroupBuildError::UnsupportedDefinition)?;
@@ -425,10 +428,14 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                     let value = match value {
                         None => Some(0),
                         Some(v) if v.is_null() => None,
-                        Some(_) if matches!(
-                            function,
-                            Function::Count | Function::Collect | Function::CollectDistinct
-                        ) => Some(0),
+                        Some(_)
+                            if matches!(
+                                function,
+                                Function::Count | Function::Collect | Function::CollectDistinct
+                            ) =>
+                        {
+                            Some(0)
+                        }
                         Some(GraphValue::Scalar(CanonicalScalar::Int(n))) => Some(i128::from(*n)),
                         _ => {
                             return Err(GroupError::NonInteger {
@@ -472,9 +479,13 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
         }
         let crossings = ZSet::from_updates(crossings, limbs, control)?;
         delta.integrate(&crossings, limbs, control)?;
-        let collections = self.collections.as_mut().map(|state| {
-            state.prepare(changes, self.definition.group_key_columns(), limbs, control)
-        }).transpose()?;
+        let collections = self
+            .collections
+            .as_mut()
+            .map(|state| {
+                state.prepare(changes, self.definition.group_key_columns(), limbs, control)
+            })
+            .transpose()?;
         let mut groups = BTreeSet::new();
         // Argument replacements and sort-key changes can leave COUNT exactly
         // unchanged. The collection index, not count crossings, invalidates
@@ -512,9 +523,10 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                         current_extremum(&self.aggregate, &group, index, maximum, &mut |e| c(e))
                     },
                     |column, distinct, c| {
-                        collections.as_ref().ok_or(GroupError::InvalidResult)?.render(
-                            &group, column, distinct, false, &mut |event| c(event),
-                        )
+                        collections
+                            .as_ref()
+                            .ok_or(GroupError::InvalidResult)?
+                            .render(&group, column, distinct, false, &mut |event| c(event))
                     },
                     control,
                 )?
@@ -545,9 +557,10 @@ impl<D: GroupDefinition> IncrementalGroupAggregate<D> {
                         pending_extremum(&aggregate, &group, index, maximum, &mut |e| c(e))
                     },
                     |column, distinct, c| {
-                        collections.as_ref().ok_or(GroupError::InvalidResult)?.render(
-                            &group, column, distinct, true, &mut |event| c(event),
-                        )
+                        collections
+                            .as_ref()
+                            .ok_or(GroupError::InvalidResult)?
+                            .render(&group, column, distinct, true, &mut |event| c(event))
                     },
                     control,
                 )?

@@ -177,5 +177,3 @@ fn accepted_statements_still_accept() {
         }
     });
 }
-
-

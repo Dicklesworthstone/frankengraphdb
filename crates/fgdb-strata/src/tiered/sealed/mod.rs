@@ -21,7 +21,9 @@
 
 mod image;
 mod incoming;
-pub use incoming::{IncomingIndexLimits, IncomingIndexStats, SealedIncomingCursor, SealedIncomingIndex};
+pub use incoming::{
+    IncomingIndexLimits, IncomingIndexStats, SealedIncomingCursor, SealedIncomingIndex,
+};
 #[cfg(test)]
 mod tests;
 mod wire;

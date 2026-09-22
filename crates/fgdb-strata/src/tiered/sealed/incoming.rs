@@ -98,15 +98,27 @@ fn mul(left: usize, right: usize) -> Result<usize, SealedError> {
 /// The existing scalar EF layout: packed low words, unary high words and one
 /// u32 rank per high word. This is requested backing storage, not an RSS claim.
 fn ef_bytes(count: usize, maximum: u64) -> Result<usize, SealedError> {
-    if count == 0 { return Ok(0); }
+    if count == 0 {
+        return Ok(0);
+    }
     let count64 = u64::try_from(count).map_err(|_| SealedError::SizeOverflow)?;
     let ratio = maximum / count64;
-    let low = if ratio == 0 { 0 } else { u64::BITS - 1 - ratio.leading_zeros() };
+    let low = if ratio == 0 {
+        0
+    } else {
+        u64::BITS - 1 - ratio.leading_zeros()
+    };
     let low_words = mul(count, low as usize)?.div_ceil(64);
-    let high_bits = (maximum >> low).checked_add(count64).ok_or(SealedError::SizeOverflow)?;
-    let high_words = usize::try_from(high_bits).map_err(|_| SealedError::SizeOverflow)?.div_ceil(64);
-    add(mul(low_words, size_of::<u64>())?,
-        mul(high_words, size_of::<u64>() + size_of::<u32>())?)
+    let high_bits = (maximum >> low)
+        .checked_add(count64)
+        .ok_or(SealedError::SizeOverflow)?;
+    let high_words = usize::try_from(high_bits)
+        .map_err(|_| SealedError::SizeOverflow)?
+        .div_ceil(64);
+    add(
+        mul(low_words, size_of::<u64>())?,
+        mul(high_words, size_of::<u64>() + size_of::<u32>())?,
+    )
 }
 
 impl SealedPartition {
@@ -114,42 +126,60 @@ impl SealedPartition {
     /// history. This is a low-level source-cost bound, not a visible degree or
     /// security-filtered graph statistic.
     pub fn retained_row_len(&self, source: VId, relation: RelationId) -> usize {
-        self.image.find_row(source, relation).map_or(0, |row| row.len())
+        self.image
+            .find_row(source, relation)
+            .map_or(0, |row| row.len())
     }
 
     /// Derive incoming access exclusively from this already-admitted image.
     /// No edge payload or property row is copied; all versions remain available
     /// over this image's exact [floor, publication] interval.
     pub fn incoming_index(
-        &self, cx: &QueryCx, limits: IncomingIndexLimits,
+        &self,
+        cx: &QueryCx,
+        limits: IncomingIndexLimits,
     ) -> Result<SealedIncomingIndex, SealedError> {
-        SealedIncomingIndex::build(self, limits,
-            &mut || cx.checkpoint().map_err(SealedError::Interrupted))
+        SealedIncomingIndex::build(self, limits, &mut || {
+            cx.checkpoint().map_err(SealedError::Interrupted)
+        })
     }
 }
 
 impl SealedIncomingIndex {
     fn build(
-        source: &SealedPartition, limits: IncomingIndexLimits,
+        source: &SealedPartition,
+        limits: IncomingIndexLimits,
         checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
     ) -> Result<Self, SealedError> {
         checkpoint()?;
         let count = source.image.incidences;
         check_limit("incoming incidences", count, limits.max_incidences)?;
         let scratch = mul(count, size_of::<IncidenceRef>())?;
-        check_limit("incoming workspace bytes", scratch, limits.max_workspace_bytes)?;
+        check_limit(
+            "incoming workspace bytes",
+            scratch,
+            limits.max_workspace_bytes,
+        )?;
         let mut refs = reserved(count)?;
         let mut position = 0u64;
         for row in &source.image.rows {
             checkpoint()?;
             for at in 0..row.len() {
                 checkpoint()?;
-                let (entry, _) = row.incidence(&source.image, at).ok_or(SealedError::NonCanonical)?;
-                refs.push(IncidenceRef { destination: entry.dst, relation: entry.relation, position });
+                let (entry, _) = row
+                    .incidence(&source.image, at)
+                    .ok_or(SealedError::NonCanonical)?;
+                refs.push(IncidenceRef {
+                    destination: entry.dst,
+                    relation: entry.relation,
+                    position,
+                });
                 position = position.checked_add(1).ok_or(SealedError::SizeOverflow)?;
             }
         }
-        if refs.len() != count { return Err(SealedError::NonCanonical); }
+        if refs.len() != count {
+            return Err(SealedError::NonCanonical);
+        }
         sort(&mut refs, checkpoint)?;
 
         // Preflight every requested output allocation before retaining any
@@ -166,15 +196,29 @@ impl SealedIncomingIndex {
             for values in refs[start..end].chunks(CHUNK_ENTRIES) {
                 checkpoint()?;
                 chunk_count = add(chunk_count, 1)?;
-                payload_bytes = add(payload_bytes,
-                    ef_bytes(values.len(), values.last().ok_or(SealedError::NonCanonical)?.position)?)?;
+                payload_bytes = add(
+                    payload_bytes,
+                    ef_bytes(
+                        values.len(),
+                        values.last().ok_or(SealedError::NonCanonical)?.position,
+                    )?,
+                )?;
             }
             start = end;
         }
-        let resident = add(payload_bytes, add(mul(row_count, size_of::<IncomingRow>())?,
-            mul(chunk_count, size_of::<EliasFano>())?)?)?;
+        let resident = add(
+            payload_bytes,
+            add(
+                mul(row_count, size_of::<IncomingRow>())?,
+                mul(chunk_count, size_of::<EliasFano>())?,
+            )?,
+        )?;
         let workspace = add(scratch, resident)?;
-        check_limit("incoming workspace bytes", workspace, limits.max_workspace_bytes)?;
+        check_limit(
+            "incoming workspace bytes",
+            workspace,
+            limits.max_workspace_bytes,
+        )?;
         let mut rows = reserved(row_count)?;
         let mut chunks = reserved(chunk_count)?;
         let mut values = [0u64; CHUNK_ENTRIES];
@@ -188,43 +232,73 @@ impl SealedIncomingIndex {
                 for (at, entry) in entries.iter().enumerate() {
                     values[at] = entry.position;
                 }
-                chunks.push(EliasFano::try_new(&values[..entries.len()], EntryLimit::new(CHUNK_ENTRIES))
-                    .map_err(SealedError::EliasFano)?);
+                chunks.push(
+                    EliasFano::try_new(&values[..entries.len()], EntryLimit::new(CHUNK_ENTRIES))
+                        .map_err(SealedError::EliasFano)?,
+                );
                 checkpoint()?;
             }
             rows.push(IncomingRow {
-                destination: refs[start].destination, relation: refs[start].relation,
-                first_chunk, end_chunk: chunks.len(), incidences: end - start,
+                destination: refs[start].destination,
+                relation: refs[start].relation,
+                first_chunk,
+                end_chunk: chunks.len(),
+                incidences: end - start,
             });
             start = end;
         }
         checkpoint()?;
         Ok(Self {
             source: source.clone(),
-            index: Arc::new(Index { rows, chunks, stats: IncomingIndexStats {
-                rows: row_count, incidences: count, chunks: chunk_count,
-                charged_resident_bytes: resident, charged_workspace_bytes: workspace,
-            } }),
+            index: Arc::new(Index {
+                rows,
+                chunks,
+                stats: IncomingIndexStats {
+                    rows: row_count,
+                    incidences: count,
+                    chunks: chunk_count,
+                    charged_resident_bytes: resident,
+                    charged_workspace_bytes: workspace,
+                },
+            }),
         })
     }
 
-    pub fn source(&self) -> &SealedPartition { &self.source }
-    pub fn source_anchor(&self) -> SealedAnchor { self.source.anchor() }
-    pub fn stats(&self) -> IncomingIndexStats { self.index.stats }
-    pub fn shares_index_with(&self, other: &Self) -> bool { Arc::ptr_eq(&self.index, &other.index) }
+    pub fn source(&self) -> &SealedPartition {
+        &self.source
+    }
+    pub fn source_anchor(&self) -> SealedAnchor {
+        self.source.anchor()
+    }
+    pub fn stats(&self) -> IncomingIndexStats {
+        self.index.stats
+    }
+    pub fn shares_index_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.index, &other.index)
+    }
 
     fn find(&self, destination: VId, relation: RelationId) -> Option<&IncomingRow> {
-        self.index.rows.binary_search_by_key(&(destination, relation),
-            |row| (row.destination, row.relation)).ok().map(|index| &self.index.rows[index])
+        self.index
+            .rows
+            .binary_search_by_key(&(destination, relation), |row| {
+                (row.destination, row.relation)
+            })
+            .ok()
+            .map(|index| &self.index.rows[index])
     }
 
     /// Retained incidence count, not a visible or authorized graph degree.
     pub fn retained_row_len(&self, destination: VId, relation: RelationId) -> usize {
-        self.find(destination, relation).map_or(0, |row| row.incidences)
+        self.find(destination, relation)
+            .map_or(0, |row| row.incidences)
     }
 
     pub fn row(
-        &self, cx: &QueryCx, destination: VId, relation: RelationId, as_of: CommitSeq,
+        &self,
+        cx: &QueryCx,
+        destination: VId,
+        relation: RelationId,
+        as_of: CommitSeq,
     ) -> Result<SealedIncomingCursor<'_>, SealedError> {
         self.row_from(cx, destination, relation, as_of, None)
     }
@@ -232,42 +306,71 @@ impl SealedIncomingIndex {
     /// Seek by the original SOURCE identity. Every returned edge retains its
     /// original src/dst orientation and borrows its original property slice.
     pub fn row_from(
-        &self, cx: &QueryCx, destination: VId, relation: RelationId, as_of: CommitSeq,
+        &self,
+        cx: &QueryCx,
+        destination: VId,
+        relation: RelationId,
+        as_of: CommitSeq,
         lower_source: Option<VId>,
     ) -> Result<SealedIncomingCursor<'_>, SealedError> {
-        self.open(destination, relation, as_of, lower_source,
-            &mut || cx.checkpoint().map_err(SealedError::Interrupted))
+        self.open(destination, relation, as_of, lower_source, &mut || {
+            cx.checkpoint().map_err(SealedError::Interrupted)
+        })
     }
 
     fn open(
-        &self, destination: VId, relation: RelationId, as_of: CommitSeq,
-        lower_source: Option<VId>, checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+        &self,
+        destination: VId,
+        relation: RelationId,
+        as_of: CommitSeq,
+        lower_source: Option<VId>,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
     ) -> Result<SealedIncomingCursor<'_>, SealedError> {
         checkpoint()?;
         self.source.anchor.authorize(as_of)?;
-        let chunks = self.find(destination, relation).map_or(&[][..],
-            |row| &self.index.chunks[row.first_chunk..row.end_chunk]);
+        let chunks = self.find(destination, relation).map_or(&[][..], |row| {
+            &self.index.chunks[row.first_chunk..row.end_chunk]
+        });
         let lower = match lower_source {
             None => 0,
             Some(source) => {
-                let row = self.source.image.rows.partition_point(|row| row.key.src < source);
-                self.source.image.offsets.select(row).ok_or(SealedError::NonCanonical)?
+                let row = self
+                    .source
+                    .image
+                    .rows
+                    .partition_point(|row| row.key.src < source);
+                self.source
+                    .image
+                    .offsets
+                    .select(row)
+                    .ok_or(SealedError::NonCanonical)?
             }
         };
-        let chunk = chunks.partition_point(|chunk| chunk.max_value().is_some_and(|max| max < lower));
+        let chunk =
+            chunks.partition_point(|chunk| chunk.max_value().is_some_and(|max| max < lower));
         let at = chunks.get(chunk).map_or(0, |chunk| chunk.rank_lt(lower));
-        Ok(SealedIncomingCursor { image: &self.source.image, chunks, chunk, at, as_of, finished: false })
+        Ok(SealedIncomingCursor {
+            image: &self.source.image,
+            chunks,
+            chunk,
+            at,
+            as_of,
+            finished: false,
+        })
     }
 }
 
 fn group_end(
-    refs: &[IncidenceRef], start: usize,
+    refs: &[IncidenceRef],
+    start: usize,
     checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
 ) -> Result<usize, SealedError> {
     let key = (refs[start].destination, refs[start].relation);
     let mut end = start + 1;
     while end < refs.len() && (refs[end].destination, refs[end].relation) == key {
-        if (end - start) % CHUNK_ENTRIES == 0 { checkpoint()?; }
+        if (end - start) % CHUNK_ENTRIES == 0 {
+            checkpoint()?;
+        }
         end += 1;
     }
     Ok(end)
@@ -276,15 +379,22 @@ fn group_end(
 // Constant-scratch heapsort. No allocation or uninterruptible whole-population
 // sort hides between the surrounding checkpoints. Input keys are total/unique.
 fn sort<T: Ord>(
-    values: &mut [T], checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    values: &mut [T],
+    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
 ) -> Result<(), SealedError> {
     let mut ordered = true;
     for pair in values.windows(2) {
         checkpoint()?;
-        if pair[0] > pair[1] { ordered = false; }
+        if pair[0] > pair[1] {
+            ordered = false;
+        }
     }
-    if ordered { return Ok(()); }
-    for root in (0..values.len() / 2).rev() { sift(values, root, checkpoint)?; }
+    if ordered {
+        return Ok(());
+    }
+    for root in (0..values.len() / 2).rev() {
+        sift(values, root, checkpoint)?;
+    }
     for end in (1..values.len()).rev() {
         checkpoint()?;
         values.swap(0, end);
@@ -294,15 +404,22 @@ fn sort<T: Ord>(
 }
 
 fn sift<T: Ord>(
-    values: &mut [T], mut root: usize,
+    values: &mut [T],
+    mut root: usize,
     checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
 ) -> Result<(), SealedError> {
     while root < values.len() / 2 {
         checkpoint()?;
         let left = 2 * root + 1;
         let right = left + 1;
-        let child = if right < values.len() && values[right] > values[left] { right } else { left };
-        if values[root] >= values[child] { break; }
+        let child = if right < values.len() && values[right] > values[left] {
+            right
+        } else {
+            left
+        };
+        if values[root] >= values[child] {
+            break;
+        }
         values.swap(root, child);
         root = child;
     }
@@ -326,16 +443,22 @@ impl<'a> SealedIncomingCursor<'a> {
     }
 
     fn next_inner(
-        &mut self, checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+        &mut self,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
     ) -> Result<Option<SealedEdge<'a>>, SealedError> {
-        if self.finished { return Ok(None); }
+        if self.finished {
+            return Ok(None);
+        }
         let result = self.pull(checkpoint);
-        if result.is_err() || matches!(&result, Ok(None)) { self.finished = true; }
+        if result.is_err() || matches!(&result, Ok(None)) {
+            self.finished = true;
+        }
         result
     }
 
     fn pull(
-        &mut self, checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+        &mut self,
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
     ) -> Result<Option<SealedEdge<'a>>, SealedError> {
         checkpoint()?;
         while let Some(chunk) = self.chunks.get(self.chunk) {
@@ -346,18 +469,40 @@ impl<'a> SealedIncomingCursor<'a> {
                 continue;
             };
             self.at += 1;
-            let row_index = self.image.offsets.rank_le(position).checked_sub(1)
+            let row_index = self
+                .image
+                .offsets
+                .rank_le(position)
+                .checked_sub(1)
                 .ok_or(SealedError::NonCanonical)?;
-            let row = self.image.rows.get(row_index).ok_or(SealedError::NonCanonical)?;
-            let offset = position.checked_sub(self.image.offsets.select(row_index)
-                .ok_or(SealedError::NonCanonical)?).ok_or(SealedError::NonCanonical)?;
-            let (entry, locator) = row.incidence(self.image,
-                usize::try_from(offset).map_err(|_| SealedError::SizeOverflow)?)
+            let row = self
+                .image
+                .rows
+                .get(row_index)
+                .ok_or(SealedError::NonCanonical)?;
+            let offset = position
+                .checked_sub(
+                    self.image
+                        .offsets
+                        .select(row_index)
+                        .ok_or(SealedError::NonCanonical)?,
+                )
+                .ok_or(SealedError::NonCanonical)?;
+            let (entry, locator) = row
+                .incidence(
+                    self.image,
+                    usize::try_from(offset).map_err(|_| SealedError::SizeOverflow)?,
+                )
                 .ok_or(SealedError::NonCanonical)?;
             if entry.visible_at(self.as_of) {
-                let properties = if locator == 0 { &[][..] } else {
-                    self.image.properties.get(locator as usize - 1)
-                        .ok_or(SealedError::NonCanonical)?.as_slice()
+                let properties = if locator == 0 {
+                    &[][..]
+                } else {
+                    self.image
+                        .properties
+                        .get(locator as usize - 1)
+                        .ok_or(SealedError::NonCanonical)?
+                        .as_slice()
                 };
                 return Ok(Some(SealedEdge { entry, properties }));
             }
