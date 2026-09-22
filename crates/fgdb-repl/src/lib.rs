@@ -17,6 +17,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 pub mod driver;
+pub mod replica;
 
 use fgdb_chronicle::seed::{
     ObjectPublication, ReplicaSeed, SeedError, SeedInstallation, SeedObjectSpec,
