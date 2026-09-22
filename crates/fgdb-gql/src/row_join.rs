@@ -44,6 +44,11 @@ pub enum RowJoinKind {
     Inner,
     /// All matches, or one null extension per left occurrence when unmatched.
     Left,
+    /// All matches, or one null extension per right occurrence when unmatched.
+    /// Output columns remain left followed by right, never swapped.
+    Right,
+    /// All matches plus null extensions for unmatched occurrences on BOTH sides.
+    Full,
     /// Preserve left multiplicity when at least one matching right row exists.
     Semi,
     /// Preserve left multiplicity when no matching right row exists.
@@ -51,14 +56,15 @@ pub enum RowJoinKind {
 }
 impl RowJoinKind {
     fn includes_right(self) -> bool {
-        matches!(self, Self::Inner | Self::Left)
+        matches!(self, Self::Inner | Self::Left | Self::Right | Self::Full)
     }
 }
 
-/// Immutable positional schema. Inner/left output concatenates both inputs;
+/// Immutable positional schema. Inner/outer output concatenates both inputs;
 /// semi/anti output contains only the left columns. `new` requires equality
 /// keys; `cross` explicitly chooses unconditional matching. Neither accepts
-/// an arbitrary ON predicate program.
+/// an arbitrary ON predicate program. Equijoin keys must be scalar or vertex
+/// columns; non-key payloads may use any bounded native value domain.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RowJoinSpec {
     left: Box<[GraphSetColumnType]>,
@@ -87,10 +93,19 @@ impl RowJoinSpec {
         }
         for (side, columns) in [left, right].into_iter().enumerate() {
             for (column, kind) in columns.iter().enumerate() {
-                if !matches!(
-                    kind,
-                    GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
-                ) {
+                // Only key cells participate in equality. Rejecting a list,
+                // path or captured edge elsewhere in the row prevents joins
+                // from composing with otherwise valid graph projections.
+                // arrange() still checks EVERY payload's schema and bounds.
+                let is_key = keys
+                    .iter()
+                    .any(|&(l, r)| column == if side == 0 { l } else { r });
+                if is_key
+                    && !matches!(
+                        kind,
+                        GraphSetColumnType::Scalar | GraphSetColumnType::Vertex
+                    )
+                {
                     return Err(RowJoinBuildError::UnsupportedColumn { side, column });
                 }
             }
@@ -119,8 +134,9 @@ impl RowJoinSpec {
     /// because no payload is interpreted as an equality key. A zero-column
     /// relation is valid; a unit tuple multiplies counts, not column widths.
     ///
-    /// The default kind is Inner. With Left/Semi/Anti, every right occurrence
-    /// is a witness regardless of its values. Source counts are still checked
+    /// The default kind is Inner. Every occurrence on the opposite side is a
+    /// witness regardless of its values, including for outer and presence
+    /// joins. Source counts are still checked
     /// when the opposite bag is empty. Products can be quadratic in support;
     /// this constructor promises neither a selective index nor spill.
     pub fn cross(
@@ -297,7 +313,7 @@ fn arrange<E>(
 /// One exact in-memory row-join circuit. Work/scratch count logical events and
 /// payload units, not allocator bytes or key-comparison costs. Arc-owned keys
 /// and input rows avoid repeated payload cloning in the generic join products.
-/// Inner/left output can be quadratic. Semi/anti use counted witnesses without
+/// Inner/outer output can be quadratic. Semi/anti use counted witnesses without
 /// producing that Cartesian bag. All kinds share work/scratch and final-row
 /// admission; this is not spill or a worst-case-optimal multiway join.
 #[derive(PartialEq, Eq)]
@@ -458,3 +474,177 @@ mod mode_tests;
 
 #[cfg(test)]
 mod cross_tests;
+
+#[cfg(test)]
+mod outer_tests;
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+    use fgdb_types::{CanonicalScalar, VId};
+
+    const LIMBS: LimbLimit = LimbLimit::new(16);
+
+    fn allow(_: ZSetEvent) -> Result<(), usize> {
+        Ok(())
+    }
+
+    fn bag(row: &GraphValueRow, count: i128) -> ZSet<GraphValueRow> {
+        ZSet::from_updates(
+            [(row.clone(), ZWeight::from_i128(count))],
+            LIMBS,
+            &mut allow,
+        )
+        .unwrap()
+    }
+
+    fn inputs() -> (GraphValueRow, GraphValueRow) {
+        let left = GraphValueRow::from_owned_values(vec![
+            GraphValue::Scalar(CanonicalScalar::Int(7)),
+            GraphValue::List(
+                vec![
+                    GraphValue::Vertex(VId(u128::MAX)),
+                    GraphValue::List(
+                        vec![GraphValue::Scalar(CanonicalScalar::Null)].into_boxed_slice(),
+                    ),
+                ]
+                .into_boxed_slice(),
+            ),
+        ]);
+        let right = GraphValueRow::from_owned_values(vec![
+            GraphValue::Scalar(CanonicalScalar::Int(7)),
+            GraphValue::Vertex(VId(9)),
+        ]);
+        (left, right)
+    }
+
+    fn operator(kind: RowJoinKind) -> IncrementalRowJoin {
+        let spec = RowJoinSpec::new(
+            &[GraphSetColumnType::Scalar, GraphSetColumnType::List],
+            &[GraphSetColumnType::Scalar, GraphSetColumnType::Any],
+            &[(0, 0)],
+        )
+        .unwrap()
+        .with_kind(kind);
+        IncrementalRowJoin::new(spec)
+    }
+
+    #[test]
+    fn all_join_kinds_preserve_nested_payloads_and_exact_witness_transitions() {
+        let (left, right) = inputs();
+        let joined = GraphValueRow::from_owned_values(
+            left.values().iter().chain(right.values()).cloned().collect(),
+        );
+        let mut null_extended = left.values().to_vec();
+        null_extended.extend((0..2).map(|_| GraphValue::Scalar(CanonicalScalar::Null)));
+        let null_extended = GraphValueRow::from_owned_values(null_extended);
+        for kind in [
+            RowJoinKind::Inner,
+            RowJoinKind::Left,
+            RowJoinKind::Right,
+            RowJoinKind::Full,
+            RowJoinKind::Semi,
+            RowJoinKind::Anti,
+        ] {
+            let mut join = operator(kind);
+            join.prepare(&bag(&left, 2), &bag(&right, 3), LIMBS, Some(6), &mut allow)
+                .unwrap()
+                .commit();
+            let matched = match kind {
+                RowJoinKind::Inner | RowJoinKind::Left | RowJoinKind::Right | RowJoinKind::Full => {
+                    bag(&joined, 6)
+                }
+                RowJoinKind::Semi => bag(&left, 2),
+                RowJoinKind::Anti => ZSet::new(),
+            };
+            assert_eq!(join.rows(), &matched);
+            let expected = match kind {
+                RowJoinKind::Inner | RowJoinKind::Right | RowJoinKind::Semi => ZSet::new(),
+                RowJoinKind::Left | RowJoinKind::Full => bag(&null_extended, 2),
+                RowJoinKind::Anti => bag(&left, 2),
+            };
+            let delta = join
+                .prepare(&ZSet::new(), &bag(&right, -3), LIMBS, Some(2), &mut allow)
+                .unwrap()
+                .commit();
+            assert_eq!(delta, expected.minus(&matched, LIMBS, &mut allow).unwrap());
+            assert_eq!(join.rows(), &expected);
+            join.prepare(&ZSet::new(), &bag(&right, 3), LIMBS, Some(6), &mut allow)
+                .unwrap()
+                .commit();
+            assert_eq!(join.rows(), &matched);
+        }
+    }
+
+    #[test]
+    fn native_payload_domains_are_admitted_but_never_promoted_to_equality_keys() {
+        use GraphSetColumnType::{Any, Edge, Edges, List, Path, Scalar, Vertices};
+        for payload in [Any, Edge, Edges, List, Path, Vertices] {
+            let schema = [Scalar, payload];
+            assert!(RowJoinSpec::new(&schema, &schema, &[(0, 0)]).is_ok());
+            assert_eq!(
+                RowJoinSpec::new(&schema, &schema, &[(1, 1)]),
+                Err(RowJoinBuildError::UnsupportedColumn { side: 0, column: 1 })
+            );
+            assert_eq!(
+                RowJoinSpec::new(&[Scalar], &schema, &[(0, 1)]),
+                Err(RowJoinBuildError::UnsupportedColumn { side: 1, column: 1 })
+            );
+        }
+    }
+
+    #[test]
+    fn payload_admission_does_not_skip_schema_checks_on_unmatched_rows() {
+        let (_, invalid_left) = inputs();
+        for kind in [
+            RowJoinKind::Inner,
+            RowJoinKind::Left,
+            RowJoinKind::Right,
+            RowJoinKind::Full,
+            RowJoinKind::Semi,
+            RowJoinKind::Anti,
+        ] {
+            let mut join = operator(kind);
+            assert_eq!(
+                join.prepare(&bag(&invalid_left, 1), &ZSet::new(), LIMBS, None, &mut allow)
+                    .unwrap_err(),
+                RowJoinError::InputSchema { side: 0 }
+            );
+            assert_eq!(join, operator(kind));
+        }
+    }
+
+    #[test]
+    fn cancellation_while_copying_nested_payloads_never_publishes_partial_state() {
+        let (left, right) = inputs();
+        let left = bag(&left, 2);
+        let right = bag(&right, 3);
+        let mut join = operator(RowJoinKind::Left);
+        let mut events = 0;
+        drop(
+            join.prepare(&left, &right, LIMBS, None, &mut |_| {
+                events += 1;
+                Ok::<_, usize>(())
+            })
+            .unwrap(),
+        );
+        assert!(events > 0);
+        assert_eq!(join, operator(RowJoinKind::Left));
+        for stop in 0..events {
+            let mut at = 0;
+            let error = join
+                .prepare(&left, &right, LIMBS, None, &mut |_| {
+                    let current = at;
+                    at += 1;
+                    if current == stop { Err(stop) } else { Ok(()) }
+                })
+                .unwrap_err();
+            assert_eq!(error, RowJoinError::Delta(ZSetError::Control(stop)));
+            assert_eq!(join, operator(RowJoinKind::Left));
+        }
+        join.prepare(&left, &right, LIMBS, Some(6), &mut allow)
+            .unwrap()
+            .commit();
+        assert_eq!(join.total(), &ZWeight::from_i128(6));
+    }
+}

@@ -431,6 +431,7 @@ mod tests {
             vertices: BTreeMap::new(),
             aggregate: IncrementalAggregate::new(),
             rows: ZSet::new(),
+            last_delta: None,
             frontier: CommitSeq::ORIGIN,
             stats: StandingQueryStats::default(),
             failure: None,
@@ -450,6 +451,7 @@ mod tests {
         assert_eq!(actual.edges, expected.edges); // includes all witness counts
         assert_eq!(actual.aggregate, expected.aggregate);
         assert_eq!(actual.rows, expected.rows);
+        assert_eq!(actual.last_delta, expected.last_delta);
         assert_eq!(actual.frontier, expected.frontier);
     }
 

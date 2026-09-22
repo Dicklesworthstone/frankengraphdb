@@ -443,11 +443,18 @@ fn projection_grouping_and_delivery_share_exact_budgets_and_terminal_cancellatio
 }
 
 #[test]
-fn transformed_input_does_not_admit_result_modifiers_or_weaken_maintenance_or_row_scans() {
+fn transformed_input_keeps_supported_result_modifiers_and_maintenance_and_row_scan_boundaries() {
     for text in [
         "MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total ORDER BY total LIMIT 0",
         "MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total HAVING total>0 ORDER BY total",
         "MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total ORDER BY total",
+    ] {
+        let q = prepare(text);
+        let s = source(63);
+        let expected = eager(&q, &s);
+        assert_eq!(run(&q, s, wide()).collect::<Result<Vec<_>, _>>().unwrap(), expected, "{text}");
+    }
+    for text in [
         "MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p+1) AS values",
         "MATCH (a)-[r:R]->(b) OPTIONAL MATCH (b)-[:S]->(c) RETURN SUM(r.p+1) AS total",
     ] {
@@ -459,7 +466,7 @@ fn transformed_input_does_not_admit_result_modifiers_or_weaken_maintenance_or_ro
     let q = prepare("MATCH (a)-[r:R]->(b) RETURN SUM(r.p+1) AS total");
     assert!(!q.supports_incremental_maintenance());
     assert!(EdgeAggregatePlan::compile(&q).is_ok());
-    assert!(EdgeAggregatePlan::compile(&q.clone().with_distinct_output(true)).is_err());
+    assert!(EdgeAggregatePlan::compile(&q.clone().with_distinct_output(true)).is_ok());
     assert!(EdgeScanPlan::compile(q.input_pattern().plan()).is_err());
     let s = source(63);
     let reads = s.reads.clone();

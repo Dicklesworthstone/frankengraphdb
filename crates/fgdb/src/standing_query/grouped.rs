@@ -501,9 +501,13 @@ impl StandingQuery {
         // representatives publish together. No recoverably fallible work remains.
         let _ = prepared.commit();
         sink.commit();
-        if let Some(projected) = projected {
-            projected.commit();
-        }
+        // Move the already prepared derivative, without cloning payloads or
+        // adding a fallible operation after source publication. A row-output
+        // sink retains its own GraphValueRow delta and returns None here.
+        self.last_delta = match projected {
+            Some(projected) => projected.commit(),
+            None => Some(changes),
+        };
         Ok(())
     }
 }
@@ -559,6 +563,7 @@ mod tests {
             edges: None,
             aggregate: IncrementalAggregate::new(),
             rows: ZSet::new(),
+            last_delta: None,
             frontier: CommitSeq::ORIGIN,
             stats: StandingQueryStats::default(),
             failure: None,
@@ -647,6 +652,7 @@ mod tests {
                 assert_eq!(candidate.vertices, before.vertices);
                 assert_eq!(candidate.aggregate, before.aggregate);
                 assert_eq!(candidate.rows, before.rows);
+                assert_eq!(candidate.last_delta, before.last_delta);
                 assert_eq!(candidate.frontier, basis);
                 let mut checkpoint = || Ok(());
                 let mut meter = Meter {
@@ -658,6 +664,7 @@ mod tests {
                 assert_eq!(candidate.vertices, success.vertices);
                 assert_eq!(candidate.aggregate, success.aggregate);
                 assert_eq!(candidate.rows, success.rows);
+                assert_eq!(candidate.last_delta, success.last_delta);
             }
             // The same transaction at the output-group limit also refuses
             // without partially advancing the aggregate or source projection.
@@ -676,6 +683,7 @@ mod tests {
             assert_eq!(bounded.vertices, before.vertices);
             assert_eq!(bounded.aggregate, before.aggregate);
             assert_eq!(bounded.rows, before.rows);
+            assert_eq!(bounded.last_delta, before.last_delta);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -764,6 +772,7 @@ mod tests {
                 assert_eq!(actual.vertices, expected.vertices);
                 assert_eq!(actual.aggregate, expected.aggregate);
                 assert_eq!(actual.rows, expected.rows);
+                assert_eq!(actual.last_delta, expected.last_delta);
                 assert_eq!(actual.frontier, expected.frontier);
                 assert_eq!(actual.failure, expected.failure);
             };

@@ -228,6 +228,7 @@ mod tests {
             edges: None,
             aggregate: IncrementalAggregate::new(),
             rows: ZSet::new(),
+            last_delta: None,
             frontier: CommitSeq::ORIGIN,
             stats: StandingQueryStats::default(),
             failure: None,
@@ -397,6 +398,7 @@ mod tests {
             assert_eq!(seen, stop);
             assert_eq!(query.aggregate, original.aggregate);
             assert_eq!(query.rows, original.rows);
+            assert_eq!(query.last_delta, original.last_delta);
             transition(&mut query, &before, &after, &mut || Ok(())).unwrap();
             assert_eq!(query.aggregate, complete.aggregate);
             assert_eq!(query.rows, complete.rows);

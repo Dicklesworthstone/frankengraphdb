@@ -39,6 +39,9 @@ pub(crate) struct StandingQuery {
     edges: Option<edge::State>,
     aggregate: IncrementalAggregate<AggregateKey>,
     pub(super) rows: ZSet<GraphAggregateRow>,
+    // Final public aggregate output, after HAVING/projection/DISTINCT/page.
+    // Row sinks own a different row domain and retain their derivative there.
+    pub(super) last_delta: Option<ZSet<GraphAggregateRow>>,
     pub(super) frontier: CommitSeq,
     pub(super) stats: StandingQueryStats,
     pub(super) failure: Option<StandingQueryFailure>,
@@ -443,6 +446,35 @@ fn affected_vertex(query: &PreparedGraphAggregate, row: &DeltaRow) -> Option<VId
     }
 }
 impl<V: Vfs + Clone> Database<V> {
+    /// Borrow the most recent complete aggregate-output change. This covers
+    /// plain and projected graph aggregates as well as relational group views.
+    /// The derivative is after HAVING, projection, DISTINCT and result paging,
+    /// not a change to private input counts or complete hidden groups.
+    ///
+    /// Initialization/rebuild returns None; an accepted unchanged successor
+    /// returns Some(empty). Only the latest tick is retained, not a backlog.
+    /// Integrate once only when its frontier follows the caller's baseline.
+    /// Owner, health and freshness checks precede access; a failed view cannot
+    /// expose an older successful tick as if it were current.
+    pub fn standing_query_delta<'a>(
+        &'a self,
+        cx: &QueryCx,
+        handle: &super::StandingQueryHandle,
+    ) -> Result<Option<super::StandingQueryView<'a>>, StandingQueryError> {
+        let source = match self.admitted_standing_query(cx, handle)? {
+            super::StandingQuery::Aggregate(source)
+            | super::StandingQuery::ProjectedAggregate { source, .. } => source,
+            super::StandingQuery::Group(_) => return self.standing_group_delta(cx, handle),
+            _ => return Err(StandingQueryError::Unsupported),
+        };
+        Ok(source.last_delta.as_ref().map(|rows| super::StandingQueryView {
+            rows,
+            ordered: None,
+            frontier: source.frontier,
+            stats: &source.stats,
+        }))
+    }
+
     pub(super) fn prepare_standing_query(
         &self,
         cx: &QueryCx,
@@ -521,6 +553,7 @@ impl<V: Vfs + Clone> Database<V> {
                 edges,
                 aggregate: IncrementalAggregate::new(),
                 rows: ZSet::new(),
+                last_delta: None,
                 frontier: self.snapshot.frontier,
                 stats: StandingQueryStats::default(),
                 failure: None,
@@ -566,6 +599,8 @@ impl<V: Vfs + Clone> Database<V> {
             }
             .map_err(StandingQueryError::Maintenance)?;
             // Both source and output are still private during registration.
+            // Bootstrap is a baseline, never an ordinary successor derivative.
+            query.last_delta = None;
             meter
                 .units(ZSetEvent::ScratchEntry, boxes)
                 .map_err(StandingQueryError::Maintenance)?;
@@ -575,6 +610,10 @@ impl<V: Vfs + Clone> Database<V> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "aggregate_delta_tests.rs"]
+mod delta_tests;
 
 #[cfg(test)]
 mod relational_admission_tests {
