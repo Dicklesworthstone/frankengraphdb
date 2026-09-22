@@ -20,7 +20,20 @@
 
 #![forbid(unsafe_code)]
 
+mod call;
+mod execute;
 mod projection;
+
+pub use call::{
+    FNX_NUMERIC_PROFILE, FNX_SIGNATURE_REGISTRY_VERSION, MAX_FNX_CALL_BYTES,
+    FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallSpec, FnxImplementationClass,
+    FnxOutput, FnxOutputColumn, FnxParameterSpec, FnxParameterType, FnxParameters,
+    FnxSignature, FnxSignatureRegistry, PageRankOptions,
+};
+pub use execute::{
+    ComplexityWitness, FnxCertificate, FnxExecutionError, FnxExecutionLimits,
+    FnxResult, FnxValue,
+};
 
 pub use fnx_algorithms::GraphView;
 pub use projection::{
