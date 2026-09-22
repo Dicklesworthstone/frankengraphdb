@@ -344,6 +344,89 @@ impl BeaconIndex {
         })
     }
 
+    /// Build one base segment without repeatedly cloning an ever-growing live
+    /// map between ingestion batches. Bulk input must contain each VId once.
+    /// The batch-operation limit governs incremental writes, not bootstrap;
+    /// all configured live-corpus limits and caller work limits still apply.
+    pub fn build(
+        config: IndexConfig,
+        documents: impl IntoIterator<Item = IndexDocument>,
+        work: &mut dyn WorkControl,
+    ) -> Result<Self, BeaconError> {
+        Self::try_build(config, documents.into_iter().map(Ok::<_, BeaconError>), work)
+    }
+
+    /// Fallible source variant: source errors are propagated unchanged, never
+    /// converted into end-of-stream or a successfully indexed partial corpus.
+    pub fn try_build<E: From<BeaconError>>(
+        config: IndexConfig,
+        documents: impl IntoIterator<Item = Result<IndexDocument, E>>,
+        work: &mut dyn WorkControl,
+    ) -> Result<Self, E> {
+        let mut index = Self::new(config)?;
+        index.try_replace_all(documents, work)?;
+        Ok(index)
+    }
+
+    /// Atomically replace the complete derived corpus. Retained snapshots keep
+    /// the preceding corpus. A failure leaves this writer unchanged as well.
+    pub fn replace_all(
+        &mut self,
+        documents: impl IntoIterator<Item = IndexDocument>,
+        work: &mut dyn WorkControl,
+    ) -> Result<IndexStats, BeaconError> {
+        self.try_replace_all(documents.into_iter().map(Ok::<_, BeaconError>), work)
+    }
+
+    /// Rebuild directly from a fallible source with one final publication.
+    /// Source polling is preceded by a work/cancellation checkpoint. The
+    /// iterator itself must enforce its own I/O and memory contracts; this
+    /// method does not confer graph-read authority on arbitrary documents.
+    ///
+    /// Unlike replay through repeated apply_batch calls, no old live map or
+    /// vocabulary is copied and no intermediate HNSW segments are constructed.
+    /// Both modalities and corpus statistics are built from the same input.
+    pub fn try_replace_all<E: From<BeaconError>>(
+        &mut self,
+        documents: impl IntoIterator<Item = Result<IndexDocument, E>>,
+        work: &mut dyn WorkControl,
+    ) -> Result<IndexStats, E> {
+        work.charge(1)?;
+        let sequence = self.current.sequence.checked_add(1)
+            .ok_or(BeaconError::GenerationExhausted)?;
+        let mut next = Generation {
+            config: Arc::clone(&self.current.config), sequence,
+            live: BTreeMap::new(), segments: Vec::new(),
+            corpus: CorpusStats::default(), vector_documents: 0,
+            vector_values: 0, text_bytes: 0, document_terms: 0,
+        };
+        let mut documents = documents.into_iter();
+        loop {
+            work.charge(1)?;
+            let Some(document) = documents.next() else { break; };
+            let document = document?;
+            let id = document.id;
+            if next.live.contains_key(&id) {
+                return Err(BeaconError::DuplicateVertex(id).into());
+            }
+            if next.live.len() == next.config.max_documents {
+                return Err(BeaconError::ResourceLimit {
+                    resource: "live documents", limit: next.config.max_documents,
+                }.into());
+            }
+            let document = Arc::new(StoredDocument::prepare(document, &next.config, work)?);
+            next.add_stats(&document, work)?;
+            next.live.insert(id, LiveDocument { generation: sequence, document });
+            // Check each prefix before fetching another row; an oversized
+            // stream must not be completely buffered before it is refused.
+            next.check_limits()?;
+        }
+        next.compact(work)?;
+        work.charge(1)?;
+        self.current = Arc::new(next);
+        Ok(self.snapshot().stats())
+    }
+
     #[must_use]
     pub fn config(&self) -> &IndexConfig {
         &self.current.config
