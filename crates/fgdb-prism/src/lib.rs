@@ -7,16 +7,21 @@
 //! `usize`. Clones share one immutable projection, including both adjacency
 //! directions, its weights, source binding and reduction policy.
 //!
+//! [`SealedGraphView`] instead borrows Strata's authenticated compressed rows
+//! through a fallible cursor. It retains a vertex directory and degrees, not
+//! flat adjacency. That cursor is deliberately not disguised as the upstream
+//! infallible slice contract; unsupported projection directions fail closed.
+//!
 //! This is the in-core projection kernel, not storage or an authorization
 //! authority. Input rows must already belong to one admitted snapshot. The
 //! trusted embedded composition layer supplies them today; the future secure
 //! view must supply authorized rows before an untrusted client can invoke this
 //! kernel. A caller-supplied source binding is provenance, not a permit.
 //!
-//! The cache has explicit admission limits. These are not an external-memory
-//! implementation, a hard process-memory cap, or a claim of zero-copy access to
-//! Strata. Algorithms without a bounded cursor or spill implementation must not
-//! acquire the larger-than-memory database-operator exposure merely by using it.
+//! The adapters have explicit admission limits. These are not external-memory
+//! implementations or hard process-memory caps. Algorithms without a bounded
+//! cursor or spill implementation must not acquire the larger-than-memory
+//! database-operator exposure merely by using them.
 
 #![forbid(unsafe_code)]
 
@@ -25,9 +30,11 @@ mod clustering;
 mod execute;
 mod input;
 mod projection;
+mod sealed;
 mod shortest_path;
 mod traversal;
 
+pub use sealed::{SealedGraphView, SealedNeighborCursor, SealedProjectionError, SealedProjectionSpec};
 pub use clustering::{TriangleStatistics, triangle_statistics};
 pub use shortest_path::{
     DijkstraComparison, DijkstraOptions, DijkstraOutput, FNX_DIJKSTRA_EPSILON, dijkstra,

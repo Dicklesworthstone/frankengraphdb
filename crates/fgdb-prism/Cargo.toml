@@ -2,7 +2,7 @@
 name = "fgdb-prism"
 version = "0.0.1"
 edition = "2024"
-description = "Snapshot-pinned decoded projections and the FrankenNetworkX analytics bridge"
+description = "Snapshot-pinned decoded and compressed FrankenNetworkX analytics bridges"
 publish = false
 
 [lints]
@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 fgdb-crypto = { path = "../fgdb-crypto" }
 fgdb-delta-types = { path = "../fgdb-delta-types" }
+fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }
 fnx-algorithms = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f", default-features = false }
 
