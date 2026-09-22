@@ -19,13 +19,16 @@
 //!   selection/recovery rules, and durable root publication support;
 //! - [`scrub`]: authenticated symbol inspection and repair-budget-aware scrub
 //!   verdicts for encoded objects;
-//! - [`pack`]: deterministic packing metadata for protected object groups.
+//! - [`pack`]: deterministic packing metadata for protected object groups;
+//! - `transfer` (native targets): bounded ATP donor scheduling and authenticated
+//!   multi-donor object recovery using the existing symbol/identity pipeline.
 //!
 //! DELIBERATELY ABSENT: retention cooling; `BranchManifest` and product-level
-//! database branches; replication; a real SSI validator (the landed
-//! [`PassThroughValidator`] is only the coordinator's validation seam); and
-//! capsule sealing of Strata objects. The marker/head primitives above do not
-//! by themselves claim those product capabilities.
+//! database branches; production replication transport/root/apply integration;
+//! a real SSI validator (the landed [`PassThroughValidator`] is only the
+//! coordinator's validation seam); and capsule sealing of Strata objects.
+//! The marker/head and transfer primitives above do not by themselves claim
+//! those product capabilities.
 #![forbid(unsafe_code)]
 
 pub mod capsule;
@@ -38,6 +41,8 @@ pub mod scrub;
 pub mod store;
 pub mod symbol;
 pub mod symbolize;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod transfer;
 pub mod validate;
 
 pub use commit::{CommitCoordinator, CommitError, CrashPoint};
