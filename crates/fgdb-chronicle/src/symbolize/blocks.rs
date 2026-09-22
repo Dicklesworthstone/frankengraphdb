@@ -164,21 +164,35 @@ impl Block {
         {
             return Err(SymbolizeError::DecodeFailed);
         }
-        let source = &source[..self.symbols];
+        for (esi, symbol) in source.iter().take(self.symbols).enumerate() {
+            self.restore_symbol(esi, symbol, protected)?;
+        }
+        Ok(())
+    }
+
+    /// Restore either a verified original symbol or one recovered by the native
+    /// decoder. Both paths enforce the same sub-block ordering and zero padding.
+    fn restore_symbol(
+        self,
+        esi: usize,
+        symbol: &[u8],
+        protected: &mut [u8],
+    ) -> Result<(), SymbolizeError> {
+        if esi >= self.symbols || symbol.len() != self.layout.symbol_size {
+            return Err(SymbolizeError::DecodeFailed);
+        }
         let target = protected.get_mut(self.start..self.end).ok_or(SymbolizeError::DecodeFailed)?;
         for n in 0..self.layout.sub_blocks {
             let (offset, width) = self.sub_symbol(n);
-            for (esi, symbol) in source.iter().enumerate() {
-                let begin = offset *self.symbols + esi * width;
-                let length = width.min(target.len().saturating_sub(begin));
-                if length != 0 {
-                    target[begin..begin + length].copy_from_slice(&symbol[offset..offset + length]);
-                }
-                // Padding is part of the encoded source block, not arbitrary data
-                // to discard merely because the object AEAD does not cover it.
-                if symbol[offset + length..offset + width].iter().any(|byte| *byte != 0) {
-                    return Err(SymbolizeError::DecodeFailed);
-                }
+            let begin = offset * self.symbols + esi * width;
+            let length = width.min(target.len().saturating_sub(begin));
+            if length != 0 {
+                target[begin..begin + length].copy_from_slice(&symbol[offset..offset + length]);
+            }
+            // Padding is part of the encoded source block, not arbitrary data
+            // to discard merely because the object AEAD does not cover it.
+            if symbol[offset + length..offset + width].iter().any(|byte| *byte != 0) {
+                return Err(SymbolizeError::DecodeFailed);
             }
         }
         Ok(())
@@ -242,6 +256,19 @@ pub(super) fn decode_protected(
     dek: &[u8; 32],
     verification: &mut dyn CryptoVerificationSink,
 ) -> Result<Vec<u8>, SymbolizeError> {
+    decode_protected_observed(encoding, serialized, bytes, dek, verification, |_| {})
+}
+
+// The test observer is called at the actual native-decoder construction site,
+// not on a predicted path. Production monomorphizes the no-op callback above.
+fn decode_protected_observed(
+    encoding: &EncodedObject,
+    serialized: &[Vec<u8>],
+    bytes: usize,
+    dek: &[u8; 32],
+    verification: &mut dyn CryptoVerificationSink,
+    mut before_erasure_decode: impl FnMut(u32),
+) -> Result<Vec<u8>, SymbolizeError> {
     let layout = Layout::new(encoding, bytes)?;
     let mut groups = Vec::new();
     groups.try_reserve_exact(layout.blocks()).map_err(|_| SymbolizeError::AllocationFailed)?;
@@ -279,6 +306,18 @@ pub(super) fn decode_protected(
     protected.resize(bytes, 0);
     for (number, group) in groups.into_iter().enumerate() {
         let block = layout.block(number as u32)?;
+        if complete_systematic(&group, block.symbols) {
+            // A systematic code transmits original symbols unchanged. All MACs,
+            // duplicate conflicts and block identities were checked above. Move
+            // each original directly into the protected object, without building
+            // constraint equations, a decoding matrix or a second source vector.
+            // Extra repair equations retain the existing native validation path.
+            for (esi, (_, payload)) in group {
+                block.restore_symbol(esi as usize, &payload, &mut protected)?;
+            }
+            continue;
+        }
+        before_erasure_decode(number as u32);
         let decoder = InactivationDecoder::try_new(block.symbols, layout.symbol_size, code_seed(encoding))
             .map_err(|_| SymbolizeError::InvalidParameters)?;
         let mut received = decoder.constraint_symbols();
@@ -302,6 +341,14 @@ pub(super) fn decode_protected(
     }
     Ok(protected)
 }
+
+fn complete_systematic(group: &BTreeMap<u32, (usize, Vec<u8>)>, sources: usize) -> bool {
+    group.len() == sources
+        && group.keys().enumerate().all(|(index, esi)| *esi as usize == index)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod source_tests;
 
 #[cfg(test)]
 mod tests {
