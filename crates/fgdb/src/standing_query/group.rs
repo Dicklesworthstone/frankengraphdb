@@ -69,7 +69,9 @@ impl State {
     ) -> Result<(), StandingQueryFailure> {
         // No public row limit on private complete groups: HAVING, projected
         // collisions, DISTINCT and the final window determine that limit.
-        let groups = self.operator.prepare(delta, LIMBS, None, &mut |event| meter.charge(event))
+        let groups = self
+            .operator
+            .prepare(delta, LIMBS, None, &mut |event| meter.charge(event))
             .map_err(group_error)?;
         let output = self.output.prepare(groups.delta(), meter)?;
         (meter.checkpoint)()?;
@@ -87,14 +89,20 @@ impl State {
     ) -> Result<(), StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
         let at = batch.commit_seq();
-        if self.frontier.checked_successor().map_err(|_| StandingQueryFailure::InvalidDelta)? != at
-            || batch.frontier() != at || batch.commit_marker_identity().commit_seq != at
+        if self
+            .frontier
+            .checked_successor()
+            .map_err(|_| StandingQueryFailure::InvalidDelta)?
+            != at
+            || batch.frontier() != at
+            || batch.commit_marker_identity().commit_seq != at
         {
             return Err(StandingQueryFailure::InvalidDelta);
         }
         let source = sets::input_at(sources, self.input, at)?;
         let delta = sets::delta(source).ok_or(StandingQueryFailure::DependencyUnavailable)?;
-        meter.stats.delta_rows = u64::try_from(delta.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
+        meter.stats.delta_rows =
+            u64::try_from(delta.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
         self.apply(delta, meter)
     }
 }
@@ -131,10 +139,18 @@ impl<V: Vfs + Clone> Database<V> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
         cx.with_restriction(|| {
-            let columns = definition.key_columns().iter().chain(definition.aggregate_columns())
-                .cloned().collect::<Vec<_>>();
-            let slots = (0..definition.key_columns().len()).map(GraphAggregateTextSlot::GroupKey)
-                .chain((0..definition.aggregate_columns().len()).map(GraphAggregateTextSlot::Aggregate))
+            let columns = definition
+                .key_columns()
+                .iter()
+                .chain(definition.aggregate_columns())
+                .cloned()
+                .collect::<Vec<_>>();
+            let slots = (0..definition.key_columns().len())
+                .map(GraphAggregateTextSlot::GroupKey)
+                .chain(
+                    (0..definition.aggregate_columns().len())
+                        .map(GraphAggregateTextSlot::Aggregate),
+                )
                 .collect::<Vec<_>>();
             native::set::register_group(self, cx, definition, &columns, &slots, policy)
         })
@@ -150,36 +166,71 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
-        let sources = self.standing_queries.get(..before).ok_or(StandingQueryError::UnknownHandle)?;
+        let sources = self
+            .standing_queries
+            .get(..before)
+            .ok_or(StandingQueryError::UnknownHandle)?;
         let at = self.snapshot.frontier;
         cx.with_restriction(|| {
-            let parent = sets::input_at(sources, input, at).map_err(StandingQueryError::Maintenance)?;
+            let parent =
+                sets::input_at(sources, input, at).map_err(StandingQueryError::Maintenance)?;
             let names = sets::columns(parent).ok_or(StandingQueryError::Unsupported)?;
             let schema = definition.input().column_types();
             if names.len() != schema.len() {
                 return Err(StandingQueryError::GroupSchema(GroupBuildError::InputWidth));
             }
-            let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
             // Never infer a schema from present data: empty parents still have
             // full column domains, and keys need not follow the first leaf.
             for (column, kind) in schema.iter().enumerate() {
-                meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Maintenance)?;
+                meter
+                    .charge(ZSetEvent::Work)
+                    .map_err(StandingQueryError::Maintenance)?;
                 if sets::column_type(parent, column) != Some(*kind) {
-                    return Err(StandingQueryError::GroupSchema(GroupBuildError::InputSchema { column }));
+                    return Err(StandingQueryError::GroupSchema(
+                        GroupBuildError::InputSchema { column },
+                    ));
                 }
             }
-            let complete = definition.complete_groups().ok_or(StandingQueryError::Unsupported)?;
+            let complete = definition
+                .complete_groups()
+                .ok_or(StandingQueryError::Unsupported)?;
             let operator = IncrementalGroupAggregate::new(complete, schema)
                 .map_err(StandingQueryError::GroupSchema)?;
             let rows = sets::rows(parent).ok_or(StandingQueryError::Unsupported)?;
-            if policy.rows.max_snapshot_records().is_some_and(|limit| rows.len() as u128 > u128::from(limit)) {
-                return Err(StandingQueryError::Maintenance(StandingQueryFailure::SnapshotBudget));
+            if policy
+                .rows
+                .max_snapshot_records()
+                .is_some_and(|limit| rows.len() as u128 > u128::from(limit))
+            {
+                return Err(StandingQueryError::Maintenance(
+                    StandingQueryFailure::SnapshotBudget,
+                ));
             }
-            meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Maintenance)?;
-            let mut state = State { input, operator, output: output::State::new(definition),
-                last_delta: None, policy, frontier: at, stats: StandingQueryStats::default(), failure: None };
-            state.apply(rows, &mut meter).map_err(StandingQueryError::Maintenance)?;
+            meter
+                .charge(ZSetEvent::ScratchEntry)
+                .map_err(StandingQueryError::Maintenance)?;
+            let mut state = State {
+                input,
+                operator,
+                output: output::State::new(definition),
+                last_delta: None,
+                policy,
+                frontier: at,
+                stats: StandingQueryStats::default(),
+                failure: None,
+            };
+            state
+                .apply(rows, &mut meter)
+                .map_err(StandingQueryError::Maintenance)?;
             state.last_delta = None; // A baseline is not a committed successor.
             state.stats = meter.stats;
             Ok(state)
@@ -190,19 +241,26 @@ impl<V: Vfs + Clone> Database<V> {
     /// denotes registration/rebuild, Some(empty) an accepted unchanged commit.
     /// The derivative is a bag, not an ordering trace or a retained delivery log.
     pub fn standing_group_delta<'a>(
-        &'a self, cx: &QueryCx, handle: &StandingQueryHandle,
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
     ) -> Result<Option<StandingQueryView<'a>>, StandingQueryError> {
         let StandingQuery::Group(query) = self.admitted_standing_query(cx, handle)? else {
             return Err(StandingQueryError::Unsupported);
         };
         Ok(query.last_delta.as_ref().map(|rows| StandingQueryView {
-            rows, ordered: None, frontier: query.frontier, stats: &query.stats,
+            rows,
+            ordered: None,
+            frontier: query.frontier,
+            stats: &query.stats,
         }))
     }
 
     /// Frozen source-aware definition; never an executable first-leaf surrogate.
     pub fn standing_group_definition<'a>(
-        &'a self, cx: &QueryCx, handle: &StandingQueryHandle,
+        &'a self,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
     ) -> Result<&'a PreparedGraphSetAggregate, StandingQueryError> {
         let StandingQuery::Group(query) = self.admitted_standing_query(cx, handle)? else {
             return Err(StandingQueryError::Unsupported);

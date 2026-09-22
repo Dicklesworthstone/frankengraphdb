@@ -365,16 +365,9 @@ fn zero_window_never_bypasses_child_errors_or_per_node_admission() {
             .unwrap();
         assert!(register(&mut db, &cx, &unsupported, policy()).is_err());
         // A finite zero at the parent cannot legitimize unsupported descendants.
-        let unsupported = PreparedGraphSet::singleton()
-            .project(
-                vec![GraphSetProjection::new(
-                    "p",
-                    GraphSetValue::Literal(
-                        GqlScalarParameter::new(CanonicalScalar::Int(1)).unwrap(),
-                    ),
-                )],
-                GraphSetQuantifier::All,
-            )
+        let unsupported = leaf()
+            .with_page(1, None)
+            .with_order_by(&order(true))
             .unwrap()
             .with_page(0, Some(0));
         assert!(register(&mut db, &cx, &unsupported, policy()).is_err());

@@ -5,11 +5,11 @@
 
 use super::*;
 use fgdb_delta_types::zset::set::SetOperation;
+use fgdb_gql::PreparedGraphSetAggregate;
 use fgdb_gql::row_join::RowJoinKind;
 use fgdb_gql::row_projection::RowProjectionSpec;
 use fgdb_gql::row_window::RowWindowSpec;
 use fgdb_gql::{GraphSetOperation, GraphSetQuantifier, PreparedGraphSet};
-use fgdb_gql::PreparedGraphSetAggregate;
 
 struct Staging<'a, V: Vfs + Clone> {
     database: &'a mut Database<V>,
@@ -93,10 +93,11 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
     ) -> Result<usize, StandingQueryError> {
         checkpoint()?;
         let index = if query.operand_count() == 0 {
-            let state = self.database.prepare_standing_constant(cx, query.clone(), policy)?;
+            let state = self
+                .database
+                .prepare_standing_constant(cx, query.clone(), policy)?;
             self.append(StandingQuery::Constant(Box::new(state)))
-        } else if let Some((input, order, offset, count)) = query.incremental_ordered_window()
-        {
+        } else if let Some((input, order, offset, count)) = query.incremental_ordered_window() {
             // Peel just this scope. Never move a page across DISTINCT, a
             // filter, or an expression, including when the page is empty.
             let spec = RowWindowSpec::new(
@@ -285,7 +286,15 @@ pub(in crate::standing_query) fn register_group<V: Vfs + Clone>(
     policy: GqlQueryPolicy,
 ) -> Result<StandingQueryHandle, StandingQueryError> {
     let mut checkpoint = || cx.checkpoint().map_err(StandingQueryError::Interrupted);
-    register_group_checked(database, cx, definition, columns, slots, policy, &mut checkpoint)
+    register_group_checked(
+        database,
+        cx,
+        definition,
+        columns,
+        slots,
+        policy,
+        &mut checkpoint,
+    )
 }
 
 fn register_group_checked<V: Vfs + Clone>(
@@ -298,7 +307,8 @@ fn register_group_checked<V: Vfs + Clone>(
     checkpoint: &mut impl FnMut() -> Result<(), StandingQueryError>,
 ) -> Result<StandingQueryHandle, StandingQueryError> {
     checkpoint()?;
-    if columns.len() != slots.len() || columns.len() > fgdb_gql::algebra::MAX_PATTERN_VERTICES
+    if columns.len() != slots.len()
+        || columns.len() > fgdb_gql::algebra::MAX_PATTERN_VERTICES
         || slots.iter().any(|slot| match *slot {
             GraphAggregateTextSlot::GroupKey(at) => at >= definition.key_columns().len(),
             GraphAggregateTextSlot::Aggregate(at) => at >= definition.aggregate_columns().len(),
@@ -309,16 +319,30 @@ fn register_group_checked<V: Vfs + Clone>(
     let mut staged = Staging::new(database);
     // The nine admitted aggregates consume a bag, not an inherited order trace.
     // Every input-local page must still be admitted by the recursive compiler.
-    let input = staged.compile(cx, definition.input(), group::input_policy(policy), checkpoint)?;
+    let input = staged.compile(
+        cx,
+        definition.input(),
+        group::input_policy(policy),
+        checkpoint,
+    )?;
     checkpoint()?;
-    let state = staged.database.prepare_standing_group(cx, input, definition.clone(), policy,
-        staged.database.standing_queries.len())?;
+    let state = staged.database.prepare_standing_group(
+        cx,
+        input,
+        definition.clone(),
+        policy,
+        staged.database.standing_queries.len(),
+    )?;
     let index = staged.append(StandingQuery::Group(Box::new(state)));
     let layout = Arc::new(Layout::GroupCircuit {
-        columns: columns.to_vec(), slots: slots.to_vec(), first: staged.first,
+        columns: columns.to_vec(),
+        slots: slots.to_vec(),
+        first: staged.first,
     });
     let handle = StandingQueryHandle {
-        owner: Arc::clone(&staged.database.handle_owner), index, native: Some(layout),
+        owner: Arc::clone(&staged.database.handle_owner),
+        index,
+        native: Some(layout),
     };
     checkpoint()?;
     staged.accepted = true;
@@ -364,7 +388,9 @@ fn rebuild_checked<V: Vfs + Clone>(
         let policy = if old == root { policy } else { input_policy };
         let replacement = match &staged.database.standing_queries[old] {
             StandingQuery::Constant(query) => StandingQuery::Constant(Box::new(
-                staged.database.prepare_standing_constant(cx, query.definition.clone(), policy)?,
+                staged
+                    .database
+                    .prepare_standing_constant(cx, query.definition.clone(), policy)?,
             )),
             StandingQuery::Rows { output, .. } => {
                 staged
@@ -446,10 +472,16 @@ fn rebuild_checked<V: Vfs + Clone>(
                 if query.input < first || query.input >= old {
                     return Err(StandingQueryError::Unsupported);
                 }
-                let input = staged.first.checked_add(query.input - first)
+                let input = staged
+                    .first
+                    .checked_add(query.input - first)
                     .ok_or(StandingQueryError::Unsupported)?;
                 StandingQuery::Group(Box::new(staged.database.prepare_standing_group(
-                    cx, input, query.definition().clone(), policy, staged.database.standing_queries.len(),
+                    cx,
+                    input,
+                    query.definition().clone(),
+                    policy,
+                    staged.database.standing_queries.len(),
                 )?))
             }
             _ => return Err(StandingQueryError::Unsupported),
@@ -488,7 +520,9 @@ fn rebuild_checked<V: Vfs + Clone>(
                 .and_then(|offset| first.checked_add(offset))
                 .ok_or(StandingQueryError::Unsupported)?;
         } else if let StandingQuery::Group(query) = query {
-            query.input = query.input.checked_sub(staged.first)
+            query.input = query
+                .input
+                .checked_sub(staged.first)
                 .and_then(|offset| first.checked_add(offset))
                 .ok_or(StandingQueryError::Unsupported)?;
         }

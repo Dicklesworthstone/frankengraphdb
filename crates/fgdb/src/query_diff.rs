@@ -18,19 +18,26 @@ fn definition(error: QueryError) -> Error {
     GqlQueryError::Source(GraphDiffError::Definition(error))
 }
 fn admit(
-    view: &EmbeddedReadView, cx: &QueryCx, before: CommitSeq, after: CommitSeq,
+    view: &EmbeddedReadView,
+    cx: &QueryCx,
+    before: CommitSeq,
+    after: CommitSeq,
 ) -> Result<(), Error> {
     // Both endpoint fences precede resolver/binding callbacks or source work,
     // including equal cuts and LIMIT 0. Existing engines also enforce every
     // history/source precondition; none is bypassed to produce an empty bag.
     for endpoint in [DiffEndpoint::Before, DiffEndpoint::After] {
-        view.snapshot.check_frontier(endpoint.sequence(before, after)).map_err(|error| {
-            GqlQueryError::Source(GraphDiffError::Endpoint {
-                endpoint, source: QueryError::Read(error),
-            })
-        })?;
+        view.snapshot
+            .check_frontier(endpoint.sequence(before, after))
+            .map_err(|error| {
+                GqlQueryError::Source(GraphDiffError::Endpoint {
+                    endpoint,
+                    source: QueryError::Read(error),
+                })
+            })?;
     }
-    cx.with_restriction(|| cx.checkpoint()).map_err(GqlQueryError::Interrupted)
+    cx.with_restriction(|| cx.checkpoint())
+        .map_err(GqlQueryError::Interrupted)
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -61,12 +68,19 @@ impl<V: Vfs + Clone> Database<V> {
     /// It needs retained endpoint state, not an intervening retained delta log.
     #[allow(clippy::too_many_arguments)]
     pub fn query_diff(
-        &self, cx: &QueryCx, text: &str, params: &GqlParameters,
-        resolver: impl GraphSymbolResolver, before: CommitSeq, after: CommitSeq,
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+        before: CommitSeq,
+        after: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<GraphResultDiff, Error> {
         // Fenced live handles cannot mint a new admitted generation.
-        let view = self.read_session().map_err(|error| definition(QueryError::Read(error)))?;
+        let view = self
+            .read_session()
+            .map_err(|error| definition(QueryError::Read(error)))?;
         view.query_diff(cx, text, params, resolver, before, after, policy)
     }
 }
@@ -79,13 +93,19 @@ impl EmbeddedReadView {
     /// Database::query_diff. Returned values do not borrow the view or query.
     #[allow(clippy::too_many_arguments)]
     pub fn query_diff(
-        &self, cx: &QueryCx, text: &str, params: &GqlParameters,
-        resolver: impl GraphSymbolResolver, before: CommitSeq, after: CommitSeq,
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+        before: CommitSeq,
+        after: CommitSeq,
         policy: GqlQueryPolicy,
     ) -> Result<GraphResultDiff, Error> {
         admit(self, cx, before, after)?;
         cx.with_restriction(|| {
-            let prepared = PreparedNativeRead::prepare(text, params, resolver).map_err(definition)?;
+            let prepared =
+                PreparedNativeRead::prepare(text, params, resolver).map_err(definition)?;
             prepared.diff_admitted(self, cx, params, before, after, policy)
         })
     }
@@ -98,10 +118,17 @@ impl PreparedNativeRead {
     /// No temporal-selector stripping or physical fallback is performed.
     #[allow(clippy::too_many_arguments)]
     pub fn diff<V: Vfs + Clone>(
-        &self, database: &Database<V>, cx: &QueryCx, params: &GqlParameters,
-        before: CommitSeq, after: CommitSeq, policy: GqlQueryPolicy,
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        before: CommitSeq,
+        after: CommitSeq,
+        policy: GqlQueryPolicy,
     ) -> Result<GraphResultDiff, Error> {
-        let view = database.read_session().map_err(|error| definition(QueryError::Read(error)))?;
+        let view = database
+            .read_session()
+            .map_err(|error| definition(QueryError::Read(error)))?;
         self.diff_in_view(&view, cx, params, before, after, policy)
     }
 
@@ -110,64 +137,147 @@ impl PreparedNativeRead {
     /// remain the ordinary typed GQL errors rather than becoming empty input.
     #[allow(clippy::too_many_arguments)]
     pub fn diff_in_view(
-        &self, view: &EmbeddedReadView, cx: &QueryCx, params: &GqlParameters,
-        before: CommitSeq, after: CommitSeq, policy: GqlQueryPolicy,
+        &self,
+        view: &EmbeddedReadView,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        before: CommitSeq,
+        after: CommitSeq,
+        policy: GqlQueryPolicy,
     ) -> Result<GraphResultDiff, Error> {
         admit(view, cx, before, after)?;
         cx.with_restriction(|| self.diff_admitted(view, cx, params, before, after, policy))
     }
 
     fn diff_admitted(
-        &self, view: &EmbeddedReadView, cx: &QueryCx, params: &GqlParameters,
-        before: CommitSeq, after: CommitSeq, policy: GqlQueryPolicy,
+        &self,
+        view: &EmbeddedReadView,
+        cx: &QueryCx,
+        params: &GqlParameters,
+        before: CommitSeq,
+        after: CommitSeq,
+        policy: GqlQueryPolicy,
     ) -> Result<GraphResultDiff, Error> {
         // Keep each native source class and bind error. A complete aggregate's
         // private input is NOT replaced by its primary pattern; compound and
         // computed stages are owned by the existing aggregate/set executor.
         match self {
             Self::Pattern(prepared) => {
-                let query = prepared.bind_parameters(params)
+                let query = prepared
+                    .bind_parameters(params)
                     .map_err(|error| definition(QueryError::PatternText(error)))?;
-                GraphResultDiff::execute(before, after, query.columns().to_vec(), policy,
-                    |endpoint, remaining| view.execute_graph_pattern_governed_at(
-                        cx, &query, endpoint.sequence(before, after), remaining,
-                    ).map(GraphDiffInput::values).map_err(|error| error.map_source(|source|
-                        QueryError::Pattern(GqlQueryError::Source(source)))),
-                    || cx.checkpoint())
+                GraphResultDiff::execute(
+                    before,
+                    after,
+                    query.columns().to_vec(),
+                    policy,
+                    |endpoint, remaining| {
+                        view.execute_graph_pattern_governed_at(
+                            cx,
+                            &query,
+                            endpoint.sequence(before, after),
+                            remaining,
+                        )
+                        .map(GraphDiffInput::values)
+                        .map_err(|error| {
+                            error.map_source(|source| {
+                                QueryError::Pattern(GqlQueryError::Source(source))
+                            })
+                        })
+                    },
+                    || cx.checkpoint(),
+                )
             }
             Self::Aggregate(prepared) => {
-                let query = prepared.bind_parameters(params)
+                let query = prepared
+                    .bind_parameters(params)
                     .map_err(|error| definition(QueryError::PatternText(error)))?;
-                GraphResultDiff::execute(before, after, prepared.columns().to_vec(), policy,
-                    |endpoint, remaining| view.execute_graph_aggregate_governed_at(
-                        cx, &query, endpoint.sequence(before, after), remaining,
-                    ).map(|result| GraphDiffInput::aggregates(result, prepared.output_slots(),
-                        query.key_columns().len(), query.aggregate_columns().len()))
-                        .map_err(|error| error.map_source(|source|
-                            QueryError::Aggregate(GqlQueryError::Source(source)))),
-                    || cx.checkpoint())
+                GraphResultDiff::execute(
+                    before,
+                    after,
+                    prepared.columns().to_vec(),
+                    policy,
+                    |endpoint, remaining| {
+                        view.execute_graph_aggregate_governed_at(
+                            cx,
+                            &query,
+                            endpoint.sequence(before, after),
+                            remaining,
+                        )
+                        .map(|result| {
+                            GraphDiffInput::aggregates(
+                                result,
+                                prepared.output_slots(),
+                                query.key_columns().len(),
+                                query.aggregate_columns().len(),
+                            )
+                        })
+                        .map_err(|error| {
+                            error.map_source(|source| {
+                                QueryError::Aggregate(GqlQueryError::Source(source))
+                            })
+                        })
+                    },
+                    || cx.checkpoint(),
+                )
             }
             Self::PipelineAggregate(prepared) => {
-                let query = prepared.bind_parameters(params)
+                let query = prepared
+                    .bind_parameters(params)
                     .map_err(|error| definition(QueryError::PipelineText(error)))?;
-                GraphResultDiff::execute(before, after, prepared.columns().to_vec(), policy,
-                    |endpoint, remaining| view.execute_graph_aggregate_governed_at(
-                        cx, &query, endpoint.sequence(before, after), remaining,
-                    ).map(|result| GraphDiffInput::aggregates(result, prepared.output_slots(),
-                        query.key_columns().len(), query.aggregate_columns().len()))
-                        .map_err(|error| error.map_source(|source|
-                            QueryError::Aggregate(GqlQueryError::Source(source)))),
-                    || cx.checkpoint())
+                GraphResultDiff::execute(
+                    before,
+                    after,
+                    prepared.columns().to_vec(),
+                    policy,
+                    |endpoint, remaining| {
+                        view.execute_graph_aggregate_governed_at(
+                            cx,
+                            &query,
+                            endpoint.sequence(before, after),
+                            remaining,
+                        )
+                        .map(|result| {
+                            GraphDiffInput::aggregates(
+                                result,
+                                prepared.output_slots(),
+                                query.key_columns().len(),
+                                query.aggregate_columns().len(),
+                            )
+                        })
+                        .map_err(|error| {
+                            error.map_source(|source| {
+                                QueryError::Aggregate(GqlQueryError::Source(source))
+                            })
+                        })
+                    },
+                    || cx.checkpoint(),
+                )
             }
             Self::Set(prepared) => {
-                let query = prepared.bind_parameters(params)
+                let query = prepared
+                    .bind_parameters(params)
                     .map_err(|error| definition(QueryError::SetText(error)))?;
-                GraphResultDiff::execute(before, after, prepared.columns().to_vec(), policy,
-                    |endpoint, remaining| view.execute_graph_set_governed_at(
-                        cx, &query, endpoint.sequence(before, after), remaining,
-                    ).map(GraphDiffInput::values).map_err(|error| error.map_source(|source|
-                        QueryError::Set(GqlQueryError::Source(source)))),
-                    || cx.checkpoint())
+                GraphResultDiff::execute(
+                    before,
+                    after,
+                    prepared.columns().to_vec(),
+                    policy,
+                    |endpoint, remaining| {
+                        view.execute_graph_set_governed_at(
+                            cx,
+                            &query,
+                            endpoint.sequence(before, after),
+                            remaining,
+                        )
+                        .map(GraphDiffInput::values)
+                        .map_err(|error| {
+                            error
+                                .map_source(|source| QueryError::Set(GqlQueryError::Source(source)))
+                        })
+                    },
+                    || cx.checkpoint(),
+                )
             }
             Self::TemporalPattern(_) | Self::TemporalAggregate(_) | Self::TemporalSet(_) => {
                 Err(GqlQueryError::Source(GraphDiffError::TemporalSelector))

@@ -66,7 +66,9 @@ pub enum StandingQueryFailure {
     NonIntegerSum,
     NonIntegerHaving,
     /// A numeric aggregate saw a noninteger, nonnull completed input cell.
-    NonIntegerAggregate { column: usize },
+    NonIntegerAggregate {
+        column: usize,
+    },
     /// An input view did not publish the same complete successor. Never
     /// interpret an unavailable input or a new baseline as an empty delta.
     DependencyUnavailable,
@@ -490,8 +492,9 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(StandingQueryError::ForeignHandle);
         }
         self.ensure_readable().map_err(StandingQueryError::Read)?;
-        if let Some(native::Layout::Circuit { first, .. } | native::Layout::GroupCircuit { first, .. })
-            = handle.native.as_deref()
+        if let Some(
+            native::Layout::Circuit { first, .. } | native::Layout::GroupCircuit { first, .. },
+        ) = handle.native.as_deref()
         {
             return native::set::rebuild(self, cx, *first, handle.index, policy);
         }
@@ -578,9 +581,15 @@ impl<V: Vfs + Clone> Database<V> {
                     handle.index,
                 )?))
             }
-            StandingQuery::Group(query) => StandingQuery::Group(Box::new(self.prepare_standing_group(
-                cx, query.input, query.definition().clone(), policy, handle.index,
-            )?)),
+            StandingQuery::Group(query) => {
+                StandingQuery::Group(Box::new(self.prepare_standing_group(
+                    cx,
+                    query.input,
+                    query.definition().clone(),
+                    policy,
+                    handle.index,
+                )?))
+            }
         };
         let frontier = replacement.status().1;
         // No source mutation, await or fallible work between preparation and swap.
@@ -625,10 +634,18 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<StandingQueryView<'a>, StandingQueryError> {
         let (rows, ordered, frontier, stats) = match self.admitted_standing_query(cx, handle)? {
             StandingQuery::Aggregate(query) => (&query.rows, None, query.frontier, &query.stats),
-            StandingQuery::ProjectedAggregate { source, output } => {
-                (&output.rows, output.ordered_rows(), source.frontier, &source.stats)
-            }
-            StandingQuery::Group(query) => (query.rows(), query.ordered_rows(), query.frontier, &query.stats),
+            StandingQuery::ProjectedAggregate { source, output } => (
+                &output.rows,
+                output.ordered_rows(),
+                source.frontier,
+                &source.stats,
+            ),
+            StandingQuery::Group(query) => (
+                query.rows(),
+                query.ordered_rows(),
+                query.frontier,
+                &query.stats,
+            ),
             StandingQuery::Reachability(_)
             | StandingQuery::Rows { .. }
             | StandingQuery::Constant(_)
@@ -659,12 +676,18 @@ impl<V: Vfs + Clone> Database<V> {
         handle: &StandingQueryHandle,
     ) -> Result<StandingQueryView<'a, GraphValueRow>, StandingQueryError> {
         let (rows, ordered, frontier, stats) = match self.admitted_standing_query(cx, handle)? {
-            StandingQuery::Rows { source, output } => {
-                (&output.rows, output.ordered.as_slice(), source.frontier, &source.stats)
-            }
-            StandingQuery::Constant(query) => {
-                (&query.rows, query.ordered.as_slice(), query.frontier, &query.stats)
-            }
+            StandingQuery::Rows { source, output } => (
+                &output.rows,
+                output.ordered.as_slice(),
+                source.frontier,
+                &source.stats,
+            ),
+            StandingQuery::Constant(query) => (
+                &query.rows,
+                query.ordered.as_slice(),
+                query.frontier,
+                &query.stats,
+            ),
             _ => return Err(StandingQueryError::Unsupported),
         };
         Ok(StandingQueryView {

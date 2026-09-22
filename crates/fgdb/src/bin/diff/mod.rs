@@ -46,7 +46,10 @@ impl DiffOptions {
         if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(Failure::usage(format!("{flag} requires decimal u64")));
         }
-        *target = Some(raw.parse().map_err(|_| Failure::usage(format!("{flag} exceeds u64")))?);
+        *target = Some(
+            raw.parse()
+                .map_err(|_| Failure::usage(format!("{flag} exceeds u64")))?,
+        );
         Ok(())
     }
 
@@ -56,44 +59,76 @@ impl DiffOptions {
 
     fn endpoints(&self) -> Result<(CommitSeq, CommitSeq), Failure> {
         Ok((
-            CommitSeq(self.before.ok_or_else(|| Failure::usage("diff requires --before"))?),
-            CommitSeq(self.after.ok_or_else(|| Failure::usage("diff requires --after"))?),
+            CommitSeq(
+                self.before
+                    .ok_or_else(|| Failure::usage("diff requires --before"))?,
+            ),
+            CommitSeq(
+                self.after
+                    .ok_or_else(|| Failure::usage("diff requires --after"))?,
+            ),
         ))
     }
 
     fn policy(&self) -> GqlQueryPolicy {
         let defaults = policy();
         GqlQueryPolicy::new(
-            self.records.unwrap_or(defaults.rows.max_snapshot_records().unwrap_or(u64::MAX)),
-            self.rows.unwrap_or(defaults.rows.max_result_rows().unwrap_or(u64::MAX)),
+            self.records
+                .unwrap_or(defaults.rows.max_snapshot_records().unwrap_or(u64::MAX)),
+            self.rows
+                .unwrap_or(defaults.rows.max_result_rows().unwrap_or(u64::MAX)),
             self.work.unwrap_or(defaults.evaluator.max_work_units),
-            self.scratch.unwrap_or(defaults.evaluator.max_scratch_entries),
+            self.scratch
+                .unwrap_or(defaults.evaluator.max_scratch_entries),
         )
     }
 }
 
 pub(super) fn run<V: Vfs + Clone>(
-    db: &Database<V>, cx: &QueryCx, options: &Options, robot: bool, out: &mut impl Write,
+    db: &Database<V>,
+    cx: &QueryCx,
+    options: &Options,
+    robot: bool,
+    out: &mut impl Write,
 ) -> Result<(), Failure> {
     let (before, after) = options.diff.endpoints()?;
     // This public API owns both revision fences, one frozen binding, full query
     // semantics and cumulative source/work/scratch admission. No write authority
     // or intermediate event stream is acquired by this command.
-    let result = db.query_diff(cx, &options.text, &options.params, options, before, after,
-        options.diff.policy()).map_err(execution_failure)?;
-    render(&result, robot, options.diff.output_bytes.unwrap_or(DEFAULT_OUTPUT_BYTES), out,
-        &mut || cx.checkpoint().map_err(Failure::query))
+    let result = db
+        .query_diff(
+            cx,
+            &options.text,
+            &options.params,
+            options,
+            before,
+            after,
+            options.diff.policy(),
+        )
+        .map_err(execution_failure)?;
+    render(
+        &result,
+        robot,
+        options.diff.output_bytes.unwrap_or(DEFAULT_OUTPUT_BYTES),
+        out,
+        &mut || cx.checkpoint().map_err(Failure::query),
+    )
 }
 
 fn signed(weight: &ZWeight) -> Result<i128, Failure> {
     // GraphResultDiff subtracts two Vec-backed occurrence bags, so each weight
     // fits i128. Refuse a future incompatible carrier, never truncate/saturate.
-    weight.to_i128().filter(|value| *value != 0)
+    weight
+        .to_i128()
+        .filter(|value| *value != 0)
         .ok_or_else(|| Failure::query("diff has an invalid or unsupported occurrence weight"))
 }
 
 fn render(
-    result: &GraphResultDiff, robot: bool, max_output_bytes: u64, out: &mut impl Write,
+    result: &GraphResultDiff,
+    robot: bool,
+    max_output_bytes: u64,
+    out: &mut impl Write,
     checkpoint: &mut impl FnMut() -> Result<(), Failure>,
 ) -> Result<(), Failure> {
     let (before, after) = (result.before().0, result.after().0);
@@ -104,11 +139,18 @@ fn render(
     for (row, weight) in result.changes().iter() {
         checkpoint()?;
         if row.len() != result.columns().len() {
-            return Err(Failure::query("diff row width does not match its native columns"));
+            return Err(Failure::query(
+                "diff row width does not match its native columns",
+            ));
         }
         let value = signed(weight)?;
-        let total = if value > 0 { &mut inserted } else { &mut retracted };
-        *total = total.checked_add(value.unsigned_abs())
+        let total = if value > 0 {
+            &mut inserted
+        } else {
+            &mut retracted
+        };
+        *total = total
+            .checked_add(value.unsigned_abs())
             .ok_or_else(|| Failure::query("diff delivery occurrence total overflow"))?;
     }
     let mut sent = 0_u64;
@@ -118,13 +160,22 @@ fn render(
         let mut names = Vec::new();
         for name in result.columns() {
             checkpoint()?;
-            names.push(if robot { quoted(name) }
-                else { name.chars().flat_map(char::escape_default).collect() });
+            names.push(if robot {
+                quoted(name)
+            } else {
+                name.chars().flat_map(char::escape_default).collect()
+            });
         }
         let header = if robot {
-            format!(r#"{{"v":1,"event":"diff_columns","before":"{before}","after":"{after}","semantics":"after_minus_before_bag","columns":[{}]}}"#, names.join(","))
+            format!(
+                r#"{{"v":1,"event":"diff_columns","before":"{before}","after":"{after}","semantics":"after_minus_before_bag","columns":[{}]}}"#,
+                names.join(",")
+            )
         } else {
-            format!("diff {before} -> {after} (net occurrence changes)\nweight\t{}", names.join("\t"))
+            format!(
+                "diff {before} -> {after} (net occurrence changes)\nweight\t{}",
+                names.join("\t")
+            )
         };
         checkpoint()?;
         frame(out, &header, &mut bytes, max_output_bytes)?;
@@ -134,7 +185,9 @@ fn render(
             let mut cells = Vec::new();
             for value in row.iter() {
                 checkpoint()?;
-                cells.push(if robot { cell(value)? } else {
+                cells.push(if robot {
+                    cell(value)?
+                } else {
                     match value {
                         QueryValue::Value(value) => human_value(value)?,
                         QueryValue::Count(value) => value.to_string(),
@@ -144,11 +197,16 @@ fn render(
                 });
             }
             let line = if robot {
-                format!(r#"{{"v":1,"event":"change","weight":"{weight}","cells":[{}]}}"#, cells.join(","))
+                format!(
+                    r#"{{"v":1,"event":"change","weight":"{weight}","cells":[{}]}}"#,
+                    cells.join(",")
+                )
             } else {
                 format!("{weight:+}\t{}", cells.join("\t"))
             };
-            let next = sent.checked_add(1).ok_or_else(|| Failure::query("diff delivery count overflow"))?;
+            let next = sent
+                .checked_add(1)
+                .ok_or_else(|| Failure::query("diff delivery count overflow"))?;
             checkpoint()?;
             frame(out, &line, &mut bytes, max_output_bytes)?;
             sent = next; // Count only a fully flushed change record.
@@ -157,10 +215,14 @@ fn render(
         let rows = result.row_stats();
         let stats = result.evaluator_stats();
         let summary = if robot {
-            format!(r#"{{"v":1,"event":"result","kind":"diff","before":"{before}","after":"{after}","changed_rows":"{sent}","inserted":"{inserted}","retracted":"{retracted}","snapshot_records":"{}","work_units":"{}","scratch_entries":"{}"}}"#,
-                rows.snapshot_records, stats.work_units, stats.scratch_entries)
+            format!(
+                r#"{{"v":1,"event":"result","kind":"diff","before":"{before}","after":"{after}","changed_rows":"{sent}","inserted":"{inserted}","retracted":"{retracted}","snapshot_records":"{}","work_units":"{}","scratch_entries":"{}"}}"#,
+                rows.snapshot_records, stats.work_units, stats.scratch_entries
+            )
         } else {
-            format!("{sent} changed tuple(s): +{inserted} / -{retracted} occurrence(s) (diff complete {before} -> {after})")
+            format!(
+                "{sent} changed tuple(s): +{inserted} / -{retracted} occurrence(s) (diff complete {before} -> {after})"
+            )
         };
         frame(out, &summary, &mut bytes, max_output_bytes)
     })();
@@ -176,7 +238,8 @@ fn render(
 // leave a partial frame. Encoding scratch and source residency are NOT bounded
 // by this delivery cap. A failed flush is terminal, not an invitation to retry.
 fn frame(out: &mut impl Write, line: &str, used: &mut u64, limit: u64) -> Result<(), Failure> {
-    let next = u64::try_from(line.len()).ok()
+    let next = u64::try_from(line.len())
+        .ok()
         .and_then(|len| len.checked_add(1))
         .and_then(|len| used.checked_add(len))
         .filter(|next| *next <= limit)

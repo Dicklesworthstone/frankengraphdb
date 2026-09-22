@@ -278,8 +278,15 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 "--db" if db.is_none() => db = Some(PathBuf::from(value)),
                 "--key-file" if key.is_none() => key = Some(PathBuf::from(value)),
                 "--tzdb-file" if tzdb_file.is_none() => tzdb_file = Some(PathBuf::from(value)),
-                "--before" | "--after" | "--max-snapshot-records" | "--max-result-rows"
-                | "--max-work-units" | "--max-scratch-entries" | "--max-output-bytes" if command == "diff" => {
+                "--before"
+                | "--after"
+                | "--max-snapshot-records"
+                | "--max-result-rows"
+                | "--max-work-units"
+                | "--max-scratch-entries"
+                | "--max-output-bytes"
+                    if command == "diff" =>
+                {
                     diff.set(arg, value)?;
                 }
                 "--input" if command == "load" && input.is_none() => {
@@ -578,7 +585,9 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             }
             Ok(())
         }
-        Some(command @ ("create" | "query" | "write" | "replay" | "load" | "transaction" | "diff")) => {
+        Some(
+            command @ ("create" | "query" | "write" | "replay" | "load" | "transaction" | "diff"),
+        ) => {
             let mut options = parse(&args[1..], command)?;
             let runtime = RuntimeBuilder::new().build().map_err(Failure::io)?;
             let root = runtime.request_cx_with_budget(Budget::INFINITE);

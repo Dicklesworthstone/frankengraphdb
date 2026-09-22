@@ -8,8 +8,7 @@
 use super::*;
 use fgdb_delta_types::{LimbLimit, ZWeight};
 use fgdb_gql::{
-    GlaLimitDimension, GqlBudgetDimension, GqlQueryError, GraphSetExecutionError,
-    PreparedGraphSet,
+    GlaLimitDimension, GqlBudgetDimension, GqlQueryError, GraphSetExecutionError, PreparedGraphSet,
 };
 
 pub(crate) struct State {
@@ -91,7 +90,9 @@ impl State {
             meter.units(ZSetEvent::ScratchEntry, 3)?;
             for value in row.values() {
                 meter.charge(ZSetEvent::Work)?;
-                let units = value.payload_units().checked_add(1)
+                let units = value
+                    .payload_units()
+                    .checked_add(1)
                     .ok_or(StandingQueryFailure::ScratchBudget)?;
                 // Reserve both retained key copies before either is cloned.
                 meter.units(ZSetEvent::ScratchEntry, units)?;
@@ -122,7 +123,11 @@ impl State {
     ) -> Result<(), StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
         let at = batch.commit_seq();
-        if self.frontier.checked_successor().map_err(|_| StandingQueryFailure::InvalidDelta)? != at
+        if self
+            .frontier
+            .checked_successor()
+            .map_err(|_| StandingQueryFailure::InvalidDelta)?
+            != at
             || batch.frontier() != at
             || batch.commit_marker_identity().commit_seq != at
         {
@@ -173,7 +178,8 @@ impl<V: Vfs + Clone> Database<V> {
         }
         cx.with_restriction(|| {
             State::build(definition, self.snapshot.frontier, policy, &mut || {
-                cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted)
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
             })
             .map_err(StandingQueryError::Maintenance)
         })
