@@ -21,14 +21,16 @@
 //!   verdicts for encoded objects;
 //! - [`pack`]: deterministic packing metadata for protected object groups;
 //! - `transfer` (native targets): bounded ATP donor scheduling and authenticated
-//!   multi-donor object recovery using the existing symbol/identity pipeline.
+//!   multi-donor object recovery using the existing symbol/identity pipeline;
+//! - `seed` (native targets): exact-inventory replica-seeding gates separating
+//!   verified bytes, durable object publication and final root installation.
 //!
 //! DELIBERATELY ABSENT: retention cooling; `BranchManifest` and product-level
 //! database branches; production replication transport/root/apply integration;
 //! a real SSI validator (the landed [`PassThroughValidator`] is only the
 //! coordinator's validation seam); and capsule sealing of Strata objects.
-//! The marker/head and transfer primitives above do not by themselves claim
-//! those product capabilities.
+//! The marker/head, transfer and seeding primitives above do not by themselves
+//! claim those product capabilities or authorize a replica to serve or vote.
 #![forbid(unsafe_code)]
 
 pub mod capsule;
@@ -38,6 +40,8 @@ pub mod marker;
 pub mod pack;
 pub mod root;
 pub mod scrub;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod seed;
 pub mod store;
 pub mod symbol;
 pub mod symbolize;
