@@ -525,8 +525,11 @@ be a commit reachable in this repository.
 ## Reverts
 
 The literal `AGENTS.md` clause, enforced. A performed revert has exactly one
-canonical `This reverts commit <sha>.` target, that target is reachable, and the
-new commit's reverse patch-id equals one parent-relative target patch-id. Subject
+canonical `This reverts commit <sha>.` target — or, when its message lacks that
+line, the target its row below declares as "exact inverse of `<40-hex>`" — that
+target is reachable, and the new commit's reverse patch-id equals one
+parent-relative target patch-id. A declared target is verified exactly like a
+canonical one; only where the declaration lives differs. Subject
 vocabulary is not execution evidence. The older mention-only dispositions remain
 here because they explain the measurement that exposed the classifier defect;
 they are reported separately and no longer inflate the performed-revert count.
@@ -536,6 +539,8 @@ None to date is a doctrine violation; see the finding at the top of this file.
 - `3a7248f` — **mention only; no committed rollback** — `hand pane2 the provenance-churn measurement; revert my stale +1` — beads bookkeeping recording that a stale working-tree pin increment was withdrawn before this commit. Not a doctrine violation.
 - `1994b8e` — **mention only; no committed rollback** — `a03 — unions cannot land before the identity kinds; write reverted` — records a catalog write withdrawn from the working tree because a construction-order law forbade it. The law worked; this is the system functioning, not a violation of it.
 - `649cbf7` — **mention only; no committed rollback** — `chore(beads): dkjg mint designed and checker-advanced to the pin boundary, then reverted [fgdb-dkjg]` — an exploratory a20 mint carried through base-name resolution, reservation-bijection, a derived construction order, and two full checker rounds, then deliberately withdrawn before this Beads-only commit with the tree left exactly as found (`git status` clean, checker `appendix` exit 0). The derivation survives in the commit message, so the next agent inherits the measurement without inheriting an unlanded write. Not a doctrine violation.
+- `68f2770` — **performed; exact inverse of `92356b3ccea18953fa84c9d126669bb75f027593`** — `Revert "Merge branch 'fgdb-ci-red-demo' into main"` — a branch sync merged the Aug-24 CI red-proof probe `cbad52d8` ("DELIBERATE RED ... revert after capture, never merges") into main on 2026-09-22, planting an unformatted, unused function in `tools/registry-check/src/lib.rs`; this reverts the merge's mainline delta. Its hand-written message lacks git's canonical target line, so the target is declared here and verified by the exact-inverse check. Not a doctrine violation; the defect it repaired was the accidental merge (fgdb-red-head-0922-574u6).
+- `7a1deb5` — **performed; exact inverse of `142b26f7eada15de09628010cab20281b963aa5a`** — `Revert "Merge branch 'ci-red-proof' into main"` — the sibling Aug-23 probe `ffc47e1b`, merged by the same sync, added a test that no longer compiled against `Database::open` and a probe workflow; this reverts the merge's mainline delta, deleting exactly those two files under the owner's in-session RULE 1 authorization. Hand-written message, target declared here as above. Not a doctrine violation (fgdb-red-head-0922-574u6).
 
 ---
 

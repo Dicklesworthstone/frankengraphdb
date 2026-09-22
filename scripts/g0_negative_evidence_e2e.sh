@@ -142,6 +142,41 @@ exact_inverse_revert() { # repository-root revert-commit target-commit
   return 1
 }
 
+# A § Reverts row may declare its target in the ledger's existing performed-row
+# form:  - `<sha>` — **performed; exact inverse of `<40-hex target>`** — ...
+#
+# For a revert whose message lacks git's canonical final-paragraph line, the
+# declared target stands in for the missing declaration. Examples are a
+# hand-written message, or git's own merge-revert text ("..., reversing changes
+# made to ..."), which the canonical regex does not match.
+#
+# This does NOT weaken the admission. The declared target must still be
+# reachable and an ancestor of the revert's parent, and the exact-inverse
+# patch-id comparison still decides. Only WHERE the target is declared moves:
+# from the commit message to the ledger row that disposes of the revert. That
+# row is also what law 4 requires to exist.
+#
+# Motivating case: 68f27704 and 7a1deb54 (2026-09-22) reverted two
+# accidentally merged CI red-proof probes with hand-written messages.
+# History is immutable, so without this path the gate would stay red forever
+# over two verified exact inverses.
+ledger_declared_target() { # reverts-section-text full-commit
+  local section="$1"
+  local commit="$2"
+  local row_sha row_target resolved
+
+  while IFS=' ' read -r row_sha row_target; do
+    [ -n "$row_sha" ] || continue
+    resolved="$(git -C "$ROOT" rev-parse --verify --quiet "${row_sha}^{commit}" 2>/dev/null)" \
+      || continue
+    if [ "$resolved" = "$commit" ]; then
+      printf '%s\n' "$row_target"
+      return 0
+    fi
+  done < <(sed -nE 's/^- `([0-9a-f]+)` — \*\*performed; exact inverse of `([0-9a-f]{40})`\*\*.*/\1 \2/p' <<<"$section")
+  return 1
+}
+
 dispositions_contain_commit() { # newline-delimited-dispositions full-commit
   local dispositions="$1"
   local commit="$2"
@@ -197,8 +232,30 @@ run_revert_classifier_self_test() {
     fail "revert disposition resolver accepted a population missing 46e654e"
   fi
 
+  # Ledger-declared targets. The parser reads only a PERFORMED row's declared
+  # target; a mention-only row declares none. A wrong declaration is still
+  # refused by the exact-inverse comparison: the swapped-target mutant below
+  # pairs 68f27704 (which inverts merge 92356b3c) with merge 142b26f7.
+  local ledger_sample
+  ledger_sample=$'- `46e654e` — **performed; exact inverse of `7f3670291c76190761d33119019ced636980af37`** — x\n- `3a7248f` — **mention only; no committed rollback** — y'
+  if [ "$(ledger_declared_target "$ledger_sample" 46e654e5f4cf36b6cbe7fe3e28e1b7c4935fb603)" \
+      != "$known_target" ]; then
+    fail "ledger-declared target parser did not read the performed 46e654e row"
+  fi
+  local mention_full
+  mention_full="$(git -C "$ROOT" rev-parse --verify --quiet '3a7248f^{commit}' 2>/dev/null || true)"
+  if [ -z "$mention_full" ]; then
+    fail "mention-only control commit 3a7248f is not resolvable"
+  elif ledger_declared_target "$ledger_sample" "$mention_full" >/dev/null; then
+    fail "ledger-declared target parser accepted a mention-only row as a target"
+  fi
+  if exact_inverse_revert "$ROOT" 68f27704861c6ce85e823f211e579132ebaa02a2 \
+      142b26f7eada15de09628010cab20281b963aa5a; then
+    fail "exact-inverse check accepted a wrong ledger-declared target for 68f27704"
+  fi
+
   if [ "$GATE_FAIL" -eq "$failures_before" ]; then
-    pass "revert classifier and disposition resolver pass positive, wrong-target, mention-only, and missing-row controls"
+    pass "revert classifier and disposition resolver pass positive, wrong-target, mention-only, missing-row, and ledger-declared-target controls"
   fi
 }
 
@@ -545,8 +602,8 @@ echo "  [law 4] every structurally verified revert commit has a disposition"
 # in for structural parsing — NE-0001 through NE-0004 exactly — committed inside
 # the gate whose whole purpose is to memorialize that class. Review did not find
 # it; mutating the input did.
-disposed="$(awk '/^## Reverts$/ {r=1; next} /^## / {r=0} r' "$LEDGER" \
-              | sed -nE 's/^- `([0-9a-f]+)`.*/\1/p')"
+reverts_section="$(awk '/^## Reverts$/ {r=1; next} /^## / {r=0} r' "$LEDGER")"
+disposed="$(sed -nE 's/^- `([0-9a-f]+)`.*/\1/p' <<<"$reverts_section")"
 
 run_revert_classifier_self_test
 
@@ -576,9 +633,13 @@ while IFS= read -r sha || [ -n "$sha" ]; do
   subject="$(git -C "$ROOT" log -1 --pretty=format:%s "$sha")"
   target=""
   if ! target="$(canonical_revert_target "$ROOT" "$sha")"; then
-    fail "revert-shaped commit lacks exactly one canonical target line: $sha — $subject"
-    invalid_reverts=$((invalid_reverts + 1))
-    continue
+    if target="$(ledger_declared_target "$reverts_section" "$sha")"; then
+      echo "    [law 4] ${sha:0:12} has no canonical target line; its § Reverts row declares ${target:0:12} (reachability and exact inverse still verified below)"
+    else
+      fail "revert-shaped commit lacks exactly one canonical target line and no § Reverts row declares its target: $sha — $subject"
+      invalid_reverts=$((invalid_reverts + 1))
+      continue
+    fi
   fi
   if ! git -C "$ROOT" cat-file -e "${target}^{commit}" 2>/dev/null; then
     fail "revert commit names an unreachable target: $sha -> $target"
