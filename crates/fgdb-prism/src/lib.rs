@@ -58,7 +58,7 @@ pub use input::{
 
 pub use fnx_algorithms::GraphView;
 pub use projection::{
-    AdapterPath, Directedness, ParallelEdgePolicy, ProjectionEdge, ProjectionError,
+    AdapterPath, Directedness, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError,
     ProjectionLimits, ProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
     PROJECTED_WEIGHT_ATTRIBUTE,
 };

@@ -81,8 +81,9 @@ pub struct ProjectionEdge {
 
 /// Deterministic in-core admission. `max_workspace_bytes` charges a conservative
 /// peak bound for this builder's vector backing stores and construction scratch.
-/// Allocator metadata/rounding, caller-owned input and fnx working memory are
-/// not part of that charge. Allocation failure is separately fallible.
+/// Transferred input buffers are charged at capacity, not length. Borrowed
+/// caller-owned inputs, allocator metadata/rounding for new vectors, and fnx
+/// working memory are excluded. Allocation failure is separately fallible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProjectionLimits {
     pub max_vertices: usize,
@@ -127,6 +128,36 @@ impl core::fmt::Display for ProjectionError {
     }
 }
 impl core::error::Error for ProjectionError {}
+
+/// A cancelled build never publishes a partially validated projection. The
+/// caller's cancellation value is retained rather than collapsed into a graph
+/// validation error or a successful empty result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectionBuildError<C> {
+    Cancelled(C),
+    Projection(ProjectionError),
+}
+impl<C> From<ProjectionError> for ProjectionBuildError<C> {
+    fn from(error: ProjectionError) -> Self {
+        Self::Projection(error)
+    }
+}
+impl<C: core::fmt::Display> core::fmt::Display for ProjectionBuildError<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Cancelled(error) => write!(f, "Prism projection cancelled: {error}"),
+            Self::Projection(error) => core::fmt::Display::fmt(error, f),
+        }
+    }
+}
+impl<C: core::error::Error + 'static> core::error::Error for ProjectionBuildError<C> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Cancelled(error) => Some(error),
+            Self::Projection(error) => Some(error),
+        }
+    }
+}
 
 struct Rows {
     offsets: Vec<usize>,
@@ -182,28 +213,95 @@ fn add(a: usize, b: usize) -> Result<usize, ProjectionError> {
 fn mul(a: usize, b: usize) -> Result<usize, ProjectionError> {
     a.checked_mul(b).ok_or(ProjectionError::SizeOverflow)
 }
-fn reserved<T>(len: usize) -> Result<Vec<T>, ProjectionError> {
+fn poll<C>(checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<(), ProjectionBuildError<C>> {
+    checkpoint().map_err(ProjectionBuildError::Cancelled)
+}
+fn reserved<T, C>(len: usize, checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<Vec<T>, ProjectionBuildError<C>> {
+    poll(checkpoint)?;
     let mut result = Vec::new();
     result.try_reserve_exact(len).map_err(|_| ProjectionError::AllocationFailed)?;
     Ok(result)
 }
-fn filled<T: Clone>(len: usize, value: T) -> Result<Vec<T>, ProjectionError> {
-    let mut result = reserved(len)?;
-    result.resize(len, value);
+fn filled<T: Copy, C>(len: usize, value: T, checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<Vec<T>, ProjectionBuildError<C>> {
+    let mut result = reserved(len, checkpoint)?;
+    for _ in 0..len {
+        poll(checkpoint)?;
+        result.push(value);
+    }
     Ok(result)
 }
-fn clone_slice<T: Clone>(values: &[T]) -> Result<Vec<T>, ProjectionError> {
-    let mut result = reserved(values.len())?;
-    result.extend_from_slice(values);
+fn clone_slice<T: Copy, C>(values: &[T], checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<Vec<T>, ProjectionBuildError<C>> {
+    let mut result = reserved(values.len(), checkpoint)?;
+    for &value in values {
+        poll(checkpoint)?;
+        result.push(value);
+    }
     Ok(result)
 }
-fn offsets(counts: &[usize]) -> Result<Vec<usize>, ProjectionError> {
-    let mut result = reserved(add(counts.len(), 1)?)?;
+fn offsets<C>(counts: &[usize], checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<Vec<usize>, ProjectionBuildError<C>> {
+    let mut result = reserved(add(counts.len(), 1)?, checkpoint)?;
     result.push(0);
     for &count in counts {
+        poll(checkpoint)?;
         result.push(add(*result.last().expect("initial zero"), count)?);
     }
     Ok(result)
+}
+
+/// In-place O(n log n) worst-case sort, with cancellation inside every sift.
+/// Keys here are fixed-width IDs/tuples, so comparisons are bounded. Using the
+/// standard sort with a callback only before/after it leaves an entire O(m log
+/// m) phase uninterruptible. No adjacency-sized merge/sort scratch is hidden.
+fn sort_by_key<T, K: Ord, C>(
+    values: &mut [T],
+    key: impl Fn(&T) -> K,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<(), ProjectionBuildError<C>> {
+    fn sift<T, K: Ord, C>(
+        values: &mut [T], mut root: usize, end: usize,
+        key: &impl Fn(&T) -> K,
+        checkpoint: &mut impl FnMut() -> Result<(), C>,
+    ) -> Result<(), ProjectionBuildError<C>> {
+        // root < end/2 proves 2*root+1 < end without overflowing usize.
+        while root < end / 2 {
+            poll(checkpoint)?;
+            let mut child = root * 2 + 1;
+            if child + 1 < end && key(&values[child]) < key(&values[child + 1]) {
+                child += 1;
+            }
+            if key(&values[root]) >= key(&values[child]) {
+                break;
+            }
+            values.swap(root, child);
+            root = child;
+        }
+        Ok(())
+    }
+    poll(checkpoint)?;
+    let n = values.len();
+    // Snapshot visitors commonly already emit VId/EId order. Keep that case
+    // linear instead of turning every ordered input into a heap permutation.
+    let mut ordered = true;
+    for pair in values.windows(2) {
+        poll(checkpoint)?;
+        if key(&pair[0]) > key(&pair[1]) {
+            ordered = false;
+            break;
+        }
+    }
+    if ordered {
+        return Ok(());
+    }
+    for root in (0..n / 2).rev() {
+        poll(checkpoint)?;
+        sift(values, root, n, &key, checkpoint)?;
+    }
+    for end in (1..n).rev() {
+        poll(checkpoint)?;
+        values.swap(0, end);
+        sift(values, 0, end, &key, checkpoint)?;
+    }
+    Ok(())
 }
 fn name(vid: VId) -> [u8; 32] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -233,33 +331,81 @@ impl SnapshotGraphView {
         spec: ProjectionSpec,
         limits: ProjectionLimits,
     ) -> Result<Self, ProjectionError> {
+        match Self::build_with_checkpoint(binding, vertices, edges, spec, limits,
+            || Ok::<(), std::convert::Infallible>(())) {
+            Ok(graph) => Ok(graph),
+            Err(ProjectionBuildError::Projection(error)) => Err(error),
+            Err(ProjectionBuildError::Cancelled(never)) => match never {},
+        }
+    }
+
+    /// Copy borrowed snapshot rows with cancellation throughout copying,
+    /// canonical sorting, validation, hashing, reduction and CSR construction.
+    /// The callback is synchronous: it does not promise an async yield, a hard
+    /// deadline during an allocator call, external spill, or a CPU bulkhead.
+    pub fn build_with_checkpoint<C>(
+        binding: SnapshotBinding,
+        vertices: &[VId],
+        edges: &[ProjectionEdge],
+        spec: ProjectionSpec,
+        limits: ProjectionLimits,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<Self, ProjectionBuildError<C>> {
+        poll(&mut checkpoint)?;
+        limit("vertices", vertices.len(), limits.max_vertices)?;
+        limit("input edges", edges.len(), limits.max_input_edges)?;
+        let bytes = add(mul(vertices.len(), size_of::<VId>())?,
+            mul(edges.len(), size_of::<ProjectionEdge>())?)?;
+        limit("workspace bytes", bytes, limits.max_workspace_bytes)?;
+        let vertices = clone_slice(vertices, &mut checkpoint)?;
+        let edges = clone_slice(edges, &mut checkpoint)?;
+        Self::build_owned_with_checkpoint(binding, vertices, edges, spec, limits, checkpoint)
+    }
+
+    /// Take ownership of staged snapshot rows without duplicating the entire
+    /// vertex/edge population. Transferred input CAPACITIES (including spare
+    /// capacity) are charged, before sorting or allocating adjacency. No cache
+    /// escapes until validation, assembly and the final checkpoint succeed.
+    /// Direction, EId-ordered reduction and projection digest are identical to
+    /// the borrowed-input adapter. This remains DECODED_CACHE, not zero-copy
+    /// compressed storage. Cancellation is synchronous, not a scheduler yield.
+    pub fn build_owned_with_checkpoint<C>(
+        binding: SnapshotBinding,
+        mut vertices: Vec<VId>,
+        mut work: Vec<ProjectionEdge>,
+        spec: ProjectionSpec,
+        limits: ProjectionLimits,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<Self, ProjectionBuildError<C>> {
+        poll(&mut checkpoint)?;
         let n = vertices.len();
-        let e = edges.len();
+        let e = work.len();
         limit("vertices", n, limits.max_vertices)?;
         limit("input edges", e, limits.max_input_edges)?;
-        let input_bytes = add(mul(n, size_of::<VId>())?, mul(e, size_of::<ProjectionEdge>())?)?;
+        let input_bytes = add(mul(vertices.capacity(), size_of::<VId>())?, mul(work.capacity(), size_of::<ProjectionEdge>())?)?;
         limit("workspace bytes", input_bytes, limits.max_workspace_bytes)?;
 
-        let mut vertices = clone_slice(vertices)?;
-        vertices.sort_unstable();
+        sort_by_key(&mut vertices, |vertex| *vertex, &mut checkpoint)?;
         for pair in vertices.windows(2) {
+            poll(&mut checkpoint)?;
             if pair[0] == pair[1] {
-                return Err(ProjectionError::DuplicateVertex(pair[0]));
+                return Err(ProjectionError::DuplicateVertex(pair[0]).into());
             }
         }
-        let mut work = clone_slice(edges)?;
-        work.sort_unstable_by_key(|edge| edge.eid);
+        sort_by_key(&mut work, |edge| edge.eid, &mut checkpoint)?;
         for pair in work.windows(2) {
+            poll(&mut checkpoint)?;
             if pair[0].eid == pair[1].eid {
-                return Err(ProjectionError::DuplicateEdge(pair[0].eid));
+                return Err(ProjectionError::DuplicateEdge(pair[0].eid).into());
             }
         }
         for edge in &mut work {
+            poll(&mut checkpoint)?;
             ordinal(&vertices, edge.eid, edge.source)?;
             ordinal(&vertices, edge.eid, edge.target)?;
             if edge.source == edge.target {
                 match spec.self_loops {
-                    SelfLoopPolicy::Reject => return Err(ProjectionError::SelfLoop(edge.eid)),
+                    SelfLoopPolicy::Reject => return Err(ProjectionError::SelfLoop(edge.eid).into()),
                     SelfLoopPolicy::Drop => continue,
                     SelfLoopPolicy::Keep => {}
                 }
@@ -269,7 +415,7 @@ impl SnapshotGraphView {
                 // groups. Do not make observation of a discarded value matter.
                 edge.weight = 1.0;
             } else if !edge.weight.is_finite() {
-                return Err(ProjectionError::NonFiniteWeight(edge.eid));
+                return Err(ProjectionError::NonFiniteWeight(edge.eid).into());
             }
             edge.weight = canonical_weight(edge.weight);
             match spec.directedness {
@@ -281,7 +427,15 @@ impl SnapshotGraphView {
             }
         }
         if spec.self_loops == SelfLoopPolicy::Drop {
-            work.retain(|edge| edge.source != edge.target);
+            let mut kept = 0;
+            for i in 0..work.len() {
+                poll(&mut checkpoint)?;
+                if work[i].source != work[i].target {
+                    work[kept] = work[i];
+                    kept += 1;
+                }
+            }
+            work.truncate(kept);
         }
 
         // Hash input identity as well as the output topology. Two different
@@ -294,32 +448,35 @@ impl SnapshotGraphView {
         hash.update(&[spec.directedness as u8, spec.parallel_edges as u8, spec.self_loops as u8]);
         hash.update(&(u64::try_from(n).map_err(|_| ProjectionError::SizeOverflow)?).to_le_bytes());
         for vertex in &vertices {
+            poll(&mut checkpoint)?;
             hash.update(&vertex.0.to_le_bytes());
         }
         hash.update(&(u64::try_from(e).map_err(|_| ProjectionError::SizeOverflow)?).to_le_bytes());
         hash.update(&(u64::try_from(work.len()).map_err(|_| ProjectionError::SizeOverflow)?).to_le_bytes());
         for edge in &work {
+            poll(&mut checkpoint)?;
             hash.update(&edge.eid.0.to_le_bytes());
             hash.update(&edge.source.0.to_le_bytes());
             hash.update(&edge.target.0.to_le_bytes());
             hash.update(&edge.weight.to_bits().to_le_bytes());
         }
 
-        work.sort_unstable_by_key(|edge| (edge.source, edge.target, edge.eid));
+        sort_by_key(&mut work, |edge| (edge.source, edge.target, edge.eid), &mut checkpoint)?;
         let mut kept = 0;
         for i in 0..work.len() {
+            poll(&mut checkpoint)?;
             let edge = work[i];
             if kept != 0 && work[kept - 1].source == edge.source && work[kept - 1].target == edge.target {
                 let previous = &mut work[kept - 1];
                 previous.weight = match spec.parallel_edges {
-                    ParallelEdgePolicy::Reject => return Err(ProjectionError::ParallelEdge { source: edge.source, target: edge.target }),
+                    ParallelEdgePolicy::Reject => return Err(ProjectionError::ParallelEdge { source: edge.source, target: edge.target }.into()),
                     ParallelEdgePolicy::CollapseUnit => 1.0,
                     ParallelEdgePolicy::Minimum => previous.weight.min(edge.weight),
                     ParallelEdgePolicy::Maximum => previous.weight.max(edge.weight),
                     ParallelEdgePolicy::Sum => previous.weight + edge.weight,
                 };
                 if !previous.weight.is_finite() {
-                    return Err(ProjectionError::WeightOverflow { source: edge.source, target: edge.target });
+                    return Err(ProjectionError::WeightOverflow { source: edge.source, target: edge.target }.into());
                 }
                 previous.weight = canonical_weight(previous.weight);
             } else {
@@ -330,7 +487,11 @@ impl SnapshotGraphView {
         work.truncate(kept);
 
         let directed = spec.directedness != Directedness::Undirected;
-        let loops = work.iter().filter(|edge| edge.source == edge.target).count();
+        let mut loops = 0;
+        for edge in &work {
+            poll(&mut checkpoint)?;
+            if edge.source == edge.target { loops += 1; }
+        }
         let arcs = if directed { kept } else { add(kept, kept - loops)? };
         limit("adjacency entries", arcs, limits.max_adjacency_entries)?;
         let faces = if directed { 2 } else { 1 };
@@ -341,9 +502,10 @@ impl SnapshotGraphView {
         bytes = add(bytes, mul(arcs, size_of::<f64>())?)?;
         limit("workspace bytes", bytes, limits.max_workspace_bytes)?;
 
-        let mut out_counts = filled(n, 0usize)?;
-        let mut in_counts = if directed { filled(n, 0usize)? } else { Vec::new() };
+        let mut out_counts = filled(n, 0usize, &mut checkpoint)?;
+        let mut in_counts = if directed { filled(n, 0usize, &mut checkpoint)? } else { Vec::new() };
         for edge in &work {
+            poll(&mut checkpoint)?;
             let s = ordinal(&vertices, edge.eid, edge.source)?;
             let t = ordinal(&vertices, edge.eid, edge.target)?;
             out_counts[s] = add(out_counts[s], 1)?;
@@ -353,15 +515,16 @@ impl SnapshotGraphView {
                 out_counts[t] = add(out_counts[t], 1)?;
             }
         }
-        let out_offsets = offsets(&out_counts)?;
+        let out_offsets = offsets(&out_counts, &mut checkpoint)?;
         let out_len = *out_offsets.last().expect("initial zero");
-        let mut out_next = clone_slice(&out_offsets[..n])?;
-        let mut out_nodes = filled(out_len, 0usize)?;
-        let mut weights = filled(out_len, 0.0)?;
-        let in_offsets = if directed { offsets(&in_counts)? } else { Vec::new() };
-        let mut in_next = if directed { clone_slice(&in_offsets[..n])? } else { Vec::new() };
-        let mut in_nodes = if directed { filled(kept, 0usize)? } else { Vec::new() };
+        let mut out_next = clone_slice(&out_offsets[..n], &mut checkpoint)?;
+        let mut out_nodes = filled(out_len, 0usize, &mut checkpoint)?;
+        let mut weights = filled(out_len, 0.0, &mut checkpoint)?;
+        let in_offsets = if directed { offsets(&in_counts, &mut checkpoint)? } else { Vec::new() };
+        let mut in_next = if directed { clone_slice(&in_offsets[..n], &mut checkpoint)? } else { Vec::new() };
+        let mut in_nodes = if directed { filled(kept, 0usize, &mut checkpoint)? } else { Vec::new() };
         for edge in &work {
+            poll(&mut checkpoint)?;
             let s = ordinal(&vertices, edge.eid, edge.source)?;
             let t = ordinal(&vertices, edge.eid, edge.target)?;
             let slot = out_next[s];
@@ -380,9 +543,13 @@ impl SnapshotGraphView {
         }
         // Sorted normalized pairs and source-order scatter produce sorted
         // rows on BOTH faces. Binary edge lookup therefore needs no hash map.
-        let mut names = reserved(n)?;
-        names.extend(vertices.iter().copied().map(name));
+        let mut names = reserved(n, &mut checkpoint)?;
+        for &vertex in &vertices {
+            poll(&mut checkpoint)?;
+            names.push(name(vertex));
+        }
         let incoming = directed.then_some(Rows { offsets: in_offsets, neighbors: in_nodes });
+        poll(&mut checkpoint)?;
         Ok(Self(Arc::new(Projection {
             binding,
             spec,
@@ -483,3 +650,7 @@ impl GraphView for SnapshotGraphView {
     fn node_count(&self) -> usize { self.0.vertices.len() }
     fn edge_count(&self) -> usize { self.0.edges }
 }
+
+#[cfg(test)]
+#[path = "projection_tests.rs"]
+mod tests;
