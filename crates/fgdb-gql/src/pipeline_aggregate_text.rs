@@ -68,11 +68,18 @@ pub(crate) struct PipelineSummary {
 /// [ORDER BY ...] [SKIP ...] [LIMIT ...]. WITH expressions/filters/pages retain
 /// their original boundaries. Terminal keys and aggregate arguments refer to
 /// completed row aliases, not discarded graph variables or property lookups.
-/// Compute complex arguments in a preceding WITH. COUNT(*), COUNT, SUM/SUM_INT,
-/// AVG/AVG_INT, MIN, MAX and argument DISTINCT use the existing exact engine.
+/// Grouping keys and aggregate arguments accept the shared row expressions:
+/// typed parameters, literals, checked integer arithmetic, conditionals and
+/// lists. COUNT(*), COUNT, SUM/SUM_INT, AVG/AVG_INT, MIN, MAX, COLLECT and argument
+/// DISTINCT use the existing exact engine. AS is optional for direct aggregates;
+/// native default names are count/sum/avg/min/max/collect and must be unique.
 ///
-/// GROUP BY is explicit for every returned nonaggregate alias and may include
-/// hidden aliases. HAVING is three-valued Boolean over returned aliases and
+/// Without GROUP BY, distinct whole nonaggregate RETURN expressions are keys
+/// in first-use order. Explicit GROUP BY remains authoritative and may include
+/// hidden keys. It accepts input expressions and unshadowed RETURN key aliases;
+/// existing WITH aliases retain their meaning. Computed RETURN keys require AS.
+/// Repeated key expressions share storage while retaining their output slots.
+/// HAVING is three-valued Boolean over returned aliases and
 /// literals/parameters; ORDER BY also uses returned aliases. Keys may be renamed
 /// in RETURN. output_slots() maps written column order to GraphAggregateRow's
 /// separate key/summary arrays. No cast to a narrower scalar domain occurs.
@@ -80,8 +87,12 @@ pub(crate) struct PipelineSummary {
 /// One frozen parameter/catalog contract spans the complete statement. Binding
 /// neither reparses text nor reopens a catalog. The result executes through all
 /// existing Database, historical, pinned-view and WriteTxn aggregate APIs.
+/// Identical terminal expressions share one late, compact ProjectValues stage,
+/// after every preceding filter, DISTINCT, UNWIND and page. Plain-column inputs
+/// retain their original definitions and execution traces. Projection consumes
+/// the same depth/work/scratch budgets; output LIMIT never hides input errors.
 /// This bounded single-source profile does not implement aggregate WITH stages,
-/// binary set inputs, inline aggregate-argument arithmetic or writes after WITH.
+/// binary set inputs, expressions combining aggregate results, or writes after WITH.
 #[derive(Clone)]
 pub struct PreparedGraphPipelineAggregateText {
     pub(crate) statement: String,
