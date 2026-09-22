@@ -5,6 +5,13 @@
 //! cannot spend the emergency reserve. These counters account requested vector
 //! capacity and explicitly supplied metadata, not allocator headers, host RSS,
 //! overcommit, or unrelated foundation allocations.
+//!
+//! Child pools add query/operator ceilings without minting new admission. A
+//! reservation charges every ancestor and rolls back every tentative charge on
+//! refusal. Individual counters are atomic; observations across multiple pools
+//! are not an atomic snapshot. A racing admission may observe a tentative charge
+//! that is subsequently refunded, but no successful allocation can escape its
+//! ancestor ceilings. Reservation and refund neither allocate nor take a lock.
 
 use core::fmt;
 use std::sync::Arc;
@@ -74,12 +81,22 @@ impl Budget {
             }
         }
     }
+
+    fn refund(&self, bytes: usize) {
+        let previous = self.used.fetch_sub(bytes, Ordering::AcqRel);
+        debug_assert!(previous >= bytes, "a resident charge was refunded twice");
+    }
 }
 
 /// Clones share one budget; cloning does not mint additional admission.
+///
+/// Ancestors are stored in a flat, root-first path. Creating children allocates
+/// this path once; reserving, refunding, and dropping deep hierarchies do not
+/// recurse or allocate. There is no registry retaining dead child pools.
 #[derive(Clone, Debug)]
 pub struct MemoryPool {
     budget: Arc<Budget>,
+    ancestors: Arc<[Arc<Budget>]>,
 }
 
 impl MemoryPool {
@@ -93,10 +110,33 @@ impl MemoryPool {
                 emergency: emergency_reserve,
                 used: AtomicUsize::new(0),
             }),
+            ancestors: Arc::from([]),
         })
     }
 
-    /// Spendable regular bytes; the emergency reserve is deliberately excluded.
+    /// Create a separately capped child of this pool (for example an operator
+    /// under a query, or a query under a shard). Every child allocation also
+    /// consumes this pool and all its ancestors. The child's emergency reserve
+    /// is excluded from its own ceiling; it does not reserve bytes in advance.
+    pub fn child(
+        &self,
+        resident_limit: usize,
+        emergency_reserve: usize,
+    ) -> Result<Self, MemoryError> {
+        let mut child = Self::new(resident_limit, emergency_reserve)?;
+        let count = self.ancestors.len().checked_add(1).ok_or(MemoryError::SizeOverflow)?;
+        let requested = count.checked_mul(size_of::<Arc<Budget>>()).ok_or(MemoryError::SizeOverflow)?;
+        let mut ancestors = Vec::new();
+        ancestors.try_reserve_exact(count)
+            .map_err(|_| MemoryError::AllocationFailed { requested })?;
+        ancestors.extend(self.ancestors.iter().cloned());
+        ancestors.push(Arc::clone(&self.budget));
+        child.ancestors = ancestors.into();
+        Ok(child)
+    }
+
+    /// Local spendable bytes; emergency bytes are deliberately excluded.
+    /// Ancestor ceilings may further constrain admission; see `available`.
     pub fn limit(&self) -> usize {
         self.budget.limit
     }
@@ -105,13 +145,17 @@ impl MemoryPool {
         self.budget.emergency
     }
 
+    /// Local usage, including all outstanding descendant reservations.
     pub fn used(&self) -> usize {
         self.budget.used.load(Ordering::Acquire)
     }
 
-    /// Advisory observation only. Admission itself uses a checked atomic CAS.
+    /// Advisory minimum headroom across this pool and all its ancestors.
+    /// Admission itself uses checked CAS operations, not this observation.
     pub fn available(&self) -> usize {
-        self.limit() - self.used()
+        self.ancestors.iter().fold(self.limit() - self.used(), |available, ancestor| {
+            available.min(ancestor.limit - ancestor.used.load(Ordering::Acquire))
+        })
     }
 
     /// Reserve before an operator allocates its own region-owned scratch.
@@ -133,12 +177,34 @@ impl MemoryPool {
         cx.with_restriction(|| self.allocate_inner(bytes, 0))
     }
 
+    fn acquire(&self, bytes: usize) -> Result<(), MemoryError> {
+        for (index, ancestor) in self.ancestors.iter().enumerate() {
+            if let Err(error) = ancestor.acquire(bytes) {
+                for acquired in self.ancestors[..index].iter().rev() {
+                    acquired.refund(bytes);
+                }
+                return Err(error);
+            }
+        }
+        if let Err(error) = self.budget.acquire(bytes) {
+            for ancestor in self.ancestors.iter().rev() {
+                ancestor.refund(bytes);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn refund(&self, bytes: usize) {
+        self.budget.refund(bytes);
+        for ancestor in self.ancestors.iter().rev() {
+            ancestor.refund(bytes);
+        }
+    }
+
     pub(super) fn reserve_inner(&self, bytes: usize) -> Result<MemoryCharge, MemoryError> {
-        self.budget.acquire(bytes)?;
-        Ok(MemoryCharge {
-            budget: Arc::clone(&self.budget),
-            bytes,
-        })
+        self.acquire(bytes)?;
+        Ok(MemoryCharge { pool: self.clone(), bytes })
     }
 
     pub(super) fn allocate_inner(
@@ -155,7 +221,7 @@ impl MemoryPool {
         // must be charged before the allocation can escape to any consumer.
         let actual = data.capacity().checked_add(metadata).ok_or(MemoryError::SizeOverflow)?;
         if actual > charge.bytes {
-            charge.budget.acquire(actual - charge.bytes)?;
+            charge.pool.acquire(actual - charge.bytes)?;
             charge.bytes = actual;
         }
         data.resize(bytes, 0);
@@ -166,7 +232,7 @@ impl MemoryPool {
 /// An affine byte reservation. There is deliberately no Clone or public refund.
 #[derive(Debug)]
 pub struct MemoryCharge {
-    budget: Arc<Budget>,
+    pool: MemoryPool,
     bytes: usize,
 }
 
@@ -178,8 +244,7 @@ impl MemoryCharge {
 
 impl Drop for MemoryCharge {
     fn drop(&mut self) {
-        let previous = self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
-        debug_assert!(previous >= self.bytes, "a resident charge was refunded twice");
+        self.pool.refund(self.bytes);
     }
 }
 
@@ -295,5 +360,103 @@ mod tests {
             }
         });
         assert_eq!(pool.used(), 0);
+    }
+
+    #[test]
+    fn sibling_operators_share_the_query_and_shard_ceiling() {
+        let shard = MemoryPool::new(100, 10).unwrap();
+        let query = shard.child(80, 10).unwrap();
+        let left = query.child(60, 0).unwrap();
+        let right = query.child(60, 0).unwrap();
+        let a = left.reserve_inner(50).unwrap();
+        assert_eq!((shard.used(), query.used(), left.used(), right.used()), (50, 50, 50, 0));
+        assert_eq!(right.available(), 20);
+        assert!(matches!(right.reserve_inner(21), Err(MemoryError::ResourceExhausted { limit: 70, .. })));
+        assert_eq!((shard.used(), query.used(), right.used()), (50, 50, 0));
+        let b = right.reserve_inner(20).unwrap();
+        assert_eq!(query.available(), 0);
+        drop(a);
+        drop(b);
+        assert_eq!((shard.used(), query.used(), left.used(), right.used()), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn local_refusal_rolls_back_every_ancestor() {
+        let root = MemoryPool::new(100, 0).unwrap();
+        let parent = root.child(80, 0).unwrap();
+        let leaf = parent.child(5, 0).unwrap();
+        assert!(leaf.reserve_inner(6).is_err());
+        assert_eq!((root.used(), parent.used(), leaf.used()), (0, 0, 0));
+        let charge = leaf.reserve_inner(5).unwrap();
+        let before = (root.used(), parent.used(), leaf.used());
+        assert!(leaf.reserve_inner(1).is_err());
+        assert_eq!((root.used(), parent.used(), leaf.used()), before);
+        drop(charge);
+    }
+
+    #[test]
+    fn parent_refusal_does_not_consume_sibling_allowance() {
+        let root = MemoryPool::new(10, 0).unwrap();
+        let a = root.child(100, 0).unwrap();
+        let b = root.child(100, 0).unwrap();
+        let charge = a.reserve_inner(10).unwrap();
+        assert!(b.reserve_inner(1).is_err());
+        assert_eq!(b.used(), 0);
+        assert_eq!(b.available(), 0);
+        drop(charge);
+        assert_eq!(b.available(), 10);
+    }
+
+    #[test]
+    fn live_allocation_keeps_ancestors_alive_without_retaining_dead_children() {
+        let root = MemoryPool::new(100, 0).unwrap();
+        let child = root.child(80, 0).unwrap();
+        let child_budget = Arc::downgrade(&child.budget);
+        let parent_budget = Arc::downgrade(&root.budget);
+        let bytes = child.allocate_inner(32, 8).unwrap();
+        drop(child);
+        assert!(child_budget.upgrade().is_some());
+        assert!(root.used() >= 40);
+        drop(root);
+        assert!(parent_budget.upgrade().is_some());
+        drop(bytes);
+        assert!(child_budget.upgrade().is_none());
+        assert!(parent_budget.upgrade().is_none());
+    }
+
+    #[test]
+    fn failed_child_allocation_refunds_the_whole_path() {
+        let root = MemoryPool::new(usize::MAX, 0).unwrap();
+        let child = root.child(usize::MAX, 0).unwrap();
+        assert!(matches!(child.allocate_inner(usize::MAX, 0), Err(MemoryError::AllocationFailed { .. })));
+        assert_eq!((root.used(), child.used()), (0, 0));
+        assert!(matches!(root.child(1, 2), Err(MemoryError::InvalidLimits)));
+        assert_eq!(root.used(), 0);
+    }
+
+    #[test]
+    fn racing_children_cannot_multiply_parent_admission() {
+        let root = MemoryPool::new(32, 2).unwrap();
+        let query = root.child(24, 3).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let child = query.child(12, 0).unwrap();
+                let root = root.clone();
+                let query = query.clone();
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        if let Ok(charge) = child.reserve_inner(3) {
+                            assert!(child.used() <= 12);
+                            assert!(query.used() <= 21);
+                            assert!(root.used() <= 30);
+                            std::thread::yield_now();
+                            drop(charge);
+                        }
+                    }
+                    assert_eq!(child.used(), 0);
+                });
+            }
+        });
+        assert_eq!((root.used(), query.used()), (0, 0));
     }
 }
