@@ -121,20 +121,66 @@ pub(crate) fn workspace_bytes<C>(n: usize) -> Result<usize, FnxExecutionError<C>
 }
 
 #[derive(Clone, Copy)]
-struct Entry {
-    node: usize,
-    cost: f64,
+pub(crate) struct Entry {
+    pub(crate) node: usize,
+    pub(crate) cost: f64,
     sequence: u64,
 }
 
-struct IndexedHeap {
+/// Shared queue mechanics, not a graph adapter. Both execution paths retain
+/// one entry per unsettled vertex and the same FIFO tie/relaxation policy.
+/// A caller must discard the heap after any error, including cancellation.
+pub(crate) struct IndexedHeap {
     entries: Vec<Entry>,
     positions: Vec<usize>,
     sequence: u64,
     comparison: DijkstraComparison,
 }
 
+#[derive(Debug)]
+pub(crate) enum HeapError<C> {
+    Cancelled(C),
+    SizeOverflow,
+    AllocationFailed,
+    InvalidOrdinal,
+}
+
+impl<C> From<HeapError<C>> for FnxExecutionError<C> {
+    fn from(error: HeapError<C>) -> Self {
+        match error {
+            HeapError::Cancelled(error) => Self::Cancelled(error),
+            HeapError::SizeOverflow => Self::SizeOverflow,
+            HeapError::AllocationFailed => Self::AllocationFailed,
+            HeapError::InvalidOrdinal => Self::InvalidUpstreamResult,
+        }
+    }
+}
+
 impl IndexedHeap {
+    pub(crate) fn new<C>(
+        n: usize,
+        comparison: DijkstraComparison,
+        checkpoint: &mut impl FnMut() -> Result<(), C>,
+    ) -> Result<Self, HeapError<C>> {
+        checkpoint().map_err(HeapError::Cancelled)?;
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(n).map_err(|_| HeapError::AllocationFailed)?;
+        checkpoint().map_err(HeapError::Cancelled)?;
+        let mut positions = Vec::new();
+        positions.try_reserve_exact(n).map_err(|_| HeapError::AllocationFailed)?;
+        for _ in 0..n {
+            checkpoint().map_err(HeapError::Cancelled)?;
+            positions.push(usize::MAX);
+        }
+        Ok(Self { entries, positions, sequence: 0, comparison })
+    }
+
+    pub(crate) fn len(&self) -> usize { self.entries.len() }
+
+    pub(crate) fn contains(&self, node: usize) -> Option<bool> {
+        self.positions.get(node).map(|&position| position != usize::MAX)
+    }
+
     fn before(left: Entry, right: Entry) -> bool {
         left.cost.total_cmp(&right.cost).then(left.sequence.cmp(&right.sequence)).is_lt()
     }
@@ -145,13 +191,14 @@ impl IndexedHeap {
         self.positions[self.entries[right].node] = right;
     }
 
-    fn offer<C>(
+    pub(crate) fn offer<C>(
         &mut self,
         node: usize,
         cost: f64,
         checkpoint: &mut impl FnMut() -> Result<(), C>,
-    ) -> Result<(), FnxExecutionError<C>> {
-        let mut position = self.positions[node];
+    ) -> Result<(), HeapError<C>> {
+        checkpoint().map_err(HeapError::Cancelled)?;
+        let mut position = *self.positions.get(node).ok_or(HeapError::InvalidOrdinal)?;
         if position != usize::MAX {
             let previous = self.entries[position].cost;
             let threshold = match self.comparison {
@@ -160,7 +207,7 @@ impl IndexedHeap {
             };
             if cost >= threshold { return Ok(()); }
         }
-        self.sequence = self.sequence.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?;
+        self.sequence = self.sequence.checked_add(1).ok_or(HeapError::SizeOverflow)?;
         let entry = Entry { node, cost, sequence: self.sequence };
         if position == usize::MAX {
             position = self.entries.len();
@@ -170,7 +217,7 @@ impl IndexedHeap {
             self.entries[position] = entry;
         }
         while position > 0 {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint().map_err(HeapError::Cancelled)?;
             let parent = (position - 1) / 2;
             if !Self::before(self.entries[position], self.entries[parent]) {
                 break;
@@ -181,10 +228,11 @@ impl IndexedHeap {
         Ok(())
     }
 
-    fn pop<C>(
+    pub(crate) fn pop<C>(
         &mut self,
         checkpoint: &mut impl FnMut() -> Result<(), C>,
-    ) -> Result<Option<Entry>, FnxExecutionError<C>> {
+    ) -> Result<Option<Entry>, HeapError<C>> {
+        checkpoint().map_err(HeapError::Cancelled)?;
         let Some(last) = self.entries.pop() else {
             return Ok(None);
         };
@@ -198,7 +246,7 @@ impl IndexedHeap {
         let mut position = 0;
         // A non-leaf has position < len / 2, so 2*position+1 cannot overflow.
         while position < self.entries.len() / 2 {
-            checkpoint().map_err(FnxExecutionError::Cancelled)?;
+            checkpoint().map_err(HeapError::Cancelled)?;
             let left = 2 * position + 1;
             let right = left + 1;
             let child = if right < self.entries.len()
@@ -246,14 +294,11 @@ pub(crate) fn run<C>(
     }
     let mut distances = reserve(n)?;
     let mut overflowed = reserve(n)?;
-    let mut heap = IndexedHeap {
-        entries: reserve(n)?, positions: reserve(n)?, sequence: 0, comparison: options.comparison,
-    };
+    let mut heap = IndexedHeap::new(n, options.comparison, checkpoint)?;
     for _ in 0..n {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
         distances.push(None);
         overflowed.push(false);
-        heap.positions.push(usize::MAX);
     }
     heap.offer(source, 0.0, checkpoint)?;
     let mut discovered = 1usize;
@@ -285,13 +330,13 @@ pub(crate) fn run<C>(
                 continue;
             }
             if options.cutoff.is_some_and(|cutoff| candidate > cutoff) { continue; }
-            if heap.positions[target] == usize::MAX {
+            if !heap.contains(target).ok_or(FnxExecutionError::InvalidUpstreamResult)? {
                 let requested = discovered.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?;
                 admit("result rows", requested, row_limit)?;
                 discovered = requested;
             }
             heap.offer(target, candidate, checkpoint)?;
-            witness.queue_peak = witness.queue_peak.max(heap.entries.len());
+            witness.queue_peak = witness.queue_peak.max(heap.len());
         }
     }
     for node in 0..n {

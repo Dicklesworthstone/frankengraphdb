@@ -18,6 +18,8 @@ use std::mem::size_of;
 
 #[path = "sealed_components.rs"]
 mod components;
+#[path = "sealed_shortest_path.rs"]
+mod shortest_path;
 
 /// Additional admission for native compressed CALLs. These account for
 /// graph-size-dependent vector/string backing stores, not allocator overhead,
@@ -124,7 +126,7 @@ impl Rows for SealedRows<'_> {
 }
 
 /// Result admission includes outer rows, typed values, column String headers
-/// and alias bytes. BFS charges each newly reached row BEFORE it is enqueued;
+/// and alias bytes. BFS/Dijkstra charge newly reached rows BEFORE enqueueing;
 /// unreachable vertices do not consume the result allowance.
 struct ResultAdmission {
     row_bytes: usize,
@@ -297,13 +299,14 @@ impl FnxCallSpec {
     pub fn supports_sealed_execution(&self) -> bool {
         matches!(self.algorithm(), FnxAlgorithm::PageRank(_)
             | FnxAlgorithm::SingleSourceShortestPathLength { .. }
+            | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
             | FnxAlgorithm::WeaklyConnectedComponents
             | FnxAlgorithm::StronglyConnectedComponents)
     }
 
-    /// Execute PageRank, outgoing hop distances, or directed weak/strong
-    /// components directly from authenticated compressed rows. Every kernel
-    /// graph pass and row pull is fallible; component labels are stable VIds.
+    /// Execute PageRank, outgoing hop/weighted distances, or directed weak/strong
+    /// components directly from authenticated compressed rows. Every graph pass
+    /// and row pull is fallible; component labels and sources are stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
     pub fn execute_sealed(
@@ -330,6 +333,14 @@ impl FnxCallSpec {
                 ("fgdb-prism/sealed-bfs-v1", pass,
                     mul(n, size_of::<usize>() + size_of::<Option<usize>>())?, Some(ordinal))
             }
+            FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+                let ordinal = graph.vertex_ordinal(options.source())
+                    .ok_or(ExecutionError::UnknownSource(options.source()))?;
+                admission.rows(1)?;
+                ("fgdb-prism/sealed-dijkstra-indexed-heap-v1",
+                    shortest_path::work(n, graph.edge_count(), pass)?,
+                    shortest_path::workspace(n)?, Some(ordinal))
+            }
             algorithm @ (FnxAlgorithm::WeaklyConnectedComponents | FnxAlgorithm::StronglyConnectedComponents) => {
                 admission.rows(n)?;
                 let strong = matches!(algorithm, FnxAlgorithm::StronglyConnectedComponents);
@@ -348,6 +359,9 @@ impl FnxCallSpec {
             FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => {
                 bfs(&rows, source.ok_or(ExecutionError::InvalidUpstreamResult)?, cutoff, &admission, &mut control)?
             }
+            FnxAlgorithm::SingleSourceDijkstraPathLength(options) => shortest_path::run(
+                &rows, source.ok_or(ExecutionError::InvalidUpstreamResult)?, options, &admission, &mut control,
+            )?,
             FnxAlgorithm::WeaklyConnectedComponents => components::weak(&rows, &admission, &mut control)?,
             FnxAlgorithm::StronglyConnectedComponents => components::strong(&rows, &admission, &mut control)?,
             other => return Err(Error::UnsupportedAlgorithm(other)),
@@ -385,6 +399,13 @@ fn finish(
                 let label = *values.get(index).ok_or(ExecutionError::InvalidUpstreamResult)?;
                 FnxValue::Vertex(graph.vertex_id(label).ok_or(ExecutionError::InvalidUpstreamResult)?)
             }
+            KernelValues::WeightedDistances(values) => {
+                let Some(distance) = *values.get(index).ok_or(ExecutionError::InvalidUpstreamResult)? else { continue; };
+                if !distance.is_finite() || distance < 0.0 {
+                    return Err(ExecutionError::InvalidNumericResult.into());
+                }
+                FnxValue::Float(distance)
+            }
             _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
         };
         let vertex = graph.vertex_id(index).ok_or(ExecutionError::InvalidUpstreamResult)?;
@@ -395,6 +416,7 @@ fn finish(
                 (FnxOutput::Vertex, _) => FnxValue::Vertex(vertex),
                 (FnxOutput::Score, FnxValue::Score(value)) => FnxValue::Score(value),
                 (FnxOutput::Distance, FnxValue::Integer(value)) => FnxValue::Integer(value),
+                (FnxOutput::Distance, FnxValue::Float(value)) => FnxValue::Float(value),
                 (FnxOutput::Component, FnxValue::Vertex(value)) => FnxValue::Vertex(value),
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
             };
@@ -402,7 +424,7 @@ fn finish(
                 FnxValue::Vertex(vertex) => { result_hash.update(&[0]); result_hash.update(&vertex.0.to_le_bytes()); }
                 FnxValue::Score(score) => { result_hash.update(&[1]); result_hash.update(&score.to_bits().to_le_bytes()); }
                 FnxValue::Integer(value) => { result_hash.update(&[2]); result_hash.update(&value.to_le_bytes()); }
-                FnxValue::Float(_) => return Err(ExecutionError::InvalidUpstreamResult.into()),
+                FnxValue::Float(value) => { result_hash.update(&[3]); result_hash.update(&value.to_bits().to_le_bytes()); }
             }
             row.push(value);
         }
@@ -462,7 +484,8 @@ fn source_digest() -> Digest {
     *DIGEST.get_or_init(|| {
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:sealed-kernel-source:v1");
-        for source in [include_str!("sealed_execute.rs"), include_str!("sealed_components.rs"), include_str!("sealed.rs"),
+        for source in [include_str!("sealed_execute.rs"), include_str!("sealed_components.rs"),
+            include_str!("sealed_shortest_path.rs"), include_str!("shortest_path.rs"), include_str!("sealed.rs"),
             include_str!("call.rs"), include_str!("input.rs"), include_str!("projection.rs")] {
             hash_text(&mut hash, source);
         }
