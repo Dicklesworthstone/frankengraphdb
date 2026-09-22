@@ -157,6 +157,59 @@ fn boundary<E>(
     Ok(lo)
 }
 
+/// The one ordered access structure used by row emission and cardinality.
+struct Index {
+    keys: Vec<Key>,
+    ordinals: Vec<usize>,
+}
+impl Index {
+    fn build<E>(
+        width: usize,
+        right: &[GraphValueRow],
+        code: &[GraphSetPredicateOp],
+        columns: Option<&[usize]>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let keys = required_keys(width, code, columns, control)?;
+        let mut ordinals = Vec::new();
+        if !keys.is_empty() {
+            for (at, row) in right.iter().enumerate() {
+                control(GlaExecutionEvent::Work)?;
+                if eligible(row, &keys, true, control)? {
+                    control(GlaExecutionEvent::ScratchEntry)?;
+                    ordinals.push(at);
+                }
+            }
+            merge::sort(&mut ordinals, control, &mut |a, b, control| {
+                let order = compare_keys(&right[*a], true, &right[*b], &keys, control)?;
+                control(GlaExecutionEvent::Work)?;
+                Ok(order.then_with(|| a.cmp(b)))
+            })?;
+        }
+        Ok(Self { keys, ordinals })
+    }
+
+    fn range<E>(
+        &self,
+        row: &GraphValueRow,
+        right: &[GraphValueRow],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<core::ops::Range<usize>, E> {
+        if self.keys.is_empty() {
+            Ok(0..right.len())
+        } else if eligible(row, &self.keys, false, control)? {
+            Ok(boundary(row, right, &self.ordinals, &self.keys, false, control)?
+                ..boundary(row, right, &self.ordinals, &self.keys, true, control)?)
+        } else {
+            Ok(0..0)
+        }
+    }
+
+    fn row<'a>(&self, right: &'a [GraphValueRow], at: usize) -> &'a GraphValueRow {
+        &right[if self.keys.is_empty() { at } else { self.ordinals[at] }]
+    }
+}
+
 /// The consumer is invoked only for TRUE pairs, in the original left-major
 /// sequence. Inputs remain resident; the index is O(right occurrences), with
 /// no key/payload clone. For fixed predicate/key width, index work is
@@ -169,51 +222,82 @@ pub(super) fn visit<E, C>(
     code: &[GraphSetPredicateOp],
     columns: Option<&[usize]>,
     control: &mut C,
-    mut consume: impl FnMut(&GraphValueRow, &GraphValueRow, &mut C) -> Result<(), E>,
+    consume: impl FnMut(&GraphValueRow, &GraphValueRow, &mut C) -> Result<(), E>,
 ) -> Result<(), E>
 where
     C: FnMut(GlaExecutionEvent) -> Result<(), E>,
 {
-    control(GlaExecutionEvent::Work)?;
+    visit_with_context(left, right, code, columns, control, |control, event| control(event), consume)
+}
+
+/// The same probe walk with a single caller-owned context. Folded aggregates
+/// can meter probes and consume accepted pairs through their existing owner,
+/// without an intermediate result bag or a second predicate/index engine.
+pub(super) fn visit_with_context<E, Context>(
+    left: &[GraphValueRow],
+    right: &[GraphValueRow],
+    code: &[GraphSetPredicateOp],
+    columns: Option<&[usize]>,
+    context: &mut Context,
+    mut event: impl FnMut(&mut Context, GlaExecutionEvent) -> Result<(), E>,
+    mut consume: impl FnMut(&GraphValueRow, &GraphValueRow, &mut Context) -> Result<(), E>,
+) -> Result<(), E> {
+    event(context, GlaExecutionEvent::Work)?;
     // Both source subtrees must have completed before this call. Empty bags
     // cannot hide a source failure; they only avoid unneeded local indexing.
     let Some(first) = left.first() else { return Ok(()) };
     if right.is_empty() { return Ok(()); }
-    let keys = required_keys(first.len(), code, columns, control)?;
-    let mut index = Vec::new();
-    if !keys.is_empty() {
-        for (at, row) in right.iter().enumerate() {
-            control(GlaExecutionEvent::Work)?;
-            if eligible(row, &keys, true, control)? {
-                control(GlaExecutionEvent::ScratchEntry)?;
-                index.push(at);
-            }
-        }
-        merge::sort(&mut index, control, &mut |a, b, control| {
-            let order = compare_keys(&right[*a], true, &right[*b], &keys, control)?;
-            control(GlaExecutionEvent::Work)?;
-            Ok(order.then_with(|| a.cmp(b)))
-        })?;
-    }
+    let index = Index::build(first.len(), right, code, columns, &mut |value| event(context, value))?;
     for row in left {
-        control(GlaExecutionEvent::Work)?;
-        let range = if keys.is_empty() {
-            0..right.len()
-        } else if eligible(row, &keys, false, control)? {
-            boundary(row, right, &index, &keys, false, control)?
-                ..boundary(row, right, &index, &keys, true, control)?
-        } else {
-            continue;
-        };
+        event(context, GlaExecutionEvent::Work)?;
+        let range = index.range(row, right, &mut |value| event(context, value))?;
         for at in range {
-            control(GlaExecutionEvent::Work)?;
-            let other = &right[if keys.is_empty() { at } else { index[at] }];
-            if GraphSetPredicateOp::evaluate_projected_pair_with_control(code, row, other, columns, control)? {
-                consume(row, other, control)?;
+            event(context, GlaExecutionEvent::Work)?;
+            let other = index.row(right, at);
+            if GraphSetPredicateOp::evaluate_projected_pair_with_control(code, row, other, columns, &mut |value| event(context, value))? {
+                consume(row, other, context)?;
             }
         }
     }
-    control(GlaExecutionEvent::Work)?;
+    event(context, GlaExecutionEvent::Work)?;
+    Ok(())
+}
+
+/// Count selected occurrences without constructing output rows. For a pure
+/// conjunction of cross-input equalities, each indexed range is already a
+/// complete TRUE run: contribute its length in one checked caller-owned step.
+/// Residual/OR/NOT predicates use the same borrowed-pair walk, contributing
+/// one per accepted occurrence. No outer join, DISTINCT or coercion is implied.
+/// The caller's exact cardinality accumulator owns overflow and final paging.
+pub(super) fn count_with_context<E, Context>(
+    left: &[GraphValueRow],
+    right: &[GraphValueRow],
+    code: &[GraphSetPredicateOp],
+    columns: Option<&[usize]>,
+    context: &mut Context,
+    mut event: impl FnMut(&mut Context, GlaExecutionEvent) -> Result<(), E>,
+    mut consume: impl FnMut(usize, &mut Context) -> Result<(), E>,
+) -> Result<(), E> {
+    event(context, GlaExecutionEvent::Work)?;
+    let Some(first) = left.first() else { return Ok(()) };
+    if right.is_empty() { return Ok(()); }
+    let mut runs = true;
+    for op in code {
+        event(context, GlaExecutionEvent::Work)?;
+        runs &= matches!(op, GraphSetPredicateOp::And | GraphSetPredicateOp::Truth(Some(true)))
+            || equality(op, first.len(), columns).is_some();
+    }
+    if !runs {
+        return visit_with_context(left, right, code, columns, context, event,
+            |_, _, context| consume(1, context));
+    }
+    let index = Index::build(first.len(), right, code, columns, &mut |value| event(context, value))?;
+    for row in left {
+        event(context, GlaExecutionEvent::Work)?;
+        let range = index.range(row, right, &mut |value| event(context, value))?;
+        if !range.is_empty() { consume(range.len(), context)?; }
+    }
+    event(context, GlaExecutionEvent::Work)?;
     Ok(())
 }
 

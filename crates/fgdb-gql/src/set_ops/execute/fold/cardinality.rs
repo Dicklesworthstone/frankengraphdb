@@ -1,4 +1,4 @@
-//! Cardinality-only physical reduction of independent relational factors.
+//! Cardinality-only reduction of independent factors and selected products.
 //!
 //! A product contributes |left| * |right| and UNION ALL contributes their sum.
 //! No pair is constructed and no factor is executed twice. Value-sensitive
@@ -69,6 +69,7 @@ where
 
 impl PreparedGraphSet {
     pub(crate) fn has_factorized_cardinality(&self) -> bool {
+        if self.filtered_cross_inputs().is_some() { return true; }
         match &self.node {
             SetNode::CrossJoin { .. }
             | SetNode::Binary {
@@ -133,7 +134,25 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
-    let size = match &query.node {
+    let size = if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+        // Complete the original scoped inputs before cardinality reduction.
+        // Pure equality runs count by range length; residuals evaluate borrowed
+        // candidates. Neither path allocates a joined row or repeats a source.
+        let left = run(left, source, meter, operand)?;
+        let right = run(right, source, meter, operand)?;
+        let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
+        let mut size = Amount::ZERO;
+        selected_cross::count_with_context(
+            &left, &right, code, columns.as_deref(), meter,
+            |meter, event| meter.event(event),
+            |count, meter| {
+                meter.event(GlaExecutionEvent::Work)?;
+                size = size.add(Amount::from_u128(count as u128));
+                Ok(())
+            },
+        )?;
+        size
+    } else { match &query.node {
         SetNode::Values => Amount::ONE,
         SetNode::CrossJoin { left, right } => {
             let left = count(left, source, meter, operand)?;
@@ -185,7 +204,7 @@ where
             })?;
             return Ok(size);
         }
-    };
+    }};
     meter.event(GlaExecutionEvent::Work)?;
     let selected = size.subtract(query.offset);
     Ok(query.count.map_or(selected, |limit| selected.limit(limit)))

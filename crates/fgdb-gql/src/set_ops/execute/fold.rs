@@ -175,6 +175,27 @@ where
 
     meter.event(GlaExecutionEvent::Work)?;
     let mut window = Window::new(query.offset, query.count);
+    if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
+        // The materialized and folded paths share the exact selected-pair walk.
+        // Complete both original children first; even LIMIT 0 cannot hide a
+        // late source or child-expression failure. Never retain the joined bag.
+        let left = run(left, source, meter, operand)?;
+        let right = run(right, source, meter, operand)?;
+        let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
+        selected_cross::visit_with_context(
+            &left, &right, code, columns.as_deref(), meter,
+            |meter, event| meter.event(event),
+            |left, right, meter| {
+                let row = selected_cross::copy_pair(
+                    left, right, columns.as_deref(), &mut |event| meter.event(event),
+                )?;
+                // Keep the ordinary window and deferred downstream-error law.
+                // The probe walk drains even after the output page is full.
+                window.push(row, meter, consume)
+            },
+        )?;
+        return window.finish();
+    }
     let mut local = None;
     match &query.node {
         SetNode::CrossJoin { left, right } => {
@@ -297,3 +318,7 @@ where
 
 #[cfg(test)]
 mod tests;
+
+
+#[cfg(test)]
+mod selected_tests;
