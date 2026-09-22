@@ -92,6 +92,34 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalJoin<K, L, R> {
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<JoinUpdate<'_, K, L, R>, ZSetError<E>> {
+        self.prepare_filtered(delta_left, delta_right, limbs, control, |_, _, _, _| Ok(true))
+    }
+
+    /// Prepare a join with a fixed residual predicate on each candidate pair.
+    /// Selection distributes over ALL THREE derivative terms, including the
+    /// simultaneous-input cross term. Rejected pairs are neither cloned nor
+    /// multiplied; their inputs are still integrated and admitted normally.
+    ///
+    /// The predicate must be deterministic and identical across ticks and
+    /// snapshot reconstruction. It must not depend on weights, call order, or
+    /// mutable external state. Higher-level operators should own a frozen,
+    /// checked definition. The callback receives the same work/scratch control
+    /// so its own data-dependent work remains cancellable. A predicate error,
+    /// arithmetic refusal, or dropped guard publishes neither input.
+    ///
+    /// This remains a keyed nested-loop derivative, not a selective index or
+    /// spill implementation. Only changed key groups are visited.
+    pub fn prepare_filtered<E, C>(
+        &mut self,
+        delta_left: &ZSet<(K, L)>,
+        delta_right: &ZSet<(K, R)>,
+        limbs: LimbLimit,
+        control: &mut C,
+        mut predicate: impl FnMut(&K, &L, &R, &mut C) -> Result<bool, ZSetError<E>>,
+    ) -> Result<JoinUpdate<'_, K, L, R>, ZSetError<E>>
+    where
+        C: FnMut(ZSetEvent) -> Result<(), E>,
+    {
         event(control, ZSetEvent::Work)?;
         let left = grouped(delta_left, limbs, control)?;
         let right = grouped(delta_right, limbs, control)?;
@@ -101,14 +129,14 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalJoin<K, L, R> {
             if let Some(old_right) = self.right.get(key) {
                 for &l in changes {
                     for r in old_right.iter() {
-                        add_product(&mut output, key, l, r, limbs, control)?;
+                        add_product(&mut output, key, l, r, limbs, control, &mut predicate)?;
                     }
                 }
             }
             if let Some(changed_right) = right.get(key) {
                 for &l in changes {
                     for &r in changed_right {
-                        add_product(&mut output, key, l, r, limbs, control)?;
+                        add_product(&mut output, key, l, r, limbs, control, &mut predicate)?;
                     }
                 }
             }
@@ -118,7 +146,7 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalJoin<K, L, R> {
             if let Some(old_left) = self.left.get(key) {
                 for l in old_left.iter() {
                     for &r in changes {
-                        add_product(&mut output, key, l, r, limbs, control)?;
+                        add_product(&mut output, key, l, r, limbs, control, &mut predicate)?;
                     }
                 }
             }
@@ -148,20 +176,35 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalJoin<K, L, R> {
             .commit())
     }
 
-    /// Recompute the current result, useful for explicit snapshots and audits.
-    /// Ordinary incremental updates do not call this method.
+    /// Recompute the unfiltered equijoin, useful for snapshots and audits.
+    /// After filtered ticks use `snapshot_filtered` with the same predicate
+    /// to reconstruct their result. Ordinary updates do not call either method.
     pub fn snapshot<E>(
         &self,
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<ZSet<(K, L, R)>, ZSetError<E>> {
+        self.snapshot_filtered(limbs, control, |_, _, _, _| Ok(true))
+    }
+
+    /// Reconstruct the selected result using the same immutable predicate as
+    /// `prepare_filtered`. This explicit audit scans all matching key groups.
+    pub fn snapshot_filtered<E, C>(
+        &self,
+        limbs: LimbLimit,
+        control: &mut C,
+        mut predicate: impl FnMut(&K, &L, &R, &mut C) -> Result<bool, ZSetError<E>>,
+    ) -> Result<ZSet<(K, L, R)>, ZSetError<E>>
+    where
+        C: FnMut(ZSetEvent) -> Result<(), E>,
+    {
         let mut output = ZSet::new();
         for (key, left) in &self.left {
             event(control, ZSetEvent::Work)?;
             if let Some(right) = self.right.get(key) {
                 for l in left.iter() {
                     for r in right.iter() {
-                        add_product(&mut output, key, l, r, limbs, control)?;
+                        add_product(&mut output, key, l, r, limbs, control, &mut predicate)?;
                     }
                 }
             }
@@ -232,15 +275,22 @@ fn grouped<'a, K: Ord, V: Ord, E>(
     Ok(groups)
 }
 
-fn add_product<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone, E>(
+fn add_product<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone, E, C>(
     output: &mut ZSet<(K, L, R)>,
     key: &K,
     left: (&L, &ZWeight),
     right: (&R, &ZWeight),
     limbs: LimbLimit,
-    control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
-) -> Result<(), ZSetError<E>> {
+    control: &mut C,
+    predicate: &mut impl FnMut(&K, &L, &R, &mut C) -> Result<bool, ZSetError<E>>,
+) -> Result<(), ZSetError<E>>
+where
+    C: FnMut(ZSetEvent) -> Result<(), E>,
+{
     event(control, ZSetEvent::Work)?;
+    if !predicate(key, left.0, right.0, control)? {
+        return Ok(());
+    }
     let weight = left
         .1
         .checked_mul(right.1, limbs)
@@ -650,3 +700,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod filtered_tests;
