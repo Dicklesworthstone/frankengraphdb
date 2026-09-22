@@ -7,24 +7,76 @@ use super::*;
 use crate::GraphWalkBounds;
 
 impl Parser<'_> {
+    /// Select the existing physical search, never enumerate all paths and
+    /// post-filter them. ALL is nonselective; ANY may deterministically choose
+    /// a shortest admissible occurrence. SHORTEST 1 selects one, whereas
+    /// SHORTEST [1] GROUP[S] and ALL SHORTEST retain all tied minima.
+    /// Bare SHORTEST is a native shorthand for SHORTEST 1. PATH/PATHS are
+    /// optional selector noise words; the native default mode remains WALK.
+    /// Counts beyond one and shortest/repetition-mode combinations need new
+    /// logical operators and refuse rather than silently weakening the query.
     pub(super) fn path_search(&mut self) -> Result<GraphWalkSearch, GraphPatternTextError> {
         let search = if self.take_word("ALL")? {
-            GraphWalkSearch::AllShortest
+            if self.take_word("SHORTEST")? {
+                self.path_selector_words()?;
+                GraphWalkSearch::AllShortest
+            } else {
+                self.path_selector_words()?;
+                return self.all_path_mode();
+            }
         } else if self.take_word("ANY")? {
+            if !self.take_word("SHORTEST")? {
+                self.single_path_count()?;
+            }
+            self.path_selector_words()?;
             GraphWalkSearch::AnyShortest
-        } else if self.take_word("ACYCLIC")? {
-            return Ok(GraphWalkSearch::Acyclic);
+        } else if self.take_word("SHORTEST")? {
+            self.single_path_count()?;
+            self.path_selector_words()?;
+            if self.take_word("GROUP")? || self.take_word("GROUPS")? {
+                GraphWalkSearch::AllShortest
+            } else {
+                GraphWalkSearch::AnyShortest
+            }
+        } else {
+            return self.all_path_mode();
+        };
+        // Existing ALL/ANY SHORTEST WALK keeps its exact lowering. Do not
+        // consume TRAIL, SIMPLE or ACYCLIC here: those are not shortest WALK.
+        self.take_word("WALK")?;
+        Ok(search)
+    }
+
+    fn path_selector_words(&mut self) -> Result<(), GraphPatternTextError> {
+        if !self.take_word("PATH")? {
+            self.take_word("PATHS")?;
+        }
+        Ok(())
+    }
+
+    fn single_path_count(&mut self) -> Result<(), GraphPatternTextError> {
+        let at = self.current.at;
+        match self.current.kind {
+            TokenKind::Digits(digits) if digits.parse::<u64>() == Ok(1) => self.advance(),
+            TokenKind::Digits(_) | TokenKind::Parameter(_) => Err(error(
+                at,
+                GraphPatternTextErrorKind::Expected("supported literal path count (1)"),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn all_path_mode(&mut self) -> Result<GraphWalkSearch, GraphPatternTextError> {
+        if self.take_word("ACYCLIC")? {
+            Ok(GraphWalkSearch::Acyclic)
         } else if self.take_word("SIMPLE")? {
-            return Ok(GraphWalkSearch::Simple);
+            Ok(GraphWalkSearch::Simple)
         } else if self.take_word("TRAIL")? {
-            return Ok(GraphWalkSearch::Trail);
+            Ok(GraphWalkSearch::Trail)
         } else {
             self.take_word("WALK")?;
-            return Ok(GraphWalkSearch::All);
-        };
-        self.word("SHORTEST")?;
-        self.word("WALK")?;
-        Ok(search)
+            Ok(GraphWalkSearch::All)
+        }
     }
 
     /// Postfix `{m,n}`, `{n}` and `{,n}` follow the complete relationship,
@@ -74,7 +126,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::GqlQueryPolicy;
+    use crate::{GqlQueryPolicy, PreparedGraphWriteScript};
     use fgdb_types::{CanonicalScalar, VId};
 
     fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -251,6 +303,143 @@ mod tests {
             });
             assert!(result.is_err(), "accepted {relationship}");
             assert_eq!(resolutions, 0, "resolved names for {relationship}");
+        }
+    }
+
+    #[test]
+    fn selectors_lower_to_their_exact_native_search() {
+        for (selector, search) in [
+            ("ALL", GraphWalkSearch::All),
+            ("ALL PATHS", GraphWalkSearch::All),
+            ("ALL PATH WALK", GraphWalkSearch::All),
+            ("ALL TRAIL", GraphWalkSearch::Trail),
+            ("ALL ACYCLIC", GraphWalkSearch::Acyclic),
+            ("ALL SIMPLE", GraphWalkSearch::Simple),
+            ("SHORTEST", GraphWalkSearch::AnyShortest),
+            ("SHORTEST 1", GraphWalkSearch::AnyShortest),
+            ("SHORTEST 1 PATH", GraphWalkSearch::AnyShortest),
+            ("ANY", GraphWalkSearch::AnyShortest),
+            ("ANY 1 PATHS", GraphWalkSearch::AnyShortest),
+            ("ANY SHORTEST", GraphWalkSearch::AnyShortest),
+            ("ANY SHORTEST WALK", GraphWalkSearch::AnyShortest),
+            ("ALL SHORTEST", GraphWalkSearch::AllShortest),
+            ("ALL SHORTEST PATHS", GraphWalkSearch::AllShortest),
+            ("ALL SHORTEST WALK", GraphWalkSearch::AllShortest),
+            ("SHORTEST GROUP", GraphWalkSearch::AllShortest),
+            ("SHORTEST 1 GROUPS", GraphWalkSearch::AllShortest),
+            ("SHORTEST 1 PATH GROUP", GraphWalkSearch::AllShortest),
+            ("aLl sHoRtEsT pAtHs", GraphWalkSearch::AllShortest),
+        ] {
+            let text = format!("MATCH {selector} (a)-[:R]->{{1,3}}(b) RETURN a,b");
+            assert_eq!(parse(&text).edges[0].search, search, "{selector}");
+            let captured = format!("MATCH p = {selector} (a)-[:R]->{{1,3}}(b) RETURN p");
+            let syntax = parse(&captured);
+            assert_eq!(syntax.path.unwrap().text, "p");
+            assert_eq!(syntax.edges[0].search, search);
+        }
+    }
+
+    #[test]
+    fn all_is_not_shortest_and_shortest_groups_keep_tied_occurrences() {
+        let arguments = GqlParameters::new();
+        let all = run("MATCH ALL (a {n:1})-[:R]->{1,2}(b) RETURN b", &arguments);
+        assert_eq!(all.len(), 5);
+        let shortest = run(
+            "MATCH SHORTEST 1 (a {n:1})-[:R]->{1,2}(b) RETURN b",
+            &arguments,
+        );
+        assert_eq!(
+            shortest,
+            vec![vec![Some(VId(2))], vec![Some(VId(3))], vec![Some(VId(4))]]
+        );
+        for selector in ["ALL SHORTEST", "SHORTEST GROUPS", "SHORTEST 1 GROUP"] {
+            let text = format!("MATCH {selector} (a {{n:1}})-[:R]->{{2}}(b) RETURN b");
+            assert_eq!(
+                run(&text, &arguments),
+                vec![vec![Some(VId(4))], vec![Some(VId(4))]]
+            );
+        }
+        for selector in ["ANY", "ANY 1", "ANY SHORTEST", "SHORTEST", "SHORTEST 1"] {
+            let text = format!("MATCH {selector} (a {{n:1}})-[:R]->{{2}}(b) RETURN b");
+            assert_eq!(run(&text, &arguments), vec![vec![Some(VId(4))]]);
+        }
+    }
+
+    #[test]
+    fn nonselective_all_keeps_compound_patterns_and_required_scopes() {
+        let arguments = GqlParameters::new();
+        assert_eq!(
+            run(
+                "MATCH ALL (a {n:1})-[:R]->{1,2}(b)-[:R]->{1}(c) RETURN c",
+                &arguments,
+            ),
+            vec![vec![Some(VId(4))], vec![Some(VId(4))]]
+        );
+        assert_eq!(
+            run(
+                "MATCH (a {n:1}) MATCH ANY SHORTEST (a)-[:R]->{2}(b) RETURN b",
+                &arguments,
+            ),
+            vec![vec![Some(VId(4))]]
+        );
+        assert_eq!(
+            run(
+                "MATCH (a {n:5}) OPTIONAL MATCH SHORTEST 1 (a)-[:R]->{1,2}(b) RETURN a,b",
+                &arguments,
+            ),
+            vec![vec![Some(VId(5)), None]]
+        );
+    }
+
+    #[test]
+    fn selectors_prepare_in_aggregate_and_native_write_programs() {
+        for selector in ["ALL", "ALL SHORTEST", "SHORTEST 1", "ANY 1"] {
+            let prefix = format!("MATCH {selector} (a)-[:R]->{{1,3}}(b)");
+            let aggregate = format!("{prefix} RETURN count(*) AS total, sum(b.n) AS amount");
+            assert!(PreparedGraphAggregateText::prepare(&aggregate, symbols).is_ok());
+            for terminal in ["SET b.n = 1", "DELETE b", "INSERT (c)"] {
+                let text = format!("{prefix} {terminal}");
+                assert!(PreparedGraphWriteScript::prepare_with_parameter_types(
+                    &text,
+                    RelationId(1),
+                    &[],
+                    symbols,
+                )
+                .is_ok(), "{selector} {terminal}");
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_selectors_never_degrade_to_an_existing_but_different_search() {
+        for selector in [
+            "SHORTEST 0",
+            "SHORTEST 2",
+            "SHORTEST 2 GROUPS",
+            "ANY 2",
+            "ANY $count",
+            "SHORTEST $count",
+            "SHORTEST 18446744073709551616",
+            "ALL SHORTEST TRAIL",
+            "ANY SHORTEST SIMPLE",
+            "SHORTEST 1 ACYCLIC",
+            "ALL PATHS PATHS",
+        ] {
+            let text = format!("MATCH {selector} (a)-[:R]->{{1,3}}(b) RETURN b LIMIT 0");
+            let mut resolutions = 0;
+            assert!(PreparedGraphText::prepare(&text, |kind, name| {
+                resolutions += 1;
+                symbols(kind, name)
+            })
+            .is_err(), "{selector}");
+            assert_eq!(resolutions, 0);
+        }
+        // A selector applies to a whole pattern, not each atom independently.
+        for selector in ["SHORTEST 1", "ALL SHORTEST", "ANY"] {
+            let text = format!(
+                "MATCH {selector} (a)-[:R]->{{1,2}}(b)-[:R]->{{1,2}}(c) RETURN c"
+            );
+            assert!(Parser::new(&text).unwrap().parse().is_err());
         }
     }
 }
