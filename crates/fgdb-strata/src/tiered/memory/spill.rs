@@ -7,8 +7,10 @@
 //! region cleanup. Scratch is not recoverable database state.
 //!
 //! Reservations are append-only for the lifetime of the file. A partial or
-//! cancelled append burns its reserved extent rather than reusing bytes a
-//! cancelled backend operation may still touch. Both attempted run count and
+//! cancelled append burns its reserved extent. I/O failure or drop while an
+//! operation is pending poisons the file: generic Vfs backends need not roll
+//! back a cursor-changing operation after drop. No subsequent operation may
+//! race that work; the owner must quiesce and retire the file. Both run count and
 //! file high-water mark are bounded. There is no resident run catalog and no
 //! unbounded payload staging; only the caller's input and a fixed-size hasher
 //! are retained while writing. Opaque run handles contain all read coordinates
@@ -48,6 +50,8 @@ pub struct SpillStats {
 pub enum SpillError {
     InvalidLimits,
     NonEmptyFile,
+    PoisonedFile,
+    UnexpectedPosition { expected: u64, actual: u64 },
     SizeOverflow,
     FileLimit { requested: u64, available: u64 },
     RunLimit { limit: u64 },
@@ -123,6 +127,7 @@ pub struct SpillFile<F> {
     pool: MemoryPool,
     limits: SpillLimits,
     stats: SpillStats,
+    io_pending: bool,
 }
 
 fn run_hasher(id: u64, offset: u64, len: u64) -> fgdb_crypto::Hasher {
@@ -137,9 +142,13 @@ fn run_hasher(id: u64, offset: u64, len: u64) -> fgdb_crypto::Hasher {
 impl<F> SpillFile<F> {
     pub const fn stats(&self) -> SpillStats { self.stats }
     pub fn memory_pool(&self) -> &MemoryPool { &self.pool }
+    /// A dropped or failed I/O may still have backend effects. Retire this file
+    /// through the query region rather than starting another cursor operation.
+    pub const fn is_poisoned(&self) -> bool { self.io_pending }
 
     /// Consume the scratch owner for region-owned close/truncate/unlink work.
     /// Previously issued run handles cannot authorize a different SpillFile.
+    /// Quiesce outstanding backend work before truncating/reusing a poisoned file.
     pub fn into_file(self) -> F { self.file }
 }
 
@@ -171,7 +180,7 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
             return Err(SpillError::NonEmptyFile);
         }
         checkpoint()?;
-        Ok(Self { file, owner: Arc::new(()), pool, limits, stats: SpillStats::default() })
+        Ok(Self { file, owner: Arc::new(()), pool, limits, stats: SpillStats::default(), io_pending: false })
     }
 
     /// Persist a borrowed buffer without allocating a second payload. On error
@@ -188,8 +197,10 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
         mut checkpoint: impl FnMut() -> Result<(), SpillError>,
     ) -> Result<SpillRun, SpillError> {
         checkpoint()?;
-        if bytes.len() > self.limits.max_run_bytes {
-            return Err(SpillError::RunTooLarge { bytes: bytes.len(), limit: self.limits.max_run_bytes });
+        if self.io_pending { return Err(SpillError::PoisonedFile); }
+        let run_limit = self.limits.max_run_bytes.min(self.pool.effective_limit());
+        if bytes.len() > run_limit {
+            return Err(SpillError::RunTooLarge { bytes: bytes.len(), limit: run_limit });
         }
         if self.stats.reserved_runs >= self.limits.max_runs {
             return Err(SpillError::RunLimit { limit: self.limits.max_runs });
@@ -205,7 +216,9 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
         // reuse this range: cancellation may leave any prefix on the backend.
         self.stats.reserved_bytes += len;
         self.stats.reserved_runs = id;
-        self.file.seek(SeekFrom::Start(offset)).await?;
+        self.io_pending = true;
+        let actual = self.file.seek(SeekFrom::Start(offset)).await?;
+        if actual != offset { return Err(SpillError::UnexpectedPosition { expected: offset, actual }); }
         let mut hash = run_hasher(id, offset, len);
         for chunk in bytes.chunks(IO_CHUNK_BYTES) {
             checkpoint()?;
@@ -214,6 +227,7 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
         }
         // Visibility to subsequent reads, NOT a database durability barrier.
         self.file.flush().await?;
+        self.io_pending = false;
         checkpoint()?;
         self.stats.published_runs += 1;
         Ok(SpillRun { owner: Arc::clone(&self.owner), id, offset, len: bytes.len(), checksum: hash.finalize().0 })
@@ -233,6 +247,7 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
         mut checkpoint: impl FnMut() -> Result<(), SpillError>,
     ) -> Result<TrackedBytes, SpillError> {
         checkpoint()?;
+        if self.io_pending { return Err(SpillError::PoisonedFile); }
         if !Arc::ptr_eq(&self.owner, &run.owner) {
             return Err(SpillError::ForeignRun);
         }
@@ -244,13 +259,18 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
             return Err(SpillError::InvalidRun);
         }
         let mut bytes = self.pool.allocate_inner(run.len, 0)?;
-        self.file.seek(SeekFrom::Start(run.offset)).await?;
+        self.io_pending = true;
+        let actual = self.file.seek(SeekFrom::Start(run.offset)).await?;
+        if actual != run.offset {
+            return Err(SpillError::UnexpectedPosition { expected: run.offset, actual });
+        }
         let mut hash = run_hasher(run.id, run.offset, len);
         for chunk in bytes.as_mut().chunks_mut(IO_CHUNK_BYTES) {
             checkpoint()?;
             self.file.read_exact(chunk).await?;
             hash.update(chunk);
         }
+        self.io_pending = false;
         if hash.finalize().0 != run.checksum {
             return Err(SpillError::ChecksumMismatch);
         }
@@ -263,6 +283,7 @@ impl<F: AsyncRead + AsyncWrite + AsyncSeek + Unpin> SpillFile<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::SpillableBytes;
     use asupersync::io::ReadBuf;
     use std::future::Future;
     use std::io::{Cursor, Seek, Write};
@@ -274,13 +295,15 @@ mod tests {
         data: Cursor<Vec<u8>>,
         write_limit: Option<usize>,
         pending_write: bool,
+        wrong_seek: bool,
         fail_flush: bool,
         read_calls: usize,
     }
 
     impl AsyncSeek for TestFile {
         fn poll_seek(mut self: Pin<&mut Self>, _: &mut Context<'_>, pos: SeekFrom) -> Poll<io::Result<u64>> {
-            Poll::Ready(self.data.seek(pos))
+            let actual = self.data.seek(pos);
+            Poll::Ready(if self.wrong_seek { actual.map(|position| position + 1) } else { actual })
         }
     }
 
@@ -384,16 +407,16 @@ mod tests {
     }
 
     #[test]
-    fn failed_writes_burn_their_extent_without_publishing_a_run() {
+    fn failed_writes_burn_their_extent_and_poison_further_io() {
         let mut file = scratch(MemoryPool::new(1024, 0).unwrap());
         file.file.write_limit = Some(2);
         assert!(matches!(complete(file.append_inner(b"abcde", || Ok(()))), Err(SpillError::Io(_))));
         assert_eq!(file.stats().published_runs, 0);
         assert_eq!(file.stats().reserved_bytes, 5);
+        assert!(file.is_poisoned());
         file.file.write_limit = None;
-        let run = complete(file.append_inner(b"next", || Ok(()))).unwrap();
-        assert_eq!((run.id(), run.offset()), (2, 5));
-        assert_eq!(complete(file.restore_inner(&run, || Ok(()))).unwrap().as_ref(), b"next");
+        assert!(matches!(complete(file.append_inner(b"next", || Ok(()))), Err(SpillError::PoisonedFile)));
+        assert_eq!(file.stats().reserved_runs, 1);
     }
 
     #[test]
@@ -407,8 +430,9 @@ mod tests {
         }
         assert_eq!((file.stats().reserved_bytes, file.stats().published_runs), (7, 0));
         file.file.pending_write = false;
-        let run = complete(file.append_inner(b"ok", || Ok(()))).unwrap();
-        assert_eq!((run.id(), run.offset()), (2, 7));
+        assert!(file.is_poisoned());
+        assert!(matches!(complete(file.append_inner(b"ok", || Ok(()))), Err(SpillError::PoisonedFile)));
+        assert_eq!(file.stats().reserved_runs, 1);
     }
 
     #[test]
@@ -476,5 +500,110 @@ mod tests {
         let file = TestFile { data: Cursor::new(b"not scratch".to_vec()), ..Default::default() };
         assert!(matches!(complete(SpillFile::new_inner(file, MemoryPool::new(100, 0).unwrap(), limits(), || Ok(()))),
             Err(SpillError::NonEmptyFile)));
+    }
+
+    fn under_lab<Fut>(test: impl FnOnce(QueryCx) -> Fut + Send + 'static)
+    where
+        Fut: Future<Output = ()> + Send,
+    {
+        let (_, report) = asupersync::lab::run_async_under_lab(20260922, |root| async move {
+            let contexts = fgdb_types::PurposeContexts::narrow_runtime_root(&root);
+            test(contexts.query()).await;
+        });
+        assert!(report.invariant_violations.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn impossible_restore_size_is_refused_before_writing() {
+        let mut file = scratch(MemoryPool::new(2, 0).unwrap());
+        assert!(matches!(complete(file.append_inner(b"abc", || Ok(()))),
+            Err(SpillError::RunTooLarge { limit: 2, .. })));
+        assert_eq!(file.stats(), SpillStats::default());
+    }
+
+    #[test]
+    fn incorrect_seek_result_is_not_treated_as_a_successful_write() {
+        let mut file = scratch(MemoryPool::new(100, 0).unwrap());
+        file.file.wrong_seek = true;
+        assert!(matches!(complete(file.append_inner(b"abc", || Ok(()))),
+            Err(SpillError::UnexpectedPosition { expected: 0, actual: 1 })));
+        assert!(file.is_poisoned());
+        assert!(file.file.data.get_ref().is_empty());
+        assert_eq!(file.stats().published_runs, 0);
+    }
+
+    #[test]
+    fn public_allocation_fallback_spills_and_restores_the_selected_batch() {
+        under_lab(|cx| async move {
+            let root = MemoryPool::new(96, 0).unwrap();
+            let pool = root.child(128, 0).unwrap();
+            let mut file = SpillFile::new(&cx, TestFile::default(), pool.clone(), limits()).await.unwrap();
+            let mut victim = SpillableBytes::new(pool.allocate_zeroed(&cx, 64).unwrap());
+            victim.resident_mut().unwrap().fill(7);
+            let next = pool.allocate_spilling(&cx, 64, &mut victim, &mut file).await.unwrap();
+            assert!(victim.is_spilled());
+            assert_eq!(victim.charged_bytes(), 0);
+            assert_eq!(root.used(), next.charged_bytes());
+            assert!(!victim.spill(&cx, &mut file).await.unwrap());
+            assert!(matches!(victim.restore(&cx, &mut file).await, Err(SpillError::Memory(_))));
+            assert!(victim.is_spilled());
+            assert!(!file.is_poisoned());
+            drop(next);
+            assert!(victim.restore(&cx, &mut file).await.unwrap());
+            assert_eq!(victim.resident().unwrap(), &[7; 64]);
+            assert!(!victim.restore(&cx, &mut file).await.unwrap());
+            victim.resident_mut().unwrap()[0] = 9;
+            victim.spill(&cx, &mut file).await.unwrap();
+            victim.restore(&cx, &mut file).await.unwrap();
+            assert_eq!(victim.resident().unwrap()[0], 9);
+            assert_eq!(file.stats().published_runs, 2);
+            drop(victim);
+            assert_eq!(root.used(), 0);
+        });
+    }
+
+    #[test]
+    fn public_spill_error_and_dropped_future_keep_the_original_resident_state() {
+        under_lab(|cx| async move {
+            let pool = MemoryPool::new(100, 0).unwrap();
+            let mut victim = SpillableBytes::new(pool.allocate_zeroed(&cx, 64).unwrap());
+            victim.resident_mut().unwrap().fill(11);
+            let mut file = SpillFile::new(&cx, TestFile::default(), pool.clone(), limits()).await.unwrap();
+            file.file.write_limit = Some(2);
+            assert!(victim.spill(&cx, &mut file).await.is_err());
+            assert_eq!(victim.resident().unwrap(), &[11; 64]);
+            assert_eq!(pool.used(), victim.charged_bytes());
+            assert!(file.is_poisoned());
+            let mut file = SpillFile::new(&cx, TestFile::default(), pool.clone(), limits()).await.unwrap();
+            file.file.pending_write = true;
+            {
+                let future = victim.spill(&cx, &mut file);
+                let mut future = std::pin::pin!(future);
+                assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            }
+            assert_eq!(victim.resident().unwrap(), &[11; 64]);
+            assert_eq!(pool.used(), victim.charged_bytes());
+            assert!(file.is_poisoned());
+            drop(victim);
+            assert_eq!(pool.used(), 0);
+        });
+    }
+
+    #[test]
+    fn impossible_requests_and_successful_admission_do_not_spill_a_victim() {
+        under_lab(|cx| async move {
+            let root = MemoryPool::new(32, 0).unwrap();
+            let pool = root.child(100, 0).unwrap();
+            let mut victim = SpillableBytes::new(pool.allocate_zeroed(&cx, 16).unwrap());
+            let mut file = SpillFile::new(&cx, TestFile::default(), pool.clone(), limits()).await.unwrap();
+            assert!(matches!(pool.allocate_spilling(&cx, 33, &mut victim, &mut file).await,
+                Err(SpillError::Memory(MemoryError::ResourceExhausted { limit: 32, .. }))));
+            let next = pool.allocate_spilling(&cx, 8, &mut victim, &mut file).await.unwrap();
+            assert!(!victim.is_spilled());
+            assert_eq!(file.stats(), SpillStats::default());
+            drop(next);
+            drop(victim);
+            assert_eq!(root.used(), 0);
+        });
     }
 }
