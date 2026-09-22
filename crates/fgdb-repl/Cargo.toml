@@ -1,0 +1,14 @@
+[package]
+name = "fgdb-repl"
+version = "0.0.1"
+edition.workspace = true
+description = "Aegis bonded replica-seed and atomic Raft snapshot publication composition"
+publish = false
+
+[lints]
+workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fgdb-chronicle = { path = "../fgdb-chronicle" }
+fgdb-order = { path = "../fgdb-order" }
+fgdb-types = { path = "../fgdb-types" }

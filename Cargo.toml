@@ -31,6 +31,7 @@ members = [
     "crates/fgdb-prism",
     "crates/fgdb-protocol",
     "crates/fgdb-reference",
+    "crates/fgdb-repl",
     "crates/fgdb-resource",
     "crates/fgdb-sim",
     "crates/fgdb-sketch",
