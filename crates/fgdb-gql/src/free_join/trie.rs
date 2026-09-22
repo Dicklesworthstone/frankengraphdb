@@ -7,8 +7,14 @@ use std::collections::BTreeSet;
 pub enum TrieBuildError<E> {
     Control(E),
     Schema(JoinPlanError),
-    RowArity { row: usize, expected: usize, actual: usize },
-    ZeroMultiplicity { row: usize },
+    RowArity {
+        row: usize,
+        expected: usize,
+        actual: usize,
+    },
+    ZeroMultiplicity {
+        row: usize,
+    },
     MultiplicityOverflow,
 }
 impl<E: core::fmt::Display> core::fmt::Display for TrieBuildError<E> {
@@ -16,8 +22,15 @@ impl<E: core::fmt::Display> core::fmt::Display for TrieBuildError<E> {
         match self {
             Self::Control(error) => error.fmt(f),
             Self::Schema(error) => error.fmt(f),
-            Self::RowArity { row, expected, actual } => {
-                write!(f, "FreeJoin row {row} has {actual} columns, expected {expected}")
+            Self::RowArity {
+                row,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "FreeJoin row {row} has {actual} columns, expected {expected}"
+                )
             }
             Self::ZeroMultiplicity { row } => {
                 write!(f, "FreeJoin row {row} has zero multiplicity")
@@ -134,22 +147,35 @@ impl<K: Ord + Clone> ColumnarTrie<K> {
         let mut declared = BTreeSet::new();
         for &variable in schema {
             if !declared.insert(variable) {
-                return Err(TrieBuildError::Schema(JoinPlanError::DuplicateVariable(variable)));
+                return Err(TrieBuildError::Schema(JoinPlanError::DuplicateVariable(
+                    variable,
+                )));
             }
         }
         let mut ordered = BTreeSet::new();
         let mut permutation = Vec::new();
         for &variable in order {
             if !declared.contains(&variable) {
-                return Err(TrieBuildError::Schema(JoinPlanError::UnknownVariable(variable)));
+                return Err(TrieBuildError::Schema(JoinPlanError::UnknownVariable(
+                    variable,
+                )));
             }
             if !ordered.insert(variable) {
-                return Err(TrieBuildError::Schema(JoinPlanError::DuplicateVariable(variable)));
+                return Err(TrieBuildError::Schema(JoinPlanError::DuplicateVariable(
+                    variable,
+                )));
             }
-            permutation.push(schema.iter().position(|v| *v == variable).expect("declared variable"));
+            permutation.push(
+                schema
+                    .iter()
+                    .position(|v| *v == variable)
+                    .expect("declared variable"),
+            );
         }
         if let Some(&missing) = declared.difference(&ordered).next() {
-            return Err(TrieBuildError::Schema(JoinPlanError::MissingVariable(missing)));
+            return Err(TrieBuildError::Schema(JoinPlanError::MissingVariable(
+                missing,
+            )));
         }
         let mut meter = |event| control(event).map_err(TrieBuildError::Control);
         for _ in 0..schema.len() {
@@ -159,7 +185,11 @@ impl<K: Ord + Clone> ColumnarTrie<K> {
         for (row, (values, multiplicity)) in rows.into_iter().enumerate() {
             meter(GlaExecutionEvent::Work)?;
             if values.len() != schema.len() {
-                return Err(TrieBuildError::RowArity { row, expected: schema.len(), actual: values.len() });
+                return Err(TrieBuildError::RowArity {
+                    row,
+                    expected: schema.len(),
+                    actual: values.len(),
+                });
             }
             if multiplicity == 0 {
                 return Err(TrieBuildError::ZeroMultiplicity { row });
@@ -173,10 +203,13 @@ impl<K: Ord + Clone> ColumnarTrie<K> {
         if !order.is_empty() {
             sort_rows(&mut admitted, &permutation, &mut meter)?;
         }
-        let mut columns: Vec<_> = order.iter().map(|_| Column {
-            keys: Vec::new(),
-            child_starts: Vec::new(),
-        }).collect();
+        let mut columns: Vec<_> = order
+            .iter()
+            .map(|_| Column {
+                keys: Vec::new(),
+                child_starts: Vec::new(),
+            })
+            .collect();
         let mut weights: Vec<usize> = Vec::new();
         let mut nullary_weight = 0_usize;
         for (row_index, (row, multiplicity)) in admitted.iter().enumerate() {
@@ -193,11 +226,13 @@ impl<K: Ord + Clone> ColumnarTrie<K> {
             }
             if common == order.len() {
                 if order.is_empty() {
-                    nullary_weight = nullary_weight.checked_add(*multiplicity)
+                    nullary_weight = nullary_weight
+                        .checked_add(*multiplicity)
                         .ok_or(TrieBuildError::MultiplicityOverflow)?;
                 } else {
                     let weight = weights.last_mut().expect("a duplicate has an earlier leaf");
-                    *weight = weight.checked_add(*multiplicity)
+                    *weight = weight
+                        .checked_add(*multiplicity)
                         .ok_or(TrieBuildError::MultiplicityOverflow)?;
                 }
                 continue;
@@ -265,7 +300,10 @@ fn sort_rows<K: Ord, E>(
     ) -> Result<(), E> {
         while root < end / 2 {
             let mut child = root * 2 + 1;
-            if child + 1 < end && compare_rows(&rows[child].0, &rows[child + 1].0, order, control)? == Ordering::Less {
+            if child + 1 < end
+                && compare_rows(&rows[child].0, &rows[child + 1].0, order, control)?
+                    == Ordering::Less
+            {
                 child += 1;
             }
             if compare_rows(&rows[root].0, &rows[child].0, order, control)? != Ordering::Less {
@@ -312,7 +350,10 @@ impl<K> core::fmt::Debug for ColumnarCursor<'_, K> {
 }
 
 impl<K: Ord + Clone> TrieRelation<K> for ColumnarTrie<K> {
-    type Cursor<'a> = ColumnarCursor<'a, K> where K: 'a;
+    type Cursor<'a>
+        = ColumnarCursor<'a, K>
+    where
+        K: 'a;
 
     fn attribute_order(&self) -> &[JoinVariable] {
         &self.order
@@ -340,8 +381,7 @@ impl<K: Ord + Clone> TrieCursor<K> for ColumnarCursor<'_, K> {
     }
 
     fn key(&self) -> Option<&K> {
-        (self.position < self.high)
-            .then(|| &self.trie.columns[self.depth].keys[self.position])
+        (self.position < self.high).then(|| &self.trie.columns[self.depth].keys[self.position])
     }
 
     fn multiplicity(&self) -> Option<usize> {

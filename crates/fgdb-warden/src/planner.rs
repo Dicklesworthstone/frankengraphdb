@@ -47,16 +47,18 @@ impl PlannerPredicates {
     /// labels. An explicit empty clause denies even unlabeled vertices.
     #[must_use]
     pub fn allows_vertex(&self, original_labels: &[LabelId]) -> bool {
-        self.label_clauses.iter().all(|clause| {
-            original_labels.iter().any(|label| clause.contains(label))
-        })
+        self.label_clauses
+            .iter()
+            .all(|clause| original_labels.iter().any(|label| clause.contains(label)))
     }
 
     /// Label names used in WHERE, labels(), certificates and metadata must
     /// satisfy EVERY label scope, even if the vertex itself was admitted.
     #[must_use]
     pub fn allows_label(&self, label: LabelId) -> bool {
-        self.label_clauses.iter().all(|clause| clause.contains(&label))
+        self.label_clauses
+            .iter()
+            .all(|clause| clause.contains(&label))
     }
 
     #[must_use]
@@ -202,7 +204,6 @@ impl<'a, Access> ExecutionPermit<'a, Access> {
             }
         }
     }
-
 }
 
 impl ExecutionPermit<'_, ReadAccess> {

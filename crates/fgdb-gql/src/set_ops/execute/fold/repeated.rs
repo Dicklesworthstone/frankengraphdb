@@ -6,8 +6,8 @@
 //! remain meaningful. Both children complete, left-to-right, before any sink
 //! runs. The ordinary executor still owns all value/order-sensitive barriers.
 
-use super::*;
 use super::cardinality::{self, Amount};
+use super::*;
 
 type RepeatedRows = Vec<(GraphValueRow, Amount)>;
 
@@ -33,12 +33,13 @@ impl PreparedGraphSet {
         match &self.node {
             SetNode::CrossJoin { left, .. } => columns.iter().all(|&at| at < left.types.len()),
             SetNode::Unwind { input, value } => {
-                cardinality::constant(value)
-                    && columns.iter().all(|&at| at < input.types.len())
+                cardinality::constant(value) && columns.iter().all(|&at| at < input.types.len())
             }
-            SetNode::Project { input, projection, quantifier: GraphSetQuantifier::All }
-                if input.preserves_row_order() && cardinality::total_projection(projection) =>
-            {
+            SetNode::Project {
+                input,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+            } if input.preserves_row_order() && cardinality::total_projection(projection) => {
                 input.has_repeated_factor(&projection_inputs(projection, columns))
             }
             SetNode::Scope(input) => input.has_repeated_factor(columns),
@@ -68,7 +69,10 @@ impl PreparedGraphSet {
         let mut meter = Meter {
             policy,
             checkpoint,
-            rows: GqlExecutionStats { snapshot_records: 0, result_rows: 0 },
+            rows: GqlExecutionStats {
+                snapshot_records: 0,
+                result_rows: 0,
+            },
             evaluator: GlaExecutionStats::default(),
         };
         let rows = collect(self, columns, &mut source, &mut meter, &mut 0)?;
@@ -106,9 +110,10 @@ where
             meter.event(GlaExecutionEvent::ScratchEntry)?;
             let mut values = Vec::new();
             for &column in columns {
-                values.push(projection::copy_value(&row.values()[column], &mut |event| {
-                    meter.event(event)
-                })?);
+                values.push(projection::copy_value(
+                    &row.values()[column],
+                    &mut |event| meter.event(event),
+                )?);
             }
             output.push((GraphValueRow::from_owned_values(values), Amount::ONE));
         }
@@ -133,7 +138,8 @@ where
             // once only after every input row succeeds, using the same checked
             // interpreter as COUNT. An empty input does not evaluate it at all.
             if !rows.is_empty() {
-                let repetitions = cardinality::constant_unwind_size(value, input.types.len(), meter)?;
+                let repetitions =
+                    cardinality::constant_unwind_size(value, input.types.len(), meter)?;
                 for (_, weight) in &mut rows {
                     meter.event(GlaExecutionEvent::Work)?;
                     *weight = weight.multiply(repetitions);
@@ -141,12 +147,16 @@ where
             }
             rows
         }
-        SetNode::Project { input, projection, .. } => {
+        SetNode::Project {
+            input, projection, ..
+        } => {
             // Admission checked ALL, preserved order and EVERY expression's
             // totality, not just observed columns. An unused division, index,
             // list constructor, filter or DISTINCT can never disappear here.
             meter.event(GlaExecutionEvent::ScratchEntry)?;
-            for _ in columns { meter.event(GlaExecutionEvent::ScratchEntry)?; }
+            for _ in columns {
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+            }
             let inputs = projection_inputs(projection, columns);
             let rows = collect(input, &inputs, source, meter, operand)?;
             let mut output = Vec::new();
@@ -159,13 +169,21 @@ where
                     // payloads remain borrowed until their metered copy.
                     let rebound;
                     let expression = if let GraphSetValue::Column(input) = value {
-                        rebound = GraphSetValue::Column(inputs.binary_search(input)
-                            .expect("the projection retained every demanded input"));
+                        rebound = GraphSetValue::Column(
+                            inputs
+                                .binary_search(input)
+                                .expect("the projection retained every demanded input"),
+                        );
                         &rebound
-                    } else { value };
-                    values.push(projection::evaluate_value(expression, &row, column,
-                        &mut |event| meter.event(event))
-                        .map_err(|error| projected(error, row_at))?);
+                    } else {
+                        value
+                    };
+                    values.push(
+                        projection::evaluate_value(expression, &row, column, &mut |event| {
+                            meter.event(event)
+                        })
+                        .map_err(|error| projected(error, row_at))?,
+                    );
                 }
                 output.push((GraphValueRow::from_owned_values(values), weight));
             }
@@ -185,7 +203,9 @@ where
         let mut selected = weight.subtract(skipped);
         if let Some(limit) = &mut remaining {
             selected = selected.limit(*limit);
-            *limit -= selected.to_u64().expect("a finite page has an exact u64 size");
+            *limit -= selected
+                .to_u64()
+                .expect("a finite page has an exact u64 size");
         }
         if !selected.is_zero() {
             meter.event(GlaExecutionEvent::ScratchEntry)?;

@@ -3,9 +3,8 @@
 //! their own source instead of claiming that fnx executed the computation.
 
 use crate::{
-    AdapterPath, FNX_IMPLEMENTATION_REVISION,
-    FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxCallSpec, FnxGraphKind, FnxOutput, GraphView,
-    SnapshotBinding, SnapshotGraphView,
+    AdapterPath, FNX_IMPLEMENTATION_REVISION, FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm,
+    FnxCallSpec, FnxGraphKind, FnxOutput, GraphView, SnapshotBinding, SnapshotGraphView,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
@@ -38,7 +37,9 @@ pub enum FnxExecutionError<C> {
     InvalidNumericResult,
     InvalidUpstreamResult,
     UnknownSource(VId),
-    GraphKind { required: FnxGraphKind },
+    GraphKind {
+        required: FnxGraphKind,
+    },
     NotConverged {
         max_iterations: usize,
         witness: ComplexityWitness,
@@ -48,19 +49,37 @@ impl<C: core::fmt::Display> core::fmt::Display for FnxExecutionError<C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Cancelled(error) => write!(f, "Prism call cancelled: {error}"),
-            Self::LimitExceeded { resource, limit, requested } => {
-                write!(f, "Prism {resource} admission refused: {requested} > {limit}")
+            Self::LimitExceeded {
+                resource,
+                limit,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "Prism {resource} admission refused: {requested} > {limit}"
+                )
             }
             Self::SizeOverflow => f.write_str("Prism work estimate overflow"),
             Self::AllocationFailed => f.write_str("Prism working allocation failed"),
             Self::NegativeWeight => f.write_str("analytics requires nonnegative projected weights"),
             Self::NonFiniteWeightSum => f.write_str("PageRank outgoing weight sum is non-finite"),
-            Self::InvalidNumericResult => f.write_str("invalid or unrepresentable analytics numeric result"),
-            Self::InvalidUpstreamResult => f.write_str("invalid projected analytics state or output"),
-            Self::UnknownSource(_) => f.write_str("analytics source vertex is absent from the projection"),
-            Self::GraphKind { required } => write!(f, "analytics requires a {required:?} projection"),
+            Self::InvalidNumericResult => {
+                f.write_str("invalid or unrepresentable analytics numeric result")
+            }
+            Self::InvalidUpstreamResult => {
+                f.write_str("invalid projected analytics state or output")
+            }
+            Self::UnknownSource(_) => {
+                f.write_str("analytics source vertex is absent from the projection")
+            }
+            Self::GraphKind { required } => {
+                write!(f, "analytics requires a {required:?} projection")
+            }
             Self::NotConverged { max_iterations, .. } => {
-                write!(f, "PageRank did not converge within {max_iterations} iterations")
+                write!(
+                    f,
+                    "PageRank did not converge within {max_iterations} iterations"
+                )
             }
         }
     }
@@ -119,16 +138,26 @@ pub struct FnxResult {
     pub certificate: FnxCertificate,
 }
 
-pub(crate) fn admit<C>(resource: &'static str, requested: usize, limit: usize) -> Result<(), FnxExecutionError<C>> {
+pub(crate) fn admit<C>(
+    resource: &'static str,
+    requested: usize,
+    limit: usize,
+) -> Result<(), FnxExecutionError<C>> {
     if requested > limit {
-        Err(FnxExecutionError::LimitExceeded { resource, limit, requested })
+        Err(FnxExecutionError::LimitExceeded {
+            resource,
+            limit,
+            requested,
+        })
     } else {
         Ok(())
     }
 }
 pub(crate) fn reserve<T, C>(length: usize) -> Result<Vec<T>, FnxExecutionError<C>> {
     let mut result = Vec::new();
-    result.try_reserve_exact(length).map_err(|_| FnxExecutionError::AllocationFailed)?;
+    result
+        .try_reserve_exact(length)
+        .map_err(|_| FnxExecutionError::AllocationFailed)?;
     Ok(result)
 }
 
@@ -154,23 +183,48 @@ impl KernelValues {
             Self::Counts(values) => index < values.len(),
         }
     }
-    fn value<C>(&self, index: usize, field: FnxOutput, graph: &SnapshotGraphView) -> Result<FnxValue, FnxExecutionError<C>> {
+    fn value<C>(
+        &self,
+        index: usize,
+        field: FnxOutput,
+        graph: &SnapshotGraphView,
+    ) -> Result<FnxValue, FnxExecutionError<C>> {
         match (field, self) {
-            (FnxOutput::Vertex, _) => graph.vertex_id(index).map(FnxValue::Vertex)
+            (FnxOutput::Vertex, _) => graph
+                .vertex_id(index)
+                .map(FnxValue::Vertex)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
-            (FnxOutput::Score, Self::Scores(values)) => values.get(index).copied().map(FnxValue::Score)
+            (FnxOutput::Score, Self::Scores(values)) => values
+                .get(index)
+                .copied()
+                .map(FnxValue::Score)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
             (FnxOutput::Distance, Self::Distances(values)) => {
-                let distance = values.get(index).copied().flatten().ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-                Ok(FnxValue::Integer(u64::try_from(distance).map_err(|_| FnxExecutionError::SizeOverflow)?))
+                let distance = values
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                Ok(FnxValue::Integer(
+                    u64::try_from(distance).map_err(|_| FnxExecutionError::SizeOverflow)?,
+                ))
             }
-            (FnxOutput::Component, Self::Components(values)) => values.get(index)
-                .and_then(|&label| graph.vertex_id(label)).map(FnxValue::Vertex)
+            (FnxOutput::Component, Self::Components(values)) => values
+                .get(index)
+                .and_then(|&label| graph.vertex_id(label))
+                .map(FnxValue::Vertex)
                 .ok_or(FnxExecutionError::InvalidUpstreamResult),
-            (FnxOutput::Distance, Self::WeightedDistances(values)) => values.get(index).copied().flatten()
-                .map(FnxValue::Float).ok_or(FnxExecutionError::InvalidUpstreamResult),
-            (FnxOutput::Triangles, Self::Counts(values)) => values.get(index).copied()
-                .map(FnxValue::Integer).ok_or(FnxExecutionError::InvalidUpstreamResult),
+            (FnxOutput::Distance, Self::WeightedDistances(values)) => values
+                .get(index)
+                .copied()
+                .flatten()
+                .map(FnxValue::Float)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult),
+            (FnxOutput::Triangles, Self::Counts(values)) => values
+                .get(index)
+                .copied()
+                .map(FnxValue::Integer)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult),
             _ => Err(FnxExecutionError::InvalidUpstreamResult),
         }
     }
@@ -204,7 +258,9 @@ fn pagerank<C>(
     let population = n as f64;
     for source in 0..n {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        let (targets, weights) = graph.projected_row(source).ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        let (targets, weights) = graph
+            .projected_row(source)
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         let mut sum = 0.0;
         if options.weighted() {
             for &weight in weights {
@@ -240,13 +296,19 @@ fn pagerank<C>(
         }
         for source in 0..n {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
-            let (targets, weights) = graph.projected_row(source).ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            let (targets, weights) = graph
+                .projected_row(source)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
             let push = options.alpha() * ranks[source];
             let sum = sums[source];
             for (offset, &target) in targets.iter().enumerate() {
                 checkpoint().map_err(FnxExecutionError::Cancelled)?;
                 let share = if options.weighted() {
-                    if sum > 0.0 { weights[offset] / sum } else { weights[offset] }
+                    if sum > 0.0 {
+                        weights[offset] / sum
+                    } else {
+                        weights[offset]
+                    }
                 } else if sum > 0.0 {
                     1.0 / sum
                 } else {
@@ -266,13 +328,22 @@ fn pagerank<C>(
         // Swapping changes no arithmetic and avoids an uncheckpointed O(n)
         // copy. The old ranks buffer is overwritten during the next pass.
         std::mem::swap(&mut ranks, &mut next);
-        witness.nodes_touched = witness.nodes_touched.checked_add(n).ok_or(FnxExecutionError::SizeOverflow)?;
-        witness.edges_scanned = witness.edges_scanned.checked_add(arcs).ok_or(FnxExecutionError::SizeOverflow)?;
+        witness.nodes_touched = witness
+            .nodes_touched
+            .checked_add(n)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
+        witness.edges_scanned = witness
+            .edges_scanned
+            .checked_add(arcs)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
         if delta < population * options.tolerance() {
             return Ok((ranks, witness));
         }
     }
-    Err(FnxExecutionError::NotConverged { max_iterations: options.max_iter(), witness })
+    Err(FnxExecutionError::NotConverged {
+        max_iterations: options.max_iter(),
+        witness,
+    })
 }
 
 impl FnxCallSpec {
@@ -293,55 +364,105 @@ impl FnxCallSpec {
         let numeric_profile = self.numeric_profile();
         let n = graph.node_count();
         match signature.graph_kind {
-            FnxGraphKind::Directed if !graph.is_directed() => return Err(FnxExecutionError::GraphKind { required: FnxGraphKind::Directed }),
-            FnxGraphKind::Undirected if graph.is_directed() => return Err(FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected }),
+            FnxGraphKind::Directed if !graph.is_directed() => {
+                return Err(FnxExecutionError::GraphKind {
+                    required: FnxGraphKind::Directed,
+                });
+            }
+            FnxGraphKind::Undirected if graph.is_directed() => {
+                return Err(FnxExecutionError::GraphKind {
+                    required: FnxGraphKind::Undirected,
+                });
+            }
             _ => {}
         }
         if let FnxAlgorithm::PageRank(options) = algorithm {
             admit("iterations", options.max_iter(), limits.max_iterations)?;
         }
-        if !matches!(algorithm, FnxAlgorithm::SingleSourceShortestPathLength { .. }
-            | FnxAlgorithm::SingleSourceDijkstraPathLength(_)) {
+        if !matches!(
+            algorithm,
+            FnxAlgorithm::SingleSourceShortestPathLength { .. }
+                | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+        ) {
             admit("result rows", n, limits.max_result_rows)?;
         }
         let mut arcs = 0usize;
         for source in 0..n {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
-            let neighbors = graph.neighbors_indices(source).ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-            arcs = arcs.checked_add(neighbors.len()).ok_or(FnxExecutionError::SizeOverflow)?;
+            let neighbors = graph
+                .neighbors_indices(source)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            arcs = arcs
+                .checked_add(neighbors.len())
+                .ok_or(FnxExecutionError::SizeOverflow)?;
         }
         let estimated_work = match algorithm {
-            FnxAlgorithm::PageRank(options) => n.checked_add(arcs)
-                .and_then(|step| options.max_iter().checked_add(1).and_then(|iterations| step.checked_mul(iterations))),
-            FnxAlgorithm::WeaklyConnectedComponents => arcs.checked_mul(2).and_then(|arcs| n.checked_add(arcs)),
-            FnxAlgorithm::StronglyConnectedComponents => n.checked_add(arcs).and_then(|step| step.checked_mul(2)),
-            FnxAlgorithm::SingleSourceDijkstraPathLength(_) => Some(crate::shortest_path::estimated_work::<C>(n, arcs)?),
-            FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => Some(crate::clustering::estimated_work(graph, &mut checkpoint)?),
+            FnxAlgorithm::PageRank(options) => n.checked_add(arcs).and_then(|step| {
+                options
+                    .max_iter()
+                    .checked_add(1)
+                    .and_then(|iterations| step.checked_mul(iterations))
+            }),
+            FnxAlgorithm::WeaklyConnectedComponents => {
+                arcs.checked_mul(2).and_then(|arcs| n.checked_add(arcs))
+            }
+            FnxAlgorithm::StronglyConnectedComponents => {
+                n.checked_add(arcs).and_then(|step| step.checked_mul(2))
+            }
+            FnxAlgorithm::SingleSourceDijkstraPathLength(_) => {
+                Some(crate::shortest_path::estimated_work::<C>(n, arcs)?)
+            }
+            FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
+                Some(crate::clustering::estimated_work(graph, &mut checkpoint)?)
+            }
             _ => n.checked_add(arcs),
-        }.ok_or(FnxExecutionError::SizeOverflow)?;
+        }
+        .ok_or(FnxExecutionError::SizeOverflow)?;
         admit("estimated work", estimated_work, limits.max_estimated_work)?;
         let word = std::mem::size_of::<usize>();
         let kernel_workspace_bytes = match algorithm {
-            FnxAlgorithm::SingleSourceDijkstraPathLength(_) => crate::shortest_path::workspace_bytes::<C>(n)?,
-            FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => crate::clustering::workspace_bytes::<C>(n)?,
+            FnxAlgorithm::SingleSourceDijkstraPathLength(_) => {
+                crate::shortest_path::workspace_bytes::<C>(n)?
+            }
+            FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
+                crate::clustering::workspace_bytes::<C>(n)?
+            }
             _ => {
                 let bytes_per_vertex = match algorithm {
                     FnxAlgorithm::PageRank(_) => 3 * std::mem::size_of::<f64>(),
-                    FnxAlgorithm::SingleSourceShortestPathLength { .. } => word + std::mem::size_of::<Option<usize>>(),
-                    FnxAlgorithm::StronglyConnectedComponents => 4 * word + std::mem::size_of::<bool>(),
+                    FnxAlgorithm::SingleSourceShortestPathLength { .. } => {
+                        word + std::mem::size_of::<Option<usize>>()
+                    }
+                    FnxAlgorithm::StronglyConnectedComponents => {
+                        4 * word + std::mem::size_of::<bool>()
+                    }
                     _ => 2 * word,
                 };
-                n.checked_mul(bytes_per_vertex).ok_or(FnxExecutionError::SizeOverflow)?
+                n.checked_mul(bytes_per_vertex)
+                    .ok_or(FnxExecutionError::SizeOverflow)?
             }
         };
         let output = match algorithm {
             FnxAlgorithm::PageRank(options) => {
                 let (scores, witness) = pagerank(graph, options, arcs, &mut checkpoint)?;
-                KernelOutput { values: KernelValues::Scores(scores), row_count: n, witness }
+                KernelOutput {
+                    values: KernelValues::Scores(scores),
+                    row_count: n,
+                    witness,
+                }
             }
             FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
-                let output = crate::shortest_path::run(graph, options, limits.max_result_rows, &mut checkpoint)?;
-                KernelOutput { values: KernelValues::WeightedDistances(output.distances), row_count: output.row_count, witness: output.witness }
+                let output = crate::shortest_path::run(
+                    graph,
+                    options,
+                    limits.max_result_rows,
+                    &mut checkpoint,
+                )?;
+                KernelOutput {
+                    values: KernelValues::WeightedDistances(output.distances),
+                    row_count: output.row_count,
+                    witness: output.witness,
+                }
             }
             FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient => {
                 let output = crate::clustering::run(graph, &mut checkpoint)?;
@@ -350,7 +471,11 @@ impl FnxCallSpec {
                 } else {
                     KernelValues::Scores(output.clustering)
                 };
-                KernelOutput { values, row_count: n, witness: output.witness }
+                KernelOutput {
+                    values,
+                    row_count: n,
+                    witness: output.witness,
+                }
             }
             _ => crate::traversal::run(graph, algorithm, limits.max_result_rows, &mut checkpoint)?,
         };
@@ -362,7 +487,9 @@ impl FnxCallSpec {
         result_hash.update(&self.digest().0);
         for index in 0..n {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
-            if !output.values.contains(index) { continue; }
+            if !output.values.contains(index) {
+                continue;
+            }
             let mut row = reserve(self.outputs().len())?;
             for column in self.outputs() {
                 let value = output.values.value(index, column.field, graph)?;
@@ -388,7 +515,9 @@ impl FnxCallSpec {
             }
             rows.push(row);
         }
-        if rows.len() != output.row_count { return Err(FnxExecutionError::InvalidUpstreamResult); }
+        if rows.len() != output.row_count {
+            return Err(FnxExecutionError::InvalidUpstreamResult);
+        }
         let witness = output.witness;
         let kernel_source_digest = kernel_source_digest();
         let mut hash = Hasher::new();
@@ -403,8 +532,16 @@ impl FnxCallSpec {
         let result_digest = result_hash.finalize();
         hash.update(&result_digest.0);
         hash_text(&mut hash, graph.adapter_path().as_str());
-        for number in [n, graph.edge_count(), graph.input_edge_count(), estimated_work,
-            kernel_workspace_bytes, witness.nodes_touched, witness.edges_scanned, witness.queue_peak] {
+        for number in [
+            n,
+            graph.edge_count(),
+            graph.input_edge_count(),
+            estimated_work,
+            kernel_workspace_bytes,
+            witness.nodes_touched,
+            witness.edges_scanned,
+            witness.queue_peak,
+        ] {
             hash.update(&(number as u128).to_le_bytes());
         }
         hash_text(&mut hash, &witness.algorithm);
@@ -430,7 +567,11 @@ impl FnxCallSpec {
         };
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
         Ok(FnxResult {
-            columns: self.outputs().iter().map(|column| column.name.clone()).collect(),
+            columns: self
+                .outputs()
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
             rows,
             certificate,
         })
@@ -461,46 +602,77 @@ fn kernel_source_digest() -> Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Directedness, PageRankOptions, ParallelEdgePolicy, ProjectionEdge,
-        ProjectionLimits, ProjectionSpec, SelfLoopPolicy, PROJECTED_WEIGHT_ATTRIBUTE};
+    use crate::{
+        Directedness, PROJECTED_WEIGHT_ATTRIBUTE, PageRankOptions, ParallelEdgePolicy,
+        ProjectionEdge, ProjectionLimits, ProjectionSpec, SelfLoopPolicy,
+    };
     use fgdb_types::{CommitSeq, EId, ids::ObjectId};
     use std::convert::Infallible;
 
     fn projection(mask: u16, direction: Directedness) -> SnapshotGraphView {
         let vertices = [VId(0), VId(17), VId(u128::MAX)];
-        let edges: Vec<_> = (0..9).filter(|bit| mask & (1 << bit) != 0).map(|bit| {
-            ProjectionEdge {
-                eid: EId(bit as u128), source: vertices[bit / 3], target: vertices[bit % 3],
+        let edges: Vec<_> = (0..9)
+            .filter(|bit| mask & (1 << bit) != 0)
+            .map(|bit| ProjectionEdge {
+                eid: EId(bit as u128),
+                source: vertices[bit / 3],
+                target: vertices[bit % 3],
                 weight: [0.0, 0.1, 0.3, 1.0, 7.0][bit % 5],
-            }
-        }).collect();
+            })
+            .collect();
         SnapshotGraphView::build(
-            SnapshotBinding { root: ObjectId([2; 32]), as_of: CommitSeq(3) },
-            &vertices, &edges,
-            ProjectionSpec { directedness: direction, parallel_edges: ParallelEdgePolicy::Sum,
-                self_loops: SelfLoopPolicy::Keep },
-            ProjectionLimits { max_vertices: 3, max_input_edges: 9,
-                max_adjacency_entries: 18, max_workspace_bytes: 1 << 20 },
-        ).unwrap()
+            SnapshotBinding {
+                root: ObjectId([2; 32]),
+                as_of: CommitSeq(3),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: direction,
+                parallel_edges: ParallelEdgePolicy::Sum,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: 3,
+                max_input_edges: 9,
+                max_adjacency_entries: 18,
+                max_workspace_bytes: 1 << 20,
+            },
+        )
+        .unwrap()
     }
 
     #[test]
     fn cooperative_kernel_is_bit_identical_to_fnx_on_all_three_node_topologies() {
         for mask in 0..512 {
-            for direction in [Directedness::Directed, Directedness::Reversed, Directedness::Undirected] {
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
                 let graph = projection(mask, direction);
-                let arcs = (0..3).map(|node| graph.neighbors_indices(node).unwrap().len()).sum();
+                let arcs = (0..3)
+                    .map(|node| graph.neighbors_indices(node).unwrap().len())
+                    .sum();
                 for weighted in [false, true] {
                     let options = PageRankOptions::new(0.85, 1000, 1e-12, weighted).unwrap();
                     let oracle = fnx_algorithms::pagerank_with_weight(
-                        &graph, options.alpha(), options.max_iter(), options.tolerance(),
+                        &graph,
+                        options.alpha(),
+                        options.max_iter(),
+                        options.tolerance(),
                         weighted.then_some(PROJECTED_WEIGHT_ATTRIBUTE),
                     );
                     assert!(oracle.converged);
-                    let (scores, witness) = pagerank(&graph, options, arcs, &mut || Ok::<(), Infallible>(())).unwrap();
+                    let (scores, witness) =
+                        pagerank(&graph, options, arcs, &mut || Ok::<(), Infallible>(())).unwrap();
                     for score in oracle.scores {
                         let ordinal = graph.get_node_index(&score.node).unwrap();
-                        assert_eq!(scores[ordinal].to_bits(), score.score.to_bits(), "{mask} {direction:?} weighted={weighted}");
+                        assert_eq!(
+                            scores[ordinal].to_bits(),
+                            score.score.to_bits(),
+                            "{mask} {direction:?} weighted={weighted}"
+                        );
                     }
                     assert_eq!(witness, oracle.witness);
                 }
@@ -516,7 +688,8 @@ mod tests {
         pagerank(&graph, options, 1, &mut || {
             checkpoints += 1;
             Ok::<(), &'static str>(())
-        }).unwrap();
+        })
+        .unwrap();
         // Initial validation takes n + m = 4 calls; subsequent callbacks
         // therefore prove cancellation INSIDE the power-iteration loop.
         assert!(checkpoints > 20);
@@ -524,7 +697,11 @@ mod tests {
             let mut observed = 0;
             let result = pagerank(&graph, options, 1, &mut || {
                 observed += 1;
-                if observed == stop { Err("stop") } else { Ok(()) }
+                if observed == stop {
+                    Err("stop")
+                } else {
+                    Ok(())
+                }
             });
             assert!(matches!(result, Err(FnxExecutionError::Cancelled("stop"))));
             assert_eq!(observed, stop);
@@ -547,10 +724,24 @@ mod tests {
         }
         assert!(graph.projected_row(usize::MAX).is_none());
         let call = FnxCallSpec::pagerank(PageRankOptions::default());
-        let result = call.execute(&graph, FnxExecutionLimits {
-            max_iterations: 100, max_result_rows: 3, max_estimated_work: 10000,
-        }, || Ok::<(), Infallible>(())).unwrap();
-        assert_eq!(result.certificate.execution_kernel, call.signature().execution_kernel);
-        assert_eq!(result.certificate.kernel_workspace_bytes, 3 * 3 * std::mem::size_of::<f64>());
+        let result = call
+            .execute(
+                &graph,
+                FnxExecutionLimits {
+                    max_iterations: 100,
+                    max_result_rows: 3,
+                    max_estimated_work: 10000,
+                },
+                || Ok::<(), Infallible>(()),
+            )
+            .unwrap();
+        assert_eq!(
+            result.certificate.execution_kernel,
+            call.signature().execution_kernel
+        );
+        assert_eq!(
+            result.certificate.kernel_workspace_bytes,
+            3 * 3 * std::mem::size_of::<f64>()
+        );
     }
 }

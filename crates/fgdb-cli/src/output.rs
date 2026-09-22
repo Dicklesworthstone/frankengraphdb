@@ -25,8 +25,14 @@ struct Buffer {
 }
 impl Buffer {
     fn new(limit: usize) -> Result<Self, Error> {
-        if limit == 0 || limit > MAX_OUTPUT_BYTES { return Err(Error::OutputLimit); }
-        Ok(Self { text: String::new(), limit, record_start: 0 })
+        if limit == 0 || limit > MAX_OUTPUT_BYTES {
+            return Err(Error::OutputLimit);
+        }
+        Ok(Self {
+            text: String::new(),
+            limit,
+            record_start: 0,
+        })
     }
     fn end_record(&mut self) -> fmt::Result {
         self.write_char('\n')?;
@@ -52,7 +58,11 @@ impl Buffer {
     }
     fn hex(&mut self, bytes: &[u8]) -> fmt::Result {
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        let needed = bytes.len().checked_mul(2).and_then(|n| n.checked_add(2)).ok_or(fmt::Error)?;
+        let needed = bytes
+            .len()
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(2))
+            .ok_or(fmt::Error)?;
         self.check(needed)?;
         self.write_char('"')?;
         for &byte in bytes {
@@ -63,7 +73,9 @@ impl Buffer {
     }
     fn check(&self, additional: usize) -> fmt::Result {
         let next = self.text.len().checked_add(additional).ok_or(fmt::Error)?;
-        if next > self.limit || next - self.record_start > MAX_RECORD_BYTES { return Err(fmt::Error); }
+        if next > self.limit || next - self.record_start > MAX_RECORD_BYTES {
+            return Err(fmt::Error);
+        }
         Ok(())
     }
 }
@@ -80,28 +92,48 @@ impl Write for Buffer {
 /// that exceeds the output cap cannot leave an apparently successful prefix.
 /// The consumer must nevertheless require `complete`: an OS write may fail.
 pub fn render_result(result: &QueryResult, format: Format, limit: usize) -> Result<String, Error> {
-    let QueryResult::Rows { columns, rows } = result else { return Err(Error::Query); };
+    let QueryResult::Rows { columns, rows } = result else {
+        return Err(Error::Query);
+    };
     let mut out = Buffer::new(limit)?;
     let render = |out: &mut Buffer| -> fmt::Result {
-        if format == Format::Ndjson { out.write_str("{\"version\":1,\"type\":\"columns\",\"columns\":[")?; }
+        if format == Format::Ndjson {
+            out.write_str("{\"version\":1,\"type\":\"columns\",\"columns\":[")?;
+        }
         for (i, column) in columns.iter().enumerate() {
-            if i > 0 { out.write_str(if format == Format::Ndjson { "," } else { "\t" })?; }
+            if i > 0 {
+                out.write_str(if format == Format::Ndjson { "," } else { "\t" })?;
+            }
             out.quoted(column)?;
         }
-        if format == Format::Ndjson { out.write_str("]}")?; }
+        if format == Format::Ndjson {
+            out.write_str("]}")?;
+        }
         out.end_record()?;
         for row in rows {
-            if row.len() != columns.len() { return Err(fmt::Error); }
-            if format == Format::Ndjson { out.write_str("{\"version\":1,\"type\":\"row\",\"values\":[")?; }
+            if row.len() != columns.len() {
+                return Err(fmt::Error);
+            }
+            if format == Format::Ndjson {
+                out.write_str("{\"version\":1,\"type\":\"row\",\"values\":[")?;
+            }
             for (i, cell) in row.iter().enumerate() {
-                if i > 0 { out.write_str(if format == Format::Ndjson { "," } else { "\t" })?; }
+                if i > 0 {
+                    out.write_str(if format == Format::Ndjson { "," } else { "\t" })?;
+                }
                 value(out, cell, format)?;
             }
-            if format == Format::Ndjson { out.write_str("]}")?; }
+            if format == Format::Ndjson {
+                out.write_str("]}")?;
+            }
             out.end_record()?;
         }
         if format == Format::Ndjson {
-            write!(out, "{{\"version\":1,\"type\":\"complete\",\"rows\":{}}}", rows.len())?;
+            write!(
+                out,
+                "{{\"version\":1,\"type\":\"complete\",\"rows\":{}}}",
+                rows.len()
+            )?;
         } else {
             write!(out, "{} row(s)", rows.len())?;
         }
@@ -127,8 +159,15 @@ fn value(out: &mut Buffer, value: &QueryValue, format: Format) -> fmt::Result {
         QueryValue::Integer(n) => tagged_number(out, "integer", n, format),
         QueryValue::Average(n) => {
             if format == Format::Ndjson {
-                write!(out, "{{\"type\":\"average\",\"numerator\":\"{}\",\"denominator\":\"{}\"}}", n.numerator(), n.denominator())
-            } else { write!(out, "average({}/{})", n.numerator(), n.denominator()) }
+                write!(
+                    out,
+                    "{{\"type\":\"average\",\"numerator\":\"{}\",\"denominator\":\"{}\"}}",
+                    n.numerator(),
+                    n.denominator()
+                )
+            } else {
+                write!(out, "average({}/{})", n.numerator(), n.denominator())
+            }
         }
         QueryValue::Value(GraphValue::Vertex(id)) => tagged_number(out, "vertex", &id.0, format),
         QueryValue::Value(GraphValue::Edge(id)) => tagged_number(out, "edge", &id.0, format),
@@ -150,13 +189,30 @@ fn value(out: &mut Buffer, value: &QueryValue, format: Format) -> fmt::Result {
         }
     }
 }
-fn tagged_number(out: &mut Buffer, kind: &str, n: &impl fmt::Display, format: Format) -> fmt::Result {
-    if format == Format::Ndjson { write!(out, "{{\"type\":\"{kind}\",\"value\":\"{n}\"}}") }
-    else { write!(out, "{kind}({n})") }
-}
-fn encoded(out: &mut Buffer, kind: &str, encoding: &str, bytes: &[u8], format: Format) -> fmt::Result {
+fn tagged_number(
+    out: &mut Buffer,
+    kind: &str,
+    n: &impl fmt::Display,
+    format: Format,
+) -> fmt::Result {
     if format == Format::Ndjson {
-        write!(out, "{{\"type\":\"{kind}\",\"encoding\":\"{encoding}\",\"hex\":")?;
+        write!(out, "{{\"type\":\"{kind}\",\"value\":\"{n}\"}}")
+    } else {
+        write!(out, "{kind}({n})")
+    }
+}
+fn encoded(
+    out: &mut Buffer,
+    kind: &str,
+    encoding: &str,
+    bytes: &[u8],
+    format: Format,
+) -> fmt::Result {
+    if format == Format::Ndjson {
+        write!(
+            out,
+            "{{\"type\":\"{kind}\",\"encoding\":\"{encoding}\",\"hex\":"
+        )?;
         out.hex(bytes)?;
         out.write_char('}')
     } else {
@@ -189,13 +245,19 @@ mod tests {
     use fgdb_gql::GraphExactAverage;
     use fgdb_types::VId;
     fn result(values: Vec<QueryValue>) -> QueryResult {
-        QueryResult::Rows { columns: (0..values.len()).map(|n| format!("c{n}")).collect(), rows: vec![values] }
+        QueryResult::Rows {
+            columns: (0..values.len()).map(|n| format!("c{n}")).collect(),
+            rows: vec![values],
+        }
     }
     #[test]
     fn exact_domains_never_become_json_numbers_or_debug_strings() {
-        let result = result(vec![QueryValue::Count(u64::MAX), QueryValue::Integer(i128::MIN),
+        let result = result(vec![
+            QueryValue::Count(u64::MAX),
+            QueryValue::Integer(i128::MIN),
             QueryValue::Average(GraphExactAverage::new(1, 3).unwrap()),
-            QueryValue::Value(GraphValue::Vertex(VId(u128::MAX)))]);
+            QueryValue::Value(GraphValue::Vertex(VId(u128::MAX))),
+        ]);
         let rendered = render_result(&result, Format::Ndjson, 4096).unwrap();
         assert!(rendered.contains("\"value\":\"18446744073709551615\""));
         assert!(rendered.contains(&format!("\"value\":\"{}\"", i128::MIN)));
@@ -206,21 +268,37 @@ mod tests {
     }
     #[test]
     fn controls_are_escaped_and_output_is_bounded_in_both_formats() {
-        let result = QueryResult::Rows { columns: vec!["x\"\\\n\u{1b}[31m".into()], rows: vec![] };
+        let result = QueryResult::Rows {
+            columns: vec!["x\"\\\n\u{1b}[31m".into()],
+            rows: vec![],
+        };
         for format in [Format::Human, Format::Ndjson] {
             let rendered = render_result(&result, format, 4096).unwrap();
             assert!(!rendered.contains('\u{1b}'));
             assert!(rendered.contains("\\u001b"));
-            assert_eq!(render_result(&result, format, rendered.len()), Ok(rendered.clone()));
-            assert_eq!(render_result(&result, format, rendered.len() - 1), Err(Error::OutputLimit));
+            assert_eq!(
+                render_result(&result, format, rendered.len()),
+                Ok(rendered.clone())
+            );
+            assert_eq!(
+                render_result(&result, format, rendered.len() - 1),
+                Err(Error::OutputLimit)
+            );
         }
     }
     #[test]
     fn scalars_and_composites_reuse_existing_canonical_codecs() {
         let scalar = CanonicalScalar::ucs_basic_text("quoted\"\nsecret").unwrap();
         let value = GraphValue::List(vec![GraphValue::Scalar(scalar.clone())].into_boxed_slice());
-        let rendered = render_result(&result(vec![QueryValue::Value(GraphValue::Scalar(scalar)),
-            QueryValue::Value(value)]), Format::Ndjson, 4096).unwrap();
+        let rendered = render_result(
+            &result(vec![
+                QueryValue::Value(GraphValue::Scalar(scalar)),
+                QueryValue::Value(value),
+            ]),
+            Format::Ndjson,
+            4096,
+        )
+        .unwrap();
         assert!(rendered.contains("strict-portable-v1"));
         assert!(rendered.contains("graph-value-v1"));
         assert!(!rendered.contains("secret"));
@@ -228,25 +306,46 @@ mod tests {
     #[test]
     fn canonical_cell_admission_checks_payload_before_encoding() {
         let scalar = QueryValue::Value(GraphValue::Scalar(
-            CanonicalScalar::bytes(vec![7; MAX_CELL_UNITS * 64]).unwrap()));
+            CanonicalScalar::bytes(vec![7; MAX_CELL_UNITS * 64]).unwrap(),
+        ));
         assert!(admit_cell(&scalar).is_err());
         let exact = QueryValue::Value(GraphValue::List(
-            vec![GraphValue::Scalar(CanonicalScalar::Null); MAX_CELL_UNITS - 1].into_boxed_slice()));
+            vec![GraphValue::Scalar(CanonicalScalar::Null); MAX_CELL_UNITS - 1].into_boxed_slice(),
+        ));
         assert!(admit_cell(&exact).is_ok());
         let over = QueryValue::Value(GraphValue::List(
-            vec![GraphValue::Scalar(CanonicalScalar::Null); MAX_CELL_UNITS].into_boxed_slice()));
+            vec![GraphValue::Scalar(CanonicalScalar::Null); MAX_CELL_UNITS].into_boxed_slice(),
+        ));
         assert!(admit_cell(&over).is_err());
         for format in [Format::Human, Format::Ndjson] {
-            assert_eq!(render_result(&result(vec![scalar.clone()]), format, MAX_OUTPUT_BYTES), Err(Error::OutputLimit));
-            assert_eq!(render_result(&result(vec![over.clone()]), format, MAX_OUTPUT_BYTES), Err(Error::OutputLimit));
+            assert_eq!(
+                render_result(&result(vec![scalar.clone()]), format, MAX_OUTPUT_BYTES),
+                Err(Error::OutputLimit)
+            );
+            assert_eq!(
+                render_result(&result(vec![over.clone()]), format, MAX_OUTPUT_BYTES),
+                Err(Error::OutputLimit)
+            );
             assert!(render_result(&result(vec![exact.clone()]), format, MAX_OUTPUT_BYTES).is_ok());
         }
     }
     #[test]
     fn malformed_rows_and_oversized_records_never_release_a_prefix() {
-        let malformed = QueryResult::Rows { columns: vec![], rows: vec![vec![QueryValue::Count(1)]] };
-        assert_eq!(render_result(&malformed, Format::Ndjson, 4096), Err(Error::OutputLimit));
-        let huge = QueryResult::Rows { columns: vec!["x".repeat(MAX_RECORD_BYTES)], rows: vec![] };
-        assert_eq!(render_result(&huge, Format::Ndjson, MAX_OUTPUT_BYTES), Err(Error::OutputLimit));
+        let malformed = QueryResult::Rows {
+            columns: vec![],
+            rows: vec![vec![QueryValue::Count(1)]],
+        };
+        assert_eq!(
+            render_result(&malformed, Format::Ndjson, 4096),
+            Err(Error::OutputLimit)
+        );
+        let huge = QueryResult::Rows {
+            columns: vec!["x".repeat(MAX_RECORD_BYTES)],
+            rows: vec![],
+        };
+        assert_eq!(
+            render_result(&huge, Format::Ndjson, MAX_OUTPUT_BYTES),
+            Err(Error::OutputLimit)
+        );
     }
 }

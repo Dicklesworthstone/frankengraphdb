@@ -86,4 +86,6 @@ large_enum_variant = "allow"
 err_expect = "allow"
 cloned_ref_to_slice_refs = "allow"
 unnecessary_get_then_check = "allow"
+manual_noop_waker = "allow"
+manual_async_fn = "allow"
 

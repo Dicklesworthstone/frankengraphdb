@@ -103,7 +103,9 @@ impl<K: Ord + Clone, L: Ord + Clone, R: Ord + Clone> IncrementalJoin<K, L, R> {
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<JoinUpdate<'_, K, L, R>, ZSetError<E>> {
-        self.prepare_filtered(delta_left, delta_right, limbs, control, |_, _, _, _| Ok(true))
+        self.prepare_filtered(delta_left, delta_right, limbs, control, |_, _, _, _| {
+            Ok(true)
+        })
     }
 
     /// Prepare a join with a fixed residual predicate on each candidate pair.

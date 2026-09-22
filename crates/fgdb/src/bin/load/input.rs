@@ -65,7 +65,11 @@ impl Input {
         max_records: usize,
     ) -> io::Result<Self> {
         Self::open_controlled(
-            path, binding, MAX_INPUT_BYTES, MAX_RECORD_BYTES, max_records,
+            path,
+            binding,
+            MAX_INPUT_BYTES,
+            MAX_RECORD_BYTES,
+            max_records,
             &mut || stopped(cx),
         )
     }
@@ -93,7 +97,9 @@ impl Input {
         let mut blocks = Vec::new();
         blocks.try_reserve_exact(count).map_err(io::Error::other)?;
         let mut buffer = Vec::new();
-        buffer.try_reserve_exact(BLOCK_BYTES).map_err(io::Error::other)?;
+        buffer
+            .try_reserve_exact(BLOCK_BYTES)
+            .map_err(io::Error::other)?;
         buffer.resize(BLOCK_BYTES, 0);
         let mut digest = Hasher::new();
         let mut remaining = len;
@@ -109,13 +115,15 @@ impl Input {
             // or JSON tree can allocate according to hostile source lengths.
             for part in bytes.split_inclusive(|&byte| byte == b'\n') {
                 let terminated = part.last() == Some(&b'\n');
-                record_bytes = record_bytes.checked_add(part.len() - usize::from(terminated))
+                record_bytes = record_bytes
+                    .checked_add(part.len() - usize::from(terminated))
                     .ok_or_else(|| refused("SourceLimit: record_bytes"))?;
                 if record_bytes > record_limit {
                     return Err(refused("SourceLimit: record_bytes"));
                 }
                 if terminated {
-                    records = records.checked_add(1)
+                    records = records
+                        .checked_add(1)
                         .ok_or_else(|| refused("SourceLimit: source_rows"))?;
                     if records > max_records {
                         return Err(refused("SourceLimit: source_rows"));
@@ -128,7 +136,8 @@ impl Input {
             remaining -= size as u64;
         }
         if record_bytes != 0 {
-            records = records.checked_add(1)
+            records = records
+                .checked_add(1)
                 .ok_or_else(|| refused("SourceLimit: source_rows"))?;
             if records > max_records {
                 return Err(refused("SourceLimit: source_rows"));
@@ -140,15 +149,31 @@ impl Input {
         // digest of the file here would silently invalidate existing resumes.
         digest.update(binding);
         Ok(Self {
-            image: Arc::new(Image { file: Mutex::new(file), len, blocks: blocks.into(), record_limit }),
+            image: Arc::new(Image {
+                file: Mutex::new(file),
+                len,
+                blocks: blocks.into(),
+                record_limit,
+            }),
             source_hash: digest.finalize(),
             records,
         })
     }
-    pub(super) fn source_hash(&self) -> &Digest { &self.source_hash }
-    pub(super) fn records(&self) -> usize { self.records }
+    pub(super) fn source_hash(&self) -> &Digest {
+        &self.source_hash
+    }
+    pub(super) fn records(&self) -> usize {
+        self.records
+    }
     pub(super) fn reader(&self) -> Reader {
-        Reader { image: self.image.clone(), offset: 0, line: 1, cache: Vec::new(), block: None, ended: false }
+        Reader {
+            image: self.image.clone(),
+            offset: 0,
+            line: 1,
+            cache: Vec::new(),
+            block: None,
+            ended: false,
+        }
     }
 }
 
@@ -164,14 +189,25 @@ impl Clone for Reader {
     fn clone(&self) -> Self {
         // Reload the current block at the exact cursor offset. No payload copy
         // or fallible file-open operation is hidden inside iterator cloning.
-        Self { image: self.image.clone(), offset: self.offset, line: self.line,
-            cache: Vec::new(), block: None, ended: self.ended }
+        Self {
+            image: self.image.clone(),
+            offset: self.offset,
+            line: self.line,
+            cache: Vec::new(),
+            block: None,
+            ended: self.ended,
+        }
     }
 }
 impl Reader {
-    pub(super) fn line(&self) -> usize { self.line }
+    pub(super) fn line(&self) -> usize {
+        self.line
+    }
     fn file(&self) -> io::Result<MutexGuard<'_, File>> {
-        self.image.file.lock().map_err(|_| refused("input handle lock poisoned"))
+        self.image
+            .file
+            .lock()
+            .map_err(|_| refused("input handle lock poisoned"))
     }
     pub(super) fn next_line(&mut self, cx: &QueryCx) -> io::Result<Option<String>> {
         self.next_controlled(&mut || stopped(cx))
@@ -180,9 +216,13 @@ impl Reader {
         &mut self,
         control: &mut impl FnMut() -> io::Result<()>,
     ) -> io::Result<Option<String>> {
-        if self.ended { return Ok(None); }
+        if self.ended {
+            return Ok(None);
+        }
         let result = self.line_controlled(control);
-        if !matches!(&result, Ok(Some(_))) { self.ended = true; }
+        if !matches!(&result, Ok(Some(_))) {
+            self.ended = true;
+        }
         result
     }
     fn line_controlled(
@@ -224,7 +264,9 @@ impl Reader {
             let suffix = &self.cache[start..];
             let newline = suffix.iter().position(|&byte| byte == b'\n');
             let size = newline.unwrap_or(suffix.len());
-            let total = row.len().checked_add(size)
+            let total = row
+                .len()
+                .checked_add(size)
                 .ok_or_else(|| refused("SourceLimit: record_bytes"))?;
             if total > self.image.record_limit {
                 return Err(refused("SourceLimit: record_bytes"));
@@ -234,10 +276,14 @@ impl Reader {
             self.offset += size as u64;
             if newline.is_some() {
                 self.offset += 1;
-                if row.last() == Some(&b'\r') { row.pop(); }
+                if row.last() == Some(&b'\r') {
+                    row.pop();
+                }
                 break;
             }
-            if self.offset == self.image.len { break; }
+            if self.offset == self.image.len {
+                break;
+            }
         }
         let text = String::from_utf8(row).map_err(|_| refused("input must be UTF-8"))?;
         control()?;

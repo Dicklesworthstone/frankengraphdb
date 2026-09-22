@@ -182,7 +182,9 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
                 self.execute_with_control(
                     vertices,
                     edges,
-                    |vid, predicates| test_vertex(vid, predicates).map_err(BudgetedGqlError::Execution),
+                    |vid, predicates| {
+                        test_vertex(vid, predicates).map_err(BudgetedGqlError::Execution)
+                    },
                     &mut control,
                 )?
             }
@@ -204,7 +206,9 @@ impl<Row: GlaIdentityOutput> GlaPlan<Row> {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
-            if let Some(physical) = topology::compile(self.operators(), &mut |event| meter.observe(event))? {
+            if let Some(physical) =
+                topology::compile(self.operators(), &mut |event| meter.observe(event))?
+            {
                 return physical.execute(self, edges, &mut |event| meter.observe(event));
             }
             self.execute_with_control(
@@ -237,7 +241,9 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             if self.requires_identified_edges() || self.projects_edge_properties() {
                 return Err(GqlQueryError::IdentifiedEdgesRequired);
             }
-            if let Some(physical) = topology::compile(self.operators(), &mut |event| meter.observe(event))? {
+            if let Some(physical) =
+                topology::compile(self.operators(), &mut |event| meter.observe(event))?
+            {
                 return physical.execute(self, edges, &mut |event| meter.observe(event));
             }
             self.execute_with_properties_control(
@@ -266,10 +272,14 @@ impl<Row: GlaOutput> GlaPlan<Row> {
         checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<Row>, GqlQueryError<E, C>> {
         governed(snapshot_records, policy, checkpoint, |meter| {
-            if let Some(physical) = topology::compile(self.operators(), &mut |event| meter.observe(event))? {
+            if let Some(physical) =
+                topology::compile(self.operators(), &mut |event| meter.observe(event))?
+            {
                 return physical.execute(
                     self,
-                    edges.into_iter().map(|(_, source, relation, destination)| (source, relation, destination)),
+                    edges
+                        .into_iter()
+                        .map(|(_, source, relation, destination)| (source, relation, destination)),
                     &mut |event| meter.observe(event),
                 );
             }
@@ -331,10 +341,14 @@ impl<Row: GlaOutput> GlaPlan<Row> {
             if self.projects_edge_properties() {
                 return Err(GqlQueryError::IdentifiedEdgesRequired);
             }
-            if let Some(physical) = topology::compile(self.operators(), &mut |event| meter.observe(event))? {
+            if let Some(physical) =
+                topology::compile(self.operators(), &mut |event| meter.observe(event))?
+            {
                 return physical.execute(
                     self,
-                    edges.into_iter().map(|(_, source, relation, destination)| (source, relation, destination)),
+                    edges
+                        .into_iter()
+                        .map(|(_, source, relation, destination)| (source, relation, destination)),
                     &mut |event| meter.observe(event),
                 );
             }

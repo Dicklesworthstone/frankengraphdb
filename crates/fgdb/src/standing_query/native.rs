@@ -6,10 +6,10 @@ use crate::{PreparedNativeRead, QueryError, QueryResult, QueryValue};
 use fgdb_delta_types::ZWeight;
 use fgdb_gql::{GqlParameters, GraphAggregateTextSlot, GraphSymbolResolver};
 
-pub(super) mod set;
 mod changes;
 mod cursor;
 mod row_handle;
+pub(super) mod set;
 pub use cursor::{StandingNativeCursor, StandingNativeDeltaCursor};
 
 pub(super) enum Layout {
@@ -346,8 +346,8 @@ impl<V: Vfs + Clone> Database<V> {
                                 // Share row-domain admission with pull/replay
                                 // delivery, including filters and recursive closure.
                                 // Ranked windows were handled above.
-                                let rows = sets::rows(root)
-                                    .ok_or(StandingQueryError::Unsupported)?;
+                                let rows =
+                                    sets::rows(root).ok_or(StandingQueryError::Unsupported)?;
                                 collect_runs(
                                     rows.iter().map(|(row, weight)| (row, Some(weight))),
                                     layout.columns().len(),
@@ -399,7 +399,10 @@ fn reserve_value(
 }
 
 // Eager and pull delivery use the same native cell mapping and payload meter.
-fn copy_values(row: &GraphValueRow, meter: &mut Meter<'_>) -> Result<Vec<QueryValue>, StandingQueryFailure> {
+fn copy_values(
+    row: &GraphValueRow,
+    meter: &mut Meter<'_>,
+) -> Result<Vec<QueryValue>, StandingQueryFailure> {
     let mut cells = Vec::new();
     for value in row.values() {
         reserve_value(value, meter)?;
@@ -408,18 +411,27 @@ fn copy_values(row: &GraphValueRow, meter: &mut Meter<'_>) -> Result<Vec<QueryVa
     Ok(cells)
 }
 
-fn copy_group(row: &GraphAggregateRow, slots: &[GraphAggregateTextSlot], meter: &mut Meter<'_>)
-    -> Result<Vec<QueryValue>, StandingQueryFailure> {
+fn copy_group(
+    row: &GraphAggregateRow,
+    slots: &[GraphAggregateTextSlot],
+    meter: &mut Meter<'_>,
+) -> Result<Vec<QueryValue>, StandingQueryFailure> {
     let mut cells = Vec::new();
     for slot in slots {
         match *slot {
             GraphAggregateTextSlot::GroupKey(at) => {
-                let value = row.keys().get(at).ok_or(StandingQueryFailure::InvalidDelta)?;
+                let value = row
+                    .keys()
+                    .get(at)
+                    .ok_or(StandingQueryFailure::InvalidDelta)?;
                 reserve_value(value, meter)?;
                 cells.push(QueryValue::Value(value.clone()));
             }
             GraphAggregateTextSlot::Aggregate(at) => {
-                let value = row.values().get(at).ok_or(StandingQueryFailure::InvalidDelta)?;
+                let value = row
+                    .values()
+                    .get(at)
+                    .ok_or(StandingQueryFailure::InvalidDelta)?;
                 match value {
                     QueryValue::Value(value) => reserve_value(value, meter)?,
                     _ => {

@@ -20,8 +20,8 @@ use fgdb_chronicle::seed::{
 use fgdb_chronicle::store::RootPublicationEvidence;
 use fgdb_chronicle::transfer::{BondedPull, DonorId, PullError, PullLimits, PullRequest};
 use fgdb_order::{
-    Configuration, Domain, Envelope, Error as RaftError, Event, Limits, MemberId,
-    Message, PersistentState, Raft, SnapshotCut, SnapshotTransfer,
+    Configuration, Domain, Envelope, Error as RaftError, Event, Limits, MemberId, Message,
+    PersistentState, Raft, SnapshotCut, SnapshotTransfer,
 };
 use fgdb_repl::driver::bonded::{PullDriveError, PullReply, PullTransport, ReplyOutcome};
 use fgdb_repl::driver::{
@@ -73,7 +73,9 @@ impl Catalog {
 
     fn snapshot() -> Self {
         let mut catalog = Self::new();
-        catalog.fixtures.extend([Fixture::new(113), Fixture::new(114)]);
+        catalog
+            .fixtures
+            .extend([Fixture::new(113), Fixture::new(114)]);
         catalog
     }
 
@@ -92,7 +94,9 @@ impl SeedCatalog for Catalog {
 
     fn recovery(&self, object: SeedObjectSpec) -> Result<SeedRecovery<'_>, Self::Error> {
         self.lookups.set(self.lookups.get() + 1);
-        let fixture = self.fixtures.iter()
+        let fixture = self
+            .fixtures
+            .iter()
             .find(|fixture| fixture.encoding.object_id() == object.object_id)
             .ok_or("object is not in the authenticated catalog")?;
         Ok(SeedRecovery {
@@ -149,18 +153,28 @@ impl PullTransport for Transport<'_> {
             if self.fail_on == Some(call) {
                 return Err("temporary transport interruption");
             }
-            Ok(requests.iter().rev().map(|request| {
-                let outcome = match self.mode.get() {
-                    Mode::Unavailable => ReplyOutcome::Unavailable,
-                    Mode::Healthy => {
-                        let fixture = self.catalog.fixtures.iter()
-                            .find(|fixture| fixture.encoding.object_id() == request.object_id)
-                            .unwrap();
-                        ReplyOutcome::Record(fixture.records[request.esi as usize].clone())
+            Ok(requests
+                .iter()
+                .rev()
+                .map(|request| {
+                    let outcome = match self.mode.get() {
+                        Mode::Unavailable => ReplyOutcome::Unavailable,
+                        Mode::Healthy => {
+                            let fixture = self
+                                .catalog
+                                .fixtures
+                                .iter()
+                                .find(|fixture| fixture.encoding.object_id() == request.object_id)
+                                .unwrap();
+                            ReplyOutcome::Record(fixture.records[request.esi as usize].clone())
+                        }
+                    };
+                    PullReply {
+                        request: *request,
+                        outcome,
                     }
-                };
-                PullReply { request: *request, outcome }
-            }).collect())
+                })
+                .collect())
         }
     }
 }
@@ -169,8 +183,10 @@ fn assert_unique_coordinates(windows: &Windows) {
     let windows = windows.borrow();
     let mut coordinates = BTreeSet::new();
     for request in windows.iter().flatten() {
-        assert!(coordinates.insert((request.object_id, request.esi)),
-            "a retry reset an ESI stream and requested the same equation twice");
+        assert!(
+            coordinates.insert((request.object_id, request.esi)),
+            "a retry reset an ESI stream and requested the same equation twice"
+        );
     }
 }
 
@@ -182,13 +198,21 @@ fn cancelled_seed_recovery_resumes_the_pinned_pull() {
     let windows = Rc::clone(&transport.windows);
     let mut verification = Vec::new();
     let mut source = BondedSeedSource::new(
-        support::namespace(), &catalog, &mut transport, &mut verification, 8,
+        support::namespace(),
+        &catalog,
+        &mut transport,
+        &mut verification,
+        8,
     );
     cancel_pending(source.recover(catalog.spec(0)));
     assert_eq!(windows.borrow().len(), 2);
     let object = immediate(source.recover(catalog.spec(0))).unwrap();
     assert_eq!(object.plaintext(), catalog.fixtures[0].plaintext);
-    assert_eq!(catalog.lookups.get(), 1, "retries must retain the catalog binding");
+    assert_eq!(
+        catalog.lookups.get(),
+        1,
+        "retries must retain the catalog binding"
+    );
     assert_unique_coordinates(&windows);
 }
 
@@ -200,10 +224,16 @@ fn transport_failure_preserves_authenticated_contributions() {
     let windows = Rc::clone(&transport.windows);
     let mut verification = Vec::new();
     let mut source = BondedSeedSource::new(
-        support::namespace(), &catalog, &mut transport, &mut verification, 8,
+        support::namespace(),
+        &catalog,
+        &mut transport,
+        &mut verification,
+        8,
     );
-    assert!(matches!(immediate(source.recover(catalog.spec(0))),
-        Err(SeedAcquireError::Pull(PullDriveError::Transport(_)))));
+    assert!(matches!(
+        immediate(source.recover(catalog.spec(0))),
+        Err(SeedAcquireError::Pull(PullDriveError::Transport(_)))
+    ));
     let object = immediate(source.recover(catalog.spec(0))).unwrap();
     assert_eq!(object.plaintext(), catalog.fixtures[0].plaintext);
     assert_eq!(catalog.lookups.get(), 1);
@@ -219,14 +249,25 @@ fn retry_cannot_reset_the_request_budget() {
     let windows = Rc::clone(&transport.windows);
     let mut verification = Vec::new();
     let mut source = BondedSeedSource::new(
-        support::namespace(), &catalog, &mut transport, &mut verification, 8,
+        support::namespace(),
+        &catalog,
+        &mut transport,
+        &mut verification,
+        8,
     );
     cancel_pending(source.recover(catalog.spec(0)));
     for _ in 0..2 {
-        assert!(matches!(immediate(source.recover(catalog.spec(0))),
-            Err(SeedAcquireError::Pull(PullDriveError::Pull(PullError::RequestBudget)))));
+        assert!(matches!(
+            immediate(source.recover(catalog.spec(0))),
+            Err(SeedAcquireError::Pull(PullDriveError::Pull(
+                PullError::RequestBudget
+            )))
+        ));
     }
-    assert_eq!(windows.borrow().iter().map(Vec::len).sum::<usize>(), catalog.fixtures[0].sources);
+    assert_eq!(
+        windows.borrow().iter().map(Vec::len).sum::<usize>(),
+        catalog.fixtures[0].sources
+    );
     assert_eq!(catalog.lookups.get(), 1);
     assert_unique_coordinates(&windows);
 }
@@ -240,19 +281,37 @@ fn failed_donors_stay_quarantined_until_authenticated_reconnection() {
     let windows = Rc::clone(&transport.windows);
     let mut verification = Vec::new();
     let mut source = BondedSeedSource::new(
-        support::namespace(), &catalog, &mut transport, &mut verification, 8,
+        support::namespace(),
+        &catalog,
+        &mut transport,
+        &mut verification,
+        8,
     );
-    assert!(matches!(immediate(source.recover(catalog.spec(0))),
-        Err(SeedAcquireError::Pull(PullDriveError::Pull(PullError::NoAvailableDonor)))));
+    assert!(matches!(
+        immediate(source.recover(catalog.spec(0))),
+        Err(SeedAcquireError::Pull(PullDriveError::Pull(
+            PullError::NoAvailableDonor
+        )))
+    ));
     mode.set(Mode::Healthy);
-    assert!(matches!(immediate(source.recover(catalog.spec(0))),
-        Err(SeedAcquireError::Pull(PullDriveError::Pull(PullError::NoAvailableDonor)))));
+    assert!(matches!(
+        immediate(source.recover(catalog.spec(0))),
+        Err(SeedAcquireError::Pull(PullDriveError::Pull(
+            PullError::NoAvailableDonor
+        )))
+    ));
     assert_eq!(windows.borrow().len(), 1);
     source.donor_available(DonorId(1)).unwrap();
     let object = immediate(source.recover(catalog.spec(0))).unwrap();
     assert_eq!(object.plaintext(), catalog.fixtures[0].plaintext);
-    assert!(windows.borrow().iter().skip(1).flatten()
-        .all(|request| request.donor == DonorId(1)));
+    assert!(
+        windows
+            .borrow()
+            .iter()
+            .skip(1)
+            .flatten()
+            .all(|request| request.donor == DonorId(1))
+    );
     assert_eq!(catalog.lookups.get(), 1);
     assert_unique_coordinates(&windows);
 }
@@ -265,7 +324,11 @@ fn active_target_cannot_be_replaced_without_explicit_abandonment() {
     let windows = Rc::clone(&transport.windows);
     let mut verification = Vec::new();
     let mut source = BondedSeedSource::new(
-        support::namespace(), &catalog, &mut transport, &mut verification, 8,
+        support::namespace(),
+        &catalog,
+        &mut transport,
+        &mut verification,
+        8,
     );
     let original = catalog.spec(0);
     cancel_pending(source.recover(original));
@@ -274,8 +337,10 @@ fn active_target_cannot_be_replaced_without_explicit_abandonment() {
     let mut wrong_length = original;
     wrong_length.compressed_len += 1;
     for replacement in [catalog.spec(1), wrong_kind, wrong_length] {
-        assert!(matches!(immediate(source.recover(replacement)),
-            Err(SeedAcquireError::RecoveryInProgress)));
+        assert!(matches!(
+            immediate(source.recover(replacement)),
+            Err(SeedAcquireError::RecoveryInProgress)
+        ));
     }
     assert_eq!(windows.borrow().len(), 2);
     assert_eq!(catalog.lookups.get(), 1);
@@ -291,7 +356,11 @@ fn successful_recovery_releases_the_slot_for_the_next_inventory_object() {
     let mut transport = Transport::new(&catalog);
     let mut verification = Vec::new();
     let mut source = BondedSeedSource::new(
-        support::namespace(), &catalog, &mut transport, &mut verification, 8,
+        support::namespace(),
+        &catalog,
+        &mut transport,
+        &mut verification,
+        8,
     );
     for index in 0..catalog.fixtures.len() {
         let object = immediate(source.recover(catalog.spec(index))).unwrap();
@@ -307,10 +376,16 @@ fn invalid_window_is_rejected_before_catalog_lookup_or_transport() {
     let windows = Rc::clone(&transport.windows);
     let mut verification = Vec::new();
     let mut source = BondedSeedSource::new(
-        support::namespace(), &catalog, &mut transport, &mut verification, 0,
+        support::namespace(),
+        &catalog,
+        &mut transport,
+        &mut verification,
+        0,
     );
-    assert!(matches!(immediate(source.recover(catalog.spec(0))),
-        Err(SeedAcquireError::Pull(PullDriveError::InvalidWindow))));
+    assert!(matches!(
+        immediate(source.recover(catalog.spec(0))),
+        Err(SeedAcquireError::Pull(PullDriveError::InvalidWindow))
+    ));
     assert_eq!(catalog.lookups.get(), 0);
     assert!(windows.borrow().is_empty());
 }
@@ -323,7 +398,11 @@ fn oversized_window_succeeds_with_exactly_enough_authentication_budget() {
     let windows = Rc::clone(&transport.windows);
     let mut verification = Vec::new();
     let mut source = BondedSeedSource::new(
-        support::namespace(), &catalog, &mut transport, &mut verification, 64,
+        support::namespace(),
+        &catalog,
+        &mut transport,
+        &mut verification,
+        64,
     );
     let object = immediate(source.recover(catalog.spec(0))).unwrap();
     assert_eq!(object.plaintext(), catalog.fixtures[0].plaintext);
@@ -338,9 +417,8 @@ fn overlapping_windows_reserve_and_release_verification_capacity() {
         max_verifications: fixture.sources as u64,
         ..PullLimits::default()
     };
-    let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &DONORS, limits,
-    ).unwrap();
+    let mut pull =
+        BondedPull::new(&fixture.encoding, fixture.target(), &DEK, &DONORS, limits).unwrap();
     let first = pull.schedule(8).unwrap();
     let second = pull.schedule(64).unwrap();
     assert_eq!(first.len() + second.len(), fixture.sources);
@@ -396,8 +474,14 @@ impl SeedPublisher<u64> for Publisher {
             assert!(self.durable.contains(&object.object_id));
         }
         let anchor = snapshot.seed().plan().anchor();
-        assert_eq!(snapshot.consensus().snapshot().unwrap().index(), anchor.raft_index);
-        assert_eq!(snapshot.consensus().snapshot().unwrap().state_root(), anchor.state_root.0);
+        assert_eq!(
+            snapshot.consensus().snapshot().unwrap().index(),
+            anchor.raft_index
+        );
+        assert_eq!(
+            snapshot.consensus().snapshot().unwrap().state_root(),
+            anchor.state_root.0
+        );
         let evidence = RootPublicationEvidence {
             written_index: 1,
             slot_generation: anchor.publication_generation,
@@ -421,13 +505,20 @@ impl SeedPublisher<u64> for Publisher {
 
 fn snapshot_offer(catalog: &Catalog) -> (Raft<u64>, SnapshotTransfer, SeedPlan) {
     let config = Configuration::stable(
-        Domain([21; 32]), [22; 32], [MemberId(1), MemberId(2), MemberId(3)], [],
-    ).unwrap();
-    let roots: Vec<_> = catalog.fixtures.iter()
-        .map(|fixture| fixture.encoding.object_id()).collect();
-    let cut = SnapshotCut::from_authenticated_parts(
-        &config, roots[0].0, roots[1].0, roots[2].0, 12, 3,
-    ).unwrap();
+        Domain([21; 32]),
+        [22; 32],
+        [MemberId(1), MemberId(2), MemberId(3)],
+        [],
+    )
+    .unwrap();
+    let roots: Vec<_> = catalog
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.encoding.object_id())
+        .collect();
+    let cut =
+        SnapshotCut::from_authenticated_parts(&config, roots[0].0, roots[1].0, roots[2].0, 12, 3)
+            .unwrap();
     let anchor = SeedAnchor {
         namespace: support::namespace(),
         consensus_domain: config.domain().0,
@@ -444,20 +535,33 @@ fn snapshot_offer(catalog: &Catalog) -> (Raft<u64>, SnapshotTransfer, SeedPlan) 
     };
     // Synthetic authenticated inventory for this state-machine test only.
     let plan = SeedPlan::from_authenticated_inventory(
-        anchor, (0..catalog.fixtures.len()).map(|index| catalog.spec(index)), SeedLimits::default(),
-    ).unwrap();
+        anchor,
+        (0..catalog.fixtures.len()).map(|index| catalog.spec(index)),
+        SeedLimits::default(),
+    )
+    .unwrap();
     let mut raft = Raft::new(MemberId(2), config.clone(), Limits::default()).unwrap();
-    let pending = raft.step(Event::Receive(Envelope {
-        domain: config.domain(),
-        configuration: config.identity(),
-        from: MemberId(1),
-        to: MemberId(2),
-        message: Message::InstallSnapshot { term: 3, request: 1, snapshot: cut },
-    })).unwrap();
+    let pending = raft
+        .step(Event::Receive(Envelope {
+            domain: config.domain(),
+            configuration: config.identity(),
+            from: MemberId(1),
+            to: MemberId(2),
+            message: Message::InstallSnapshot {
+                term: 3,
+                request: 1,
+                snapshot: cut,
+            },
+        }))
+        .unwrap();
     let id = pending.id();
     // The offer's durability acknowledgement is modeled in memory here.
     let output = raft.persisted(id).unwrap();
-    (raft, output.snapshot_transfers.into_iter().next().unwrap(), plan)
+    (
+        raft,
+        output.snapshot_transfers.into_iter().next().unwrap(),
+        plan,
+    )
 }
 
 #[test]
@@ -465,13 +569,16 @@ fn interrupted_object_publication_resumes_staging_and_keeps_the_durable_prefix()
     for cancel in [false, true] {
         let catalog = Catalog::snapshot();
         let (mut raft, transfer, plan) = snapshot_offer(&catalog);
-        let mut catchup = SnapshotCatchup::begin(
-            &mut raft, support::namespace(), transfer, plan,
-        ).unwrap();
+        let mut catchup =
+            SnapshotCatchup::begin(&mut raft, support::namespace(), transfer, plan).unwrap();
         let mut transport = Transport::new(&catalog);
         let mut verification = Vec::new();
         let mut source = BondedSeedSource::new(
-            support::namespace(), &catalog, &mut transport, &mut verification, 8,
+            support::namespace(),
+            &catalog,
+            &mut transport,
+            &mut verification,
+            8,
         );
         let mut publisher = Publisher {
             suspend_object_on: cancel.then_some(2),
@@ -481,8 +588,10 @@ fn interrupted_object_publication_resumes_staging_and_keeps_the_durable_prefix()
         if cancel {
             cancel_pending(resume_snapshot(&mut catchup, &mut source, &mut publisher));
         } else {
-            assert!(matches!(immediate(resume_snapshot(&mut catchup, &mut source, &mut publisher)),
-                Err(SeedDriveError::Publication(_))));
+            assert!(matches!(
+                immediate(resume_snapshot(&mut catchup, &mut source, &mut publisher)),
+                Err(SeedDriveError::Publication(_))
+            ));
         }
         assert_eq!(catchup.phase(), CatchupPhase::Transferring);
         assert_eq!(catchup.published_count(), 1);
@@ -492,9 +601,16 @@ fn interrupted_object_publication_resumes_staging_and_keeps_the_durable_prefix()
         let output = immediate(resume_snapshot(&mut catchup, &mut source, &mut publisher)).unwrap();
         assert_eq!(catchup.phase(), CatchupPhase::Complete);
         assert_eq!(catchup.published_count(), 4);
-        assert_eq!(catalog.lookups.get(), 4, "staged objects must not be fetched again");
+        assert_eq!(
+            catalog.lookups.get(),
+            4,
+            "staged objects must not be fetched again"
+        );
         assert_eq!(publisher.attempts.len(), 5);
-        assert_eq!(publisher.attempts[2].0, staged, "retry must use the same publication identity");
+        assert_eq!(
+            publisher.attempts[2].0, staged,
+            "retry must use the same publication identity"
+        );
         assert_eq!(publisher.durable.len(), 4);
         assert_eq!(output.installed_snapshot.unwrap().index(), 12);
         drop(catchup);
@@ -507,13 +623,16 @@ fn interrupted_root_publication_fences_even_a_caller_owned_session() {
     for cancel in [false, true] {
         let catalog = Catalog::snapshot();
         let (mut raft, transfer, plan) = snapshot_offer(&catalog);
-        let mut catchup = SnapshotCatchup::begin(
-            &mut raft, support::namespace(), transfer, plan,
-        ).unwrap();
+        let mut catchup =
+            SnapshotCatchup::begin(&mut raft, support::namespace(), transfer, plan).unwrap();
         let mut transport = Transport::new(&catalog);
         let mut verification = Vec::new();
         let mut source = BondedSeedSource::new(
-            support::namespace(), &catalog, &mut transport, &mut verification, 8,
+            support::namespace(),
+            &catalog,
+            &mut transport,
+            &mut verification,
+            8,
         );
         let mut publisher = Publisher {
             suspend_root: cancel,
@@ -523,13 +642,17 @@ fn interrupted_root_publication_fences_even_a_caller_owned_session() {
         if cancel {
             cancel_pending(resume_snapshot(&mut catchup, &mut source, &mut publisher));
         } else {
-            assert!(matches!(immediate(resume_snapshot(&mut catchup, &mut source, &mut publisher)),
-                Err(SeedDriveError::Publication(_))));
+            assert!(matches!(
+                immediate(resume_snapshot(&mut catchup, &mut source, &mut publisher)),
+                Err(SeedDriveError::Publication(_))
+            ));
         }
         assert_eq!(catchup.phase(), CatchupPhase::Failed);
         assert!(publisher.consensus.is_some());
-        assert!(matches!(immediate(resume_snapshot(&mut catchup, &mut source, &mut publisher)),
-            Err(SeedDriveError::Catchup(CatchupError::WrongPhase))));
+        assert!(matches!(
+            immediate(resume_snapshot(&mut catchup, &mut source, &mut publisher)),
+            Err(SeedDriveError::Catchup(CatchupError::WrongPhase))
+        ));
         assert_eq!(catalog.lookups.get(), 4);
         drop(catchup);
         assert_eq!(raft.role(), Err(RaftError::RecoveryRequired));

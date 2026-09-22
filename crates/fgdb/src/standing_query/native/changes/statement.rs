@@ -14,7 +14,9 @@ pub enum SubscribeError {
 impl core::fmt::Display for SubscribeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::ExpectedKeyword(keyword) => write!(f, "expected {keyword} in subscription header"),
+            Self::ExpectedKeyword(keyword) => {
+                write!(f, "expected {keyword} in subscription header")
+            }
             Self::EmptyQuery => f.write_str("SUBSCRIBE TO requires a native query"),
             Self::UnterminatedComment => f.write_str("unterminated subscription header comment"),
             Self::Subscription(error) => error.fmt(f),
@@ -68,9 +70,9 @@ impl<V: Vfs + Clone> Database<V> {
         let mut remaining = policy.evaluator.max_work_units;
         let query = subscription_query(statement, &mut || {
             cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
-            remaining = remaining.checked_sub(1).ok_or_else(|| {
-                StandingQueryError::Delivery(StandingQueryFailure::WorkBudget)
-            })?;
+            remaining = remaining
+                .checked_sub(1)
+                .ok_or_else(|| StandingQueryError::Delivery(StandingQueryFailure::WorkBudget))?;
             Ok(())
         })?;
         let first = self.standing_queries.len();
@@ -247,15 +249,28 @@ mod tests {
                 "RETURN '/* literal */' AS s; -- tail",
             ),
         ] {
-            assert_eq!(subscription_query(statement, &mut || Ok(())).unwrap(), expected);
+            assert_eq!(
+                subscription_query(statement, &mut || Ok(())).unwrap(),
+                expected
+            );
         }
         for statement in [
-            "", "SUBSCRIBETO RETURN 1", "SUBSCRIBE2 TO RETURN 1",
-            "SUBSCRIBE_TO RETURN 1", "SUBSCRIBE TOGETHER RETURN 1",
-            "SUBSCRIBE", "SUBSCRIBE TO", "SUBSCRIBE TO -- only comment",
-            "SUBSCRIBE /* unclosed", "/* λ", "ΣUBSCRIBE TO RETURN 1",
+            "",
+            "SUBSCRIBETO RETURN 1",
+            "SUBSCRIBE2 TO RETURN 1",
+            "SUBSCRIBE_TO RETURN 1",
+            "SUBSCRIBE TOGETHER RETURN 1",
+            "SUBSCRIBE",
+            "SUBSCRIBE TO",
+            "SUBSCRIBE TO -- only comment",
+            "SUBSCRIBE /* unclosed",
+            "/* λ",
+            "ΣUBSCRIBE TO RETURN 1",
         ] {
-            assert!(subscription_query(statement, &mut || Ok(())).is_err(), "{statement}");
+            assert!(
+                subscription_query(statement, &mut || Ok(())).is_err(),
+                "{statement}"
+            );
         }
     }
 
@@ -263,12 +278,23 @@ mod tests {
     fn every_header_checkpoint_refuses_without_changing_the_input() {
         let input = "/* α /* nested */ */SUBSCRIBE-- line\n TO RETURN 1 AS x";
         let mut count = 0;
-        assert_eq!(subscription_query(input, &mut || { count += 1; Ok(()) }).unwrap(), "RETURN 1 AS x");
+        assert_eq!(
+            subscription_query(input, &mut || {
+                count += 1;
+                Ok(())
+            })
+            .unwrap(),
+            "RETURN 1 AS x"
+        );
         for stop in 1..=count {
             let mut seen = 0;
             let result = subscription_query(input, &mut || {
                 seen += 1;
-                if seen == stop { Err(SubscribeError::EmptyQuery) } else { Ok(()) }
+                if seen == stop {
+                    Err(SubscribeError::EmptyQuery)
+                } else {
+                    Ok(())
+                }
             });
             assert!(matches!(result, Err(SubscribeError::EmptyQuery)));
             assert_eq!(seen, stop);
@@ -295,9 +321,15 @@ mod tests {
             let mut consumers = Vec::new();
             let mut bags = Vec::new();
             for text in texts {
-                let mut sub = db.subscribe_native(
-                    &cx, &format!("SUBSCRIBE TO {text}"), &params, resolve, policy(),
-                ).unwrap();
+                let mut sub = db
+                    .subscribe_native(
+                        &cx,
+                        &format!("SUBSCRIBE TO {text}"),
+                        &params,
+                        resolve,
+                        policy(),
+                    )
+                    .unwrap();
                 let frame = sub.poll(&db, &cx, policy()).unwrap().unwrap();
                 assert!(frame.is_snapshot());
                 assert_eq!(frame.frontier(), first);
@@ -312,9 +344,17 @@ mod tests {
                 let mut batch = WriteBatch::new(RelationId(1));
                 if tick == 0 {
                     batch.delete_vertex(VId(1));
-                    batch.set_vertex_property(VId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(2)));
+                    batch.set_vertex_property(
+                        VId(3),
+                        PropertyKeyId(1),
+                        Some(CanonicalScalar::Int(2)),
+                    );
                 } else {
-                    batch.set_vertex_property(VId(2), PropertyKeyId(99), Some(CanonicalScalar::Int(1)));
+                    batch.set_vertex_property(
+                        VId(2),
+                        PropertyKeyId(99),
+                        Some(CanonicalScalar::Int(1)),
+                    );
                 }
                 let at = db.write(&commit, batch).await.unwrap();
                 for (index, sub) in consumers.iter_mut().enumerate() {
@@ -322,12 +362,25 @@ mod tests {
                     let frame = sub.poll(&db, &cx, policy()).unwrap().unwrap();
                     assert_eq!(frame.from(), Some(from));
                     assert_eq!(frame.frontier(), at);
-                    let replay = sub.poll(&db, &cx, GqlQueryPolicy::new(0, 0, 0, 0)).unwrap().unwrap();
+                    let replay = sub
+                        .poll(&db, &cx, GqlQueryPolicy::new(0, 0, 0, 0))
+                        .unwrap()
+                        .unwrap();
                     assert!(Arc::ptr_eq(&frame, &replay));
                     assert_eq!(sub.acknowledged_frontier(), Some(from));
-                    if tick == 1 { assert!(frame.rows().is_empty()); }
-                    bags[index].integrate(frame.rows(), LIMBS, &mut |_| Ok::<_, ()>(())).unwrap();
-                    assert_eq!(bags[index], result_bag(db.query(&cx, texts[index], &params, resolve, policy()).unwrap()));
+                    if tick == 1 {
+                        assert!(frame.rows().is_empty());
+                    }
+                    bags[index]
+                        .integrate(frame.rows(), LIMBS, &mut |_| Ok::<_, ()>(()))
+                        .unwrap();
+                    assert_eq!(
+                        bags[index],
+                        result_bag(
+                            db.query(&cx, texts[index], &params, resolve, policy())
+                                .unwrap()
+                        )
+                    );
                     sub.acknowledge(frame.receipt()).unwrap();
                     assert!(sub.poll(&db, &cx, policy()).unwrap().is_none());
                 }
@@ -345,12 +398,20 @@ mod tests {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let first = db.write(&commit, seed()).await.unwrap();
             let params = GqlParameters::new();
-            let mut sub = db.subscribe_native(
-                &cx, "SUBSCRIBE TO MATCH (n) RETURN n.p AS p", &params, resolve, policy(),
-            ).unwrap();
+            let mut sub = db
+                .subscribe_native(
+                    &cx,
+                    "SUBSCRIBE TO MATCH (n) RETURN n.p AS p",
+                    &params,
+                    resolve,
+                    policy(),
+                )
+                .unwrap();
             assert!(matches!(
                 sub.poll(&db, &cx, GqlQueryPolicy::new(0, 0, 100_000, 100_000)),
-                Err(SubscriptionError::Query(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget)))
+                Err(SubscriptionError::Query(StandingQueryError::Delivery(
+                    StandingQueryFailure::ResultBudget
+                )))
             ));
             assert_eq!(sub.acknowledged_frontier(), None);
             let initial = sub.poll(&db, &cx, policy()).unwrap().unwrap();
@@ -364,24 +425,40 @@ mod tests {
             sub.acknowledge(initial.receipt()).unwrap();
             assert!(matches!(
                 sub.poll(&db, &cx, policy()),
-                Err(SubscriptionError::Query(StandingQueryError::DeltaUnavailable { .. }))
+                Err(SubscriptionError::Query(
+                    StandingQueryError::DeltaUnavailable { .. }
+                ))
             ));
             assert_eq!(sub.acknowledged_frontier(), Some(first));
             sub.restart_from_current().unwrap();
             let replacement = sub.poll(&db, &cx, policy()).unwrap().unwrap();
             assert!(replacement.is_snapshot());
             assert_eq!(replacement.frontier(), db.frontier().unwrap());
-            assert_eq!(replacement.rows(), &db.standing_native_bag(&cx, sub.handle(), policy()).unwrap().1);
-            assert!(matches!(sub.acknowledge(initial.receipt()), Err(SubscriptionError::InvalidReceipt)));
+            assert_eq!(
+                replacement.rows(),
+                &db.standing_native_bag(&cx, sub.handle(), policy())
+                    .unwrap()
+                    .1
+            );
+            assert!(matches!(
+                sub.acknowledge(initial.receipt()),
+                Err(SubscriptionError::InvalidReceipt)
+            ));
             let foreign = Database::open_memory(&commit, keys()).await.unwrap();
             assert!(matches!(
                 sub.poll(&foreign, &cx, policy()),
                 Err(SubscriptionError::Query(StandingQueryError::ForeignHandle))
             ));
-            assert!(Arc::ptr_eq(&replacement, &sub.poll(&db, &cx, policy()).unwrap().unwrap()));
+            assert!(Arc::ptr_eq(
+                &replacement,
+                &sub.poll(&db, &cx, policy()).unwrap().unwrap()
+            ));
             sub.acknowledge(replacement.receipt()).unwrap();
             sub.close();
-            assert!(matches!(sub.poll(&db, &cx, policy()), Err(SubscriptionError::Closed)));
+            assert!(matches!(
+                sub.poll(&db, &cx, policy()),
+                Err(SubscriptionError::Closed)
+            ));
             assert!(db.standing_native_bag(&cx, sub.handle(), policy()).is_ok());
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -396,16 +473,28 @@ mod tests {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             db.write(&commit, seed()).await.unwrap();
             let params = GqlParameters::new();
-            let template = PreparedNativeRead::prepare("MATCH (n) RETURN n.p AS p", &params, resolve).unwrap();
+            let template =
+                PreparedNativeRead::prepare("MATCH (n) RETURN n.p AS p", &params, resolve).unwrap();
             let mut existing = template.subscribe(&mut db, &cx, &params, policy()).unwrap();
             let count = db.standing_queries.len();
-            for text in ["", "SUBSCRIBE TO", "SUBSCRIBE /* unclosed", "SUBSCRIBE TO NOT_A_QUERY"] {
-                assert!(db.subscribe_native(&cx, text, &params, resolve, policy()).is_err());
+            for text in [
+                "",
+                "SUBSCRIBE TO",
+                "SUBSCRIBE /* unclosed",
+                "SUBSCRIBE TO NOT_A_QUERY",
+            ] {
+                assert!(
+                    db.subscribe_native(&cx, text, &params, resolve, policy())
+                        .is_err()
+                );
                 assert_eq!(db.standing_queries.len(), count);
             }
             assert!(matches!(
                 db.subscribe_native(
-                    &cx, "SUBSCRIBE TO RETURN 1 AS v", &params, resolve,
+                    &cx,
+                    "SUBSCRIBE TO RETURN 1 AS v",
+                    &params,
+                    resolve,
                     GqlQueryPolicy::new(0, 0, 0, 0),
                 ),
                 Err(SubscribeError::Subscription(SubscriptionError::Query(
@@ -428,27 +517,42 @@ mod tests {
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let first = db.write(&commit, seed()).await.unwrap();
             let params = GqlParameters::new();
-            let mut sub = db.subscribe_native(
-                &cx, "SUBSCRIBE TO MATCH (n) RETURN SUM(n.p) AS s", &params, resolve, policy(),
-            ).unwrap();
+            let mut sub = db
+                .subscribe_native(
+                    &cx,
+                    "SUBSCRIBE TO MATCH (n) RETURN SUM(n.p) AS s",
+                    &params,
+                    resolve,
+                    policy(),
+                )
+                .unwrap();
             let baseline = sub.poll(&db, &cx, policy()).unwrap().unwrap();
             sub.acknowledge(baseline.receipt()).unwrap();
             let mut invalid = WriteBatch::new(RelationId(1));
-            invalid.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Bool(true)));
+            invalid.set_vertex_property(
+                VId(1),
+                PropertyKeyId(1),
+                Some(CanonicalScalar::Bool(true)),
+            );
             let at = db.write(&commit, invalid).await.unwrap();
             assert_eq!(db.frontier().unwrap(), at);
             assert!(matches!(
                 sub.poll(&db, &cx, policy()),
-                Err(SubscriptionError::Query(StandingQueryError::Unavailable { .. }))
+                Err(SubscriptionError::Query(
+                    StandingQueryError::Unavailable { .. }
+                ))
             ));
             assert_eq!(sub.acknowledged_frontier(), Some(first));
             let mut repair = WriteBatch::new(RelationId(1));
             repair.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(3)));
             db.write(&commit, repair).await.unwrap();
-            db.rebuild_standing_query(&cx, sub.handle(), policy()).unwrap();
+            db.rebuild_standing_query(&cx, sub.handle(), policy())
+                .unwrap();
             assert!(matches!(
                 sub.poll(&db, &cx, policy()),
-                Err(SubscriptionError::Query(StandingQueryError::DeltaUnavailable { .. }))
+                Err(SubscriptionError::Query(
+                    StandingQueryError::DeltaUnavailable { .. }
+                ))
             ));
             sub.restart_from_current().unwrap();
             assert!(sub.poll(&db, &cx, policy()).unwrap().unwrap().is_snapshot());

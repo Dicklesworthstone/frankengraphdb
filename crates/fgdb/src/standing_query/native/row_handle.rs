@@ -36,18 +36,38 @@ impl<V: Vfs + Clone> Database<V> {
         let names = sets::columns(source).ok_or(StandingQueryError::Unsupported)?;
         sets::rows(source).ok_or(StandingQueryError::Unsupported)?;
         cx.with_restriction(|| {
-            let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-            meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Delivery)?;
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            meter
+                .charge(ZSetEvent::ScratchEntry)
+                .map_err(StandingQueryError::Delivery)?;
             let mut columns = Vec::new();
             for name in names {
-                meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Delivery)?;
-                let units = name.len().div_ceil(64).checked_add(1)
-                    .ok_or(StandingQueryError::Delivery(StandingQueryFailure::ScratchBudget))?;
-                meter.units(ZSetEvent::ScratchEntry, units).map_err(StandingQueryError::Delivery)?;
+                meter
+                    .charge(ZSetEvent::Work)
+                    .map_err(StandingQueryError::Delivery)?;
+                let units =
+                    name.len()
+                        .div_ceil(64)
+                        .checked_add(1)
+                        .ok_or(StandingQueryError::Delivery(
+                            StandingQueryFailure::ScratchBudget,
+                        ))?;
+                meter
+                    .units(ZSetEvent::ScratchEntry, units)
+                    .map_err(StandingQueryError::Delivery)?;
                 columns.push(name.clone());
             }
-            meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Delivery)?;
+            meter
+                .charge(ZSetEvent::ScratchEntry)
+                .map_err(StandingQueryError::Delivery)?;
             let layout = Arc::new(Layout::Rows { columns });
             (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
             let mut alias = handle.clone();
@@ -62,8 +82,8 @@ mod tests {
     use super::*;
     use crate::{DatabaseKeys, WriteBatch};
     use asupersync::lab::run_async_under_lab;
-    use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts};
     use fgdb_gql::{GraphSetOperand, GraphSetPredicateOp, GraphSymbol, GraphSymbolKind};
+    use fgdb_types::{DatabaseSecurityNamespaceId, EId, PurposeContexts};
 
     fn policy() -> GqlQueryPolicy {
         GqlQueryPolicy::new(10000, 10000, 1_000_000, 1_000_000)
@@ -79,7 +99,9 @@ mod tests {
     }
 
     fn native_agreement<V: Vfs + Clone>(
-        db: &Database<V>, cx: &QueryCx, handle: &StandingQueryHandle,
+        db: &Database<V>,
+        cx: &QueryCx,
+        handle: &StandingQueryHandle,
     ) {
         let (at, result) = db.standing_native_query(cx, handle, policy()).unwrap();
         let QueryResult::Rows { columns, rows } = result else {
@@ -91,8 +113,10 @@ mod tests {
         assert_eq!(cursor.collect::<Result<Vec<_>, _>>().unwrap(), rows);
         let bag = ZSet::from_updates(
             rows.into_iter().map(|row| (row, ZWeight::ONE)),
-            fgdb_delta_types::LimbLimit::new(4), &mut |_| Ok::<_, ()>(()),
-        ).unwrap();
+            fgdb_delta_types::LimbLimit::new(4),
+            &mut |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
         let (bag_at, expected) = db.standing_native_bag(cx, handle, policy()).unwrap();
         assert_eq!(bag_at, at);
         assert_eq!(bag, expected);
@@ -106,17 +130,31 @@ mod tests {
             let commit = contexts.commit();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
             let mut seed = WriteBatch::new(RelationId(1));
-            for id in 1..=3 { seed.create_vertex(VId(id), vec![], vec![]); }
+            for id in 1..=3 {
+                seed.create_vertex(VId(id), vec![], vec![]);
+            }
             seed.add_edge(EId(1), VId(1), VId(2), vec![]);
             seed.add_edge(EId(2), VId(2), VId(3), vec![]);
             db.write(&commit, seed).await.unwrap();
             let params = GqlParameters::new();
-            let source = db.register_standing_native(&cx, "MATCH (a)-[:R]->(b) RETURN a,b",
-                &params, symbols, policy()).unwrap();
-            let closure = db.register_standing_closure(&cx, &source, [0, 1], policy()).unwrap();
-            let vertices = db.register_standing_native(&cx, "MATCH (n) RETURN n",
-                &params, symbols, policy()).unwrap();
-            let joined = db.register_standing_join(&cx, &closure, &vertices, &[(1, 0)], policy()).unwrap();
+            let source = db
+                .register_standing_native(
+                    &cx,
+                    "MATCH (a)-[:R]->(b) RETURN a,b",
+                    &params,
+                    symbols,
+                    policy(),
+                )
+                .unwrap();
+            let closure = db
+                .register_standing_closure(&cx, &source, [0, 1], policy())
+                .unwrap();
+            let vertices = db
+                .register_standing_native(&cx, "MATCH (n) RETURN n", &params, symbols, policy())
+                .unwrap();
+            let joined = db
+                .register_standing_join(&cx, &closure, &vertices, &[(1, 0)], policy())
+                .unwrap();
             assert!(joined.native.is_none());
             let before = db.standing_queries.len();
             let native = db.standing_native_handle(&cx, &joined, policy()).unwrap();
@@ -127,19 +165,33 @@ mod tests {
             native_agreement(&db, &cx, &closure);
             native_agreement(&db, &cx, &native);
             let mut sub = db.open_standing_subscription(&cx, &native).unwrap();
-            sub.enable_replay(&mut db, &cx, 4, 100, 10000, policy()).unwrap();
+            sub.enable_replay(&mut db, &cx, 4, 100, 10000, policy())
+                .unwrap();
             let baseline = sub.poll(&db, &cx, policy()).unwrap().unwrap();
-            let mut delivered = baseline.rows().checked_clone(fgdb_delta_types::LimbLimit::new(4),
-                &mut |_| Ok::<_, ()>(())).unwrap();
+            let mut delivered = baseline
+                .rows()
+                .checked_clone(
+                    fgdb_delta_types::LimbLimit::new(4),
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
             sub.acknowledge(baseline.receipt()).unwrap();
             let mut edit = WriteBatch::new(RelationId(1));
             edit.delete_edge(EId(2));
             let at = db.write(&commit, edit).await.unwrap();
             let delta = sub.poll(&db, &cx, policy()).unwrap().unwrap();
             assert_eq!(delta.frontier(), at);
-            delivered.integrate(delta.rows(), fgdb_delta_types::LimbLimit::new(4),
-                &mut |_| Ok::<_, ()>(())).unwrap();
-            assert_eq!(delivered, db.standing_native_bag(&cx, &native, policy()).unwrap().1);
+            delivered
+                .integrate(
+                    delta.rows(),
+                    fgdb_delta_types::LimbLimit::new(4),
+                    &mut |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
+            assert_eq!(
+                delivered,
+                db.standing_native_bag(&cx, &native, policy()).unwrap().1
+            );
             assert_eq!(delivered.len(), 1);
             native_agreement(&db, &cx, &closure);
             native_agreement(&db, &cx, &native);
@@ -154,13 +206,27 @@ mod tests {
             let cx = contexts.query();
             let commit = contexts.commit();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-            let original = db.register_standing_native(&cx,
-                "MATCH (a) RETURN a AS n UNION ALL MATCH (b) RETURN b AS n",
-                &GqlParameters::new(), symbols, policy()).unwrap();
-            assert!(matches!(original.native.as_deref(), Some(Layout::Circuit { .. })));
+            let original = db
+                .register_standing_native(
+                    &cx,
+                    "MATCH (a) RETURN a AS n UNION ALL MATCH (b) RETURN b AS n",
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
+                .unwrap();
+            assert!(matches!(
+                original.native.as_deref(),
+                Some(Layout::Circuit { .. })
+            ));
             let count = db.standing_queries.len();
-            let alias = db.standing_native_handle(&cx, &original, GqlQueryPolicy::new(0, 0, 0, 0)).unwrap();
-            assert!(Arc::ptr_eq(original.native.as_ref().unwrap(), alias.native.as_ref().unwrap()));
+            let alias = db
+                .standing_native_handle(&cx, &original, GqlQueryPolicy::new(0, 0, 0, 0))
+                .unwrap();
+            assert!(Arc::ptr_eq(
+                original.native.as_ref().unwrap(),
+                alias.native.as_ref().unwrap()
+            ));
             assert_eq!(db.standing_queries.len(), count);
             db.rebuild_standing_query(&cx, &alias, policy()).unwrap();
             assert_eq!(db.standing_queries.len(), count);
@@ -176,19 +242,37 @@ mod tests {
             let cx = contexts.query();
             let commit = contexts.commit();
             let mut db = Database::open_memory(&commit, keys()).await.unwrap();
-            let source = db.register_standing_native(&cx, "MATCH (n) RETURN n",
-                &GqlParameters::new(), symbols, policy()).unwrap();
-            let typed = db.register_standing_join(&cx, &source, &source, &[(0, 0)], policy()).unwrap();
+            let source = db
+                .register_standing_native(
+                    &cx,
+                    "MATCH (n) RETURN n",
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
+                .unwrap();
+            let typed = db
+                .register_standing_join(&cx, &source, &source, &[(0, 0)], policy())
+                .unwrap();
             let count = db.standing_queries.len();
-            for limited in [GqlQueryPolicy::new(0, 0, 0, 100), GqlQueryPolicy::new(0, 0, 100, 0)] {
-                assert!(matches!(db.standing_native_handle(&cx, &typed, limited), Err(StandingQueryError::Delivery(_))));
+            for limited in [
+                GqlQueryPolicy::new(0, 0, 0, 100),
+                GqlQueryPolicy::new(0, 0, 100, 0),
+            ] {
+                assert!(matches!(
+                    db.standing_native_handle(&cx, &typed, limited),
+                    Err(StandingQueryError::Delivery(_))
+                ));
                 assert!(typed.native.is_none());
                 assert_eq!(db.standing_queries.len(), count);
             }
             let alias = db.standing_native_handle(&cx, &typed, policy()).unwrap();
             assert!(db.standing_native_query(&cx, &alias, policy()).is_ok());
             let foreign = Database::open_memory(&commit, keys()).await.unwrap();
-            assert!(matches!(foreign.standing_native_handle(&cx, &alias, policy()), Err(StandingQueryError::ForeignHandle)));
+            assert!(matches!(
+                foreign.standing_native_handle(&cx, &alias, policy()),
+                Err(StandingQueryError::ForeignHandle)
+            ));
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
@@ -204,13 +288,26 @@ mod tests {
             seed.create_vertex(VId(1), vec![], vec![]);
             seed.create_vertex(VId(2), vec![], vec![]);
             let basis = db.write(&commit, seed).await.unwrap();
-            let source = db.register_standing_native(&cx, "MATCH (n) RETURN n",
-                &GqlParameters::new(), symbols, policy()).unwrap();
-            let filtered = db.register_standing_filter(&cx, &source, &[
-                GraphSetPredicateOp::IsNull {
-                    operand: GraphSetOperand::Column(0), is_null: false,
-                },
-            ], policy()).unwrap();
+            let source = db
+                .register_standing_native(
+                    &cx,
+                    "MATCH (n) RETURN n",
+                    &GqlParameters::new(),
+                    symbols,
+                    policy(),
+                )
+                .unwrap();
+            let filtered = db
+                .register_standing_filter(
+                    &cx,
+                    &source,
+                    &[GraphSetPredicateOp::IsNull {
+                        operand: GraphSetOperand::Column(0),
+                        is_null: false,
+                    }],
+                    policy(),
+                )
+                .unwrap();
             let native = db.standing_native_handle(&cx, &filtered, policy()).unwrap();
             native_agreement(&db, &cx, &native);
             let mut delivered = db.standing_native_bag(&cx, &native, policy()).unwrap().1;
@@ -218,17 +315,33 @@ mod tests {
             let mut edit = WriteBatch::new(RelationId(1));
             edit.create_vertex(VId(3), vec![], vec![]);
             let at = db.write(&commit, edit).await.unwrap();
-            let cursor = db.standing_native_delta_cursor(&cx, &native, basis, policy())
-                .unwrap().unwrap();
+            let cursor = db
+                .standing_native_delta_cursor(&cx, &native, basis, policy())
+                .unwrap()
+                .unwrap();
             assert_eq!(cursor.snapshot_seq(), at);
             let frames = cursor.collect::<Result<Vec<_>, _>>().unwrap();
-            let delta = ZSet::from_updates(frames, fgdb_delta_types::LimbLimit::new(4),
-                &mut |_| Ok::<_, ()>(())).unwrap();
-            assert_eq!(delta, db.standing_native_delta(&cx, &native, basis, policy()).unwrap().1);
-            delivered.integrate(&delta, fgdb_delta_types::LimbLimit::new(4),
-                &mut |_| Ok::<_, ()>(())).unwrap();
+            let delta =
+                ZSet::from_updates(frames, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            assert_eq!(
+                delta,
+                db.standing_native_delta(&cx, &native, basis, policy())
+                    .unwrap()
+                    .1
+            );
+            delivered
+                .integrate(&delta, fgdb_delta_types::LimbLimit::new(4), &mut |_| {
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
             assert_eq!(delivered.len(), 3);
-            assert_eq!(delivered, db.standing_native_bag(&cx, &native, policy()).unwrap().1);
+            assert_eq!(
+                delivered,
+                db.standing_native_bag(&cx, &native, policy()).unwrap().1
+            );
             native_agreement(&db, &cx, &native);
         });
         assert!(report.lab_test_passed(), "{report:?}");

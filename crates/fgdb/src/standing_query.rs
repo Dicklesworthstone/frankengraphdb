@@ -96,7 +96,9 @@ pub enum StandingQueryError {
     SetSchema(fgdb_gql::GraphSetBuildError),
     JoinSchema(fgdb_gql::row_join::RowJoinBuildError),
     /// A checked join definition belongs to a different complete input schema.
-    JoinInputSchema { side: usize },
+    JoinInputSchema {
+        side: usize,
+    },
     ProjectionSchema(fgdb_gql::row_projection::RowProjectionBuildError),
     FilterSchema(fgdb_gql::row_filter::RowFilterBuildError),
     ReductionSchema(fgdb_gql::row_aggregate::RowAggregateBuildError),
@@ -149,7 +151,10 @@ impl core::fmt::Display for StandingQueryError {
             Self::SetSchema(error) => error.fmt(f),
             Self::JoinSchema(error) => error.fmt(f),
             Self::JoinInputSchema { side } => {
-                write!(f, "standing join input {side} does not match its bound schema")
+                write!(
+                    f,
+                    "standing join input {side} does not match its bound schema"
+                )
             }
             Self::ProjectionSchema(error) => error.fmt(f),
             Self::FilterSchema(error) => error.fmt(f),
@@ -172,11 +177,17 @@ impl core::fmt::Display for StandingQueryError {
                 f,
                 "standing delta after {after:?} cannot reach {frontier:?} in one retained tick"
             ),
-            Self::ReplayGap { after, retained_after, frontier } => write!(
+            Self::ReplayGap {
+                after,
+                retained_after,
+                frontier,
+            } => write!(
                 f,
                 "replay cut {after:?} is outside retained cuts {retained_after:?}..={frontier:?}"
             ),
-            Self::InvalidReplayLimits => f.write_str("replay requires nonzero tick and payload limits"),
+            Self::InvalidReplayLimits => {
+                f.write_str("replay requires nonzero tick and payload limits")
+            }
             Self::Unavailable { frontier, reason } => write!(
                 f,
                 "standing query unavailable after {frontier:?}: {reason:?}"
@@ -570,9 +581,15 @@ impl<V: Vfs + Clone> Database<V> {
             StandingQuery::Reachability(query) => StandingQuery::Reachability(Box::new(
                 self.prepare_standing_reachability(cx, query.relation(), policy)?,
             )),
-            StandingQuery::Closure(query) => StandingQuery::Closure(Box::new(
-                self.prepare_standing_closure(cx, query.input, query.endpoints, policy, handle.index)?,
-            )),
+            StandingQuery::Closure(query) => {
+                StandingQuery::Closure(Box::new(self.prepare_standing_closure(
+                    cx,
+                    query.input,
+                    query.endpoints,
+                    policy,
+                    handle.index,
+                )?))
+            }
             StandingQuery::Triangles(query) => StandingQuery::Triangles(Box::new(
                 self.prepare_standing_triangles(cx, query.relation(), query.quantifier(), policy)?,
             )),

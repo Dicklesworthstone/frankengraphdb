@@ -36,15 +36,22 @@ impl Default for Bm25Config {
 impl Bm25Config {
     pub fn validate(&self) -> Result<(), BeaconError> {
         if !self.k1.is_finite() || self.k1 <= 0.0 {
-            return Err(BeaconError::InvalidConfig("BM25 k1 must be finite and positive"));
+            return Err(BeaconError::InvalidConfig(
+                "BM25 k1 must be finite and positive",
+            ));
         }
         if !self.b.is_finite() || !(0.0..=1.0).contains(&self.b) {
             return Err(BeaconError::InvalidConfig("BM25 b must be in 0..=1"));
         }
-        if self.max_documents == 0 || self.max_document_bytes == 0
-            || self.max_document_terms == 0 || self.max_query_bytes == 0 || self.max_query_terms == 0
+        if self.max_documents == 0
+            || self.max_document_bytes == 0
+            || self.max_document_terms == 0
+            || self.max_query_bytes == 0
+            || self.max_query_terms == 0
         {
-            return Err(BeaconError::InvalidConfig("BM25 resource limits must be positive"));
+            return Err(BeaconError::InvalidConfig(
+                "BM25 resource limits must be positive",
+            ));
         }
         Ok(())
     }
@@ -62,8 +69,12 @@ impl Bm25Config {
         query: &str,
         work: &mut dyn WorkControl,
     ) -> Result<Vec<String>, BeaconError> {
-        Ok(analyze(query, self.max_query_bytes, self.max_query_terms, work)?
-            .frequencies.into_keys().collect())
+        Ok(
+            analyze(query, self.max_query_bytes, self.max_query_terms, work)?
+                .frequencies
+                .into_keys()
+                .collect(),
+        )
     }
 }
 
@@ -102,7 +113,10 @@ fn analyze(
 ) -> Result<AnalyzedText, BeaconError> {
     work.charge(1)?;
     if text.len() > byte_limit {
-        return Err(BeaconError::ResourceLimit { resource: "text bytes", limit: byte_limit });
+        return Err(BeaconError::ResourceLimit {
+            resource: "text bytes",
+            limit: byte_limit,
+        });
     }
     let mut result = AnalyzedText {
         frequencies: BTreeMap::new(),
@@ -134,13 +148,20 @@ fn finish_token(
         return Ok(());
     }
     if !result.frequencies.contains_key(token.as_str()) && result.frequencies.len() == limit {
-        return Err(BeaconError::ResourceLimit { resource: "distinct analyzed terms", limit });
+        return Err(BeaconError::ResourceLimit {
+            resource: "distinct analyzed terms",
+            limit,
+        });
     }
     let frequency = result.frequencies.entry(std::mem::take(token)).or_default();
     *frequency = frequency.checked_add(1).ok_or(BeaconError::ResourceLimit {
-        resource: "term frequency", limit: u32::MAX as usize,
+        resource: "term frequency",
+        limit: u32::MAX as usize,
     })?;
-    result.length = result.length.checked_add(1).ok_or(BeaconError::Invariant("token count overflow"))?;
+    result.length = result
+        .length
+        .checked_add(1)
+        .ok_or(BeaconError::Invariant("token count overflow"))?;
     Ok(())
 }
 
@@ -155,29 +176,59 @@ pub(crate) struct CorpusStats {
 }
 
 impl CorpusStats {
-    pub fn add(&mut self, text: &AnalyzedText, work: &mut dyn WorkControl) -> Result<(), BeaconError> {
+    pub fn add(
+        &mut self,
+        text: &AnalyzedText,
+        work: &mut dyn WorkControl,
+    ) -> Result<(), BeaconError> {
         work.charge(text.frequencies.len())?;
-        self.documents = self.documents.checked_add(1).ok_or(BeaconError::Invariant("corpus count overflow"))?;
-        self.total_length = self.total_length.checked_add(text.length).ok_or(BeaconError::Invariant("corpus length overflow"))?;
+        self.documents = self
+            .documents
+            .checked_add(1)
+            .ok_or(BeaconError::Invariant("corpus count overflow"))?;
+        self.total_length = self
+            .total_length
+            .checked_add(text.length)
+            .ok_or(BeaconError::Invariant("corpus length overflow"))?;
         for term in text.frequencies.keys() {
             work.charge(term.len())?;
             if !self.frequencies.contains_key(term) {
-                self.term_bytes = self.term_bytes.checked_add(term.len()).ok_or(BeaconError::Invariant("vocabulary bytes overflow"))?;
+                self.term_bytes = self
+                    .term_bytes
+                    .checked_add(term.len())
+                    .ok_or(BeaconError::Invariant("vocabulary bytes overflow"))?;
             }
             let frequency = self.frequencies.entry(term.clone()).or_default();
-            *frequency = frequency.checked_add(1).ok_or(BeaconError::Invariant("document frequency overflow"))?;
+            *frequency = frequency
+                .checked_add(1)
+                .ok_or(BeaconError::Invariant("document frequency overflow"))?;
         }
         Ok(())
     }
 
-    pub fn remove(&mut self, text: &AnalyzedText, work: &mut dyn WorkControl) -> Result<(), BeaconError> {
+    pub fn remove(
+        &mut self,
+        text: &AnalyzedText,
+        work: &mut dyn WorkControl,
+    ) -> Result<(), BeaconError> {
         work.charge(text.frequencies.len())?;
-        self.documents = self.documents.checked_sub(1).ok_or(BeaconError::Invariant("corpus count underflow"))?;
-        self.total_length = self.total_length.checked_sub(text.length).ok_or(BeaconError::Invariant("corpus length underflow"))?;
+        self.documents = self
+            .documents
+            .checked_sub(1)
+            .ok_or(BeaconError::Invariant("corpus count underflow"))?;
+        self.total_length = self
+            .total_length
+            .checked_sub(text.length)
+            .ok_or(BeaconError::Invariant("corpus length underflow"))?;
         for term in text.frequencies.keys() {
             work.charge(term.len())?;
-            let frequency = self.frequencies.get_mut(term).ok_or(BeaconError::Invariant("missing live term"))?;
-            *frequency = frequency.checked_sub(1).ok_or(BeaconError::Invariant("document frequency underflow"))?;
+            let frequency = self
+                .frequencies
+                .get_mut(term)
+                .ok_or(BeaconError::Invariant("missing live term"))?;
+            *frequency = frequency
+                .checked_sub(1)
+                .ok_or(BeaconError::Invariant("document frequency underflow"))?;
             if *frequency == 0 {
                 self.frequencies.remove(term);
                 self.term_bytes -= term.len();
@@ -229,7 +280,11 @@ impl TextSegment {
             }
             for (term, &frequency) in &text.frequencies {
                 work.charge(term.len().saturating_add(1))?;
-                segment.postings.entry(term.clone()).or_default().insert(id, frequency);
+                segment
+                    .postings
+                    .entry(term.clone())
+                    .or_default()
+                    .insert(id, frequency);
             }
         }
         Ok(segment)
@@ -271,19 +326,26 @@ impl TextSegment {
         let average_length = corpus.total_length as f64 / corpus.documents as f64;
         loop {
             work.charge(streams.len().saturating_add(1))?;
-            let Some(id) = streams.iter_mut().filter_map(|(_, stream)| {
-                stream.peek().map(|(id, _)| **id)
-            }).min() else {
+            let Some(id) = streams
+                .iter_mut()
+                .filter_map(|(_, stream)| stream.peek().map(|(id, _)| **id))
+                .min()
+            else {
                 break;
             };
             let visible = eligible(id);
-            let length = *self.lengths.get(&id).ok_or(BeaconError::Invariant("posting has no document length"))?;
+            let length = *self
+                .lengths
+                .get(&id)
+                .ok_or(BeaconError::Invariant("posting has no document length"))?;
             let length_norm = 1.0 - config.b + config.b * length as f64 / average_length;
             let mut matches = 0;
             let mut score = 0.0;
             for (idf, stream) in &mut streams {
                 if stream.peek().is_some_and(|(next, _)| **next == id) {
-                    let (_, frequency) = stream.next().ok_or(BeaconError::Invariant("posting cursor disappeared"))?;
+                    let (_, frequency) = stream
+                        .next()
+                        .ok_or(BeaconError::Invariant("posting cursor disappeared"))?;
                     matches += 1;
                     if visible {
                         score += *idf * saturation(config.k1, length_norm, f64::from(*frequency));
@@ -294,7 +356,15 @@ impl TextSegment {
                 if !score.is_finite() {
                     return Err(BeaconError::Invariant("non-finite BM25 score"));
                 }
-                retain_best(best, Ranked { cost: -score, id, slot: 0 }, limit);
+                retain_best(
+                    best,
+                    Ranked {
+                        cost: -score,
+                        id,
+                        slot: 0,
+                    },
+                    limit,
+                );
             }
         }
         Ok(())
@@ -322,7 +392,10 @@ pub struct Bm25 {
 
 impl core::fmt::Debug for Bm25 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Bm25").field("config", &self.config).field("stats", &self.stats()).finish_non_exhaustive()
+        f.debug_struct("Bm25")
+            .field("config", &self.config)
+            .field("stats", &self.stats())
+            .finish_non_exhaustive()
     }
 }
 
@@ -341,13 +414,20 @@ impl Bm25 {
                 return Err(BeaconError::DuplicateVertex(id));
             }
             if ordered.len() == config.max_documents {
-                return Err(BeaconError::ResourceLimit { resource: "BM25 documents", limit: config.max_documents });
+                return Err(BeaconError::ResourceLimit {
+                    resource: "BM25 documents",
+                    limit: config.max_documents,
+                });
             }
             corpus.add(&text, work)?;
             ordered.insert(id, text);
         }
         let segment = TextSegment::build(ordered.iter().map(|(&id, text)| (id, text)), work)?;
-        Ok(Self { config, segment, corpus })
+        Ok(Self {
+            config,
+            segment,
+            corpus,
+        })
     }
 
     #[must_use]
@@ -370,9 +450,24 @@ impl Bm25 {
     ) -> Result<Vec<TextHit>, BeaconError> {
         let terms = self.config.query_terms(query, work)?;
         let mut best = BinaryHeap::new();
-        self.segment.search_into(&terms, mode, &self.config, &self.corpus,
-            k.min(self.corpus.documents), &eligible, &mut best, work)?;
-        Ok(best.into_sorted_vec().into_iter().map(|hit| TextHit { id: hit.id, score: -hit.cost }).collect())
+        self.segment.search_into(
+            &terms,
+            mode,
+            &self.config,
+            &self.corpus,
+            k.min(self.corpus.documents),
+            &eligible,
+            &mut best,
+            work,
+        )?;
+        Ok(best
+            .into_sorted_vec()
+            .into_iter()
+            .map(|hit| TextHit {
+                id: hit.id,
+                score: -hit.cost,
+            })
+            .collect())
     }
 }
 

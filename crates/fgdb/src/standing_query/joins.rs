@@ -15,7 +15,10 @@ const LIMBS: LimbLimit = LimbLimit::new(4);
 
 /// Rebuild preserves the complete checked definition, never just keys/kind.
 enum Definition<'a> {
-    Inferred { keys: &'a [(usize, usize)], kind: RowJoinKind },
+    Inferred {
+        keys: &'a [(usize, usize)],
+        kind: RowJoinKind,
+    },
     Prepared(&'a RowJoinSpec),
 }
 impl Definition<'_> {
@@ -59,8 +62,12 @@ impl Definition<'_> {
                 // logical payload units, not allocator-byte or spill bounds.
                 use fgdb_gql::{GraphSetOperand, GraphSetPredicateOp};
                 for op in spec.predicate().unwrap_or_default() {
-                    meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Maintenance)?;
-                    meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Maintenance)?;
+                    meter
+                        .charge(ZSetEvent::Work)
+                        .map_err(StandingQueryError::Maintenance)?;
+                    meter
+                        .charge(ZSetEvent::ScratchEntry)
+                        .map_err(StandingQueryError::Maintenance)?;
                     let mut admit = |operand: &GraphSetOperand| {
                         if let GraphSetOperand::Literal(value) = operand {
                             let units = value.canonical_bytes().len().div_ceil(64);
@@ -213,7 +220,11 @@ impl<V: Vfs + Clone> Database<V> {
             }
         }
         let query = self.prepare_standing_join_spec(
-            cx, [left.index, right.index], spec, policy, self.standing_queries.len(),
+            cx,
+            [left.index, right.index],
+            spec,
+            policy,
+            self.standing_queries.len(),
         )?;
         Ok(self.store_standing_query(StandingQuery::Join(Box::new(query))))
     }
@@ -382,7 +393,11 @@ impl<V: Vfs + Clone> Database<V> {
         before: usize,
     ) -> Result<State, StandingQueryError> {
         self.prepare_standing_join_definition(
-            cx, inputs, Definition::Inferred { keys, kind }, policy, before,
+            cx,
+            inputs,
+            Definition::Inferred { keys, kind },
+            policy,
+            before,
         )
     }
 
@@ -395,7 +410,11 @@ impl<V: Vfs + Clone> Database<V> {
         before: usize,
     ) -> Result<State, StandingQueryError> {
         self.prepare_standing_join_definition(
-            cx, inputs, Definition::Prepared(spec), policy, before,
+            cx,
+            inputs,
+            Definition::Prepared(spec),
+            policy,
+            before,
         )
     }
 

@@ -8,31 +8,51 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-struct Fixture { home: PathBuf }
+struct Fixture {
+    home: PathBuf,
+}
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let home = std::env::temp_dir().join(format!("fgdb-stream-load-{}-{}",
-            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let home = std::env::temp_dir().join(format!(
+            "fgdb-stream-load-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir(&home).unwrap();
-        std::fs::write(home.join("keys"), format!("{}\n{}\n{}\n",
-            "5a".repeat(32), "77".repeat(32), "3c".repeat(32))).unwrap();
+        std::fs::write(
+            home.join("keys"),
+            format!(
+                "{}\n{}\n{}\n",
+                "5a".repeat(32),
+                "77".repeat(32),
+                "3c".repeat(32)
+            ),
+        )
+        .unwrap();
         let fixture = Self { home };
         success(&fixture.command("create").output().unwrap());
         fixture
     }
     fn command(&self, verb: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fgdb"));
-        command.env_remove("FGDB_LOAD_CRASH_CHUNK").env_remove("FGDB_LOAD_CRASH_POINT")
-            .args(["--robot", verb, "--db"]).arg(self.home.join("db"))
-            .arg("--key-file").arg(self.home.join("keys"))
+        command
+            .env_remove("FGDB_LOAD_CRASH_CHUNK")
+            .env_remove("FGDB_LOAD_CRASH_POINT")
+            .args(["--robot", verb, "--db"])
+            .arg(self.home.join("db"))
+            .arg("--key-file")
+            .arg(self.home.join("keys"))
             .args(["--relation", "R=1", "--relation", "S=2"]);
         command
     }
     fn load(&self) -> Command {
         let mut command = self.command("load");
-        command.arg("--input").arg(self.home.join("input"))
-            .arg("--checkpoint").arg(self.home.join("checkpoint"))
+        command
+            .arg("--input")
+            .arg(self.home.join("input"))
+            .arg("--checkpoint")
+            .arg(self.home.join("checkpoint"))
             .args(["--rows-per-chunk", "3"]);
         command
     }
@@ -41,19 +61,29 @@ impl Fixture {
         let root = runtime.request_cx_with_budget(Budget::INFINITE);
         let cx = PurposeContexts::narrow_runtime_root(&root).commit();
         runtime.block_on(async {
-            let keys = DatabaseKeys::new([0x5a; 32], DatabaseSecurityNamespaceId([0x77; 32]), [0x3c; 32]);
-            let db = Database::open(&cx, &self.home.join("db"), keys).await.unwrap();
+            let keys = DatabaseKeys::new(
+                [0x5a; 32],
+                DatabaseSecurityNamespaceId([0x77; 32]),
+                [0x3c; 32],
+            );
+            let db = Database::open(&cx, &self.home.join("db"), keys)
+                .await
+                .unwrap();
             check(&db)
         })
     }
-    fn frontier(&self) -> CommitSeq { self.inspect(|db| db.frontier().unwrap()) }
+    fn frontier(&self) -> CommitSeq {
+        self.inspect(|db| db.frontier().unwrap())
+    }
     fn source(&self) -> Vec<u8> {
         // Whitespace crosses several read blocks without manufacturing giant
         // stored properties; the test exercises ten real creation effects.
         let mut source = String::new();
         let padding = " ".repeat(10_000);
         for id in 0..6 {
-            source.push_str(&format!("{padding}{{\"kind\":\"vertex\",\"key\":\"v{id}λ\",\"labels\":[]}}\r\n"));
+            source.push_str(&format!(
+                "{padding}{{\"kind\":\"vertex\",\"key\":\"v{id}λ\",\"labels\":[]}}\r\n"
+            ));
         }
         for id in 0..4 {
             source.push_str(&format!("{padding}{{\"kind\":\"edge\",\"key\":\"e{id}\",\"source\":\"v{id}λ\",\"destination\":\"v{}λ\",\"relation\":\"{}\"}}{}",
@@ -66,8 +96,12 @@ impl Fixture {
     }
 }
 fn success(output: &Output) {
-    assert!(output.status.success(), "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(output.stderr.is_empty());
 }
 
@@ -82,15 +116,27 @@ fn large_input_streams_across_blocks_and_completed_resume_is_a_noop() {
         assert_eq!(db.vertices().unwrap().len(), 6);
         let edges = db.edges().unwrap();
         assert_eq!(edges.len(), 4);
-        assert_eq!(edges.iter().filter(|row| row.entry.relation.0 == 1).count(), 2);
-        assert_eq!(edges.iter().filter(|row| row.entry.relation.0 == 2).count(), 2);
+        assert_eq!(
+            edges.iter().filter(|row| row.entry.relation.0 == 1).count(),
+            2
+        );
+        assert_eq!(
+            edges.iter().filter(|row| row.entry.relation.0 == 2).count(),
+            2
+        );
         (db.vertices().unwrap(), edges)
     });
     let checkpoint = std::fs::read(fixture.home.join("checkpoint")).unwrap();
     success(&fixture.load().output().unwrap());
     assert_eq!(fixture.frontier(), CommitSeq(basis.0 + 4));
-    assert_eq!(fixture.inspect(|db| (db.vertices().unwrap(), db.edges().unwrap())), before);
-    assert_eq!(std::fs::read(fixture.home.join("checkpoint")).unwrap(), checkpoint);
+    assert_eq!(
+        fixture.inspect(|db| (db.vertices().unwrap(), db.edges().unwrap())),
+        before
+    );
+    assert_eq!(
+        std::fs::read(fixture.home.join("checkpoint")).unwrap(),
+        checkpoint
+    );
 }
 
 #[test]
@@ -98,11 +144,17 @@ fn marker_to_checkpoint_crash_window_reconciles_using_streamed_source_rows() {
     let fixture = Fixture::new();
     fixture.source();
     let basis = fixture.frontier();
-    let stopped = fixture.load().env("FGDB_LOAD_CRASH_CHUNK", "1")
-        .env("FGDB_LOAD_CRASH_POINT", "after-marker-sync").output().unwrap();
+    let stopped = fixture
+        .load()
+        .env("FGDB_LOAD_CRASH_CHUNK", "1")
+        .env("FGDB_LOAD_CRASH_POINT", "after-marker-sync")
+        .output()
+        .unwrap();
     assert!(!stopped.status.success());
-    assert!(String::from_utf8_lossy(&std::fs::read(fixture.home.join("checkpoint")).unwrap())
-        .contains("\"next_row\":3"));
+    assert!(
+        String::from_utf8_lossy(&std::fs::read(fixture.home.join("checkpoint")).unwrap())
+            .contains("\"next_row\":3")
+    );
     success(&fixture.load().output().unwrap());
     fixture.inspect(|db| {
         assert_eq!(db.frontier().unwrap(), CommitSeq(basis.0 + 4));
@@ -162,5 +214,8 @@ fn changing_source_after_a_completed_load_does_not_relabel_checkpoint_identity()
     assert_eq!(refused.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&refused.stdout).contains("InvalidResume"));
     assert_eq!(fixture.frontier(), frontier);
-    assert_eq!(std::fs::read(fixture.home.join("checkpoint")).unwrap(), saved);
+    assert_eq!(
+        std::fs::read(fixture.home.join("checkpoint")).unwrap(),
+        saved
+    );
 }

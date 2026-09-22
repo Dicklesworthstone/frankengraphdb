@@ -103,25 +103,42 @@ pub enum ProjectionError {
     AllocationFailed,
     DuplicateVertex(VId),
     DuplicateEdge(EId),
-    MissingEndpoint { edge: EId, vertex: VId },
+    MissingEndpoint {
+        edge: EId,
+        vertex: VId,
+    },
     SelfLoop(EId),
-    ParallelEdge { source: VId, target: VId },
+    ParallelEdge {
+        source: VId,
+        target: VId,
+    },
     NonFiniteWeight(EId),
-    WeightOverflow { source: VId, target: VId },
+    WeightOverflow {
+        source: VId,
+        target: VId,
+    },
 }
 impl core::fmt::Display for ProjectionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::LimitExceeded { resource, limit, observed } => {
+            Self::LimitExceeded {
+                resource,
+                limit,
+                observed,
+            } => {
                 write!(f, "Prism {resource} limit exceeded: {observed} > {limit}")
             }
             Self::SizeOverflow => f.write_str("Prism projection size overflow"),
             Self::AllocationFailed => f.write_str("Prism projection allocation failed"),
-            Self::DuplicateVertex(_) => f.write_str("duplicate vertex identity in projection input"),
+            Self::DuplicateVertex(_) => {
+                f.write_str("duplicate vertex identity in projection input")
+            }
             Self::DuplicateEdge(_) => f.write_str("duplicate edge identity in projection input"),
             Self::MissingEndpoint { .. } => f.write_str("projection edge endpoint is absent"),
             Self::SelfLoop(_) => f.write_str("self-loop rejected by the projection policy"),
-            Self::ParallelEdge { .. } => f.write_str("parallel edges require an explicit reduction"),
+            Self::ParallelEdge { .. } => {
+                f.write_str("parallel edges require an explicit reduction")
+            }
             Self::NonFiniteWeight(_) => f.write_str("projection weight must be finite"),
             Self::WeightOverflow { .. } => f.write_str("parallel-edge weight reduction overflow"),
         }
@@ -202,7 +219,11 @@ impl core::fmt::Debug for SnapshotGraphView {
 
 fn limit(resource: &'static str, observed: usize, maximum: usize) -> Result<(), ProjectionError> {
     if observed > maximum {
-        Err(ProjectionError::LimitExceeded { resource, limit: maximum, observed })
+        Err(ProjectionError::LimitExceeded {
+            resource,
+            limit: maximum,
+            observed,
+        })
     } else {
         Ok(())
     }
@@ -216,13 +237,22 @@ fn mul(a: usize, b: usize) -> Result<usize, ProjectionError> {
 fn poll<C>(checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<(), ProjectionBuildError<C>> {
     checkpoint().map_err(ProjectionBuildError::Cancelled)
 }
-fn reserved<T, C>(len: usize, checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<Vec<T>, ProjectionBuildError<C>> {
+fn reserved<T, C>(
+    len: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<Vec<T>, ProjectionBuildError<C>> {
     poll(checkpoint)?;
     let mut result = Vec::new();
-    result.try_reserve_exact(len).map_err(|_| ProjectionError::AllocationFailed)?;
+    result
+        .try_reserve_exact(len)
+        .map_err(|_| ProjectionError::AllocationFailed)?;
     Ok(result)
 }
-fn filled<T: Copy, C>(len: usize, value: T, checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<Vec<T>, ProjectionBuildError<C>> {
+fn filled<T: Copy, C>(
+    len: usize,
+    value: T,
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<Vec<T>, ProjectionBuildError<C>> {
     let mut result = reserved(len, checkpoint)?;
     for _ in 0..len {
         poll(checkpoint)?;
@@ -230,7 +260,10 @@ fn filled<T: Copy, C>(len: usize, value: T, checkpoint: &mut impl FnMut() -> Res
     }
     Ok(result)
 }
-fn clone_slice<T: Copy, C>(values: &[T], checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<Vec<T>, ProjectionBuildError<C>> {
+fn clone_slice<T: Copy, C>(
+    values: &[T],
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<Vec<T>, ProjectionBuildError<C>> {
     let mut result = reserved(values.len(), checkpoint)?;
     for &value in values {
         poll(checkpoint)?;
@@ -238,7 +271,10 @@ fn clone_slice<T: Copy, C>(values: &[T], checkpoint: &mut impl FnMut() -> Result
     }
     Ok(result)
 }
-fn offsets<C>(counts: &[usize], checkpoint: &mut impl FnMut() -> Result<(), C>) -> Result<Vec<usize>, ProjectionBuildError<C>> {
+fn offsets<C>(
+    counts: &[usize],
+    checkpoint: &mut impl FnMut() -> Result<(), C>,
+) -> Result<Vec<usize>, ProjectionBuildError<C>> {
     let mut result = reserved(add(counts.len(), 1)?, checkpoint)?;
     result.push(0);
     for &count in counts {
@@ -258,7 +294,9 @@ fn sort_by_key<T, K: Ord, C>(
     checkpoint: &mut impl FnMut() -> Result<(), C>,
 ) -> Result<(), ProjectionBuildError<C>> {
     fn sift<T, K: Ord, C>(
-        values: &mut [T], mut root: usize, end: usize,
+        values: &mut [T],
+        mut root: usize,
+        end: usize,
         key: &impl Fn(&T) -> K,
         checkpoint: &mut impl FnMut() -> Result<(), C>,
     ) -> Result<(), ProjectionBuildError<C>> {
@@ -316,7 +354,9 @@ fn canonical_weight(weight: f64) -> f64 {
     if weight == 0.0 { 0.0 } else { weight }
 }
 fn ordinal(vertices: &[VId], edge: EId, vertex: VId) -> Result<usize, ProjectionError> {
-    vertices.binary_search(&vertex).map_err(|_| ProjectionError::MissingEndpoint { edge, vertex })
+    vertices
+        .binary_search(&vertex)
+        .map_err(|_| ProjectionError::MissingEndpoint { edge, vertex })
 }
 
 impl SnapshotGraphView {
@@ -331,8 +371,9 @@ impl SnapshotGraphView {
         spec: ProjectionSpec,
         limits: ProjectionLimits,
     ) -> Result<Self, ProjectionError> {
-        match Self::build_with_checkpoint(binding, vertices, edges, spec, limits,
-            || Ok::<(), std::convert::Infallible>(())) {
+        match Self::build_with_checkpoint(binding, vertices, edges, spec, limits, || {
+            Ok::<(), std::convert::Infallible>(())
+        }) {
             Ok(graph) => Ok(graph),
             Err(ProjectionBuildError::Projection(error)) => Err(error),
             Err(ProjectionBuildError::Cancelled(never)) => match never {},
@@ -354,8 +395,10 @@ impl SnapshotGraphView {
         poll(&mut checkpoint)?;
         limit("vertices", vertices.len(), limits.max_vertices)?;
         limit("input edges", edges.len(), limits.max_input_edges)?;
-        let bytes = add(mul(vertices.len(), size_of::<VId>())?,
-            mul(edges.len(), size_of::<ProjectionEdge>())?)?;
+        let bytes = add(
+            mul(vertices.len(), size_of::<VId>())?,
+            mul(edges.len(), size_of::<ProjectionEdge>())?,
+        )?;
         limit("workspace bytes", bytes, limits.max_workspace_bytes)?;
         let vertices = clone_slice(vertices, &mut checkpoint)?;
         let edges = clone_slice(edges, &mut checkpoint)?;
@@ -382,7 +425,10 @@ impl SnapshotGraphView {
         let e = work.len();
         limit("vertices", n, limits.max_vertices)?;
         limit("input edges", e, limits.max_input_edges)?;
-        let input_bytes = add(mul(vertices.capacity(), size_of::<VId>())?, mul(work.capacity(), size_of::<ProjectionEdge>())?)?;
+        let input_bytes = add(
+            mul(vertices.capacity(), size_of::<VId>())?,
+            mul(work.capacity(), size_of::<ProjectionEdge>())?,
+        )?;
         limit("workspace bytes", input_bytes, limits.max_workspace_bytes)?;
 
         sort_by_key(&mut vertices, |vertex| *vertex, &mut checkpoint)?;
@@ -405,7 +451,9 @@ impl SnapshotGraphView {
             ordinal(&vertices, edge.eid, edge.target)?;
             if edge.source == edge.target {
                 match spec.self_loops {
-                    SelfLoopPolicy::Reject => return Err(ProjectionError::SelfLoop(edge.eid).into()),
+                    SelfLoopPolicy::Reject => {
+                        return Err(ProjectionError::SelfLoop(edge.eid).into());
+                    }
                     SelfLoopPolicy::Drop => continue,
                     SelfLoopPolicy::Keep => {}
                 }
@@ -445,14 +493,20 @@ impl SnapshotGraphView {
         hash.update(b"fgdb:prism:decoded-projection:v1");
         hash.update(&binding.root.0);
         hash.update(&binding.as_of.0.to_le_bytes());
-        hash.update(&[spec.directedness as u8, spec.parallel_edges as u8, spec.self_loops as u8]);
+        hash.update(&[
+            spec.directedness as u8,
+            spec.parallel_edges as u8,
+            spec.self_loops as u8,
+        ]);
         hash.update(&(u64::try_from(n).map_err(|_| ProjectionError::SizeOverflow)?).to_le_bytes());
         for vertex in &vertices {
             poll(&mut checkpoint)?;
             hash.update(&vertex.0.to_le_bytes());
         }
         hash.update(&(u64::try_from(e).map_err(|_| ProjectionError::SizeOverflow)?).to_le_bytes());
-        hash.update(&(u64::try_from(work.len()).map_err(|_| ProjectionError::SizeOverflow)?).to_le_bytes());
+        hash.update(
+            &(u64::try_from(work.len()).map_err(|_| ProjectionError::SizeOverflow)?).to_le_bytes(),
+        );
         for edge in &work {
             poll(&mut checkpoint)?;
             hash.update(&edge.eid.0.to_le_bytes());
@@ -461,22 +515,39 @@ impl SnapshotGraphView {
             hash.update(&edge.weight.to_bits().to_le_bytes());
         }
 
-        sort_by_key(&mut work, |edge| (edge.source, edge.target, edge.eid), &mut checkpoint)?;
+        sort_by_key(
+            &mut work,
+            |edge| (edge.source, edge.target, edge.eid),
+            &mut checkpoint,
+        )?;
         let mut kept = 0;
         for i in 0..work.len() {
             poll(&mut checkpoint)?;
             let edge = work[i];
-            if kept != 0 && work[kept - 1].source == edge.source && work[kept - 1].target == edge.target {
+            if kept != 0
+                && work[kept - 1].source == edge.source
+                && work[kept - 1].target == edge.target
+            {
                 let previous = &mut work[kept - 1];
                 previous.weight = match spec.parallel_edges {
-                    ParallelEdgePolicy::Reject => return Err(ProjectionError::ParallelEdge { source: edge.source, target: edge.target }.into()),
+                    ParallelEdgePolicy::Reject => {
+                        return Err(ProjectionError::ParallelEdge {
+                            source: edge.source,
+                            target: edge.target,
+                        }
+                        .into());
+                    }
                     ParallelEdgePolicy::CollapseUnit => 1.0,
                     ParallelEdgePolicy::Minimum => previous.weight.min(edge.weight),
                     ParallelEdgePolicy::Maximum => previous.weight.max(edge.weight),
                     ParallelEdgePolicy::Sum => previous.weight + edge.weight,
                 };
                 if !previous.weight.is_finite() {
-                    return Err(ProjectionError::WeightOverflow { source: edge.source, target: edge.target }.into());
+                    return Err(ProjectionError::WeightOverflow {
+                        source: edge.source,
+                        target: edge.target,
+                    }
+                    .into());
                 }
                 previous.weight = canonical_weight(previous.weight);
             } else {
@@ -490,20 +561,33 @@ impl SnapshotGraphView {
         let mut loops = 0;
         for edge in &work {
             poll(&mut checkpoint)?;
-            if edge.source == edge.target { loops += 1; }
+            if edge.source == edge.target {
+                loops += 1;
+            }
         }
-        let arcs = if directed { kept } else { add(kept, kept - loops)? };
+        let arcs = if directed {
+            kept
+        } else {
+            add(kept, kept - loops)?
+        };
         limit("adjacency entries", arcs, limits.max_adjacency_entries)?;
         let faces = if directed { 2 } else { 1 };
         let mut bytes = add(input_bytes, mul(n, size_of::<[u8; 32]>())?)?;
         // Degree arrays, row offsets and construction cursors for each face.
-        bytes = add(bytes, mul(mul(add(mul(n, 3)?, 1)?, faces)?, size_of::<usize>())?)?;
+        bytes = add(
+            bytes,
+            mul(mul(add(mul(n, 3)?, 1)?, faces)?, size_of::<usize>())?,
+        )?;
         bytes = add(bytes, mul(mul(arcs, faces)?, size_of::<usize>())?)?;
         bytes = add(bytes, mul(arcs, size_of::<f64>())?)?;
         limit("workspace bytes", bytes, limits.max_workspace_bytes)?;
 
         let mut out_counts = filled(n, 0usize, &mut checkpoint)?;
-        let mut in_counts = if directed { filled(n, 0usize, &mut checkpoint)? } else { Vec::new() };
+        let mut in_counts = if directed {
+            filled(n, 0usize, &mut checkpoint)?
+        } else {
+            Vec::new()
+        };
         for edge in &work {
             poll(&mut checkpoint)?;
             let s = ordinal(&vertices, edge.eid, edge.source)?;
@@ -520,9 +604,21 @@ impl SnapshotGraphView {
         let mut out_next = clone_slice(&out_offsets[..n], &mut checkpoint)?;
         let mut out_nodes = filled(out_len, 0usize, &mut checkpoint)?;
         let mut weights = filled(out_len, 0.0, &mut checkpoint)?;
-        let in_offsets = if directed { offsets(&in_counts, &mut checkpoint)? } else { Vec::new() };
-        let mut in_next = if directed { clone_slice(&in_offsets[..n], &mut checkpoint)? } else { Vec::new() };
-        let mut in_nodes = if directed { filled(kept, 0usize, &mut checkpoint)? } else { Vec::new() };
+        let in_offsets = if directed {
+            offsets(&in_counts, &mut checkpoint)?
+        } else {
+            Vec::new()
+        };
+        let mut in_next = if directed {
+            clone_slice(&in_offsets[..n], &mut checkpoint)?
+        } else {
+            Vec::new()
+        };
+        let mut in_nodes = if directed {
+            filled(kept, 0usize, &mut checkpoint)?
+        } else {
+            Vec::new()
+        };
         for edge in &work {
             poll(&mut checkpoint)?;
             let s = ordinal(&vertices, edge.eid, edge.source)?;
@@ -548,7 +644,10 @@ impl SnapshotGraphView {
             poll(&mut checkpoint)?;
             names.push(name(vertex));
         }
-        let incoming = directed.then_some(Rows { offsets: in_offsets, neighbors: in_nodes });
+        let incoming = directed.then_some(Rows {
+            offsets: in_offsets,
+            neighbors: in_nodes,
+        });
         poll(&mut checkpoint)?;
         Ok(Self(Arc::new(Projection {
             binding,
@@ -556,7 +655,10 @@ impl SnapshotGraphView {
             digest: hash.finalize(),
             vertices,
             names,
-            outgoing: Rows { offsets: out_offsets, neighbors: out_nodes },
+            outgoing: Rows {
+                offsets: out_offsets,
+                neighbors: out_nodes,
+            },
             incoming,
             weights,
             edges: kept,
@@ -565,16 +667,36 @@ impl SnapshotGraphView {
         })))
     }
 
-    pub fn binding(&self) -> SnapshotBinding { self.0.binding }
-    pub fn spec(&self) -> ProjectionSpec { self.0.spec }
-    pub fn digest(&self) -> Digest { self.0.digest }
-    pub fn adapter_path(&self) -> AdapterPath { AdapterPath::DecodedCache }
-    pub fn vertex_ids(&self) -> &[VId] { &self.0.vertices }
-    pub fn vertex_id(&self, ordinal: usize) -> Option<VId> { self.0.vertices.get(ordinal).copied() }
-    pub fn vertex_ordinal(&self, vertex: VId) -> Option<usize> { self.0.vertices.binary_search(&vertex).ok() }
-    pub fn input_edge_count(&self) -> usize { self.0.input_edges }
-    pub fn charged_workspace_bytes(&self) -> usize { self.0.workspace_bytes }
-    pub fn shares_cache_with(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
+    pub fn binding(&self) -> SnapshotBinding {
+        self.0.binding
+    }
+    pub fn spec(&self) -> ProjectionSpec {
+        self.0.spec
+    }
+    pub fn digest(&self) -> Digest {
+        self.0.digest
+    }
+    pub fn adapter_path(&self) -> AdapterPath {
+        AdapterPath::DecodedCache
+    }
+    pub fn vertex_ids(&self) -> &[VId] {
+        &self.0.vertices
+    }
+    pub fn vertex_id(&self, ordinal: usize) -> Option<VId> {
+        self.0.vertices.get(ordinal).copied()
+    }
+    pub fn vertex_ordinal(&self, vertex: VId) -> Option<usize> {
+        self.0.vertices.binary_search(&vertex).ok()
+    }
+    pub fn input_edge_count(&self) -> usize {
+        self.0.input_edges
+    }
+    pub fn charged_workspace_bytes(&self) -> usize {
+        self.0.workspace_bytes
+    }
+    pub fn shares_cache_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 
     /// Borrow one canonical outgoing row and its position-aligned weights.
     /// The two slices have equal length and share the immutable cache lifetime;
@@ -584,24 +706,38 @@ impl SnapshotGraphView {
         let end = source.checked_add(1)?;
         let start = *self.0.outgoing.offsets.get(source)?;
         let end = *self.0.outgoing.offsets.get(end)?;
-        Some((self.0.outgoing.neighbors.get(start..end)?, self.0.weights.get(start..end)?))
+        Some((
+            self.0.outgoing.neighbors.get(start..end)?,
+            self.0.weights.get(start..end)?,
+        ))
     }
 
     pub fn projected_weight(&self, source: usize, target: usize) -> Option<f64> {
         let row = self.0.outgoing.row(source)?;
         let index = row.binary_search(&target).ok()?;
-        self.0.weights.get(self.0.outgoing.offsets[source] + index).copied()
+        self.0
+            .weights
+            .get(self.0.outgoing.offsets[source] + index)
+            .copied()
     }
 }
 
 impl GraphView for SnapshotGraphView {
     fn nodes_ordered(&self) -> Vec<&str> {
-        self.0.names.iter().map(|bytes| std::str::from_utf8(bytes).expect("hex name is ASCII")).collect()
+        self.0
+            .names
+            .iter()
+            .map(|bytes| std::str::from_utf8(bytes).expect("hex name is ASCII"))
+            .collect()
     }
     fn get_node_index(&self, node: &str) -> Option<usize> {
         // Reject aliases (uppercase, short spellings, signs) so fnx strings have
         // exactly one inverse into the stable-identity domain.
-        if node.len() != 32 || !node.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if node.len() != 32
+            || !node
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return None;
         }
         self.vertex_ordinal(VId(u128::from_str_radix(node, 16).ok()?))
@@ -609,20 +745,32 @@ impl GraphView for SnapshotGraphView {
     fn get_node_name(&self, index: usize) -> Option<&str> {
         std::str::from_utf8(self.0.names.get(index)?).ok()
     }
-    fn neighbors_indices(&self, node: usize) -> Option<&[usize]> { self.0.outgoing.row(node) }
+    fn neighbors_indices(&self, node: usize) -> Option<&[usize]> {
+        self.0.outgoing.row(node)
+    }
     fn in_neighbors_indices(&self, node: usize) -> Option<&[usize]> {
-        self.0.incoming.as_ref().unwrap_or(&self.0.outgoing).row(node)
+        self.0
+            .incoming
+            .as_ref()
+            .unwrap_or(&self.0.outgoing)
+            .row(node)
     }
     fn neighbors_iter(&self, node: &str) -> Option<Box<dyn Iterator<Item = &str> + '_>> {
         let row = self.neighbors_indices(self.get_node_index(node)?)?;
-        Some(Box::new(row.iter().map(move |&i| self.get_node_name(i).expect("validated ordinal"))))
+        Some(Box::new(row.iter().map(move |&i| {
+            self.get_node_name(i).expect("validated ordinal")
+        })))
     }
     fn in_neighbors_iter(&self, node: &str) -> Option<Box<dyn Iterator<Item = &str> + '_>> {
         let row = self.in_neighbors_indices(self.get_node_index(node)?)?;
-        Some(Box::new(row.iter().map(move |&i| self.get_node_name(i).expect("validated ordinal"))))
+        Some(Box::new(row.iter().map(move |&i| {
+            self.get_node_name(i).expect("validated ordinal")
+        })))
     }
     fn neighbor_count(&self, node: &str) -> usize {
-        self.get_node_index(node).and_then(|i| self.neighbors_indices(i)).map_or(0, <[usize]>::len)
+        self.get_node_index(node)
+            .and_then(|i| self.neighbors_indices(i))
+            .map_or(0, <[usize]>::len)
     }
     fn edge_weight(&self, source: &str, target: &str, attr: Option<&str>) -> f64 {
         match (self.get_node_index(source), self.get_node_index(target)) {
@@ -639,16 +787,24 @@ impl GraphView for SnapshotGraphView {
             1.0
         }
     }
-    fn has_node(&self, node: &str) -> bool { self.get_node_index(node).is_some() }
+    fn has_node(&self, node: &str) -> bool {
+        self.get_node_index(node).is_some()
+    }
     fn has_edge(&self, source: &str, target: &str) -> bool {
         match (self.get_node_index(source), self.get_node_index(target)) {
             (Some(s), Some(t)) => self.projected_weight(s, t).is_some(),
             _ => false,
         }
     }
-    fn is_directed(&self) -> bool { self.0.spec.directedness != Directedness::Undirected }
-    fn node_count(&self) -> usize { self.0.vertices.len() }
-    fn edge_count(&self) -> usize { self.0.edges }
+    fn is_directed(&self) -> bool {
+        self.0.spec.directedness != Directedness::Undirected
+    }
+    fn node_count(&self) -> usize {
+        self.0.vertices.len()
+    }
+    fn edge_count(&self) -> usize {
+        self.0.edges
+    }
 }
 
 #[cfg(test)]

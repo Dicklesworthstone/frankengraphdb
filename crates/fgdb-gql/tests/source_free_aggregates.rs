@@ -4,8 +4,8 @@
 use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{
     GqlListParameter, GqlParameterValue, GqlParameters, GqlQueryError, GqlQueryExecution,
-    GqlQueryPolicy, GraphAggregateRow, GraphAggregateTextSlot,
-    GraphExactAverage, PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate,
+    GqlQueryPolicy, GraphAggregateRow, GraphAggregateTextSlot, GraphExactAverage,
+    PreparedGraphPipelineAggregateText, PreparedGraphSetAggregate,
 };
 use fgdb_types::CanonicalScalar;
 
@@ -53,9 +53,12 @@ fn standalone_aggregate_return_starts_with_one_real_empty_row() {
     assert_eq!(row.values()[1].as_integer(), Some(7));
     assert_eq!(row.values()[2].as_average(), GraphExactAverage::new(7, 1));
     assert_eq!(row.values()[3].as_count(), Some(0));
-    assert!(template("RETURN COUNT(*)")
-        .bind_parameters(&GqlParameters::new())
-        .is_err(), "the iterator API still requires one actual graph source");
+    assert!(
+        template("RETURN COUNT(*)")
+            .bind_parameters(&GqlParameters::new())
+            .is_err(),
+        "the iterator API still requires one actual graph source"
+    );
 }
 
 #[test]
@@ -66,12 +69,18 @@ fn empty_unwind_distinguishes_keyless_and_keyed_aggregation() {
         )));
         assert_eq!(result.value.len(), 1);
         assert_eq!(result.value[0].values()[0].as_count(), Some(0));
-        assert!(result.value[0].values()[1..].iter().all(|value| value.is_null()));
-        assert!(run(&prepare(&format!(
-            "{prefix} RETURN x AS key,COUNT(*) AS rows"
-        )))
-        .value
-        .is_empty());
+        assert!(
+            result.value[0].values()[1..]
+                .iter()
+                .all(|value| value.is_null())
+        );
+        assert!(
+            run(&prepare(&format!(
+                "{prefix} RETURN x AS key,COUNT(*) AS rows"
+            )))
+            .value
+            .is_empty()
+        );
     }
 }
 
@@ -88,9 +97,14 @@ fn parameter_lists_preserve_nulls_occurrences_exact_averages_and_frozen_bindings
             CanonicalScalar::Null,
             CanonicalScalar::Int(9),
         ];
-        args.insert("xs", GqlParameterValue::List(GqlListParameter::new(
-            values.into_iter().map(GraphValue::Scalar).collect(),
-        ).unwrap())).unwrap();
+        args.insert(
+            "xs",
+            GqlParameterValue::List(
+                GqlListParameter::new(values.into_iter().map(GraphValue::Scalar).collect())
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
         args
     };
     assert_eq!(template.parameter_schema()[0].name, "xs");
@@ -110,13 +124,22 @@ fn parameter_lists_preserve_nulls_occurrences_exact_averages_and_frozen_bindings
     assert_ne!(changed.canonical_bytes(), frozen);
     assert_eq!(bound.canonical_bytes(), frozen);
     assert_eq!(run(&changed).value[0].values()[3].as_integer(), Some(57));
-    assert!(template.bind_relation_parameters(&GqlParameters::new()).is_err());
-    let wrong = GqlParameters::new().with_int64("xs", 4).unwrap()
-        .with_int64("step", 2).unwrap();
+    assert!(
+        template
+            .bind_relation_parameters(&GqlParameters::new())
+            .is_err()
+    );
+    let wrong = GqlParameters::new()
+        .with_int64("xs", 4)
+        .unwrap()
+        .with_int64("step", 2)
+        .unwrap();
     assert!(template.bind_relation_parameters(&wrong).is_err());
-    assert!(template.bind_relation_parameters(
-        &arguments(2).with_int64("extra", 7).unwrap(),
-    ).is_err());
+    assert!(
+        template
+            .bind_relation_parameters(&arguments(2).with_int64("extra", 7).unwrap(),)
+            .is_err()
+    );
 }
 
 #[test]
@@ -126,14 +149,22 @@ fn implicit_computed_keys_aliases_having_order_and_group_page_share_one_schema()
     let clauses = " HAVING rows > 1 ORDER BY bucket DESC SKIP 0 LIMIT 1";
     let implicit = template(&format!("{head}{clauses}"));
     let explicit = template(&format!("{head} GROUP BY bucket{clauses}"));
-    assert_eq!(implicit.canonical_template_bytes(), explicit.canonical_template_bytes());
-    assert_eq!(implicit.output_slots(), &[
-        GraphAggregateTextSlot::GroupKey(0),
-        GraphAggregateTextSlot::GroupKey(0),
-        GraphAggregateTextSlot::Aggregate(0),
-        GraphAggregateTextSlot::Aggregate(1),
-    ]);
-    let result = run(&implicit.bind_relation_parameters(&GqlParameters::new()).unwrap());
+    assert_eq!(
+        implicit.canonical_template_bytes(),
+        explicit.canonical_template_bytes()
+    );
+    assert_eq!(
+        implicit.output_slots(),
+        &[
+            GraphAggregateTextSlot::GroupKey(0),
+            GraphAggregateTextSlot::GroupKey(0),
+            GraphAggregateTextSlot::Aggregate(0),
+            GraphAggregateTextSlot::Aggregate(1),
+        ]
+    );
+    let result = run(&implicit
+        .bind_relation_parameters(&GqlParameters::new())
+        .unwrap());
     assert_eq!(result.value.len(), 1);
     let row = &result.value[0];
     assert_eq!(row.keys(), &[GraphValue::Scalar(CanonicalScalar::Int(1))]);
@@ -167,7 +198,10 @@ fn aggregate_width_is_not_narrowed_to_the_scalar_domain() {
     );
     let row = run(&plan).value.remove(0);
     assert_eq!(row.values()[0].as_integer(), Some(i128::from(i64::MAX) * 2));
-    assert_eq!(row.values()[1].as_average(), GraphExactAverage::new(i128::from(i64::MAX), 1));
+    assert_eq!(
+        row.values()[1].as_average(),
+        GraphExactAverage::new(i128::from(i64::MAX), 1)
+    );
 }
 
 #[test]
@@ -190,27 +224,38 @@ fn limit_zero_cannot_hide_input_arithmetic_errors_or_cancelled_execution() {
 
 #[test]
 fn zero_source_rows_work_scratch_and_cancellation_share_one_allowance() {
-    let plan = prepare(
-        "UNWIND [1,1,2] AS x RETURN x AS key,SUM(x+1) AS total ORDER BY key DESC",
-    );
+    let plan = prepare("UNWIND [1,1,2] AS x RETURN x AS key,SUM(x+1) AS total ORDER BY key DESC");
     let mut checkpoints = 0;
-    let measured = plan.execute_governed(policy(), no_source, || {
-        checkpoints += 1;
-        Ok(())
-    }).unwrap();
+    let measured = plan
+        .execute_governed(policy(), no_source, || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
     assert!(checkpoints > 0);
     assert_eq!(measured.rows.snapshot_records, 0);
-    let caps = [measured.rows.result_rows, measured.evaluator.work_units,
-        measured.evaluator.scratch_entries];
+    let caps = [
+        measured.rows.result_rows,
+        measured.evaluator.work_units,
+        measured.evaluator.scratch_entries,
+    ];
     assert!(caps.iter().all(|cap| *cap > 0));
     let exact = GqlQueryPolicy::new(0, caps[0], caps[1], caps[2]);
-    assert_eq!(plan.execute_governed(exact, no_source, || Ok(())).unwrap(), measured);
+    assert_eq!(
+        plan.execute_governed(exact, no_source, || Ok(())).unwrap(),
+        measured
+    );
     for dimension in 0..3 {
         let mut bound = caps;
         bound[dimension] -= 1;
-        assert!(plan.execute_governed(
-            GqlQueryPolicy::new(0, bound[0], bound[1], bound[2]), no_source, || Ok(()),
-        ).is_err());
+        assert!(
+            plan.execute_governed(
+                GqlQueryPolicy::new(0, bound[0], bound[1], bound[2]),
+                no_source,
+                || Ok(()),
+            )
+            .is_err()
+        );
     }
     for stop in 1..=checkpoints {
         let mut at = 0;
@@ -229,13 +274,25 @@ fn real_singleton_depth_is_admitted_without_a_phantom_graph_level() {
         ("x", fgdb_gql::MAX_GRAPH_SET_DEPTH - 3),
         ("x+1", fgdb_gql::MAX_GRAPH_SET_DEPTH - 4),
     ] {
-        let text = format!("WITH 1 AS x{} RETURN SUM({argument}) AS total", " WITH x".repeat(repeats));
+        let text = format!(
+            "WITH 1 AS x{} RETURN SUM({argument}) AS total",
+            " WITH x".repeat(repeats)
+        );
         let row = run(&prepare(&text)).value.remove(0);
-        assert_eq!(row.values()[0].as_integer(), Some(if argument == "x" { 1 } else { 2 }));
-        let excess = format!("WITH 1 AS x{} RETURN SUM({argument}) AS total", " WITH x".repeat(repeats + 1));
-        assert!(PreparedGraphPipelineAggregateText::prepare(&excess, |_, _| {
-            panic!("depth failure must precede catalog access")
-        }).is_err());
+        assert_eq!(
+            row.values()[0].as_integer(),
+            Some(if argument == "x" { 1 } else { 2 })
+        );
+        let excess = format!(
+            "WITH 1 AS x{} RETURN SUM({argument}) AS total",
+            " WITH x".repeat(repeats + 1)
+        );
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(&excess, |_, _| {
+                panic!("depth failure must precede catalog access")
+            })
+            .is_err()
+        );
     }
 }
 
@@ -253,11 +310,17 @@ fn invalid_terminal_shapes_and_parameters_fail_before_any_source_or_catalog() {
         "RETURN COUNT(*) LIMIT 0 MATCH (n)",
         "UNWIND [1] AS x MATCH (n) RETURN COUNT(*)",
     ] {
-        assert!(PreparedGraphPipelineAggregateText::prepare(text, |_, _| {
-            panic!("invalid syntax must not resolve symbols")
-        }).is_err(), "{text}");
+        assert!(
+            PreparedGraphPipelineAggregateText::prepare(text, |_, _| {
+                panic!("invalid syntax must not resolve symbols")
+            })
+            .is_err(),
+            "{text}"
+        );
     }
     let text = "\u{2003}WITH $p AS x RETURN SUM(x) AS total";
-    let missing = template(text).bind_relation_parameters(&GqlParameters::new()).unwrap_err();
+    let missing = template(text)
+        .bind_relation_parameters(&GqlParameters::new())
+        .unwrap_err();
     assert_eq!(missing.offset, text.find("$p").unwrap());
 }

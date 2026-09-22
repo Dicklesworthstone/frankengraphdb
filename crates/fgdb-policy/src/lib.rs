@@ -134,9 +134,15 @@ pub enum ReadCaveat {
     VertexProperty(PropertyPredicate),
     EdgeProperty(PropertyPredicate),
     /// Closed-open authority-profile ticks. No ambient clock is consulted.
-    TimeWindow { not_before: u128, expires_at: u128 },
+    TimeWindow {
+        not_before: u128,
+        expires_at: u128,
+    },
     /// Closed interval of permitted committed snapshots.
-    Snapshots { first: CommitSeq, last: CommitSeq },
+    Snapshots {
+        first: CommitSeq,
+        last: CommitSeq,
+    },
     Limits(ReadLimits),
 }
 impl core::fmt::Debug for ReadCaveat {
@@ -150,7 +156,9 @@ pub struct Scope<T>(Option<Vec<T>>);
 impl<T: Ord + Clone> Scope<T> {
     #[must_use]
     pub fn contains(&self, value: &T) -> bool {
-        self.0.as_ref().is_none_or(|items| items.binary_search(value).is_ok())
+        self.0
+            .as_ref()
+            .is_none_or(|items| items.binary_search(value).is_ok())
     }
     /// None is unrestricted; Some(empty) is deny-all.
     #[must_use]
@@ -207,7 +215,9 @@ impl ReadPolicy {
         let mut bytes = 0usize;
         for caveat in caveats {
             let encoded = caveat.to_bytes()?;
-            bytes = bytes.checked_add(encoded.len() + 2).ok_or(PolicyError::Limit)?;
+            bytes = bytes
+                .checked_add(encoded.len() + 2)
+                .ok_or(PolicyError::Limit)?;
             if bytes > MAX_POLICY_BYTES {
                 return Err(PolicyError::Limit);
             }
@@ -238,9 +248,16 @@ impl ReadPolicy {
                 ReadCaveat::Properties(items) => policy.properties.intersect(items),
                 ReadCaveat::Vertices(items) => policy.vertices.intersect(items),
                 ReadCaveat::HasLabel(label) => policy.required_labels.push(*label),
-                ReadCaveat::VertexProperty(predicate) => policy.vertex_predicates.push(predicate.clone()),
-                ReadCaveat::EdgeProperty(predicate) => policy.edge_predicates.push(predicate.clone()),
-                ReadCaveat::TimeWindow { not_before, expires_at } => {
+                ReadCaveat::VertexProperty(predicate) => {
+                    policy.vertex_predicates.push(predicate.clone())
+                }
+                ReadCaveat::EdgeProperty(predicate) => {
+                    policy.edge_predicates.push(predicate.clone())
+                }
+                ReadCaveat::TimeWindow {
+                    not_before,
+                    expires_at,
+                } => {
                     policy.not_before = policy.not_before.max(*not_before);
                     policy.expires_at = policy.expires_at.min(*expires_at);
                 }
@@ -269,32 +286,56 @@ impl ReadPolicy {
     }
 
     #[must_use]
-    pub fn caveats(&self) -> &[ReadCaveat] { &self.caveats }
+    pub fn caveats(&self) -> &[ReadCaveat] {
+        &self.caveats
+    }
     #[must_use]
-    pub fn graph_scope(&self) -> &Scope<GraphId> { &self.graphs }
+    pub fn graph_scope(&self) -> &Scope<GraphId> {
+        &self.graphs
+    }
     #[must_use]
-    pub fn branch_scope(&self) -> &Scope<BranchId> { &self.branches }
+    pub fn branch_scope(&self) -> &Scope<BranchId> {
+        &self.branches
+    }
     #[must_use]
-    pub fn label_scope(&self) -> &Scope<LabelId> { &self.labels }
+    pub fn label_scope(&self) -> &Scope<LabelId> {
+        &self.labels
+    }
     #[must_use]
-    pub fn edge_type_scope(&self) -> &Scope<RelationId> { &self.edge_types }
+    pub fn edge_type_scope(&self) -> &Scope<RelationId> {
+        &self.edge_types
+    }
     #[must_use]
-    pub fn property_scope(&self) -> &Scope<PropertyKeyId> { &self.properties }
+    pub fn property_scope(&self) -> &Scope<PropertyKeyId> {
+        &self.properties
+    }
     #[must_use]
-    pub fn vertex_scope(&self) -> &Scope<VId> { &self.vertices }
+    pub fn vertex_scope(&self) -> &Scope<VId> {
+        &self.vertices
+    }
     #[must_use]
-    pub fn required_labels(&self) -> &[LabelId] { &self.required_labels }
+    pub fn required_labels(&self) -> &[LabelId] {
+        &self.required_labels
+    }
     #[must_use]
-    pub fn vertex_predicates(&self) -> &[PropertyPredicate] { &self.vertex_predicates }
+    pub fn vertex_predicates(&self) -> &[PropertyPredicate] {
+        &self.vertex_predicates
+    }
     #[must_use]
-    pub fn edge_predicates(&self) -> &[PropertyPredicate] { &self.edge_predicates }
+    pub fn edge_predicates(&self) -> &[PropertyPredicate] {
+        &self.edge_predicates
+    }
     #[must_use]
-    pub fn limits(&self) -> ReadLimits { self.limits }
+    pub fn limits(&self) -> ReadLimits {
+        self.limits
+    }
 
     #[must_use]
     pub fn allows_snapshot(&self, graph: GraphId, branch: BranchId, at: CommitSeq) -> bool {
-        self.graphs.contains(&graph) && self.branches.contains(&branch)
-            && at >= self.first_snapshot && at <= self.last_snapshot
+        self.graphs.contains(&graph)
+            && self.branches.contains(&branch)
+            && at >= self.first_snapshot
+            && at <= self.last_snapshot
     }
 
     /// Every instant in the trusted observation interval must be usable.
@@ -305,26 +346,51 @@ impl ReadPolicy {
     }
 
     #[must_use]
-    pub fn allows_vertex(&self, id: VId, labels: &[LabelId], properties: &[(PropertyKeyId, CanonicalScalar)]) -> bool {
+    pub fn allows_vertex(
+        &self,
+        id: VId,
+        labels: &[LabelId],
+        properties: &[(PropertyKeyId, CanonicalScalar)],
+    ) -> bool {
         self.vertices.contains(&id)
-            && (self.labels.items().is_none() || (!labels.is_empty()
-                && labels.iter().all(|label| self.labels.contains(label))))
-            && self.required_labels.iter().all(|label| labels.contains(label))
-            && self.vertex_predicates.iter().all(|predicate| predicate.matches(properties))
+            && (self.labels.items().is_none()
+                || (!labels.is_empty() && labels.iter().all(|label| self.labels.contains(label))))
+            && self
+                .required_labels
+                .iter()
+                .all(|label| labels.contains(label))
+            && self
+                .vertex_predicates
+                .iter()
+                .all(|predicate| predicate.matches(properties))
     }
 
     /// Only the edge-local part. The secure-view caller MUST also authorize
     /// both endpoint vertices before exposing the edge, including self-loops.
     #[must_use]
-    pub fn allows_edge(&self, relation: RelationId, properties: &[(PropertyKeyId, CanonicalScalar)]) -> bool {
+    pub fn allows_edge(
+        &self,
+        relation: RelationId,
+        properties: &[(PropertyKeyId, CanonicalScalar)],
+    ) -> bool {
         self.edge_types.contains(&relation)
-            && self.edge_predicates.iter().all(|predicate| predicate.matches(properties))
+            && self
+                .edge_predicates
+                .iter()
+                .all(|predicate| predicate.matches(properties))
     }
 
     /// Filter only after evaluating the row's authorization predicates.
     #[must_use]
-    pub fn project_properties(&self, properties: &[(PropertyKeyId, CanonicalScalar)]) -> Vec<(PropertyKeyId, CanonicalScalar)> {
-        properties.iter().filter(|(key, _)| self.properties.contains(key)).cloned().collect()
+    pub fn project_properties(
+        &self,
+        properties: &[(PropertyKeyId, CanonicalScalar)],
+    ) -> Vec<(PropertyKeyId, CanonicalScalar)> {
+        properties
+            .iter()
+            .filter(|(key, _)| self.properties.contains(key))
+            .cloned()
+            .collect()
     }
 }
 

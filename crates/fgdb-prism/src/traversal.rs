@@ -2,17 +2,22 @@
 //! construct a second Graph/DiGraph, recurse on the process stack, or consult
 //! weights that their registered semantics ignore.
 
-use crate::{FnxAlgorithm, FnxExecutionError, GraphView, SnapshotGraphView};
 use crate::execute::{ComplexityWitness, KernelOutput, KernelValues, admit, reserve};
+use crate::{FnxAlgorithm, FnxExecutionError, GraphView, SnapshotGraphView};
 
 fn witness(algorithm: &str) -> ComplexityWitness {
     ComplexityWitness {
-        algorithm: algorithm.to_owned(), complexity_claim: "O(|V| + |E|)".to_owned(),
-        nodes_touched: 0, edges_scanned: 0, queue_peak: 0,
+        algorithm: algorithm.to_owned(),
+        complexity_claim: "O(|V| + |E|)".to_owned(),
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 0,
     }
 }
 fn increment<C>(counter: &mut usize) -> Result<(), FnxExecutionError<C>> {
-    *counter = counter.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?;
+    *counter = counter
+        .checked_add(1)
+        .ok_or(FnxExecutionError::SizeOverflow)?;
     Ok(())
 }
 
@@ -24,7 +29,9 @@ pub(crate) fn run<C>(
 ) -> Result<KernelOutput, FnxExecutionError<C>> {
     match algorithm {
         FnxAlgorithm::SingleSourceShortestPathLength { source, cutoff } => {
-            let source = graph.vertex_ordinal(source).ok_or(FnxExecutionError::UnknownSource(source))?;
+            let source = graph
+                .vertex_ordinal(source)
+                .ok_or(FnxExecutionError::UnknownSource(source))?;
             bfs(graph, source, cutoff, row_limit, checkpoint)
         }
         FnxAlgorithm::ConnectedComponents => components(graph, false, checkpoint),
@@ -63,14 +70,23 @@ fn bfs<C>(
         head += 1;
         increment(&mut witness.nodes_touched)?;
         let depth = distances[vertex].ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-        if cutoff.is_some_and(|cutoff| depth >= cutoff) { continue; }
-        let next_depth = depth.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?;
-        let neighbors = graph.neighbors_indices(vertex).ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+        if cutoff.is_some_and(|cutoff| depth >= cutoff) {
+            continue;
+        }
+        let next_depth = depth
+            .checked_add(1)
+            .ok_or(FnxExecutionError::SizeOverflow)?;
+        let neighbors = graph
+            .neighbors_indices(vertex)
+            .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         for &neighbor in neighbors {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
             increment(&mut witness.edges_scanned)?;
             if distances[neighbor].is_none() {
-                let requested = queue.len().checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?;
+                let requested = queue
+                    .len()
+                    .checked_add(1)
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
                 admit("result rows", requested, row_limit)?;
                 distances[neighbor] = Some(next_depth);
                 queue.push(neighbor);
@@ -78,7 +94,11 @@ fn bfs<C>(
             }
         }
     }
-    Ok(KernelOutput { values: KernelValues::Distances(distances), row_count: queue.len(), witness })
+    Ok(KernelOutput {
+        values: KernelValues::Distances(distances),
+        row_count: queue.len(),
+        witness,
+    })
 }
 
 fn components<C>(
@@ -93,12 +113,18 @@ fn components<C>(
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
         labels.push(usize::MAX);
     }
-    let mut witness = witness(if weak { "weakly_connected_components_bfs" } else { "connected_components_bfs" });
+    let mut witness = witness(if weak {
+        "weakly_connected_components_bfs"
+    } else {
+        "connected_components_bfs"
+    });
     // Roots are visited in VId order, so the first unseen member is already
     // the minimum VId in its component. No post-hoc hash-map relabel is needed.
     for root in 0..n {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        if labels[root] != usize::MAX { continue; }
+        if labels[root] != usize::MAX {
+            continue;
+        }
         queue.clear();
         labels[root] = root;
         queue.push(root);
@@ -110,8 +136,12 @@ fn components<C>(
             head += 1;
             increment(&mut witness.nodes_touched)?;
             for face in 0..(if weak { 2 } else { 1 }) {
-                let neighbors = (if face == 0 { graph.neighbors_indices(vertex) }
-                    else { graph.in_neighbors_indices(vertex) }).ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                let neighbors = (if face == 0 {
+                    graph.neighbors_indices(vertex)
+                } else {
+                    graph.in_neighbors_indices(vertex)
+                })
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
                 for &neighbor in neighbors {
                     checkpoint().map_err(FnxExecutionError::Cancelled)?;
                     increment(&mut witness.edges_scanned)?;
@@ -124,7 +154,11 @@ fn components<C>(
             }
         }
     }
-    Ok(KernelOutput { values: KernelValues::Components(labels), row_count: n, witness })
+    Ok(KernelOutput {
+        values: KernelValues::Components(labels),
+        row_count: n,
+        witness,
+    })
 }
 
 /// Iterative Kosaraju, rather than recursive Tarjan. The first-pass stack is
@@ -147,13 +181,17 @@ fn strongly_connected<C>(
     let mut witness = witness("strongly_connected_components_iterative_kosaraju");
     for root in 0..n {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        if seen[root] { continue; }
+        if seen[root] {
+            continue;
+        }
         seen[root] = true;
         stack.push((root, 0usize));
         witness.queue_peak = witness.queue_peak.max(stack.len());
         while let Some(&(vertex, offset)) = stack.last() {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
-            let row = graph.neighbors_indices(vertex).ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            let row = graph
+                .neighbors_indices(vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
             if let Some(&neighbor) = row.get(offset) {
                 increment(&mut witness.edges_scanned)?;
                 let last = stack.len() - 1;
@@ -172,7 +210,9 @@ fn strongly_connected<C>(
     }
     for &root in order.iter().rev() {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        if labels[root] != usize::MAX { continue; }
+        if labels[root] != usize::MAX {
+            continue;
+        }
         stack.clear();
         stack.push((root, 0));
         labels[root] = root;
@@ -184,7 +224,9 @@ fn strongly_connected<C>(
             let vertex = stack[head].0;
             head += 1;
             increment(&mut witness.nodes_touched)?;
-            let row = graph.in_neighbors_indices(vertex).ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            let row = graph
+                .in_neighbors_indices(vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
             for &neighbor in row {
                 checkpoint().map_err(FnxExecutionError::Cancelled)?;
                 increment(&mut witness.edges_scanned)?;
@@ -201,5 +243,9 @@ fn strongly_connected<C>(
             labels[vertex] = minimum;
         }
     }
-    Ok(KernelOutput { values: KernelValues::Components(labels), row_count: n, witness })
+    Ok(KernelOutput {
+        values: KernelValues::Components(labels),
+        row_count: n,
+        witness,
+    })
 }

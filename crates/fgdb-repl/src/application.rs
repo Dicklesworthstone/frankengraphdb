@@ -93,7 +93,9 @@ impl<E: core::fmt::Debug> core::fmt::Display for ApplicationError<E> {
 }
 impl<E: core::fmt::Debug> core::error::Error for ApplicationError<E> {}
 impl<E> From<ApplicationStateError> for ApplicationError<E> {
-    fn from(error: ApplicationStateError) -> Self { Self::State(error) }
+    fn from(error: ApplicationStateError) -> Self {
+        Self::State(error)
+    }
 }
 
 /// A nonempty, contiguous, bounded borrow of the committed log. Only this
@@ -109,16 +111,32 @@ pub struct ApplicationBatch<'a, C> {
 }
 
 impl<C> ApplicationBatch<'_, C> {
-    pub fn basis(&self) -> &ApplicationProgress { self.basis }
-    pub fn consensus(&self) -> &PersistentState<C> { self.consensus }
-    pub fn first_index(&self) -> u64 { self.first_index }
-    pub fn last(&self) -> AppliedPosition { self.last }
-    pub fn entries(&self) -> &[Entry<C>] { self.entries }
+    pub fn basis(&self) -> &ApplicationProgress {
+        self.basis
+    }
+    pub fn consensus(&self) -> &PersistentState<C> {
+        self.consensus
+    }
+    pub fn first_index(&self) -> u64 {
+        self.first_index
+    }
+    pub fn last(&self) -> AppliedPosition {
+        self.last
+    }
+    pub fn entries(&self) -> &[Entry<C>] {
+        self.entries
+    }
 
     /// All entries, including no-ops, must advance the persisted Raft cursor.
     pub fn indexed_entries(&self) -> impl ExactSizeIterator<Item = (AppliedPosition, &Entry<C>)> {
         self.entries.iter().enumerate().map(|(offset, entry)| {
-            (AppliedPosition { index: self.first_index + offset as u64, term: entry.term }, entry)
+            (
+                AppliedPosition {
+                    index: self.first_index + offset as u64,
+                    term: entry.term,
+                },
+                entry,
+            )
         })
     }
 
@@ -126,7 +144,10 @@ impl<C> ApplicationBatch<'_, C> {
     /// CommitSeq or HLC. The interpreter classifies the remaining commands.
     pub fn commands(&self) -> impl Iterator<Item = (u64, &C)> {
         self.indexed_entries().filter_map(|(position, entry)| {
-            entry.command.as_ref().map(|command| (position.index, command))
+            entry
+                .command
+                .as_ref()
+                .map(|command| (position.index, command))
         })
     }
 }
@@ -183,11 +204,19 @@ impl<C: Clone + Eq, A: Application<C>> ApplicationDriver<C, A> {
         }
         // Hold the borrow through load: the verified log cannot change under
         // the recovered application cut, even when load suspends.
-        let state = replica.durable_state().map_err(ApplicationStateError::Raft)?;
-        let progress = application.load().await.map_err(ApplicationError::Backend)?;
+        let state = replica
+            .durable_state()
+            .map_err(ApplicationStateError::Raft)?;
+        let progress = application
+            .load()
+            .await
+            .map_err(ApplicationError::Backend)?;
         validate_progress(state, &progress)?;
         Ok(Self {
-            application, progress, maximum_batch_entries, poisoned: false,
+            application,
+            progress,
+            maximum_batch_entries,
+            poisoned: false,
             command: PhantomData,
         })
     }
@@ -206,30 +235,48 @@ impl<C: Clone + Eq, A: Application<C>> ApplicationDriver<C, A> {
         replica: &Replica<C>,
     ) -> Result<Option<ApplicationProgress>, ApplicationError<A::Error>> {
         self.available()?;
-        let state = replica.durable_state().map_err(ApplicationStateError::Raft)?;
+        let state = replica
+            .durable_state()
+            .map_err(ApplicationStateError::Raft)?;
         validate_progress(state, &self.progress)?;
-        if self.progress.applied.index == state.commit_index() { return Ok(None); }
+        if self.progress.applied.index == state.commit_index() {
+            return Ok(None);
+        }
         let base = state.snapshot().map_or(0, |cut| cut.index());
         let start = usize::try_from(self.progress.applied.index - base)
             .map_err(|_| ApplicationStateError::InvalidPosition)?;
         let remaining = usize::try_from(state.commit_index() - self.progress.applied.index)
             .map_err(|_| ApplicationStateError::InvalidPosition)?;
         let count = remaining.min(self.maximum_batch_entries);
-        let end = start.checked_add(count).ok_or(ApplicationStateError::InvalidPosition)?;
-        let entries = state.entries().get(start..end).ok_or(ApplicationStateError::InvalidPosition)?;
-        let last_entry = entries.last().ok_or(ApplicationStateError::InvalidPosition)?;
+        let end = start
+            .checked_add(count)
+            .ok_or(ApplicationStateError::InvalidPosition)?;
+        let entries = state
+            .entries()
+            .get(start..end)
+            .ok_or(ApplicationStateError::InvalidPosition)?;
+        let last_entry = entries
+            .last()
+            .ok_or(ApplicationStateError::InvalidPosition)?;
         let last = AppliedPosition {
             index: self.progress.applied.index + count as u64,
             term: last_entry.term,
         };
         let batch = ApplicationBatch {
-            basis: &self.progress, consensus: state, entries,
-            first_index: self.progress.applied.index + 1, last,
+            basis: &self.progress,
+            consensus: state,
+            entries,
+            first_index: self.progress.applied.index + 1,
+            last,
         };
         // Set BEFORE invoking backend code, not merely before polling its future.
         // Error, panic or cancellation leaves this driver permanently fenced.
         self.poisoned = true;
-        let published = self.application.apply(batch).await.map_err(ApplicationError::Backend)?;
+        let published = self
+            .application
+            .apply(batch)
+            .await
+            .map_err(ApplicationError::Backend)?;
         validate_progress(state, &published)?;
         if published.applied != last
             || published.publication_generation <= self.progress.publication_generation
@@ -246,7 +293,11 @@ impl<C: Clone + Eq, A: Application<C>> ApplicationDriver<C, A> {
     }
 
     fn available(&self) -> Result<(), ApplicationStateError> {
-        if self.poisoned { Err(ApplicationStateError::RecoveryRequired) } else { Ok(()) }
+        if self.poisoned {
+            Err(ApplicationStateError::RecoveryRequired)
+        } else {
+            Ok(())
+        }
     }
 }
 

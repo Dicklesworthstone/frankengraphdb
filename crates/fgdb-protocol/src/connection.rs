@@ -126,10 +126,15 @@ impl Connection {
             FrameKind::SelectDatabase => self.phase == Phase::Authenticated,
             FrameKind::AuthRefresh => matches!(self.phase, Phase::Authenticated | Phase::Ready),
             FrameKind::Prepare | FrameKind::Execute => self.phase == Phase::Ready,
-            FrameKind::QueryCancel | FrameKind::ResultAck | FrameKind::ResultRelease
+            FrameKind::QueryCancel
+            | FrameKind::ResultAck
+            | FrameKind::ResultRelease
             | FrameKind::WindowUpdate => matches!(self.phase, Phase::Ready | Phase::Draining),
             FrameKind::Ping => matches!(self.phase, Phase::Authenticated | Phase::Ready),
-            FrameKind::Drain => matches!(self.phase, Phase::Authenticated | Phase::Ready | Phase::Draining),
+            FrameKind::Drain => matches!(
+                self.phase,
+                Phase::Authenticated | Phase::Ready | Phase::Draining
+            ),
             // A client cannot impersonate a server reply, including ERROR.
             _ => false,
         };
@@ -138,14 +143,18 @@ impl Connection {
         }
         let needs_stream = matches!(
             header.kind,
-            FrameKind::QueryCancel | FrameKind::ResultAck
-                | FrameKind::ResultRelease | FrameKind::WindowUpdate
+            FrameKind::QueryCancel
+                | FrameKind::ResultAck
+                | FrameKind::ResultRelease
+                | FrameKind::WindowUpdate
         );
         if needs_stream == header.stream_id.is_control() {
             return Err(ProtocolError::InvalidStream);
         }
-        if matches!(header.kind, FrameKind::QueryCancel | FrameKind::WindowUpdate)
-            && !self.children.contains_key(&header.stream_id)
+        if matches!(
+            header.kind,
+            FrameKind::QueryCancel | FrameKind::WindowUpdate
+        ) && !self.children.contains_key(&header.stream_id)
         {
             return Err(ProtocolError::InvalidStream);
         }
@@ -197,8 +206,13 @@ impl Connection {
         if !matches!(self.phase, Phase::Authenticated | Phase::Ready) {
             return Err(ProtocolError::InvalidState);
         }
-        let mut session = self.binding.session().ok_or(ProtocolError::InvalidBinding)?;
-        session.auth_generation = session.auth_generation.checked_add(1)
+        let mut session = self
+            .binding
+            .session()
+            .ok_or(ProtocolError::InvalidBinding)?;
+        session.auth_generation = session
+            .auth_generation
+            .checked_add(1)
             .ok_or(ProtocolError::GenerationExhausted)?;
         self.binding = match self.binding {
             Binding::Session(_) => Binding::Session(session),
@@ -211,7 +225,11 @@ impl Connection {
         Ok(session)
     }
 
-    pub fn admit_child(&mut self, stream_id: StreamId, kind: ChildKind) -> Result<u64, ProtocolError> {
+    pub fn admit_child(
+        &mut self,
+        stream_id: StreamId,
+        kind: ChildKind,
+    ) -> Result<u64, ProtocolError> {
         if self.phase != Phase::Ready {
             return Err(ProtocolError::InvalidState);
         }
@@ -221,7 +239,9 @@ impl Connection {
         if self.children.len() >= self.maximum_children {
             return Err(ProtocolError::StreamLimit);
         }
-        let generation = self.next_child_generation.checked_add(1)
+        let generation = self
+            .next_child_generation
+            .checked_add(1)
             .ok_or(ProtocolError::GenerationExhausted)?;
         self.children.insert(stream_id, Child { kind, generation });
         self.next_child_generation = generation;
@@ -236,7 +256,10 @@ impl Connection {
         generation: u64,
         terminus: ChildTerminus,
     ) -> Result<(), ProtocolError> {
-        let child = self.children.get(&stream_id).ok_or(ProtocolError::InvalidStream)?;
+        let child = self
+            .children
+            .get(&stream_id)
+            .ok_or(ProtocolError::InvalidStream)?;
         if child.generation != generation {
             return Err(ProtocolError::InvalidStream);
         }
@@ -267,11 +290,16 @@ impl Connection {
         if self.sends.len() == self.maximum_sends {
             return Err(ProtocolError::SendLimit);
         }
-        let sequence = self.next_send_sequence.checked_add(1)
+        let sequence = self
+            .next_send_sequence
+            .checked_add(1)
             .ok_or(ProtocolError::GenerationExhausted)?;
         self.sends.insert(sequence);
         self.next_send_sequence = sequence;
-        Ok(SendTicket { owner: Arc::clone(&self.send_owner), sequence })
+        Ok(SendTicket {
+            owner: Arc::clone(&self.send_owner),
+            sequence,
+        })
     }
     /// Report only Sent, CancelledBeforeWrite, or Failed. This discharges a
     /// transport obligation and has no authority to ACK/release a result.

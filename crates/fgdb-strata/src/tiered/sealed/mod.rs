@@ -20,22 +20,24 @@
 //! but does not authorize the image under an unrelated branch.
 
 mod image;
-mod wire;
 #[cfg(test)]
 mod tests;
+mod wire;
 
-use std::sync::Arc;
+use super::inline::InlineError;
+use crate::edge_props::EdgePropertyPatchError;
+use crate::store::{BlockStore, StoreError};
+use crate::{AdjacencyEntry, BlockError, PartitionRootVersion};
 use asupersync::fs::Vfs;
 use fgdb_codec::ef_payload::EfPayloadError;
 use fgdb_codec::elias_fano::EliasFanoError;
 use fgdb_codec::identity::IdentityColumnError;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
-use fgdb_types::{BranchId, CanonicalScalar, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId};
-use crate::edge_props::EdgePropertyPatchError;
-use crate::store::{BlockStore, StoreError};
-use crate::{AdjacencyEntry, BlockError, PartitionRootVersion};
-use super::inline::InlineError;
+use fgdb_types::{
+    BranchId, CanonicalScalar, CanonicalScalarResolver, CommitSeq, GraphId, QueryCx, VId,
+};
 use image::{Image, Row};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SealedLimits {
@@ -48,8 +50,12 @@ pub struct SealedLimits {
 
 impl Default for SealedLimits {
     fn default() -> Self {
-        Self { max_rows: 1_000_000, max_incidences: 1_000_000,
-            max_image_bytes: 256 * 1024 * 1024, max_property_bytes: 64 * 1024 * 1024 }
+        Self {
+            max_rows: 1_000_000,
+            max_incidences: 1_000_000,
+            max_image_bytes: 256 * 1024 * 1024,
+            max_property_bytes: 64 * 1024 * 1024,
+        }
     }
 }
 
@@ -64,7 +70,11 @@ pub enum SealedError {
     Payload(EfPayloadError),
     Property(EdgePropertyPatchError),
     Interrupted(Box<asupersync::error::Error>),
-    Limit { resource: &'static str, requested: usize, limit: usize },
+    Limit {
+        resource: &'static str,
+        requested: usize,
+        limit: usize,
+    },
     SizeOverflow,
     AllocationFailed,
     InvalidFormat,
@@ -72,15 +82,25 @@ pub enum SealedError {
     Truncated,
     TrailingBytes,
     InvalidFloor,
-    SnapshotOutsideAnchor { requested: CommitSeq, floor: CommitSeq, publication: CommitSeq },
+    SnapshotOutsideAnchor {
+        requested: CommitSeq,
+        floor: CommitSeq,
+        publication: CommitSeq,
+    },
     ImageMismatch,
 }
 
 impl core::fmt::Display for SealedError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Limit { resource, requested, limit } => write!(f,
-                "ResourceExhausted: sealed {resource} needs {requested}, limit {limit}"),
+            Self::Limit {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "ResourceExhausted: sealed {resource} needs {requested}, limit {limit}"
+            ),
             Self::Interrupted(_) => write!(f, "sealed adjacency operation interrupted"),
             other => write!(f, "sealed adjacency: {other:?}"),
         }
@@ -123,7 +143,9 @@ impl SealedAnchor {
     pub(super) fn authorize(self, as_of: CommitSeq) -> Result<(), SealedError> {
         if as_of < self.scope.floor || as_of > self.scope.publication {
             return Err(SealedError::SnapshotOutsideAnchor {
-                requested: as_of, floor: self.scope.floor, publication: self.scope.publication,
+                requested: as_of,
+                floor: self.scope.floor,
+                publication: self.scope.publication,
             });
         }
         Ok(())
@@ -157,8 +179,10 @@ pub struct SealedPartition {
 
 impl core::fmt::Debug for SealedPartition {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("SealedPartition").field("scope", &self.anchor.scope)
-            .field("stats", &self.stats()).finish()
+        f.debug_struct("SealedPartition")
+            .field("scope", &self.anchor.scope)
+            .field("stats", &self.stats())
+            .finish()
     }
 }
 
@@ -171,7 +195,11 @@ fn fingerprint(bytes: &[u8]) -> [u8; 32] {
 
 fn check_limit(resource: &'static str, requested: usize, limit: usize) -> Result<(), SealedError> {
     if requested > limit {
-        Err(SealedError::Limit { resource, requested, limit })
+        Err(SealedError::Limit {
+            resource,
+            requested,
+            limit,
+        })
     } else {
         Ok(())
     }
@@ -190,13 +218,17 @@ impl<V: Vfs> BlockStore<V> {
         limits: SealedLimits,
     ) -> Result<SealedPartition, SealedError> {
         cx.checkpoint().map_err(SealedError::Interrupted)?;
-        let (root, blocks, properties, vertices) = self.reopen(cx, root_id).await
+        let (root, blocks, properties, vertices) = self
+            .reopen(cx, root_id)
+            .await
             .map_err(|error| SealedError::Store(Box::new(error)))?;
         drop(vertices);
         if floor > root.published_at {
             return Err(SealedError::InvalidFloor);
         }
-        let source_count = blocks.iter().try_fold(0usize, |count, block| count.checked_add(block.len()))
+        let source_count = blocks
+            .iter()
+            .try_fold(0usize, |count, block| count.checked_add(block.len()))
             .ok_or(SealedError::SizeOverflow)?;
         check_limit("source incidences", source_count, limits.max_incidences)?;
         cx.checkpoint().map_err(SealedError::Interrupted)?;
@@ -204,8 +236,14 @@ impl<V: Vfs> BlockStore<V> {
             .map_err(SealedError::History)?;
         drop(blocks);
         drop(properties);
-        let scope = SealedScope { source_root: root_id, graph: root.graph, branch: root.branch,
-            partition: root.partition, floor, publication: root.published_at };
+        let scope = SealedScope {
+            source_root: root_id,
+            graph: root.graph,
+            branch: root.branch,
+            partition: root.partition,
+            floor,
+            publication: root.published_at,
+        };
         let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
         let image = image::build(compacted, limits, &mut checkpoint)?;
         SealedPartition::finish(scope, image, limits, &mut checkpoint)
@@ -221,9 +259,16 @@ impl SealedPartition {
     ) -> Result<Self, SealedError> {
         image.validate(scope, limits, checkpoint)?;
         let bytes = wire::encode(&image, limits, checkpoint)?;
-        let anchor = SealedAnchor { scope, fingerprint: fingerprint(&bytes), encoded_bytes: bytes.len() };
+        let anchor = SealedAnchor {
+            scope,
+            fingerprint: fingerprint(&bytes),
+            encoded_bytes: bytes.len(),
+        };
         checkpoint()?;
-        Ok(Self { anchor, image: Arc::new(image) })
+        Ok(Self {
+            anchor,
+            image: Arc::new(image),
+        })
     }
 
     pub const fn anchor(&self) -> SealedAnchor {
@@ -235,10 +280,20 @@ impl SealedPartition {
     }
 
     pub fn stats(&self) -> SealedStats {
-        let inline_rows = self.image.rows.iter().filter(|row| row.kind() == RowStorageKind::Inline).count();
-        SealedStats { rows: self.image.rows.len(), inline_rows,
-            sealed_rows: self.image.rows.len() - inline_rows, incidences: self.image.incidences,
-            property_rows: self.image.properties.len(), encoded_bytes: self.anchor.encoded_bytes }
+        let inline_rows = self
+            .image
+            .rows
+            .iter()
+            .filter(|row| row.kind() == RowStorageKind::Inline)
+            .count();
+        SealedStats {
+            rows: self.image.rows.len(),
+            inline_rows,
+            sealed_rows: self.image.rows.len() - inline_rows,
+            incidences: self.image.incidences,
+            property_rows: self.image.properties.len(),
+            encoded_bytes: self.anchor.encoded_bytes,
+        }
     }
 
     pub fn storage_kind(&self, src: VId, relation: RelationId) -> Option<RowStorageKind> {
@@ -248,7 +303,9 @@ impl SealedPartition {
     /// Produce canonical bytes for a derived-object cache/archive. These bytes
     /// carry no claim to be a registered authoritative graph object.
     pub fn encode(&self, cx: &QueryCx, limits: SealedLimits) -> Result<Vec<u8>, SealedError> {
-        wire::encode(&self.image, limits, &mut || cx.checkpoint().map_err(SealedError::Interrupted))
+        wire::encode(&self.image, limits, &mut || {
+            cx.checkpoint().map_err(SealedError::Interrupted)
+        })
     }
 
     /// Reload under a previously earned, opaque source receipt. Integrity is
@@ -260,8 +317,9 @@ impl SealedPartition {
         limits: SealedLimits,
         resolver: Option<&dyn CanonicalScalarResolver>,
     ) -> Result<Self, SealedError> {
-        Self::reload_inner(anchor, bytes, limits, resolver,
-            &mut || cx.checkpoint().map_err(SealedError::Interrupted))
+        Self::reload_inner(anchor, bytes, limits, resolver, &mut || {
+            cx.checkpoint().map_err(SealedError::Interrupted)
+        })
     }
 
     fn reload_inner(
@@ -279,7 +337,10 @@ impl SealedPartition {
         let image = wire::decode(bytes, limits, resolver, checkpoint)?;
         image.validate(anchor.scope, limits, checkpoint)?;
         checkpoint()?;
-        Ok(Self { anchor, image: Arc::new(image) })
+        Ok(Self {
+            anchor,
+            image: Arc::new(image),
+        })
     }
 
     /// Stream retained edge incidences visible at an authorized scalar cut.
@@ -299,7 +360,13 @@ impl SealedPartition {
             (Some(row), Some(destination)) => row.lower_bound(&self.image, destination),
             _ => 0,
         };
-        Ok(SealedCursor { image: &self.image, row, position, as_of, finished: false })
+        Ok(SealedCursor {
+            image: &self.image,
+            row,
+            position,
+            as_of,
+            finished: false,
+        })
     }
 
     pub fn row<'a>(
@@ -356,11 +423,14 @@ impl<'a> SealedCursor<'a> {
                     return Err(error);
                 }
             }
-            let (entry, locator) = row.incidence(self.image, self.position)
+            let (entry, locator) = row
+                .incidence(self.image, self.position)
                 .expect("sealed admission validated every incidence");
             self.position += 1;
             if entry.visible_at(self.as_of) {
-                let properties = if locator == 0 { &[][..] } else {
+                let properties = if locator == 0 {
+                    &[][..]
+                } else {
                     self.image.properties[locator as usize - 1].as_slice()
                 };
                 return Ok(Some(SealedEdge { entry, properties }));

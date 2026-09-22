@@ -15,8 +15,8 @@ use fgdb_chronicle::transfer::{
 };
 use fgdb_types::DatabaseSecurityNamespaceId;
 
-use crate::driver::{SeedAcquireError, SeedCatalog, SeedObjectSource};
 use super::{PullDriveError, ReplyOutcome};
+use crate::driver::{SeedAcquireError, SeedCatalog, SeedObjectSource};
 
 /// One independently cancellable, authenticated ATP request capability.
 ///
@@ -83,7 +83,9 @@ impl<'a, C: SeedCatalog, T: SymbolTransport> StreamingSeedSource<'a, C, T> {
 
     /// Accepted equations retained across cancellation of an object future.
     pub fn retained_symbols(&self) -> usize {
-        self.current.as_ref().map_or(0, |(_, pull)| pull.symbol_count())
+        self.current
+            .as_ref()
+            .map_or(0, |(_, pull)| pull.symbol_count())
     }
 
     /// Deliberately abandon an unfinished immutable-object attempt. This drops
@@ -100,7 +102,10 @@ impl<'a, C: SeedCatalog, T: SymbolTransport> StreamingSeedSource<'a, C, T> {
         &mut self,
         donor: DonorId,
     ) -> Result<(), SeedAcquireError<C::Error, T::Error>> {
-        let (_, pull) = self.current.as_mut().ok_or(SeedAcquireError::InvalidObject)?;
+        let (_, pull) = self
+            .current
+            .as_mut()
+            .ok_or(SeedAcquireError::InvalidObject)?;
         pull.donor_available(donor)
             .map_err(|error| SeedAcquireError::Pull(PullDriveError::Pull(error)))
     }
@@ -109,6 +114,7 @@ impl<'a, C: SeedCatalog, T: SymbolTransport> StreamingSeedSource<'a, C, T> {
 impl<'a, C: SeedCatalog, T: SymbolTransport> SeedObjectSource for StreamingSeedSource<'a, C, T> {
     type Error = SeedAcquireError<C::Error, T::Error>;
 
+    #[allow(clippy::manual_async_fn)]
     fn recover(
         &mut self,
         object: SeedObjectSpec,
@@ -125,7 +131,9 @@ impl<'a, C: SeedCatalog, T: SymbolTransport> SeedObjectSource for StreamingSeedS
                 // The borrow is of the externally pinned catalog, NOT of this
                 // movable source. The retained pull contains no self-reference.
                 let catalog: &'a C = self.catalog;
-                let material = catalog.recovery(object).map_err(SeedAcquireError::Catalog)?;
+                let material = catalog
+                    .recovery(object)
+                    .map_err(SeedAcquireError::Catalog)?;
                 if material.target.namespace != self.namespace {
                     return Err(SeedAcquireError::WrongNamespace);
                 }
@@ -146,7 +154,10 @@ impl<'a, C: SeedCatalog, T: SymbolTransport> SeedObjectSource for StreamingSeedS
                 .map_err(|error| SeedAcquireError::Pull(PullDriveError::Pull(error)))?;
                 self.current = Some((object, pull));
             }
-            let (_, pull) = self.current.as_mut().ok_or(SeedAcquireError::InvalidObject)?;
+            let (_, pull) = self
+                .current
+                .as_mut()
+                .ok_or(SeedAcquireError::InvalidObject)?;
             let recovered = recover(
                 pull,
                 self.transport,
@@ -250,7 +261,11 @@ pub async fn recover<T: SymbolTransport>(
     flights
         .try_reserve_exact(concurrency)
         .map_err(|_| PullDriveError::Pull(PullError::AllocationFailed))?;
-    let mut session = Session { pull, flights, processing: None };
+    let mut session = Session {
+        pull,
+        flights,
+        processing: None,
+    };
     let mut next_poll = 0;
     let mut completed = 0usize;
     loop {
@@ -266,16 +281,20 @@ pub async fn recover<T: SymbolTransport>(
             Ok(requests) => requests,
             // The last requested symbols may still finish the object. Exhausted
             // issuance does not revoke their existing authenticated reservations.
-            Err(PullError::RequestBudget
+            Err(
+                PullError::RequestBudget
                 | PullError::SymbolSpaceExhausted
-                | PullError::NoAvailableDonor) if !session.flights.is_empty() => Vec::new(),
+                | PullError::NoAvailableDonor,
+            ) if !session.flights.is_empty() => Vec::new(),
             Err(error) => return Err(PullDriveError::Pull(error)),
         };
         let start = session.flights.len();
-        session.flights.extend(requests.into_iter().map(|request| Flight {
-            request,
-            future: None,
-        }));
+        session
+            .flights
+            .extend(requests.into_iter().map(|request| Flight {
+                request,
+                future: None,
+            }));
         for flight in &mut session.flights[start..] {
             flight.future = Some(Box::pin(transport.request(flight.request)));
         }
@@ -305,17 +324,23 @@ pub async fn recover<T: SymbolTransport>(
             ReplyOutcome::Record(bytes) => {
                 match session.pull.accept_reply(request, &bytes, verification) {
                     Ok(SymbolAdmission::Added | SymbolAdmission::Duplicate) => {}
-                    Err(PullError::RecordLength
+                    Err(
+                        PullError::RecordLength
                         | PullError::UnrequestedSymbol
                         | PullError::ConflictingSymbol
-                        | PullError::Symbol(_)) => {
-                            session.quarantine(request.donor).map_err(PullDriveError::Pull)?;
-                        }
+                        | PullError::Symbol(_),
+                    ) => {
+                        session
+                            .quarantine(request.donor)
+                            .map_err(PullDriveError::Pull)?;
+                    }
                     Err(error) => return Err(PullDriveError::Pull(error)),
                 }
             }
             ReplyOutcome::Unavailable => {
-                session.quarantine(request.donor).map_err(PullDriveError::Pull)?;
+                session
+                    .quarantine(request.donor)
+                    .map_err(PullDriveError::Pull)?;
             }
             ReplyOutcome::TimedOut => {}
         }

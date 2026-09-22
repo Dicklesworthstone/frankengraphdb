@@ -6,9 +6,7 @@
 
 use super::{Database, EmbeddedReadView, QueryError, QueryResult};
 use asupersync::fs::Vfs;
-use fgdb_gql::{
-    GqlParameters, GqlQueryPolicy, GraphSymbolResolver, PreparedGraphBranchText,
-};
+use fgdb_gql::{GqlParameters, GqlQueryPolicy, GraphSymbolResolver, PreparedGraphBranchText};
 use fgdb_types::QueryCx;
 
 impl EmbeddedReadView {

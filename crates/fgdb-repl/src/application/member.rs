@@ -14,11 +14,13 @@ use fgdb_order::{Event, MemberId, Output, PersistentState, Role, SnapshotTransfe
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 
 use super::{
-    Application, ApplicationDriver, ApplicationError, ApplicationProgress,
-    ApplicationStateError, AppliedPosition, position_at, validate_progress,
+    Application, ApplicationDriver, ApplicationError, ApplicationProgress, ApplicationStateError,
+    AppliedPosition, position_at, validate_progress,
 };
 use crate::driver::{RaftPublisher, SeedDriveError, SeedObjectSource, SeedPublisher};
-use crate::replica::{ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput};
+use crate::replica::{
+    ReadIndexId, ReadIndexReady, ReadResolution, Replica, ReplicaError, ReplicaOutput,
+};
 
 /// A backend-owned immutable view and its verified cut. Its lifetime must retain
 /// all objects/keys needed by the view, independently of later applies or member
@@ -60,11 +62,21 @@ pub struct ApplicationRead<V> {
 }
 
 impl<V> ApplicationRead<V> {
-    pub fn id(&self) -> &ReadIndexId { self.read.id() }
-    pub fn required_index(&self) -> u64 { self.read.index() }
-    pub fn at(&self) -> AppliedPosition { self.pinned.at }
-    pub fn state_root(&self) -> ObjectId { self.pinned.state_root }
-    pub fn view(&self) -> &V { &self.pinned.view }
+    pub fn id(&self) -> &ReadIndexId {
+        self.read.id()
+    }
+    pub fn required_index(&self) -> u64 {
+        self.read.index()
+    }
+    pub fn at(&self) -> AppliedPosition {
+        self.pinned.at
+    }
+    pub fn state_root(&self) -> ObjectId {
+        self.pinned.state_root
+    }
+    pub fn view(&self) -> &V {
+        &self.pinned.view
+    }
 }
 
 pub enum ReadState<V> {
@@ -94,7 +106,9 @@ impl<E: core::fmt::Debug> core::fmt::Display for MemberError<E> {
 }
 impl<E: core::fmt::Debug> core::error::Error for MemberError<E> {}
 impl<E> From<ApplicationStateError> for MemberError<E> {
-    fn from(error: ApplicationStateError) -> Self { Self::State(error) }
+    fn from(error: ApplicationStateError) -> Self {
+        Self::State(error)
+    }
 }
 
 #[derive(Debug)]
@@ -110,7 +124,9 @@ impl<S: core::fmt::Debug, P: core::fmt::Debug, A: core::fmt::Debug> core::fmt::D
     }
 }
 impl<S: core::fmt::Debug, P: core::fmt::Debug, A: core::fmt::Debug> core::error::Error
-    for MemberSeedError<S, P, A> {}
+    for MemberSeedError<S, P, A>
+{
+}
 
 struct WaitingRead {
     id: ReadIndexId,
@@ -145,20 +161,34 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
             return Err(ApplicationStateError::PendingReadsAtAttach.into());
         }
         let mut waiting = Vec::new();
-        waiting.try_reserve_exact(maximum_reads).map_err(|_| ApplicationStateError::AllocationFailed)?;
-        let application = ApplicationDriver::recover(backend, &replica, maximum_batch_entries).await?;
-        Ok(Self { replica, application, waiting, maximum_reads })
+        waiting
+            .try_reserve_exact(maximum_reads)
+            .map_err(|_| ApplicationStateError::AllocationFailed)?;
+        let application =
+            ApplicationDriver::recover(backend, &replica, maximum_batch_entries).await?;
+        Ok(Self {
+            replica,
+            application,
+            waiting,
+            maximum_reads,
+        })
     }
 
-    pub fn id(&self) -> MemberId { self.replica.id() }
-    pub fn pending_reads(&self) -> usize { self.waiting.len() }
+    pub fn id(&self) -> MemberId {
+        self.replica.id()
+    }
+    pub fn pending_reads(&self) -> usize {
+        self.waiting.len()
+    }
     pub fn progress(&self) -> Result<ApplicationProgress, ApplicationStateError> {
         self.available()?;
         self.application.progress()
     }
     pub fn durable_state(&self) -> Result<&PersistentState<C>, ApplicationStateError> {
         self.available()?;
-        self.replica.durable_state().map_err(ApplicationStateError::Raft)
+        self.replica
+            .durable_state()
+            .map_err(ApplicationStateError::Raft)
     }
 
     pub async fn step(
@@ -177,7 +207,10 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
             // The caller still owes complete retention-floor/log-to-state proofs;
             // this additional applied/visible bound is not GC authority.
         }
-        let output = self.replica.step(&mut self.application.application, event).await
+        let output = self
+            .replica
+            .step(&mut self.application.application, event)
+            .await
             .map_err(MemberError::Replica)?;
         self.absorb(output).map_err(MemberError::State)
     }
@@ -193,16 +226,23 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
     /// Runtime deadlines/cancellation retire requests through cancel_read.
     pub async fn read_index(
         &mut self,
-    ) -> Result<(ReadIndexId, AppliedReplicaOutput<C>), MemberError<<A as RaftPublisher<C>>::Error>> {
+    ) -> Result<(ReadIndexId, AppliedReplicaOutput<C>), MemberError<<A as RaftPublisher<C>>::Error>>
+    {
         self.available()?;
         if self.waiting.len() >= self.maximum_reads {
             return Err(ApplicationStateError::ReadBackpressure.into());
         }
-        let (id, output) = self.replica.read_index(&mut self.application.application).await
+        let (id, output) = self
+            .replica
+            .read_index(&mut self.application.application)
+            .await
             .map_err(MemberError::Replica)?;
         // Capacity was reserved before admission. No await separates the issued
         // ID from recording it and absorbing a possible immediate quorum result.
-        self.waiting.push(WaitingRead { id: id.clone(), quorum: None });
+        self.waiting.push(WaitingRead {
+            id: id.clone(),
+            quorum: None,
+        });
         let output = self.absorb(output).map_err(MemberError::State)?;
         Ok((id, output))
     }
@@ -226,25 +266,42 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
         transfer: SnapshotTransfer,
         plan: SeedPlan,
         source: &mut S,
-    ) -> Result<AppliedReplicaOutput<C>, MemberSeedError<
-        S::Error, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error,
-    >>
-    where A: SeedPublisher<C>,
+    ) -> Result<
+        AppliedReplicaOutput<C>,
+        MemberSeedError<S::Error, <A as SeedPublisher<C>>::Error, <A as Application<C>>::Error>,
+    >
+    where
+        A: SeedPublisher<C>,
     {
-        self.available().map_err(|error| MemberSeedError::Application(error.into()))?;
+        self.available()
+            .map_err(|error| MemberSeedError::Application(error.into()))?;
         let anchor = plan.anchor();
         let expected_root = anchor.publication_root;
         let expected_generation = anchor.publication_generation;
         if expected_generation <= self.application.progress.publication_generation {
-            return Err(MemberSeedError::Application(ApplicationStateError::InvalidPublication.into()));
+            return Err(MemberSeedError::Application(
+                ApplicationStateError::InvalidPublication.into(),
+            ));
         }
-        let output = self.replica.install_snapshot(
-            namespace, transfer, plan, source, &mut self.application.application,
-        ).await.map_err(MemberSeedError::Seed)?;
+        let output = self
+            .replica
+            .install_snapshot(
+                namespace,
+                transfer,
+                plan,
+                source,
+                &mut self.application.application,
+            )
+            .await
+            .map_err(MemberSeedError::Seed)?;
         // The atomic root may already be current. Fence BEFORE invoking load,
         // including a synchronous panic or cancellation of the reload future.
         self.application.poisoned = true;
-        let progress = self.application.application.load().await
+        let progress = self
+            .application
+            .application
+            .load()
+            .await
             .map_err(|error| MemberSeedError::Application(ApplicationError::Backend(error)))?;
         let state = self.replica.durable_state().map_err(|error| {
             MemberSeedError::Application(ApplicationStateError::Raft(error).into())
@@ -256,21 +313,30 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
             || progress.publication_root != expected_root
             || progress.publication_generation != expected_generation
         {
-            return Err(MemberSeedError::Application(ApplicationStateError::InvalidPublication.into()));
+            return Err(MemberSeedError::Application(
+                ApplicationStateError::InvalidPublication.into(),
+            ));
         }
         self.application.progress = progress;
-        let output = self.absorb(output).map_err(|error| MemberSeedError::Application(error.into()))?;
+        let output = self
+            .absorb(output)
+            .map_err(|error| MemberSeedError::Application(error.into()))?;
         self.application.poisoned = false;
         Ok(output)
     }
 
     fn available(&self) -> Result<(), ApplicationStateError> {
         self.application.available()?;
-        self.replica.durable_state().map_err(ApplicationStateError::Raft)?;
+        self.replica
+            .durable_state()
+            .map_err(ApplicationStateError::Raft)?;
         Ok(())
     }
 
-    fn absorb(&mut self, output: ReplicaOutput<C>) -> Result<AppliedReplicaOutput<C>, ApplicationStateError> {
+    fn absorb(
+        &mut self,
+        output: ReplicaOutput<C>,
+    ) -> Result<AppliedReplicaOutput<C>, ApplicationStateError> {
         let mut leadership_lost = Vec::new();
         if output.consensus.role != Role::Leader {
             // Include already-confirmed reads, which no longer live in the
@@ -282,7 +348,8 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
                     ReadResolution::Ready(ready) => ready.id(),
                     ReadResolution::LeadershipLost(id) => id,
                 };
-                let Some(position) = self.waiting.iter().position(|waiting| &waiting.id == id) else {
+                let Some(position) = self.waiting.iter().position(|waiting| &waiting.id == id)
+                else {
                     self.application.poisoned = true;
                     return Err(ApplicationStateError::ReadHistoryMismatch);
                 };
@@ -300,7 +367,10 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
                 }
             }
         }
-        Ok(AppliedReplicaOutput { consensus: output.consensus, leadership_lost })
+        Ok(AppliedReplicaOutput {
+            consensus: output.consensus,
+            leadership_lost,
+        })
     }
 }
 
@@ -314,10 +384,18 @@ impl<C: Clone + Eq, A: ReadApplication<C> + RaftPublisher<C>> AppliedReplica<C, 
         id: &ReadIndexId,
     ) -> Result<ReadState<A::View>, ApplicationError<<A as Application<C>>::Error>> {
         self.available()?;
-        let position = self.waiting.iter().position(|waiting| &waiting.id == id)
+        let position = self
+            .waiting
+            .iter()
+            .position(|waiting| &waiting.id == id)
             .ok_or(ApplicationStateError::UnknownRead)?;
-        let Some(ready) = &self.waiting[position].quorum else { return Ok(ReadState::PendingQuorum) };
-        let state = self.replica.durable_state().map_err(ApplicationStateError::Raft)?;
+        let Some(ready) = &self.waiting[position].quorum else {
+            return Ok(ReadState::PendingQuorum);
+        };
+        let state = self
+            .replica
+            .durable_state()
+            .map_err(ApplicationStateError::Raft)?;
         if self.replica.role().map_err(ApplicationStateError::Raft)? != Role::Leader
             || ready.term() != state.term()
             || ready.leader() != self.replica.id()
@@ -329,15 +407,27 @@ impl<C: Clone + Eq, A: ReadApplication<C> + RaftPublisher<C>> AppliedReplica<C, 
         let basis = self.application.progress;
         let required = ready.index();
         if basis.applied.index < required {
-            return Ok(ReadState::PendingApplication { required, applied: basis.applied.index });
+            return Ok(ReadState::PendingApplication {
+                required,
+                applied: basis.applied.index,
+            });
         }
         if basis.visible_index < required {
-            return Ok(ReadState::PendingAudit { required, visible: basis.visible_index });
+            return Ok(ReadState::PendingAudit {
+                required,
+                visible: basis.visible_index,
+            });
         }
-        let at = position_at(state, basis.visible_index).ok_or(ApplicationStateError::InvalidPosition)?;
-        let pinned = self.application.application.pin_visible(&basis, at).await
+        let at = position_at(state, basis.visible_index)
+            .ok_or(ApplicationStateError::InvalidPosition)?;
+        let pinned = self
+            .application
+            .application
+            .pin_visible(&basis, at)
+            .await
             .map_err(ApplicationError::Backend)?;
-        if pinned.basis != basis || pinned.at != at
+        if pinned.basis != basis
+            || pinned.at != at
             || (at == basis.applied && pinned.state_root != basis.state_root)
         {
             self.application.poisoned = true;

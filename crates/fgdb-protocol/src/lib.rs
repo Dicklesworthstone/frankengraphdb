@@ -23,11 +23,11 @@ mod frame;
 #[cfg(feature = "transport")]
 pub mod transport;
 
-pub use connection::{ChildKind, ChildTerminus, Connection, Phase, SendTicket, SendTerminus};
+pub use connection::{ChildKind, ChildTerminus, Connection, Phase, SendTerminus, SendTicket};
 pub use flow::{CreditUpdate, FlowWindow, Reservation, SendCost, SendState, WindowStatus};
 pub use frame::{
-    Binding, DecodeProgress, Decoder, Frame, FrameKind, FrameLimits, Header, Posture,
-    ReadyBinding, SessionBinding, StreamId, MAX_HEADER_LEN, PROTOCOL_VERSION, TRANSPORT_HEADER_LEN,
+    Binding, DecodeProgress, Decoder, Frame, FrameKind, FrameLimits, Header, MAX_HEADER_LEN,
+    PROTOCOL_VERSION, Posture, ReadyBinding, SessionBinding, StreamId, TRANSPORT_HEADER_LEN,
 };
 
 /// Stable, data-independent failures. None contains payloads or hidden lookup

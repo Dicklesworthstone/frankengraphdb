@@ -55,10 +55,12 @@ fn an_empty_smallest_domain_exhausts_without_visiting_the_primary() {
     cursor.add_membership(&[], &mut allow).unwrap();
     let mut visits = 0;
     assert_eq!(
-        cursor.next(&mut |_| {
-            visits += 1;
-            Ok::<_, Infallible>(())
-        }).unwrap(),
+        cursor
+            .next(&mut |_| {
+                visits += 1;
+                Ok::<_, Infallible>(())
+            })
+            .unwrap(),
         None
     );
     assert_eq!(visits, 0);
@@ -78,9 +80,13 @@ fn constructor_reordering_matches_every_small_bag_and_membership_permutation() {
         for first in &arrays {
             for second in &arrays {
                 for third in &arrays {
-                    let expected: Vec<_> = primary.iter().copied().filter(|value| {
-                        first.contains(value) && second.contains(value) && third.contains(value)
-                    }).collect();
+                    let expected: Vec<_> = primary
+                        .iter()
+                        .copied()
+                        .filter(|value| {
+                            first.contains(value) && second.contains(value) && third.contains(value)
+                        })
+                        .collect();
                     let mut cursor = Candidates::all(primary);
                     cursor.membership = Some(first);
                     cursor.add_membership(second, &mut allow).unwrap();

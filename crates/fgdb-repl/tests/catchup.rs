@@ -9,8 +9,10 @@ mod support;
 use fgdb_chronicle::seed::{SeedAnchor, SeedError, SeedLimits, SeedObjectSpec, SeedPlan};
 use fgdb_chronicle::store::RootPublicationEvidence;
 use fgdb_chronicle::transfer::{BondedPull, DonorId, PullLimits, VerifiedObject};
-use fgdb_order::{Configuration, Domain, Entry, Envelope, Error as RaftError, Event,
-    Limits, MemberId, Message, Raft, SnapshotCut, SnapshotTransfer};
+use fgdb_order::{
+    Configuration, Domain, Entry, Envelope, Error as RaftError, Event, Limits, MemberId, Message,
+    Raft, SnapshotCut, SnapshotTransfer,
+};
 use fgdb_repl::{CatchupError, CatchupPhase, SnapshotCatchup};
 use fgdb_types::DatabaseSecurityNamespaceId;
 use support::{Fixture, KIND};
@@ -21,43 +23,77 @@ fn fixtures() -> Vec<Fixture> {
 
 fn anchor(objects: &[Fixture]) -> SeedAnchor {
     SeedAnchor {
-        namespace: support::namespace(), consensus_domain: [5; 32], configuration: [6; 32],
+        namespace: support::namespace(),
+        consensus_domain: [5; 32],
+        configuration: [6; 32],
         snapshot_manifest: objects[0].encoding.object_id(),
         state_root: objects[1].encoding.object_id(),
         retention_floor: objects[2].encoding.object_id(),
         publication_root: objects[3].encoding.object_id(),
-        publication_generation: 17, raft_index: 93, raft_term: 11,
-        logical_command_seq: 61, commit_seq: 49,
+        publication_generation: 17,
+        raft_index: 93,
+        raft_term: 11,
+        logical_command_seq: 61,
+        commit_seq: 49,
     }
 }
 
 fn plan(anchor: SeedAnchor, objects: &[Fixture]) -> SeedPlan {
-    SeedPlan::from_authenticated_inventory(anchor, objects.iter().map(|object| SeedObjectSpec {
-        object_id: object.encoding.object_id(), object_kind: KIND,
-        compressed_len: object.plaintext.len() as u64,
-    }), SeedLimits::default()).unwrap()
+    SeedPlan::from_authenticated_inventory(
+        anchor,
+        objects.iter().map(|object| SeedObjectSpec {
+            object_id: object.encoding.object_id(),
+            object_kind: KIND,
+            compressed_len: object.plaintext.len() as u64,
+        }),
+        SeedLimits::default(),
+    )
+    .unwrap()
 }
 
 fn configuration() -> Configuration {
-    Configuration::stable(Domain([5; 32]), [6; 32],
-        [MemberId(1), MemberId(2), MemberId(3)], []).unwrap()
+    Configuration::stable(
+        Domain([5; 32]),
+        [6; 32],
+        [MemberId(1), MemberId(2), MemberId(3)],
+        [],
+    )
+    .unwrap()
 }
 
 fn evidence(anchor: &SeedAnchor) -> RootPublicationEvidence {
-    RootPublicationEvidence { written_index: 1, slot_generation: anchor.publication_generation,
-        root_manifest_oid: anchor.publication_root.0 }
+    RootPublicationEvidence {
+        written_index: 1,
+        slot_generation: anchor.publication_generation,
+        root_manifest_oid: anchor.publication_root.0,
+    }
 }
 
 fn offered_node(id: u128, anchor: &SeedAnchor) -> (Raft<u64>, SnapshotTransfer) {
     let configuration = configuration();
-    let cut = SnapshotCut::from_authenticated_parts(&configuration, anchor.snapshot_manifest.0,
-        anchor.state_root.0, anchor.retention_floor.0, anchor.raft_index, anchor.raft_term).unwrap();
+    let cut = SnapshotCut::from_authenticated_parts(
+        &configuration,
+        anchor.snapshot_manifest.0,
+        anchor.state_root.0,
+        anchor.retention_floor.0,
+        anchor.raft_index,
+        anchor.raft_term,
+    )
+    .unwrap();
     let mut node = Raft::new(MemberId(id), configuration, Limits::default()).unwrap();
-    let publication = node.step(Event::Receive(Envelope {
-        domain: Domain(anchor.consensus_domain), configuration: anchor.configuration,
-        from: MemberId(1), to: MemberId(id),
-        message: Message::InstallSnapshot { term: 12, request: 71, snapshot: cut },
-    })).unwrap();
+    let publication = node
+        .step(Event::Receive(Envelope {
+            domain: Domain(anchor.consensus_domain),
+            configuration: anchor.configuration,
+            from: MemberId(1),
+            to: MemberId(id),
+            message: Message::InstallSnapshot {
+                term: 12,
+                request: 71,
+                snapshot: cut,
+            },
+        }))
+        .unwrap();
     assert!(publication.requires_write()); // term first, not an installation
     assert!(publication.state().snapshot().is_none());
     let token = publication.id();
@@ -69,13 +105,31 @@ fn offered_node(id: u128, anchor: &SeedAnchor) -> (Raft<u64>, SnapshotTransfer) 
 }
 
 fn recover_with_failed_donor(fixture: &Fixture) -> VerifiedObject {
-    let limits = PullLimits { max_in_flight: 12, ..PullLimits::default() };
-    let mut pull = BondedPull::new(&fixture.encoding, fixture.target(), &support::DEK,
-        &[DonorId(1), DonorId(2), DonorId(3)], limits).unwrap();
+    let limits = PullLimits {
+        max_in_flight: 12,
+        ..PullLimits::default()
+    };
+    let mut pull = BondedPull::new(
+        &fixture.encoding,
+        fixture.target(),
+        &support::DEK,
+        &[DonorId(1), DonorId(2), DonorId(3)],
+        limits,
+    )
+    .unwrap();
     let first = pull.schedule(12).unwrap();
     pull.donor_failed(DonorId(2)).unwrap();
-    for request in first.into_iter().rev().filter(|request| request.donor != DonorId(2)) {
-        pull.accept(request.donor, &fixture.records[request.esi as usize], &mut Vec::new()).unwrap();
+    for request in first
+        .into_iter()
+        .rev()
+        .filter(|request| request.donor != DonorId(2))
+    {
+        pull.accept(
+            request.donor,
+            &fixture.records[request.esi as usize],
+            &mut Vec::new(),
+        )
+        .unwrap();
     }
     for _ in 0..8 {
         if let Some(object) = pull.try_recover(&mut Vec::new()).unwrap() {
@@ -86,7 +140,12 @@ fn recover_with_failed_donor(fixture: &Fixture) -> VerifiedObject {
         assert!(!requests.is_empty());
         for request in requests.into_iter().rev() {
             assert_ne!(request.donor, DonorId(2));
-            pull.accept(request.donor, &fixture.records[request.esi as usize], &mut Vec::new()).unwrap();
+            pull.accept(
+                request.donor,
+                &fixture.records[request.esi as usize],
+                &mut Vec::new(),
+            )
+            .unwrap();
         }
     }
     panic!("surviving donor streams did not recover the fixture");
@@ -105,16 +164,30 @@ fn donor_loss_to_atomic_snapshot_to_suffix_replay_is_one_composed_path() {
     let anchor = anchor(&objects);
     let (mut raft, transfer) = offered_node(2, &anchor);
     let expected_cut = transfer.snapshot().clone();
-    let mut catchup = SnapshotCatchup::begin(&mut raft, support::namespace(),
-        transfer, plan(anchor.clone(), &objects)).unwrap();
-    assert!(matches!(catchup.begin_publication(),
-        Err(CatchupError::Seed(SeedError::MissingObjects { remaining: 4 }))));
+    let mut catchup = SnapshotCatchup::begin(
+        &mut raft,
+        support::namespace(),
+        transfer,
+        plan(anchor.clone(), &objects),
+    )
+    .unwrap();
+    assert!(matches!(
+        catchup.begin_publication(),
+        Err(CatchupError::Seed(SeedError::MissingObjects {
+            remaining: 4
+        }))
+    ));
     for (offset, object) in objects.iter().enumerate() {
-        let token = catchup.stage(recover_with_failed_donor(object)).unwrap().id();
+        let token = catchup
+            .stage(recover_with_failed_donor(object))
+            .unwrap()
+            .id();
         assert_eq!(catchup.published_count(), offset);
         assert_eq!(catchup.pending_object().unwrap().id(), token);
-        assert!(matches!(catchup.begin_publication(),
-            Err(CatchupError::Seed(SeedError::AwaitingObjectPublication))));
+        assert!(matches!(
+            catchup.begin_publication(),
+            Err(CatchupError::Seed(SeedError::AwaitingObjectPublication))
+        ));
         catchup.object_published(token).unwrap();
     }
     assert_eq!(catchup.missing_objects().count(), 0);
@@ -132,17 +205,36 @@ fn donor_loss_to_atomic_snapshot_to_suffix_replay_is_one_composed_path() {
     let output = catchup.published(token, &evidence(&anchor)).unwrap();
     assert_eq!(output.installed_snapshot, Some(expected_cut));
     assert!(output.committed.is_empty());
-    assert!(matches!(output.messages[0].message,
-        Message::SnapshotInstalled { term: 12, request: 71 }));
+    assert!(matches!(
+        output.messages[0].message,
+        Message::SnapshotInstalled {
+            term: 12,
+            request: 71
+        }
+    ));
     assert_eq!(catchup.phase(), CatchupPhase::Complete);
     drop(catchup);
     assert_eq!(raft.durable_state().unwrap(), &disk);
     let mut resumed = Raft::recover(MemberId(2), disk, Limits::default()).unwrap();
-    let publication = resumed.step(Event::Receive(Envelope {
-        domain: Domain([5; 32]), configuration: [6; 32], from: MemberId(1), to: MemberId(2),
-        message: Message::Append { term: 12, request: 72, prev_index: 93,
-            prev_term: 11, entries: vec![Entry { term: 12, command: Some(777) }], leader_commit: 94 },
-    })).unwrap();
+    let publication = resumed
+        .step(Event::Receive(Envelope {
+            domain: Domain([5; 32]),
+            configuration: [6; 32],
+            from: MemberId(1),
+            to: MemberId(2),
+            message: Message::Append {
+                term: 12,
+                request: 72,
+                prev_index: 93,
+                prev_term: 11,
+                entries: vec![Entry {
+                    term: 12,
+                    command: Some(777),
+                }],
+                leader_commit: 94,
+            },
+        }))
+        .unwrap();
     let token = publication.id();
     let output = resumed.persisted(token).unwrap();
     assert_eq!(output.committed[0].index, 94);
@@ -167,9 +259,20 @@ fn every_independent_seed_binding_is_checked_before_bulk_work() {
         }
         let (mut raft, transfer) = offered_node(2, &original);
         let before = raft.durable_state().unwrap().clone();
-        assert_eq!(SnapshotCatchup::begin(&mut raft, support::namespace(), transfer,
-            plan(changed, &objects)).err(), Some(if mutation == 0 { CatchupError::WrongNamespace }
-                else { CatchupError::SnapshotBindingMismatch }));
+        assert_eq!(
+            SnapshotCatchup::begin(
+                &mut raft,
+                support::namespace(),
+                transfer,
+                plan(changed, &objects)
+            )
+            .err(),
+            Some(if mutation == 0 {
+                CatchupError::WrongNamespace
+            } else {
+                CatchupError::SnapshotBindingMismatch
+            })
+        );
         assert_eq!(raft.durable_state().unwrap(), &before);
     }
 }
@@ -179,8 +282,13 @@ fn wrong_root_generation_and_slot_evidence_never_release_either_gate() {
     let objects = fixtures();
     let anchor = anchor(&objects);
     let (mut raft, transfer) = offered_node(2, &anchor);
-    let mut catchup = SnapshotCatchup::begin(&mut raft, support::namespace(), transfer,
-        plan(anchor.clone(), &objects)).unwrap();
+    let mut catchup = SnapshotCatchup::begin(
+        &mut raft,
+        support::namespace(),
+        transfer,
+        plan(anchor.clone(), &objects),
+    )
+    .unwrap();
     publish_objects(&mut catchup, &objects);
     let token = catchup.begin_publication().unwrap().id();
     for mutation in 0..3 {
@@ -190,12 +298,20 @@ fn wrong_root_generation_and_slot_evidence_never_release_either_gate() {
             1 => wrong.root_manifest_oid[0] ^= 1,
             _ => wrong.written_index = 2,
         }
-        assert!(matches!(catchup.published(token.clone(), &wrong),
-            Err(CatchupError::Seed(SeedError::RootEvidenceMismatch))));
+        assert!(matches!(
+            catchup.published(token.clone(), &wrong),
+            Err(CatchupError::Seed(SeedError::RootEvidenceMismatch))
+        ));
         assert_eq!(catchup.phase(), CatchupPhase::Publishing);
         assert_eq!(catchup.begin_publication().unwrap().id(), token);
     }
-    assert!(catchup.published(token, &evidence(&anchor)).unwrap().installed_snapshot.is_some());
+    assert!(
+        catchup
+            .published(token, &evidence(&anchor))
+            .unwrap()
+            .installed_snapshot
+            .is_some()
+    );
 }
 
 #[test]
@@ -204,17 +320,40 @@ fn a_foreign_joint_publication_token_cannot_release_an_ack() {
     let anchor = anchor(&objects);
     let (mut left, first) = offered_node(2, &anchor);
     let (mut right, second) = offered_node(3, &anchor);
-    let mut a = SnapshotCatchup::begin(&mut left, support::namespace(), first,
-        plan(anchor.clone(), &objects)).unwrap();
-    let mut b = SnapshotCatchup::begin(&mut right, support::namespace(), second,
-        plan(anchor.clone(), &objects)).unwrap();
+    let mut a = SnapshotCatchup::begin(
+        &mut left,
+        support::namespace(),
+        first,
+        plan(anchor.clone(), &objects),
+    )
+    .unwrap();
+    let mut b = SnapshotCatchup::begin(
+        &mut right,
+        support::namespace(),
+        second,
+        plan(anchor.clone(), &objects),
+    )
+    .unwrap();
     publish_objects(&mut a, &objects);
     publish_objects(&mut b, &objects);
     let a_id = a.begin_publication().unwrap().id();
     let b_id = b.begin_publication().unwrap().id();
-    assert_eq!(b.published(a_id.clone(), &evidence(&anchor)).err(), Some(CatchupError::StalePublication));
-    assert!(a.published(a_id, &evidence(&anchor)).unwrap().installed_snapshot.is_some());
-    assert!(b.published(b_id, &evidence(&anchor)).unwrap().installed_snapshot.is_some());
+    assert_eq!(
+        b.published(a_id.clone(), &evidence(&anchor)).err(),
+        Some(CatchupError::StalePublication)
+    );
+    assert!(
+        a.published(a_id, &evidence(&anchor))
+            .unwrap()
+            .installed_snapshot
+            .is_some()
+    );
+    assert!(
+        b.published(b_id, &evidence(&anchor))
+            .unwrap()
+            .installed_snapshot
+            .is_some()
+    );
 }
 
 #[test]
@@ -225,17 +364,29 @@ fn cross_node_and_cancelled_transfer_capabilities_fail_before_root_publication()
         let (mut left, transfer) = offered_node(2, &anchor);
         let (mut right, _) = offered_node(3, &anchor);
         let target = if cancelled {
-            let token = left.step(Event::SnapshotFailed(transfer.id())).unwrap().id();
+            let token = left
+                .step(Event::SnapshotFailed(transfer.id()))
+                .unwrap()
+                .id();
             left.persisted(token).unwrap();
             &mut left
-        } else { &mut right };
+        } else {
+            &mut right
+        };
         let before = target.durable_state().unwrap().clone();
         {
-            let mut catchup = SnapshotCatchup::begin(target, support::namespace(), transfer,
-                plan(anchor.clone(), &objects)).unwrap();
+            let mut catchup = SnapshotCatchup::begin(
+                target,
+                support::namespace(),
+                transfer,
+                plan(anchor.clone(), &objects),
+            )
+            .unwrap();
             publish_objects(&mut catchup, &objects);
-            assert!(matches!(catchup.begin_publication(),
-                Err(CatchupError::Raft(RaftError::StaleSnapshotTransfer))));
+            assert!(matches!(
+                catchup.begin_publication(),
+                Err(CatchupError::Raft(RaftError::StaleSnapshotTransfer))
+            ));
             assert_eq!(catchup.phase(), CatchupPhase::Failed);
         }
         // No root-publication view was ever returned; restart from the old root.
@@ -251,12 +402,21 @@ fn cancellation_before_root_preparation_keeps_the_old_durable_raft_state() {
     let (mut raft, transfer) = offered_node(2, &anchor);
     let before = raft.durable_state().unwrap().clone();
     {
-        let mut catchup = SnapshotCatchup::begin(&mut raft, support::namespace(), transfer,
-            plan(anchor, &objects)).unwrap();
+        let mut catchup = SnapshotCatchup::begin(
+            &mut raft,
+            support::namespace(),
+            transfer,
+            plan(anchor, &objects),
+        )
+        .unwrap();
         let token = catchup.stage(objects[0].verified()).unwrap().id();
         catchup.object_published(token).unwrap();
-        assert!(matches!(catchup.begin_publication(),
-            Err(CatchupError::Seed(SeedError::MissingObjects { remaining: 3 }))));
+        assert!(matches!(
+            catchup.begin_publication(),
+            Err(CatchupError::Seed(SeedError::MissingObjects {
+                remaining: 3
+            }))
+        ));
     }
     assert_eq!(raft.durable_state().unwrap(), &before);
 }
@@ -269,22 +429,41 @@ fn cancelled_or_failed_atomic_publication_requires_recovery() {
         let (mut raft, transfer) = offered_node(2, &anchor);
         let candidate;
         {
-            let mut catchup = SnapshotCatchup::begin(&mut raft, support::namespace(), transfer,
-                plan(anchor.clone(), &objects)).unwrap();
+            let mut catchup = SnapshotCatchup::begin(
+                &mut raft,
+                support::namespace(),
+                transfer,
+                plan(anchor.clone(), &objects),
+            )
+            .unwrap();
             publish_objects(&mut catchup, &objects);
             let publication = catchup.begin_publication().unwrap();
             candidate = publication.consensus().clone();
             let token = publication.id();
             if failed {
                 catchup.publication_failed();
-                assert_eq!(catchup.published(token, &evidence(&anchor)).err(), Some(CatchupError::WrongPhase));
+                assert_eq!(
+                    catchup.published(token, &evidence(&anchor)).err(),
+                    Some(CatchupError::WrongPhase)
+                );
             }
         }
-        assert_eq!(raft.step(Event::ElectionTimeout).err(), Some(RaftError::RecoveryRequired));
+        assert_eq!(
+            raft.step(Event::ElectionTimeout).err(),
+            Some(RaftError::RecoveryRequired)
+        );
         // If the atomic root did make it to disk, recovery has BOTH the new cut
         // and the new consensus state, even if no acknowledgement was sent.
         let recovered = Raft::recover(MemberId(2), candidate, Limits::default()).unwrap();
-        assert_eq!(recovered.durable_state().unwrap().snapshot().unwrap().index(), 93);
+        assert_eq!(
+            recovered
+                .durable_state()
+                .unwrap()
+                .snapshot()
+                .unwrap()
+                .index(),
+            93
+        );
         assert_eq!(recovered.durable_state().unwrap().commit_index(), 93);
     }
 }
@@ -296,15 +475,33 @@ fn completed_cut_cannot_start_a_second_snapshot_installation() {
     let (mut raft, transfer) = offered_node(2, &anchor);
     let again = transfer.clone();
     {
-        let mut catchup = SnapshotCatchup::begin(&mut raft, support::namespace(), transfer,
-            plan(anchor.clone(), &objects)).unwrap();
+        let mut catchup = SnapshotCatchup::begin(
+            &mut raft,
+            support::namespace(),
+            transfer,
+            plan(anchor.clone(), &objects),
+        )
+        .unwrap();
         publish_objects(&mut catchup, &objects);
         let token = catchup.begin_publication().unwrap().id();
-        catchup.published(token.clone(), &evidence(&anchor)).unwrap();
-        assert_eq!(catchup.published(token, &evidence(&anchor)).err(), Some(CatchupError::WrongPhase));
+        catchup
+            .published(token.clone(), &evidence(&anchor))
+            .unwrap();
+        assert_eq!(
+            catchup.published(token, &evidence(&anchor)).err(),
+            Some(CatchupError::WrongPhase)
+        );
         catchup.publication_failed(); // cannot undo a completed durable operation
         assert_eq!(catchup.phase(), CatchupPhase::Complete);
     }
-    assert_eq!(SnapshotCatchup::begin(&mut raft, support::namespace(), again,
-        plan(anchor, &objects)).err(), Some(CatchupError::StaleSnapshot));
+    assert_eq!(
+        SnapshotCatchup::begin(
+            &mut raft,
+            support::namespace(),
+            again,
+            plan(anchor, &objects)
+        )
+        .err(),
+        Some(CatchupError::StaleSnapshot)
+    );
 }

@@ -156,9 +156,8 @@ impl Configuration {
     }
 
     fn quorum(&self, members: &BTreeSet<MemberId>) -> bool {
-        let majority = |voters: &BTreeSet<MemberId>| {
-            voters.intersection(members).count() > voters.len() / 2
-        };
+        let majority =
+            |voters: &BTreeSet<MemberId>| voters.intersection(members).count() > voters.len() / 2;
         match &self.joint {
             None => majority(&self.voters),
             Some(joint) => majority(&joint.old) && majority(&joint.new),
@@ -729,9 +728,15 @@ impl<C: Clone + Eq> Raft<C> {
     pub fn step(&mut self, event: Event<C>) -> Result<Persistence<'_, C>, Error> {
         self.available()?;
         self.validate_event(&event)?;
-        let generation = self.generation.checked_add(1).ok_or(Error::CounterExhausted)?;
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(Error::CounterExhausted)?;
         let before = self.state.commit_index;
-        let previous_transfer = self.incoming_snapshot.as_ref().map(|pending| pending.transfer.id());
+        let previous_transfer = self
+            .incoming_snapshot
+            .as_ref()
+            .map(|pending| pending.transfer.id());
         let old_hard = (self.state.term, self.state.voted_for, before);
         self.log_changed = false;
         let mut output = Output {
@@ -770,7 +775,10 @@ impl<C: Clone + Eq> Raft<C> {
         }
         if let Some(previous) = previous_transfer {
             if output.installed_snapshot.is_none()
-                && !self.incoming_snapshot.as_ref().is_some_and(|pending| pending.transfer.id == previous)
+                && !self
+                    .incoming_snapshot
+                    .as_ref()
+                    .is_some_and(|pending| pending.transfer.id == previous)
             {
                 output.cancelled_snapshot_transfers.push(previous);
             }
@@ -780,7 +788,12 @@ impl<C: Clone + Eq> Raft<C> {
         output.leader = self.leader;
         let requires_write = !self.initialized
             || self.log_changed
-            || old_hard != (self.state.term, self.state.voted_for, self.state.commit_index);
+            || old_hard
+                != (
+                    self.state.term,
+                    self.state.voted_for,
+                    self.state.commit_index,
+                );
         let id = PersistenceId {
             incarnation: Arc::clone(&self.incarnation),
             generation,
@@ -908,7 +921,8 @@ impl<C: Clone + Eq> Raft<C> {
                         }
                         // A distant predecessor needs a conflict reply, not a
                         // capacity error: it does not allocate the absent gap.
-                        if *term >= self.state.term && self.term_at(*prev_index) == Some(*prev_term) {
+                        if *term >= self.state.term && self.term_at(*prev_index) == Some(*prev_term)
+                        {
                             if last - self.state.base_index() > self.limits.max_log_entries as u64 {
                                 return Err(Error::LogFull);
                             }
@@ -928,7 +942,11 @@ impl<C: Clone + Eq> Raft<C> {
                             }
                         }
                     }
-                    Message::RequestVote { term, last_index, last_term } => {
+                    Message::RequestVote {
+                        term,
+                        last_index,
+                        last_term,
+                    } => {
                         if (*last_index == 0) != (*last_term == 0)
                             || last_term > term
                             || *last_index == u64::MAX
@@ -936,14 +954,20 @@ impl<C: Clone + Eq> Raft<C> {
                             return Err(Error::InvalidMessage);
                         }
                     }
-                    Message::InstallSnapshot { term, request, snapshot } => {
+                    Message::InstallSnapshot {
+                        term,
+                        request,
+                        snapshot,
+                    } => {
                         self.validate_snapshot(snapshot)?;
                         if snapshot.term > *term {
                             return Err(Error::InvalidSnapshot);
                         }
                         if *term >= self.state.term {
                             if snapshot.index <= self.state.commit_index
-                                && self.term_at(snapshot.index).is_some_and(|local| local != snapshot.term)
+                                && self
+                                    .term_at(snapshot.index)
+                                    .is_some_and(|local| local != snapshot.term)
                             {
                                 return Err(Error::SnapshotConflict);
                             }
@@ -983,7 +1007,10 @@ impl<C: Clone + Eq> Raft<C> {
     }
 
     fn last_term(&self) -> u64 {
-        self.state.entries.last().map_or(self.state.base_term(), |entry| entry.term)
+        self.state
+            .entries
+            .last()
+            .map_or(self.state.base_term(), |entry| entry.term)
     }
 
     fn committed_range(&self, after: u64) -> Vec<Committed<C>> {
@@ -1023,7 +1050,11 @@ impl<C: Clone + Eq> Raft<C> {
 
     fn accept_leader(&mut self, from: MemberId, term: u64, output: &mut Output<C>) {
         self.follow(term);
-        if self.incoming_snapshot.as_ref().is_some_and(|pending| pending.transfer.source != from) {
+        if self
+            .incoming_snapshot
+            .as_ref()
+            .is_some_and(|pending| pending.transfer.source != from)
+        {
             self.incoming_snapshot = None;
         }
         self.leader = Some(from);
@@ -1034,7 +1065,11 @@ impl<C: Clone + Eq> Raft<C> {
         if self.role == Role::Leader {
             return Ok(());
         }
-        let term = self.state.term.checked_add(1).ok_or(Error::CounterExhausted)?;
+        let term = self
+            .state
+            .term
+            .checked_add(1)
+            .ok_or(Error::CounterExhausted)?;
         self.follow(term);
         self.role = Role::Candidate;
         self.state.voted_for = Some(self.id);
@@ -1065,14 +1100,24 @@ impl<C: Clone + Eq> Raft<C> {
         let next = self.last_index() + 1;
         for member in self.state.configuration.members() {
             if member != self.id {
-                self.progress.insert(member, Progress { matched: 0, next, in_flight: None });
+                self.progress.insert(
+                    member,
+                    Progress {
+                        matched: 0,
+                        next,
+                        in_flight: None,
+                    },
+                );
             }
         }
         // Only a current-term quorum commits inherited entries. At capacity or
         // absolute-index exhaustion, never infer commitment from older terms.
         if self.state.entries.len() < self.limits.max_log_entries && next < u64::MAX {
             self.log_changed = true;
-            self.state.entries.push(Entry { term: self.state.term, command: None });
+            self.state.entries.push(Entry {
+                term: self.state.term,
+                command: None,
+            });
         }
         self.advance_commit();
         self.broadcast(output)
@@ -1083,7 +1128,9 @@ impl<C: Clone + Eq> Raft<C> {
             if member == self.id {
                 self.last_index()
             } else {
-                self.progress.get(&member).map_or(0, |progress| progress.matched)
+                self.progress
+                    .get(&member)
+                    .map_or(0, |progress| progress.matched)
             }
         });
         if candidate > self.state.commit_index && self.term_at(candidate) == Some(self.state.term) {
@@ -1111,19 +1158,37 @@ impl<C: Clone + Eq> Raft<C> {
         } else {
             self.request = self.request.checked_add(1).ok_or(Error::CounterExhausted)?;
             if progress.next <= self.state.base_index() {
-                let snapshot = self.state.snapshot.clone().ok_or(Error::InvalidRecoveryState)?;
-                InFlight::Snapshot { request: self.request, snapshot }
+                let snapshot = self
+                    .state
+                    .snapshot
+                    .clone()
+                    .ok_or(Error::InvalidRecoveryState)?;
+                InFlight::Snapshot {
+                    request: self.request,
+                    snapshot,
+                }
             } else {
                 let prev = progress.next - 1;
-                let last = self.last_index().min(prev.saturating_add(self.limits.max_append_entries as u64));
-                InFlight::Append { request: self.request, prev, last }
+                let last = self
+                    .last_index()
+                    .min(prev.saturating_add(self.limits.max_append_entries as u64));
+                InFlight::Append {
+                    request: self.request,
+                    prev,
+                    last,
+                }
             }
         };
         let message = match &flight {
-            InFlight::Append { request, prev, last } => {
+            InFlight::Append {
+                request,
+                prev,
+                last,
+            } => {
                 let prev_term = self.term_at(*prev).ok_or(Error::InvalidRecoveryState)?;
                 let base = self.state.base_index();
-                let entries = self.state.entries[(*prev - base) as usize..(*last - base) as usize].to_vec();
+                let entries =
+                    self.state.entries[(*prev - base) as usize..(*last - base) as usize].to_vec();
                 Message::Append {
                     term: self.state.term,
                     request: *request,
@@ -1171,9 +1236,16 @@ impl<C: Clone + Eq> Raft<C> {
     ) {
         if term < self.state.term {
             // Use an ordinary term-bearing rejection, never a successful seed ack.
-            self.emit(from, Message::Appended {
-                term: self.state.term, request, success: false, conflict_next: self.last_index() + 1,
-            }, output);
+            self.emit(
+                from,
+                Message::Appended {
+                    term: self.state.term,
+                    request,
+                    success: false,
+                    conflict_next: self.last_index() + 1,
+                },
+                output,
+            );
             return;
         }
         self.accept_leader(from, term, output);
@@ -1193,7 +1265,8 @@ impl<C: Clone + Eq> Raft<C> {
                 return;
             }
             // Old retransmissions must not continually cancel a newer transfer.
-            if pending.term == term && pending.transfer.source == from && request < pending.request {
+            if pending.term == term && pending.transfer.source == from && request < pending.request
+            {
                 return;
             }
         }
@@ -1205,12 +1278,19 @@ impl<C: Clone + Eq> Raft<C> {
             source: from,
             snapshot,
         };
-        self.incoming_snapshot = Some(IncomingSnapshot { transfer: transfer.clone(), term, request });
+        self.incoming_snapshot = Some(IncomingSnapshot {
+            transfer: transfer.clone(),
+            term,
+            request,
+        });
         output.snapshot_transfers.push(transfer);
     }
 
     fn install_snapshot(&mut self, output: &mut Output<C>) -> Result<(), Error> {
-        let pending = self.incoming_snapshot.take().ok_or(Error::StaleSnapshotTransfer)?;
+        let pending = self
+            .incoming_snapshot
+            .take()
+            .ok_or(Error::StaleSnapshotTransfer)?;
         let snapshot = pending.transfer.snapshot;
         if snapshot.index <= self.state.commit_index {
             return Err(Error::StaleSnapshotTransfer);
@@ -1229,13 +1309,21 @@ impl<C: Clone + Eq> Raft<C> {
         output.installed_snapshot = Some(snapshot);
         self.emit(
             pending.transfer.source,
-            Message::SnapshotInstalled { term: self.state.term, request: pending.request },
+            Message::SnapshotInstalled {
+                term: self.state.term,
+                request: pending.request,
+            },
             output,
         );
         Ok(())
     }
 
-    fn acknowledge(&mut self, from: MemberId, last: u64, output: &mut Output<C>) -> Result<(), Error> {
+    fn acknowledge(
+        &mut self,
+        from: MemberId,
+        last: u64,
+        output: &mut Output<C>,
+    ) -> Result<(), Error> {
         if let Some(progress) = self.progress.get_mut(&from) {
             progress.matched = progress.matched.max(last);
             progress.next = progress.matched + 1;
@@ -1256,7 +1344,11 @@ impl<C: Clone + Eq> Raft<C> {
             self.follow(term);
         }
         match envelope.message {
-            Message::RequestVote { last_index, last_term, .. } => {
+            Message::RequestVote {
+                last_index,
+                last_term,
+                ..
+            } => {
                 let granted = term == self.state.term
                     && self.state.configuration.voters.contains(&self.id)
                     && (self.state.voted_for.is_none() || self.state.voted_for == Some(from))
@@ -1265,7 +1357,14 @@ impl<C: Clone + Eq> Raft<C> {
                     self.state.voted_for = Some(from);
                     output.reset_election_timer = true;
                 }
-                self.emit(from, Message::Vote { term: self.state.term, granted }, output);
+                self.emit(
+                    from,
+                    Message::Vote {
+                        term: self.state.term,
+                        granted,
+                    },
+                    output,
+                );
             }
             Message::Vote { granted, .. } => {
                 if term == self.state.term && self.role == Role::Candidate && granted {
@@ -1275,11 +1374,25 @@ impl<C: Clone + Eq> Raft<C> {
                     }
                 }
             }
-            Message::Append { request, prev_index, prev_term, entries, leader_commit, .. } => {
+            Message::Append {
+                request,
+                prev_index,
+                prev_term,
+                entries,
+                leader_commit,
+                ..
+            } => {
                 if term < self.state.term {
-                    self.emit(from, Message::Appended {
-                        term: self.state.term, request, success: false, conflict_next: self.last_index() + 1,
-                    }, output);
+                    self.emit(
+                        from,
+                        Message::Appended {
+                            term: self.state.term,
+                            request,
+                            success: false,
+                            conflict_next: self.last_index() + 1,
+                        },
+                        output,
+                    );
                     return Ok(());
                 }
                 self.accept_leader(from, term, output);
@@ -1293,13 +1406,27 @@ impl<C: Clone + Eq> Raft<C> {
                             next -= 1;
                         }
                     }
-                    self.emit(from, Message::Appended { term, request, success: false, conflict_next: next }, output);
+                    self.emit(
+                        from,
+                        Message::Appended {
+                            term,
+                            request,
+                            success: false,
+                            conflict_next: next,
+                        },
+                        output,
+                    );
                     return Ok(());
                 }
                 let matched = prev_index + entries.len() as u64;
                 for (offset, entry) in entries.into_iter().enumerate() {
                     let position = (prev_index - self.state.base_index()) as usize + offset;
-                    if self.state.entries.get(position).is_some_and(|local| local.term != entry.term) {
+                    if self
+                        .state
+                        .entries
+                        .get(position)
+                        .is_some_and(|local| local.term != entry.term)
+                    {
                         self.log_changed = true;
                         self.state.entries.truncate(position);
                     }
@@ -1315,16 +1442,35 @@ impl<C: Clone + Eq> Raft<C> {
                 }) {
                     self.incoming_snapshot = None;
                 }
-                self.emit(from, Message::Appended { term, request, success: true, conflict_next: 0 }, output);
+                self.emit(
+                    from,
+                    Message::Appended {
+                        term,
+                        request,
+                        success: true,
+                        conflict_next: 0,
+                    },
+                    output,
+                );
             }
-            Message::Appended { request, success, conflict_next, .. } => {
+            Message::Appended {
+                request,
+                success,
+                conflict_next,
+                ..
+            } => {
                 if term != self.state.term || self.role != Role::Leader {
                     return Ok(());
                 }
                 let Some(progress) = self.progress.get(&from).cloned() else {
                     return Ok(());
                 };
-                let Some(InFlight::Append { request: expected, prev, last }) = progress.in_flight else {
+                let Some(InFlight::Append {
+                    request: expected,
+                    prev,
+                    last,
+                }) = progress.in_flight
+                else {
                     return Ok(());
                 };
                 if expected != request {
@@ -1348,15 +1494,22 @@ impl<C: Clone + Eq> Raft<C> {
                     self.send_append(from, output)?;
                 }
             }
-            Message::InstallSnapshot { request, snapshot, .. } => {
+            Message::InstallSnapshot {
+                request, snapshot, ..
+            } => {
                 self.offer_snapshot(from, term, request, snapshot, output);
             }
             Message::SnapshotInstalled { request, .. } => {
                 if term != self.state.term || self.role != Role::Leader {
                     return Ok(());
                 }
-                let Some(InFlight::Snapshot { request: expected, snapshot }) = self
-                    .progress.get(&from).and_then(|progress| progress.in_flight.as_ref())
+                let Some(InFlight::Snapshot {
+                    request: expected,
+                    snapshot,
+                }) = self
+                    .progress
+                    .get(&from)
+                    .and_then(|progress| progress.in_flight.as_ref())
                 else {
                     return Ok(());
                 };

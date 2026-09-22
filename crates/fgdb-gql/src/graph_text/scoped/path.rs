@@ -190,7 +190,14 @@ mod tests {
 
     #[test]
     fn postfix_intervals_preserve_bounds_direction_and_selector() {
-        for selector in ["", "WALK", "TRAIL", "ACYCLIC", "SIMPLE", "ALL SHORTEST WALK"] {
+        for selector in [
+            "",
+            "WALK",
+            "TRAIL",
+            "ACYCLIC",
+            "SIMPLE",
+            "ALL SHORTEST WALK",
+        ] {
             for (left, right, direction) in [
                 ("-", "->", GlaDirection::Forward),
                 ("<-", "-", GlaDirection::Reverse),
@@ -203,13 +210,15 @@ mod tests {
                     ("{0}", 0, 0),
                     ("{0,1024}", 0, 1024),
                 ] {
-                    let text = format!(
-                        "MATCH {selector} (a){left}[:R]{right}{quantifier}(b) RETURN a,b"
-                    );
+                    let text =
+                        format!("MATCH {selector} (a){left}[:R]{right}{quantifier}(b) RETURN a,b");
                     let syntax = parse(&text);
                     let edge = &syntax.edges[0];
                     assert_eq!(edge.direction, direction);
-                    assert_eq!(edge.walk, Some(GraphWalkBounds::new(minimum, maximum).unwrap()));
+                    assert_eq!(
+                        edge.walk,
+                        Some(GraphWalkBounds::new(minimum, maximum).unwrap())
+                    );
                     let legacy = format!(
                         "MATCH {selector} (a){left}[:R*{minimum}..{maximum}]{right}(b) RETURN a,b"
                     );
@@ -269,16 +278,21 @@ mod tests {
 
     #[test]
     fn aggregate_and_write_heads_use_the_same_quantifier_parser() {
-        assert!(PreparedGraphAggregateText::prepare(
-            "MATCH (a)-[:R]->{1,3}(b) RETURN count(*) AS total",
-            symbols,
-        )
-        .is_ok());
+        assert!(
+            PreparedGraphAggregateText::prepare(
+                "MATCH (a)-[:R]->{1,3}(b) RETURN count(*) AS total",
+                symbols,
+            )
+            .is_ok()
+        );
         for terminal in ["SET b.n = 1", "DELETE b", "INSERT (c)"] {
             let text = format!("MATCH (a)-[:R]->{{1,3}}(b) {terminal}");
             let mut parser = Parser::new(&text).unwrap();
             parser.parse_match_prefix().unwrap();
-            assert_eq!(parser.syntax.edges[0].walk, Some(GraphWalkBounds::new(1, 3).unwrap()));
+            assert_eq!(
+                parser.syntax.edges[0].walk,
+                Some(GraphWalkBounds::new(1, 3).unwrap())
+            );
             assert_eq!(&text[parser.current.at..], terminal);
         }
     }
@@ -405,13 +419,16 @@ mod tests {
             assert!(PreparedGraphAggregateText::prepare(&aggregate, symbols).is_ok());
             for terminal in ["SET b.n = 1", "DELETE b", "INSERT (c)"] {
                 let text = format!("{prefix} {terminal}");
-                assert!(PreparedGraphWriteScript::prepare_with_parameter_types(
-                    &text,
-                    RelationId(1),
-                    &[],
-                    symbols,
-                )
-                .is_ok(), "{selector} {terminal}");
+                assert!(
+                    PreparedGraphWriteScript::prepare_with_parameter_types(
+                        &text,
+                        RelationId(1),
+                        &[],
+                        symbols,
+                    )
+                    .is_ok(),
+                    "{selector} {terminal}"
+                );
             }
         }
     }
@@ -433,18 +450,19 @@ mod tests {
         ] {
             let text = format!("MATCH {selector} (a)-[:R]->{{1,3}}(b) RETURN b LIMIT 0");
             let mut resolutions = 0;
-            assert!(PreparedGraphText::prepare(&text, |kind, name| {
-                resolutions += 1;
-                symbols(kind, name)
-            })
-            .is_err(), "{selector}");
+            assert!(
+                PreparedGraphText::prepare(&text, |kind, name| {
+                    resolutions += 1;
+                    symbols(kind, name)
+                })
+                .is_err(),
+                "{selector}"
+            );
             assert_eq!(resolutions, 0);
         }
         // A selector applies to a whole pattern, not each atom independently.
         for selector in ["SHORTEST 1", "ALL SHORTEST", "ANY"] {
-            let text = format!(
-                "MATCH {selector} (a)-[:R]->{{1,2}}(b)-[:R]->{{1,2}}(c) RETURN c"
-            );
+            let text = format!("MATCH {selector} (a)-[:R]->{{1,2}}(b)-[:R]->{{1,2}}(c) RETURN c");
             assert!(Parser::new(&text).unwrap().parse().is_err());
         }
     }

@@ -111,7 +111,10 @@ impl Authority {
         validate_name(graph)?;
         let identifier = format!(
             "fgdb-warden:1:{}:{}:{}:{}",
-            hex(&namespace.0), hex(graph.as_bytes()), schema_epoch.0, policy_epoch,
+            hex(&namespace.0),
+            hex(graph.as_bytes()),
+            schema_epoch.0,
+            policy_epoch,
         );
         if identifier.len() > MAX_IDENTIFIER_BYTES {
             return Err(Error::TooLarge);
@@ -143,7 +146,9 @@ impl Authority {
         ];
         // Validate all caller-controlled lengths before invoking foundation
         // serialization, whose u16 length checks would otherwise panic.
-        let predicates = restrictions.iter().map(encode_restriction)
+        let predicates = restrictions
+            .iter()
+            .map(encode_restriction)
             .collect::<Result<Vec<_>, _>>()?;
         let mut token = MacaroonToken::mint(&self.key, &self.identifier, LOCATION);
         for predicate in predicates {
@@ -178,7 +183,10 @@ impl Authority {
         }
         let program = compile(&token.token)?;
         program.check_at(branch, now_ms)?;
-        Ok(VerifiedCapability { _authority: self, program })
+        Ok(VerifiedCapability {
+            _authority: self,
+            program,
+        })
     }
 
     /// Recheck a preverified value received from another Rust component.
@@ -288,7 +296,10 @@ fn encode_restriction(restriction: &Restriction) -> Result<CaveatPredicate, Erro
             if keys.len() > MAX_SCOPE_ORDINALS {
                 return Err(Error::TooLarge);
             }
-            custom(DENY_PROPERTIES, encode_scope(&Scope::Only(keys.clone()), |id| id.0)?)
+            custom(
+                DENY_PROPERTIES,
+                encode_scope(&Scope::Only(keys.clone()), |id| id.0)?,
+            )
         }
         Restriction::Rights(rights) => custom(RIGHTS, rights.bits().to_string()),
         Restriction::MaxNodes(value) => custom(MAX_NODES, value.to_string()),
@@ -301,15 +312,20 @@ fn encode_restriction(restriction: &Restriction) -> Result<CaveatPredicate, Erro
 
 fn encode_scope<T: Ord>(scope: &Scope<T>, ordinal: impl Fn(&T) -> u64) -> Result<String, Error> {
     validate_scope(scope)?;
-    let Scope::Only(values) = scope else { return Ok("*".to_owned()); };
+    let Scope::Only(values) = scope else {
+        return Ok("*".to_owned());
+    };
     if values.len() > MAX_SCOPE_ORDINALS {
         return Err(Error::TooLarge);
     }
     if values.is_empty() {
         return Ok("-".to_owned());
     }
-    Ok(values.iter().map(|value| format!("{:016x}", ordinal(value)))
-        .collect::<Vec<_>>().join(","))
+    Ok(values
+        .iter()
+        .map(|value| format!("{:016x}", ordinal(value)))
+        .collect::<Vec<_>>()
+        .join(","))
 }
 
 fn validate_scope<T: Ord>(scope: &Scope<T>) -> Result<(), Error> {
@@ -322,12 +338,20 @@ fn validate_scope<T: Ord>(scope: &Scope<T>) -> Result<(), Error> {
 }
 
 fn parse_scope<T: Ord>(value: &str, wrap: impl Fn(u64) -> T) -> Result<Scope<T>, Error> {
-    if value == "*" { return Ok(Scope::All); }
-    if value == "-" { return Ok(Scope::Only(BTreeSet::new())); }
+    if value == "*" {
+        return Ok(Scope::All);
+    }
+    if value == "-" {
+        return Ok(Scope::Only(BTreeSet::new()));
+    }
     let mut values = BTreeSet::new();
     let mut previous = None;
     for item in value.split(',') {
-        if item.len() != 16 || !item.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if item.len() != 16
+            || !item
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return Err(Error::Malformed);
         }
         let ordinal = u64::from_str_radix(item, 16).map_err(|_| Error::Malformed)?;
@@ -344,7 +368,9 @@ fn parse_scope<T: Ord>(value: &str, wrap: impl Fn(u64) -> T) -> Result<Scope<T>,
 }
 
 fn unsigned(value: &str) -> Result<u64, Error> {
-    if value.is_empty() || value.len() > 20 || !value.bytes().all(|b| b.is_ascii_digit())
+    if value.is_empty()
+        || value.len() > 20
+        || !value.bytes().all(|b| b.is_ascii_digit())
         || (value.len() > 1 && value.starts_with('0'))
     {
         return Err(Error::Malformed);
@@ -391,7 +417,11 @@ fn compile(token: &MacaroonToken) -> Result<PlannerPredicates, Error> {
         properties: Scope::All,
         denied_properties: BTreeSet::new(),
         rights: Rights::ReadWrite,
-        limits: QueryLimits { max_nodes: u64::MAX, max_work: u64::MAX, max_rows: u64::MAX },
+        limits: QueryLimits {
+            max_nodes: u64::MAX,
+            max_work: u64::MAX,
+            max_rows: u64::MAX,
+        },
         not_before_ms: 0,
         expires_at_ms: u64::MAX,
     };

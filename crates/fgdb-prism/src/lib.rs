@@ -35,32 +35,33 @@ mod sealed_execute;
 mod shortest_path;
 mod traversal;
 
-pub use sealed_execute::{FnxMemoryLimits, FnxSealedExecutionError};
-pub use sealed::{SealedGraphView, SealedNeighborCursor, SealedProjectionError, SealedProjectionSpec};
-pub use clustering::{TriangleStatistics, triangle_statistics};
-pub use shortest_path::{
-    DijkstraComparison, DijkstraOptions, DijkstraOutput, FNX_DIJKSTRA_EPSILON, dijkstra,
-};
 pub use call::{
-    FNX_DISCRETE_PROFILE, FNX_NUMERIC_PROFILE, FNX_SIGNATURE_REGISTRY_VERSION, MAX_FNX_CALL_BYTES,
-    FnxAlgorithm, FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallSpec, FnxGraphKind,
-    FnxImplementationClass, FnxOutput, FnxOutputColumn, FnxParameterSpec, FnxParameterType,
-    FnxParameters, FnxSignature, FnxSignatureRegistry, PageRankOptions,
+    FNX_DISCRETE_PROFILE, FNX_NUMERIC_PROFILE, FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm,
+    FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallSpec, FnxGraphKind, FnxImplementationClass,
+    FnxOutput, FnxOutputColumn, FnxParameterSpec, FnxParameterType, FnxParameters, FnxSignature,
+    FnxSignatureRegistry, MAX_FNX_CALL_BYTES, PageRankOptions,
 };
+pub use clustering::{TriangleStatistics, triangle_statistics};
 pub use execute::{
-    ComplexityWitness, FnxCertificate, FnxExecutionError, FnxExecutionLimits,
-    FnxResult, FnxValue,
+    ComplexityWitness, FnxCertificate, FnxExecutionError, FnxExecutionLimits, FnxResult, FnxValue,
 };
 pub use input::{
-    FnxReadError, FnxReadOptions, FnxReadResult, FnxSelection, FnxSourceLimits,
-    FnxWeightError, FnxWeightSpec, MissingWeightPolicy,
+    FnxReadError, FnxReadOptions, FnxReadResult, FnxSelection, FnxSourceLimits, FnxWeightError,
+    FnxWeightSpec, MissingWeightPolicy,
+};
+pub use sealed::{
+    SealedGraphView, SealedNeighborCursor, SealedProjectionError, SealedProjectionSpec,
+};
+pub use sealed_execute::{FnxMemoryLimits, FnxSealedExecutionError};
+pub use shortest_path::{
+    DijkstraComparison, DijkstraOptions, DijkstraOutput, FNX_DIJKSTRA_EPSILON, dijkstra,
 };
 
 pub use fnx_algorithms::GraphView;
 pub use projection::{
-    AdapterPath, Directedness, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError,
-    ProjectionLimits, ProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
-    PROJECTED_WEIGHT_ATTRIBUTE,
+    AdapterPath, Directedness, PROJECTED_WEIGHT_ATTRIBUTE, ParallelEdgePolicy,
+    ProjectionBuildError, ProjectionEdge, ProjectionError, ProjectionLimits, ProjectionSpec,
+    SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
 };
 
 /// The same immutable foundation revision as the workspace topology registry.

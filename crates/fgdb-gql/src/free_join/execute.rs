@@ -29,11 +29,16 @@ impl<K> JoinBinding<'_, K> {
 
     #[must_use]
     pub fn get(&self, variable: JoinVariable) -> Option<&K> {
-        self.variables.iter().position(|v| *v == variable).and_then(|at| self.values[at].as_ref())
+        self.variables
+            .iter()
+            .position(|v| *v == variable)
+            .and_then(|at| self.values[at].as_ref())
     }
 
     pub fn values(&self) -> impl Iterator<Item = &K> {
-        self.values.iter().map(|value| value.as_ref().expect("complete join binding"))
+        self.values
+            .iter()
+            .map(|value| value.as_ref().expect("complete join binding"))
     }
 
     #[must_use]
@@ -43,7 +48,9 @@ impl<K> JoinBinding<'_, K> {
 
     pub fn multiplicity(&self) -> Result<u128, MultiplicityOverflow> {
         self.factors.iter().try_fold(1_u128, |count, &factor| {
-            count.checked_mul(factor as u128).ok_or(MultiplicityOverflow)
+            count
+                .checked_mul(factor as u128)
+                .ok_or(MultiplicityOverflow)
         })
     }
 
@@ -96,14 +103,21 @@ pub struct FreeJoin<'a, K, T> {
 impl<'a, K: Ord + Clone, T: TrieRelation<K>> FreeJoin<'a, K, T> {
     pub fn new(plan: &'a FreeJoinPlan, relations: &'a [T]) -> Result<Self, JoinPlanError> {
         if relations.len() != plan.relation_count() {
-            return Err(JoinPlanError::RelationCount { expected: plan.relation_count(), actual: relations.len() });
+            return Err(JoinPlanError::RelationCount {
+                expected: plan.relation_count(),
+                actual: relations.len(),
+            });
         }
         for (relation, source) in relations.iter().enumerate() {
             if source.attribute_order() != plan.required_orders[relation].as_slice() {
                 return Err(JoinPlanError::AttributeOrder { relation });
             }
         }
-        Ok(Self { plan, relations, marker: PhantomData })
+        Ok(Self {
+            plan,
+            relations,
+            marker: PhantomData,
+        })
     }
 
     /// Push complete distinct bindings without retaining a result relation.
@@ -121,7 +135,9 @@ impl<'a, K: Ord + Clone, T: TrieRelation<K>> FreeJoin<'a, K, T> {
         for relation in self.relations {
             control(GlaExecutionEvent::ScratchEntry)?;
             let cursor = relation.cursor();
-            if cursor.multiplicity() == Some(0) || (!cursor.remaining_order().is_empty() && cursor.distinct_prefixes(1) == 0) {
+            if cursor.multiplicity() == Some(0)
+                || (!cursor.remaining_order().is_empty() && cursor.distinct_prefixes(1) == 0)
+            {
                 return Ok(());
             }
             cursors.push(cursor);
@@ -136,7 +152,15 @@ impl<'a, K: Ord + Clone, T: TrieRelation<K>> FreeJoin<'a, K, T> {
             control(GlaExecutionEvent::ScratchEntry)?;
             factors.push(1_usize);
         }
-        visit(self.plan, 0, &mut cursors, &mut values, &mut factors, control, &mut emit)
+        visit(
+            self.plan,
+            0,
+            &mut cursors,
+            &mut values,
+            &mut factors,
+            control,
+            &mut emit,
+        )
     }
 }
 
@@ -160,7 +184,12 @@ impl<K: Ord + Clone, T: TrieCursor<K>> GroupScan<K, T> {
         }
         let mut stack = Vec::with_capacity(attributes);
         stack.push(root);
-        Ok(Self { stack, keys: Vec::with_capacity(attributes), attributes, yielded: false })
+        Ok(Self {
+            stack,
+            keys: Vec::with_capacity(attributes),
+            attributes,
+            yielded: false,
+        })
     }
 
     pub(super) fn next<E>(
@@ -169,7 +198,10 @@ impl<K: Ord + Clone, T: TrieCursor<K>> GroupScan<K, T> {
     ) -> Result<Option<&[K]>, E> {
         if self.yielded {
             self.keys.pop();
-            self.stack.last_mut().expect("yielded group has a level").advance(control)?;
+            self.stack
+                .last_mut()
+                .expect("yielded group has a level")
+                .advance(control)?;
             self.yielded = false;
         }
         loop {
@@ -190,7 +222,9 @@ impl<K: Ord + Clone, T: TrieCursor<K>> GroupScan<K, T> {
                 self.yielded = true;
                 return Ok(Some(&self.keys));
             }
-            let child = cursor.open(control)?.expect("a current trie key has a child");
+            let child = cursor
+                .open(control)?
+                .expect("a current trie key has a child");
             self.stack.push(child);
         }
     }
@@ -229,7 +263,9 @@ pub(super) fn probe<K: Ord + Clone, T: TrieCursor<K>, E>(
         if cursor.key() != Some(&candidate[position]) {
             return Ok(None);
         }
-        cursor = cursor.open(control)?.expect("matching trie key has a child");
+        cursor = cursor
+            .open(control)?
+            .expect("matching trie key has a child");
     }
     Ok(Some(cursor))
 }
@@ -252,9 +288,18 @@ where
     let Some(stage) = plan.stages.get(at) else {
         for (relation, cursor) in cursors.iter().enumerate() {
             control(GlaExecutionEvent::Work)?;
-            factors[relation] = cursor.multiplicity().expect("a checked plan binds every attribute");
+            factors[relation] = cursor
+                .multiplicity()
+                .expect("a checked plan binds every attribute");
         }
-        return emit(JoinBinding { variables: &plan.order, values, factors }, control);
+        return emit(
+            JoinBinding {
+                variables: &plan.order,
+                values,
+                factors,
+            },
+            control,
+        );
     };
     let proposer = driver(stage, cursors, control)?;
     let mut candidates = GroupScan::new(cursors[proposer].clone(), stage.variables.len(), control)?;
@@ -266,7 +311,8 @@ where
         let mut accepted = true;
         for access in &stage.probes {
             let original = cursors[access.relation].clone();
-            let Some(child) = probe(original.clone(), &access.key_positions, candidate, control)? else {
+            let Some(child) = probe(original.clone(), &access.key_positions, candidate, control)?
+            else {
                 accepted = false;
                 break;
             };

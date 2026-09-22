@@ -12,16 +12,16 @@
 
 #![forbid(unsafe_code)]
 
-mod control;
 mod bm25;
+mod control;
 mod fabric;
 mod hnsw;
 mod ranking;
 
-pub use control::{BeaconError, WorkBudget, WorkControl};
 pub use bm25::{Bm25, Bm25Config, Bm25Stats, TextHit, TextMatch};
+pub use control::{BeaconError, WorkBudget, WorkControl};
 pub use fabric::{
-    ApplyReport, BeaconIndex, HybridHit, HybridQuery, IndexConfig, IndexDocument,
-    IndexMutation, IndexSnapshot, IndexStats,
+    ApplyReport, BeaconIndex, HybridHit, HybridQuery, IndexConfig, IndexDocument, IndexMutation,
+    IndexSnapshot, IndexStats,
 };
 pub use hnsw::{DistanceMetric, Hnsw, HnswConfig, Neighbor, VectorSearch};

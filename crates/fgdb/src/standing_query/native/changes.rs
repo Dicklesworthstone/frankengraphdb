@@ -22,8 +22,7 @@ impl StandingQuery {
         let width = layout.columns().len();
         match layout {
             Layout::Rows { .. } | Layout::Circuit { .. } => {
-                let rows = sets::delta(self)
-                    .ok_or(StandingQueryFailure::DependencyUnavailable)?;
+                let rows = sets::delta(self).ok_or(StandingQueryFailure::DependencyUnavailable)?;
                 collect_bag(rows, true, width, meter, row_cells)
             }
             Layout::Aggregate { slots, .. } | Layout::GroupCircuit { slots, .. } => {
@@ -33,7 +32,8 @@ impl StandingQuery {
                     }
                     Self::Group(query) => query.delta(),
                     _ => None,
-                }.ok_or(StandingQueryFailure::DependencyUnavailable)?;
+                }
+                .ok_or(StandingQueryFailure::DependencyUnavailable)?;
                 collect_bag(rows, true, width, meter, |row, meter| {
                     aggregate_cells(row, slots, meter)
                 })

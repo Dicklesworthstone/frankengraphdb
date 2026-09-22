@@ -4,8 +4,8 @@
 //! which the CALL boundary maps back to the full stable VId.
 
 use super::{
-    ComplexityWitness, Cursor, ExecutionError, KernelOutput, KernelValues,
-    Result, ResultAdmission, Rows, SealedRow, add, mul, reserve,
+    ComplexityWitness, Cursor, ExecutionError, KernelOutput, KernelValues, Result, ResultAdmission,
+    Rows, SealedRow, add, mul, reserve,
 };
 use std::mem::size_of;
 
@@ -39,7 +39,8 @@ pub(super) fn work(n: usize, edges: usize, pass: usize, strong: bool) -> Result<
 }
 
 fn root(
-    parents: &mut [usize], mut vertex: usize,
+    parents: &mut [usize],
+    mut vertex: usize,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<usize> {
     while parents[vertex] != vertex {
@@ -51,7 +52,8 @@ fn root(
 }
 
 pub(super) fn weak(
-    graph: &impl Rows, admission: &ResultAdmission,
+    graph: &impl Rows,
+    admission: &ResultAdmission,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<KernelOutput> {
     checkpoint()?;
@@ -66,8 +68,12 @@ pub(super) fn weak(
     }
     let mut witness = ComplexityWitness {
         algorithm: "weakly_connected_components_union_find".to_owned(),
-        complexity_claim: "O(|V| log(1+H) + (H+|V|) log(1+|V|)) compressed row visits and bounded union-find".to_owned(),
-        nodes_touched: 0, edges_scanned: 0, queue_peak: 0,
+        complexity_claim:
+            "O(|V| log(1+H) + (H+|V|) log(1+|V|)) compressed row visits and bounded union-find"
+                .to_owned(),
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 0,
     };
     for source in 0..n {
         checkpoint()?;
@@ -75,11 +81,15 @@ pub(super) fn weak(
         let mut row = graph.open(source)?;
         while let Some((target, _)) = row.next()? {
             checkpoint()?;
-            if target >= n { return Err(ExecutionError::InvalidUpstreamResult.into()); }
+            if target >= n {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            }
             witness.edges_scanned = add(witness.edges_scanned, 1)?;
             let mut a = root(&mut parents, source, checkpoint)?;
             let mut b = root(&mut parents, target, checkpoint)?;
-            if a == b { continue; }
+            if a == b {
+                continue;
+            }
             if sizes[a] < sizes[b] || (sizes[a] == sizes[b] && a > b) {
                 std::mem::swap(&mut a, &mut b);
             }
@@ -95,7 +105,10 @@ pub(super) fn weak(
         let representative = root(&mut parents, vertex, checkpoint)?;
         parents[vertex] = representative;
     }
-    for size in &mut sizes { checkpoint()?; *size = usize::MAX; }
+    for size in &mut sizes {
+        checkpoint()?;
+        *size = usize::MAX;
+    }
     for (vertex, &representative) in parents.iter().enumerate() {
         checkpoint()?;
         sizes[representative] = sizes[representative].min(vertex);
@@ -105,11 +118,16 @@ pub(super) fn weak(
         *representative = sizes[*representative];
     }
     checkpoint()?;
-    Ok(KernelOutput { values: KernelValues::Components(parents), row_count: n, witness })
+    Ok(KernelOutput {
+        values: KernelValues::Components(parents),
+        row_count: n,
+        witness,
+    })
 }
 
 pub(super) fn strong<G: Rows>(
-    graph: &G, admission: &ResultAdmission,
+    graph: &G,
+    admission: &ResultAdmission,
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<KernelOutput> {
     checkpoint()?;
@@ -133,11 +151,15 @@ pub(super) fn strong<G: Rows>(
         algorithm: "strongly_connected_components_iterative_tarjan_cursor".to_owned(),
         complexity_claim: "O(|V| * (1+log(1+H)) + H log(1+|V|)) compressed row visits".to_owned(),
         // queue_peak records active resumable DFS frames, not a BFS queue.
-        nodes_touched: 0, edges_scanned: 0, queue_peak: 0,
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 0,
     };
     for seed in 0..n {
         checkpoint()?;
-        if indices[seed] != usize::MAX { continue; }
+        if indices[seed] != usize::MAX {
+            continue;
+        }
         let row = graph.open(seed)?;
         indices[seed] = next_index;
         lowlinks[seed] = next_index;
@@ -153,7 +175,9 @@ pub(super) fn strong<G: Rows>(
             match frame.row.next()? {
                 Some((target, _)) => {
                     checkpoint()?;
-                    let index = *indices.get(target).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                    let index = *indices
+                        .get(target)
+                        .ok_or(ExecutionError::InvalidUpstreamResult)?;
                     witness.edges_scanned = add(witness.edges_scanned, 1)?;
                     if index == usize::MAX {
                         let row = graph.open(target)?;
@@ -162,7 +186,10 @@ pub(super) fn strong<G: Rows>(
                         next_index = add(next_index, 1)?;
                         on_stack[target] = true;
                         members.push(target);
-                        frames.push(Frame { vertex: target, row });
+                        frames.push(Frame {
+                            vertex: target,
+                            row,
+                        });
                         witness.nodes_touched = add(witness.nodes_touched, 1)?;
                         witness.queue_peak = witness.queue_peak.max(frames.len());
                     } else if on_stack[target] {
@@ -179,10 +206,14 @@ pub(super) fn strong<G: Rows>(
                         let mut minimum = source;
                         loop {
                             checkpoint()?;
-                            start = start.checked_sub(1).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                            start = start
+                                .checked_sub(1)
+                                .ok_or(ExecutionError::InvalidUpstreamResult)?;
                             let member = members[start];
                             minimum = minimum.min(member);
-                            if member == source { break; }
+                            if member == source {
+                                break;
+                            }
                         }
                         for &member in &members[start..] {
                             checkpoint()?;
@@ -200,8 +231,14 @@ pub(super) fn strong<G: Rows>(
     }
     for &label in &labels {
         checkpoint()?;
-        if label == usize::MAX { return Err(ExecutionError::InvalidUpstreamResult.into()); }
+        if label == usize::MAX {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
     }
     checkpoint()?;
-    Ok(KernelOutput { values: KernelValues::Components(labels), row_count: n, witness })
+    Ok(KernelOutput {
+        values: KernelValues::Components(labels),
+        row_count: n,
+        witness,
+    })
 }

@@ -112,15 +112,30 @@ pub enum BulkLoadErrorKind {
     InvalidResume,
     /// Replay differs from preflight; this chunk has not entered publication.
     /// The row is the chunk start for content drift, or the first missing/extra row.
-    SourceChanged { row: usize },
-    SourceEncoding { row: usize, source: fgdb_types::ScalarEncodeError },
+    SourceChanged {
+        row: usize,
+    },
+    SourceEncoding {
+        row: usize,
+        source: fgdb_types::ScalarEncodeError,
+    },
     CounterOverflow,
     /// A source reader/decoder failed. No partially read chunk was submitted.
-    Source { row: usize, source: Box<dyn core::error::Error + Send + Sync> },
+    Source {
+        row: usize,
+        source: Box<dyn core::error::Error + Send + Sync>,
+    },
     /// Exact observed logical admission count, never estimated resident bytes.
     /// Dimensions are source_rows, key_bytes, total_key_bytes or chunk_bytes.
-    SourceLimit { row: usize, dimension: &'static str, limit: usize, observed: usize },
-    SourceAllocation { row: usize },
+    SourceLimit {
+        row: usize,
+        dimension: &'static str,
+        limit: usize,
+        observed: usize,
+    },
+    SourceAllocation {
+        row: usize,
+    },
     DuplicateCallerKey {
         key: String,
     },
@@ -224,9 +239,14 @@ impl<V: Vfs + Clone> Database<V> {
         F: FnMut(&BulkLoadCheckpoint) -> Result<(), std::io::Error>,
     {
         self.try_bulk_load_with_checkpoint(
-            cx, commit_cx, source.into_iter().map(Ok::<_, core::convert::Infallible>),
-            policy, crash, acknowledged,
-        ).await
+            cx,
+            commit_cx,
+            source.into_iter().map(Ok::<_, core::convert::Infallible>),
+            policy,
+            crash,
+            acknowledged,
+        )
+        .await
     }
 
     /// Replayable, fallible ingestion without converting a decoder error to EOF
@@ -245,7 +265,8 @@ impl<V: Vfs + Clone> Database<V> {
         I::IntoIter: Clone,
         E: core::error::Error + Send + Sync + 'static,
     {
-        self.try_bulk_load_with_checkpoint(cx, commit_cx, source, policy, None, |_| Ok(())).await
+        self.try_bulk_load_with_checkpoint(cx, commit_cx, source, policy, None, |_| Ok(()))
+            .await
     }
 
     /// Fallible counterpart of bulk_load_with_checkpoint, using the very same
@@ -274,7 +295,9 @@ impl<V: Vfs + Clone> Database<V> {
             source::checkpoint(cx)?;
             self.ensure_writable()
                 .map_err(|e| BulkLoadErrorKind::Write(e.into()))?;
-            if policy.rows_per_chunk == 0 || policy.rows_per_chunk > BulkLoadPolicy::MAX_ROWS_PER_CHUNK {
+            if policy.rows_per_chunk == 0
+                || policy.rows_per_chunk > BulkLoadPolicy::MAX_ROWS_PER_CHUNK
+            {
                 return Err(BulkLoadErrorKind::InvalidPolicy);
             }
             let frontier = self
@@ -298,14 +321,20 @@ impl<V: Vfs + Clone> Database<V> {
             let mut audit = source.clone();
             loop {
                 let index = count;
-                let Some(row) = source::next_row(cx, &mut audit, index)? else { break; };
-                count = index.checked_add(1).ok_or(BulkLoadErrorKind::CounterOverflow)?;
+                let Some(row) = source::next_row(cx, &mut audit, index)? else {
+                    break;
+                };
+                count = index
+                    .checked_add(1)
+                    .ok_or(BulkLoadErrorKind::CounterOverflow)?;
                 source::limit(index, "source_rows", policy.max_source_rows, count)?;
                 source::admit_keys(index, &row, &policy)?;
                 source::admit_row(&row)?;
                 transcript.push(cx, &row)?;
                 if count.is_multiple_of(policy.rows_per_chunk) {
-                    seals.try_reserve(1).map_err(|_| BulkLoadErrorKind::SourceAllocation { row: index })?;
+                    seals
+                        .try_reserve(1)
+                        .map_err(|_| BulkLoadErrorKind::SourceAllocation { row: index })?;
                     seals.push(transcript.finish());
                     transcript = source::ChunkHasher::new(count, &policy);
                 }
@@ -313,9 +342,15 @@ impl<V: Vfs + Clone> Database<V> {
                     BulkRow::Vertex(v) => &v.key,
                     BulkRow::Edge(e) => &e.key,
                 };
-                total_key_bytes = total_key_bytes.checked_add(key.len())
+                total_key_bytes = total_key_bytes
+                    .checked_add(key.len())
                     .ok_or(BulkLoadErrorKind::CounterOverflow)?;
-                source::limit(index, "total_key_bytes", policy.max_total_key_bytes, total_key_bytes)?;
+                source::limit(
+                    index,
+                    "total_key_bytes",
+                    policy.max_total_key_bytes,
+                    total_key_bytes,
+                )?;
                 if !keys.insert(key.clone()) {
                     return Err(BulkLoadErrorKind::DuplicateCallerKey { key: key.clone() });
                 }
@@ -379,32 +414,59 @@ impl<V: Vfs + Clone> Database<V> {
                 return Err(BulkLoadErrorKind::InvalidResume);
             }
             if !count.is_multiple_of(policy.rows_per_chunk) {
-                seals.try_reserve(1).map_err(|_| BulkLoadErrorKind::SourceAllocation { row: count })?;
+                seals
+                    .try_reserve(1)
+                    .map_err(|_| BulkLoadErrorKind::SourceAllocation { row: count })?;
                 seals.push(transcript.finish());
             }
             Ok(seals)
         })();
         let seals = match preflight {
             Ok(seals) => seals,
-            Err(kind) => return Err(BulkLoadError { kind, committed, pending: None }),
+            Err(kind) => {
+                return Err(BulkLoadError {
+                    kind,
+                    committed,
+                    pending: None,
+                });
+            }
         };
         if seals.is_empty() {
             if let Err(kind) = source::expect_end(cx, &mut source, 0) {
-                return Err(BulkLoadError { kind, committed, pending: None });
+                return Err(BulkLoadError {
+                    kind,
+                    committed,
+                    pending: None,
+                });
             }
         }
         for (index, seal) in seals.iter().enumerate() {
             let skip = seal.end() <= committed.next_row;
             let chunk = match source::read_verified(
-                cx, &mut source, seal, &policy, !skip, index + 1 == seals.len(),
+                cx,
+                &mut source,
+                seal,
+                &policy,
+                !skip,
+                index + 1 == seals.len(),
             ) {
                 Ok(chunk) => chunk,
-                Err(kind) => return Err(BulkLoadError { kind, committed, pending: None }),
+                Err(kind) => {
+                    return Err(BulkLoadError {
+                        kind,
+                        committed,
+                        pending: None,
+                    });
+                }
             };
-            if skip { continue; }
+            if skip {
+                continue;
+            }
             let Some(next_chunks) = committed.committed_chunks.checked_add(1) else {
                 return Err(BulkLoadError {
-                    kind: BulkLoadErrorKind::CounterOverflow, committed, pending: None,
+                    kind: BulkLoadErrorKind::CounterOverflow,
+                    committed,
+                    pending: None,
                 });
             };
             let mut new_vertices = BTreeMap::new();
@@ -416,10 +478,12 @@ impl<V: Vfs + Clone> Database<V> {
                     source::checkpoint(cx)?;
                     match row {
                         BulkRow::Vertex(v) => {
-                            let ElementId::Vertex(id) = self.allocate_identity(
-                                cx,
-                                GraphInsertRequest::Vertex { row: 0, vertex: 0 },
-                            ).map_err(BulkLoadErrorKind::Write)?
+                            let ElementId::Vertex(id) = self
+                                .allocate_identity(
+                                    cx,
+                                    GraphInsertRequest::Vertex { row: 0, vertex: 0 },
+                                )
+                                .map_err(BulkLoadErrorKind::Write)?
                             else {
                                 unreachable!("typed allocator")
                             };
@@ -431,18 +495,19 @@ impl<V: Vfs + Clone> Database<V> {
                                 .get(&e.source)
                                 .or_else(|| committed.vertices.get(&e.source))
                                 .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
-                                    edge: e.key.clone(), endpoint: e.source.clone(),
+                                    edge: e.key.clone(),
+                                    endpoint: e.source.clone(),
                                 })?;
                             let dst = *new_vertices
                                 .get(&e.destination)
                                 .or_else(|| committed.vertices.get(&e.destination))
                                 .ok_or_else(|| BulkLoadErrorKind::DanglingEndpointKey {
-                                    edge: e.key.clone(), endpoint: e.destination.clone(),
+                                    edge: e.key.clone(),
+                                    endpoint: e.destination.clone(),
                                 })?;
-                            let ElementId::Edge(id) = self.allocate_identity(
-                                cx,
-                                GraphInsertRequest::Edge { row: 0, edge: 0 },
-                            ).map_err(BulkLoadErrorKind::Write)?
+                            let ElementId::Edge(id) = self
+                                .allocate_identity(cx, GraphInsertRequest::Edge { row: 0, edge: 0 })
+                                .map_err(BulkLoadErrorKind::Write)?
                             else {
                                 unreachable!("typed allocator")
                             };
@@ -459,7 +524,8 @@ impl<V: Vfs + Clone> Database<V> {
                     batches.push(vertex_batch);
                 }
                 batches.extend(edge_batches.into_values());
-                self.prepare_atomic_writes(batches).map_err(BulkLoadErrorKind::Write)
+                self.prepare_atomic_writes(batches)
+                    .map_err(BulkLoadErrorKind::Write)
             })();
             let prepared = match prepared {
                 Ok(prepared) => prepared,

@@ -94,7 +94,10 @@ fn validate_replies<E>(
     if replies.len() > requests.len() {
         return Err(PullDriveError::TooManyReplies);
     }
-    let expected: BTreeMap<_, _> = requests.iter().map(|request| (request.esi, request)).collect();
+    let expected: BTreeMap<_, _> = requests
+        .iter()
+        .map(|request| (request.esi, request))
+        .collect();
     let mut answered = BTreeSet::new();
     // Validate the entire envelope before admitting any bytes. A malformed
     // batch cannot partially mutate the authenticated reconstruction state.
@@ -132,10 +135,15 @@ pub async fn recover<T: PullTransport>(
         return Err(PullDriveError::OutstandingRequests);
     }
     loop {
-        if let Some(object) = pull.try_recover(verification).map_err(PullDriveError::Pull)? {
+        if let Some(object) = pull
+            .try_recover(verification)
+            .map_err(PullDriveError::Pull)?
+        {
             return Ok(object);
         }
-        let requests = pull.schedule(maximum_window).map_err(PullDriveError::Pull)?;
+        let requests = pull
+            .schedule(maximum_window)
+            .map_err(PullDriveError::Pull)?;
         if requests.is_empty() {
             return Err(PullDriveError::NoCapacity);
         }
@@ -149,12 +157,17 @@ pub async fn recover<T: PullTransport>(
         for reply in replies {
             match reply.outcome {
                 ReplyOutcome::Record(bytes) => {
-                    match window.pull.accept_reply(reply.request, &bytes, verification) {
+                    match window
+                        .pull
+                        .accept_reply(reply.request, &bytes, verification)
+                    {
                         Ok(SymbolAdmission::Added | SymbolAdmission::Duplicate) => {}
-                        Err(PullError::RecordLength
+                        Err(
+                            PullError::RecordLength
                             | PullError::UnrequestedSymbol
                             | PullError::ConflictingSymbol
-                            | PullError::Symbol(_)) => {
+                            | PullError::Symbol(_),
+                        ) => {
                             failed.insert(reply.request.donor);
                         }
                         Err(error) => return Err(PullDriveError::Pull(error)),
@@ -170,7 +183,10 @@ pub async fn recover<T: PullTransport>(
         // A disconnected donor's earlier authenticated contributions stay useful,
         // regardless of response order; the surviving streams continue with FEC.
         for donor in failed {
-            window.pull.donor_failed(donor).map_err(PullDriveError::Pull)?;
+            window
+                .pull
+                .donor_failed(donor)
+                .map_err(PullDriveError::Pull)?;
         }
         // Release missing/invalid/expired replies before requesting fresh repairs.
         drop(window);
@@ -196,8 +212,14 @@ mod tests {
     fn reordered_subset_is_valid_and_missing_responses_are_timeouts() {
         let requests = [request(0), request(1), request(2)];
         let replies = [
-            PullReply { request: requests[2], outcome: ReplyOutcome::TimedOut },
-            PullReply { request: requests[0], outcome: ReplyOutcome::Unavailable },
+            PullReply {
+                request: requests[2],
+                outcome: ReplyOutcome::TimedOut,
+            },
+            PullReply {
+                request: requests[0],
+                outcome: ReplyOutcome::Unavailable,
+            },
         ];
         assert!(validate_replies::<()>(&requests, &replies).is_ok());
     }
@@ -207,13 +229,29 @@ mod tests {
         let requests = [request(0), request(1)];
         let mut foreign = requests[0];
         foreign.donor = DonorId(2);
-        assert!(matches!(validate_replies::<()>(&requests, &[PullReply {
-            request: foreign, outcome: ReplyOutcome::TimedOut,
-        }]), Err(PullDriveError::ForeignReply)));
+        assert!(matches!(
+            validate_replies::<()>(
+                &requests,
+                &[PullReply {
+                    request: foreign,
+                    outcome: ReplyOutcome::TimedOut,
+                }]
+            ),
+            Err(PullDriveError::ForeignReply)
+        ));
         let replies = [
-            PullReply { request: requests[0], outcome: ReplyOutcome::TimedOut },
-            PullReply { request: requests[0], outcome: ReplyOutcome::Unavailable },
+            PullReply {
+                request: requests[0],
+                outcome: ReplyOutcome::TimedOut,
+            },
+            PullReply {
+                request: requests[0],
+                outcome: ReplyOutcome::Unavailable,
+            },
         ];
-        assert!(matches!(validate_replies::<()>(&requests, &replies), Err(PullDriveError::DuplicateReply)));
+        assert!(matches!(
+            validate_replies::<()>(&requests, &replies),
+            Err(PullDriveError::DuplicateReply)
+        ));
     }
 }

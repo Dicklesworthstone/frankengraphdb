@@ -1,4 +1,6 @@
-use fgdb_chronicle::identity::{CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject};
+use fgdb_chronicle::identity::{
+    CipherDescriptor, EncodedObject, EncodingDescriptor, IdentifiedObject,
+};
 use fgdb_chronicle::symbolize::{RecoveryTarget, encode_object, source_symbol_count};
 use fgdb_chronicle::transfer::{BondedPull, DonorId, PullLimits, VerifiedObject};
 use fgdb_types::DatabaseSecurityNamespaceId;
@@ -50,15 +52,8 @@ impl Fixture {
             source_block_count,
             symbol_auth_profile: 1,
         });
-        let records = encode_object(
-            &encoding,
-            protected.protected_bytes(),
-            KIND,
-            0,
-            128,
-            &DEK,
-        )
-        .unwrap();
+        let records =
+            encode_object(&encoding, protected.protected_bytes(), KIND, 0, 128, &DEK).unwrap();
         Self {
             encoding,
             records,
@@ -88,8 +83,12 @@ impl Fixture {
         )
         .unwrap();
         for request in pull.schedule(self.sources).unwrap() {
-            pull.accept(request.donor, &self.records[request.esi as usize], &mut Vec::new())
-                .unwrap();
+            pull.accept(
+                request.donor,
+                &self.records[request.esi as usize],
+                &mut Vec::new(),
+            )
+            .unwrap();
         }
         pull.try_recover(&mut Vec::new()).unwrap().unwrap()
     }

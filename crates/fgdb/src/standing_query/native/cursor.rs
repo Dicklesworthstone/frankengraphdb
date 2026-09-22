@@ -359,7 +359,10 @@ pub(super) fn open<'a, V: Vfs + Clone>(
                         // All other native row circuits share the same complete
                         // selected bag. Ranked windows are handled above; do not
                         // lose filters or recursive outputs in an adapter whitelist.
-                        _ => (sets::rows(root).ok_or(StandingQueryError::Unsupported)?, None),
+                        _ => (
+                            sets::rows(root).ok_or(StandingQueryError::Unsupported)?,
+                            None,
+                        ),
                     };
                     if matches!(layout.as_ref(), Layout::Circuit { .. })
                         && !matches!(root, StandingQuery::Constant(_))

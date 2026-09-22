@@ -26,9 +26,18 @@ pub enum FactorNodeKind {
 enum Value<K> {
     Empty,
     Unit,
-    Flat { start: usize, values: Vec<K> },
-    Product { children: Vec<usize>, suffixes: Vec<Option<u128>> },
-    Union { children: Vec<usize>, cumulative: Vec<Option<u128>> },
+    Flat {
+        start: usize,
+        values: Vec<K>,
+    },
+    Product {
+        children: Vec<usize>,
+        suffixes: Vec<Option<u128>>,
+    },
+    Union {
+        children: Vec<usize>,
+        cumulative: Vec<Option<u128>>,
+    },
 }
 
 #[derive(Clone)]
@@ -83,10 +92,13 @@ impl<K> FactorizedBatch<K> {
 
     #[must_use]
     pub fn stored_values(&self) -> usize {
-        self.nodes.iter().map(|node| match &node.value {
-            Value::Flat { values, .. } => values.len(),
-            _ => 0,
-        }).sum()
+        self.nodes
+            .iter()
+            .map(|node| match &node.value {
+                Value::Flat { values, .. } => values.len(),
+                _ => 0,
+            })
+            .sum()
     }
 
     pub fn node_kinds(&self) -> impl Iterator<Item = FactorNodeKind> + '_ {
@@ -101,7 +113,12 @@ impl<K> FactorizedBatch<K> {
 
     pub fn cursor(&self) -> Result<FactorizedCursor<'_, K>, MultiplicityOverflow> {
         let cardinality = self.cardinality()?;
-        Ok(FactorizedCursor { batch: self, position: 0, cardinality, failed: false })
+        Ok(FactorizedCursor {
+            batch: self,
+            position: 0,
+            cardinality,
+            failed: false,
+        })
     }
 
     fn push<E>(
@@ -130,7 +147,9 @@ impl<K> FactorizedBatch<K> {
             }
             control(GlaExecutionEvent::ScratchEntry)?;
             suffixes.push(suffix);
-            suffix = suffix.zip(self.nodes[child].count).and_then(|(a, b)| a.checked_mul(b));
+            suffix = suffix
+                .zip(self.nodes[child].count)
+                .and_then(|(a, b)| a.checked_mul(b));
         }
         suffixes.reverse();
         if children.is_empty() {
@@ -157,10 +176,19 @@ impl<K> FactorizedBatch<K> {
         let mut cumulative = Vec::new();
         for &child in &children {
             control(GlaExecutionEvent::ScratchEntry)?;
-            count = count.zip(self.nodes[child].count).and_then(|(a, b)| a.checked_add(b));
+            count = count
+                .zip(self.nodes[child].count)
+                .and_then(|(a, b)| a.checked_add(b));
             cumulative.push(count);
         }
-        self.push(Value::Union { children, cumulative }, count, control)
+        self.push(
+            Value::Union {
+                children,
+                cumulative,
+            },
+            count,
+            control,
+        )
     }
 }
 
@@ -186,10 +214,16 @@ fn forest(plan: &FreeJoinPlan, range: Range<usize>, last: &[Option<usize>]) -> V
             scan += 1;
         }
         debug_assert!(end <= range.end, "a component cannot escape its parent");
-        let closes = plan.stages[start].probes.iter().filter_map(|access| {
-            (last[access.relation] == Some(start)).then_some(access.relation)
-        }).collect();
-        result.push(StageTree { at: start, children: forest(plan, start + 1..end, last), closes });
+        let closes = plan.stages[start]
+            .probes
+            .iter()
+            .filter_map(|access| (last[access.relation] == Some(start)).then_some(access.relation))
+            .collect();
+        result.push(StageTree {
+            at: start,
+            children: forest(plan, start + 1..end, last),
+            closes,
+        });
         start = end;
     }
     result
@@ -293,7 +327,8 @@ fn evaluate_stage<K: Ord + Clone, T: TrieCursor<K>, E>(
         let mut accepted = true;
         for access in &stage.probes {
             let original = cursors[access.relation].clone();
-            let Some(child) = probe(original.clone(), &access.key_positions, candidate, control)? else {
+            let Some(child) = probe(original.clone(), &access.key_positions, candidate, control)?
+            else {
                 accepted = false;
                 break;
             };
@@ -306,12 +341,21 @@ fn evaluate_stage<K: Ord + Clone, T: TrieCursor<K>, E>(
                 control(GlaExecutionEvent::ScratchEntry)?;
                 values.push(key.clone());
             }
-            let flat = batch.push(Value::Flat { start: stage.start, values }, Some(1), control)?;
+            let flat = batch.push(
+                Value::Flat {
+                    start: stage.start,
+                    values,
+                },
+                Some(1),
+                control,
+            )?;
             control(GlaExecutionEvent::ScratchEntry)?;
             let mut children = vec![flat];
             for &relation in &tree.closes {
                 control(GlaExecutionEvent::Work)?;
-                let count = cursors[relation].multiplicity().expect("last relation attribute is bound");
+                let count = cursors[relation]
+                    .multiplicity()
+                    .expect("last relation attribute is bound");
                 let node = batch.push(Value::Unit, Some(count as u128), control)?;
                 control(GlaExecutionEvent::ScratchEntry)?;
                 children.push(node);
@@ -342,15 +386,24 @@ pub struct FactorizedColumns<K> {
 }
 impl<K> FactorizedColumns<K> {
     #[must_use]
-    pub fn variables(&self) -> &[JoinVariable] { &self.variables }
+    pub fn variables(&self) -> &[JoinVariable] {
+        &self.variables
+    }
     #[must_use]
-    pub fn columns(&self) -> &[Vec<K>] { &self.columns }
+    pub fn columns(&self) -> &[Vec<K>] {
+        &self.columns
+    }
     #[must_use]
-    pub fn row_count(&self) -> usize { self.rows }
+    pub fn row_count(&self) -> usize {
+        self.rows
+    }
 }
 impl<K> core::fmt::Debug for FactorizedColumns<K> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("FactorizedColumns").field("rows", &self.rows).field("values", &"[REDACTED]").finish()
+        f.debug_struct("FactorizedColumns")
+            .field("rows", &self.rows)
+            .field("values", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -380,9 +433,13 @@ pub struct FactorizedCursor<'a, K> {
 }
 impl<K> FactorizedCursor<'_, K> {
     #[must_use]
-    pub fn position(&self) -> u128 { self.position }
+    pub fn position(&self) -> u128 {
+        self.position
+    }
     #[must_use]
-    pub fn is_failed(&self) -> bool { self.failed }
+    pub fn is_failed(&self) -> bool {
+        self.failed
+    }
 
     /// Monotone positioning in the declared physical order. No values are read.
     pub fn seek(&mut self, rank: u128) {
@@ -428,14 +485,24 @@ impl<K: Clone> FactorizedCursor<'_, K> {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 row.push(None);
             }
-            fill(self.batch, self.batch.root, self.position + offset as u128, &mut row, control)?;
+            fill(
+                self.batch,
+                self.batch.root,
+                self.position + offset as u128,
+                &mut row,
+                control,
+            )?;
             for (column, value) in columns.iter_mut().zip(row) {
                 control(GlaExecutionEvent::ScratchEntry)?;
                 column.push(value.expect("factor forest binds every variable exactly once"));
             }
         }
         self.position += count as u128;
-        Ok(FactorizedColumns { variables, columns, rows: count })
+        Ok(FactorizedColumns {
+            variables,
+            columns,
+            rows: count,
+        })
     }
 }
 
@@ -461,12 +528,17 @@ fn fill<K: Clone, E>(
         Value::Product { children, suffixes } => {
             for (&child, &suffix) in children.iter().zip(suffixes) {
                 control(GlaExecutionEvent::Work)?;
-                let count = batch.nodes[child].count.expect("exact nonempty product child");
+                let count = batch.nodes[child]
+                    .count
+                    .expect("exact nonempty product child");
                 let digit = (rank / suffix.expect("exact product suffix")) % count;
                 fill(batch, child, digit, row, control)?;
             }
         }
-        Value::Union { children, cumulative } => {
+        Value::Union {
+            children,
+            cumulative,
+        } => {
             let (mut low, mut high) = (0, children.len());
             while low < high {
                 control(GlaExecutionEvent::Work)?;
@@ -477,7 +549,11 @@ fn fill<K: Clone, E>(
                     high = middle;
                 }
             }
-            let before = if low == 0 { 0 } else { cumulative[low - 1].expect("exact union prefix") };
+            let before = if low == 0 {
+                0
+            } else {
+                cumulative[low - 1].expect("exact union prefix")
+            };
             fill(batch, children[low], rank - before, row, control)?;
         }
     }

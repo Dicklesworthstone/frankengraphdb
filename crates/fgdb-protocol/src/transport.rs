@@ -105,10 +105,10 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
                 return Poll::Ready(Err(TransportError::ContextStopped));
             }
             if self.start != self.end {
-                let progress = match self.decoder.decode(
-                    &self.bytes[self.start..self.end],
-                    &mut validate,
-                ) {
+                let progress = match self
+                    .decoder
+                    .decode(&self.bytes[self.start..self.end], &mut validate)
+                {
                     Ok(progress) => progress,
                     Err(error) => {
                         self.failed = true;
@@ -183,7 +183,9 @@ pub enum AbandonedSend {
     CancelledBeforeWrite,
     /// The old stream is permanently unusable. Flow credit must not be
     /// refunded and an uncertain result must not be acknowledged.
-    FailedAfterWrite { accepted_bytes: usize },
+    FailedAfterWrite {
+        accepted_bytes: usize,
+    },
 }
 
 /// One serialized writer. No API exposes its underlying stream while a frame
@@ -197,7 +199,12 @@ pub struct FrameWriter<W> {
 
 impl<W> FrameWriter<W> {
     pub fn new(io: W, limits: FrameLimits) -> Self {
-        Self { io, limits, pending: None, failed: false }
+        Self {
+            io,
+            limits,
+            pending: None,
+            failed: false,
+        }
     }
 
     /// Reserve the application's flow credit and transport obligation first.
@@ -209,9 +216,14 @@ impl<W> FrameWriter<W> {
         if self.pending.is_some() {
             return Err(TransportError::SendInProgress);
         }
-        cx.checkpoint().map_err(|_| TransportError::ContextStopped)?;
+        cx.checkpoint()
+            .map_err(|_| TransportError::ContextStopped)?;
         let bytes = frame.encode(self.limits)?;
-        self.pending = Some(PendingFrame { header: *frame.header(), bytes, written: 0 });
+        self.pending = Some(PendingFrame {
+            header: *frame.header(),
+            bytes,
+            written: 0,
+        });
         Ok(())
     }
 
@@ -227,7 +239,9 @@ impl<W> FrameWriter<W> {
             Ok(AbandonedSend::CancelledBeforeWrite)
         } else {
             self.failed = true;
-            Ok(AbandonedSend::FailedAfterWrite { accepted_bytes: pending.written })
+            Ok(AbandonedSend::FailedAfterWrite {
+                accepted_bytes: pending.written,
+            })
         }
     }
 }
@@ -269,7 +283,9 @@ impl<W: AsyncWrite + Unpin> FrameWriter<W> {
                         return Poll::Ready(Err(TransportError::Io(error.kind())));
                     }
                     Poll::Ready(Ok(())) => {
-                        let completion = SendCompletion { encoded_bytes: pending.written };
+                        let completion = SendCompletion {
+                            encoded_bytes: pending.written,
+                        };
                         self.pending = None;
                         return Poll::Ready(Ok(completion));
                     }

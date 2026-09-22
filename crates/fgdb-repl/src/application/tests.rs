@@ -3,13 +3,18 @@ use std::cell::RefCell;
 use std::future::{pending, ready};
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::task::{Context, Poll, Wake, Waker};
 
 use fgdb_order::{Configuration, Limits, MemberId, SnapshotCut};
 
 pub(super) struct NoopWake;
-impl Wake for NoopWake { fn wake(self: Arc<Self>) {} }
+impl Wake for NoopWake {
+    fn wake(self: Arc<Self>) {}
+}
 
 pub(super) fn immediate<F: Future>(future: F) -> F::Output {
     let waker = Waker::from(Arc::new(NoopWake));
@@ -32,14 +37,21 @@ pub(super) fn config() -> Configuration {
 
 pub(super) fn genesis() -> ApplicationProgress {
     ApplicationProgress {
-        domain: config().domain(), configuration: config().identity(),
-        applied: AppliedPosition { index: 0, term: 0 }, visible_index: 0,
-        state_root: oid(10), publication_root: oid(11), publication_generation: 1,
+        domain: config().domain(),
+        configuration: config().identity(),
+        applied: AppliedPosition { index: 0, term: 0 },
+        visible_index: 0,
+        state_root: oid(10),
+        publication_root: oid(11),
+        publication_generation: 1,
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Command { Put(u64), ReleaseThrough(u64) }
+pub(super) enum Command {
+    Put(u64),
+    ReleaseThrough(u64),
+}
 
 pub(super) fn entry(term: u64, command: Option<Command>) -> Entry<Command> {
     Entry { term, command }
@@ -47,16 +59,30 @@ pub(super) fn entry(term: u64, command: Option<Command>) -> Entry<Command> {
 
 pub(super) fn replica(entries: Vec<Entry<Command>>, commit: u64) -> Replica<Command> {
     let term = entries.last().map_or(1, |entry| entry.term);
-    Replica::recover(MemberId(1), PersistentState::from_authenticated_parts(
-        config(), term, None, commit, entries,
-    ), Limits::default(), 16).unwrap()
+    Replica::recover(
+        MemberId(1),
+        PersistentState::from_authenticated_parts(config(), term, None, commit, entries),
+        Limits::default(),
+        16,
+    )
+    .unwrap()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
-    Normal, FailBefore, FailAfter, SuspendAfter, PanicAfter,
-    WrongPosition, WrongTerm, WrongDomain, WrongConfiguration,
-    FutureVisibility, RegressVisibility, SameGeneration, SameRoot,
+    Normal,
+    FailBefore,
+    FailAfter,
+    SuspendAfter,
+    PanicAfter,
+    WrongPosition,
+    WrongTerm,
+    WrongDomain,
+    WrongConfiguration,
+    FutureVisibility,
+    RegressVisibility,
+    SameGeneration,
+    SameRoot,
 }
 
 /// An explicitly memory-only publication model, NOT Chronicle disk evidence.
@@ -72,9 +98,16 @@ pub(super) struct MemoryState {
 
 pub(super) struct MemoryApplication(pub(super) Rc<RefCell<MemoryState>>);
 
-pub(super) fn memory(progress: ApplicationProgress) -> (MemoryApplication, Rc<RefCell<MemoryState>>) {
+pub(super) fn memory(
+    progress: ApplicationProgress,
+) -> (MemoryApplication, Rc<RefCell<MemoryState>>) {
     let store = Rc::new(RefCell::new(MemoryState {
-        progress, values: Vec::new(), batches: Vec::new(), calls: 0, loads: 0, mode: Mode::Normal,
+        progress,
+        values: Vec::new(),
+        batches: Vec::new(),
+        calls: 0,
+        loads: 0,
+        mode: Mode::Normal,
     }));
     (MemoryApplication(Rc::clone(&store)), store)
 }
@@ -88,9 +121,10 @@ impl Application<Command> for MemoryApplication {
         ready(Ok(store.progress))
     }
 
-    fn apply(&mut self, batch: ApplicationBatch<'_, Command>)
-        -> impl Future<Output = Result<ApplicationProgress, Self::Error>>
-    {
+    fn apply(
+        &mut self,
+        batch: ApplicationBatch<'_, Command>,
+    ) -> impl Future<Output = Result<ApplicationProgress, Self::Error>> {
         let mut store = self.0.borrow_mut();
         store.calls += 1;
         assert_eq!(&store.progress, batch.basis());
@@ -106,9 +140,14 @@ impl Application<Command> for MemoryApplication {
                         store.progress.state_root = oid(1000 + position.index);
                     }
                     Some(Command::ReleaseThrough(cut)) => {
-                        assert!(*cut < position.index, "a test audit control cannot release the future");
+                        assert!(
+                            *cut < position.index,
+                            "a test audit control cannot release the future"
+                        );
                         store.progress.visible_index = store.progress.visible_index.max(*cut);
-                        if *cut == position.index - 1 { store.progress.visible_index = position.index; }
+                        if *cut == position.index - 1 {
+                            store.progress.visible_index = position.index;
+                        }
                     }
                     None if store.progress.visible_index == position.index - 1 => {
                         store.progress.visible_index = position.index;
@@ -116,7 +155,9 @@ impl Application<Command> for MemoryApplication {
                     None => {}
                 }
             }
-            store.batches.push((batch.first_index(), batch.last().index));
+            store
+                .batches
+                .push((batch.first_index(), batch.last().index));
             store.progress.applied = batch.last();
             store.progress.publication_generation += 1;
             store.progress.publication_root = oid(10 + store.progress.publication_generation);
@@ -128,8 +169,12 @@ impl Application<Command> for MemoryApplication {
             Mode::WrongDomain => result.domain = Domain([9; 32]),
             Mode::WrongConfiguration => result.configuration = [9; 32],
             Mode::FutureVisibility => result.visible_index = result.applied.index + 1,
-            Mode::RegressVisibility => result.visible_index = batch.basis().visible_index.saturating_sub(1),
-            Mode::SameGeneration => result.publication_generation = batch.basis().publication_generation,
+            Mode::RegressVisibility => {
+                result.visible_index = batch.basis().visible_index.saturating_sub(1)
+            }
+            Mode::SameGeneration => {
+                result.publication_generation = batch.basis().publication_generation
+            }
             Mode::SameRoot => result.publication_root = batch.basis().publication_root,
             Mode::PanicAfter => panic!("publication panicked after changing the durable model"),
             _ => {}
@@ -137,20 +182,30 @@ impl Application<Command> for MemoryApplication {
         // No borrow of the test store survives suspension.
         drop(store);
         async move {
-            if mode == Mode::SuspendAfter { pending::<()>().await; }
-            if matches!(mode, Mode::FailBefore | Mode::FailAfter) { Err("publication outcome unknown") }
-            else { Ok(result) }
+            if mode == Mode::SuspendAfter {
+                pending::<()>().await;
+            }
+            if matches!(mode, Mode::FailBefore | Mode::FailAfter) {
+                Err("publication outcome unknown")
+            } else {
+                Ok(result)
+            }
         }
     }
 }
 
 #[test]
 fn bounded_replay_excludes_uncommitted_tail_and_never_reapplies() {
-    let replica = replica(vec![
-        entry(1, None), entry(1, Some(Command::Put(10))),
-        entry(2, Some(Command::Put(20))), entry(2, Some(Command::ReleaseThrough(3))),
-        entry(2, Some(Command::Put(99))),
-    ], 4);
+    let replica = replica(
+        vec![
+            entry(1, None),
+            entry(1, Some(Command::Put(10))),
+            entry(2, Some(Command::Put(20))),
+            entry(2, Some(Command::ReleaseThrough(3))),
+            entry(2, Some(Command::Put(99))),
+        ],
+        4,
+    );
     let (backend, store) = memory(genesis());
     let mut app = immediate(ApplicationDriver::recover(backend, &replica, 2)).unwrap();
     let first = immediate(app.apply_next(&replica)).unwrap().unwrap();
@@ -181,14 +236,32 @@ fn noops_publish_the_cursor_without_becoming_semantic_commands() {
 
 #[test]
 fn hidden_commands_and_following_noops_need_an_ordered_visibility_control() {
-    let replica = replica(vec![entry(1, Some(Command::Put(7))), entry(1, None),
-        entry(1, Some(Command::ReleaseThrough(2)))], 3);
+    let replica = replica(
+        vec![
+            entry(1, Some(Command::Put(7))),
+            entry(1, None),
+            entry(1, Some(Command::ReleaseThrough(2))),
+        ],
+        3,
+    );
     let (backend, _) = memory(genesis());
     let mut app = immediate(ApplicationDriver::recover(backend, &replica, 1)).unwrap();
     for _ in 0..2 {
-        assert_eq!(immediate(app.apply_next(&replica)).unwrap().unwrap().visible_index, 0);
+        assert_eq!(
+            immediate(app.apply_next(&replica))
+                .unwrap()
+                .unwrap()
+                .visible_index,
+            0
+        );
     }
-    assert_eq!(immediate(app.apply_next(&replica)).unwrap().unwrap().visible_index, 3);
+    assert_eq!(
+        immediate(app.apply_next(&replica))
+            .unwrap()
+            .unwrap()
+            .visible_index,
+        3
+    );
 }
 
 #[test]
@@ -218,19 +291,39 @@ fn recovery_rejects_wrong_domains_cuts_and_impossible_visibility() {
             _ => unreachable!(),
         }
         let (backend, _) = memory(bad);
-        assert!(matches!(immediate(ApplicationDriver::recover(backend, &replica, 2)),
-            Err(ApplicationError::State(error)) if error == expected));
+        assert!(
+            matches!(immediate(ApplicationDriver::recover(backend, &replica, 2)),
+            Err(ApplicationError::State(error)) if error == expected)
+        );
     }
 }
 
 #[test]
 fn installed_snapshot_requires_exact_state_and_audit_safe_base() {
     let configuration = config();
-    let cut = SnapshotCut::from_authenticated_parts(&configuration, oid(40).0, oid(50).0,
-        oid(60).0, 5, 2).unwrap();
-    let replica = Replica::recover(MemberId(1), PersistentState::from_authenticated_snapshot(
-        configuration, 2, None, 6, cut, vec![entry(2, Some(Command::Put(70)))],
-    ), Limits::default(), 16).unwrap();
+    let cut = SnapshotCut::from_authenticated_parts(
+        &configuration,
+        oid(40).0,
+        oid(50).0,
+        oid(60).0,
+        5,
+        2,
+    )
+    .unwrap();
+    let replica = Replica::recover(
+        MemberId(1),
+        PersistentState::from_authenticated_snapshot(
+            configuration,
+            2,
+            None,
+            6,
+            cut,
+            vec![entry(2, Some(Command::Put(70)))],
+        ),
+        Limits::default(),
+        16,
+    )
+    .unwrap();
     let mut progress = genesis();
     progress.applied = AppliedPosition { index: 5, term: 2 };
     progress.visible_index = 5;
@@ -256,17 +349,28 @@ fn installed_snapshot_requires_exact_state_and_audit_safe_base() {
 #[test]
 fn every_bad_or_uncertain_publication_permanently_fences_cached_state() {
     let replica = replica(vec![entry(1, Some(Command::Put(10)))], 1);
-    for mode in [Mode::FailBefore, Mode::FailAfter, Mode::WrongPosition, Mode::WrongTerm,
-        Mode::WrongDomain, Mode::WrongConfiguration, Mode::FutureVisibility,
-        Mode::SameGeneration, Mode::SameRoot]
-    {
+    for mode in [
+        Mode::FailBefore,
+        Mode::FailAfter,
+        Mode::WrongPosition,
+        Mode::WrongTerm,
+        Mode::WrongDomain,
+        Mode::WrongConfiguration,
+        Mode::FutureVisibility,
+        Mode::SameGeneration,
+        Mode::SameRoot,
+    ] {
         let (backend, store) = memory(genesis());
         store.borrow_mut().mode = mode;
         let mut app = immediate(ApplicationDriver::recover(backend, &replica, 2)).unwrap();
         assert!(immediate(app.apply_next(&replica)).is_err(), "{mode:?}");
         assert_eq!(app.progress(), Err(ApplicationStateError::RecoveryRequired));
-        assert!(matches!(immediate(app.apply_next(&replica)),
-            Err(ApplicationError::State(ApplicationStateError::RecoveryRequired))));
+        assert!(matches!(
+            immediate(app.apply_next(&replica)),
+            Err(ApplicationError::State(
+                ApplicationStateError::RecoveryRequired
+            ))
+        ));
         assert_eq!(store.borrow().calls, 1);
     }
 }
@@ -278,30 +382,47 @@ fn visibility_must_never_regress_after_a_successful_apply() {
     let mut app = immediate(ApplicationDriver::recover(backend, &replica, 1)).unwrap();
     immediate(app.apply_next(&replica)).unwrap();
     store.borrow_mut().mode = Mode::RegressVisibility;
-    assert!(matches!(immediate(app.apply_next(&replica)),
-        Err(ApplicationError::State(ApplicationStateError::VisibilityRegression))));
+    assert!(matches!(
+        immediate(app.apply_next(&replica)),
+        Err(ApplicationError::State(
+            ApplicationStateError::VisibilityRegression
+        ))
+    ));
     assert_eq!(app.progress(), Err(ApplicationStateError::RecoveryRequired));
 }
 
 #[test]
 fn cancellation_after_atomic_publish_recovers_without_duplicate_effects() {
-    let replica = replica(vec![entry(1, Some(Command::Put(10))),
-        entry(1, Some(Command::Put(20)))], 2);
+    let replica = replica(
+        vec![
+            entry(1, Some(Command::Put(10))),
+            entry(1, Some(Command::Put(20))),
+        ],
+        2,
+    );
     let (backend, store) = memory(genesis());
     store.borrow_mut().mode = Mode::SuspendAfter;
     let mut app = immediate(ApplicationDriver::recover(backend, &replica, 1)).unwrap();
     {
         let mut future = pin!(app.apply_next(&replica));
         let waker = Waker::from(Arc::new(NoopWake));
-        assert!(future.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        assert!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
     }
     assert_eq!(app.progress(), Err(ApplicationStateError::RecoveryRequired));
     assert_eq!(store.borrow().progress.applied.index, 1);
     drop(app);
     store.borrow_mut().mode = Mode::Normal;
     let mut recovered = immediate(ApplicationDriver::recover(
-        MemoryApplication(Rc::clone(&store)), &replica, 1,
-    )).unwrap();
+        MemoryApplication(Rc::clone(&store)),
+        &replica,
+        1,
+    ))
+    .unwrap();
     immediate(recovered.apply_next(&replica)).unwrap();
     assert_eq!(store.borrow().values, [(1, 10), (2, 20)]);
     assert_eq!(store.borrow().batches, [(1, 1), (2, 2)]);
@@ -318,8 +439,11 @@ fn failure_before_publication_recovers_the_old_cursor_without_skipping() {
     drop(app);
     store.borrow_mut().mode = Mode::Normal;
     let mut recovered = immediate(ApplicationDriver::recover(
-        MemoryApplication(Rc::clone(&store)), &replica, 1,
-    )).unwrap();
+        MemoryApplication(Rc::clone(&store)),
+        &replica,
+        1,
+    ))
+    .unwrap();
     immediate(recovered.apply_next(&replica)).unwrap();
     assert_eq!(store.borrow().values, [(1, 10)]);
 }
@@ -330,9 +454,12 @@ fn synchronous_backend_panic_is_fenced_before_future_creation() {
     let (backend, store) = memory(genesis());
     store.borrow_mut().mode = Mode::PanicAfter;
     let mut app = immediate(ApplicationDriver::recover(backend, &replica, 1)).unwrap();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = immediate(app.apply_next(&replica));
-    })).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = immediate(app.apply_next(&replica));
+        }))
+        .is_err()
+    );
     assert_eq!(app.progress(), Err(ApplicationStateError::RecoveryRequired));
     assert_eq!(store.borrow().values, [(1, 10)]);
 }
@@ -342,8 +469,12 @@ fn invalid_limits_do_not_load_or_mutate_the_backend() {
     let replica = replica(Vec::new(), 0);
     for limit in [0, 65_537, usize::MAX] {
         let (backend, store) = memory(genesis());
-        assert!(matches!(immediate(ApplicationDriver::recover(backend, &replica, limit)),
-            Err(ApplicationError::State(ApplicationStateError::InvalidLimits))));
+        assert!(matches!(
+            immediate(ApplicationDriver::recover(backend, &replica, limit)),
+            Err(ApplicationError::State(
+                ApplicationStateError::InvalidLimits
+            ))
+        ));
         assert_eq!(store.borrow().loads, 0);
     }
 }
@@ -353,17 +484,27 @@ fn replay_borrows_commands_instead_of_cloning_the_retained_log() {
     #[derive(Debug)]
     struct Counted(Arc<AtomicUsize>);
     impl Clone for Counted {
-        fn clone(&self) -> Self { self.0.fetch_add(1, Ordering::SeqCst); Self(Arc::clone(&self.0)) }
+        fn clone(&self) -> Self {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Self(Arc::clone(&self.0))
+        }
     }
-    impl PartialEq for Counted { fn eq(&self, _: &Self) -> bool { true } }
+    impl PartialEq for Counted {
+        fn eq(&self, _: &Self) -> bool {
+            true
+        }
+    }
     impl Eq for Counted {}
     struct CounterBackend(ApplicationProgress);
     impl Application<Counted> for CounterBackend {
         type Error = ();
-        fn load(&mut self) -> impl Future<Output = Result<ApplicationProgress, ()>> { ready(Ok(self.0)) }
-        fn apply(&mut self, batch: ApplicationBatch<'_, Counted>)
-            -> impl Future<Output = Result<ApplicationProgress, ()>>
-        {
+        fn load(&mut self) -> impl Future<Output = Result<ApplicationProgress, ()>> {
+            ready(Ok(self.0))
+        }
+        fn apply(
+            &mut self,
+            batch: ApplicationBatch<'_, Counted>,
+        ) -> impl Future<Output = Result<ApplicationProgress, ()>> {
             assert_eq!(batch.commands().count(), 2);
             self.0.applied = batch.last();
             self.0.publication_generation += 1;
@@ -372,11 +513,25 @@ fn replay_borrows_commands_instead_of_cloning_the_retained_log() {
         }
     }
     let clones = Arc::new(AtomicUsize::new(0));
-    let entries = (0..1000).map(|_| Entry { term: 1, command: Some(Counted(Arc::clone(&clones))) }).collect();
-    let replica = Replica::recover(MemberId(1), PersistentState::from_authenticated_parts(
-        config(), 1, None, 1000, entries,
-    ), Limits::default(), 16).unwrap();
-    let mut app = immediate(ApplicationDriver::recover(CounterBackend(genesis()), &replica, 2)).unwrap();
+    let entries = (0..1000)
+        .map(|_| Entry {
+            term: 1,
+            command: Some(Counted(Arc::clone(&clones))),
+        })
+        .collect();
+    let replica = Replica::recover(
+        MemberId(1),
+        PersistentState::from_authenticated_parts(config(), 1, None, 1000, entries),
+        Limits::default(),
+        16,
+    )
+    .unwrap();
+    let mut app = immediate(ApplicationDriver::recover(
+        CounterBackend(genesis()),
+        &replica,
+        2,
+    ))
+    .unwrap();
     immediate(app.apply_next(&replica)).unwrap();
     assert_eq!(clones.load(Ordering::SeqCst), 0);
     assert_eq!(app.progress().unwrap().applied.index, 2);

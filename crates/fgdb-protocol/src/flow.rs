@@ -61,17 +61,26 @@ impl FlowWindow {
             if update == previous {
                 return Ok(WindowStatus::Replayed);
             }
-            if update.sequence != previous.sequence.checked_add(1)
-                .ok_or(ProtocolError::InvalidCreditUpdate)?
+            if update.sequence
+                != previous
+                    .sequence
+                    .checked_add(1)
+                    .ok_or(ProtocolError::InvalidCreditUpdate)?
             {
                 return Err(ProtocolError::InvalidCreditUpdate);
             }
         } else if update.sequence != 1 {
             return Err(ProtocolError::InvalidCreditUpdate);
         }
-        let bytes = self.available.bytes.checked_add(update.bytes)
+        let bytes = self
+            .available
+            .bytes
+            .checked_add(update.bytes)
             .ok_or(ProtocolError::CreditOverflow)?;
-        let rows = self.available.rows.checked_add(update.rows)
+        let rows = self
+            .available
+            .rows
+            .checked_add(update.rows)
             .ok_or(ProtocolError::CreditOverflow)?;
         if bytes > self.maximum.bytes || rows > self.maximum.rows {
             return Err(ProtocolError::CreditOverflow);
@@ -86,12 +95,24 @@ impl FlowWindow {
         }
         // Preflight the cumulative counters now, so recording a successful
         // physical write cannot subsequently fail due to arithmetic overflow.
-        self.sent.bytes.checked_add(cost.bytes).ok_or(ProtocolError::CreditOverflow)?;
-        self.sent.rows.checked_add(cost.rows).ok_or(ProtocolError::CreditOverflow)?;
-        self.failed_after_write.checked_add(1).ok_or(ProtocolError::CreditOverflow)?;
+        self.sent
+            .bytes
+            .checked_add(cost.bytes)
+            .ok_or(ProtocolError::CreditOverflow)?;
+        self.sent
+            .rows
+            .checked_add(cost.rows)
+            .ok_or(ProtocolError::CreditOverflow)?;
+        self.failed_after_write
+            .checked_add(1)
+            .ok_or(ProtocolError::CreditOverflow)?;
         self.available.bytes -= cost.bytes;
         self.available.rows -= cost.rows;
-        Ok(Reservation { window: self, cost, state: SendState::Queued })
+        Ok(Reservation {
+            window: self,
+            cost,
+            state: SendState::Queued,
+        })
     }
 }
 

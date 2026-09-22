@@ -605,12 +605,18 @@ fn implicit_computed_keys_do_not_duplicate_parameter_occurrences_or_resolve_on_b
     assert_eq!(first, explicit.bind_parameters(&arguments(7)).unwrap());
     assert_ne!(
         frozen,
-        template.bind_parameters(&arguments(8)).unwrap().canonical_bytes()
+        template
+            .bind_parameters(&arguments(8))
+            .unwrap()
+            .canonical_bytes()
     );
     assert_eq!(first.canonical_bytes(), frozen);
     assert_eq!(calls, 1);
     assert_eq!(
-        template.bind_parameters(&GqlParameters::new()).unwrap_err().kind,
+        template
+            .bind_parameters(&GqlParameters::new())
+            .unwrap_err()
+            .kind,
         GraphPatternTextErrorKind::MissingParameter
     );
     assert_eq!(

@@ -49,7 +49,8 @@ impl Amount {
             for j in 0..4 {
                 // (2^64-1)^2 + two carries fits exactly in u128.
                 let product = u128::from(self.0[i]) * u128::from(other.0[j])
-                    + u128::from(output[i + j]) + carry;
+                    + u128::from(output[i + j])
+                    + carry;
                 output[i + j] = product as u64;
                 carry = product >> 64;
             }
@@ -91,8 +92,10 @@ mod tests {
         let two_to_128 = Amount::from_u128(u128::MAX).add(Amount::ONE);
         assert_eq!(two_to_128.to_u128(), None);
         assert_eq!(two_to_128.subtract(1).to_u128(), Some(u128::MAX));
-        assert_eq!(two_to_128.subtract(u64::MAX).to_u128(),
-            Some(u128::MAX - u128::from(u64::MAX) + 1));
+        assert_eq!(
+            two_to_128.subtract(u64::MAX).to_u128(),
+            Some(u128::MAX - u128::from(u64::MAX) + 1)
+        );
         let saturated = two_to_128.multiply(two_to_128);
         assert_eq!(saturated, Amount::MAX);
         assert_eq!(saturated.multiply(Amount::ZERO), Amount::ZERO);
@@ -108,14 +111,28 @@ mod tests {
 
     #[test]
     fn small_products_and_pages_match_builtin_checked_arithmetic() {
-        let values = [0, 1, 2, 17, u64::MAX as u128, 1_u128 << 64,
-            (1_u128 << 96) + 7, u128::MAX];
+        let values = [
+            0,
+            1,
+            2,
+            17,
+            u64::MAX as u128,
+            1_u128 << 64,
+            (1_u128 << 96) + 7,
+            u128::MAX,
+        ];
         for a in values {
             for b in values {
-                assert_eq!(Amount::from_u128(a).add(Amount::from_u128(b)).to_u128(),
-                    a.checked_add(b));
-                assert_eq!(Amount::from_u128(a).multiply(Amount::from_u128(b)).to_u128(),
-                    a.checked_mul(b));
+                assert_eq!(
+                    Amount::from_u128(a).add(Amount::from_u128(b)).to_u128(),
+                    a.checked_add(b)
+                );
+                assert_eq!(
+                    Amount::from_u128(a)
+                        .multiply(Amount::from_u128(b))
+                        .to_u128(),
+                    a.checked_mul(b)
+                );
             }
             for offset in [0, 1, 17, u64::MAX] {
                 let paged = Amount::from_u128(a).subtract(offset);

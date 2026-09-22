@@ -110,13 +110,18 @@ impl FreeJoinPlan {
                 let key_positions: Vec<_> = variables
                     .iter()
                     .enumerate()
-                    .filter_map(|(position, variable)| schema.contains(variable).then_some(position))
+                    .filter_map(|(position, variable)| {
+                        schema.contains(variable).then_some(position)
+                    })
                     .collect();
                 if key_positions.len() == variables.len() {
                     covers.push(relation);
                 }
                 if !key_positions.is_empty() {
-                    probes.push(Probe { relation, key_positions });
+                    probes.push(Probe {
+                        relation,
+                        key_positions,
+                    });
                 }
             }
             if covers.is_empty() {
@@ -124,16 +129,32 @@ impl FreeJoinPlan {
             }
             let start = order.len();
             order.extend_from_slice(&variables);
-            stages.push(Stage { start, variables, covers, probes });
+            stages.push(Stage {
+                start,
+                variables,
+                covers,
+                probes,
+            });
         }
         if let Some(&missing) = universe.difference(&seen).next() {
             return Err(JoinPlanError::MissingVariable(missing));
         }
         let required_orders = schemas
             .iter()
-            .map(|schema| order.iter().copied().filter(|variable| schema.contains(variable)).collect())
+            .map(|schema| {
+                order
+                    .iter()
+                    .copied()
+                    .filter(|variable| schema.contains(variable))
+                    .collect()
+            })
             .collect();
-        Ok(Self { schemas, order, stages, required_orders })
+        Ok(Self {
+            schemas,
+            order,
+            stages,
+            required_orders,
+        })
     }
 
     /// The worst-case-optimal, variable-at-a-time member of the same family.
@@ -141,7 +162,13 @@ impl FreeJoinPlan {
         schemas: Vec<Vec<JoinVariable>>,
         variable_order: Vec<JoinVariable>,
     ) -> Result<Self, JoinPlanError> {
-        Self::new(schemas, variable_order.into_iter().map(|variable| vec![variable]).collect())
+        Self::new(
+            schemas,
+            variable_order
+                .into_iter()
+                .map(|variable| vec![variable])
+                .collect(),
+        )
     }
 
     /// Intersect the shared key projection, then enumerate the two independent
@@ -152,8 +179,16 @@ impl FreeJoinPlan {
         right: Vec<JoinVariable>,
     ) -> Result<Self, JoinPlanError> {
         let shared: Vec<_> = left.iter().copied().filter(|v| right.contains(v)).collect();
-        let left_only: Vec<_> = left.iter().copied().filter(|v| !right.contains(v)).collect();
-        let right_only: Vec<_> = right.iter().copied().filter(|v| !left.contains(v)).collect();
+        let left_only: Vec<_> = left
+            .iter()
+            .copied()
+            .filter(|v| !right.contains(v))
+            .collect();
+        let right_only: Vec<_> = right
+            .iter()
+            .copied()
+            .filter(|v| !left.contains(v))
+            .collect();
         let groups = [shared, left_only, right_only]
             .into_iter()
             .filter(|group| !group.is_empty())

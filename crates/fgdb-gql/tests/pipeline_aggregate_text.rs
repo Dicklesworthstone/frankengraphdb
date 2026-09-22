@@ -561,8 +561,18 @@ fn terminal_expressions_share_one_compact_projection_without_recounting_paramete
     assert_eq!(result.value.len(), 3);
     for (row, (key, total, mean, count)) in result.value.iter().zip([
         (CanonicalScalar::Null, None, None, 1),
-        (CanonicalScalar::Int(4), Some(8), GraphExactAverage::new(4, 1), 2),
-        (CanonicalScalar::Int(6), Some(6), GraphExactAverage::new(6, 1), 1),
+        (
+            CanonicalScalar::Int(4),
+            Some(8),
+            GraphExactAverage::new(4, 1),
+            2,
+        ),
+        (
+            CanonicalScalar::Int(6),
+            Some(6),
+            GraphExactAverage::new(6, 1),
+            1,
+        ),
     ]) {
         assert_eq!(row.keys()[0].as_scalar(), Some(&key));
         assert_eq!(row.values()[0].as_integer(), total);
@@ -611,7 +621,10 @@ fn whole_expression_grouping_supports_explicit_aliases_and_repeated_output_keys(
     for (row, (key, count)) in result.value.iter().zip([(1, 2), (2, 1)]) {
         assert_eq!(row.keys().len(), 2);
         assert_eq!(row.keys()[0].as_scalar(), Some(&CanonicalScalar::Int(key)));
-        assert_eq!(row.keys()[1].as_scalar(), Some(&CanonicalScalar::Int(key + 1)));
+        assert_eq!(
+            row.keys()[1].as_scalar(),
+            Some(&CanonicalScalar::Int(key + 1))
+        );
         assert_eq!(row.values()[0].as_count(), Some(count));
     }
     let compact = query("MATCH (n) WITH n.p AS x RETURN x+1 AS key,COUNT(*) AS rows");
@@ -625,7 +638,10 @@ fn optional_summary_aliases_and_all_star_keep_native_default_names() {
         symbols,
     )
     .unwrap();
-    assert_eq!(implicit.columns(), &["count", "sum", "avg", "min", "max", "collect"]);
+    assert_eq!(
+        implicit.columns(),
+        &["count", "sum", "avg", "min", "max", "collect"]
+    );
     let explicit = query(
         "MATCH (n) WITH n.p AS x RETURN COUNT(*) AS count,SUM(ALL x+1) AS sum, \
          AVG(x+1) AS avg,MIN(DISTINCT x+1) AS min,MAX(DISTINCT x+1) AS max, \
@@ -638,7 +654,10 @@ fn optional_summary_aliases_and_all_star_keep_native_default_names() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].values()[0].as_count(), Some(3));
     assert_eq!(rows[0].values()[1].as_integer(), Some(8));
-    assert_eq!(rows[0].values()[2].as_average(), GraphExactAverage::new(8, 3));
+    assert_eq!(
+        rows[0].values()[2].as_average(),
+        GraphExactAverage::new(8, 3)
+    );
 }
 
 #[test]
@@ -648,13 +667,19 @@ fn terminal_projection_stays_after_filters_input_pages_and_distinct() {
         "MATCH (n) WITH n.p AS x WHERE x <> 0 WITH x ORDER BY x LIMIT 2 \
          RETURN SUM(10/x) AS total",
     );
-    assert_eq!(run(&filtered, &input, wide()).value[0].values()[0].as_integer(), Some(-5));
+    assert_eq!(
+        run(&filtered, &input, wide()).value[0].values()[0].as_integer(),
+        Some(-5)
+    );
     let input = [1, 1, 2].map(CanonicalScalar::Int);
     for (quantifier, sum) in [("ALL", 7), ("DISTINCT", 5)] {
         let bound = query(&format!(
             "MATCH (n) WITH {quantifier} n.p AS x RETURN SUM(x+1) AS total"
         ));
-        assert_eq!(run(&bound, &input, wide()).value[0].values()[0].as_integer(), Some(sum));
+        assert_eq!(
+            run(&bound, &input, wide()).value[0].values()[0].as_integer(),
+            Some(sum)
+        );
     }
     // Output LIMIT is NOT an input short-circuit. Arithmetic remains typed
     // failure rather than a successful empty result, even inside an aggregate.
@@ -683,10 +708,16 @@ fn terminal_projection_stays_after_filters_input_pages_and_distinct() {
 #[test]
 fn computed_arguments_preserve_wide_aggregate_domains_and_empty_input() {
     let bound = query("MATCH (n) WITH n.p AS x RETURN SUM(x+0) AS total,AVG(x+0) AS mean");
-    let large = [CanonicalScalar::Int(i64::MAX), CanonicalScalar::Int(i64::MAX)];
+    let large = [
+        CanonicalScalar::Int(i64::MAX),
+        CanonicalScalar::Int(i64::MAX),
+    ];
     let row = run(&bound, &large, wide()).value.remove(0);
     assert_eq!(row.values()[0].as_integer(), Some(i128::from(i64::MAX) * 2));
-    assert_eq!(row.values()[1].as_average(), GraphExactAverage::new(i128::from(i64::MAX), 1));
+    assert_eq!(
+        row.values()[1].as_average(),
+        GraphExactAverage::new(i128::from(i64::MAX), 1)
+    );
     let empty = query("MATCH (n) WITH n.p AS x RETURN COUNT(1/0) AS rows,SUM(1/0) AS total");
     let row = run(&empty, &[], wide()).value.remove(0);
     assert_eq!(row.values()[0].as_count(), Some(0));
@@ -694,8 +725,15 @@ fn computed_arguments_preserve_wide_aggregate_domains_and_empty_input() {
     // Literal/list/scalar argument types reuse the ordinary row compiler;
     // lists are nonnull values even when their elements are null.
     let list = query("MATCH (n) WITH n.p AS x RETURN COUNT(DISTINCT [x,x+1]) AS rows");
-    let input = [CanonicalScalar::Null, CanonicalScalar::Int(1), CanonicalScalar::Int(1)];
-    assert_eq!(run(&list, &input, wide()).value[0].values()[0].as_count(), Some(2));
+    let input = [
+        CanonicalScalar::Null,
+        CanonicalScalar::Int(1),
+        CanonicalScalar::Int(1),
+    ];
+    assert_eq!(
+        run(&list, &input, wide()).value[0].values()[0].as_count(),
+        Some(2)
+    );
 }
 
 #[test]
@@ -739,11 +777,12 @@ fn computed_terminal_definition_limits_and_invalid_scopes_refuse_before_resoluti
 fn existing_group_names_and_private_projection_names_cannot_be_captured() {
     // Swapping public output aliases must not reinterpret a previously valid
     // GROUP BY that names the completed WITH schema in its original order.
-    let bound = query(
-        "MATCH (n) WITH n.p AS x,n AS y RETURN x AS y,y AS x,COUNT(*) AS rows GROUP BY x,y",
-    );
+    let bound =
+        query("MATCH (n) WITH n.p AS x,n AS y RETURN x AS y,y AS x,COUNT(*) AS rows GROUP BY x,y");
     assert_eq!(bound.group_key_columns(), &[0, 1]);
-    let row = run(&bound, &[CanonicalScalar::Int(7)], wide()).value.remove(0);
+    let row = run(&bound, &[CanonicalScalar::Int(7)], wide())
+        .value
+        .remove(0);
     assert_eq!(row.keys()[0].as_scalar(), Some(&CanonicalScalar::Int(7)));
     assert_eq!(row.keys()[1].as_vertex(), Some(VId(0)));
     let bound = query(
@@ -751,7 +790,9 @@ fn existing_group_names_and_private_projection_names_cannot_be_captured() {
          RETURN __fgdb_pipeline_input_0+1 AS key, \
          SUM(__fgdb_pipeline_input_0+1) AS __fgdb_pipeline_input_1",
     );
-    let row = run(&bound, &[CanonicalScalar::Int(7)], wide()).value.remove(0);
+    let row = run(&bound, &[CanonicalScalar::Int(7)], wide())
+        .value
+        .remove(0);
     assert_eq!(row.keys()[0].as_scalar(), Some(&CanonicalScalar::Int(8)));
     assert_eq!(row.values()[0].as_integer(), Some(8));
 }

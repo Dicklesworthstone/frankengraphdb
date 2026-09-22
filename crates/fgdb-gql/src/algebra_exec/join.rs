@@ -324,7 +324,10 @@ impl<'a> Candidates<'a> {
                 core::mem::swap(membership, &mut values);
             }
         }
-        self.additional.push(Membership { values, position: 0 });
+        self.additional.push(Membership {
+            values,
+            position: 0,
+        });
         Ok(())
     }
 

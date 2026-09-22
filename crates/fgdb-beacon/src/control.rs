@@ -5,11 +5,19 @@ use fgdb_types::VId;
 pub enum BeaconError {
     InvalidConfig(&'static str),
     InvalidQuery(&'static str),
-    Dimension { expected: usize, actual: usize },
-    NonFinite { coordinate: usize },
+    Dimension {
+        expected: usize,
+        actual: usize,
+    },
+    NonFinite {
+        coordinate: usize,
+    },
     ZeroVector,
     DuplicateVertex(VId),
-    ResourceLimit { resource: &'static str, limit: usize },
+    ResourceLimit {
+        resource: &'static str,
+        limit: usize,
+    },
     WorkBudgetExceeded,
     Cancelled,
     GenerationExhausted,
@@ -25,7 +33,9 @@ impl core::fmt::Display for BeaconError {
             Self::Dimension { expected, actual } => {
                 write!(f, "vector dimension {actual}; expected {expected}")
             }
-            Self::NonFinite { coordinate } => write!(f, "non-finite vector coordinate {coordinate}"),
+            Self::NonFinite { coordinate } => {
+                write!(f, "non-finite vector coordinate {coordinate}")
+            }
             Self::ZeroVector => f.write_str("cosine distance is undefined for a zero vector"),
             Self::DuplicateVertex(id) => write!(f, "duplicate index document for vertex {}", id.0),
             Self::ResourceLimit { resource, limit } => {

@@ -15,8 +15,8 @@ use fgdb_strata::tiered::memory::{MemoryPool, SpillError, SpillFile, SpillLimits
 use fgdb_strata::tiered::sealed::{RowStorageKind, SealedLimits, SealedPartition};
 use fgdb_strata::{AdjacencyEntry, encode_block};
 use fgdb_types::{
-    BranchId, CommitSeq, DatabaseSecurityNamespaceId, EId, GraphId, ObjectId,
-    PurposeContexts, QueryCx, VId,
+    BranchId, CommitSeq, DatabaseSecurityNamespaceId, EId, GraphId, ObjectId, PurposeContexts,
+    QueryCx, VId,
 };
 use std::future::Future;
 use std::io::{self, SeekFrom};
@@ -37,7 +37,8 @@ impl Fixture {
         for _ in 0..100 {
             let ordinal = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "fgdb-tiered-residency-{}-{ordinal}", std::process::id()
+                "fgdb-tiered-residency-{}-{ordinal}",
+                std::process::id()
             ));
             match std::fs::create_dir(&path) {
                 Ok(()) => return Self(path),
@@ -67,13 +68,23 @@ where
 }
 
 fn sample_edges() -> Vec<AdjacencyEntry> {
-    let mut edges: Vec<_> = (0..40u128).map(|i| AdjacencyEntry {
-        src: VId(1), relation: REL, dst: VId(10 + i / 3), eid: EId(i + 1),
-        created_at: CommitSeq(1), retired_at: (i % 5 == 0).then_some(CommitSeq(7)),
-    }).collect();
+    let mut edges: Vec<_> = (0..40u128)
+        .map(|i| AdjacencyEntry {
+            src: VId(1),
+            relation: REL,
+            dst: VId(10 + i / 3),
+            eid: EId(i + 1),
+            created_at: CommitSeq(1),
+            retired_at: (i % 5 == 0).then_some(CommitSeq(7)),
+        })
+        .collect();
     edges.extend((0..4u128).map(|i| AdjacencyEntry {
-        src: VId(2), relation: REL, dst: VId(100 + i), eid: EId(100 + i),
-        created_at: CommitSeq(2), retired_at: None,
+        src: VId(2),
+        relation: REL,
+        dst: VId(100 + i),
+        eid: EId(100 + i),
+        created_at: CommitSeq(2),
+        retired_at: None,
     }));
     edges
 }
@@ -81,28 +92,47 @@ fn sample_edges() -> Vec<AdjacencyEntry> {
 async fn admitted_image(contexts: &PurposeContexts, dir: &Path) -> SealedPartition {
     let commit = contexts.commit();
     let query = contexts.query();
-    let store = BlockStore::open(&commit, dir, K_OID, NAMESPACE).await.unwrap();
+    let store = BlockStore::open(&commit, dir, K_OID, NAMESPACE)
+        .await
+        .unwrap();
     let bytes = encode_block(0, None, &sample_edges()).unwrap();
     let block = store.put(&commit, &bytes).await.unwrap();
     let root = PartitionRoot {
-        graph: GraphId(1), branch: BranchId(2), partition: 0, published_at: CommitSeq(10),
+        graph: GraphId(1),
+        branch: BranchId(2),
+        partition: 0,
+        published_at: CommitSeq(10),
         blocks: vec![BlockRef {
-            block_id: block.0, first_seq: CommitSeq(1), last_seq: CommitSeq(7),
+            block_id: block.0,
+            first_seq: CommitSeq(1),
+            last_seq: CommitSeq(7),
         }],
         vertex_patches: vec![],
     };
     let root_id = store.put_root(&commit, &root).await.unwrap();
-    store.seal_partition(&query, root_id, CommitSeq(2), SealedLimits::default()).await.unwrap()
+    store
+        .seal_partition(&query, root_id, CommitSeq(2), SealedLimits::default())
+        .await
+        .unwrap()
 }
 
 fn assert_snapshots(query: &QueryCx, image: &SealedPartition) {
-    assert_eq!(image.storage_kind(VId(1), REL), Some(RowStorageKind::SealedCsr));
-    assert_eq!(image.storage_kind(VId(2), REL), Some(RowStorageKind::Inline));
+    assert_eq!(
+        image.storage_kind(VId(1), REL),
+        Some(RowStorageKind::SealedCsr)
+    );
+    assert_eq!(
+        image.storage_kind(VId(2), REL),
+        Some(RowStorageKind::Inline)
+    );
     let edges = sample_edges();
     for cut in 2..=10 {
         for src in [VId(1), VId(2)] {
-            let expected: Vec<_> = edges.iter().copied().filter(|entry|
-                entry.src == src && entry.visible_at(CommitSeq(cut))).collect();
+            let expected: Vec<_> = edges
+                .iter()
+                .copied()
+                .filter(|entry| entry.src == src && entry.visible_at(CommitSeq(cut)))
+                .collect();
             let mut cursor = image.row(query, src, REL, CommitSeq(cut)).unwrap();
             let mut actual = Vec::new();
             while let Some(edge) = cursor.next(query).unwrap() {
@@ -122,7 +152,9 @@ async fn load_extent(path: &Path, mut pending: PendingExtent) -> io::Result<Pend
     let expected = pending.key().offset();
     let actual = file.seek(SeekFrom::Start(expected)).await?;
     if actual != expected {
-        return Err(io::Error::other("extent seek did not reach its requested offset"));
+        return Err(io::Error::other(
+            "extent seek did not reach its requested offset",
+        ));
     }
     file.read_exact(pending.as_mut()).await?;
     Ok(pending)
@@ -147,26 +179,51 @@ fn admitted_inline_and_csr_images_survive_real_file_spill_and_memory_readmission
 
         let vfs = UnixVfs;
         let path = fixture.0.join("query.scratch");
-        let file = query.with_restriction_async(vfs.open(&path,
-            &OpenOptions::new().read(true).write(true).create_new(true))).await.unwrap();
-        let mut scratch = SpillFile::new(&query, file, operator_pool.clone(), SpillLimits {
-            max_file_bytes: (len * 4) as u64, max_runs: 8, max_run_bytes: len,
-        }).await.unwrap();
+        let file = query
+            .with_restriction_async(vfs.open(
+                &path,
+                &OpenOptions::new().read(true).write(true).create_new(true),
+            ))
+            .await
+            .unwrap();
+        let mut scratch = SpillFile::new(
+            &query,
+            file,
+            operator_pool.clone(),
+            SpillLimits {
+                max_file_bytes: (len * 4) as u64,
+                max_runs: 8,
+                max_run_bytes: len,
+            },
+        )
+        .await
+        .unwrap();
 
         // Two resident image-sized batches cannot fit. Admission spills the
         // selected old batch, then admits the new one under the same ceiling.
-        let replacement = operator_pool.allocate_spilling(&query, len, &mut batch, &mut scratch)
-            .await.unwrap();
+        let replacement = operator_pool
+            .allocate_spilling(&query, len, &mut batch, &mut scratch)
+            .await
+            .unwrap();
         assert!(batch.is_spilled());
         assert_eq!(batch.charged_bytes(), 0);
         assert!(root_pool.used() <= operator_pool.limit());
-        assert!(matches!(batch.restore(&query, &mut scratch).await, Err(SpillError::Memory(_))));
+        assert!(matches!(
+            batch.restore(&query, &mut scratch).await,
+            Err(SpillError::Memory(_))
+        ));
         assert!(batch.is_spilled());
         drop(replacement);
         assert_eq!(root_pool.used(), 0);
         assert!(batch.restore(&query, &mut scratch).await.unwrap());
-        let reloaded = SealedPartition::reload(&query, anchor, batch.resident().unwrap(),
-            SealedLimits::default(), None).unwrap();
+        let reloaded = SealedPartition::reload(
+            &query,
+            anchor,
+            batch.resident().unwrap(),
+            SealedLimits::default(),
+            None,
+        )
+        .unwrap();
         assert_snapshots(&query, &reloaded);
         assert_eq!(reloaded.anchor(), anchor);
         assert_eq!(scratch.stats().published_runs, 1);
@@ -192,41 +249,84 @@ fn anchored_images_fault_through_unix_vfs_after_cache_eviction() {
         let offset = 17;
         // These IDs are fixture-local cache namespaces, NOT newly minted
         // registered graph objects. The opaque anchor retains source authority.
-        let image_key = ExtentKey::new(ObjectId([0xc1; 32]), offset, len, extent_checksum(&encoded)).unwrap();
-        let other_key = ExtentKey::new(ObjectId([0xc2; 32]), offset + len as u64,
-            other_bytes.len(), extent_checksum(&other_bytes)).unwrap();
-        query.with_restriction_async(async {
-            let mut file = vfs.open(&path,
-                &OpenOptions::new().read(true).write(true).create_new(true)).await.unwrap();
-            file.write_all(&[0x33; 17]).await.unwrap();
-            file.write_all(&encoded).await.unwrap();
-            file.write_all(&other_bytes).await.unwrap();
-            file.flush().await.unwrap();
-        }).await;
+        let image_key =
+            ExtentKey::new(ObjectId([0xc1; 32]), offset, len, extent_checksum(&encoded)).unwrap();
+        let other_key = ExtentKey::new(
+            ObjectId([0xc2; 32]),
+            offset + len as u64,
+            other_bytes.len(),
+            extent_checksum(&other_bytes),
+        )
+        .unwrap();
+        query
+            .with_restriction_async(async {
+                let mut file = vfs
+                    .open(
+                        &path,
+                        &OpenOptions::new().read(true).write(true).create_new(true),
+                    )
+                    .await
+                    .unwrap();
+                file.write_all(&[0x33; 17]).await.unwrap();
+                file.write_all(&encoded).await.unwrap();
+                file.write_all(&other_bytes).await.unwrap();
+                file.flush().await.unwrap();
+            })
+            .await;
         drop(encoded);
         drop(image);
         let pool = MemoryPool::new(len * 4 + 8192, 0).unwrap();
-        let mut cache = ExtentBuffer::new(pool.clone(), BufferLimits {
-            max_frames: 1, max_ghost_entries: 2, max_extent_bytes: len.max(other_bytes.len()),
-        }).unwrap();
-        let first = cache.pin_async(&query, image_key, Admission::Normal,
-            |pending| load_extent(&path, pending)).await.unwrap();
-        let first_image = SealedPartition::reload(&query, anchor, first.as_ref(),
-            SealedLimits::default(), None).unwrap();
+        let mut cache = ExtentBuffer::new(
+            pool.clone(),
+            BufferLimits {
+                max_frames: 1,
+                max_ghost_entries: 2,
+                max_extent_bytes: len.max(other_bytes.len()),
+            },
+        )
+        .unwrap();
+        let first = cache
+            .pin_async(&query, image_key, Admission::Normal, |pending| {
+                load_extent(&path, pending)
+            })
+            .await
+            .unwrap();
+        let first_image = SealedPartition::reload(
+            &query,
+            anchor,
+            first.as_ref(),
+            SealedLimits::default(),
+            None,
+        )
+        .unwrap();
         assert_snapshots(&query, &first_image);
         drop(first_image);
         drop(first);
-        let other = cache.pin_async(&query, other_key, Admission::Normal,
-            |pending| load_extent(&path, pending)).await.unwrap();
+        let other = cache
+            .pin_async(&query, other_key, Admission::Normal, |pending| {
+                load_extent(&path, pending)
+            })
+            .await
+            .unwrap();
         assert_eq!(other.as_ref(), &other_bytes);
         drop(other);
         assert_eq!(cache.stats().evictions, 1);
         // Keeping the small anchor must not prevent its former frame's eviction.
-        let restored = cache.pin_async(&query, image_key, Admission::Normal,
-            |pending| load_extent(&path, pending)).await.unwrap();
+        let restored = cache
+            .pin_async(&query, image_key, Admission::Normal, |pending| {
+                load_extent(&path, pending)
+            })
+            .await
+            .unwrap();
         assert_eq!(cache.stats().evictions, 2);
-        let restored_image = SealedPartition::reload(&query, anchor, restored.as_ref(),
-            SealedLimits::default(), None).unwrap();
+        let restored_image = SealedPartition::reload(
+            &query,
+            anchor,
+            restored.as_ref(),
+            SealedLimits::default(),
+            None,
+        )
+        .unwrap();
         assert_snapshots(&query, &restored_image);
         drop(restored_image);
         cache.forget_object(&query, image_key.object());
@@ -237,21 +337,43 @@ fn anchored_images_fault_through_unix_vfs_after_cache_eviction() {
 
         // Real disk corruption/short reads must never publish partially read
         // graph bytes, even when the caller still retains a legitimate anchor.
-        query.with_restriction_async(async {
-            let mut file = vfs.open(&path, &OpenOptions::new().read(true).write(true)).await.unwrap();
-            file.seek(SeekFrom::Start(offset)).await.unwrap();
-            file.write_all(&[corrupt_byte]).await.unwrap();
-            file.flush().await.unwrap();
-        }).await;
-        assert!(matches!(cache.pin_async(&query, image_key, Admission::Normal,
-            |pending| load_extent(&path, pending)).await, Err(BufferError::ChecksumMismatch)));
+        query
+            .with_restriction_async(async {
+                let mut file = vfs
+                    .open(&path, &OpenOptions::new().read(true).write(true))
+                    .await
+                    .unwrap();
+                file.seek(SeekFrom::Start(offset)).await.unwrap();
+                file.write_all(&[corrupt_byte]).await.unwrap();
+                file.flush().await.unwrap();
+            })
+            .await;
+        assert!(matches!(
+            cache
+                .pin_async(&query, image_key, Admission::Normal, |pending| load_extent(
+                    &path, pending
+                ))
+                .await,
+            Err(BufferError::ChecksumMismatch)
+        ));
         assert_eq!((pool.used(), cache.resident_frames()), (0, 0));
-        query.with_restriction_async(async {
-            let file = vfs.open(&path, &OpenOptions::new().write(true)).await.unwrap();
-            file.set_len(offset + len as u64 - 1).await.unwrap();
-        }).await;
-        assert!(matches!(cache.pin_async(&query, image_key, Admission::Normal,
-            |pending| load_extent(&path, pending)).await, Err(BufferError::Load(_))));
+        query
+            .with_restriction_async(async {
+                let file = vfs
+                    .open(&path, &OpenOptions::new().write(true))
+                    .await
+                    .unwrap();
+                file.set_len(offset + len as u64 - 1).await.unwrap();
+            })
+            .await;
+        assert!(matches!(
+            cache
+                .pin_async(&query, image_key, Admission::Normal, |pending| load_extent(
+                    &path, pending
+                ))
+                .await,
+            Err(BufferError::Load(_))
+        ));
         assert_eq!((pool.used(), cache.resident_frames()), (0, 0));
     });
 }

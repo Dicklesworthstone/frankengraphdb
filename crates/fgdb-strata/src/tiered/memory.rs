@@ -41,7 +41,11 @@ impl fmt::Display for MemoryError {
         match self {
             Self::InvalidLimits => write!(f, "emergency reserve exceeds the resident limit"),
             Self::SizeOverflow => write!(f, "resident allocation size overflow"),
-            Self::ResourceExhausted { requested, available, limit } => write!(
+            Self::ResourceExhausted {
+                requested,
+                available,
+                limit,
+            } => write!(
                 f,
                 "ResourceExhausted: requested {requested} resident bytes, {available} available under {limit}"
             ),
@@ -127,10 +131,17 @@ impl MemoryPool {
         emergency_reserve: usize,
     ) -> Result<Self, MemoryError> {
         let mut child = Self::new(resident_limit, emergency_reserve)?;
-        let count = self.ancestors.len().checked_add(1).ok_or(MemoryError::SizeOverflow)?;
-        let requested = count.checked_mul(size_of::<Arc<Budget>>()).ok_or(MemoryError::SizeOverflow)?;
+        let count = self
+            .ancestors
+            .len()
+            .checked_add(1)
+            .ok_or(MemoryError::SizeOverflow)?;
+        let requested = count
+            .checked_mul(size_of::<Arc<Budget>>())
+            .ok_or(MemoryError::SizeOverflow)?;
         let mut ancestors = Vec::new();
-        ancestors.try_reserve_exact(count)
+        ancestors
+            .try_reserve_exact(count)
             .map_err(|_| MemoryError::AllocationFailed { requested })?;
         ancestors.extend(self.ancestors.iter().cloned());
         ancestors.push(Arc::clone(&self.budget));
@@ -146,7 +157,9 @@ impl MemoryPool {
 
     /// Largest reservation this hierarchy can ever admit, even when empty.
     pub fn effective_limit(&self) -> usize {
-        self.ancestors.iter().fold(self.limit(), |limit, ancestor| limit.min(ancestor.limit))
+        self.ancestors
+            .iter()
+            .fold(self.limit(), |limit, ancestor| limit.min(ancestor.limit))
     }
 
     pub fn emergency_reserve(&self) -> usize {
@@ -161,9 +174,11 @@ impl MemoryPool {
     /// Advisory minimum headroom across this pool and all its ancestors.
     /// Admission itself uses checked CAS operations, not this observation.
     pub fn available(&self) -> usize {
-        self.ancestors.iter().fold(self.limit() - self.used(), |available, ancestor| {
-            available.min(ancestor.limit - ancestor.used.load(Ordering::Acquire))
-        })
+        self.ancestors
+            .iter()
+            .fold(self.limit() - self.used(), |available, ancestor| {
+                available.min(ancestor.limit - ancestor.used.load(Ordering::Acquire))
+            })
     }
 
     /// Reserve before an operator allocates its own region-owned scratch.
@@ -197,14 +212,19 @@ impl MemoryPool {
         scratch: &mut SpillFile<F>,
     ) -> Result<TrackedBytes, SpillError>
     where
-        F: asupersync::io::AsyncRead + asupersync::io::AsyncWrite
-            + asupersync::io::AsyncSeek + Unpin,
+        F: asupersync::io::AsyncRead
+            + asupersync::io::AsyncWrite
+            + asupersync::io::AsyncSeek
+            + Unpin,
     {
         cx.checkpoint().map_err(SpillError::Interrupted)?;
         if bytes > self.effective_limit() {
             return Err(MemoryError::ResourceExhausted {
-                requested: bytes, available: self.available(), limit: self.effective_limit(),
-            }.into());
+                requested: bytes,
+                available: self.available(),
+                limit: self.effective_limit(),
+            }
+            .into());
         }
         match self.allocate_zeroed(cx, bytes) {
             Ok(allocation) => Ok(allocation),
@@ -246,7 +266,10 @@ impl MemoryPool {
 
     pub(super) fn reserve_inner(&self, bytes: usize) -> Result<MemoryCharge, MemoryError> {
         self.acquire(bytes)?;
-        Ok(MemoryCharge { pool: self.clone(), bytes })
+        Ok(MemoryCharge {
+            pool: self.clone(),
+            bytes,
+        })
     }
 
     pub(super) fn allocate_inner(
@@ -254,14 +277,19 @@ impl MemoryPool {
         bytes: usize,
         metadata: usize,
     ) -> Result<TrackedBytes, MemoryError> {
-        let requested = bytes.checked_add(metadata).ok_or(MemoryError::SizeOverflow)?;
+        let requested = bytes
+            .checked_add(metadata)
+            .ok_or(MemoryError::SizeOverflow)?;
         let mut charge = self.reserve_inner(requested)?;
         let mut data = Vec::new();
         data.try_reserve_exact(bytes)
             .map_err(|_| MemoryError::AllocationFailed { requested: bytes })?;
         // reserve_exact is permitted to return a larger logical capacity. It
         // must be charged before the allocation can escape to any consumer.
-        let actual = data.capacity().checked_add(metadata).ok_or(MemoryError::SizeOverflow)?;
+        let actual = data
+            .capacity()
+            .checked_add(metadata)
+            .ok_or(MemoryError::SizeOverflow)?;
         if actual > charge.bytes {
             charge.pool.acquire(actual - charge.bytes)?;
             charge.bytes = actual;
@@ -347,7 +375,11 @@ enum SpillableState {
 }
 
 impl SpillableBytes {
-    pub fn new(bytes: TrackedBytes) -> Self { Self { state: SpillableState::Resident(bytes) } }
+    pub fn new(bytes: TrackedBytes) -> Self {
+        Self {
+            state: SpillableState::Resident(bytes),
+        }
+    }
 
     pub fn len(&self) -> usize {
         match &self.state {
@@ -356,8 +388,12 @@ impl SpillableBytes {
         }
     }
 
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
-    pub fn is_spilled(&self) -> bool { matches!(&self.state, SpillableState::Spilled(_)) }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn is_spilled(&self) -> bool {
+        matches!(&self.state, SpillableState::Spilled(_))
+    }
 
     pub fn resident(&self) -> Option<&[u8]> {
         match &self.state {
@@ -382,13 +418,21 @@ impl SpillableBytes {
 
     /// Returns false when already spilled. Source memory is freed only after
     /// scratch publishes a complete run; there is no second payload allocation.
-    pub async fn spill<F>(&mut self, cx: &QueryCx, scratch: &mut SpillFile<F>) -> Result<bool, SpillError>
+    pub async fn spill<F>(
+        &mut self,
+        cx: &QueryCx,
+        scratch: &mut SpillFile<F>,
+    ) -> Result<bool, SpillError>
     where
-        F: asupersync::io::AsyncRead + asupersync::io::AsyncWrite
-            + asupersync::io::AsyncSeek + Unpin,
+        F: asupersync::io::AsyncRead
+            + asupersync::io::AsyncWrite
+            + asupersync::io::AsyncSeek
+            + Unpin,
     {
         cx.checkpoint().map_err(SpillError::Interrupted)?;
-        let SpillableState::Resident(bytes) = &self.state else { return Ok(false); };
+        let SpillableState::Resident(bytes) = &self.state else {
+            return Ok(false);
+        };
         let run = scratch.append(cx, bytes.as_ref()).await?;
         self.state = SpillableState::Spilled(run);
         Ok(true)
@@ -397,13 +441,21 @@ impl SpillableBytes {
     /// Returns false when already resident. The old run remains available on
     /// admission failure, corrupt/truncated I/O, or cancellation, permitting a
     /// retry once another batch has released its resident charge.
-    pub async fn restore<F>(&mut self, cx: &QueryCx, scratch: &mut SpillFile<F>) -> Result<bool, SpillError>
+    pub async fn restore<F>(
+        &mut self,
+        cx: &QueryCx,
+        scratch: &mut SpillFile<F>,
+    ) -> Result<bool, SpillError>
     where
-        F: asupersync::io::AsyncRead + asupersync::io::AsyncWrite
-            + asupersync::io::AsyncSeek + Unpin,
+        F: asupersync::io::AsyncRead
+            + asupersync::io::AsyncWrite
+            + asupersync::io::AsyncSeek
+            + Unpin,
     {
         cx.checkpoint().map_err(SpillError::Interrupted)?;
-        let SpillableState::Spilled(run) = &self.state else { return Ok(false); };
+        let SpillableState::Spilled(run) = &self.state else {
+            return Ok(false);
+        };
         let bytes = scratch.restore(cx, run).await?;
         self.state = SpillableState::Resident(bytes);
         Ok(true)
@@ -419,11 +471,17 @@ mod tests {
         let pool = MemoryPool::new(100, 20).unwrap();
         let charge = pool.reserve_inner(80).unwrap();
         assert_eq!(pool.available(), 0);
-        assert!(matches!(pool.reserve_inner(1), Err(MemoryError::ResourceExhausted { .. })));
+        assert!(matches!(
+            pool.reserve_inner(1),
+            Err(MemoryError::ResourceExhausted { .. })
+        ));
         drop(charge);
         assert_eq!(pool.available(), 80);
         assert_eq!(pool.emergency_reserve(), 20);
-        assert!(matches!(MemoryPool::new(19, 20), Err(MemoryError::InvalidLimits)));
+        assert!(matches!(
+            MemoryPool::new(19, 20),
+            Err(MemoryError::InvalidLimits)
+        ));
     }
 
     #[test]
@@ -444,10 +502,16 @@ mod tests {
     #[test]
     fn refused_allocations_and_arithmetic_leave_no_reservation() {
         let pool = MemoryPool::new(usize::MAX, 0).unwrap();
-        assert!(matches!(pool.allocate_inner(usize::MAX, 1), Err(MemoryError::SizeOverflow)));
+        assert!(matches!(
+            pool.allocate_inner(usize::MAX, 1),
+            Err(MemoryError::SizeOverflow)
+        ));
         assert_eq!(pool.used(), 0);
         // Vec rejects a byte capacity beyond isize::MAX before calling malloc.
-        assert!(matches!(pool.allocate_inner(usize::MAX, 0), Err(MemoryError::AllocationFailed { .. })));
+        assert!(matches!(
+            pool.allocate_inner(usize::MAX, 0),
+            Err(MemoryError::AllocationFailed { .. })
+        ));
         assert_eq!(pool.used(), 0);
     }
 
@@ -489,16 +553,25 @@ mod tests {
         let left = query.child(60, 0).unwrap();
         let right = query.child(60, 0).unwrap();
         let a = left.reserve_inner(50).unwrap();
-        assert_eq!((shard.used(), query.used(), left.used(), right.used()), (50, 50, 50, 0));
+        assert_eq!(
+            (shard.used(), query.used(), left.used(), right.used()),
+            (50, 50, 50, 0)
+        );
         assert_eq!(right.available(), 20);
         assert_eq!(right.effective_limit(), 60);
-        assert!(matches!(right.reserve_inner(21), Err(MemoryError::ResourceExhausted { limit: 70, .. })));
+        assert!(matches!(
+            right.reserve_inner(21),
+            Err(MemoryError::ResourceExhausted { limit: 70, .. })
+        ));
         assert_eq!((shard.used(), query.used(), right.used()), (50, 50, 0));
         let b = right.reserve_inner(20).unwrap();
         assert_eq!(query.available(), 0);
         drop(a);
         drop(b);
-        assert_eq!((shard.used(), query.used(), left.used(), right.used()), (0, 0, 0, 0));
+        assert_eq!(
+            (shard.used(), query.used(), left.used(), right.used()),
+            (0, 0, 0, 0)
+        );
     }
 
     #[test]
@@ -550,7 +623,10 @@ mod tests {
     fn failed_child_allocation_refunds_the_whole_path() {
         let root = MemoryPool::new(usize::MAX, 0).unwrap();
         let child = root.child(usize::MAX, 0).unwrap();
-        assert!(matches!(child.allocate_inner(usize::MAX, 0), Err(MemoryError::AllocationFailed { .. })));
+        assert!(matches!(
+            child.allocate_inner(usize::MAX, 0),
+            Err(MemoryError::AllocationFailed { .. })
+        ));
         assert_eq!((root.used(), child.used()), (0, 0));
         assert!(matches!(root.child(1, 2), Err(MemoryError::InvalidLimits)));
         assert_eq!(root.used(), 0);

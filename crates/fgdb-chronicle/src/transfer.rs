@@ -12,9 +12,7 @@ use crate::symbol::{HEADER_LEN_V1, SYMBOL_MAC_LEN_V1, SymbolError, SymbolRecord}
 use crate::symbolize::{
     MAX_SOURCE_SYMBOLS_PER_BLOCK, RecoveryTarget, SymbolizeError, decode_object,
 };
-use asupersync::net::atp::channel_bonding::{
-    DonorEsiStream, MAX_STATIC_RESIDUE_DONORS, owns_esi,
-};
+use asupersync::net::atp::channel_bonding::{DonorEsiStream, MAX_STATIC_RESIDUE_DONORS, owns_esi};
 use fgdb_crypto::Digest;
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -188,7 +186,9 @@ impl core::fmt::Debug for BondedPull<'_> {
 // issue work whose valid response cannot fit in the remaining verification
 // budget. Expiration frees a reservation, but never refunds work already done.
 fn verification_capacity(limit: u64, used: u64, pending: usize) -> Result<usize, PullError> {
-    let remaining = limit.checked_sub(used).filter(|remaining| *remaining != 0)
+    let remaining = limit
+        .checked_sub(used)
+        .filter(|remaining| *remaining != 0)
         .ok_or(PullError::VerificationBudget)?;
     let reserved = u64::try_from(pending).unwrap_or(u64::MAX);
     Ok(usize::try_from(remaining.saturating_sub(reserved)).unwrap_or(usize::MAX))
@@ -348,7 +348,11 @@ impl<'a> BondedPull<'a> {
         // three differences remain nonnegative even when replies are reordered.
         let capacity = maximum
             .min(self.limits.max_in_flight - self.pending.len())
-            .min(window.unwrap_or(self.limits.max_in_flight).saturating_sub(self.pending.len()))
+            .min(
+                window
+                    .unwrap_or(self.limits.max_in_flight)
+                    .saturating_sub(self.pending.len()),
+            )
             .min(self.limits.max_symbols - self.records.len() - self.pending.len())
             .min(
                 (self.limits.max_wire_bytes - self.stored_bytes) / self.record_len
@@ -362,7 +366,9 @@ impl<'a> BondedPull<'a> {
             return Err(PullError::RequestBudget);
         }
         let authentication = verification_capacity(
-            self.limits.max_verifications, self.verifications, self.pending.len(),
+            self.limits.max_verifications,
+            self.verifications,
+            self.pending.len(),
         )?;
         let count = capacity
             .min(usize::try_from(budget).unwrap_or(usize::MAX))
@@ -380,10 +386,14 @@ impl<'a> BondedPull<'a> {
         if let Some(window) = window {
             let window = window.min(self.limits.max_in_flight);
             let available = self.donors.iter().filter(|donor| donor.available).count();
-            if available != 0 {
-                let quotient = window / available;
+            if let Some(quotient) = window.checked_div(available) {
                 let remainder = window % available;
-                for (rank, donor) in self.donors.iter().filter(|donor| donor.available).enumerate() {
+                for (rank, donor) in self
+                    .donors
+                    .iter()
+                    .filter(|donor| donor.available)
+                    .enumerate()
+                {
                     let extra = usize::from(quotient != 0 && rank < remainder);
                     caps.insert(donor.id, quotient.max(1) + extra);
                 }
@@ -578,7 +588,8 @@ impl<'a> BondedPull<'a> {
         verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Option<VerifiedObject>, PullError> {
         self.open()?;
-        if self.records.len() < self.source_symbols || self.records.len() == self.last_decode_count {
+        if self.records.len() < self.source_symbols || self.records.len() == self.last_decode_count
+        {
             return Ok(None);
         }
         if self.decode_attempts >= self.limits.max_decode_attempts {
@@ -586,7 +597,13 @@ impl<'a> BondedPull<'a> {
         }
         self.decode_attempts += 1;
         self.last_decode_count = self.records.len();
-        match decode_object(self.encoding, &self.records, self.target, self.dek, verification) {
+        match decode_object(
+            self.encoding,
+            &self.records,
+            self.target,
+            self.dek,
+            verification,
+        ) {
             Ok(plaintext) => {
                 self.closed = true;
                 self.pending.clear();
@@ -623,7 +640,10 @@ mod verification_budget_tests {
     #[test]
     fn exhausted_or_overdrawn_verification_budget_fails_closed() {
         for (limit, used) in [(0, 0), (17, 17), (17, 18)] {
-            assert!(matches!(verification_capacity(limit, used, 0), Err(PullError::VerificationBudget)));
+            assert!(matches!(
+                verification_capacity(limit, used, 0),
+                Err(PullError::VerificationBudget)
+            ));
         }
         // Duplicate or unsolicited authentication attempts can consume work
         // while other requests remain pending. Never underflow or issue more.

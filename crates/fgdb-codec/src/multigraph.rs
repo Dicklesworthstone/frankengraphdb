@@ -424,10 +424,21 @@ mod tests {
     fn intersection_carries_both_bag_multiplicities() {
         let csr = MultigraphCsr::try_new(&[&[1, 3, 3, 8], &[3, 3, 3, 5, 8, 8]], limits()).unwrap();
         let groups: Vec<_> = csr.row(0).unwrap().intersect(csr.row(1).unwrap()).collect();
-        assert_eq!(groups, vec![
-            NeighborIntersection { neighbor: 3, left_incidences: 1..3, right_incidences: 4..7 },
-            NeighborIntersection { neighbor: 8, left_incidences: 3..4, right_incidences: 8..10 },
-        ]);
+        assert_eq!(
+            groups,
+            vec![
+                NeighborIntersection {
+                    neighbor: 3,
+                    left_incidences: 1..3,
+                    right_incidences: 4..7
+                },
+                NeighborIntersection {
+                    neighbor: 8,
+                    left_incidences: 3..4,
+                    right_incidences: 8..10
+                },
+            ]
+        );
     }
 
     #[test]
@@ -456,25 +467,71 @@ mod tests {
 
     #[test]
     fn order_and_every_resource_ceiling_fail_closed() {
-        assert!(matches!(MultigraphCsr::try_new(&[&[2, 1]], limits()),
-            Err(CsrError::NonMonotone { row: 0, index: 1 })));
-        assert!(matches!(MultigraphCsr::try_new(&[&[]], CsrLimits { max_rows: 0, ..limits() }),
-            Err(CsrError::RowLimit { .. })));
-        assert!(matches!(MultigraphCsr::try_new(&[&[1, 1]], CsrLimits { max_incidences: 1, ..limits() }),
-            Err(CsrError::IncidenceLimit { .. })));
+        assert!(matches!(
+            MultigraphCsr::try_new(&[&[2, 1]], limits()),
+            Err(CsrError::NonMonotone { row: 0, index: 1 })
+        ));
+        assert!(matches!(
+            MultigraphCsr::try_new(
+                &[&[]],
+                CsrLimits {
+                    max_rows: 0,
+                    ..limits()
+                }
+            ),
+            Err(CsrError::RowLimit { .. })
+        ));
+        assert!(matches!(
+            MultigraphCsr::try_new(
+                &[&[1, 1]],
+                CsrLimits {
+                    max_incidences: 1,
+                    ..limits()
+                }
+            ),
+            Err(CsrError::IncidenceLimit { .. })
+        ));
         let rows: &[&[u64]] = &[&[1, 1, u64::MAX]];
-        let exact = MultigraphCsr::try_new(rows, limits()).unwrap().logical_storage_words();
-        assert!(MultigraphCsr::try_new(rows, CsrLimits { max_storage_words: exact, ..limits() }).is_ok());
-        assert!(matches!(MultigraphCsr::try_new(rows, CsrLimits { max_storage_words: exact - 1, ..limits() }),
-            Err(CsrError::StorageLimit { .. })));
+        let exact = MultigraphCsr::try_new(rows, limits())
+            .unwrap()
+            .logical_storage_words();
+        assert!(
+            MultigraphCsr::try_new(
+                rows,
+                CsrLimits {
+                    max_storage_words: exact,
+                    ..limits()
+                }
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            MultigraphCsr::try_new(
+                rows,
+                CsrLimits {
+                    max_storage_words: exact - 1,
+                    ..limits()
+                }
+            ),
+            Err(CsrError::StorageLimit { .. })
+        ));
     }
 
     #[test]
     fn ef_preflight_matches_the_actual_kernel_including_u64_extremes() {
-        for values in [vec![], vec![0], vec![u64::MAX], vec![0, u64::MAX], vec![9; 257], (0..1000).collect()] {
+        for values in [
+            vec![],
+            vec![0],
+            vec![u64::MAX],
+            vec![0, u64::MAX],
+            vec![9; 257],
+            (0..1000).collect(),
+        ] {
             let ef = EliasFano::try_new(&values, EntryLimit::new(values.len())).unwrap();
-            assert_eq!(ef_words(values.len(), values.last().copied().unwrap_or(0)).unwrap(),
-                ef.logical_storage_words());
+            assert_eq!(
+                ef_words(values.len(), values.last().copied().unwrap_or(0)).unwrap(),
+                ef.logical_storage_words()
+            );
         }
     }
 

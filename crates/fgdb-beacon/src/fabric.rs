@@ -41,7 +41,9 @@ impl Default for IndexConfig {
 impl IndexConfig {
     pub fn validate(&self) -> Result<(), BeaconError> {
         if self.vector.is_none() && self.text.is_none() {
-            return Err(BeaconError::InvalidConfig("at least one index lane is required"));
+            return Err(BeaconError::InvalidConfig(
+                "at least one index lane is required",
+            ));
         }
         if let Some(vector) = &self.vector {
             vector.validate()?;
@@ -49,8 +51,12 @@ impl IndexConfig {
         if let Some(text) = &self.text {
             text.validate()?;
         }
-        if self.max_documents == 0 || self.max_batch_operations == 0 || self.max_segments == 0
-            || self.max_vector_values == 0 || self.max_text_bytes == 0 || self.max_document_terms == 0
+        if self.max_documents == 0
+            || self.max_batch_operations == 0
+            || self.max_segments == 0
+            || self.max_vector_values == 0
+            || self.max_text_bytes == 0
+            || self.max_document_terms == 0
         {
             return Err(BeaconError::InvalidConfig("index limits must be positive"));
         }
@@ -97,8 +103,16 @@ impl StoredDocument {
         // Bound a single input before retaining analyzed terms or allocating
         // an Arc. Aggregate staging limits are enforced by apply_batch too.
         for (resource, actual, limit) in [
-            ("staged vector values", document.vector.as_ref().map_or(0, Vec::len), config.max_vector_values),
-            ("staged text bytes", document.text.as_ref().map_or(0, String::len), config.max_text_bytes),
+            (
+                "staged vector values",
+                document.vector.as_ref().map_or(0, Vec::len),
+                config.max_vector_values,
+            ),
+            (
+                "staged text bytes",
+                document.text.as_ref().map_or(0, String::len),
+                config.max_text_bytes,
+            ),
         ] {
             if actual > limit {
                 return Err(BeaconError::ResourceLimit { resource, limit });
@@ -106,15 +120,23 @@ impl StoredDocument {
         }
         let vector = match document.vector {
             Some(vector) => {
-                let vector_config = config.vector.as_ref().ok_or(BeaconError::Disabled("vector"))?;
+                let vector_config = config
+                    .vector
+                    .as_ref()
+                    .ok_or(BeaconError::Disabled("vector"))?;
                 vector_config.validate_vector(&vector, work)?;
                 Some(Arc::from(vector))
             }
             None => None,
         };
         let text = match document.text {
-            Some(text) => Some(config.text.as_ref().ok_or(BeaconError::Disabled("text"))?
-                .analyze_document(&text, work)?),
+            Some(text) => Some(
+                config
+                    .text
+                    .as_ref()
+                    .ok_or(BeaconError::Disabled("text"))?
+                    .analyze_document(&text, work)?,
+            ),
             None => None,
         };
         Ok(Self { vector, text })
@@ -138,13 +160,20 @@ impl StagedSize {
     fn update(&mut self, document: &StoredDocument, insert: bool) -> Result<(), BeaconError> {
         let values = document.vector.as_ref().map_or(0, |vector| vector.len());
         let bytes = document.text.as_ref().map_or(0, |text| text.source_bytes);
-        let terms = document.text.as_ref().map_or(0, |text| text.frequencies.len());
+        let terms = document
+            .text
+            .as_ref()
+            .map_or(0, |text| text.frequencies.len());
         for (total, delta) in [
             (&mut self.vector_values, values),
             (&mut self.text_bytes, bytes),
             (&mut self.document_terms, terms),
         ] {
-            let next = if insert { total.checked_add(delta) } else { total.checked_sub(delta) };
+            let next = if insert {
+                total.checked_add(delta)
+            } else {
+                total.checked_sub(delta)
+            };
             *total = next.ok_or(BeaconError::Invariant("staged resource arithmetic"))?;
         }
         Ok(())
@@ -152,9 +181,17 @@ impl StagedSize {
 
     fn check(&self, config: &IndexConfig) -> Result<(), BeaconError> {
         for (resource, actual, limit) in [
-            ("staged vector values", self.vector_values, config.max_vector_values),
+            (
+                "staged vector values",
+                self.vector_values,
+                config.max_vector_values,
+            ),
             ("staged text bytes", self.text_bytes, config.max_text_bytes),
-            ("staged document terms", self.document_terms, config.max_document_terms),
+            (
+                "staged document terms",
+                self.document_terms,
+                config.max_document_terms,
+            ),
         ] {
             if actual > limit {
                 return Err(BeaconError::ResourceLimit { resource, limit });
@@ -178,15 +215,33 @@ impl Segment {
         work: &mut dyn WorkControl,
     ) -> Result<Self, BeaconError> {
         work.charge(documents.len())?;
-        let vector = config.vector.as_ref().map(|vector_config| {
-            Hnsw::build_shared(vector_config.clone(), documents.iter().filter_map(|(&id, document)| {
-                document.vector.as_ref().map(|vector| (id, Arc::clone(vector)))
-            }), work)
-        }).transpose()?;
-        let text = TextSegment::build(documents.iter().filter_map(|(&id, document)| {
-            document.text.as_ref().map(|text| (id, text))
-        }), work)?;
-        Ok(Self { generation, vector, text })
+        let vector = config
+            .vector
+            .as_ref()
+            .map(|vector_config| {
+                Hnsw::build_shared(
+                    vector_config.clone(),
+                    documents.iter().filter_map(|(&id, document)| {
+                        document
+                            .vector
+                            .as_ref()
+                            .map(|vector| (id, Arc::clone(vector)))
+                    }),
+                    work,
+                )
+            })
+            .transpose()?;
+        let text = TextSegment::build(
+            documents
+                .iter()
+                .filter_map(|(&id, document)| document.text.as_ref().map(|text| (id, text))),
+            work,
+        )?;
+        Ok(Self {
+            generation,
+            vector,
+            text,
+        })
     }
 }
 
@@ -213,7 +268,10 @@ impl Generation {
         let corpus = self.corpus.clone_with_work(work)?;
         Ok(Self {
             config: Arc::clone(&self.config),
-            sequence: self.sequence.checked_add(1).ok_or(BeaconError::GenerationExhausted)?,
+            sequence: self
+                .sequence
+                .checked_add(1)
+                .ok_or(BeaconError::GenerationExhausted)?,
             live,
             segments: self.segments.clone(),
             corpus,
@@ -224,28 +282,60 @@ impl Generation {
         })
     }
 
-    fn remove_stats(&mut self, document: &StoredDocument, work: &mut dyn WorkControl) -> Result<(), BeaconError> {
+    fn remove_stats(
+        &mut self,
+        document: &StoredDocument,
+        work: &mut dyn WorkControl,
+    ) -> Result<(), BeaconError> {
         if let Some(vector) = &document.vector {
-            self.vector_documents = self.vector_documents.checked_sub(1).ok_or(BeaconError::Invariant("vector count underflow"))?;
-            self.vector_values = self.vector_values.checked_sub(vector.len()).ok_or(BeaconError::Invariant("vector values underflow"))?;
+            self.vector_documents = self
+                .vector_documents
+                .checked_sub(1)
+                .ok_or(BeaconError::Invariant("vector count underflow"))?;
+            self.vector_values = self
+                .vector_values
+                .checked_sub(vector.len())
+                .ok_or(BeaconError::Invariant("vector values underflow"))?;
         }
         if let Some(text) = &document.text {
             self.corpus.remove(text, work)?;
-            self.text_bytes = self.text_bytes.checked_sub(text.source_bytes).ok_or(BeaconError::Invariant("text bytes underflow"))?;
-            self.document_terms = self.document_terms.checked_sub(text.frequencies.len()).ok_or(BeaconError::Invariant("document terms underflow"))?;
+            self.text_bytes = self
+                .text_bytes
+                .checked_sub(text.source_bytes)
+                .ok_or(BeaconError::Invariant("text bytes underflow"))?;
+            self.document_terms = self
+                .document_terms
+                .checked_sub(text.frequencies.len())
+                .ok_or(BeaconError::Invariant("document terms underflow"))?;
         }
         Ok(())
     }
 
-    fn add_stats(&mut self, document: &StoredDocument, work: &mut dyn WorkControl) -> Result<(), BeaconError> {
+    fn add_stats(
+        &mut self,
+        document: &StoredDocument,
+        work: &mut dyn WorkControl,
+    ) -> Result<(), BeaconError> {
         if let Some(vector) = &document.vector {
-            self.vector_documents = self.vector_documents.checked_add(1).ok_or(BeaconError::Invariant("vector count overflow"))?;
-            self.vector_values = self.vector_values.checked_add(vector.len()).ok_or(BeaconError::Invariant("vector values overflow"))?;
+            self.vector_documents = self
+                .vector_documents
+                .checked_add(1)
+                .ok_or(BeaconError::Invariant("vector count overflow"))?;
+            self.vector_values = self
+                .vector_values
+                .checked_add(vector.len())
+                .ok_or(BeaconError::Invariant("vector values overflow"))?;
         }
         if let Some(text) = &document.text {
             self.corpus.add(text, work)?;
-            self.text_bytes = self.text_bytes.checked_add(text.source_bytes).ok_or(BeaconError::Invariant("text bytes overflow"))?;
-            self.document_terms = self.document_terms.checked_add(text.frequencies.len()).ok_or(BeaconError::Invariant("document terms overflow"))?;
+            self.text_bytes = self
+                .text_bytes
+                .checked_add(text.source_bytes)
+                .ok_or(BeaconError::Invariant("text bytes overflow"))?;
+            self.document_terms = self
+                .document_terms
+                .checked_add(text.frequencies.len())
+                .ok_or(BeaconError::Invariant("document terms overflow"))?;
         }
         Ok(())
     }
@@ -253,9 +343,21 @@ impl Generation {
     fn check_limits(&self) -> Result<(), BeaconError> {
         for (resource, actual, limit) in [
             ("live documents", self.live.len(), self.config.max_documents),
-            ("live vector values", self.vector_values, self.config.max_vector_values),
-            ("live text bytes", self.text_bytes, self.config.max_text_bytes),
-            ("live document terms", self.document_terms, self.config.max_document_terms),
+            (
+                "live vector values",
+                self.vector_values,
+                self.config.max_vector_values,
+            ),
+            (
+                "live text bytes",
+                self.text_bytes,
+                self.config.max_text_bytes,
+            ),
+            (
+                "live document terms",
+                self.document_terms,
+                self.config.max_document_terms,
+            ),
         ] {
             if actual > limit {
                 return Err(BeaconError::ResourceLimit { resource, limit });
@@ -263,12 +365,18 @@ impl Generation {
         }
         if let Some(vector) = &self.config.vector {
             if self.vector_documents > vector.max_vectors {
-                return Err(BeaconError::ResourceLimit { resource: "live vector documents", limit: vector.max_vectors });
+                return Err(BeaconError::ResourceLimit {
+                    resource: "live vector documents",
+                    limit: vector.max_vectors,
+                });
             }
         }
         if let Some(text) = &self.config.text {
             if self.corpus.documents > text.max_documents {
-                return Err(BeaconError::ResourceLimit { resource: "live text documents", limit: text.max_documents });
+                return Err(BeaconError::ResourceLimit {
+                    resource: "live text documents",
+                    limit: text.max_documents,
+                });
             }
         }
         Ok(())
@@ -284,7 +392,12 @@ impl Generation {
             work.charge(1)?;
             documents.insert(id, Arc::clone(&live.document));
         }
-        let segment = Arc::new(Segment::build(self.sequence, &documents, &self.config, work)?);
+        let segment = Arc::new(Segment::build(
+            self.sequence,
+            &documents,
+            &self.config,
+            work,
+        )?);
         for live in self.live.values_mut() {
             work.charge(1)?;
             live.generation = self.sequence;
@@ -328,7 +441,9 @@ pub struct BeaconIndex {
 
 impl core::fmt::Debug for BeaconIndex {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("BeaconIndex").field("stats", &self.snapshot().stats()).finish_non_exhaustive()
+        f.debug_struct("BeaconIndex")
+            .field("stats", &self.snapshot().stats())
+            .finish_non_exhaustive()
     }
 }
 
@@ -337,9 +452,15 @@ impl BeaconIndex {
         config.validate()?;
         Ok(Self {
             current: Arc::new(Generation {
-                config: Arc::new(config), sequence: 0, live: BTreeMap::new(), segments: Vec::new(),
-                corpus: CorpusStats::default(), vector_documents: 0, vector_values: 0,
-                text_bytes: 0, document_terms: 0,
+                config: Arc::new(config),
+                sequence: 0,
+                live: BTreeMap::new(),
+                segments: Vec::new(),
+                corpus: CorpusStats::default(),
+                vector_documents: 0,
+                vector_values: 0,
+                text_bytes: 0,
+                document_terms: 0,
             }),
         })
     }
@@ -353,7 +474,11 @@ impl BeaconIndex {
         documents: impl IntoIterator<Item = IndexDocument>,
         work: &mut dyn WorkControl,
     ) -> Result<Self, BeaconError> {
-        Self::try_build(config, documents.into_iter().map(Ok::<_, BeaconError>), work)
+        Self::try_build(
+            config,
+            documents.into_iter().map(Ok::<_, BeaconError>),
+            work,
+        )
     }
 
     /// Fallible source variant: source errors are propagated unchanged, never
@@ -392,18 +517,28 @@ impl BeaconIndex {
         work: &mut dyn WorkControl,
     ) -> Result<IndexStats, E> {
         work.charge(1)?;
-        let sequence = self.current.sequence.checked_add(1)
+        let sequence = self
+            .current
+            .sequence
+            .checked_add(1)
             .ok_or(BeaconError::GenerationExhausted)?;
         let mut next = Generation {
-            config: Arc::clone(&self.current.config), sequence,
-            live: BTreeMap::new(), segments: Vec::new(),
-            corpus: CorpusStats::default(), vector_documents: 0,
-            vector_values: 0, text_bytes: 0, document_terms: 0,
+            config: Arc::clone(&self.current.config),
+            sequence,
+            live: BTreeMap::new(),
+            segments: Vec::new(),
+            corpus: CorpusStats::default(),
+            vector_documents: 0,
+            vector_values: 0,
+            text_bytes: 0,
+            document_terms: 0,
         };
         let mut documents = documents.into_iter();
         loop {
             work.charge(1)?;
-            let Some(document) = documents.next() else { break; };
+            let Some(document) = documents.next() else {
+                break;
+            };
             let document = document?;
             let id = document.id;
             if next.live.contains_key(&id) {
@@ -411,12 +546,20 @@ impl BeaconIndex {
             }
             if next.live.len() == next.config.max_documents {
                 return Err(BeaconError::ResourceLimit {
-                    resource: "live documents", limit: next.config.max_documents,
-                }.into());
+                    resource: "live documents",
+                    limit: next.config.max_documents,
+                }
+                .into());
             }
             let document = Arc::new(StoredDocument::prepare(document, &next.config, work)?);
             next.add_stats(&document, work)?;
-            next.live.insert(id, LiveDocument { generation: sequence, document });
+            next.live.insert(
+                id,
+                LiveDocument {
+                    generation: sequence,
+                    document,
+                },
+            );
             // Check each prefix before fetching another row; an oversized
             // stream must not be completely buffered before it is refused.
             next.check_limits()?;
@@ -434,7 +577,9 @@ impl BeaconIndex {
 
     #[must_use]
     pub fn snapshot(&self) -> IndexSnapshot {
-        IndexSnapshot { generation: Arc::clone(&self.current) }
+        IndexSnapshot {
+            generation: Arc::clone(&self.current),
+        }
     }
 
     /// Last operation for a vertex wins, but EVERY supplied operation is
@@ -451,7 +596,10 @@ impl BeaconIndex {
         for mutation in mutations {
             work.charge(1)?;
             if operations == self.current.config.max_batch_operations {
-                return Err(BeaconError::ResourceLimit { resource: "batch operations", limit: self.current.config.max_batch_operations });
+                return Err(BeaconError::ResourceLimit {
+                    resource: "batch operations",
+                    limit: self.current.config.max_batch_operations,
+                });
             }
             operations += 1;
             match mutation {
@@ -475,7 +623,12 @@ impl BeaconIndex {
         }
         let distinct_vertices = normalized.len();
         if distinct_vertices == 0 {
-            return Ok(ApplyReport { operations, distinct_vertices, compacted: false, segments: self.current.segments.len() });
+            return Ok(ApplyReport {
+                operations,
+                distinct_vertices,
+                compacted: false,
+                segments: self.current.segments.len(),
+            });
         }
         let mut next = self.current.successor(work)?;
         let mut documents = BTreeMap::new();
@@ -486,7 +639,13 @@ impl BeaconIndex {
             }
             if let Some(document) = document {
                 next.add_stats(&document, work)?;
-                next.live.insert(id, LiveDocument { generation: next.sequence, document: Arc::clone(&document) });
+                next.live.insert(
+                    id,
+                    LiveDocument {
+                        generation: next.sequence,
+                        document: Arc::clone(&document),
+                    },
+                );
                 documents.insert(id, document);
             }
         }
@@ -498,9 +657,19 @@ impl BeaconIndex {
         if compacted {
             next.compact(work)?;
         } else if !documents.is_empty() {
-            next.segments.push(Arc::new(Segment::build(next.sequence, &documents, &next.config, work)?));
+            next.segments.push(Arc::new(Segment::build(
+                next.sequence,
+                &documents,
+                &next.config,
+                work,
+            )?));
         }
-        let report = ApplyReport { operations, distinct_vertices, compacted, segments: next.segments.len() };
+        let report = ApplyReport {
+            operations,
+            distinct_vertices,
+            compacted,
+            segments: next.segments.len(),
+        };
         self.current = Arc::new(next);
         Ok(report)
     }
@@ -520,7 +689,9 @@ pub struct IndexSnapshot {
 
 impl core::fmt::Debug for IndexSnapshot {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("IndexSnapshot").field("stats", &self.stats()).finish_non_exhaustive()
+        f.debug_struct("IndexSnapshot")
+            .field("stats", &self.stats())
+            .finish_non_exhaustive()
     }
 }
 
@@ -528,9 +699,12 @@ impl IndexSnapshot {
     #[must_use]
     pub fn stats(&self) -> IndexStats {
         IndexStats {
-            documents: self.generation.live.len(), vector_documents: self.generation.vector_documents,
-            vector_values: self.generation.vector_values, text: self.generation.corpus.stats(),
-            text_bytes: self.generation.text_bytes, segments: self.generation.segments.len(),
+            documents: self.generation.live.len(),
+            vector_documents: self.generation.vector_documents,
+            vector_values: self.generation.vector_values,
+            text: self.generation.corpus.stats(),
+            text_bytes: self.generation.text_bytes,
+            segments: self.generation.segments.len(),
         }
     }
 
@@ -542,7 +716,12 @@ impl IndexSnapshot {
         eligible: impl Fn(VId) -> bool,
         work: &mut dyn WorkControl,
     ) -> Result<Vec<Neighbor>, BeaconError> {
-        let config = self.generation.config.vector.as_ref().ok_or(BeaconError::Disabled("vector"))?;
+        let config = self
+            .generation
+            .config
+            .vector
+            .as_ref()
+            .ok_or(BeaconError::Disabled("vector"))?;
         config.validate_vector(query, work)?;
         if matches!(mode, VectorSearch::Approximate { ef_search: 0 }) {
             return Err(BeaconError::InvalidQuery("ef_search must be positive"));
@@ -555,12 +734,27 @@ impl IndexSnapshot {
                 if let Some(vector) = &segment.vector {
                     let visible = |id| self.visible_in(id, segment.generation) && eligible(id);
                     for hit in vector.search(query, limit, mode, visible, work)? {
-                        retain_best(&mut best, Ranked { cost: hit.distance, id: hit.id, slot: 0 }, limit);
+                        retain_best(
+                            &mut best,
+                            Ranked {
+                                cost: hit.distance,
+                                id: hit.id,
+                                slot: 0,
+                            },
+                            limit,
+                        );
                     }
                 }
             }
         }
-        Ok(best.into_sorted_vec().into_iter().map(|hit| Neighbor { id: hit.id, distance: hit.cost }).collect())
+        Ok(best
+            .into_sorted_vec()
+            .into_iter()
+            .map(|hit| Neighbor {
+                id: hit.id,
+                distance: hit.cost,
+            })
+            .collect())
     }
 
     pub fn text_search(
@@ -571,20 +765,44 @@ impl IndexSnapshot {
         eligible: impl Fn(VId) -> bool,
         work: &mut dyn WorkControl,
     ) -> Result<Vec<TextHit>, BeaconError> {
-        let config = self.generation.config.text.as_ref().ok_or(BeaconError::Disabled("text"))?;
+        let config = self
+            .generation
+            .config
+            .text
+            .as_ref()
+            .ok_or(BeaconError::Disabled("text"))?;
         let terms = config.query_terms(query, work)?;
         let limit = k.min(self.generation.corpus.documents);
         let mut best = BinaryHeap::new();
         for segment in &self.generation.segments {
             work.charge(1)?;
             let visible = |id| self.visible_in(id, segment.generation) && eligible(id);
-            segment.text.search_into(&terms, mode, config, &self.generation.corpus, limit, &visible, &mut best, work)?;
+            segment.text.search_into(
+                &terms,
+                mode,
+                config,
+                &self.generation.corpus,
+                limit,
+                &visible,
+                &mut best,
+                work,
+            )?;
         }
-        Ok(best.into_sorted_vec().into_iter().map(|hit| TextHit { id: hit.id, score: -hit.cost }).collect())
+        Ok(best
+            .into_sorted_vec()
+            .into_iter()
+            .map(|hit| TextHit {
+                id: hit.id,
+                score: -hit.cost,
+            })
+            .collect())
     }
 
     fn visible_in(&self, id: VId, generation: u64) -> bool {
-        self.generation.live.get(&id).is_some_and(|live| live.generation == generation)
+        self.generation
+            .live
+            .get(&id)
+            .is_some_and(|live| live.generation == generation)
     }
 
     /// Weighted reciprocal-rank fusion of two explicitly bounded candidate
@@ -598,32 +816,69 @@ impl IndexSnapshot {
         work: &mut dyn WorkControl,
     ) -> Result<Vec<HybridHit>, BeaconError> {
         query.validate()?;
-        let vector = self.knn(query.vector, query.candidates, query.vector_mode, &eligible, work)?;
-        let text = self.text_search(query.text, query.candidates, query.text_mode, &eligible, work)?;
+        let vector = self.knn(
+            query.vector,
+            query.candidates,
+            query.vector_mode,
+            &eligible,
+            work,
+        )?;
+        let text = self.text_search(
+            query.text,
+            query.candidates,
+            query.text_mode,
+            &eligible,
+            work,
+        )?;
         let total_weight = query.vector_weight + query.text_weight;
         let mut fused = BTreeMap::<VId, HybridHit>::new();
         for (rank, hit) in vector.into_iter().enumerate() {
             work.charge(1)?;
-            let row = fused.entry(hit.id).or_insert(HybridHit { id: hit.id, score: 0.0, vector_distance: None, text_score: None });
+            let row = fused.entry(hit.id).or_insert(HybridHit {
+                id: hit.id,
+                score: 0.0,
+                vector_distance: None,
+                text_score: None,
+            });
             row.vector_distance = Some(hit.distance);
-            row.score += (query.vector_weight / total_weight) / (query.rank_constant + rank as f64 + 1.0);
+            row.score +=
+                (query.vector_weight / total_weight) / (query.rank_constant + rank as f64 + 1.0);
         }
         for (rank, hit) in text.into_iter().enumerate() {
             work.charge(1)?;
-            let row = fused.entry(hit.id).or_insert(HybridHit { id: hit.id, score: 0.0, vector_distance: None, text_score: None });
+            let row = fused.entry(hit.id).or_insert(HybridHit {
+                id: hit.id,
+                score: 0.0,
+                vector_distance: None,
+                text_score: None,
+            });
             row.text_score = Some(hit.score);
-            row.score += (query.text_weight / total_weight) / (query.rank_constant + rank as f64 + 1.0);
+            row.score +=
+                (query.text_weight / total_weight) / (query.rank_constant + rank as f64 + 1.0);
         }
         let mut best = BinaryHeap::new();
         for hit in fused.values() {
             work.charge(1)?;
             if hit.score > 0.0 {
-                retain_best(&mut best, Ranked { cost: -hit.score, id: hit.id, slot: 0 }, query.k);
+                retain_best(
+                    &mut best,
+                    Ranked {
+                        cost: -hit.score,
+                        id: hit.id,
+                        slot: 0,
+                    },
+                    query.k,
+                );
             }
         }
-        best.into_sorted_vec().into_iter().map(|hit| {
-            fused.remove(&hit.id).ok_or(BeaconError::Invariant("fused result disappeared"))
-        }).collect()
+        best.into_sorted_vec()
+            .into_iter()
+            .map(|hit| {
+                fused
+                    .remove(&hit.id)
+                    .ok_or(BeaconError::Invariant("fused result disappeared"))
+            })
+            .collect()
     }
 }
 
@@ -643,16 +898,26 @@ pub struct HybridQuery<'a> {
 impl HybridQuery<'_> {
     fn validate(&self) -> Result<(), BeaconError> {
         if self.candidates < self.k {
-            return Err(BeaconError::InvalidQuery("hybrid candidates must be at least k"));
+            return Err(BeaconError::InvalidQuery(
+                "hybrid candidates must be at least k",
+            ));
         }
         if !self.rank_constant.is_finite() || self.rank_constant < 1.0 {
-            return Err(BeaconError::InvalidQuery("RRF rank constant must be finite and at least one"));
+            return Err(BeaconError::InvalidQuery(
+                "RRF rank constant must be finite and at least one",
+            ));
         }
         let sum = self.vector_weight + self.text_weight;
-        if !self.vector_weight.is_finite() || !self.text_weight.is_finite()
-            || self.vector_weight < 0.0 || self.text_weight < 0.0 || !sum.is_finite() || sum <= 0.0
+        if !self.vector_weight.is_finite()
+            || !self.text_weight.is_finite()
+            || self.vector_weight < 0.0
+            || self.text_weight < 0.0
+            || !sum.is_finite()
+            || sum <= 0.0
         {
-            return Err(BeaconError::InvalidQuery("RRF weights must be finite, nonnegative, with a finite positive sum"));
+            return Err(BeaconError::InvalidQuery(
+                "RRF weights must be finite, nonnegative, with a finite positive sum",
+            ));
         }
         Ok(())
     }

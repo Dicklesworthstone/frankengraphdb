@@ -169,10 +169,18 @@ pub struct Header {
 }
 
 impl Header {
-    pub const fn kind(self) -> FrameKind { self.kind }
-    pub const fn request_id(self) -> u64 { self.request_id }
-    pub const fn stream_id(self) -> StreamId { self.stream_id }
-    pub const fn binding(self) -> Binding { self.binding }
+    pub const fn kind(self) -> FrameKind {
+        self.kind
+    }
+    pub const fn request_id(self) -> u64 {
+        self.request_id
+    }
+    pub const fn stream_id(self) -> StreamId {
+        self.stream_id
+    }
+    pub const fn binding(self) -> Binding {
+        self.binding
+    }
     pub const fn frame_len(self) -> usize {
         self.frame_len
     }
@@ -204,7 +212,13 @@ impl Frame {
             return Err(ProtocolError::FrameTooLarge);
         }
         Ok(Self {
-            header: Header { kind, request_id, stream_id, binding, frame_len },
+            header: Header {
+                kind,
+                request_id,
+                stream_id,
+                binding,
+                frame_len,
+            },
             payload,
         })
     }
@@ -225,8 +239,7 @@ impl Frame {
         output
             .try_reserve_exact(self.header.frame_len)
             .map_err(|_| ProtocolError::AllocationFailed)?;
-        let len = u32::try_from(self.header.frame_len)
-            .map_err(|_| ProtocolError::FrameTooLarge)?;
+        let len = u32::try_from(self.header.frame_len).map_err(|_| ProtocolError::FrameTooLarge)?;
         output.extend_from_slice(&len.to_be_bytes());
         output.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
         output.extend_from_slice(&(self.header.kind as u16).to_be_bytes());
@@ -241,7 +254,10 @@ impl Frame {
             output.extend_from_slice(&ready.namespace);
             output.extend_from_slice(&ready.incarnation);
             output.extend_from_slice(&ready.service_epoch.to_be_bytes());
-            output.push(match ready.posture { Posture::Local => 0, Posture::Sharded => 1 });
+            output.push(match ready.posture {
+                Posture::Local => 0,
+                Posture::Sharded => 1,
+            });
             output.extend_from_slice(&ready.authority_commitment);
         }
         output.extend_from_slice(&self.payload);
@@ -340,7 +356,10 @@ impl Decoder {
                 self.fixed_used += count;
                 consumed += count;
                 if self.fixed_used < self.fixed_target {
-                    return Ok(DecodeProgress { consumed, frame: None });
+                    return Ok(DecodeProgress {
+                        consumed,
+                        frame: None,
+                    });
                 }
                 if self.declared_len.is_none() {
                     let len = usize::try_from(u32::from_be_bytes(self.array::<4>(0)))
@@ -396,7 +415,10 @@ impl Decoder {
             self.payload_used += count;
             consumed += count;
             if self.payload_used != self.payload.len() {
-                return Ok(DecodeProgress { consumed, frame: None });
+                return Ok(DecodeProgress {
+                    consumed,
+                    frame: None,
+                });
             }
             let header = self.header.take().ok_or(ProtocolError::InvalidState)?;
             let payload = core::mem::take(&mut self.payload);
@@ -404,7 +426,10 @@ impl Decoder {
             self.fixed_target = 4;
             self.declared_len = None;
             self.payload_used = 0;
-            return Ok(DecodeProgress { consumed, frame: Some(Frame { header, payload }) });
+            return Ok(DecodeProgress {
+                consumed,
+                frame: Some(Frame { header, payload }),
+            });
         }
     }
     fn array<const N: usize>(&self, start: usize) -> [u8; N] {

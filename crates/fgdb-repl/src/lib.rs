@@ -21,13 +21,14 @@ pub mod driver;
 pub mod replica;
 
 use fgdb_chronicle::seed::{
-    ObjectPublication, ReplicaSeed, SeedError, SeedInstallation, SeedObjectSpec,
-    SeedPlan, SeedPublicationId,
+    ObjectPublication, ReplicaSeed, SeedError, SeedInstallation, SeedObjectSpec, SeedPlan,
+    SeedPublicationId,
 };
 use fgdb_chronicle::store::RootPublicationEvidence;
 use fgdb_chronicle::transfer::VerifiedObject;
-use fgdb_order::{Error as RaftError, Event, Output, PersistenceId, PersistentState,
-    Raft, SnapshotTransfer};
+use fgdb_order::{
+    Error as RaftError, Event, Output, PersistenceId, PersistentState, Raft, SnapshotTransfer,
+};
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,14 +218,28 @@ impl<'r, C: Clone + Eq> SnapshotCatchup<'r, C> {
                 }
             };
             self.consensus = Some(pending.state().clone());
-            self.publication = Some(CatchupPublicationId { seed: seed_id, consensus: pending.id() });
+            self.publication = Some(CatchupPublicationId {
+                seed: seed_id,
+                consensus: pending.id(),
+            });
             self.phase = CatchupPhase::Publishing;
         }
         self.require(CatchupPhase::Publishing)?;
-        let id = self.publication.as_ref().ok_or(CatchupError::StalePublication)?.clone();
-        let consensus = self.consensus.as_ref().ok_or(CatchupError::StalePublication)?;
+        let id = self
+            .publication
+            .as_ref()
+            .ok_or(CatchupError::StalePublication)?
+            .clone();
+        let consensus = self
+            .consensus
+            .as_ref()
+            .ok_or(CatchupError::StalePublication)?;
         let seed = self.seed.begin_install().map_err(CatchupError::Seed)?;
-        Ok(SnapshotPublication { id, seed, consensus })
+        Ok(SnapshotPublication {
+            id,
+            seed,
+            consensus,
+        })
     }
 
     /// Complete BOTH gates using the exact post-sync root reread evidence.
@@ -240,7 +255,9 @@ impl<'r, C: Clone + Eq> SnapshotCatchup<'r, C> {
         if self.publication.as_ref() != Some(&id) {
             return Err(CatchupError::StalePublication);
         }
-        self.seed.finish_install(id.seed, evidence).map_err(CatchupError::Seed)?;
+        self.seed
+            .finish_install(id.seed, evidence)
+            .map_err(CatchupError::Seed)?;
         let output = match self.raft.persisted(id.consensus) {
             Ok(output) => output,
             Err(error) => {
@@ -269,7 +286,11 @@ impl<'r, C: Clone + Eq> SnapshotCatchup<'r, C> {
     }
 
     fn require(&self, phase: CatchupPhase) -> Result<(), CatchupError> {
-        if self.phase == phase { Ok(()) } else { Err(CatchupError::WrongPhase) }
+        if self.phase == phase {
+            Ok(())
+        } else {
+            Err(CatchupError::WrongPhase)
+        }
     }
 }
 

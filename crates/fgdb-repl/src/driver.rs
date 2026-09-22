@@ -179,7 +179,14 @@ impl<'a, C: SeedCatalog, T: bonded::PullTransport> BondedSeedSource<'a, C, T> {
         verification: &'a mut dyn CryptoVerificationSink,
         maximum_window: usize,
     ) -> Self {
-        Self { namespace, catalog, transport, verification, maximum_window, active: None }
+        Self {
+            namespace,
+            catalog,
+            transport,
+            verification,
+            maximum_window,
+            active: None,
+        }
     }
 
     /// Deliberately discard an unfinished immutable-object recovery. Ordinary
@@ -196,12 +203,20 @@ impl<'a, C: SeedCatalog, T: bonded::PullTransport> BondedSeedSource<'a, C, T> {
         &mut self,
         donor: DonorId,
     ) -> Result<(), SeedAcquireError<C::Error, T::Error>> {
-        let active = self.active.as_mut().ok_or(SeedAcquireError::InvalidObject)?;
-        active.pull.donor_available(donor)
+        let active = self
+            .active
+            .as_mut()
+            .ok_or(SeedAcquireError::InvalidObject)?;
+        active
+            .pull
+            .donor_available(donor)
             .map_err(|error| SeedAcquireError::Pull(bonded::PullDriveError::Pull(error)))
     }
 
-    fn prepare(&mut self, object: SeedObjectSpec) -> Result<(), SeedAcquireError<C::Error, T::Error>> {
+    fn prepare(
+        &mut self,
+        object: SeedObjectSpec,
+    ) -> Result<(), SeedAcquireError<C::Error, T::Error>> {
         if let Some(active) = &self.active {
             if active.object.object_id != object.object_id
                 || active.object.object_kind != object.object_kind
@@ -214,7 +229,9 @@ impl<'a, C: SeedCatalog, T: bonded::PullTransport> BondedSeedSource<'a, C, T> {
         // Borrow the externally pinned catalog, not this short-lived call's
         // borrow of self. The pull may then safely outlive its recovery future.
         let catalog: &'a C = self.catalog;
-        let material = catalog.recovery(object).map_err(SeedAcquireError::Catalog)?;
+        let material = catalog
+            .recovery(object)
+            .map_err(SeedAcquireError::Catalog)?;
         if material.target.namespace != self.namespace {
             return Err(SeedAcquireError::WrongNamespace);
         }
@@ -226,8 +243,13 @@ impl<'a, C: SeedCatalog, T: bonded::PullTransport> BondedSeedSource<'a, C, T> {
             return Err(SeedAcquireError::InvalidObject);
         }
         let pull = BondedPull::new(
-            material.encoding, material.target, material.dek, material.donors, material.limits,
-        ).map_err(|error| SeedAcquireError::Pull(bonded::PullDriveError::Pull(error)))?;
+            material.encoding,
+            material.target,
+            material.dek,
+            material.donors,
+            material.limits,
+        )
+        .map_err(|error| SeedAcquireError::Pull(bonded::PullDriveError::Pull(error)))?;
         self.active = Some(ActiveSeedRecovery { object, pull });
         Ok(())
     }
@@ -236,19 +258,30 @@ impl<'a, C: SeedCatalog, T: bonded::PullTransport> BondedSeedSource<'a, C, T> {
 impl<C: SeedCatalog, T: bonded::PullTransport> SeedObjectSource for BondedSeedSource<'_, C, T> {
     type Error = SeedAcquireError<C::Error, T::Error>;
 
+    #[allow(clippy::manual_async_fn)]
     fn recover(
         &mut self,
         object: SeedObjectSpec,
     ) -> impl Future<Output = Result<VerifiedObject, Self::Error>> {
         async move {
             if self.maximum_window == 0 {
-                return Err(SeedAcquireError::Pull(bonded::PullDriveError::InvalidWindow));
+                return Err(SeedAcquireError::Pull(
+                    bonded::PullDriveError::InvalidWindow,
+                ));
             }
             self.prepare(object)?;
-            let active = self.active.as_mut().ok_or(SeedAcquireError::InvalidObject)?;
+            let active = self
+                .active
+                .as_mut()
+                .ok_or(SeedAcquireError::InvalidObject)?;
             let recovered = bonded::recover(
-                &mut active.pull, self.transport, self.verification, self.maximum_window,
-            ).await.map_err(SeedAcquireError::Pull)?;
+                &mut active.pull,
+                self.transport,
+                self.verification,
+                self.maximum_window,
+            )
+            .await
+            .map_err(SeedAcquireError::Pull)?;
             // No await separates successful recovery from ownership transfer.
             // On error or cancellation the active pull remains available to retry.
             self.active = None;
@@ -301,7 +334,10 @@ struct CatchupGuard<'a, 'r, C: Clone + Eq> {
 
 impl<C: Clone + Eq> Drop for CatchupGuard<'_, '_, C> {
     fn drop(&mut self) {
-        if matches!(self.catchup.phase(), CatchupPhase::Publishing | CatchupPhase::Failed) {
+        if matches!(
+            self.catchup.phase(),
+            CatchupPhase::Publishing | CatchupPhase::Failed
+        ) {
             self.catchup.publication_failed();
         }
     }
@@ -361,7 +397,10 @@ where
                     .publish_object(publication)
                     .await
                     .map_err(SeedDriveError::Publication)?;
-                guard.catchup.object_published(id).map_err(SeedDriveError::Catchup)?;
+                guard
+                    .catchup
+                    .object_published(id)
+                    .map_err(SeedDriveError::Catchup)?;
                 continue;
             }
             Err(CatchupError::Seed(SeedError::StalePublication)) => {}
@@ -370,23 +409,34 @@ where
         let missing = guard.catchup.missing_objects().next().copied();
         let Some(spec) = missing else { break };
         let object = source.recover(spec).await.map_err(SeedDriveError::Source)?;
-        guard.catchup.stage(object).map_err(SeedDriveError::Catchup)?;
+        guard
+            .catchup
+            .stage(object)
+            .map_err(SeedDriveError::Catchup)?;
     }
-    let publication = guard.catchup.begin_publication().map_err(SeedDriveError::Catchup)?;
+    let publication = guard
+        .catchup
+        .begin_publication()
+        .map_err(SeedDriveError::Catchup)?;
     let id = publication.id();
-    let evidence = publisher.publish_snapshot(publication).await
+    let evidence = publisher
+        .publish_snapshot(publication)
+        .await
         .map_err(SeedDriveError::Publication)?;
-    guard.catchup.published(id, &evidence).map_err(SeedDriveError::Catchup)
+    guard
+        .catchup
+        .published(id, &evidence)
+        .map_err(SeedDriveError::Catchup)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fgdb_order::{Configuration, Domain, Limits, MemberId, Role};
     use std::future::{pending, ready};
     use std::pin::pin;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
-    use fgdb_order::{Configuration, Domain, Limits, MemberId, Role};
 
     struct NoopWake;
     impl Wake for NoopWake {
@@ -411,18 +461,28 @@ mod tests {
 
     impl RaftPublisher<u64> for MemoryPublisher {
         type Error = &'static str;
-        fn publish(&mut self, state: &PersistentState<u64>) -> impl Future<Output = Result<(), Self::Error>> {
+        fn publish(
+            &mut self,
+            state: &PersistentState<u64>,
+        ) -> impl Future<Output = Result<(), Self::Error>> {
             self.writes += 1;
             // Model an uncertain outcome: the root can change before an error.
             self.state = Some(state.clone());
-            ready(if self.fail { Err("sync outcome unknown") } else { Ok(()) })
+            ready(if self.fail {
+                Err("sync outcome unknown")
+            } else {
+                Ok(())
+            })
         }
     }
 
     struct SuspendedPublisher;
     impl RaftPublisher<u64> for SuspendedPublisher {
         type Error = &'static str;
-        fn publish(&mut self, _: &PersistentState<u64>) -> impl Future<Output = Result<(), Self::Error>> {
+        fn publish(
+            &mut self,
+            _: &PersistentState<u64>,
+        ) -> impl Future<Output = Result<(), Self::Error>> {
             pending()
         }
     }
@@ -439,7 +499,12 @@ mod tests {
         let election = immediate(sequence(&mut raft, &mut store, Event::ElectionTimeout)).unwrap();
         assert_eq!(election.role, Role::Leader);
         let output = immediate(sequence(&mut raft, &mut store, Event::Propose(41))).unwrap();
-        assert!(output.committed.iter().any(|entry| entry.entry.command == Some(41)));
+        assert!(
+            output
+                .committed
+                .iter()
+                .any(|entry| entry.entry.command == Some(41))
+        );
         let durable = store.state.as_ref().unwrap();
         for entry in &output.committed {
             assert!(entry.index <= durable.commit_index());
@@ -459,11 +524,18 @@ mod tests {
     #[test]
     fn publication_error_requires_recovery_even_if_root_was_written() {
         let mut raft = node();
-        let mut store = MemoryPublisher { fail: true, ..MemoryPublisher::default() };
-        assert!(matches!(immediate(sequence(&mut raft, &mut store, Event::ElectionTimeout)), Err(SequenceError::Publication(_))));
+        let mut store = MemoryPublisher {
+            fail: true,
+            ..MemoryPublisher::default()
+        };
+        assert!(matches!(
+            immediate(sequence(&mut raft, &mut store, Event::ElectionTimeout)),
+            Err(SequenceError::Publication(_))
+        ));
         assert!(store.state.is_some());
         assert_eq!(raft.role(), Err(RaftError::RecoveryRequired));
-        let reopened = Raft::recover(MemberId(1), store.state.take().unwrap(), Limits::default()).unwrap();
+        let reopened =
+            Raft::recover(MemberId(1), store.state.take().unwrap(), Limits::default()).unwrap();
         assert_eq!(reopened.durable_state().unwrap().term(), 1);
     }
 
@@ -484,7 +556,10 @@ mod tests {
     fn invalid_proposal_does_not_poison_or_publish() {
         let mut raft = node();
         let mut store = MemoryPublisher::default();
-        assert!(matches!(immediate(sequence(&mut raft, &mut store, Event::Propose(1))), Err(SequenceError::Raft(RaftError::NotLeader))));
+        assert!(matches!(
+            immediate(sequence(&mut raft, &mut store, Event::Propose(1))),
+            Err(SequenceError::Raft(RaftError::NotLeader))
+        ));
         assert_eq!(raft.role(), Ok(Role::Follower));
         assert_eq!(store.writes, 0);
     }

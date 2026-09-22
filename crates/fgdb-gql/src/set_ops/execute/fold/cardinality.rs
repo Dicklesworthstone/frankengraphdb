@@ -18,9 +18,7 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
     match value {
         GraphSetValue::Column(_) => false,
         GraphSetValue::Literal(_) | GraphSetValue::Value(_) => true,
-        GraphSetValue::Integer(expression) => {
-            expression.referenced_columns().into_iter().next().is_none()
-        }
+        GraphSetValue::Integer(expression) => expression.referenced_columns().next().is_none(),
         GraphSetValue::List(values) => values.iter().all(constant),
         GraphSetValue::Index { list, index } => constant(list) && constant(index),
         GraphSetValue::Size(list) => constant(list),
@@ -28,9 +26,12 @@ pub(super) fn constant(value: &GraphSetValue) -> bool {
 }
 
 pub(super) fn total_projection(projection: &[GraphSetProjection]) -> bool {
-    projection.iter().all(|column| matches!(column.value(),
-        GraphSetValue::Column(_) | GraphSetValue::Literal(_) | GraphSetValue::Value(_)
-    ))
+    projection.iter().all(|column| {
+        matches!(
+            column.value(),
+            GraphSetValue::Column(_) | GraphSetValue::Literal(_) | GraphSetValue::Value(_)
+        )
+    })
 }
 
 /// Evaluate the already-checked row-independent expression exactly once, but
@@ -45,19 +46,23 @@ pub(super) fn constant_unwind_size<E, C, Checkpoint>(
 where
     Checkpoint: FnMut() -> Result<(), C>,
 {
-    let value = projection::evaluate_value(
-        value, &GraphValueRow::unit(), column, &mut |event| meter.event(event),
-    ).map_err(|error| projected(error, 0))?;
+    let value = projection::evaluate_value(value, &GraphValueRow::unit(), column, &mut |event| {
+        meter.event(event)
+    })
+    .map_err(|error| projected(error, 0))?;
     let elements = match value {
         GraphValue::List(values) => values.len() as u128,
         value if value.is_null() => 0,
-        _ => return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
-            row: 0, column,
-            error: crate::GraphIntegerError {
-                instruction: 0,
-                kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
-            },
-        })),
+        _ => {
+            return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+                row: 0,
+                column,
+                error: crate::GraphIntegerError {
+                    instruction: 0,
+                    kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+                },
+            }));
+        }
     };
     Ok(Amount::from_u128(elements))
 }
@@ -73,7 +78,9 @@ impl PreparedGraphSet {
             } => true,
             SetNode::Unwind { value, .. } => constant(value),
             SetNode::Project {
-                input, projection, quantifier: GraphSetQuantifier::All,
+                input,
+                projection,
+                quantifier: GraphSetQuantifier::All,
             } => total_projection(projection) && input.has_factorized_cardinality(),
             SetNode::Scope(input) => input.has_factorized_cardinality(),
             _ => false,
@@ -156,7 +163,9 @@ where
             }
         }
         SetNode::Project {
-            input, projection, quantifier: GraphSetQuantifier::All,
+            input,
+            projection,
+            quantifier: GraphSetQuantifier::All,
         } if total_projection(projection) => {
             // Checked aliases and already-admitted literal values cannot fail
             // semantically. Their unused copies and sort may be eliminated.

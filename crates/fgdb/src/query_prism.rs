@@ -7,10 +7,9 @@ use crate::gql_exec::source::{self, SourceEvent};
 use crate::{Database, EmbeddedReadView, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_prism::{
-    FnxCallSpec, FnxParameters, FnxReadError, FnxReadOptions, FnxReadResult,
-    FnxSelection, FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge,
-    ProjectionError, ProjectionLimits, ProjectionSpec, SelfLoopPolicy,
-    SnapshotBinding, SnapshotGraphView,
+    FnxCallSpec, FnxParameters, FnxReadError, FnxReadOptions, FnxReadResult, FnxSelection,
+    FnxSourceLimits, ParallelEdgePolicy, ProjectionBuildError, ProjectionEdge, ProjectionError,
+    ProjectionLimits, ProjectionSpec, SelfLoopPolicy, SnapshotBinding, SnapshotGraphView,
 };
 use fgdb_types::{CommitSeq, QueryCx};
 use std::mem::size_of;
@@ -43,7 +42,9 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<FnxReadResult, FnxReadError<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
-            self.read_session().map_err(FnxReadError::Read)?.execute_fnx(cx, call, options)
+            self.read_session()
+                .map_err(FnxReadError::Read)?
+                .execute_fnx(cx, call, options)
         })
     }
 }
@@ -70,10 +71,15 @@ impl EmbeddedReadView {
     ) -> Result<FnxReadResult, FnxReadError<ReadError, Cancel>> {
         cx.with_restriction(|| {
             let graph = self.prism_projection_at(
-                cx, options.as_of.unwrap_or(self.frontier()), options.selection,
-                options.projection, options.projection_limits, options.source_limits,
+                cx,
+                options.as_of.unwrap_or(self.frontier()),
+                options.selection,
+                options.projection,
+                options.projection_limits,
+                options.source_limits,
             )?;
-            let result = call.execute(&graph, options.execution_limits, || cx.checkpoint())
+            let result = call
+                .execute(&graph, options.execution_limits, || cx.checkpoint())
                 .map_err(FnxReadError::Execution)?;
             Ok(FnxReadResult::bind_selection(result, options.selection))
         })
@@ -99,63 +105,124 @@ impl EmbeddedReadView {
     ) -> Result<SnapshotGraphView, FnxReadError<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
-            self.snapshot.check_frontier(as_of).map_err(FnxReadError::Read)?;
+            self.snapshot
+                .check_frontier(as_of)
+                .map_err(FnxReadError::Read)?;
             let mut work = 0u64;
             let mut scratch = 0u64;
             let mut control = |event| -> Result<(), Error> {
                 cx.checkpoint().map_err(FnxReadError::Cancelled)?;
                 let (counter, limit, resource) = match event {
-                    SourceEvent::Work | SourceEvent::SnapshotRecord => (&mut work, source_limits.max_work_units, "work units"),
-                    SourceEvent::ScratchEntry => (&mut scratch, source_limits.max_scratch_entries, "scratch entries"),
+                    SourceEvent::Work | SourceEvent::SnapshotRecord => {
+                        (&mut work, source_limits.max_work_units, "work units")
+                    }
+                    SourceEvent::ScratchEntry => (
+                        &mut scratch,
+                        source_limits.max_scratch_entries,
+                        "scratch entries",
+                    ),
                 };
                 *counter = counter.checked_add(1).ok_or(FnxReadError::SizeOverflow)?;
                 source_admit(resource, u128::from(*counter), u128::from(limit))
             };
             let mut vertices = Vec::new();
             let mut staging_bytes = 0usize;
-            source::visit_vertices(&self.snapshot.patches, as_of, &mut control, |row, control| {
-                control(SourceEvent::Work)?;
-                if selection.vertex_label.is_some_and(|label| row.labels.binary_search(&label).is_err()) {
-                    return Ok(());
-                }
-                // Check the visitor's ordered-emission invariant incrementally,
-                // not in an uninterruptible post-scan debug assertion.
-                debug_assert!(vertices.last().is_none_or(|last| *last < row.vid));
-                push_staged(&mut vertices, row.vid, "vertices", limits.max_vertices,
-                    &mut staging_bytes, source_limits.max_staging_bytes)
-            })?;
-            let mut edges = Vec::new();
-            source::visit_edges_with_properties(&self.snapshot, as_of, &mut control, |entry, props, control| {
-                control(SourceEvent::Work)?;
-                if selection.relation.is_some_and(|relation| relation != entry.relation)
-                    || vertices.binary_search(&entry.src).is_err()
-                    || vertices.binary_search(&entry.dst).is_err() {
-                    return Ok(());
-                }
-                if entry.src == entry.dst {
-                    match spec.self_loops {
-                        SelfLoopPolicy::Drop => return Ok(()),
-                        SelfLoopPolicy::Reject => return Err(FnxReadError::Projection(ProjectionError::SelfLoop(entry.eid))),
-                        SelfLoopPolicy::Keep => {}
+            source::visit_vertices(
+                &self.snapshot.patches,
+                as_of,
+                &mut control,
+                |row, control| {
+                    control(SourceEvent::Work)?;
+                    if selection
+                        .vertex_label
+                        .is_some_and(|label| row.labels.binary_search(&label).is_err())
+                    {
+                        return Ok(());
                     }
-                }
-                let weight = if spec.parallel_edges == ParallelEdgePolicy::CollapseUnit {
-                    1.0 // explicitly discard weights BEFORE property observation
-                } else {
-                    let value = selection.weight.property_key().and_then(|key| {
-                        props.binary_search_by_key(&key, |(key, _)| *key).ok().map(|index| &props[index].1)
-                    });
-                    selection.weight.resolve(value).map_err(|reason| FnxReadError::Weight { edge: entry.eid, reason })?
-                };
-                push_staged(&mut edges, ProjectionEdge {
-                    eid: entry.eid, source: entry.src, target: entry.dst, weight,
-                }, "input edges", limits.max_input_edges, &mut staging_bytes, source_limits.max_staging_bytes)
-            })?;
+                    // Check the visitor's ordered-emission invariant incrementally,
+                    // not in an uninterruptible post-scan debug assertion.
+                    debug_assert!(vertices.last().is_none_or(|last| *last < row.vid));
+                    push_staged(
+                        &mut vertices,
+                        row.vid,
+                        "vertices",
+                        limits.max_vertices,
+                        &mut staging_bytes,
+                        source_limits.max_staging_bytes,
+                    )
+                },
+            )?;
+            let mut edges = Vec::new();
+            source::visit_edges_with_properties(
+                &self.snapshot,
+                as_of,
+                &mut control,
+                |entry, props, control| {
+                    control(SourceEvent::Work)?;
+                    if selection
+                        .relation
+                        .is_some_and(|relation| relation != entry.relation)
+                        || vertices.binary_search(&entry.src).is_err()
+                        || vertices.binary_search(&entry.dst).is_err()
+                    {
+                        return Ok(());
+                    }
+                    if entry.src == entry.dst {
+                        match spec.self_loops {
+                            SelfLoopPolicy::Drop => return Ok(()),
+                            SelfLoopPolicy::Reject => {
+                                return Err(FnxReadError::Projection(ProjectionError::SelfLoop(
+                                    entry.eid,
+                                )));
+                            }
+                            SelfLoopPolicy::Keep => {}
+                        }
+                    }
+                    let weight = if spec.parallel_edges == ParallelEdgePolicy::CollapseUnit {
+                        1.0 // explicitly discard weights BEFORE property observation
+                    } else {
+                        let value = selection.weight.property_key().and_then(|key| {
+                            props
+                                .binary_search_by_key(&key, |(key, _)| *key)
+                                .ok()
+                                .map(|index| &props[index].1)
+                        });
+                        selection
+                            .weight
+                            .resolve(value)
+                            .map_err(|reason| FnxReadError::Weight {
+                                edge: entry.eid,
+                                reason,
+                            })?
+                    };
+                    push_staged(
+                        &mut edges,
+                        ProjectionEdge {
+                            eid: entry.eid,
+                            source: entry.src,
+                            target: entry.dst,
+                            weight,
+                        },
+                        "input edges",
+                        limits.max_input_edges,
+                        &mut staging_bytes,
+                        source_limits.max_staging_bytes,
+                    )
+                },
+            )?;
             cx.checkpoint().map_err(FnxReadError::Cancelled)?;
             let graph = SnapshotGraphView::build_owned_with_checkpoint(
-                SnapshotBinding { root: self.partition_root().0, as_of },
-                vertices, edges, spec, limits, || cx.checkpoint(),
-            ).map_err(|error| match error {
+                SnapshotBinding {
+                    root: self.partition_root().0,
+                    as_of,
+                },
+                vertices,
+                edges,
+                spec,
+                limits,
+                || cx.checkpoint(),
+            )
+            .map_err(|error| match error {
                 ProjectionBuildError::Cancelled(error) => FnxReadError::Cancelled(error),
                 ProjectionBuildError::Projection(error) => FnxReadError::Projection(error),
             })?;
@@ -167,7 +234,11 @@ impl EmbeddedReadView {
 
 fn source_admit(resource: &'static str, requested: u128, limit: u128) -> Result<(), Error> {
     if requested > limit {
-        Err(FnxReadError::SourceLimit { resource, limit, requested })
+        Err(FnxReadError::SourceLimit {
+            resource,
+            limit,
+            requested,
+        })
     } else {
         Ok(())
     }
@@ -184,19 +255,36 @@ fn push_staged<T>(
     staged_bytes: &mut usize,
     byte_limit: usize,
 ) -> Result<(), Error> {
-    let next = output.len().checked_add(1).ok_or(FnxReadError::SizeOverflow)?;
+    let next = output
+        .len()
+        .checked_add(1)
+        .ok_or(FnxReadError::SizeOverflow)?;
     if next > maximum {
-        return Err(FnxReadError::Projection(ProjectionError::LimitExceeded { resource, limit: maximum, observed: next }));
+        return Err(FnxReadError::Projection(ProjectionError::LimitExceeded {
+            resource,
+            limit: maximum,
+            observed: next,
+        }));
     }
     if output.len() == output.capacity() {
         let old_capacity = output.capacity();
         let target = old_capacity.saturating_mul(2).max(4).min(maximum);
-        let new_bytes = target.checked_mul(size_of::<T>()).ok_or(FnxReadError::SizeOverflow)?;
-        let peak = staged_bytes.checked_add(new_bytes).ok_or(FnxReadError::SizeOverflow)?;
+        let new_bytes = target
+            .checked_mul(size_of::<T>())
+            .ok_or(FnxReadError::SizeOverflow)?;
+        let peak = staged_bytes
+            .checked_add(new_bytes)
+            .ok_or(FnxReadError::SizeOverflow)?;
         source_admit("staging bytes", peak as u128, byte_limit as u128)?;
-        output.try_reserve_exact(target - output.len()).map_err(|_| FnxReadError::AllocationFailed)?;
-        let added = (output.capacity() - old_capacity).checked_mul(size_of::<T>()).ok_or(FnxReadError::SizeOverflow)?;
-        *staged_bytes = staged_bytes.checked_add(added).ok_or(FnxReadError::SizeOverflow)?;
+        output
+            .try_reserve_exact(target - output.len())
+            .map_err(|_| FnxReadError::AllocationFailed)?;
+        let added = (output.capacity() - old_capacity)
+            .checked_mul(size_of::<T>())
+            .ok_or(FnxReadError::SizeOverflow)?;
+        *staged_bytes = staged_bytes
+            .checked_add(added)
+            .ok_or(FnxReadError::SizeOverflow)?;
         source_admit("staging bytes", *staged_bytes as u128, byte_limit as u128)?;
     }
     output.push(value);

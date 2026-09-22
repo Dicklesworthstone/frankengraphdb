@@ -150,7 +150,12 @@ fn minority_cannot_commit_and_new_leader_replaces_only_uncommitted_suffix() {
     cluster.drain();
     for state in cluster.disk.values() {
         assert_eq!(state.commit_index(), 3);
-        assert!(!state.entries().iter().any(|entry| entry.command == Some(111)));
+        assert!(
+            !state
+                .entries()
+                .iter()
+                .any(|entry| entry.command == Some(111))
+        );
         assert_eq!(state.entries()[2].command, Some(222));
     }
     assert_eq!(cluster.nodes[&MemberId(1)].role().unwrap(), Role::Follower);
@@ -166,7 +171,12 @@ fn learner_replication_never_counts_as_a_vote() {
     assert_eq!(cluster.disk[&MemberId(4)].entries().len(), 2);
     assert_eq!(cluster.disk[&MemberId(1)].commit_index(), 1);
     assert_eq!(
-        cluster.nodes.get_mut(&MemberId(4)).unwrap().step(Event::ElectionTimeout).err(),
+        cluster
+            .nodes
+            .get_mut(&MemberId(4))
+            .unwrap()
+            .step(Event::ElectionTimeout)
+            .err(),
         Some(Error::NotVoter)
     );
 }
@@ -180,7 +190,10 @@ fn cancelled_and_failed_publication_release_no_messages_or_commands() {
     let id = pending.id();
     assert_eq!(node.role(), Err(Error::AwaitingDurability));
     assert_eq!(node.committed_after(0), Err(Error::AwaitingDurability));
-    assert_eq!(node.step(Event::Propose(7)).err(), Some(Error::AwaitingDurability));
+    assert_eq!(
+        node.step(Event::Propose(7)).err(),
+        Some(Error::AwaitingDurability)
+    );
     node.publication_failed();
     assert_eq!(node.persisted(id), Err(Error::RecoveryRequired));
     assert_eq!(node.durable_state().err(), Some(Error::RecoveryRequired));
@@ -214,7 +227,10 @@ fn granted_vote_survives_restart_and_duplicate_requires_no_write() {
         last_term: 0,
     };
     let output = publish(&mut node, message(2, 1, request.clone()));
-    assert!(matches!(output.messages[0].message, Message::Vote { granted: true, .. }));
+    assert!(matches!(
+        output.messages[0].message,
+        Message::Vote { granted: true, .. }
+    ));
     let state = node.durable_state().unwrap().clone();
     let mut node = Raft::recover(MemberId(1), state, Limits::default()).unwrap();
     let pending = node.step(message(2, 1, request.clone())).unwrap();
@@ -222,7 +238,10 @@ fn granted_vote_survives_restart_and_duplicate_requires_no_write() {
     let id = pending.id();
     node.persisted(id).unwrap();
     let output = publish(&mut node, message(3, 1, request));
-    assert!(matches!(output.messages[0].message, Message::Vote { granted: false, .. }));
+    assert!(matches!(
+        output.messages[0].message,
+        Message::Vote { granted: false, .. }
+    ));
     assert!(!output.reset_election_timer);
 }
 
@@ -231,40 +250,90 @@ fn duplicate_votes_and_responses_never_form_a_quorum() {
     let mut node = Raft::new(MemberId(1), config(5, &[]), Limits::default()).unwrap();
     publish(&mut node, Event::ElectionTimeout);
     for _ in 0..10 {
-        publish(&mut node, message(2, 1, Message::Vote { term: 1, granted: true }));
+        publish(
+            &mut node,
+            message(
+                2,
+                1,
+                Message::Vote {
+                    term: 1,
+                    granted: true,
+                },
+            ),
+        );
     }
     assert_eq!(node.role().unwrap(), Role::Candidate);
-    let output = publish(&mut node, message(3, 1, Message::Vote { term: 1, granted: true }));
-    let request = output.messages.iter().find_map(|envelope| match &envelope.message {
-        Message::Append { request, .. } if envelope.to == MemberId(2) => Some(*request),
-        _ => None,
-    }).unwrap();
+    let output = publish(
+        &mut node,
+        message(
+            3,
+            1,
+            Message::Vote {
+                term: 1,
+                granted: true,
+            },
+        ),
+    );
+    let request = output
+        .messages
+        .iter()
+        .find_map(|envelope| match &envelope.message {
+            Message::Append { request, .. } if envelope.to == MemberId(2) => Some(*request),
+            _ => None,
+        })
+        .unwrap();
     for _ in 0..10 {
-        publish(&mut node, message(2, 1, Message::Appended {
-            term: 1,
-            request,
-            success: true,
-            conflict_next: u64::MAX,
-        }));
+        publish(
+            &mut node,
+            message(
+                2,
+                1,
+                Message::Appended {
+                    term: 1,
+                    request,
+                    success: true,
+                    conflict_next: u64::MAX,
+                },
+            ),
+        );
     }
     assert_eq!(node.durable_state().unwrap().commit_index(), 0);
 }
 
 #[test]
 fn heartbeat_commits_only_the_prefix_it_actually_matches() {
-    let state = PersistentState::from_authenticated_parts(config(3, &[]), 3, None, 1, vec![
-        Entry { term: 1, command: Some(1) },
-        Entry { term: 2, command: Some(999) },
-    ]);
+    let state = PersistentState::from_authenticated_parts(
+        config(3, &[]),
+        3,
+        None,
+        1,
+        vec![
+            Entry {
+                term: 1,
+                command: Some(1),
+            },
+            Entry {
+                term: 2,
+                command: Some(999),
+            },
+        ],
+    );
     let mut node = Raft::recover(MemberId(2), state, Limits::default()).unwrap();
-    publish(&mut node, message(1, 2, Message::Append {
-        term: 3,
-        request: 1,
-        prev_index: 1,
-        prev_term: 1,
-        entries: vec![],
-        leader_commit: 2,
-    }));
+    publish(
+        &mut node,
+        message(
+            1,
+            2,
+            Message::Append {
+                term: 3,
+                request: 1,
+                prev_index: 1,
+                prev_term: 1,
+                entries: vec![],
+                leader_commit: 2,
+            },
+        ),
+    );
     assert_eq!(node.durable_state().unwrap().commit_index(), 1);
 }
 
@@ -274,7 +343,12 @@ fn wrong_domain_configuration_and_peer_cannot_advance_term() {
     publish(&mut node, Event::Heartbeat);
     for (domain, configuration, from, error) in [
         (Domain([9; 32]), [2; 32], MemberId(2), Error::WrongDomain),
-        (Domain([1; 32]), [9; 32], MemberId(2), Error::WrongConfiguration),
+        (
+            Domain([1; 32]),
+            [9; 32],
+            MemberId(2),
+            Error::WrongConfiguration,
+        ),
         (Domain([1; 32]), [2; 32], MemberId(9), Error::UnknownMember),
     ] {
         let event = Event::Receive(Envelope {
@@ -282,7 +356,11 @@ fn wrong_domain_configuration_and_peer_cannot_advance_term() {
             configuration,
             from,
             to: MemberId(1),
-            message: Message::RequestVote { term: 99, last_index: 0, last_term: 0 },
+            message: Message::RequestVote {
+                term: 99,
+                last_index: 0,
+                last_term: 0,
+            },
         });
         assert_eq!(node.step(event).err(), Some(error));
         assert_eq!(node.durable_state().unwrap().term(), 0);
@@ -291,18 +369,49 @@ fn wrong_domain_configuration_and_peer_cannot_advance_term() {
 
 #[test]
 fn log_freshness_is_lexicographic_term_then_index() {
-    let state = PersistentState::from_authenticated_parts(config(3, &[]), 5, None, 0, vec![
-        Entry { term: 4, command: Some(1) },
-    ]);
+    let state = PersistentState::from_authenticated_parts(
+        config(3, &[]),
+        5,
+        None,
+        0,
+        vec![Entry {
+            term: 4,
+            command: Some(1),
+        }],
+    );
     let mut node = Raft::recover(MemberId(1), state, Limits::default()).unwrap();
-    let output = publish(&mut node, message(2, 1, Message::RequestVote {
-        term: 6, last_index: 200, last_term: 3,
-    }));
-    assert!(matches!(output.messages[0].message, Message::Vote { granted: false, .. }));
-    let output = publish(&mut node, message(3, 1, Message::RequestVote {
-        term: 6, last_index: 1, last_term: 5,
-    }));
-    assert!(matches!(output.messages[0].message, Message::Vote { granted: true, .. }));
+    let output = publish(
+        &mut node,
+        message(
+            2,
+            1,
+            Message::RequestVote {
+                term: 6,
+                last_index: 200,
+                last_term: 3,
+            },
+        ),
+    );
+    assert!(matches!(
+        output.messages[0].message,
+        Message::Vote { granted: false, .. }
+    ));
+    let output = publish(
+        &mut node,
+        message(
+            3,
+            1,
+            Message::RequestVote {
+                term: 6,
+                last_index: 1,
+                last_term: 5,
+            },
+        ),
+    );
+    assert!(matches!(
+        output.messages[0].message,
+        Message::Vote { granted: true, .. }
+    ));
 }
 
 #[test]
@@ -310,35 +419,77 @@ fn old_term_entries_wait_for_a_current_term_quorum() {
     let mut cluster = Cluster::new(3, &[], 1);
     for id in 1..=3 {
         let id = MemberId(id);
-        let state = PersistentState::from_authenticated_parts(config(3, &[]), 1, None, 0, vec![
-            Entry { term: 1, command: Some(42) },
-        ]);
+        let state = PersistentState::from_authenticated_parts(
+            config(3, &[]),
+            1,
+            None,
+            0,
+            vec![Entry {
+                term: 1,
+                command: Some(42),
+            }],
+        );
         cluster.disk.insert(id, state);
         cluster.restart(id);
     }
     cluster.elect(1);
     for state in cluster.disk.values() {
         assert_eq!(state.commit_index(), 2);
-        assert_eq!(state.entries()[1], Entry { term: 2, command: None });
+        assert_eq!(
+            state.entries()[1],
+            Entry {
+                term: 2,
+                command: None
+            }
+        );
     }
 }
 
 #[test]
 fn malformed_append_and_committed_conflict_leave_state_unchanged() {
-    let state = PersistentState::from_authenticated_parts(config(3, &[]), 2, None, 1, vec![
-        Entry { term: 1, command: Some(1) },
-    ]);
+    let state = PersistentState::from_authenticated_parts(
+        config(3, &[]),
+        2,
+        None,
+        1,
+        vec![Entry {
+            term: 1,
+            command: Some(1),
+        }],
+    );
     let mut node = Raft::recover(MemberId(2), state.clone(), Limits::default()).unwrap();
-    let event = message(1, 2, Message::Append {
-        term: 3, request: 1, prev_index: 0, prev_term: 0,
-        entries: vec![Entry { term: 2, command: Some(2) }], leader_commit: 1,
-    });
+    let event = message(
+        1,
+        2,
+        Message::Append {
+            term: 3,
+            request: 1,
+            prev_index: 0,
+            prev_term: 0,
+            entries: vec![Entry {
+                term: 2,
+                command: Some(2),
+            }],
+            leader_commit: 1,
+        },
+    );
     assert_eq!(node.step(event).err(), Some(Error::CommittedConflict));
     assert_eq!(node.durable_state().unwrap(), &state);
-    let event = message(1, 2, Message::Append {
-        term: 3, request: 1, prev_index: u64::MAX, prev_term: 1,
-        entries: vec![Entry { term: 2, command: Some(2) }], leader_commit: 1,
-    });
+    let event = message(
+        1,
+        2,
+        Message::Append {
+            term: 3,
+            request: 1,
+            prev_index: u64::MAX,
+            prev_term: 1,
+            entries: vec![Entry {
+                term: 2,
+                command: Some(2),
+            }],
+            leader_commit: 1,
+        },
+    );
     assert_eq!(node.step(event).err(), Some(Error::InvalidMessage));
     assert_eq!(node.durable_state().unwrap(), &state);
 }
@@ -357,7 +508,7 @@ fn seeded_reordering_duplicates_loss_and_restarts_preserve_committed_prefixes() 
                 random ^= random << 17;
                 if let Some(envelope) = cluster.queue.pop_front() {
                     match random % 5 {
-                        0 => {} // loss; heartbeat retransmits the pending range
+                        0 => {}                                 // loss; heartbeat retransmits the pending range
                         1 => cluster.queue.push_back(envelope), // reorder
                         2 => {
                             cluster.queue.push_back(envelope.clone());

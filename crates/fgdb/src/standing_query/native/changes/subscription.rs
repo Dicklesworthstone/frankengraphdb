@@ -177,7 +177,10 @@ impl NativeSubscription {
         if self.closed {
             return Err(SubscriptionError::Closed);
         }
-        let current = database.admitted_standing_query(cx, &self.handle)?.status().1;
+        let current = database
+            .admitted_standing_query(cx, &self.handle)?
+            .status()
+            .1;
         if self.replay.is_some() {
             return Err(SubscriptionError::ReplayAlreadyEnabled);
         }
@@ -186,11 +189,20 @@ impl NativeSubscription {
         }
         if let Some(from) = self.acknowledged {
             if from != current {
-                return Err(StandingQueryError::DeltaUnavailable { from, frontier: current }.into());
+                return Err(StandingQueryError::DeltaUnavailable {
+                    from,
+                    frontier: current,
+                }
+                .into());
             }
         }
         let replay = database.register_standing_replay(
-            cx, &self.handle, max_ticks, max_rows, max_payload_units, policy,
+            cx,
+            &self.handle,
+            max_ticks,
+            max_rows,
+            max_payload_units,
+            policy,
         )?;
         // Exclusive database access spans admission and linking. Nothing
         // fallible follows registry publication, so no orphan sink can escape.
@@ -237,7 +249,10 @@ impl NativeSubscription {
         if self.closed {
             return Err(SubscriptionError::Closed);
         }
-        let current = database.admitted_standing_query(cx, &self.handle)?.status().1;
+        let current = database
+            .admitted_standing_query(cx, &self.handle)?
+            .status()
+            .1;
         if let Some(pending) = &self.pending {
             return Ok(Some(Arc::clone(pending)));
         }
@@ -247,15 +262,24 @@ impl NativeSubscription {
         if self.acknowledged == Some(current) {
             return Ok(None);
         }
-        self.serial.checked_add(1).ok_or(SubscriptionError::ReceiptExhausted)?;
+        self.serial
+            .checked_add(1)
+            .ok_or(SubscriptionError::ReceiptExhausted)?;
         if let (Some(from), Some(replay)) = (self.acknowledged, self.replay.as_ref()) {
-            let frame = database.standing_replay_next(cx, replay, from, policy)?
-                .ok_or(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
+            let frame = database
+                .standing_replay_next(cx, replay, from, policy)?
+                .ok_or(StandingQueryError::Delivery(
+                    StandingQueryFailure::InvalidDelta,
+                ))?;
             if frame.from() != from || from.checked_successor().ok() != Some(frame.frontier()) {
-                return Err(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta).into());
+                return Err(
+                    StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta).into(),
+                );
             }
             cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
-            return self.publish_shared(frame.frontier(), frame.shared_rows()).map(Some);
+            return self
+                .publish_shared(frame.frontier(), frame.shared_rows())
+                .map(Some);
         }
         let (frontier, rows) = match self.acknowledged {
             Some(from) => database.standing_native_delta(cx, &self.handle, from, policy)?,
@@ -284,9 +308,15 @@ impl NativeSubscription {
         if self.pending.is_some() {
             return Err(SubscriptionError::Unacknowledged);
         }
-        let serial = self.serial.checked_add(1).ok_or(SubscriptionError::ReceiptExhausted)?;
+        let serial = self
+            .serial
+            .checked_add(1)
+            .ok_or(SubscriptionError::ReceiptExhausted)?;
         let frame = Arc::new(SubscriptionBatch {
-            receipt: SubscriptionReceipt { owner: Arc::clone(&self.owner), serial },
+            receipt: SubscriptionReceipt {
+                owner: Arc::clone(&self.owner),
+                serial,
+            },
             from: self.acknowledged,
             frontier,
             rows,
@@ -313,7 +343,9 @@ impl NativeSubscription {
         if self.last_ack == Some(receipt.serial) {
             return self.acknowledged.ok_or(SubscriptionError::InvalidReceipt);
         }
-        let pending = self.pending.as_ref()
+        let pending = self
+            .pending
+            .as_ref()
             .filter(|frame| frame.receipt.serial == receipt.serial)
             .ok_or(SubscriptionError::InvalidReceipt)?;
         let frontier = pending.frontier;
@@ -442,7 +474,10 @@ mod tests {
         sub.close();
         sub.close();
         assert!(sub.is_closed());
-        assert!(matches!(sub.restart_from_current(), Err(SubscriptionError::Closed)));
+        assert!(matches!(
+            sub.restart_from_current(),
+            Err(SubscriptionError::Closed)
+        ));
         assert!(matches!(
             sub.acknowledge(frame.receipt()),
             Err(SubscriptionError::Closed)

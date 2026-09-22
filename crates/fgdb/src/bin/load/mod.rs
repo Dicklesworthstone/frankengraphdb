@@ -40,14 +40,23 @@ pub(super) async fn run<V: Vfs + Clone>(
     }
     // Preserve Saved V1's full raw source/binding identity while sealing it
     // without keeping the entire source file or its decoded rows resident.
-    let binding = format!("\n{:?}\n{:?}\n{:?}\n{}",
-        options.labels, options.relations, options.properties, options.coordinate.0);
-    let source = input::Input::open(&cx, options.input.as_ref().expect("required input"),
-        binding.as_bytes(), policy.max_source_rows).map_err(|error| {
-            if error.kind() == io::ErrorKind::InvalidData {
-                Failure::query(error.to_string())
-            } else { Failure::io(error) }
-        })?;
+    let binding = format!(
+        "\n{:?}\n{:?}\n{:?}\n{}",
+        options.labels, options.relations, options.properties, options.coordinate.0
+    );
+    let source = input::Input::open(
+        &cx,
+        options.input.as_ref().expect("required input"),
+        binding.as_bytes(),
+        policy.max_source_rows,
+    )
+    .map_err(|error| {
+        if error.kind() == io::ErrorKind::InvalidData {
+            Failure::query(error.to_string())
+        } else {
+            Failure::io(error)
+        }
+    })?;
     let rows = Rows::new(source.reader(), &cx, options, resolver);
     // Validate all format/shape/key failures before touching a checkpoint. Drop
     // these temporary key sets before recovery maps or the engine's preflight.
@@ -67,7 +76,8 @@ pub(super) async fn run<V: Vfs + Clone>(
             if keys.contains(key) {
                 return Err(line_error(index + 1, "DuplicateCallerKey", key));
             }
-            key_bytes = key_bytes.checked_add(key.len())
+            key_bytes = key_bytes
+                .checked_add(key.len())
                 .filter(|&bytes| bytes <= policy.max_total_key_bytes)
                 .ok_or_else(|| line_error(index + 1, "SourceLimit", "total_key_bytes"))?;
             keys.insert(key.clone());
@@ -131,7 +141,13 @@ pub(super) async fn run<V: Vfs + Clone>(
         let mut replay = rows.clone();
         for batch in db.delta_since(base).map_err(invalid)? {
             cx.checkpoint().map_err(Failure::io)?;
-            reconcile(batch, &mut replay, source.records(), options.rows_per_chunk, &mut checkpoint)?;
+            reconcile(
+                batch,
+                &mut replay,
+                source.records(),
+                options.rows_per_chunk,
+                &mut checkpoint,
+            )?;
             if checkpoint.frontier == saved.checkpoint.frontier {
                 same_checkpoint(&saved.checkpoint, &checkpoint)?;
             }
@@ -217,11 +233,21 @@ pub(super) async fn run<V: Vfs + Clone>(
                     line_error(row.saturating_add(1), "Source", source)
                 }
             }
-            BulkLoadErrorKind::SourceChanged { row } =>
-                line_error(row.saturating_add(1), "SourceChanged", "source replay differs"),
-            BulkLoadErrorKind::SourceLimit { row, dimension, limit, observed } =>
-                line_error(row.saturating_add(1), "SourceLimit",
-                    format!("{dimension}: observed {observed}, limit {limit}")),
+            BulkLoadErrorKind::SourceChanged { row } => line_error(
+                row.saturating_add(1),
+                "SourceChanged",
+                "source replay differs",
+            ),
+            BulkLoadErrorKind::SourceLimit {
+                row,
+                dimension,
+                limit,
+                observed,
+            } => line_error(
+                row.saturating_add(1),
+                "SourceLimit",
+                format!("{dimension}: observed {observed}, limit {limit}"),
+            ),
             kind => line_error(e.committed.next_row + 1, "BulkLoad", format!("{kind:?}")),
         })?;
     if robot {
@@ -254,15 +280,31 @@ struct Rows<'a> {
     failed: bool,
 }
 impl<'a> Rows<'a> {
-    fn new(reader: input::Reader, cx: &'a fgdb_types::QueryCx, options: &'a Options,
-        resolver: Option<&'a fgdb::PinnedTzdb>) -> Self {
-        Self { reader, cx, options, resolver, failed: false }
+    fn new(
+        reader: input::Reader,
+        cx: &'a fgdb_types::QueryCx,
+        options: &'a Options,
+        resolver: Option<&'a fgdb::PinnedTzdb>,
+    ) -> Self {
+        Self {
+            reader,
+            cx,
+            options,
+            resolver,
+            failed: false,
+        }
     }
 }
 #[derive(Debug)]
-struct RowError { line: usize, detail: RowErrorDetail }
+struct RowError {
+    line: usize,
+    detail: RowErrorDetail,
+}
 #[derive(Debug)]
-enum RowErrorDetail { Read(io::Error), Decode(String) }
+enum RowErrorDetail {
+    Read(io::Error),
+    Decode(String),
+}
 impl std::fmt::Display for RowError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.detail {
@@ -273,22 +315,36 @@ impl std::fmt::Display for RowError {
 }
 impl std::error::Error for RowError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.detail { RowErrorDetail::Read(error) => Some(error), _ => None }
+        match &self.detail {
+            RowErrorDetail::Read(error) => Some(error),
+            _ => None,
+        }
     }
 }
 impl RowError {
-    fn failure(&self) -> Failure { line_error(self.line, "MalformedRow", self) }
+    fn failure(&self) -> Failure {
+        line_error(self.line, "MalformedRow", self)
+    }
 }
 impl Iterator for Rows<'_> {
     type Item = Result<BulkRow, RowError>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.failed { return None; }
+        if self.failed {
+            return None;
+        }
         let line = self.reader.line();
         let result = match self.reader.next_line(self.cx) {
             Ok(None) => return None,
-            Err(error) => Err(RowError { line, detail: RowErrorDetail::Read(error) }),
-            Ok(Some(text)) => parse_row(&text, self.options, self.resolver)
-                .map_err(|error| RowError { line, detail: RowErrorDetail::Decode(error) }),
+            Err(error) => Err(RowError {
+                line,
+                detail: RowErrorDetail::Read(error),
+            }),
+            Ok(Some(text)) => {
+                parse_row(&text, self.options, self.resolver).map_err(|error| RowError {
+                    line,
+                    detail: RowErrorDetail::Decode(error),
+                })
+            }
         };
         self.failed = result.is_err();
         Some(result)
@@ -328,10 +384,17 @@ fn reconcile(
     size: usize,
     cp: &mut BulkLoadCheckpoint,
 ) -> Result<(), Failure> {
-    let count = source_rows.checked_sub(cp.next_row)
-        .ok_or_else(|| invalid("source shorter than history"))?.min(size);
-    let end = cp.next_row.checked_add(count).ok_or_else(|| invalid("row counter overflow"))?;
-    let next_chunk = cp.committed_chunks.checked_add(1)
+    let count = source_rows
+        .checked_sub(cp.next_row)
+        .ok_or_else(|| invalid("source shorter than history"))?
+        .min(size);
+    let end = cp
+        .next_row
+        .checked_add(count)
+        .ok_or_else(|| invalid("row counter overflow"))?;
+    let next_chunk = cp
+        .committed_chunks
+        .checked_add(1)
         .ok_or_else(|| invalid("chunk counter overflow"))?;
     if count == 0 || Some(batch.commit_seq().0) != cp.frontier.0.checked_add(1) {
         return Err(invalid("unexpected history after import"));
@@ -377,7 +440,9 @@ fn reconcile(
     let mut vs = vs.into_iter();
     let mut es = es.into_iter();
     for _ in 0..count {
-        let row = rows.next().ok_or_else(|| invalid("source shorter than history"))?
+        let row = rows
+            .next()
+            .ok_or_else(|| invalid("source shorter than history"))?
             .map_err(|error| error.failure())?;
         match row {
             BulkRow::Vertex(v) => {

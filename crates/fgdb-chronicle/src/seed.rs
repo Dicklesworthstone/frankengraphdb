@@ -14,7 +14,9 @@
 use crate::identity::{CryptoVerificationSink, EncodedObject};
 use crate::store::RootPublicationEvidence;
 use crate::symbolize::RecoveryTarget;
-use crate::transfer::{BondedPull, DonorId, PullError, PullLimits, PullRequest, SymbolAdmission, VerifiedObject};
+use crate::transfer::{
+    BondedPull, DonorId, PullError, PullLimits, PullRequest, SymbolAdmission, VerifiedObject,
+};
 use fgdb_crypto::Digest;
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 use std::collections::BTreeMap;
@@ -116,14 +118,10 @@ impl SeedPlan {
         objects: impl IntoIterator<Item = SeedObjectSpec>,
         limits: SeedLimits,
     ) -> Result<Self, SeedError> {
-        if limits.max_objects == 0
-            || limits.max_object_bytes == 0
-            || limits.max_total_bytes == 0
-        {
+        if limits.max_objects == 0 || limits.max_object_bytes == 0 || limits.max_total_bytes == 0 {
             return Err(SeedError::InvalidLimits);
         }
-        if anchor.publication_generation == 0
-            || (anchor.raft_index == 0) != (anchor.raft_term == 0)
+        if anchor.publication_generation == 0 || (anchor.raft_index == 0) != (anchor.raft_term == 0)
         {
             return Err(SeedError::InvalidAnchor);
         }
@@ -154,7 +152,11 @@ impl SeedPlan {
                 return Err(SeedError::MissingRoot);
             }
         }
-        Ok(Self { anchor, inventory, total_bytes })
+        Ok(Self {
+            anchor,
+            inventory,
+            total_bytes,
+        })
     }
 
     pub fn anchor(&self) -> &SeedAnchor {
@@ -230,7 +232,9 @@ impl SeedInstallation<'_> {
     /// Verified incoming encodings, not a replacement for durable placement
     /// descriptors. Storage must publish valid local placement/ownership roots.
     pub fn incoming_encodings(&self) -> impl Iterator<Item = (ObjectId, Digest)> + '_ {
-        self.encodings.iter().map(|(oid, encoding)| (ObjectId(*oid), *encoding))
+        self.encodings
+            .iter()
+            .map(|(oid, encoding)| (ObjectId(*oid), *encoding))
     }
 }
 
@@ -287,9 +291,10 @@ impl ReplicaSeed {
     }
 
     pub fn missing_objects(&self) -> impl Iterator<Item = &SeedObjectSpec> {
-        self.plan.inventory.iter().filter_map(|(oid, spec)| {
-            (!self.published.contains_key(oid)).then_some(spec)
-        })
+        self.plan
+            .inventory
+            .iter()
+            .filter_map(|(oid, spec)| (!self.published.contains_key(oid)).then_some(spec))
     }
 
     pub fn published_count(&self) -> usize {
@@ -311,9 +316,16 @@ impl ReplicaSeed {
     }
 
     fn next_id(&mut self, kind: PublicationKind) -> Result<SeedPublicationId, SeedError> {
-        let serial = self.serial.checked_add(1).ok_or(SeedError::GenerationExhausted)?;
+        let serial = self
+            .serial
+            .checked_add(1)
+            .ok_or(SeedError::GenerationExhausted)?;
         self.serial = serial;
-        Ok(SeedPublicationId { session: Arc::clone(&self.session), serial, kind })
+        Ok(SeedPublicationId {
+            session: Arc::clone(&self.session),
+            serial,
+            kind,
+        })
     }
 
     /// Admit one inventory-bound bonded pull before emitting any ATP requests.
@@ -347,7 +359,11 @@ impl ReplicaSeed {
         if target.object_id != oid {
             return Err(PullError::InvalidTarget.into());
         }
-        let spec = self.plan.inventory.get(&oid.0).ok_or(SeedError::UnexpectedObject)?;
+        let spec = self
+            .plan
+            .inventory
+            .get(&oid.0)
+            .ok_or(SeedError::UnexpectedObject)?;
         if self.published.contains_key(&oid.0) {
             return Err(SeedError::AlreadyPublished.into());
         }
@@ -358,7 +374,10 @@ impl ReplicaSeed {
             return Err(SeedError::LengthMismatch.into());
         }
         let pull = BondedPull::new(encoding, target, dek, donors, limits)?;
-        Ok(SeedObjectPull { seed: self, pull: Some(pull) })
+        Ok(SeedObjectPull {
+            seed: self,
+            pull: Some(pull),
+        })
     }
 
     /// Stage one cryptographically verified object without marking it durable.
@@ -375,7 +394,11 @@ impl ReplicaSeed {
             return Err(SeedError::WrongNamespace);
         }
         let oid = object.object_id();
-        let spec = self.plan.inventory.get(&oid.0).ok_or(SeedError::UnexpectedObject)?;
+        let spec = self
+            .plan
+            .inventory
+            .get(&oid.0)
+            .ok_or(SeedError::UnexpectedObject)?;
         if self.published.contains_key(&oid.0) {
             return Err(SeedError::AlreadyPublished);
         }
@@ -394,15 +417,24 @@ impl ReplicaSeed {
     /// not acknowledge it and cannot advance missing/published object counts.
     pub fn pending_publication(&self) -> Result<ObjectPublication<'_>, SeedError> {
         self.open()?;
-        let (id, object) = self.pending_object.as_ref().ok_or(SeedError::StalePublication)?;
-        Ok(ObjectPublication { id: id.clone(), object })
+        let (id, object) = self
+            .pending_object
+            .as_ref()
+            .ok_or(SeedError::StalePublication)?;
+        Ok(ObjectPublication {
+            id: id.clone(),
+            object,
+        })
     }
 
     /// Call only after all required object/placement/ownership publication
     /// barriers complete. This method is not evidence that storage was called.
     pub fn object_published(&mut self, id: SeedPublicationId) -> Result<ObjectId, SeedError> {
         self.open()?;
-        let (expected, object) = self.pending_object.as_ref().ok_or(SeedError::StalePublication)?;
+        let (expected, object) = self
+            .pending_object
+            .as_ref()
+            .ok_or(SeedError::StalePublication)?;
         if expected != &id {
             return Err(SeedError::StalePublication);
         }
@@ -426,8 +458,16 @@ impl ReplicaSeed {
             let id = self.next_id(PublicationKind::Install)?;
             self.installing = Some(id);
         }
-        let id = self.installing.as_ref().ok_or(SeedError::StalePublication)?.clone();
-        Ok(SeedInstallation { id, plan: &self.plan, encodings: &self.published })
+        let id = self
+            .installing
+            .as_ref()
+            .ok_or(SeedError::StalePublication)?
+            .clone();
+        Ok(SeedInstallation {
+            id,
+            plan: &self.plan,
+            encodings: &self.published,
+        })
     }
 
     /// Complete only for the exact post-sync root reread evidence. The caller

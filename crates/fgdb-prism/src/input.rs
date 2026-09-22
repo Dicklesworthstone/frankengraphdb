@@ -2,8 +2,8 @@
 //! recipes, not secure-view constructors or capabilities.
 
 use crate::{
-    FnxBindError, FnxExecutionError, FnxExecutionLimits, FnxResult,
-    ProjectionError, ProjectionLimits, ProjectionSpec,
+    FnxBindError, FnxExecutionError, FnxExecutionLimits, FnxResult, ProjectionError,
+    ProjectionLimits, ProjectionSpec,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
@@ -22,7 +22,10 @@ pub enum FnxWeightSpec {
     Unit,
     /// Null and absent are both missing. Only finite Float or EXACTLY
     /// representable Int values are admitted; no text/boolean/decimal coercion.
-    Property { key: PropertyKeyId, missing: MissingWeightPolicy },
+    Property {
+        key: PropertyKeyId,
+        missing: MissingWeightPolicy,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FnxWeightError {
@@ -33,16 +36,23 @@ pub enum FnxWeightError {
 }
 impl FnxWeightSpec {
     pub fn property_key(self) -> Option<PropertyKeyId> {
-        match self { Self::Unit => None, Self::Property { key, .. } => Some(key) }
+        match self {
+            Self::Unit => None,
+            Self::Property { key, .. } => Some(key),
+        }
     }
     pub fn resolve(self, value: Option<&CanonicalScalar>) -> Result<f64, FnxWeightError> {
-        let Self::Property { missing, .. } = self else { return Ok(1.0); };
+        let Self::Property { missing, .. } = self else {
+            return Ok(1.0);
+        };
         let value = match value {
-            None | Some(CanonicalScalar::Null) => return match missing {
-                MissingWeightPolicy::Reject => Err(FnxWeightError::Missing),
-                MissingWeightPolicy::Unit => Ok(1.0),
-                MissingWeightPolicy::Zero => Ok(0.0),
-            },
+            None | Some(CanonicalScalar::Null) => {
+                return match missing {
+                    MissingWeightPolicy::Reject => Err(FnxWeightError::Missing),
+                    MissingWeightPolicy::Unit => Ok(1.0),
+                    MissingWeightPolicy::Zero => Ok(0.0),
+                };
+            }
             Some(CanonicalScalar::Float(value)) => value.get(),
             Some(CanonicalScalar::Int(value)) => {
                 let converted = *value as f64;
@@ -55,7 +65,9 @@ impl FnxWeightSpec {
             }
             _ => return Err(FnxWeightError::NotNumeric),
         };
-        if !value.is_finite() { return Err(FnxWeightError::NonFinite); }
+        if !value.is_finite() {
+            return Err(FnxWeightError::NonFinite);
+        }
         Ok(if value == 0.0 { 0.0 } else { value })
     }
 }
@@ -75,15 +87,27 @@ impl FnxSelection {
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:induced-selection:v1");
         match self.vertex_label {
-            None => { hash.update(&[0]); }
-            Some(label) => { hash.update(&[1]); hash.update(&label.0.to_le_bytes()); }
+            None => {
+                hash.update(&[0]);
+            }
+            Some(label) => {
+                hash.update(&[1]);
+                hash.update(&label.0.to_le_bytes());
+            }
         }
         match self.relation {
-            None => { hash.update(&[0]); }
-            Some(relation) => { hash.update(&[1]); hash.update(&relation.0.to_le_bytes()); }
+            None => {
+                hash.update(&[0]);
+            }
+            Some(relation) => {
+                hash.update(&[1]);
+                hash.update(&relation.0.to_le_bytes());
+            }
         }
         match self.weight {
-            FnxWeightSpec::Unit => { hash.update(&[0]); }
+            FnxWeightSpec::Unit => {
+                hash.update(&[0]);
+            }
             FnxWeightSpec::Property { key, missing } => {
                 hash.update(&[1, missing as u8]);
                 hash.update(&key.0.to_le_bytes());
@@ -122,10 +146,17 @@ pub enum FnxReadError<S, C> {
     Cancelled(C),
     Projection(ProjectionError),
     Execution(FnxExecutionError<C>),
-    SourceLimit { resource: &'static str, limit: u128, requested: u128 },
+    SourceLimit {
+        resource: &'static str,
+        limit: u128,
+        requested: u128,
+    },
     SizeOverflow,
     AllocationFailed,
-    Weight { edge: EId, reason: FnxWeightError },
+    Weight {
+        edge: EId,
+        reason: FnxWeightError,
+    },
 }
 impl<S: core::fmt::Display, C: core::fmt::Display> core::fmt::Display for FnxReadError<S, C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -135,14 +166,23 @@ impl<S: core::fmt::Display, C: core::fmt::Display> core::fmt::Display for FnxRea
             Self::Cancelled(error) => write!(f, "Prism source cancelled: {error}"),
             Self::Projection(error) => error.fmt(f),
             Self::Execution(error) => error.fmt(f),
-            Self::SourceLimit { resource, limit, requested } => write!(f, "Prism source {resource} admission refused: {requested} > {limit}"),
+            Self::SourceLimit {
+                resource,
+                limit,
+                requested,
+            } => write!(
+                f,
+                "Prism source {resource} admission refused: {requested} > {limit}"
+            ),
             Self::SizeOverflow => f.write_str("Prism source accounting overflow"),
             Self::AllocationFailed => f.write_str("Prism source allocation failed"),
             Self::Weight { reason, .. } => write!(f, "Prism selected weight refused: {reason:?}"),
         }
     }
 }
-impl<S: core::error::Error + 'static, C: core::error::Error + 'static> core::error::Error for FnxReadError<S, C> {
+impl<S: core::error::Error + 'static, C: core::error::Error + 'static> core::error::Error
+    for FnxReadError<S, C>
+{
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Bind(error) => Some(error),
@@ -170,6 +210,10 @@ impl FnxReadResult {
         hash.update(b"fgdb:prism:embedded-read:v1");
         hash.update(&analytics.certificate.digest.0);
         hash.update(&selection.digest().0);
-        Self { analytics, selection, digest: hash.finalize() }
+        Self {
+            analytics,
+            selection,
+            digest: hash.finalize(),
+        }
     }
 }

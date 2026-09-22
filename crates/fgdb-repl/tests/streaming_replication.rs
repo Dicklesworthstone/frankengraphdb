@@ -12,18 +12,18 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
-use fgdb_chronicle::transfer::{BondedPull, DonorId, PullError, PullLimits, PullRequest};
 use fgdb_chronicle::seed::{ObjectPublication, SeedAnchor, SeedLimits, SeedObjectSpec, SeedPlan};
 use fgdb_chronicle::store::RootPublicationEvidence;
+use fgdb_chronicle::transfer::{BondedPull, DonorId, PullError, PullLimits, PullRequest};
 use fgdb_order::{
-    Configuration, Domain, Envelope, Error as RaftError, Event, Limits, MemberId,
-    Message, PersistentState, Raft, SnapshotCut, SnapshotTransfer,
+    Configuration, Domain, Envelope, Error as RaftError, Event, Limits, MemberId, Message,
+    PersistentState, Raft, SnapshotCut, SnapshotTransfer,
 };
 use fgdb_repl::driver::bonded::streaming::{StreamingSeedSource, SymbolTransport, recover};
 use fgdb_repl::driver::bonded::{PullDriveError, ReplyOutcome};
 use fgdb_repl::driver::{
-    RaftPublisher, SeedAcquireError, SeedCatalog, SeedObjectSource, SeedPublisher,
-    SeedRecovery, sequence,
+    RaftPublisher, SeedAcquireError, SeedCatalog, SeedObjectSource, SeedPublisher, SeedRecovery,
+    sequence,
 };
 use fgdb_repl::{SnapshotCatchup, SnapshotPublication};
 use support::{DEK, Fixture};
@@ -99,7 +99,11 @@ impl SymbolTransport for Transport<'_> {
     ) -> impl Future<Output = Result<ReplyOutcome, Self::Error>> {
         let call = self.counters.started.get() + 1;
         self.counters.started.set(call);
-        assert_ne!(self.panic_on, Some(call), "injected adapter constructor panic");
+        assert_ne!(
+            self.panic_on,
+            Some(call),
+            "injected adapter constructor panic"
+        );
         self.counters.requests.borrow_mut().push(request);
         let live = self.counters.live.get() + 1;
         self.counters.live.set(live);
@@ -143,15 +147,28 @@ fn healthy_donors_finish_while_another_donor_never_replies() {
     let mut transport = Transport::healthy(&fixture);
     transport.silent = Some(DonorId(1));
     let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &DONORS, PullLimits::default(),
-    ).unwrap();
+        &fixture.encoding,
+        fixture.target(),
+        &DEK,
+        &DONORS,
+        PullLimits::default(),
+    )
+    .unwrap();
     let object = immediate(recover(&mut pull, &transport, &mut Vec::new(), 6)).unwrap();
     assert_eq!(object.plaintext(), fixture.plaintext);
     assert_eq!(pull.pending_count(), 0);
     assert_eq!(transport.counters.live.get(), 0);
     assert!(transport.counters.peak.get() <= 6);
-    assert_eq!(transport.counters.requests.borrow().iter()
-        .filter(|request| request.donor == DonorId(1)).count(), 2);
+    assert_eq!(
+        transport
+            .counters
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| request.donor == DonorId(1))
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -161,8 +178,13 @@ fn corrupt_and_disconnected_donors_do_not_cancel_healthy_recovery() {
     transport.unavailable = Some(DonorId(1));
     transport.corrupt = Some(DonorId(2));
     let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &DONORS, PullLimits::default(),
-    ).unwrap();
+        &fixture.encoding,
+        fixture.target(),
+        &DEK,
+        &DONORS,
+        PullLimits::default(),
+    )
+    .unwrap();
     let object = immediate(recover(&mut pull, &transport, &mut Vec::new(), 9)).unwrap();
     assert_eq!(object.plaintext(), fixture.plaintext);
     assert_eq!(pull.pending_count(), 0);
@@ -175,13 +197,26 @@ fn authenticated_wrong_coordinate_is_quarantined_not_miscredited() {
     let mut transport = Transport::healthy(&fixture);
     transport.misroute = Some(DonorId(1));
     let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &DONORS, PullLimits::default(),
-    ).unwrap();
+        &fixture.encoding,
+        fixture.target(),
+        &DEK,
+        &DONORS,
+        PullLimits::default(),
+    )
+    .unwrap();
     let object = immediate(recover(&mut pull, &transport, &mut Vec::new(), 6)).unwrap();
     assert_eq!(object.plaintext(), fixture.plaintext);
     assert_eq!(transport.counters.live.get(), 0);
-    assert_eq!(transport.counters.requests.borrow().iter()
-        .filter(|request| request.donor == DonorId(1)).count(), 2);
+    assert_eq!(
+        transport
+            .counters
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| request.donor == DonorId(1))
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -190,8 +225,13 @@ fn cancellation_preserves_verified_symbols_and_releases_every_credit() {
     let transport = Transport::healthy(&fixture);
     transport.suspend_after.set(Some(8));
     let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &DONORS, PullLimits::default(),
-    ).unwrap();
+        &fixture.encoding,
+        fixture.target(),
+        &DEK,
+        &DONORS,
+        PullLimits::default(),
+    )
+    .unwrap();
     let mut verification = Vec::new();
     {
         let mut future = pin!(recover(&mut pull, &transport, &mut verification, 8));
@@ -217,8 +257,13 @@ fn issuance_budget_exhaustion_drains_already_requested_useful_symbols() {
     };
     let transport = Transport::healthy(&fixture);
     let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &[DonorId(1)], limits,
-    ).unwrap();
+        &fixture.encoding,
+        fixture.target(),
+        &DEK,
+        &[DonorId(1)],
+        limits,
+    )
+    .unwrap();
     let object = immediate(recover(&mut pull, &transport, &mut Vec::new(), 6)).unwrap();
     assert_eq!(object.plaintext(), fixture.plaintext);
     assert_eq!(transport.counters.started.get(), fixture.sources);
@@ -234,8 +279,13 @@ fn esi_exhaustion_does_not_discard_in_flight_systematic_symbols() {
     };
     let transport = Transport::healthy(&fixture);
     let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &[DonorId(1)], limits,
-    ).unwrap();
+        &fixture.encoding,
+        fixture.target(),
+        &DEK,
+        &[DonorId(1)],
+        limits,
+    )
+    .unwrap();
     let object = immediate(recover(&mut pull, &transport, &mut Vec::new(), 6)).unwrap();
     assert_eq!(object.plaintext(), fixture.plaintext);
     assert_eq!(pull.pending_count(), 0);
@@ -249,15 +299,23 @@ fn fatal_error_and_constructor_panic_retire_the_entire_owned_batch() {
         transport.panic_on = panic_on;
         transport.fatal = Some(DonorId(1));
         let mut pull = BondedPull::new(
-            &fixture.encoding, fixture.target(), &DEK, &DONORS, PullLimits::default(),
-        ).unwrap();
+            &fixture.encoding,
+            fixture.target(),
+            &DEK,
+            &DONORS,
+            PullLimits::default(),
+        )
+        .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             immediate(recover(&mut pull, &transport, &mut Vec::new(), 6))
         }));
         if panic_on.is_some() {
             assert!(result.is_err());
         } else {
-            assert!(matches!(result.unwrap(), Err(PullDriveError::Transport("authority revoked"))));
+            assert!(matches!(
+                result.unwrap(),
+                Err(PullDriveError::Transport("authority revoked"))
+            ));
         }
         assert_eq!(pull.pending_count(), 0);
         assert_eq!(transport.counters.live.get(), 0);
@@ -270,8 +328,13 @@ fn instant_timeouts_cooperate_instead_of_monopolizing_the_executor() {
     let mut transport = Transport::healthy(&fixture);
     transport.timeouts_only = true;
     let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &DONORS, PullLimits::default(),
-    ).unwrap();
+        &fixture.encoding,
+        fixture.target(),
+        &DEK,
+        &DONORS,
+        PullLimits::default(),
+    )
+    .unwrap();
     let mut verification = Vec::new();
     {
         let mut future = pin!(recover(&mut pull, &transport, &mut verification, 6));
@@ -289,8 +352,13 @@ fn a_driver_does_not_steal_another_owners_reservations() {
     let fixture = Fixture::new(129);
     let transport = Transport::healthy(&fixture);
     let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &DONORS, PullLimits::default(),
-    ).unwrap();
+        &fixture.encoding,
+        fixture.target(),
+        &DEK,
+        &DONORS,
+        PullLimits::default(),
+    )
+    .unwrap();
     let request = pull.schedule(1).unwrap()[0];
     assert!(matches!(
         immediate(recover(&mut pull, &transport, &mut Vec::new(), 6)),
@@ -306,10 +374,12 @@ fn repeated_timeouts_preserve_the_original_request_budget() {
     let fixture = Fixture::new(130);
     let mut transport = Transport::healthy(&fixture);
     transport.timeouts_only = true;
-    let limits = PullLimits { max_requests: 20, ..PullLimits::default() };
-    let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &DONORS, limits,
-    ).unwrap();
+    let limits = PullLimits {
+        max_requests: 20,
+        ..PullLimits::default()
+    };
+    let mut pull =
+        BondedPull::new(&fixture.encoding, fixture.target(), &DEK, &DONORS, limits).unwrap();
     for _ in 0..2 {
         assert!(matches!(
             immediate(recover(&mut pull, &transport, &mut Vec::new(), 6)),
@@ -352,7 +422,9 @@ impl SeedCatalog for Catalog {
 
     fn recovery(&self, object: SeedObjectSpec) -> Result<SeedRecovery<'_>, Self::Error> {
         self.lookups.set(self.lookups.get() + 1);
-        let fixture = self.fixtures.iter()
+        let fixture = self
+            .fixtures
+            .iter()
             .find(|fixture| fixture.encoding.object_id() == object.object_id)
             .ok_or("object absent from pinned catalog")?;
         let mut target = fixture.target();
@@ -376,24 +448,36 @@ fn seed_inventory_and_namespace_mismatches_fail_before_network_requests() {
     let mut verification = Vec::new();
     let spec = catalog.spec(0);
     let mut source = StreamingSeedSource::new(
-        support::namespace(), &catalog, &transport, &mut verification, 6,
+        support::namespace(),
+        &catalog,
+        &transport,
+        &mut verification,
+        6,
     );
     let mut wrong = spec;
     wrong.object_kind += 1;
-    assert!(matches!(immediate(source.recover(wrong)), Err(SeedAcquireError::InvalidObject)));
+    assert!(matches!(
+        immediate(source.recover(wrong)),
+        Err(SeedAcquireError::InvalidObject)
+    ));
     wrong = spec;
     wrong.compressed_len += 1;
-    assert!(matches!(immediate(source.recover(wrong)), Err(SeedAcquireError::InvalidObject)));
+    assert!(matches!(
+        immediate(source.recover(wrong)),
+        Err(SeedAcquireError::InvalidObject)
+    ));
     assert!(source.active_object().is_none());
     assert_eq!(transport.counters.started.get(), 0);
     drop(source);
 
     let mut namespace = support::namespace();
     namespace.0[0] ^= 1;
-    let mut source = StreamingSeedSource::new(
-        namespace, &catalog, &transport, &mut verification, 6,
-    );
-    assert!(matches!(immediate(source.recover(spec)), Err(SeedAcquireError::WrongNamespace)));
+    let mut source =
+        StreamingSeedSource::new(namespace, &catalog, &transport, &mut verification, 6);
+    assert!(matches!(
+        immediate(source.recover(spec)),
+        Err(SeedAcquireError::WrongNamespace)
+    ));
     assert_eq!(transport.counters.started.get(), 0);
 }
 
@@ -405,7 +489,11 @@ fn seed_cancellation_resumes_the_same_pinned_object_without_resetting_progress()
     let mut verification = Vec::new();
     let spec = catalog.spec(0);
     let mut source = StreamingSeedSource::new(
-        support::namespace(), &catalog, &transport, &mut verification, 8,
+        support::namespace(),
+        &catalog,
+        &transport,
+        &mut verification,
+        8,
     );
     {
         let mut future = pin!(source.recover(spec));
@@ -417,7 +505,10 @@ fn seed_cancellation_resumes_the_same_pinned_object_without_resetting_progress()
     assert_eq!(source.retained_symbols(), 8);
     assert_eq!(transport.counters.live.get(), 0);
     let requests = transport.counters.started.get();
-    assert!(matches!(immediate(source.recover(catalog.spec(1))), Err(SeedAcquireError::RecoveryInProgress)));
+    assert!(matches!(
+        immediate(source.recover(catalog.spec(1))),
+        Err(SeedAcquireError::RecoveryInProgress)
+    ));
     assert_eq!(transport.counters.started.get(), requests);
     assert_eq!(source.retained_symbols(), 8);
     // Recovering a different object cannot silently replace the pinned closure.
@@ -438,11 +529,19 @@ fn seed_retry_does_not_reset_an_exhausted_request_budget() {
     transport.timeouts_only = true;
     let mut verification = Vec::new();
     let mut source = StreamingSeedSource::new(
-        support::namespace(), &catalog, &transport, &mut verification, 6,
+        support::namespace(),
+        &catalog,
+        &transport,
+        &mut verification,
+        6,
     );
     for _ in 0..2 {
-        assert!(matches!(immediate(source.recover(catalog.spec(0))),
-            Err(SeedAcquireError::Pull(PullDriveError::Pull(PullError::RequestBudget)))));
+        assert!(matches!(
+            immediate(source.recover(catalog.spec(0))),
+            Err(SeedAcquireError::Pull(PullDriveError::Pull(
+                PullError::RequestBudget
+            )))
+        ));
         assert_eq!(source.active_object(), Some(catalog.spec(0)));
         assert_eq!(transport.counters.live.get(), 0);
     }
@@ -457,11 +556,15 @@ struct CatalogTransport<'a> {
 impl<'a> CatalogTransport<'a> {
     fn with_silent_donor(catalog: &'a Catalog, donor: DonorId) -> Self {
         Self {
-            objects: catalog.fixtures.iter().map(|fixture| {
-                let mut transport = Transport::healthy(fixture);
-                transport.silent = Some(donor);
-                transport
-            }).collect(),
+            objects: catalog
+                .fixtures
+                .iter()
+                .map(|fixture| {
+                    let mut transport = Transport::healthy(fixture);
+                    transport.silent = Some(donor);
+                    transport
+                })
+                .collect(),
         }
     }
 }
@@ -469,9 +572,14 @@ impl<'a> CatalogTransport<'a> {
 impl SymbolTransport for CatalogTransport<'_> {
     type Error = &'static str;
 
-    fn request(&self, request: PullRequest) -> impl Future<Output = Result<ReplyOutcome, Self::Error>> {
+    fn request(
+        &self,
+        request: PullRequest,
+    ) -> impl Future<Output = Result<ReplyOutcome, Self::Error>> {
         async move {
-            let transport = self.objects.iter()
+            let transport = self
+                .objects
+                .iter()
                 .find(|transport| transport.fixture.encoding.object_id() == request.object_id)
                 .ok_or("transport has no authorized object route")?;
             transport.request(request).await
@@ -485,7 +593,10 @@ struct MemoryRaftRoot(Vec<PersistentState<u64>>);
 impl RaftPublisher<u64> for MemoryRaftRoot {
     type Error = &'static str;
 
-    fn publish(&mut self, state: &PersistentState<u64>) -> impl Future<Output = Result<(), Self::Error>> {
+    fn publish(
+        &mut self,
+        state: &PersistentState<u64>,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
         self.0.push(state.clone());
         ready(Ok(()))
     }
@@ -493,12 +604,20 @@ impl RaftPublisher<u64> for MemoryRaftRoot {
 
 fn seed_offer(catalog: &Catalog) -> (Raft<u64>, SnapshotTransfer, SeedPlan) {
     let config = Configuration::stable(
-        Domain([5; 32]), [6; 32], [MemberId(1), MemberId(2), MemberId(3)], [],
-    ).unwrap();
-    let roots: Vec<_> = catalog.fixtures.iter().map(|fixture| fixture.encoding.object_id()).collect();
-    let cut = SnapshotCut::from_authenticated_parts(
-        &config, roots[0].0, roots[1].0, roots[2].0, 12, 3,
-    ).unwrap();
+        Domain([5; 32]),
+        [6; 32],
+        [MemberId(1), MemberId(2), MemberId(3)],
+        [],
+    )
+    .unwrap();
+    let roots: Vec<_> = catalog
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.encoding.object_id())
+        .collect();
+    let cut =
+        SnapshotCut::from_authenticated_parts(&config, roots[0].0, roots[1].0, roots[2].0, 12, 3)
+            .unwrap();
     let anchor = SeedAnchor {
         namespace: support::namespace(),
         consensus_domain: config.domain().0,
@@ -516,20 +635,36 @@ fn seed_offer(catalog: &Catalog) -> (Raft<u64>, SnapshotTransfer, SeedPlan) {
     // Synthetic verifier output for a composition test. This is not a canonical
     // manifest parser, a signed availability certificate, or production storage.
     let plan = SeedPlan::from_authenticated_inventory(
-        anchor, (0..catalog.fixtures.len()).map(|index| catalog.spec(index)), SeedLimits::default(),
-    ).unwrap();
+        anchor,
+        (0..catalog.fixtures.len()).map(|index| catalog.spec(index)),
+        SeedLimits::default(),
+    )
+    .unwrap();
     let mut raft = Raft::new(MemberId(2), config.clone(), Limits::default()).unwrap();
     let mut root = MemoryRaftRoot::default();
-    let output = immediate(sequence(&mut raft, &mut root, Event::Receive(Envelope {
-        domain: config.domain(),
-        configuration: config.identity(),
-        from: MemberId(1),
-        to: MemberId(2),
-        message: Message::InstallSnapshot { term: 3, request: 1, snapshot: cut },
-    }))).unwrap();
+    let output = immediate(sequence(
+        &mut raft,
+        &mut root,
+        Event::Receive(Envelope {
+            domain: config.domain(),
+            configuration: config.identity(),
+            from: MemberId(1),
+            to: MemberId(2),
+            message: Message::InstallSnapshot {
+                term: 3,
+                request: 1,
+                snapshot: cut,
+            },
+        }),
+    ))
+    .unwrap();
     assert!(output.installed_snapshot.is_none());
     assert!(output.messages.is_empty());
-    (raft, output.snapshot_transfers.into_iter().next().unwrap(), plan)
+    (
+        raft,
+        output.snapshot_transfers.into_iter().next().unwrap(),
+        plan,
+    )
 }
 
 #[derive(Default)]
@@ -545,12 +680,18 @@ struct MemorySeedRoot {
 impl SeedPublisher<u64> for MemorySeedRoot {
     type Error = &'static str;
 
-    fn publish_object(&mut self, object: ObjectPublication<'_>) -> impl Future<Output = Result<(), Self::Error>> {
+    fn publish_object(
+        &mut self,
+        object: ObjectPublication<'_>,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
         self.objects.push(object.object().object_id().0);
         ready(Ok(()))
     }
 
-    fn publish_snapshot(&mut self, snapshot: SnapshotPublication<'_, u64>) -> impl Future<Output = Result<RootPublicationEvidence, Self::Error>> {
+    fn publish_snapshot(
+        &mut self,
+        snapshot: SnapshotPublication<'_, u64>,
+    ) -> impl Future<Output = Result<RootPublicationEvidence, Self::Error>> {
         self.snapshot_calls += 1;
         for object in snapshot.seed().plan().objects() {
             assert!(self.objects.contains(&object.object_id.0));
@@ -574,8 +715,14 @@ impl SeedPublisher<u64> for MemorySeedRoot {
         }
         let (suspend, fail) = (self.suspend, self.fail);
         async move {
-            if suspend { pending::<()>().await; }
-            if fail { Err("root publication outcome unknown") } else { Ok(evidence) }
+            if suspend {
+                pending::<()>().await;
+            }
+            if fail {
+                Err("root publication outcome unknown")
+            } else {
+                Ok(evidence)
+            }
         }
     }
 }
@@ -586,7 +733,11 @@ fn streaming_seed_installs_exact_cut_without_waiting_for_silent_donor() {
     let transport = CatalogTransport::with_silent_donor(&catalog, DonorId(1));
     let mut verification = Vec::new();
     let mut source = StreamingSeedSource::new(
-        support::namespace(), &catalog, &transport, &mut verification, 6,
+        support::namespace(),
+        &catalog,
+        &transport,
+        &mut verification,
+        6,
     );
     let (mut raft, transfer, plan) = seed_offer(&catalog);
     let expected_cut = transfer.snapshot().clone();
@@ -596,9 +747,18 @@ fn streaming_seed_installs_exact_cut_without_waiting_for_silent_donor() {
     assert_eq!(root.snapshot_calls, 1);
     assert_eq!(root.objects.len(), 4);
     assert_eq!(output.installed_snapshot, Some(expected_cut.clone()));
-    assert_eq!(raft.durable_state().unwrap().snapshot(), Some(&expected_cut));
+    assert_eq!(
+        raft.durable_state().unwrap().snapshot(),
+        Some(&expected_cut)
+    );
     assert_eq!(output.messages.len(), 1);
-    assert!(matches!(output.messages[0].message, Message::SnapshotInstalled { term: 3, request: 1 }));
+    assert!(matches!(
+        output.messages[0].message,
+        Message::SnapshotInstalled {
+            term: 3,
+            request: 1
+        }
+    ));
     for object in &transport.objects {
         assert_eq!(object.counters.live.get(), 0);
         assert!(object.counters.peak.get() <= 6);
@@ -613,16 +773,30 @@ fn streaming_seed_root_failure_or_wrong_evidence_never_releases_install_ack() {
         let transport = CatalogTransport::with_silent_donor(&catalog, DonorId(1));
         let mut verification = Vec::new();
         let mut source = StreamingSeedSource::new(
-            support::namespace(), &catalog, &transport, &mut verification, 6,
+            support::namespace(),
+            &catalog,
+            &transport,
+            &mut verification,
+            6,
         );
         let (mut raft, transfer, plan) = seed_offer(&catalog);
-        let catchup = SnapshotCatchup::begin(&mut raft, support::namespace(), transfer, plan).unwrap();
-        let mut root = MemorySeedRoot { fail: !wrong_root, wrong_root, ..MemorySeedRoot::default() };
+        let catchup =
+            SnapshotCatchup::begin(&mut raft, support::namespace(), transfer, plan).unwrap();
+        let mut root = MemorySeedRoot {
+            fail: !wrong_root,
+            wrong_root,
+            ..MemorySeedRoot::default()
+        };
         assert!(immediate(catchup.install(&mut source, &mut root)).is_err());
         assert_eq!(root.objects.len(), 4);
         assert_eq!(root.snapshot_calls, 1);
         assert_eq!(raft.role(), Err(RaftError::RecoveryRequired));
-        assert!(transport.objects.iter().all(|object| object.counters.live.get() == 0));
+        assert!(
+            transport
+                .objects
+                .iter()
+                .all(|object| object.counters.live.get() == 0)
+        );
     }
 }
 
@@ -632,11 +806,18 @@ fn cancelling_streaming_seed_during_atomic_publication_fences_the_member() {
     let transport = CatalogTransport::with_silent_donor(&catalog, DonorId(1));
     let mut verification = Vec::new();
     let mut source = StreamingSeedSource::new(
-        support::namespace(), &catalog, &transport, &mut verification, 6,
+        support::namespace(),
+        &catalog,
+        &transport,
+        &mut verification,
+        6,
     );
     let (mut raft, transfer, plan) = seed_offer(&catalog);
     let catchup = SnapshotCatchup::begin(&mut raft, support::namespace(), transfer, plan).unwrap();
-    let mut root = MemorySeedRoot { suspend: true, ..MemorySeedRoot::default() };
+    let mut root = MemorySeedRoot {
+        suspend: true,
+        ..MemorySeedRoot::default()
+    };
     {
         let mut future = pin!(catchup.install(&mut source, &mut root));
         let waker = Waker::from(Arc::new(NoopWake));
@@ -647,7 +828,12 @@ fn cancelling_streaming_seed_during_atomic_publication_fences_the_member() {
     assert_eq!(root.snapshot_calls, 1);
     assert!(root.consensus.is_some()); // Publication may have escaped before drop.
     assert_eq!(raft.role(), Err(RaftError::RecoveryRequired));
-    assert!(transport.objects.iter().all(|object| object.counters.live.get() == 0));
+    assert!(
+        transport
+            .objects
+            .iter()
+            .all(|object| object.counters.live.get() == 0)
+    );
 }
 
 #[test]
@@ -657,15 +843,27 @@ fn failed_final_object_authentication_cannot_be_reset_by_retrying_seed_recovery(
     let transport = Transport::healthy(&catalog.fixtures[0]);
     let mut verification = Vec::new();
     let mut source = StreamingSeedSource::new(
-        support::namespace(), &catalog, &transport, &mut verification, 6,
+        support::namespace(),
+        &catalog,
+        &transport,
+        &mut verification,
+        6,
     );
     let spec = catalog.spec(0);
-    assert!(matches!(immediate(source.recover(spec)),
-        Err(SeedAcquireError::Pull(PullDriveError::Pull(PullError::Recovery(_))))));
+    assert!(matches!(
+        immediate(source.recover(spec)),
+        Err(SeedAcquireError::Pull(PullDriveError::Pull(
+            PullError::Recovery(_)
+        )))
+    ));
     let requests = transport.counters.started.get();
     assert_eq!(transport.counters.live.get(), 0);
-    assert!(matches!(immediate(source.recover(spec)),
-        Err(SeedAcquireError::Pull(PullDriveError::Pull(PullError::Closed)))));
+    assert!(matches!(
+        immediate(source.recover(spec)),
+        Err(SeedAcquireError::Pull(PullDriveError::Pull(
+            PullError::Closed
+        )))
+    ));
     assert_eq!(transport.counters.started.get(), requests);
     assert_eq!(catalog.lookups.get(), 1);
 }
@@ -687,7 +885,12 @@ fn pump_pair(members: &mut [PairMember; 2], messages: Vec<Envelope<u64>>) {
         delivered += 1;
         assert!(delivered < 4096, "replication must quiesce");
         let member = &mut members[envelope.to.0 as usize - 1];
-        let output = immediate(sequence(&mut member.raft, &mut member.root, Event::Receive(envelope))).unwrap();
+        let output = immediate(sequence(
+            &mut member.raft,
+            &mut member.root,
+            Event::Receive(envelope),
+        ))
+        .unwrap();
         assert!(output.snapshot_transfers.is_empty());
         queue.extend(output.messages);
     }
@@ -699,10 +902,15 @@ fn seeded_replica_rejoins_multi_member_sequencing_with_distinct_append_and_commi
     let transport = CatalogTransport::with_silent_donor(&catalog, DonorId(1));
     let mut verification = Vec::new();
     let mut source = StreamingSeedSource::new(
-        support::namespace(), &catalog, &transport, &mut verification, 6,
+        support::namespace(),
+        &catalog,
+        &transport,
+        &mut verification,
+        6,
     );
     let (mut follower, transfer, plan) = seed_offer(&catalog);
-    let catchup = SnapshotCatchup::begin(&mut follower, support::namespace(), transfer, plan).unwrap();
+    let catchup =
+        SnapshotCatchup::begin(&mut follower, support::namespace(), transfer, plan).unwrap();
     let mut snapshot_root = MemorySeedRoot::default();
     immediate(catchup.install(&mut source, &mut snapshot_root)).unwrap();
 
@@ -711,15 +919,31 @@ fn seeded_replica_rejoins_multi_member_sequencing_with_distinct_append_and_commi
     let initial = snapshot_root.consensus.clone().unwrap();
     let leader = Raft::recover(MemberId(1), initial, Limits::default()).unwrap();
     let mut members = [
-        PairMember { raft: leader, root: MemoryRaftRoot::default() },
-        PairMember { raft: follower, root: MemoryRaftRoot::default() },
+        PairMember {
+            raft: leader,
+            root: MemoryRaftRoot::default(),
+        },
+        PairMember {
+            raft: follower,
+            root: MemoryRaftRoot::default(),
+        },
     ];
     let node = &mut members[0];
-    let election = immediate(sequence(&mut node.raft, &mut node.root, Event::ElectionTimeout)).unwrap();
+    let election = immediate(sequence(
+        &mut node.raft,
+        &mut node.root,
+        Event::ElectionTimeout,
+    ))
+    .unwrap();
     pump_pair(&mut members, election.messages);
     let node = &mut members[0];
     let proposal = immediate(sequence(&mut node.raft, &mut node.root, Event::Propose(42))).unwrap();
-    assert!(!proposal.committed.iter().any(|entry| entry.entry.command == Some(42)));
+    assert!(
+        !proposal
+            .committed
+            .iter()
+            .any(|entry| entry.entry.command == Some(42))
+    );
     pump_pair(&mut members, proposal.messages);
 
     let first = members[0].raft.committed_after(12).unwrap();
@@ -734,11 +958,21 @@ fn seeded_replica_rejoins_multi_member_sequencing_with_distinct_append_and_commi
     // commit=14 separately. Neither a payload decode nor an append reply is a
     // license to fuse these two independently observable multi-member roots.
     let states = &members[1].root.0;
-    let appended = states.iter().position(|state|
-        state.commit_index() == 13 && state.entries().len() == 2).unwrap();
-    let committed = states.iter().position(|state| state.commit_index() == 14).unwrap();
+    let appended = states
+        .iter()
+        .position(|state| state.commit_index() == 13 && state.entries().len() == 2)
+        .unwrap();
+    let committed = states
+        .iter()
+        .position(|state| state.commit_index() == 14)
+        .unwrap();
     assert!(appended < committed);
-    let reopened = Raft::recover(MemberId(2), states.last().unwrap().clone(), Limits::default()).unwrap();
+    let reopened = Raft::recover(
+        MemberId(2),
+        states.last().unwrap().clone(),
+        Limits::default(),
+    )
+    .unwrap();
     assert_eq!(reopened.committed_after(12).unwrap(), first);
 }
 
@@ -751,8 +985,13 @@ fn streaming_respects_upstream_authentication_reservations_and_drains_the_last_r
     };
     let transport = Transport::healthy(&fixture);
     let mut pull = BondedPull::new(
-        &fixture.encoding, fixture.target(), &DEK, &[DonorId(1)], limits,
-    ).unwrap();
+        &fixture.encoding,
+        fixture.target(),
+        &DEK,
+        &[DonorId(1)],
+        limits,
+    )
+    .unwrap();
     let object = immediate(recover(&mut pull, &transport, &mut Vec::new(), 6)).unwrap();
     assert_eq!(object.plaintext(), fixture.plaintext);
     assert_eq!(transport.counters.started.get(), fixture.sources);
@@ -769,7 +1008,10 @@ struct RecoveringTransport<'a> {
 impl SymbolTransport for RecoveringTransport<'_> {
     type Error = &'static str;
 
-    fn request(&self, request: PullRequest) -> impl Future<Output = Result<ReplyOutcome, Self::Error>> {
+    fn request(
+        &self,
+        request: PullRequest,
+    ) -> impl Future<Output = Result<ReplyOutcome, Self::Error>> {
         self.issued.borrow_mut().push(request);
         async move {
             if self.offline.get() {
@@ -791,18 +1033,31 @@ fn an_authenticated_returning_donor_resumes_without_resetting_residues_or_catalo
     };
     let mut verification = Vec::new();
     let mut source = StreamingSeedSource::new(
-        support::namespace(), &catalog, &transport, &mut verification, 6,
+        support::namespace(),
+        &catalog,
+        &transport,
+        &mut verification,
+        6,
     );
     let spec = catalog.spec(0);
-    assert!(matches!(immediate(source.recover(spec)),
-        Err(SeedAcquireError::Pull(PullDriveError::Pull(PullError::NoAvailableDonor)))));
+    assert!(matches!(
+        immediate(source.recover(spec)),
+        Err(SeedAcquireError::Pull(PullDriveError::Pull(
+            PullError::NoAvailableDonor
+        )))
+    ));
     assert_eq!(source.active_object(), Some(spec));
     assert_eq!(catalog.lookups.get(), 1);
     let issued = transport.issued.borrow().len();
     assert!(issued >= 6);
-    let previous_last = transport.issued.borrow().iter()
+    let previous_last = transport
+        .issued
+        .borrow()
+        .iter()
         .filter(|request| request.donor == DonorId(3))
-        .map(|request| request.esi).max().unwrap();
+        .map(|request| request.esi)
+        .max()
+        .unwrap();
     transport.offline.set(false);
     // The test models the caller's fresh authenticated donor-recovery decision.
     // A production caller must obtain that authority, not trust a gossip flag.
@@ -810,11 +1065,19 @@ fn an_authenticated_returning_donor_resumes_without_resetting_residues_or_catalo
     let object = immediate(source.recover(spec)).unwrap();
     assert_eq!(object.plaintext(), catalog.fixtures[0].plaintext);
     assert_eq!(catalog.lookups.get(), 1);
-    assert!(transport.issued.borrow()[issued..].iter().all(|request|
-        request.donor == DonorId(3) && request.esi > previous_last && request.esi % 3 == 2));
+    assert!(
+        transport.issued.borrow()[issued..]
+            .iter()
+            .all(|request| request.donor == DonorId(3)
+                && request.esi > previous_last
+                && request.esi % 3 == 2)
+    );
     assert_eq!(transport.inner.counters.live.get(), 0);
     assert!(source.active_object().is_none());
-    assert!(matches!(source.donor_available(DonorId(3)), Err(SeedAcquireError::InvalidObject)));
+    assert!(matches!(
+        source.donor_available(DonorId(3)),
+        Err(SeedAcquireError::InvalidObject)
+    ));
 }
 
 #[test]
@@ -824,7 +1087,11 @@ fn abandoning_seed_recovery_is_explicit_and_does_not_touch_durable_publication()
     transport.suspend_after.set(Some(8));
     let mut verification = Vec::new();
     let mut source = StreamingSeedSource::new(
-        support::namespace(), &catalog, &transport, &mut verification, 8,
+        support::namespace(),
+        &catalog,
+        &transport,
+        &mut verification,
+        8,
     );
     let spec = catalog.spec(0);
     {

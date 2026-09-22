@@ -44,13 +44,17 @@ impl HnswConfig {
 
     pub fn validate(&self) -> Result<(), BeaconError> {
         if self.dimensions == 0 || self.dimensions > MAX_DIMENSIONS {
-            return Err(BeaconError::InvalidConfig("dimensions must be in 1..=65536"));
+            return Err(BeaconError::InvalidConfig(
+                "dimensions must be in 1..=65536",
+            ));
         }
         if !(2..=64).contains(&self.m) {
             return Err(BeaconError::InvalidConfig("HNSW m must be in 2..=64"));
         }
         if self.ef_construction < self.m {
-            return Err(BeaconError::InvalidConfig("ef_construction must be at least m"));
+            return Err(BeaconError::InvalidConfig(
+                "ef_construction must be at least m",
+            ));
         }
         if self.max_vectors == 0 {
             return Err(BeaconError::InvalidConfig("max_vectors must be positive"));
@@ -135,7 +139,9 @@ impl Hnsw {
     ) -> Result<Self, BeaconError> {
         Self::build_shared(
             config,
-            vectors.into_iter().map(|(id, vector)| (id, Arc::from(vector))),
+            vectors
+                .into_iter()
+                .map(|(id, vector)| (id, Arc::from(vector))),
             work,
         )
     }
@@ -241,7 +247,10 @@ impl Hnsw {
         ranked.truncate(k);
         Ok(ranked
             .into_iter()
-            .map(|hit| Neighbor { id: hit.id, distance: hit.cost })
+            .map(|hit| Neighbor {
+                id: hit.id,
+                distance: hit.cost,
+            })
             .collect())
     }
 
@@ -363,7 +372,12 @@ impl Hnsw {
         let level = level_for(id.0, self.config.seed, self.config.m);
         let slot = self.nodes.len();
         let Some(entry) = self.entry else {
-            self.nodes.push(Node { id, vector, norm, links: vec![Vec::new(); level + 1] });
+            self.nodes.push(Node {
+                id,
+                vector,
+                norm,
+                links: vec![Vec::new(); level + 1],
+            });
             self.entry = Some(slot);
             self.top_level = level;
             return Ok(());
@@ -395,7 +409,11 @@ impl Hnsw {
             self.nodes[slot].links[layer] = neighbours.clone();
             for neighbour in neighbours {
                 self.nodes[neighbour].links[layer].push(slot);
-                let limit = if layer == 0 { 2 * self.config.m } else { self.config.m };
+                let limit = if layer == 0 {
+                    2 * self.config.m
+                } else {
+                    self.config.m
+                };
                 if self.nodes[neighbour].links[layer].len() > limit {
                     self.prune(neighbour, layer, limit, work)?;
                 }
@@ -499,15 +517,30 @@ mod tests {
 
     #[test]
     fn graph_has_bounded_valid_links_and_stable_topology() {
-        let rows: Vec<_> = (0..128).map(|id| (VId(id), vec![id as f32, (id % 7) as f32])).collect();
+        let rows: Vec<_> = (0..128)
+            .map(|id| (VId(id), vec![id as f32, (id % 7) as f32]))
+            .collect();
         let config = HnswConfig::new(2, DistanceMetric::SquaredEuclidean);
-        let left = Hnsw::build(config.clone(), rows.clone(), &mut WorkBudget::new(20_000_000)).unwrap();
-        let right = Hnsw::build(config.clone(), rows.into_iter().rev(), &mut WorkBudget::new(20_000_000)).unwrap();
+        let left = Hnsw::build(
+            config.clone(),
+            rows.clone(),
+            &mut WorkBudget::new(20_000_000),
+        )
+        .unwrap();
+        let right = Hnsw::build(
+            config.clone(),
+            rows.into_iter().rev(),
+            &mut WorkBudget::new(20_000_000),
+        )
+        .unwrap();
         for (slot, (a, b)) in left.nodes.iter().zip(&right.nodes).enumerate() {
             assert_eq!(a.links, b.links);
             for (layer, links) in a.links.iter().enumerate() {
                 assert!(links.len() <= if layer == 0 { 2 * config.m } else { config.m });
-                assert_eq!(links.iter().copied().collect::<BTreeSet<_>>().len(), links.len());
+                assert_eq!(
+                    links.iter().copied().collect::<BTreeSet<_>>().len(),
+                    links.len()
+                );
                 for &other in links {
                     assert_ne!(slot, other);
                     assert!(other < left.nodes.len());

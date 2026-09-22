@@ -113,10 +113,17 @@ impl Input {
                 let presence = predicate::presence_delta(input, spec, left, right, limbs, control)?;
                 let pairs = spec.kind.includes_right();
                 let matched = input.prepare_filtered(
-                    left, right, limbs, control,
+                    left,
+                    right,
+                    limbs,
+                    control,
                     |_, left, right, control| {
                         // Existence never needs a product of occurrence counts.
-                        if pairs { spec.matches(left, right, control) } else { Ok(false) }
+                        if pairs {
+                            spec.matches(left, right, control)
+                        } else {
+                            Ok(false)
+                        }
                     },
                 )?;
                 Ok(InputUpdate::Predicated { matched, presence })

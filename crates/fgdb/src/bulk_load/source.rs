@@ -12,18 +12,28 @@ pub(super) fn checkpoint(cx: &QueryCx) -> Result<(), BulkLoadErrorKind> {
         .map_err(|error| BulkLoadErrorKind::Write(super::WriteTxnError::Interrupted(error)))
 }
 
-pub(super) fn limit(row: usize, dimension: &'static str, maximum: usize, observed: usize)
-    -> Result<(), BulkLoadErrorKind>
-{
+pub(super) fn limit(
+    row: usize,
+    dimension: &'static str,
+    maximum: usize,
+    observed: usize,
+) -> Result<(), BulkLoadErrorKind> {
     if observed > maximum {
-        return Err(BulkLoadErrorKind::SourceLimit { row, dimension, limit: maximum, observed });
+        return Err(BulkLoadErrorKind::SourceLimit {
+            row,
+            dimension,
+            limit: maximum,
+            observed,
+        });
     }
     Ok(())
 }
 
-pub(super) fn admit_keys(row: usize, value: &BulkRow, policy: &BulkLoadPolicy)
-    -> Result<(), BulkLoadErrorKind>
-{
+pub(super) fn admit_keys(
+    row: usize,
+    value: &BulkRow,
+    policy: &BulkLoadPolicy,
+) -> Result<(), BulkLoadErrorKind> {
     match value {
         BulkRow::Vertex(v) => limit(row, "key_bytes", policy.max_key_bytes, v.key.len())?,
         BulkRow::Edge(e) => {
@@ -35,17 +45,29 @@ pub(super) fn admit_keys(row: usize, value: &BulkRow, policy: &BulkLoadPolicy)
     Ok(())
 }
 
-pub(super) fn admit_checkpoint(cx: &QueryCx, value: &BulkLoadCheckpoint, policy: &BulkLoadPolicy)
-    -> Result<(), BulkLoadErrorKind>
-{
-    let count = value.vertices.len().checked_add(value.edges.len())
+pub(super) fn admit_checkpoint(
+    cx: &QueryCx,
+    value: &BulkLoadCheckpoint,
+    policy: &BulkLoadPolicy,
+) -> Result<(), BulkLoadErrorKind> {
+    let count = value
+        .vertices
+        .len()
+        .checked_add(value.edges.len())
         .ok_or(BulkLoadErrorKind::CounterOverflow)?;
-    limit(0, "source_rows", policy.max_source_rows, count.max(value.next_row))?;
+    limit(
+        0,
+        "source_rows",
+        policy.max_source_rows,
+        count.max(value.next_row),
+    )?;
     let mut bytes = 0usize;
     for key in value.vertices.keys().chain(value.edges.keys()) {
         checkpoint(cx)?;
         limit(0, "key_bytes", policy.max_key_bytes, key.len())?;
-        bytes = bytes.checked_add(key.len()).ok_or(BulkLoadErrorKind::CounterOverflow)?;
+        bytes = bytes
+            .checked_add(key.len())
+            .ok_or(BulkLoadErrorKind::CounterOverflow)?;
         limit(0, "total_key_bytes", policy.max_total_key_bytes, bytes)?;
     }
     Ok(())
@@ -59,24 +81,31 @@ pub(super) fn next_row<E: core::error::Error + Send + Sync + 'static>(
     checkpoint(cx)?;
     let value = source.next();
     checkpoint(cx)?;
-    value.transpose().map_err(|source| BulkLoadErrorKind::Source { row, source: Box::new(source) })
+    value
+        .transpose()
+        .map_err(|source| BulkLoadErrorKind::Source {
+            row,
+            source: Box::new(source),
+        })
 }
 
 pub(super) fn admit_row(row: &BulkRow) -> Result<(), BulkLoadErrorKind> {
     match row {
         BulkRow::Vertex(vertex) => {
-            fgdb_strata::vertex::admit_row_content(&vertex.labels, &vertex.props)
-                .map_err(|source| BulkLoadErrorKind::InvalidVertex {
+            fgdb_strata::vertex::admit_row_content(&vertex.labels, &vertex.props).map_err(
+                |source| BulkLoadErrorKind::InvalidVertex {
                     key: vertex.key.clone(),
                     source,
-                })?;
+                },
+            )?;
         }
         BulkRow::Edge(edge) => {
-            fgdb_strata::edge_props::admitted_row_bytes(&edge.props)
-                .map_err(|source| BulkLoadErrorKind::InvalidEdge {
+            fgdb_strata::edge_props::admitted_row_bytes(&edge.props).map_err(|source| {
+                BulkLoadErrorKind::InvalidEdge {
                     key: edge.key.clone(),
                     source,
-                })?;
+                }
+            })?;
         }
     }
     Ok(())
@@ -108,11 +137,20 @@ impl ChunkHasher {
         hasher.update(&(start as u64).to_be_bytes());
         hasher.update(&(policy.rows_per_chunk as u64).to_be_bytes());
         hasher.update(&policy.vertex_relation.0.to_be_bytes());
-        Self { start, rows: 0, bytes: 0, byte_limit: policy.max_chunk_bytes, hasher }
+        Self {
+            start,
+            rows: 0,
+            bytes: 0,
+            byte_limit: policy.max_chunk_bytes,
+            hasher,
+        }
     }
 
     fn raw(&mut self, cx: &QueryCx, bytes: &[u8]) -> Result<(), BulkLoadErrorKind> {
-        let next = self.bytes.checked_add(bytes.len()).ok_or(BulkLoadErrorKind::CounterOverflow)?;
+        let next = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or(BulkLoadErrorKind::CounterOverflow)?;
         limit(self.start + self.rows, "chunk_bytes", self.byte_limit, next)?;
         for part in bytes.chunks(4096) {
             checkpoint(cx)?;
@@ -129,9 +167,13 @@ impl ChunkHasher {
 
     pub fn push(&mut self, cx: &QueryCx, row: &BulkRow) -> Result<(), BulkLoadErrorKind> {
         checkpoint(cx)?;
-        let ordinal = self.start.checked_add(self.rows)
+        let ordinal = self
+            .start
+            .checked_add(self.rows)
             .ok_or(BulkLoadErrorKind::CounterOverflow)?;
-        ordinal.checked_add(1).ok_or(BulkLoadErrorKind::CounterOverflow)?;
+        ordinal
+            .checked_add(1)
+            .ok_or(BulkLoadErrorKind::CounterOverflow)?;
         let props = match row {
             BulkRow::Vertex(vertex) => {
                 self.raw(cx, &[0])?;
@@ -156,10 +198,12 @@ impl ChunkHasher {
         for (key, value) in props {
             checkpoint(cx)?;
             self.raw(cx, &key.0.to_be_bytes())?;
-            let bytes = value.encode().map_err(|source| BulkLoadErrorKind::SourceEncoding {
-                row: ordinal,
-                source,
-            })?;
+            let bytes = value
+                .encode()
+                .map_err(|source| BulkLoadErrorKind::SourceEncoding {
+                    row: ordinal,
+                    source,
+                })?;
             self.bytes(cx, &bytes)?;
         }
         self.rows += 1;
@@ -168,7 +212,11 @@ impl ChunkHasher {
 
     pub fn finish(mut self) -> ChunkSeal {
         self.hasher.update(&(self.rows as u64).to_be_bytes());
-        ChunkSeal { start: self.start, rows: self.rows, digest: self.hasher.finalize() }
+        ChunkSeal {
+            start: self.start,
+            rows: self.rows,
+            digest: self.hasher.finalize(),
+        }
     }
 }
 
@@ -199,13 +247,19 @@ pub(super) fn read_verified<E: core::error::Error + Send + Sync + 'static>(
     let mut chunk = Vec::new();
     for at in 0..seal.rows {
         let row = next_row(cx, source, seal.start + at)?;
-        let row = row.ok_or(BulkLoadErrorKind::SourceChanged { row: seal.start + at })?;
+        let row = row.ok_or(BulkLoadErrorKind::SourceChanged {
+            row: seal.start + at,
+        })?;
         // Replay is an untrusted second observation, not an admission bypass.
         admit_keys(seal.start + at, &row, policy)?;
         admit_row(&row)?;
         actual.push(cx, &row)?;
         if retain {
-            chunk.try_reserve(1).map_err(|_| BulkLoadErrorKind::SourceAllocation { row: seal.start + at })?;
+            chunk
+                .try_reserve(1)
+                .map_err(|_| BulkLoadErrorKind::SourceAllocation {
+                    row: seal.start + at,
+                })?;
             chunk.push(row);
         }
     }

@@ -6,8 +6,8 @@
 //! Input and output multiplicities stay exact and compressed. Only changed key
 //! groups are probed, including the simultaneous-input cross term.
 
-use crate::{GlaExecutionEvent, GraphSetColumnType, GraphSetFilterError, GraphSetPredicateOp};
 use crate::algebra::{GraphValue, GraphValueRow, MAX_PATTERN_VERTICES};
+use crate::{GlaExecutionEvent, GraphSetColumnType, GraphSetFilterError, GraphSetPredicateOp};
 use fgdb_delta_types::zset::ZSetUpdate;
 use fgdb_delta_types::{LimbLimit, ZSet, ZSetError, ZSetEvent, ZWeight};
 use std::sync::Arc;
@@ -178,8 +178,7 @@ impl RowJoinSpec {
         code: &[GraphSetPredicateOp],
     ) -> Result<Self, RowJoinBuildError> {
         let types: Vec<_> = self.left.iter().chain(self.right.iter()).copied().collect();
-        GraphSetPredicateOp::validate_schema(&types, code)
-            .map_err(RowJoinBuildError::Predicate)?;
+        GraphSetPredicateOp::validate_schema(&types, code).map_err(RowJoinBuildError::Predicate)?;
         self.predicate = Some(code.to_vec().into_boxed_slice());
         Ok(self)
     }
@@ -198,10 +197,13 @@ impl RowJoinSpec {
             return Ok(true);
         };
         GraphSetPredicateOp::evaluate_pair_with_control(code, left, right, &mut |event| {
-            charge(control, match event {
-                GlaExecutionEvent::ScratchEntry => ZSetEvent::ScratchEntry,
-                _ => ZSetEvent::Work,
-            })
+            charge(
+                control,
+                match event {
+                    GlaExecutionEvent::ScratchEntry => ZSetEvent::ScratchEntry,
+                    _ => ZSetEvent::Work,
+                },
+            )
         })
     }
 
@@ -428,7 +430,9 @@ impl IncrementalRowJoin {
                 }
             }
         }
-        let input = self.input.prepare(&self.spec, &left, &right, limbs, control)?;
+        let input = self
+            .input
+            .prepare(&self.spec, &left, &right, limbs, control)?;
         let delta = input.project_delta(&self.spec, limbs, control)?;
         let change = delta.total_weight(limbs, control)?;
         charge(control, ZSetEvent::Work)?;

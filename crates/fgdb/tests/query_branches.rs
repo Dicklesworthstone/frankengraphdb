@@ -102,34 +102,47 @@ fn branch_views_drive_properties_aggregates_paths_and_compound_reads() {
             "MATCH (n:Person) RETURN n.name AS name UNION ALL MATCH (m:Person) RETURN m.name AS name",
         ];
         for statement in statements {
-            let expected = selected.query(&cx, statement, &params, symbols, policy()).unwrap();
-            let current = db.query(&cx, statement, &params, symbols, policy()).unwrap();
-            assert_ne!(expected, current, "fixture must distinguish sources: {statement}");
+            let expected = selected
+                .query(&cx, statement, &params, symbols, policy())
+                .unwrap();
+            let current = db
+                .query(&cx, statement, &params, symbols, policy())
+                .unwrap();
+            assert_ne!(
+                expected, current,
+                "fixture must distinguish sources: {statement}"
+            );
             let mut calls = 0;
-            let result = db.query_with_branch_resolver(
-                &cx,
-                &format!("AT BRANCH baseline {statement}"),
-                &params,
-                symbols,
-                |name| {
-                    calls += 1;
-                    assert_eq!(name, "baseline");
-                    Ok(selected.clone())
-                },
-                policy(),
-            ).unwrap();
+            let result = db
+                .query_with_branch_resolver(
+                    &cx,
+                    &format!("AT BRANCH baseline {statement}"),
+                    &params,
+                    symbols,
+                    |name| {
+                        calls += 1;
+                        assert_eq!(name, "baseline");
+                        Ok(selected.clone())
+                    },
+                    policy(),
+                )
+                .unwrap();
             assert_eq!(calls, 1);
             assert_eq!(result, expected, "{statement}");
         }
-        let summary = db.query_with_branch_resolver(
-            &cx,
-            "MATCH (n:Person) AT BRANCH baseline RETURN count(*) AS total, sum(n.age) AS ages",
-            &params,
-            symbols,
-            |_| Ok(selected.clone()),
-            policy(),
-        ).unwrap();
-        let QueryResult::Rows { rows, .. } = summary else { panic!("read became a write") };
+        let summary = db
+            .query_with_branch_resolver(
+                &cx,
+                "MATCH (n:Person) AT BRANCH baseline RETURN count(*) AS total, sum(n.age) AS ages",
+                &params,
+                symbols,
+                |_| Ok(selected.clone()),
+                policy(),
+            )
+            .unwrap();
+        let QueryResult::Rows { rows, .. } = summary else {
+            panic!("read became a write")
+        };
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0].as_count(), Some(3));
         assert_eq!(rows[0][1].as_integer(), Some(60));
@@ -137,13 +150,31 @@ fn branch_views_drive_properties_aggregates_paths_and_compound_reads() {
         let current = db.read_session().unwrap();
         drop(db);
         let text = "MATCH (n:Person) RETURN n.name AT BRANCH baseline";
-        let result = current.query_with_branch_resolver(
-            &cx, text, &params, symbols, |_| Ok(selected.clone()), policy(),
-        ).unwrap();
+        let result = current
+            .query_with_branch_resolver(
+                &cx,
+                text,
+                &params,
+                symbols,
+                |_| Ok(selected.clone()),
+                policy(),
+            )
+            .unwrap();
         assert_eq!(row_count(&result), 3);
-        assert_eq!(row_count(&current.query(
-            &cx, "MATCH (n:Person) RETURN n.name", &params, symbols, policy(),
-        ).unwrap()), 4);
+        assert_eq!(
+            row_count(
+                &current
+                    .query(
+                        &cx,
+                        "MATCH (n:Person) RETURN n.name",
+                        &params,
+                        symbols,
+                        policy(),
+                    )
+                    .unwrap()
+            ),
+            4
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -158,36 +189,77 @@ fn branch_parameters_are_values_and_native_argument_validation_is_preserved() {
         let selected = seed(&mut db, &commit).await;
         advance(&mut db, &commit).await;
         let opaque = "baseline' RETURN secrets; MATCH (x)";
-        let params = GqlParameters::new().with_text("branch", opaque).unwrap()
-            .with_int64("floor", 20).unwrap();
+        let params = GqlParameters::new()
+            .with_text("branch", opaque)
+            .unwrap()
+            .with_int64("floor", 20)
+            .unwrap();
         let original = params.clone();
         let text = "AT BRANCH $branch MATCH (n:Person) WHERE n.age >= $floor RETURN n.name";
-        let result = db.query_with_branch_resolver(
-            &cx, text, &params, symbols,
-            |name| { assert_eq!(name, opaque); Ok(selected.clone()) }, policy(),
-        ).unwrap();
+        let result = db
+            .query_with_branch_resolver(
+                &cx,
+                text,
+                &params,
+                symbols,
+                |name| {
+                    assert_eq!(name, opaque);
+                    Ok(selected.clone())
+                },
+                policy(),
+            )
+            .unwrap();
         assert_eq!(row_count(&result), 2);
         assert_eq!(params, original);
 
         let reused = GqlParameters::new().with_text("branch", "Ada").unwrap();
-        let result = db.query_with_branch_resolver(
-            &cx,
-            "MATCH AT BRANCH $branch (n:Person) WHERE n.name = $branch RETURN n.name",
-            &reused, symbols, |_| Ok(selected.clone()), policy(),
-        ).unwrap();
-        let QueryResult::Rows { rows, .. } = result else { panic!("read became a write") };
+        let result = db
+            .query_with_branch_resolver(
+                &cx,
+                "MATCH AT BRANCH $branch (n:Person) WHERE n.name = $branch RETURN n.name",
+                &reused,
+                symbols,
+                |_| Ok(selected.clone()),
+                policy(),
+            )
+            .unwrap();
+        let QueryResult::Rows { rows, .. } = result else {
+            panic!("read became a write")
+        };
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][0].as_value().and_then(GraphValue::as_scalar),
-            Some(&CanonicalScalar::ucs_basic_text("Ada").unwrap()));
+        assert_eq!(
+            rows[0][0].as_value().and_then(GraphValue::as_scalar),
+            Some(&CanonicalScalar::ucs_basic_text("Ada").unwrap())
+        );
 
         let extra = params.clone().with_int64("unused", 1).unwrap();
-        assert!(db.query_with_branch_resolver(
-            &cx, text, &extra, symbols, |_| Ok(selected.clone()), policy(),
-        ).is_err(), "routing must not filter unknown query parameters");
-        let missing = GqlParameters::new().with_text("branch", "baseline").unwrap();
-        assert!(db.query_with_branch_resolver(
-            &cx, text, &missing, symbols, |_| Ok(selected.clone()), policy(),
-        ).is_err(), "routing must not satisfy missing native arguments");
+        assert!(
+            db.query_with_branch_resolver(
+                &cx,
+                text,
+                &extra,
+                symbols,
+                |_| Ok(selected.clone()),
+                policy(),
+            )
+            .is_err(),
+            "routing must not filter unknown query parameters"
+        );
+        let missing = GqlParameters::new()
+            .with_text("branch", "baseline")
+            .unwrap();
+        assert!(
+            db.query_with_branch_resolver(
+                &cx,
+                text,
+                &missing,
+                symbols,
+                |_| Ok(selected.clone()),
+                policy(),
+            )
+            .is_err(),
+            "routing must not satisfy missing native arguments"
+        );
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
@@ -203,33 +275,75 @@ fn default_reads_never_resolve_and_branch_misses_never_fall_back() {
         let params = GqlParameters::new();
         let text = "MATCH (n:Person) RETURN n.name";
         let expected = view.query(&cx, text, &params, symbols, policy()).unwrap();
-        assert_eq!(db.query_with_branch_resolver(
-            &cx, text, &params, symbols, |_| panic!("unqualified read resolved a branch"), policy(),
-        ).unwrap(), expected);
-        assert_eq!(view.query_with_branch_resolver(
-            &cx, text, &params, symbols, |_| panic!("unqualified view resolved a branch"), policy(),
-        ).unwrap(), expected);
+        assert_eq!(
+            db.query_with_branch_resolver(
+                &cx,
+                text,
+                &params,
+                symbols,
+                |_| panic!("unqualified read resolved a branch"),
+                policy(),
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            view.query_with_branch_resolver(
+                &cx,
+                text,
+                &params,
+                symbols,
+                |_| panic!("unqualified view resolved a branch"),
+                policy(),
+            )
+            .unwrap(),
+            expected
+        );
 
         let mut calls = 0;
-        let failure = db.query_with_branch_resolver(
-            &cx, "AT BRANCH missing MATCH (n:Person) RETURN n.name LIMIT 0",
-            &params, symbols,
-            |_| { calls += 1; Err(refused()) }, policy(),
-        ).unwrap_err();
+        let failure = db
+            .query_with_branch_resolver(
+                &cx,
+                "AT BRANCH missing MATCH (n:Person) RETURN n.name LIMIT 0",
+                &params,
+                symbols,
+                |_| {
+                    calls += 1;
+                    Err(refused())
+                },
+                policy(),
+            )
+            .unwrap_err();
         assert_eq!(calls, 1);
         assert!(matches!(failure, QueryError::Unsupported { diagnostics }
             if diagnostics == vec!["branch lookup refused"]));
-        assert!(db.query(&cx, "AT BRANCH missing MATCH (n) RETURN n", &params, symbols, policy()).is_err());
+        assert!(
+            db.query(
+                &cx,
+                "AT BRANCH missing MATCH (n) RETURN n",
+                &params,
+                symbols,
+                policy()
+            )
+            .is_err()
+        );
 
         for text in [
             "AT BRANCH a MATCH (n) RETURN n AT BRANCH b",
             "AT BRANCH $b MATCH (n) RETURN n",
             "AT BRANCH '' MATCH (n) RETURN n",
         ] {
-            assert!(db.query_with_branch_resolver(
-                &cx, text, &params, symbols,
-                |_| panic!("invalid selector reached branch resolution"), policy(),
-            ).is_err());
+            assert!(
+                db.query_with_branch_resolver(
+                    &cx,
+                    text,
+                    &params,
+                    symbols,
+                    |_| panic!("invalid selector reached branch resolution"),
+                    policy(),
+                )
+                .is_err()
+            );
         }
     });
     assert!(report.lab_test_passed(), "{report:?}");
@@ -249,20 +363,38 @@ fn temporal_and_budget_refusals_belong_to_the_selected_view_and_writes_stay_refu
             "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {} RETURN n.name",
             selected.frontier().0,
         );
-        let expected = selected.query(&cx, &at_selected, &params, symbols, policy()).unwrap();
-        assert_eq!(db.query_with_branch_resolver(
-            &cx, &format!("AT BRANCH baseline {at_selected}"), &params, symbols,
-            |_| Ok(selected.clone()), policy(),
-        ).unwrap(), expected);
+        let expected = selected
+            .query(&cx, &at_selected, &params, symbols, policy())
+            .unwrap();
+        assert_eq!(
+            db.query_with_branch_resolver(
+                &cx,
+                &format!("AT BRANCH baseline {at_selected}"),
+                &params,
+                symbols,
+                |_| Ok(selected.clone()),
+                policy(),
+            )
+            .unwrap(),
+            expected
+        );
         let future = format!(
             "MATCH (n:Person) FOR SYSTEM_TIME AS OF SEQ {} RETURN n.name",
             db.frontier().unwrap().0,
         );
         assert!(db.query(&cx, &future, &params, symbols, policy()).is_ok());
-        assert!(db.query_with_branch_resolver(
-            &cx, &format!("AT BRANCH baseline {future}"), &params, symbols,
-            |_| Ok(selected.clone()), policy(),
-        ).is_err(), "selected history must not borrow a later default frontier");
+        assert!(
+            db.query_with_branch_resolver(
+                &cx,
+                &format!("AT BRANCH baseline {future}"),
+                &params,
+                symbols,
+                |_| Ok(selected.clone()),
+                policy(),
+            )
+            .is_err(),
+            "selected history must not borrow a later default frontier"
+        );
 
         let before = db.frontier().unwrap();
         for text in [
@@ -270,18 +402,35 @@ fn temporal_and_budget_refusals_belong_to_the_selected_view_and_writes_stay_refu
             "AT BRANCH baseline MATCH (n:Person) DELETE n",
             "AT BRANCH baseline INSERT (n:Person {age:99})",
         ] {
-            assert!(db.query_with_branch_resolver(
-                &cx, text, &params, symbols, |_| Ok(selected.clone()), policy(),
-            ).is_err(), "read-only branch facade accepted a write");
+            assert!(
+                db.query_with_branch_resolver(
+                    &cx,
+                    text,
+                    &params,
+                    symbols,
+                    |_| Ok(selected.clone()),
+                    policy(),
+                )
+                .is_err(),
+                "read-only branch facade accepted a write"
+            );
         }
         assert_eq!(db.frontier().unwrap(), before);
         let limited = GqlQueryPolicy::new(1_000, 0, 1_000_000, 1_000_000);
         let plain = "MATCH (n:Person) RETURN n.name";
-        let expected_error = selected.query(&cx, plain, &params, symbols, limited).unwrap_err();
-        let branch_error = db.query_with_branch_resolver(
-            &cx, &format!("AT BRANCH baseline {plain}"), &params, symbols,
-            |_| Ok(selected.clone()), limited,
-        ).unwrap_err();
+        let expected_error = selected
+            .query(&cx, plain, &params, symbols, limited)
+            .unwrap_err();
+        let branch_error = db
+            .query_with_branch_resolver(
+                &cx,
+                &format!("AT BRANCH baseline {plain}"),
+                &params,
+                symbols,
+                |_| Ok(selected.clone()),
+                limited,
+            )
+            .unwrap_err();
         assert_eq!(format!("{branch_error:?}"), format!("{expected_error:?}"));
     });
     assert!(report.lab_test_passed(), "{report:?}");

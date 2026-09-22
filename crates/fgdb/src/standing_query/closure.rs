@@ -59,14 +59,25 @@ fn edge_delta(
         }
         // Validate BOTH endpoints before skipping a NULL. Other columns are
         // opaque parent-owned payload, neither copied nor used as edge identity.
-        let left = row.values().get(endpoints[0]).ok_or(StandingQueryFailure::InvalidDelta)?;
-        let right = row.values().get(endpoints[1]).ok_or(StandingQueryFailure::InvalidDelta)?;
+        let left = row
+            .values()
+            .get(endpoints[0])
+            .ok_or(StandingQueryFailure::InvalidDelta)?;
+        let right = row
+            .values()
+            .get(endpoints[1])
+            .ok_or(StandingQueryFailure::InvalidDelta)?;
         meter.units(ZSetEvent::Work, 2)?;
         let left = vertex(left)?;
         let right = vertex(right)?;
         if let (Some(left), Some(right)) = (left, right) {
-            let weight = weight.checked_clone(LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)?;
-            output.accumulate((left, right), weight, LIMBS, &mut |event| meter.charge(event))
+            let weight = weight
+                .checked_clone(LIMBS)
+                .map_err(|_| StandingQueryFailure::Arithmetic)?;
+            output
+                .accumulate((left, right), weight, LIMBS, &mut |event| {
+                    meter.charge(event)
+                })
                 .map_err(zset_error)?;
         }
     }
@@ -91,7 +102,9 @@ impl State {
     ) -> Result<Update<'_>, StandingQueryFailure> {
         meter.charge(ZSetEvent::Work)?;
         let edges = edge_delta(delta, self.width, self.endpoints, meter)?;
-        let input = self.operator.prepare(&edges, LIMBS, &mut |event| meter.charge(event))
+        let input = self
+            .operator
+            .prepare(&edges, LIMBS, &mut |event| meter.charge(event))
             .map_err(recursion_error)?;
         let mut output = ZSet::new();
         let mut inserted = 0_u128;
@@ -101,36 +114,62 @@ impl State {
             // Fixed-width native identities, never narrowed to scalar integers.
             meter.units(ZSetEvent::ScratchEntry, 3)?;
             let row = GraphValueRow::from_owned_values(vec![
-                GraphValue::Vertex(*source), GraphValue::Vertex(*destination),
+                GraphValue::Vertex(*source),
+                GraphValue::Vertex(*destination),
             ]);
             match weight.to_i128() {
                 Some(1) if self.rows.weight(&row).is_none() => {
-                    inserted = inserted.checked_add(1).ok_or(StandingQueryFailure::Arithmetic)?;
+                    inserted = inserted
+                        .checked_add(1)
+                        .ok_or(StandingQueryFailure::Arithmetic)?;
                 }
-                Some(-1) if self.rows.weight(&row).is_some_and(|old| old == &ZWeight::ONE) => {
-                    removed = removed.checked_add(1).ok_or(StandingQueryFailure::Arithmetic)?;
+                Some(-1)
+                    if self
+                        .rows
+                        .weight(&row)
+                        .is_some_and(|old| old == &ZWeight::ONE) =>
+                {
+                    removed = removed
+                        .checked_add(1)
+                        .ok_or(StandingQueryFailure::Arithmetic)?;
                 }
                 _ => return Err(StandingQueryFailure::InvalidDelta),
             }
-            let weight = weight.checked_clone(LIMBS).map_err(|_| StandingQueryFailure::Arithmetic)?;
-            output.accumulate(row, weight, LIMBS, &mut |event| meter.charge(event))
+            let weight = weight
+                .checked_clone(LIMBS)
+                .map_err(|_| StandingQueryFailure::Arithmetic)?;
+            output
+                .accumulate(row, weight, LIMBS, &mut |event| meter.charge(event))
                 .map_err(zset_error)?;
         }
         // Check the FINAL cardinality, not a key-ordered insertion-first prefix.
-        let count = (self.rows.len() as u128).checked_sub(removed)
+        let count = (self.rows.len() as u128)
+            .checked_sub(removed)
             .and_then(|count| count.checked_add(inserted))
             .ok_or(StandingQueryFailure::InvalidDelta)?;
-        if meter.policy.rows.max_result_rows().is_some_and(|limit| count > u128::from(limit)) {
+        if meter
+            .policy
+            .rows
+            .max_result_rows()
+            .is_some_and(|limit| count > u128::from(limit))
+        {
             return Err(StandingQueryFailure::ResultBudget);
         }
         for _ in output.iter() {
             meter.charge(ZSetEvent::Work)?;
             meter.units(ZSetEvent::ScratchEntry, 3)?;
         }
-        let sink = self.rows.prepare_update(&output, LIMBS, &mut |event| meter.charge(event))
+        let sink = self
+            .rows
+            .prepare_update(&output, LIMBS, &mut |event| meter.charge(event))
             .map_err(zset_error)?;
         (meter.checkpoint)()?;
-        Ok(Update { input, sink, output, last_delta: &mut self.last_delta })
+        Ok(Update {
+            input,
+            sink,
+            output,
+            last_delta: &mut self.last_delta,
+        })
     }
 
     pub(super) fn maintain(
@@ -142,13 +181,15 @@ impl State {
         meter.charge(ZSetEvent::Work)?;
         let at = batch.commit_seq();
         if self.frontier.checked_successor().ok() != Some(at)
-            || batch.frontier() != at || batch.commit_marker_identity().commit_seq != at
+            || batch.frontier() != at
+            || batch.commit_marker_identity().commit_seq != at
         {
             return Err(StandingQueryFailure::InvalidDelta);
         }
         let source = sets::input_at(sources, self.input, at)?;
         let delta = sets::delta(source).ok_or(StandingQueryFailure::DependencyUnavailable)?;
-        meter.stats.delta_rows = u64::try_from(delta.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
+        meter.stats.delta_rows =
+            u64::try_from(delta.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
         self.prepare(delta, meter)?.commit();
         Ok(())
     }
@@ -163,7 +204,12 @@ struct Update<'a> {
 }
 impl Update<'_> {
     fn commit(self) {
-        let Self { input, sink, output, last_delta } = self;
+        let Self {
+            input,
+            sink,
+            output,
+            last_delta,
+        } = self;
         let _ = input.commit();
         sink.commit();
         *last_delta = Some(output);
@@ -209,9 +255,15 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<StandingQueryHandle, StandingQueryError> {
         self.admitted_standing_query(cx, source)?;
         let state = self.prepare_standing_closure(
-            cx, source.index, endpoints, policy, self.standing_queries.len(),
+            cx,
+            source.index,
+            endpoints,
+            policy,
+            self.standing_queries.len(),
         )?;
-        let layout = Arc::new(native::Layout::Rows { columns: state.columns.clone() });
+        let layout = Arc::new(native::Layout::Rows {
+            columns: state.columns.clone(),
+        });
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         let mut handle = self.store_standing_query(StandingQuery::Closure(Box::new(state)));
         handle.native = Some(layout);
@@ -228,31 +280,62 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<State, StandingQueryError> {
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         self.ensure_readable().map_err(StandingQueryError::Read)?;
-        let sources = self.standing_queries.get(..before).ok_or(StandingQueryError::UnknownHandle)?;
+        let sources = self
+            .standing_queries
+            .get(..before)
+            .ok_or(StandingQueryError::UnknownHandle)?;
         let at = self.snapshot.frontier;
         cx.with_restriction(|| {
-            let parent = sets::input_at(sources, input, at).map_err(StandingQueryError::Maintenance)?;
+            let parent =
+                sets::input_at(sources, input, at).map_err(StandingQueryError::Maintenance)?;
             let names = sets::columns(parent).ok_or(StandingQueryError::Unsupported)?;
             for column in endpoints {
-                if column >= names.len() || sets::column_type(parent, column) != Some(GraphSetColumnType::Vertex) {
+                if column >= names.len()
+                    || sets::column_type(parent, column) != Some(GraphSetColumnType::Vertex)
+                {
                     return Err(StandingQueryError::Unsupported);
                 }
             }
             let rows = sets::rows(parent).ok_or(StandingQueryError::Unsupported)?;
-            if policy.rows.max_snapshot_records().is_some_and(|limit| rows.len() as u128 > u128::from(limit)) {
-                return Err(StandingQueryError::Maintenance(StandingQueryFailure::SnapshotBudget));
+            if policy
+                .rows
+                .max_snapshot_records()
+                .is_some_and(|limit| rows.len() as u128 > u128::from(limit))
+            {
+                return Err(StandingQueryError::Maintenance(
+                    StandingQueryFailure::SnapshotBudget,
+                ));
             }
-            let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-            // Fixed metadata/state slots, including the native presentation copy.
-            meter.units(ZSetEvent::ScratchEntry, 8).map_err(StandingQueryError::Maintenance)?;
-            let mut state = State {
-                input, endpoints, width: names.len(),
-                columns: vec!["source".into(), "destination".into()],
-                operator: IncrementalReachability::new(), rows: ZSet::new(), last_delta: None,
-                policy, frontier: at, stats: StandingQueryStats::default(), failure: None,
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
             };
-            state.prepare(rows, &mut meter).map_err(StandingQueryError::Maintenance)?.commit();
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            // Fixed metadata/state slots, including the native presentation copy.
+            meter
+                .units(ZSetEvent::ScratchEntry, 8)
+                .map_err(StandingQueryError::Maintenance)?;
+            let mut state = State {
+                input,
+                endpoints,
+                width: names.len(),
+                columns: vec!["source".into(), "destination".into()],
+                operator: IncrementalReachability::new(),
+                rows: ZSet::new(),
+                last_delta: None,
+                policy,
+                frontier: at,
+                stats: StandingQueryStats::default(),
+                failure: None,
+            };
+            state
+                .prepare(rows, &mut meter)
+                .map_err(StandingQueryError::Maintenance)?
+                .commit();
             state.last_delta = None;
             state.stats = meter.stats;
             Ok(state)
@@ -269,7 +352,12 @@ impl<V: Vfs + Clone> Database<V> {
         let StandingQuery::Closure(state) = self.admitted_standing_query(cx, handle)? else {
             return Err(StandingQueryError::Unsupported);
         };
-        Ok(StandingQueryView { rows: &state.rows, ordered: None, frontier: state.frontier, stats: &state.stats })
+        Ok(StandingQueryView {
+            rows: &state.rows,
+            ordered: None,
+            frontier: state.frontier,
+            stats: &state.stats,
+        })
     }
 }
 

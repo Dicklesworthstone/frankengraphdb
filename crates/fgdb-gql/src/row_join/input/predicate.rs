@@ -71,7 +71,11 @@ fn has_match<E>(
 ) -> Result<bool, ZSetError<E>> {
     for (candidate, _) in other.iter() {
         charge(control, ZSetEvent::Work)?;
-        let (left, right) = if reversed { (candidate, row) } else { (row, candidate) };
+        let (left, right) = if reversed {
+            (candidate, row)
+        } else {
+            (row, candidate)
+        };
         if spec.matches(left, right, control)? {
             return Ok(true);
         }
@@ -90,13 +94,22 @@ fn append_presence<E>(
     control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
 ) -> Result<(), ZSetError<E>> {
     let sign = ZWeight::from_i128(sign);
-    if matches!(spec.kind, RowJoinKind::Left | RowJoinKind::Full | RowJoinKind::Semi | RowJoinKind::Anti) {
+    if matches!(
+        spec.kind,
+        RowJoinKind::Left | RowJoinKind::Full | RowJoinKind::Semi | RowJoinKind::Anti
+    ) {
         for (row, count) in left.iter() {
             charge(control, ZSetEvent::Work)?;
             let matched = has_match(spec, row, right, false, control)?;
-            let keep = if spec.kind == RowJoinKind::Semi { matched } else { !matched };
+            let keep = if spec.kind == RowJoinKind::Semi {
+                matched
+            } else {
+                !matched
+            };
             if keep {
-                let count = count.checked_mul(&sign, limbs).map_err(ZSetError::Arithmetic)?;
+                let count = count
+                    .checked_mul(&sign, limbs)
+                    .map_err(ZSetError::Arithmetic)?;
                 append(output, spec, Some(row), None, &count, limbs, control)?;
             }
         }
@@ -105,7 +118,9 @@ fn append_presence<E>(
         for (row, count) in right.iter() {
             charge(control, ZSetEvent::Work)?;
             if !has_match(spec, row, left, true, control)? {
-                let count = count.checked_mul(&sign, limbs).map_err(ZSetError::Arithmetic)?;
+                let count = count
+                    .checked_mul(&sign, limbs)
+                    .map_err(ZSetError::Arithmetic)?;
                 append(output, spec, None, Some(row), &count, limbs, control)?;
             }
         }

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use fgdb_order::{
-    Configuration, Domain, Entry, Envelope, Error as RaftError, Event, Limits,
-    MemberId, Message, PersistentState, Role, SnapshotCut,
+    Configuration, Domain, Entry, Envelope, Error as RaftError, Event, Limits, MemberId, Message,
+    PersistentState, Role, SnapshotCut,
 };
 use fgdb_repl::driver::{RaftPublisher, SequenceError};
 use fgdb_repl::replica::{
@@ -40,14 +40,23 @@ struct MemoryRoot {
 
 impl RaftPublisher<u64> for MemoryRoot {
     type Error = &'static str;
-    fn publish(&mut self, state: &PersistentState<u64>) -> impl Future<Output = Result<(), Self::Error>> {
+    fn publish(
+        &mut self,
+        state: &PersistentState<u64>,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
         // An error/cancellation can follow a completed write. Never assume the
         // old root stayed authoritative solely because the caller saw an error.
         self.states.push(state.clone());
         let (fail, suspend) = (self.fail, self.suspend);
         async move {
-            if suspend { pending::<()>().await; }
-            if fail { Err("publication outcome unknown") } else { Ok(()) }
+            if suspend {
+                pending::<()>().await;
+            }
+            if fail {
+                Err("publication outcome unknown")
+            } else {
+                Ok(())
+            }
         }
     }
 }
@@ -68,20 +77,30 @@ impl Node {
 
 fn stable(voters: u128, learners: u128) -> Configuration {
     Configuration::stable(
-        Domain([11; 32]), [12; 32],
+        Domain([11; 32]),
+        [12; 32],
         (1..=voters).map(MemberId),
         (voters + 1..=voters + learners).map(MemberId),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 fn nodes(configuration: &Configuration) -> Vec<Node> {
-    configuration.voters().union(configuration.learners()).map(|id| Node {
-        member: Replica::new(*id, configuration.clone(), Limits::default(), 16).unwrap(),
-        root: MemoryRoot::default(),
-    }).collect()
+    configuration
+        .voters()
+        .union(configuration.learners())
+        .map(|id| Node {
+            member: Replica::new(*id, configuration.clone(), Limits::default(), 16).unwrap(),
+            root: MemoryRoot::default(),
+        })
+        .collect()
 }
 
-fn pump(nodes: &mut [Node], messages: Vec<Envelope<u64>>, reachable: &[u128]) -> Vec<ReadResolution> {
+fn pump(
+    nodes: &mut [Node],
+    messages: Vec<Envelope<u64>>,
+    reachable: &[u128],
+) -> Vec<ReadResolution> {
     let mut queue: VecDeque<_> = messages.into();
     let mut resolutions = Vec::new();
     let mut count = 0;
@@ -91,7 +110,10 @@ fn pump(nodes: &mut [Node], messages: Vec<Envelope<u64>>, reachable: &[u128]) ->
         if !reachable.contains(&envelope.from.0) || !reachable.contains(&envelope.to.0) {
             continue;
         }
-        let destination = nodes.iter_mut().find(|node| node.member.id() == envelope.to).unwrap();
+        let destination = nodes
+            .iter_mut()
+            .find(|node| node.member.id() == envelope.to)
+            .unwrap();
         let output = destination.step(Event::Receive(envelope));
         queue.extend(output.consensus.messages);
         resolutions.extend(output.reads);
@@ -111,15 +133,29 @@ fn elect(nodes: &mut [Node], reachable: &[u128]) {
 }
 
 fn request_to(output: &ReplicaOutput<u64>, to: u128) -> Envelope<u64> {
-    output.consensus.messages.iter().find(|envelope| envelope.to == MemberId(to)).unwrap().clone()
+    output
+        .consensus
+        .messages
+        .iter()
+        .find(|envelope| envelope.to == MemberId(to))
+        .unwrap()
+        .clone()
 }
 
 fn reply(nodes: &mut [Node], request: Envelope<u64>) -> Envelope<u64> {
     let leader = request.from;
-    let destination = nodes.iter_mut().find(|node| node.member.id() == request.to).unwrap();
+    let destination = nodes
+        .iter_mut()
+        .find(|node| node.member.id() == request.to)
+        .unwrap();
     let output = destination.step(Event::Receive(request));
     assert!(output.reads.is_empty());
-    output.consensus.messages.into_iter().find(|envelope| envelope.to == leader).unwrap()
+    output
+        .consensus
+        .messages
+        .into_iter()
+        .find(|envelope| envelope.to == leader)
+        .unwrap()
 }
 
 fn only_ready(mut resolutions: Vec<ReadResolution>) -> ReadIndexReady {
@@ -148,7 +184,13 @@ fn quiescent_majority_confirms_one_read_without_a_log_entry_or_publication() {
     assert_eq!(ready.index(), before.commit_index());
     assert_eq!(nodes[0].member.durable_state().unwrap(), &before);
     assert_eq!(nodes[0].member.pending_reads(), 0);
-    assert_eq!(nodes.iter().map(|node| node.root.states.len()).collect::<Vec<_>>(), writes);
+    assert_eq!(
+        nodes
+            .iter()
+            .map(|node| node.root.states.len())
+            .collect::<Vec<_>>(),
+        writes
+    );
 }
 
 #[test]
@@ -194,9 +236,19 @@ fn duplicates_and_learner_responses_do_not_form_a_voter_quorum() {
     let learner = reply(&mut nodes, request_to(&output, 6));
     assert!(nodes[0].step(Event::Receive(learner)).reads.is_empty());
     let voter = reply(&mut nodes, request_to(&output, 2));
-    assert!(nodes[0].step(Event::Receive(voter.clone())).reads.is_empty());
+    assert!(
+        nodes[0]
+            .step(Event::Receive(voter.clone()))
+            .reads
+            .is_empty()
+    );
     for _ in 0..8 {
-        assert!(nodes[0].step(Event::Receive(voter.clone())).reads.is_empty());
+        assert!(
+            nodes[0]
+                .step(Event::Receive(voter.clone()))
+                .reads
+                .is_empty()
+        );
     }
     assert_eq!(nodes[0].member.pending_reads(), 1);
     let another = reply(&mut nodes, request_to(&output, 3));
@@ -208,10 +260,13 @@ fn duplicates_and_learner_responses_do_not_form_a_voter_quorum() {
 #[test]
 fn joint_read_needs_independent_old_and_new_majorities() {
     let config = Configuration::joint(
-        Domain([13; 32]), [14; 32],
+        Domain([13; 32]),
+        [14; 32],
         [MemberId(1), MemberId(2), MemberId(3)],
-        [MemberId(3), MemberId(4), MemberId(5)], [],
-    ).unwrap();
+        [MemberId(3), MemberId(4), MemberId(5)],
+        [],
+    )
+    .unwrap();
     let mut nodes = nodes(&config);
     elect(&mut nodes, &[1, 2, 3, 4, 5]);
     let (id, output) = nodes[0].read();
@@ -231,8 +286,10 @@ fn follower_and_new_leader_without_current_term_commit_refuse_reads() {
     let mut nodes = nodes(&stable(3, 0));
     {
         let node = &mut nodes[0];
-        assert!(matches!(immediate(node.member.read_index(&mut node.root)),
-            Err(ReplicaError::Raft(RaftError::NotLeader))));
+        assert!(matches!(
+            immediate(node.member.read_index(&mut node.root)),
+            Err(ReplicaError::Raft(RaftError::NotLeader))
+        ));
     }
     let campaign = nodes[0].step(Event::ElectionTimeout);
     let vote = reply(&mut nodes, request_to(&campaign, 2));
@@ -241,8 +298,10 @@ fn follower_and_new_leader_without_current_term_commit_refuse_reads() {
     assert_eq!(nodes[0].member.durable_state().unwrap().commit_index(), 0);
     {
         let node = &mut nodes[0];
-        assert!(matches!(immediate(node.member.read_index(&mut node.root)),
-            Err(ReplicaError::CurrentTermNotCommitted)));
+        assert!(matches!(
+            immediate(node.member.read_index(&mut node.root)),
+            Err(ReplicaError::CurrentTermNotCommitted)
+        ));
         assert_eq!(node.member.pending_reads(), 0);
     }
     assert!(pump(&mut nodes, leader.consensus.messages, &[1, 2]).is_empty());
@@ -262,15 +321,25 @@ fn unknown_or_wrong_domain_replies_never_consume_the_real_probe() {
     let (id, output) = nodes[0].read();
     let ack = reply(&mut nodes, request_to(&output, 2));
     let mut unissued = ack.clone();
-    if let Message::Appended { request, .. } = &mut unissued.message { *request += 1000; }
+    if let Message::Appended { request, .. } = &mut unissued.message {
+        *request += 1000;
+    }
     assert!(nodes[0].step(Event::Receive(unissued)).reads.is_empty());
     for configuration in [false, true] {
         let mut foreign = ack.clone();
-        if configuration { foreign.configuration[0] ^= 1; } else { foreign.domain.0[0] ^= 1; }
+        if configuration {
+            foreign.configuration[0] ^= 1;
+        } else {
+            foreign.domain.0[0] ^= 1;
+        }
         let node = &mut nodes[0];
         let result = immediate(node.member.step(&mut node.root, Event::Receive(foreign)));
-        assert!(matches!(result,
-            Err(ReplicaError::Sequence(SequenceError::Raft(RaftError::WrongDomain | RaftError::WrongConfiguration)))));
+        assert!(matches!(
+            result,
+            Err(ReplicaError::Sequence(SequenceError::Raft(
+                RaftError::WrongDomain | RaftError::WrongConfiguration
+            )))
+        ));
         assert_eq!(node.member.pending_reads(), 1);
     }
     let ready = only_ready(nodes[0].step(Event::Receive(ack)).reads);
@@ -283,7 +352,12 @@ fn rejection_only_schedules_a_new_probe_and_never_confirms_the_read() {
     elect(&mut nodes, &[1, 2]);
     let (id, output) = nodes[0].read();
     let mut rejected = reply(&mut nodes, request_to(&output, 2));
-    if let Message::Appended { success, conflict_next, .. } = &mut rejected.message {
+    if let Message::Appended {
+        success,
+        conflict_next,
+        ..
+    } = &mut rejected.message
+    {
         *success = false;
         *conflict_next = 1;
     }
@@ -303,9 +377,15 @@ fn observed_leader_loss_cancels_pending_reads_instead_of_releasing_stale_floors(
     // New term from the other voter invalidates all prior-term read barriers.
     let term = nodes[0].member.durable_state().unwrap().term() + 1;
     let output = nodes[0].step(Event::Receive(Envelope {
-        domain: config.domain(), configuration: config.identity(),
-        from: MemberId(3), to: MemberId(1),
-        message: Message::RequestVote { term, last_index: 1, last_term: term - 1 },
+        domain: config.domain(),
+        configuration: config.identity(),
+        from: MemberId(3),
+        to: MemberId(1),
+        message: Message::RequestVote {
+            term,
+            last_index: 1,
+            last_term: term - 1,
+        },
     }));
     assert_eq!(output.consensus.role, Role::Follower);
     assert!(matches!(&output.reads[..], [ReadResolution::LeadershipLost(lost)] if lost == &id));
@@ -318,24 +398,42 @@ fn partitioned_former_leader_never_completes_a_new_read_from_old_responses() {
     let mut nodes = nodes(&stable(3, 0));
     elect(&mut nodes, &[1, 2, 3]);
     let old = nodes[0].step(Event::Heartbeat);
-    let delayed: Vec<_> = [2, 3].into_iter()
-        .map(|to| reply(&mut nodes, request_to(&old, to))).collect();
+    let delayed: Vec<_> = [2, 3]
+        .into_iter()
+        .map(|to| reply(&mut nodes, request_to(&old, to)))
+        .collect();
     // The old leader is partitioned while voters 2 and 3 elect a successor.
     let election = nodes[1].step(Event::ElectionTimeout);
     assert!(pump(&mut nodes, election.consensus.messages, &[2, 3]).is_empty());
     assert_eq!(nodes[1].member.role(), Ok(Role::Leader));
     let write = nodes[1].step(Event::Propose(42));
     assert!(pump(&mut nodes, write.consensus.messages, &[2, 3]).is_empty());
-    assert!(nodes[1].member.committed_after(0).unwrap().iter()
-        .any(|entry| entry.entry.command == Some(42)));
+    assert!(
+        nodes[1]
+            .member
+            .committed_after(0)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.entry.command == Some(42))
+    );
     let (id, _) = nodes[0].read(); // Still believes it leads, but must probe afresh.
-    for ack in delayed { assert!(nodes[0].step(Event::Receive(ack)).reads.is_empty()); }
+    for ack in delayed {
+        assert!(nodes[0].step(Event::Receive(ack)).reads.is_empty());
+    }
     assert_eq!(nodes[0].member.pending_reads(), 1);
     // Healing delivers a current-term rejection, not a read confirmation.
     let probe = nodes[0].step(Event::Heartbeat);
     let results = pump(&mut nodes, probe.consensus.messages, &[1, 2, 3]);
-    assert!(results.iter().all(|result| matches!(result, ReadResolution::LeadershipLost(_))));
-    assert!(results.iter().any(|result| matches!(result, ReadResolution::LeadershipLost(lost) if lost == &id)));
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(result, ReadResolution::LeadershipLost(_)))
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| matches!(result, ReadResolution::LeadershipLost(lost) if lost == &id))
+    );
     assert_eq!(nodes[0].member.role(), Ok(Role::Follower));
 }
 
@@ -366,8 +464,14 @@ fn compaction_invalidates_old_probe_identities_without_losing_pending_reads() {
     let delayed = reply(&mut nodes, request_to(&output, 2));
     let state = nodes[0].member.durable_state().unwrap();
     let cut = SnapshotCut::from_authenticated_parts(
-        &config, [21; 32], [22; 32], [23; 32], state.commit_index(), state.term(),
-    ).unwrap();
+        &config,
+        [21; 32],
+        [22; 32],
+        [23; 32],
+        state.commit_index(),
+        state.term(),
+    )
+    .unwrap();
     // Synthetic verifier-approved visible/retained cut in this protocol fixture.
     assert!(nodes[0].step(Event::Compact(cut)).reads.is_empty());
     assert!(nodes[0].step(Event::Receive(delayed)).reads.is_empty());
@@ -385,7 +489,10 @@ fn bounded_admission_cancellation_and_recovery_do_not_reuse_read_identities() {
     let (cancelled, first) = nodes[0].read();
     {
         let node = &mut nodes[0];
-        assert!(matches!(immediate(node.member.read_index(&mut node.root)), Err(ReplicaError::ReadBackpressure)));
+        assert!(matches!(
+            immediate(node.member.read_index(&mut node.root)),
+            Err(ReplicaError::ReadBackpressure)
+        ));
     }
     assert!(!nodes[1].member.cancel_read(&cancelled));
     assert!(nodes[0].member.cancel_read(&cancelled));
@@ -407,11 +514,15 @@ fn bounded_admission_cancellation_and_recovery_do_not_reuse_read_identities() {
 #[test]
 fn one_member_read_after_snapshot_and_noop_needs_no_extra_root_write() {
     let config = stable(1, 0);
-    let cut = SnapshotCut::from_authenticated_parts(
-        &config, [31; 32], [32; 32], [33; 32], 10, 2,
-    ).unwrap();
+    let cut = SnapshotCut::from_authenticated_parts(&config, [31; 32], [32; 32], [33; 32], 10, 2)
+        .unwrap();
     let persisted = PersistentState::from_authenticated_snapshot(
-        config, 2, None, 10, cut, Vec::<Entry<u64>>::new(),
+        config,
+        2,
+        None,
+        10,
+        cut,
+        Vec::<Entry<u64>>::new(),
     );
     let mut node = Node {
         member: Replica::recover(MemberId(1), persisted, Limits::default(), 16).unwrap(),
@@ -448,12 +559,16 @@ fn failed_or_cancelled_publication_cannot_release_a_quorum_read() {
             let mut context = Context::from_waker(&waker);
             assert!(future.as_mut().poll(&mut context).is_pending());
         } else {
-            assert!(matches!(immediate(node.member.step(&mut node.root, Event::Receive(ack))),
-                Err(ReplicaError::Sequence(SequenceError::Publication(_)))));
+            assert!(matches!(
+                immediate(node.member.step(&mut node.root, Event::Receive(ack))),
+                Err(ReplicaError::Sequence(SequenceError::Publication(_)))
+            ));
         }
         assert_eq!(node.member.role(), Err(RaftError::RecoveryRequired));
-        assert!(matches!(immediate(node.member.read_index(&mut node.root)),
-            Err(ReplicaError::Raft(RaftError::RecoveryRequired))));
+        assert!(matches!(
+            immediate(node.member.read_index(&mut node.root)),
+            Err(ReplicaError::Raft(RaftError::RecoveryRequired))
+        ));
         assert!(node.root.states.last().unwrap().commit_index() >= 2);
     }
 }
@@ -461,8 +576,10 @@ fn failed_or_cancelled_publication_cannot_release_a_quorum_read() {
 #[test]
 fn invalid_read_capacity_is_rejected_before_a_replica_can_be_used() {
     for capacity in [0, 1025, usize::MAX] {
-        assert!(matches!(Replica::<u64>::new(MemberId(1), stable(1, 0), Limits::default(), capacity),
-            Err(RaftError::InvalidLimits)));
+        assert!(matches!(
+            Replica::<u64>::new(MemberId(1), stable(1, 0), Limits::default(), capacity),
+            Err(RaftError::InvalidLimits)
+        ));
     }
 }
 
@@ -473,8 +590,14 @@ fn snapshot_install_ack_is_not_a_fresh_read_confirmation() {
     elect(&mut nodes, &[1, 3]); // Voter 2 never learned the committed prefix.
     let state = nodes[0].member.durable_state().unwrap();
     let cut = SnapshotCut::from_authenticated_parts(
-        &config, [41; 32], [42; 32], [43; 32], state.commit_index(), state.term(),
-    ).unwrap();
+        &config,
+        [41; 32],
+        [42; 32],
+        [43; 32],
+        state.commit_index(),
+        state.term(),
+    )
+    .unwrap();
     nodes[0].step(Event::Compact(cut));
     let (id, probe) = nodes[0].read();
     let offer = request_to(&probe, 2);
@@ -484,8 +607,10 @@ fn snapshot_install_ack_is_not_a_fresh_read_confirmation() {
     // Even an exact successful install receipt cannot stand in for the separate
     // Append-based current-leader probe. The ordinary quorum still must respond.
     let output = nodes[0].step(Event::Receive(Envelope {
-        domain: config.domain(), configuration: config.identity(),
-        from: MemberId(2), to: MemberId(1),
+        domain: config.domain(),
+        configuration: config.identity(),
+        from: MemberId(2),
+        to: MemberId(1),
         message: Message::SnapshotInstalled { term, request },
     }));
     assert!(output.reads.is_empty());
@@ -501,17 +626,18 @@ mod seed_support;
 use fgdb_chronicle::seed::{ObjectPublication, SeedAnchor, SeedLimits, SeedObjectSpec, SeedPlan};
 use fgdb_chronicle::store::RootPublicationEvidence;
 use fgdb_chronicle::transfer::{DonorId, PullLimits, PullRequest};
-use fgdb_repl::driver::{SeedCatalog, SeedPublisher, SeedRecovery};
+use fgdb_repl::SnapshotPublication;
 use fgdb_repl::driver::bonded::ReplyOutcome;
 use fgdb_repl::driver::bonded::streaming::{StreamingSeedSource, SymbolTransport};
-use fgdb_repl::SnapshotPublication;
+use fgdb_repl::driver::{SeedCatalog, SeedPublisher, SeedRecovery};
 
 struct SeedFixture(Vec<seed_support::Fixture>);
 
 impl SeedFixture {
     fn spec(&self, i: usize) -> SeedObjectSpec {
         SeedObjectSpec {
-            object_id: self.0[i].encoding.object_id(), object_kind: seed_support::KIND,
+            object_id: self.0[i].encoding.object_id(),
+            object_kind: seed_support::KIND,
             compressed_len: self.0[i].plaintext.len() as u64,
         }
     }
@@ -520,23 +646,39 @@ impl SeedFixture {
 impl SeedCatalog for SeedFixture {
     type Error = &'static str;
     fn recovery(&self, object: SeedObjectSpec) -> Result<SeedRecovery<'_>, Self::Error> {
-        let fixture = self.0.iter().find(|item| item.encoding.object_id() == object.object_id)
+        let fixture = self
+            .0
+            .iter()
+            .find(|item| item.encoding.object_id() == object.object_id)
             .ok_or("unknown fixture object")?;
         Ok(SeedRecovery {
-            encoding: &fixture.encoding, target: fixture.target(), dek: &seed_support::DEK,
-            donors: &[DonorId(1), DonorId(2), DonorId(3)], limits: PullLimits::default(),
+            encoding: &fixture.encoding,
+            target: fixture.target(),
+            dek: &seed_support::DEK,
+            donors: &[DonorId(1), DonorId(2), DonorId(3)],
+            limits: PullLimits::default(),
         })
     }
 }
 
 impl SymbolTransport for SeedFixture {
     type Error = &'static str;
-    fn request(&self, request: PullRequest) -> impl Future<Output = Result<ReplyOutcome, Self::Error>> {
+    fn request(
+        &self,
+        request: PullRequest,
+    ) -> impl Future<Output = Result<ReplyOutcome, Self::Error>> {
         async move {
-            if request.donor == DonorId(1) { return Ok(ReplyOutcome::Unavailable); }
-            let fixture = self.0.iter().find(|item| item.encoding.object_id() == request.object_id)
+            if request.donor == DonorId(1) {
+                return Ok(ReplyOutcome::Unavailable);
+            }
+            let fixture = self
+                .0
+                .iter()
+                .find(|item| item.encoding.object_id() == request.object_id)
                 .ok_or("unknown fixture route")?;
-            Ok(ReplyOutcome::Record(fixture.records[request.esi as usize].clone()))
+            Ok(ReplyOutcome::Record(
+                fixture.records[request.esi as usize].clone(),
+            ))
         }
     }
 }
@@ -549,13 +691,17 @@ struct SeedRoot {
 
 impl SeedPublisher<u64> for SeedRoot {
     type Error = &'static str;
-    fn publish_object(&mut self, object: ObjectPublication<'_>) -> impl Future<Output = Result<(), Self::Error>> {
+    fn publish_object(
+        &mut self,
+        object: ObjectPublication<'_>,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
         self.objects.push(object.object().object_id().0);
         std::future::ready(Ok(()))
     }
-    fn publish_snapshot(&mut self, snapshot: SnapshotPublication<'_, u64>)
-        -> impl Future<Output = Result<RootPublicationEvidence, Self::Error>>
-    {
+    fn publish_snapshot(
+        &mut self,
+        snapshot: SnapshotPublication<'_, u64>,
+    ) -> impl Future<Output = Result<RootPublicationEvidence, Self::Error>> {
         for object in snapshot.seed().plan().objects() {
             assert!(self.objects.contains(&object.object_id.0));
         }
@@ -564,7 +710,8 @@ impl SeedPublisher<u64> for SeedRoot {
         // Memory publication test double; production obtains post-sync reread
         // evidence from RootStore, never by copying coordinates from the plan.
         std::future::ready(Ok(RootPublicationEvidence {
-            written_index: 1, slot_generation: anchor.publication_generation,
+            written_index: 1,
+            slot_generation: anchor.publication_generation,
             root_manifest_oid: anchor.publication_root.0,
         }))
     }
@@ -575,42 +722,79 @@ fn owned_replica_seeds_then_elects_and_confirms_reads_through_the_same_driver() 
     let config = stable(3, 0);
     let fixture = SeedFixture((161..165).map(seed_support::Fixture::new).collect());
     let roots: Vec<_> = (0..4).map(|i| fixture.spec(i).object_id).collect();
-    let cut = SnapshotCut::from_authenticated_parts(
-        &config, roots[0].0, roots[1].0, roots[2].0, 12, 3,
-    ).unwrap();
-    let plan = SeedPlan::from_authenticated_inventory(SeedAnchor {
-        namespace: seed_support::namespace(), consensus_domain: config.domain().0,
-        configuration: config.identity(), snapshot_manifest: roots[0], state_root: roots[1],
-        retention_floor: roots[2], publication_root: roots[3], publication_generation: 2,
-        raft_index: 12, raft_term: 3, logical_command_seq: 8, commit_seq: 8,
-    }, (0..4).map(|i| fixture.spec(i)), SeedLimits::default()).unwrap();
+    let cut =
+        SnapshotCut::from_authenticated_parts(&config, roots[0].0, roots[1].0, roots[2].0, 12, 3)
+            .unwrap();
+    let plan = SeedPlan::from_authenticated_inventory(
+        SeedAnchor {
+            namespace: seed_support::namespace(),
+            consensus_domain: config.domain().0,
+            configuration: config.identity(),
+            snapshot_manifest: roots[0],
+            state_root: roots[1],
+            retention_floor: roots[2],
+            publication_root: roots[3],
+            publication_generation: 2,
+            raft_index: 12,
+            raft_term: 3,
+            logical_command_seq: 8,
+            commit_seq: 8,
+        },
+        (0..4).map(|i| fixture.spec(i)),
+        SeedLimits::default(),
+    )
+    .unwrap();
     let mut follower = Node {
         member: Replica::new(MemberId(2), config.clone(), Limits::default(), 16).unwrap(),
         root: MemoryRoot::default(),
     };
     let offered = follower.step(Event::Receive(Envelope {
-        domain: config.domain(), configuration: config.identity(), from: MemberId(1), to: MemberId(2),
-        message: Message::InstallSnapshot { term: 3, request: 1, snapshot: cut.clone() },
+        domain: config.domain(),
+        configuration: config.identity(),
+        from: MemberId(1),
+        to: MemberId(2),
+        message: Message::InstallSnapshot {
+            term: 3,
+            request: 1,
+            snapshot: cut.clone(),
+        },
     }));
     assert!(offered.consensus.messages.is_empty());
-    let transfer = offered.consensus.snapshot_transfers.into_iter().next().unwrap();
+    let transfer = offered
+        .consensus
+        .snapshot_transfers
+        .into_iter()
+        .next()
+        .unwrap();
     let mut verification = Vec::new();
     let mut source = StreamingSeedSource::new(
-        seed_support::namespace(), &fixture, &fixture, &mut verification, 6,
+        seed_support::namespace(),
+        &fixture,
+        &fixture,
+        &mut verification,
+        6,
     );
     let mut publisher = SeedRoot::default();
     let installed = immediate(follower.member.install_snapshot(
-        seed_support::namespace(), transfer, plan, &mut source, &mut publisher,
-    )).unwrap();
+        seed_support::namespace(),
+        transfer,
+        plan,
+        &mut source,
+        &mut publisher,
+    ))
+    .unwrap();
     assert_eq!(installed.consensus.installed_snapshot, Some(cut));
     assert!(installed.reads.is_empty());
     assert_eq!(publisher.objects.len(), 4);
     assert_eq!(follower.member.role(), Ok(Role::Follower));
-    assert!(matches!(immediate(follower.member.read_index(&mut follower.root)),
-        Err(ReplicaError::Raft(RaftError::NotLeader))));
+    assert!(matches!(
+        immediate(follower.member.read_index(&mut follower.root)),
+        Err(ReplicaError::Raft(RaftError::NotLeader))
+    ));
     let mut nodes = vec![
         Node {
-            member: Replica::recover(MemberId(1), publisher.state.unwrap(), Limits::default(), 16).unwrap(),
+            member: Replica::recover(MemberId(1), publisher.state.unwrap(), Limits::default(), 16)
+                .unwrap(),
             root: MemoryRoot::default(),
         },
         follower,

@@ -76,13 +76,22 @@ struct History {
 }
 impl History {
     fn new(at: CommitSeq) -> Self {
-        Self { baseline: at, frames: VecDeque::new(), rows: 0, units: 0 }
+        Self {
+            baseline: at,
+            frames: VecDeque::new(),
+            rows: 0,
+            units: 0,
+        }
     }
     fn frontier(&self) -> CommitSeq {
-        self.frames.back().map_or(self.baseline, |frame| frame.frontier)
+        self.frames
+            .back()
+            .map_or(self.baseline, |frame| frame.frontier)
     }
     fn retained_after(&self) -> CommitSeq {
-        self.frames.front().map_or(self.baseline, |frame| frame.from)
+        self.frames
+            .front()
+            .map_or(self.baseline, |frame| frame.from)
     }
     fn window(&self) -> StandingReplayWindow {
         StandingReplayWindow {
@@ -93,11 +102,18 @@ impl History {
             payload_units: self.units,
         }
     }
-    fn next(&self, after: CommitSeq) -> Result<Option<&Arc<StandingReplayBatch>>, StandingQueryError> {
+    fn next(
+        &self,
+        after: CommitSeq,
+    ) -> Result<Option<&Arc<StandingReplayBatch>>, StandingQueryError> {
         let frontier = self.frontier();
         let retained_after = self.retained_after();
         if after < retained_after || after > frontier {
-            return Err(StandingQueryError::ReplayGap { after, retained_after, frontier });
+            return Err(StandingQueryError::ReplayGap {
+                after,
+                retained_after,
+                frontier,
+            });
         }
         if after == frontier {
             return Ok(None);
@@ -106,9 +122,15 @@ impl History {
         // of the retained prefix: each consumer step is O(1) in backlog length.
         let offset = usize::try_from(after.0 - retained_after.0)
             .map_err(|_| StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
-        let frame = self.frames.get(offset)
-            .filter(|frame| frame.from == after && after.checked_successor().ok() == Some(frame.frontier))
-            .ok_or(StandingQueryError::Delivery(StandingQueryFailure::InvalidDelta))?;
+        let frame = self
+            .frames
+            .get(offset)
+            .filter(|frame| {
+                frame.from == after && after.checked_successor().ok() == Some(frame.frontier)
+            })
+            .ok_or(StandingQueryError::Delivery(
+                StandingQueryFailure::InvalidDelta,
+            ))?;
         Ok(Some(frame))
     }
 
@@ -133,7 +155,8 @@ impl History {
         let mut units = 1_usize;
         for (row, weight) in rows.iter() {
             meter.charge(ZSetEvent::Work)?;
-            units = units.checked_add(1)
+            units = units
+                .checked_add(1)
                 .and_then(|n| n.checked_add(weight.magnitude_limb_count()))
                 .ok_or(StandingQueryFailure::ScratchBudget)?;
             for cell in row {
@@ -142,7 +165,9 @@ impl History {
                     QueryValue::Value(value) => value.payload_units(),
                     _ => 0,
                 };
-                units = units.checked_add(1).and_then(|n| n.checked_add(payload))
+                units = units
+                    .checked_add(1)
+                    .and_then(|n| n.checked_add(payload))
                     .ok_or(StandingQueryFailure::ScratchBudget)?;
             }
             if units > limits.units {
@@ -162,10 +187,15 @@ impl History {
             || retained_units > limits.units - units
         {
             meter.charge(ZSetEvent::Work)?;
-            let frame = self.frames.get(evict).ok_or(StandingQueryFailure::InvalidDelta)?;
-            retained_rows = retained_rows.checked_sub(frame.rows.len())
+            let frame = self
+                .frames
+                .get(evict)
                 .ok_or(StandingQueryFailure::InvalidDelta)?;
-            retained_units = retained_units.checked_sub(frame.units)
+            retained_rows = retained_rows
+                .checked_sub(frame.rows.len())
+                .ok_or(StandingQueryFailure::InvalidDelta)?;
+            retained_units = retained_units
+                .checked_sub(frame.units)
                 .ok_or(StandingQueryFailure::InvalidDelta)?;
             evict += 1;
         }
@@ -173,17 +203,33 @@ impl History {
         let next_units = retained_units + units;
         meter.units(ZSetEvent::ScratchEntry, evict)?;
         let mut retired = Vec::new();
-        retired.try_reserve_exact(evict).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+        retired
+            .try_reserve_exact(evict)
+            .map_err(|_| StandingQueryFailure::ScratchBudget)?;
         // If a prefix will be removed, its slots already admit the new frame.
         // Reserve before publication; no allocation can fail during the swap.
         if evict == 0 {
             meter.charge(ZSetEvent::ScratchEntry)?;
-            self.frames.try_reserve(1).map_err(|_| StandingQueryFailure::ScratchBudget)?;
+            self.frames
+                .try_reserve(1)
+                .map_err(|_| StandingQueryFailure::ScratchBudget)?;
         }
         meter.units(ZSetEvent::ScratchEntry, 2)?;
-        let frame = Arc::new(StandingReplayBatch { from, frontier: at, rows: Arc::new(rows), units });
+        let frame = Arc::new(StandingReplayBatch {
+            from,
+            frontier: at,
+            rows: Arc::new(rows),
+            units,
+        });
         (meter.checkpoint)()?;
-        Ok(Update { owner: self, frame, evict, next_rows, next_units, retired })
+        Ok(Update {
+            owner: self,
+            frame,
+            evict,
+            next_rows,
+            next_units,
+            retired,
+        })
     }
 }
 
@@ -235,18 +281,26 @@ impl State {
         meter.charge(ZSetEvent::Work)?;
         let at = batch.commit_seq();
         if self.frontier.checked_successor().ok() != Some(at)
-            || batch.frontier() != at || batch.commit_marker_identity().commit_seq != at
+            || batch.frontier() != at
+            || batch.commit_marker_identity().commit_seq != at
         {
             return Err(StandingQueryFailure::InvalidDelta);
         }
-        let source = sources.get(self.source.index).ok_or(StandingQueryFailure::DependencyUnavailable)?;
+        let source = sources
+            .get(self.source.index)
+            .ok_or(StandingQueryFailure::DependencyUnavailable)?;
         let (_, frontier, failure) = source.status();
         if frontier != at || failure.is_some() {
             return Err(StandingQueryFailure::DependencyUnavailable);
         }
-        let layout = self.source.native.as_deref().ok_or(StandingQueryFailure::InvalidDelta)?;
+        let layout = self
+            .source
+            .native
+            .as_deref()
+            .ok_or(StandingQueryFailure::InvalidDelta)?;
         let rows = source.native_delta_for_replay(layout, meter)?;
-        meter.stats.delta_rows = u64::try_from(rows.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
+        meter.stats.delta_rows =
+            u64::try_from(rows.len()).map_err(|_| StandingQueryFailure::WorkBudget)?;
         self.history.prepare(at, rows, self.limits, meter)?.commit();
         Ok(())
     }
@@ -298,8 +352,13 @@ impl<V: Vfs + Clone> Database<V> {
         let frontier = self.admitted_standing_query(cx, source)?.status().1;
         cx.checkpoint().map_err(StandingQueryError::Interrupted)?;
         Ok(State {
-            source: source.clone(), limits, history: History::new(frontier),
-            policy, frontier, stats: StandingQueryStats::default(), failure: None,
+            source: source.clone(),
+            limits,
+            history: History::new(frontier),
+            policy,
+            frontier,
+            stats: StandingQueryStats::default(),
+            failure: None,
         })
     }
 
@@ -330,15 +389,34 @@ impl<V: Vfs + Clone> Database<V> {
         let StandingQuery::Replay(state) = self.admitted_standing_query(cx, replay)? else {
             return Err(StandingQueryError::Unsupported);
         };
-        let Some(frame) = state.history.next(after)? else { return Ok(None); };
+        let Some(frame) = state.history.next(after)? else {
+            return Ok(None);
+        };
         cx.with_restriction(|| {
-            let mut checkpoint = || cx.checkpoint().map_err(|_| StandingQueryFailure::Interrupted);
-            let mut meter = Meter { policy, stats: StandingQueryStats::default(), checkpoint: &mut checkpoint };
-            meter.charge(ZSetEvent::Work).map_err(StandingQueryError::Delivery)?;
-            if policy.rows.max_result_rows().is_some_and(|limit| frame.rows.len() as u128 > u128::from(limit)) {
-                return Err(StandingQueryError::Delivery(StandingQueryFailure::ResultBudget));
+            let mut checkpoint = || {
+                cx.checkpoint()
+                    .map_err(|_| StandingQueryFailure::Interrupted)
+            };
+            let mut meter = Meter {
+                policy,
+                stats: StandingQueryStats::default(),
+                checkpoint: &mut checkpoint,
+            };
+            meter
+                .charge(ZSetEvent::Work)
+                .map_err(StandingQueryError::Delivery)?;
+            if policy
+                .rows
+                .max_result_rows()
+                .is_some_and(|limit| frame.rows.len() as u128 > u128::from(limit))
+            {
+                return Err(StandingQueryError::Delivery(
+                    StandingQueryFailure::ResultBudget,
+                ));
             }
-            meter.charge(ZSetEvent::ScratchEntry).map_err(StandingQueryError::Delivery)?;
+            meter
+                .charge(ZSetEvent::ScratchEntry)
+                .map_err(StandingQueryError::Delivery)?;
             (meter.checkpoint)().map_err(StandingQueryError::Delivery)?;
             Ok(Some(Arc::clone(frame)))
         })

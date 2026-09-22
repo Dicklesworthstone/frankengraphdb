@@ -158,7 +158,10 @@ impl<'a> Parser<'a> {
         }
         if self.take(b'*')? {
             if function != F::Count || distinct {
-                return Err(expected(name.at, "COUNT(*) without DISTINCT, or a row expression"));
+                return Err(expected(
+                    name.at,
+                    "COUNT(*) without DISTINCT, or a row expression",
+                ));
             }
             self.punct(b')', ")")?;
             return Ok((F::CountRows, None));
@@ -172,7 +175,10 @@ impl<'a> Parser<'a> {
                 GraphSetColumnType::Scalar | GraphSetColumnType::Any
             )
         {
-            return Err(expected(at, "a scalar row expression for a numeric aggregate"));
+            return Err(expected(
+                at,
+                "a scalar row expression for a numeric aggregate",
+            ));
         }
         let function = if distinct {
             match function {
@@ -238,7 +244,10 @@ impl PreparedGraphPipelineAggregateText {
                 let name = if parser.take_word("AS")? {
                     parser.name()?
                 } else {
-                    Name { text: summary_name(function), at }
+                    Name {
+                        text: summary_name(function),
+                        at,
+                    }
                 };
                 let index = summaries.len();
                 summaries.push(PipelineSummary {
@@ -335,7 +344,9 @@ impl PreparedGraphPipelineAggregateText {
         }
         for &column in &keys {
             if !inputs.is_computed(column)
-                && summaries.iter().any(|summary| summary.name == schema[column].0.text)
+                && summaries
+                    .iter()
+                    .any(|summary| summary.name == schema[column].0.text)
             {
                 return Err(build(aggregate_at, GraphAggregateBuildError::DuplicateName));
             }
@@ -362,7 +373,11 @@ impl PreparedGraphPipelineAggregateText {
                         index
                     };
                     let slot = GraphAggregateTextSlot::GroupKey(public);
-                    (slot, GraphAggregateColumn::GroupKey(key), inputs.kind(input, &schema))
+                    (
+                        slot,
+                        GraphAggregateColumn::GroupKey(key),
+                        inputs.kind(input, &schema),
+                    )
                 }
                 ReturnedValue::Summary(at) => {
                     let summary = &summaries[at];
@@ -435,7 +450,13 @@ impl PreparedGraphPipelineAggregateText {
         }
         parser.end()?;
         inputs.append_projection(
-            &parser, &schema, &mut keys, &mut summaries, &mut stages, depth, aggregate_at,
+            &parser,
+            &schema,
+            &mut keys,
+            &mut summaries,
+            &mut stages,
+            depth,
+            aggregate_at,
         )?;
         let input = rows::finish(parser, statement, head, stages)?.resolve(resolve)?;
         Ok(Self {
