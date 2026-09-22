@@ -124,9 +124,10 @@ impl GraphSetPredicateOp {
                     }
                     compare(left, right, *comparison)
                 }
-                GraphSetPredicateOp::IsNull { operand, is_null } => {
-                    Some(resolve(operand, left_cells, right_cells, columns, control)?.is_null() == *is_null)
-                }
+                GraphSetPredicateOp::IsNull { operand, is_null } => Some(
+                    resolve(operand, left_cells, right_cells, columns, control)?.is_null()
+                        == *is_null,
+                ),
                 GraphSetPredicateOp::Truth(value) => *value,
                 GraphSetPredicateOp::Not => {
                     stack[depth - 1] = stack[depth - 1].map(|value| !value);
@@ -345,18 +346,23 @@ fn resolve<'a, E>(
 ) -> Result<Cell<'a>, E> {
     control(GlaExecutionEvent::Work)?;
     Ok(match operand {
-        GraphSetOperand::Column(column) => match {
+        GraphSetOperand::Column(column) => {
             let column = columns.map_or(*column, |columns| columns[*column]);
-            if column < left.len() { &left[column] } else { &right[column - left.len()] }
-        } {
-            GraphValue::Vertex(value) => Cell::Vertex(*value),
-            GraphValue::Scalar(value) => Cell::Scalar(value),
-            GraphValue::Path(_)
-            | GraphValue::Vertices(_)
-            | GraphValue::Edges(_)
-            | GraphValue::Edge(_)
-            | GraphValue::List(_) => Cell::Incompatible,
-        },
+            let value = if column < left.len() {
+                &left[column]
+            } else {
+                &right[column - left.len()]
+            };
+            match value {
+                GraphValue::Vertex(value) => Cell::Vertex(*value),
+                GraphValue::Scalar(value) => Cell::Scalar(value),
+                GraphValue::Path(_)
+                | GraphValue::Vertices(_)
+                | GraphValue::Edges(_)
+                | GraphValue::Edge(_)
+                | GraphValue::List(_) => Cell::Incompatible,
+            }
+        }
         GraphSetOperand::Literal(value) => Cell::Scalar(value.value()),
     })
 }
@@ -405,9 +411,7 @@ impl PreparedGraphSet {
     /// latter preserves the product sequence and cannot raise expression errors.
     /// A product's own ORDER BY or LIMIT (including zero) remains a barrier.
     /// The caller applies THIS filter node's order/page after matching.
-    pub(crate) fn filtered_cross_inputs(
-        &self,
-    ) -> Option<FilteredCrossInputs<'_>> {
+    pub(crate) fn filtered_cross_inputs(&self) -> Option<FilteredCrossInputs<'_>> {
         let SetNode::Filter { input, predicate } = &self.node else {
             return None;
         };
@@ -419,10 +423,15 @@ impl PreparedGraphSet {
             }
             match &input.node {
                 SetNode::Scope(child) => input = child,
-                SetNode::Project { input: child, projection, quantifier }
-                    if selected.is_none()
-                        && *quantifier == super::GraphSetQuantifier::All
-                        && projection.iter().all(|column| matches!(column.value(), super::GraphSetValue::Column(_))) =>
+                SetNode::Project {
+                    input: child,
+                    projection,
+                    quantifier,
+                } if selected.is_none()
+                    && *quantifier == super::GraphSetQuantifier::All
+                    && projection.iter().all(|column| {
+                        matches!(column.value(), super::GraphSetValue::Column(_))
+                    }) =>
                 {
                     selected = Some(projection.as_slice());
                     input = child;

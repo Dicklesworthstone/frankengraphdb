@@ -226,7 +226,9 @@ where
         let left = run(left, source, meter, operand)?;
         let right = run(right, source, meter, operand)?;
         let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
-        selected_cross::collect(&left, &right, code, columns.as_deref(), &mut |event| meter.event(event))?
+        selected_cross::collect(&left, &right, code, columns.as_deref(), &mut |event| {
+            meter.event(event)
+        })?
     } else {
         run_node(query, source, meter, operand)?
     };

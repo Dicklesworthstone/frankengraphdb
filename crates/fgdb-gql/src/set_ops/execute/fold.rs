@@ -183,12 +183,17 @@ where
         let right = run(right, source, meter, operand)?;
         let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
         selected_cross::visit_with_context(
-            &left, &right, code, columns.as_deref(), meter,
+            &left,
+            &right,
+            code,
+            columns.as_deref(),
+            meter,
             |meter, event| meter.event(event),
             |left, right, meter| {
-                let row = selected_cross::copy_pair(
-                    left, right, columns.as_deref(), &mut |event| meter.event(event),
-                )?;
+                let row =
+                    selected_cross::copy_pair(left, right, columns.as_deref(), &mut |event| {
+                        meter.event(event)
+                    })?;
                 // Keep the ordinary window and deferred downstream-error law.
                 // The probe walk drains even after the output page is full.
                 window.push(row, meter, consume)
@@ -318,7 +323,6 @@ where
 
 #[cfg(test)]
 mod tests;
-
 
 #[cfg(test)]
 mod selected_tests;

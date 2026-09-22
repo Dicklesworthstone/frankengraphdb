@@ -92,7 +92,9 @@ impl GraphSetColumnType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphSetBuildError {
     /// The complete left (0) or right (1) schema differs from the checked join.
-    JoinInputSchema { side: usize },
+    JoinInputSchema {
+        side: usize,
+    },
     TooManyOperands {
         limit: usize,
         observed: usize,

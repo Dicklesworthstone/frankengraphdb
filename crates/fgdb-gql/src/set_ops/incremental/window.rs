@@ -64,11 +64,15 @@ impl PreparedGraphSet {
             SetNode::Join { left, right, spec } => {
                 use crate::row_join::RowJoinKind;
                 let left = left.incremental_result_order().and_then(|(_, bound)| bound);
-                let right = right.incremental_result_order().and_then(|(_, bound)| bound);
+                let right = right
+                    .incremental_result_order()
+                    .and_then(|(_, bound)| bound);
                 let bound = match spec.kind() {
                     RowJoinKind::Inner => left.zip(right).and_then(|(a, b)| a.checked_mul(b)),
                     RowJoinKind::Left => left.zip(right).and_then(|(a, b)| a.checked_mul(b.max(1))),
-                    RowJoinKind::Right => left.zip(right).and_then(|(a, b)| b.checked_mul(a.max(1))),
+                    RowJoinKind::Right => {
+                        left.zip(right).and_then(|(a, b)| b.checked_mul(a.max(1)))
+                    }
                     RowJoinKind::Full => left.zip(right).and_then(|(a, b)| {
                         // Max over matched and unmatched bipartite supports.
                         Some(a.checked_mul(b)?.max(a.checked_add(b)?))

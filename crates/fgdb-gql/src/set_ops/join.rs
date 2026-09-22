@@ -52,7 +52,11 @@ impl PreparedGraphSet {
                 return Err(GraphSetBuildError::JoinInputSchema { side });
             }
         }
-        let mut columns: Vec<_> = self.columns.iter().map(|name| format!("left.{name}")).collect();
+        let mut columns: Vec<_> = self
+            .columns
+            .iter()
+            .map(|name| format!("left.{name}"))
+            .collect();
         if !matches!(spec.kind(), RowJoinKind::Semi | RowJoinKind::Anti) {
             columns.extend(right.columns.iter().map(|name| format!("right.{name}")));
         }
@@ -108,7 +112,12 @@ pub(super) fn append_transcript(spec: &RowJoinSpec, bytes: &mut Vec<u8>) {
     }
     bytes.push(u8::from(spec.predicate().is_some()));
     if let Some(code) = spec.predicate() {
-        let types: Vec<_> = spec.left_types().iter().chain(spec.right_types()).copied().collect();
+        let types: Vec<_> = spec
+            .left_types()
+            .iter()
+            .chain(spec.right_types())
+            .copied()
+            .collect();
         filter::RowPredicate::prepare(&types, code)
             .expect("immutable RowJoinSpec already validated the complete predicate schema")
             .append_transcript(bytes);
@@ -150,13 +159,19 @@ fn failure<E, C>(
     error: RowJoinError<GqlQueryError<GraphSetExecutionError<E>, C>>,
 ) -> GqlQueryError<GraphSetExecutionError<E>, C> {
     let error = match error {
-        RowJoinError::Delta(ZSetError::Control(error) | ZSetError::Callback(error)) => return error,
+        RowJoinError::Delta(ZSetError::Control(error) | ZSetError::Callback(error)) => {
+            return error;
+        }
         RowJoinError::Delta(ZSetError::Arithmetic(error)) => {
             RowJoinError::Delta(ZSetError::Arithmetic(error))
         }
-        RowJoinError::Delta(ZSetError::WeightAdmission { required_limbs, limit }) => {
-            RowJoinError::Delta(ZSetError::WeightAdmission { required_limbs, limit })
-        }
+        RowJoinError::Delta(ZSetError::WeightAdmission {
+            required_limbs,
+            limit,
+        }) => RowJoinError::Delta(ZSetError::WeightAdmission {
+            required_limbs,
+            limit,
+        }),
         RowJoinError::InputSchema { side } => RowJoinError::InputSchema { side },
         RowJoinError::NegativeMultiplicity { side } => RowJoinError::NegativeMultiplicity { side },
         RowJoinError::ResultBudget { limit } => RowJoinError::ResultBudget { limit },
@@ -213,18 +228,24 @@ pub(super) fn execute<E, C>(
     // This private bag is not yet the final page. Only the parent result sink
     // spends max_result_rows; every retained/expanded row still spends scratch.
     let rows = operator
-        .prepare(&left, &right, LIMBS, None, &mut |value| control(event(value)))
+        .prepare(&left, &right, LIMBS, None, &mut |value| {
+            control(event(value))
+        })
         .map_err(failure)?
         .commit();
     drop(operator);
     let mut output = Vec::new();
     for (row, count) in rows.into_updates() {
         control(GlaExecutionEvent::Work)?;
-        let count = count.to_i128().and_then(|count| u64::try_from(count).ok())
+        let count = count
+            .to_i128()
+            .and_then(|count| u64::try_from(count).ok())
             .filter(|count| *count != 0)
-            .ok_or_else(|| GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow {
-                dimension: GqlBudgetDimension::ResultRows,
-            }))?;
+            .ok_or_else(|| {
+                GqlQueryError::Source(GraphSetExecutionError::AccountingOverflow {
+                    dimension: GqlBudgetDimension::ResultRows,
+                })
+            })?;
         for _ in 1..count {
             control(GlaExecutionEvent::ScratchEntry)?;
             let mut values = Vec::new();

@@ -69,7 +69,9 @@ where
 
 impl PreparedGraphSet {
     pub(crate) fn has_factorized_cardinality(&self) -> bool {
-        if self.filtered_cross_inputs().is_some() { return true; }
+        if self.filtered_cross_inputs().is_some() {
+            return true;
+        }
         match &self.node {
             SetNode::CrossJoin { .. }
             | SetNode::Binary {
@@ -143,7 +145,11 @@ where
         let columns = selected_cross::columns(projection, &mut |event| meter.event(event))?;
         let mut size = Amount::ZERO;
         selected_cross::count_with_context(
-            &left, &right, code, columns.as_deref(), meter,
+            &left,
+            &right,
+            code,
+            columns.as_deref(),
+            meter,
             |meter, event| meter.event(event),
             |count, meter| {
                 meter.event(GlaExecutionEvent::Work)?;
@@ -152,59 +158,61 @@ where
             },
         )?;
         size
-    } else { match &query.node {
-        SetNode::Values => Amount::ONE,
-        SetNode::CrossJoin { left, right } => {
-            let left = count(left, source, meter, operand)?;
-            // Do not short-circuit zero, overflow or a parent LIMIT 0. The
-            // right source can fail and its negative-read witnesses matter.
-            let right = count(right, source, meter, operand)?;
-            left.multiply(right)
-        }
-        SetNode::Binary {
-            operation: GraphSetOperation::Union,
-            quantifier: GraphSetQuantifier::All,
-            left,
-            right,
-        } => {
-            let left = count(left, source, meter, operand)?;
-            let right = count(right, source, meter, operand)?;
-            left.add(right)
-        }
-        SetNode::Scope(input) => count(input, source, meter, operand)?,
-        SetNode::Unwind { input, value } if constant(value) => {
-            let input_size = count(input, source, meter, operand)?;
-            if input_size.is_zero() {
-                Amount::ZERO // An empty input never evaluates a downstream expression.
-            } else {
-                let elements = constant_unwind_size(value, input.types.len(), meter)?;
-                input_size.multiply(elements)
+    } else {
+        match &query.node {
+            SetNode::Values => Amount::ONE,
+            SetNode::CrossJoin { left, right } => {
+                let left = count(left, source, meter, operand)?;
+                // Do not short-circuit zero, overflow or a parent LIMIT 0. The
+                // right source can fail and its negative-read witnesses matter.
+                let right = count(right, source, meter, operand)?;
+                left.multiply(right)
+            }
+            SetNode::Binary {
+                operation: GraphSetOperation::Union,
+                quantifier: GraphSetQuantifier::All,
+                left,
+                right,
+            } => {
+                let left = count(left, source, meter, operand)?;
+                let right = count(right, source, meter, operand)?;
+                left.add(right)
+            }
+            SetNode::Scope(input) => count(input, source, meter, operand)?,
+            SetNode::Unwind { input, value } if constant(value) => {
+                let input_size = count(input, source, meter, operand)?;
+                if input_size.is_zero() {
+                    Amount::ZERO // An empty input never evaluates a downstream expression.
+                } else {
+                    let elements = constant_unwind_size(value, input.types.len(), meter)?;
+                    input_size.multiply(elements)
+                }
+            }
+            SetNode::Project {
+                input,
+                projection,
+                quantifier: GraphSetQuantifier::All,
+            } if total_projection(projection) => {
+                // Checked aliases and already-admitted literal values cannot fail
+                // semantically. Their unused copies and sort may be eliminated.
+                // Arithmetic, indexing and list construction remain barriers:
+                // even wrapping a column in a list can exceed runtime depth bounds.
+                count(input, source, meter, operand)?
+            }
+            _ => {
+                // Existing visit/run owns every value-sensitive barrier, including
+                // DISTINCT, filters, computed projections and dynamic UNWIND.
+                // Its page has already been applied; do not apply it twice.
+                let mut size = Amount::ZERO;
+                visit(query, source, meter, operand, &mut |_, meter| {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    size = size.add(Amount::ONE);
+                    Ok(())
+                })?;
+                return Ok(size);
             }
         }
-        SetNode::Project {
-            input,
-            projection,
-            quantifier: GraphSetQuantifier::All,
-        } if total_projection(projection) => {
-            // Checked aliases and already-admitted literal values cannot fail
-            // semantically. Their unused copies and sort may be eliminated.
-            // Arithmetic, indexing and list construction remain barriers:
-            // even wrapping a column in a list can exceed runtime depth bounds.
-            count(input, source, meter, operand)?
-        }
-        _ => {
-            // Existing visit/run owns every value-sensitive barrier, including
-            // DISTINCT, filters, computed projections and dynamic UNWIND.
-            // Its page has already been applied; do not apply it twice.
-            let mut size = Amount::ZERO;
-            visit(query, source, meter, operand, &mut |_, meter| {
-                meter.event(GlaExecutionEvent::Work)?;
-                size = size.add(Amount::ONE);
-                Ok(())
-            })?;
-            return Ok(size);
-        }
-    }};
+    };
     meter.event(GlaExecutionEvent::Work)?;
     let selected = size.subtract(query.offset);
     Ok(query.count.map_or(selected, |limit| selected.limit(limit)))

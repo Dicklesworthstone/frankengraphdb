@@ -16,7 +16,8 @@ fn equality(op: &GraphSetPredicateOp, width: usize, columns: Option<&[usize]>) -
         left: GraphSetOperand::Column(a),
         comparison: IntegerComparison::Equal,
         right: GraphSetOperand::Column(b),
-    } = op else {
+    } = op
+    else {
         return None;
     };
     let a = columns.map_or(*a, |columns| columns[*a]);
@@ -34,7 +35,9 @@ pub(super) fn columns<E>(
     projection: Option<&[GraphSetProjection]>,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Option<Vec<usize>>, E> {
-    let Some(projection) = projection else { return Ok(None) };
+    let Some(projection) = projection else {
+        return Ok(None);
+    };
     let mut columns = Vec::new();
     for column in projection {
         control(GlaExecutionEvent::Work)?;
@@ -61,13 +64,17 @@ fn required_keys<E>(
     let mut keys = Vec::new();
     for op in code {
         control(GlaExecutionEvent::Work)?;
-        let Some(key) = equality(op, width, columns) else { continue };
+        let Some(key) = equality(op, width, columns) else {
+            continue;
+        };
         let mut duplicate = false;
         for prior in &keys {
             control(GlaExecutionEvent::Work)?;
             duplicate |= *prior == key;
         }
-        if duplicate { continue; }
+        if duplicate {
+            continue;
+        }
         let mut stack = [false; MAX_PATTERN_PREDICATES];
         let mut depth = 0;
         for op in code {
@@ -130,7 +137,9 @@ fn compare_keys<E>(
             &right.values()[b],
             control,
         )?;
-        if order != Ordering::Equal { return Ok(order); }
+        if order != Ordering::Equal {
+            return Ok(order);
+        }
     }
     Ok(Ordering::Equal)
 }
@@ -198,15 +207,21 @@ impl Index {
         if self.keys.is_empty() {
             Ok(0..right.len())
         } else if eligible(row, &self.keys, false, control)? {
-            Ok(boundary(row, right, &self.ordinals, &self.keys, false, control)?
-                ..boundary(row, right, &self.ordinals, &self.keys, true, control)?)
+            Ok(
+                boundary(row, right, &self.ordinals, &self.keys, false, control)?
+                    ..boundary(row, right, &self.ordinals, &self.keys, true, control)?,
+            )
         } else {
             Ok(0..0)
         }
     }
 
     fn row<'a>(&self, right: &'a [GraphValueRow], at: usize) -> &'a GraphValueRow {
-        &right[if self.keys.is_empty() { at } else { self.ordinals[at] }]
+        &right[if self.keys.is_empty() {
+            at
+        } else {
+            self.ordinals[at]
+        }]
     }
 }
 
@@ -227,7 +242,15 @@ pub(super) fn visit<E, C>(
 where
     C: FnMut(GlaExecutionEvent) -> Result<(), E>,
 {
-    visit_with_context(left, right, code, columns, control, |control, event| control(event), consume)
+    visit_with_context(
+        left,
+        right,
+        code,
+        columns,
+        control,
+        |control, event| control(event),
+        consume,
+    )
 }
 
 /// The same probe walk with a single caller-owned context. Folded aggregates
@@ -245,16 +268,28 @@ pub(super) fn visit_with_context<E, Context>(
     event(context, GlaExecutionEvent::Work)?;
     // Both source subtrees must have completed before this call. Empty bags
     // cannot hide a source failure; they only avoid unneeded local indexing.
-    let Some(first) = left.first() else { return Ok(()) };
-    if right.is_empty() { return Ok(()); }
-    let index = Index::build(first.len(), right, code, columns, &mut |value| event(context, value))?;
+    let Some(first) = left.first() else {
+        return Ok(());
+    };
+    if right.is_empty() {
+        return Ok(());
+    }
+    let index = Index::build(first.len(), right, code, columns, &mut |value| {
+        event(context, value)
+    })?;
     for row in left {
         event(context, GlaExecutionEvent::Work)?;
         let range = index.range(row, right, &mut |value| event(context, value))?;
         for at in range {
             event(context, GlaExecutionEvent::Work)?;
             let other = index.row(right, at);
-            if GraphSetPredicateOp::evaluate_projected_pair_with_control(code, row, other, columns, &mut |value| event(context, value))? {
+            if GraphSetPredicateOp::evaluate_projected_pair_with_control(
+                code,
+                row,
+                other,
+                columns,
+                &mut |value| event(context, value),
+            )? {
                 consume(row, other, context)?;
             }
         }
@@ -279,23 +314,40 @@ pub(super) fn count_with_context<E, Context>(
     mut consume: impl FnMut(usize, &mut Context) -> Result<(), E>,
 ) -> Result<(), E> {
     event(context, GlaExecutionEvent::Work)?;
-    let Some(first) = left.first() else { return Ok(()) };
-    if right.is_empty() { return Ok(()); }
+    let Some(first) = left.first() else {
+        return Ok(());
+    };
+    if right.is_empty() {
+        return Ok(());
+    }
     let mut runs = true;
     for op in code {
         event(context, GlaExecutionEvent::Work)?;
-        runs &= matches!(op, GraphSetPredicateOp::And | GraphSetPredicateOp::Truth(Some(true)))
-            || equality(op, first.len(), columns).is_some();
+        runs &= matches!(
+            op,
+            GraphSetPredicateOp::And | GraphSetPredicateOp::Truth(Some(true))
+        ) || equality(op, first.len(), columns).is_some();
     }
     if !runs {
-        return visit_with_context(left, right, code, columns, context, event,
-            |_, _, context| consume(1, context));
+        return visit_with_context(
+            left,
+            right,
+            code,
+            columns,
+            context,
+            event,
+            |_, _, context| consume(1, context),
+        );
     }
-    let index = Index::build(first.len(), right, code, columns, &mut |value| event(context, value))?;
+    let index = Index::build(first.len(), right, code, columns, &mut |value| {
+        event(context, value)
+    })?;
     for row in left {
         event(context, GlaExecutionEvent::Work)?;
         let range = index.range(row, right, &mut |value| event(context, value))?;
-        if !range.is_empty() { consume(range.len(), context)?; }
+        if !range.is_empty() {
+            consume(range.len(), context)?;
+        }
     }
     event(context, GlaExecutionEvent::Work)?;
     Ok(())
@@ -334,10 +386,17 @@ pub(super) fn collect<E>(
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Vec<GraphValueRow>, E> {
     let mut output = Vec::new();
-    visit(left, right, code, columns, control, |left, right, control| {
-        output.push(copy_pair(left, right, columns, control)?);
-        Ok(())
-    })?;
+    visit(
+        left,
+        right,
+        code,
+        columns,
+        control,
+        |left, right, control| {
+            output.push(copy_pair(left, right, columns, control)?);
+            Ok(())
+        },
+    )?;
     Ok(output)
 }
 
