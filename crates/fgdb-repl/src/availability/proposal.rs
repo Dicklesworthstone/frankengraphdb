@@ -19,8 +19,8 @@ use crate::driver::RaftPublisher;
 use crate::replica::{Replica, ReplicaError, ReplicaOutput};
 
 use super::{
-    AvailabilityError, AvailabilityInput, AvailabilityLimits, StorageSets,
-    SystematicAssessment, assess_systematic,
+    AvailabilityError, AvailabilityInput, AvailabilityLimits, StorageSets, SystematicAssessment,
+    assess_systematic,
 };
 
 /// Internal order-attempt coordinates, never a public transaction outcome.
@@ -154,21 +154,33 @@ where
     let base = state.snapshot().map_or(0, |snapshot| snapshot.index());
     let suffix = u64::try_from(state.entries().len())
         .map_err(|_| ProposalError::Raft(RaftError::CounterExhausted))?;
-    let index = base.checked_add(suffix).and_then(|last| last.checked_add(1))
+    let index = base
+        .checked_add(suffix)
+        .and_then(|last| last.checked_add(1))
         .filter(|index| *index < u64::MAX)
         .ok_or(ProposalError::Raft(RaftError::CounterExhausted))?;
     let position = ProposalPosition {
-        member: replica.id(), domain: configuration.domain(),
-        configuration: configuration.identity(), term: state.term(), index,
+        member: replica.id(),
+        domain: configuration.domain(),
+        configuration: configuration.identity(),
+        term: state.term(),
+        index,
     };
-    let assessment = assess_systematic(input, limits, checkpoint)
-        .map_err(ProposalError::Availability)?;
-    let mut permit = authority.acquire(&command, position, &assessment).await
+    let assessment =
+        assess_systematic(input, limits, checkpoint).map_err(ProposalError::Availability)?;
+    let mut permit = authority
+        .acquire(&command, position, &assessment)
+        .await
         .map_err(ProposalError::Authority)?;
     checkpoint().map_err(ProposalError::Interrupted)?;
-    let output = replica.step(&mut permit, Event::Propose(command)).await
+    let output = replica
+        .step(&mut permit, Event::Propose(command))
+        .await
         .map_err(ProposalError::Replica)?;
-    Ok(ProposalOutput { position, replica: output })
+    Ok(ProposalOutput {
+        position,
+        replica: output,
+    })
 }
 
 #[cfg(test)]

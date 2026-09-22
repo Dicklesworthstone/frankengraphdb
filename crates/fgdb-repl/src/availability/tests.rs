@@ -1,29 +1,58 @@
 use super::*;
 
 fn basis() -> PayloadBasis {
-    PayloadBasis { domain: Domain([1; 32]), configuration: [2; 32],
-        predicate_digest: [3; 32], base_closure_digest: [4; 32] }
+    PayloadBasis {
+        domain: Domain([1; 32]),
+        configuration: [2; 32],
+        predicate_digest: [3; 32],
+        base_closure_digest: [4; 32],
+    }
 }
-fn member(index: u8) -> MemberId { MemberId((1_u128 << 96) + u128::from(index)) }
+fn member(index: u8) -> MemberId {
+    MemberId((1_u128 << 96) + u128::from(index))
+}
 fn fixture(count: u8, faults: usize) -> AvailabilityInput {
     let members: Vec<_> = (1..=count).map(member).collect();
     let mut input = AvailabilityInput {
-        policy: AvailabilityPolicy { basis: basis(), storage_sets: StorageSets::Stable(members),
-            locations: (1..=count).map(|id| StorageLocation { member: member(id),
-                placement_id: [id; 32], failure_domains: vec![FailureDomain(u128::from(id))] }).collect(),
-            tolerated_domain_failures: faults },
-        requirements: vec![EncodingRequirement { object_id: ObjectId([10; 32]),
-            encoding_id: [11; 32], source_symbols: vec![3] }],
+        policy: AvailabilityPolicy {
+            basis: basis(),
+            storage_sets: StorageSets::Stable(members),
+            locations: (1..=count)
+                .map(|id| StorageLocation {
+                    member: member(id),
+                    placement_id: [id; 32],
+                    failure_domains: vec![FailureDomain(u128::from(id))],
+                })
+                .collect(),
+            tolerated_domain_failures: faults,
+        },
+        requirements: vec![EncodingRequirement {
+            object_id: ObjectId([10; 32]),
+            encoding_id: [11; 32],
+            source_symbols: vec![3],
+        }],
         receipts: Vec::new(),
     };
-    input.receipts = (1..=count).map(|id| ReceiptCoverage { receipt_id: [id; 32], basis: basis(),
-        storage_member: member(id), prepared_ownership_id: [id + 20; 32],
-        coverage: vec![span(id, 0, 3)] }).collect();
+    input.receipts = (1..=count)
+        .map(|id| ReceiptCoverage {
+            receipt_id: [id; 32],
+            basis: basis(),
+            storage_member: member(id),
+            prepared_ownership_id: [id + 20; 32],
+            coverage: vec![span(id, 0, 3)],
+        })
+        .collect();
     input
 }
 fn span(placement: u8, first: u32, end: u32) -> SourceCoverage {
-    SourceCoverage { object_id: ObjectId([10; 32]), encoding_id: [11; 32],
-        placement_id: [placement; 32], source_block: 0, first_esi: first, end_esi: end }
+    SourceCoverage {
+        object_id: ObjectId([10; 32]),
+        encoding_id: [11; 32],
+        placement_id: [placement; 32],
+        source_block: 0,
+        first_esi: first,
+        end_esi: end,
+    }
 }
 fn check(input: &AvailabilityInput) -> Result<SystematicAssessment<'_>, AvailabilityError<()>> {
     assess_systematic(input, AvailabilityLimits::default(), &mut || Ok(()))
@@ -47,7 +76,10 @@ fn quorum_one_still_requires_the_complete_inventory() {
 fn replicas_in_independent_domains_survive_each_declared_loss() {
     for f in 0..3 {
         let input = fixture(3, f);
-        assert_eq!(check(&input).unwrap().checked_failure_cases(), cut_count(3, f) as u64);
+        assert_eq!(
+            check(&input).unwrap().checked_failure_cases(),
+            cut_count(3, f) as u64
+        );
     }
     let mut input = fixture(3, 1);
     // Three members but one common physical failure domain.
@@ -62,8 +94,12 @@ fn replicas_in_independent_domains_survive_each_declared_loss() {
 #[test]
 fn overlapping_rack_and_zone_failures_remove_every_affected_placement() {
     let mut input = fixture(3, 1);
-    input.policy.locations[0].failure_domains.push(FailureDomain(4));
-    input.policy.locations[1].failure_domains.push(FailureDomain(4));
+    input.policy.locations[0]
+        .failure_domains
+        .push(FailureDomain(4));
+    input.policy.locations[1]
+        .failure_domains
+        .push(FailureDomain(4));
     input.receipts[2].coverage = vec![span(3, 1, 3)];
     // Losing either host alone is fine. Losing their shared rack loses ESI 0.
     assert_eq!(gap(&input).failed_domains, [FailureDomain(4)]);
@@ -85,7 +121,8 @@ fn striped_source_ranges_union_without_double_counting_overlap() {
 fn joint_storage_quorums_never_pool_their_payloads() {
     let mut input = fixture(3, 0);
     input.policy.storage_sets = StorageSets::Joint {
-        old: vec![member(1), member(2)], new: vec![member(2), member(3)],
+        old: vec![member(1), member(2)],
+        new: vec![member(2), member(3)],
     };
     input.receipts[0].coverage = vec![span(1, 0, 3)];
     input.receipts[1].coverage.clear();
@@ -94,7 +131,10 @@ fn joint_storage_quorums_never_pool_their_payloads() {
     input.receipts[2].coverage.push(span(3, 0, 1));
     assert_eq!(check(&input).unwrap().checked_failure_cases(), 2);
     input.policy.tolerated_domain_failures = 1;
-    assert!(matches!(check(&input), Err(AvailabilityError::Unrecoverable(_))));
+    assert!(matches!(
+        check(&input),
+        Err(AvailabilityError::Unrecoverable(_))
+    ));
     input.receipts[1].coverage = vec![span(2, 0, 3)];
     assert_eq!(check(&input).unwrap().checked_failure_cases(), 6);
 }
@@ -108,8 +148,11 @@ fn every_encoding_and_source_block_is_checked_separately() {
     block.source_block = 1;
     input.receipts[0].coverage.push(block);
     assert!(check(&input).is_ok());
-    input.requirements.push(EncodingRequirement { object_id: ObjectId([10; 32]),
-        encoding_id: [12; 32], source_symbols: vec![3] });
+    input.requirements.push(EncodingRequirement {
+        object_id: ObjectId([10; 32]),
+        encoding_id: [12; 32],
+        source_symbols: vec![3],
+    });
     assert_eq!(gap(&input).encoding_id, [12; 32]);
     let mut different = span(1, 0, 3);
     different.encoding_id = [12; 32];
@@ -124,11 +167,20 @@ fn every_encoding_and_source_block_is_checked_separately() {
 fn repair_symbols_are_not_mislabeled_as_independent_source_symbols() {
     let mut input = fixture(1, 0);
     input.receipts[0].coverage = vec![span(1, 3, 6)];
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::InvalidCoverage);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::InvalidCoverage
+    );
     input.receipts[0].coverage = vec![span(1, 0, 0)];
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::InvalidCoverage);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::InvalidCoverage
+    );
     input.receipts[0].coverage = vec![span(1, 0, 4)];
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::InvalidCoverage);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::InvalidCoverage
+    );
 }
 
 #[test]
@@ -154,16 +206,28 @@ fn receipt_and_placement_identity_cannot_be_reassigned() {
     assert_eq!(check(&input).unwrap_err(), AvailabilityError::UnknownMember);
     input = original.clone();
     input.receipts[0].coverage[0].placement_id = [2; 32];
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::UnknownPlacement);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::UnknownPlacement
+    );
     input = original.clone();
     input.receipts[0].coverage[0].object_id = ObjectId([99; 32]);
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::UnknownEncoding);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::UnknownEncoding
+    );
     input = original.clone();
     input.receipts[1].receipt_id = input.receipts[0].receipt_id;
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::DuplicateReceipt);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::DuplicateReceipt
+    );
     input = original;
     input.receipts[1].storage_member = input.receipts[0].storage_member;
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::DuplicateReceipt);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::DuplicateReceipt
+    );
 }
 
 #[test]
@@ -174,7 +238,9 @@ fn malformed_inventory_and_ambiguous_policy_fail_closed() {
         match case {
             0 => input.policy.locations[1].placement_id = input.policy.locations[0].placement_id,
             1 => input.policy.locations[0].failure_domains.clear(),
-            2 => input.policy.locations[0].failure_domains.push(FailureDomain(1)),
+            2 => input.policy.locations[0]
+                .failure_domains
+                .push(FailureDomain(1)),
             3 => input.policy.storage_sets = StorageSets::Stable(vec![member(1), member(1)]),
             4 => input.policy.storage_sets = StorageSets::Stable(vec![member(2), member(1)]),
             5 => input.policy.storage_sets = StorageSets::Stable(Vec::new()),
@@ -186,13 +252,22 @@ fn malformed_inventory_and_ambiguous_policy_fail_closed() {
     for count in [0, MAX_SYSTEMATIC_SYMBOLS + 1] {
         let mut input = original.clone();
         input.requirements[0].source_symbols = vec![count];
-        assert_eq!(check(&input).unwrap_err(), AvailabilityError::InvalidInventory);
+        assert_eq!(
+            check(&input).unwrap_err(),
+            AvailabilityError::InvalidInventory
+        );
     }
     let mut input = original.clone();
     input.requirements.push(input.requirements[0].clone());
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::InvalidInventory);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::InvalidInventory
+    );
     input.requirements[1].object_id = ObjectId([99; 32]);
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::InvalidInventory);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::InvalidInventory
+    );
 }
 
 #[test]
@@ -207,14 +282,21 @@ fn large_source_coordinates_do_not_expand_to_per_symbol_storage_or_work() {
 #[test]
 fn failure_case_budget_precedes_exponential_enumeration() {
     let mut input = fixture(20, 10);
-    assert_eq!(check(&input).unwrap_err(), AvailabilityError::FailureCaseBudget);
+    assert_eq!(
+        check(&input).unwrap_err(),
+        AvailabilityError::FailureCaseBudget
+    );
     input.policy.tolerated_domain_failures = 1;
-    let mut limits = AvailabilityLimits::default();
-    limits.max_failure_cases = 20;
+    let mut limits = AvailabilityLimits {
+        max_failure_cases: 20,
+        ..AvailabilityLimits::default()
+    };
     assert!(assess_systematic(&input, limits, &mut || Ok::<(), ()>(())).is_ok());
     limits.max_failure_cases = 19;
-    assert_eq!(assess_systematic(&input, limits, &mut || Ok::<(), ()>(())).unwrap_err(),
-        AvailabilityError::FailureCaseBudget);
+    assert_eq!(
+        assess_systematic(&input, limits, &mut || Ok::<(), ()>(())).unwrap_err(),
+        AvailabilityError::FailureCaseBudget
+    );
 }
 
 #[test]
@@ -226,8 +308,11 @@ fn input_work_and_cancellation_budgets_do_not_emit_partial_proofs() {
     let saved = input.clone();
     let mut callbacks = 0;
     let work = assess_systematic(&input, AvailabilityLimits::default(), &mut || {
-        callbacks += 1; Ok::<(), usize>(())
-    }).unwrap().work();
+        callbacks += 1;
+        Ok::<(), usize>(())
+    })
+    .unwrap()
+    .work();
     for stop in 1..=callbacks {
         let mut call = 0;
         let result = assess_systematic(&input, AvailabilityLimits::default(), &mut || {
@@ -237,14 +322,24 @@ fn input_work_and_cancellation_budgets_do_not_emit_partial_proofs() {
         assert_eq!(result.unwrap_err(), AvailabilityError::Interrupted(stop));
         assert_eq!(input, saved);
     }
-    let mut limits = AvailabilityLimits { max_work: work, ..AvailabilityLimits::default() };
+    let mut limits = AvailabilityLimits {
+        max_work: work,
+        ..AvailabilityLimits::default()
+    };
     assert!(assess_systematic(&input, limits, &mut || Ok::<(), ()>(())).is_ok());
     limits.max_work -= 1;
-    assert_eq!(assess_systematic(&input, limits, &mut || Ok::<(), ()>(())).unwrap_err(),
-        AvailabilityError::WorkBudget);
-    limits = AvailabilityLimits { max_spans: 767, ..AvailabilityLimits::default() };
-    assert_eq!(assess_systematic(&input, limits, &mut || Ok::<(), ()>(())).unwrap_err(),
-        AvailabilityError::InputBudget);
+    assert_eq!(
+        assess_systematic(&input, limits, &mut || Ok::<(), ()>(())).unwrap_err(),
+        AvailabilityError::WorkBudget
+    );
+    limits = AvailabilityLimits {
+        max_spans: 767,
+        ..AvailabilityLimits::default()
+    };
+    assert_eq!(
+        assess_systematic(&input, limits, &mut || Ok::<(), ()>(())).unwrap_err(),
+        AvailabilityError::InputBudget
+    );
 }
 
 #[test]
@@ -252,7 +347,9 @@ fn cut_enumeration_matches_an_independent_bitmask_oracle() {
     for n in 0..=12 {
         for k in 0..=n {
             let actual: BTreeSet<_> = Cuts::new(n, k).collect();
-            let expected: BTreeSet<_> = (0..(1_u64 << n)).filter(|mask| mask.count_ones() as usize == k).collect();
+            let expected: BTreeSet<_> = (0..(1_u64 << n))
+                .filter(|mask| mask.count_ones() as usize == k)
+                .collect();
             assert_eq!(actual, expected);
             assert_eq!(actual.len() as u128, cut_count(n, k));
         }
@@ -271,22 +368,35 @@ fn exhaustive_small_placements_match_per_symbol_failure_recomputation() {
                 let mut input = fixture(3, f);
                 if joint {
                     input.policy.storage_sets = StorageSets::Joint {
-                        old: vec![member(1), member(2)], new: vec![member(2), member(3)],
+                        old: vec![member(1), member(2)],
+                        new: vec![member(2), member(3)],
                     };
                 }
                 for donor in 0..3 {
                     input.receipts[donor].coverage = (0..3_u32)
                         .filter(|esi| bits & (1 << (donor as u32 * 3 + esi)) != 0)
-                        .map(|esi| span(donor as u8 + 1, esi, esi + 1)).collect();
+                        .map(|esi| span(donor as u8 + 1, esi, esi + 1))
+                        .collect();
                 }
                 let masks: &[u32] = if joint { &[0b011, 0b110] } else { &[0b111] };
-                let expected = masks.iter().all(|members| (0..8_u32)
-                    .filter(|failed| failed.count_ones() as usize <= f)
-                    .all(|failed| (0..3_u32).all(|esi| (0..3_u32).any(|donor| {
-                        members & (1 << donor) != 0 && failed & (1 << donor) == 0
-                            && bits & (1 << (donor * 3 + esi)) != 0
-                    }))));
-                assert_eq!(check(&input).is_ok(), expected, "bits={bits}, f={f}, joint={joint}");
+                let expected = masks.iter().all(|members| {
+                    (0..8_u32)
+                        .filter(|failed| failed.count_ones() as usize <= f)
+                        .all(|failed| {
+                            (0..3_u32).all(|esi| {
+                                (0..3_u32).any(|donor| {
+                                    members & (1 << donor) != 0
+                                        && failed & (1 << donor) == 0
+                                        && bits & (1 << (donor * 3 + esi)) != 0
+                                })
+                            })
+                        })
+                });
+                assert_eq!(
+                    check(&input).is_ok(),
+                    expected,
+                    "bits={bits}, f={f}, joint={joint}"
+                );
             }
         }
     }
