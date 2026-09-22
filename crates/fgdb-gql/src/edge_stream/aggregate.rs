@@ -50,7 +50,12 @@ impl core::error::Error for EdgeAggregateBuildError {
 /// Output DISTINCT retains only the best SKIP+LIMIT projected classes and
 /// their best-ranked complete representatives. Both rank and class support
 /// obey this prefix bound; upstream group accumulation is separately resident.
-/// Relational input and COLLECT remain outside this profile.
+/// COLLECT and COLLECT DISTINCT require the ordinary edge row-stream order
+/// proof on the complete child: root edge identity, root source identity, then
+/// each joined edge identity. Batch identified inputs sort that child before
+/// aggregation; an unordered private projection cannot be substituted for it.
+/// Row-local input expressions run after this ordered child. Relational input
+/// remains outside this profile. Collection payloads are metered, not spilled.
 /// Every child operator and
 /// column is checked before opening the source; a failed plan is never retried
 /// as another source or an eager query. The ordinary row stream's identity
@@ -62,13 +67,22 @@ pub struct EdgeAggregatePlan {
 }
 impl EdgeAggregatePlan {
     pub fn compile(aggregate: &PreparedGraphAggregate) -> Result<Self, EdgeAggregateBuildError> {
-        if !aggregate.aggregates().iter().all(|spec| NumericState::supports(spec.function())) {
+        if !aggregate.aggregates().iter().all(|spec|
+            NumericState::supports(spec.function()) || NumericState::collects(spec.function())) {
             return Err(EdgeAggregateBuildError::RequiresPlainGlobalAggregate);
         }
         let aggregate = aggregate.prepare_streamed_output()
             .ok_or(EdgeAggregateBuildError::RequiresPlainGlobalAggregate)?;
-        let input = join::compile_aggregate(aggregate.input_pattern().plan())
-            .map_err(EdgeAggregateBuildError::Scan)?;
+        let collects = aggregate.aggregates().iter()
+            .any(|spec| NumericState::collects(spec.function()));
+        let input = if collects {
+            // Reuse the full canonical order proof, including every appended
+            // edge and undirected orientation. Numeric reducers may relax the
+            // output prefix because they commute; ordered lists cannot.
+            EdgeScanPlan::compile(aggregate.input_pattern().plan())
+        } else {
+            join::compile_aggregate(aggregate.input_pattern().plan())
+        }.map_err(EdgeAggregateBuildError::Scan)?;
         Ok(Self { input, aggregate })
     }
     #[must_use]
@@ -96,8 +110,10 @@ type PendingGroups = btree_map::IntoIter<Vec<GraphValue>, Vec<NumericState>>;
 /// Delivery work/cancellation can fail after earlier complete groups; one error
 /// fuses the cursor. Close/drop frees the pin and pending groups without demand.
 ///
-/// Retained state grows with groups and DISTINCT support, plus chosen extrema
-/// and the join's bounded traversal state. One projected binding is transient.
+/// Retained state grows with groups and DISTINCT support, plus chosen extrema,
+/// ordered collection payloads and the join's bounded traversal state. List
+/// elements spend work/scratch, not the completed-group result-row allowance.
+/// One projected binding is transient.
 /// Logical payload allowances are not allocator-byte or source-residency caps;
 /// this does not add spill, factorized counting or durable cursor resumption.
 pub struct EdgeAggregateCursor<S, F> {
@@ -358,3 +374,6 @@ impl<S, F> core::fmt::Debug for EdgeAggregateCursor<S, F> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod collection_tests;
