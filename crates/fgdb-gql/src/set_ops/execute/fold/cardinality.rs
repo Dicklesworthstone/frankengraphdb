@@ -8,10 +8,13 @@
 
 use super::*;
 
+mod amount;
+pub(super) use amount::Amount;
+
 // Admission follows the checked expression, never query text or bound values
 // from an earlier execution. A constant can still FAIL, so this is permission
 // to evaluate it once after input completion, not permission to skip it.
-fn constant(value: &GraphSetValue) -> bool {
+pub(super) fn constant(value: &GraphSetValue) -> bool {
     match value {
         GraphSetValue::Column(_) => false,
         GraphSetValue::Literal(_) | GraphSetValue::Value(_) => true,
@@ -24,7 +27,7 @@ fn constant(value: &GraphSetValue) -> bool {
     }
 }
 
-fn total_projection(projection: &[GraphSetProjection]) -> bool {
+pub(super) fn total_projection(projection: &[GraphSetProjection]) -> bool {
     projection.iter().all(|column| matches!(column.value(),
         GraphSetValue::Column(_) | GraphSetValue::Literal(_) | GraphSetValue::Value(_)
     ))
@@ -73,23 +76,19 @@ impl PreparedGraphSet {
         let mut operand = 0;
         let count = count(self, &mut source, &mut meter, &mut operand)?;
         meter.event(GlaExecutionEvent::Work)?;
-        Ok((u64::try_from(count).ok(), meter.rows, meter.evaluator))
+        Ok((count.to_u64(), meter.rows, meter.evaluator))
     }
 }
 
-/// Exact through u128::MAX; saturation above it is only an overflow witness,
-/// NEVER a returned count. A path has at most MAX_GRAPH_SET_DEPTH pages, each
-/// subtracting at most u64::MAX. Even after all such subtractions a saturated
-/// value remains above u64::MAX. Positive sums/products cannot lower it, zero
-/// factors annihilate it, and a finite LIMIT restores an exact u64 count.
-/// Consequently every representable final count remains exact, including
-/// (2^64 SKIP u64::MAX) = 1. Saturating at u64 would give the wrong answer.
-fn count<E, C, S, Checkpoint>(
+/// One cardinality interpreter for both COUNT(*) and repeated-value factors.
+/// Amount retains subtraction headroom above the largest exact numeric domain;
+/// saturation can never be mistaken for an exact count or signed sum.
+pub(super) fn count<E, C, S, Checkpoint>(
     query: &PreparedGraphSet,
     source: &mut S,
     meter: &mut Meter<Checkpoint>,
     operand: &mut usize,
-) -> SetResult<u128, E, C>
+) -> SetResult<Amount, E, C>
 where
     S: FnMut(
         &PreparedGraphPattern<GraphValueRow>,
@@ -99,13 +98,13 @@ where
 {
     meter.event(GlaExecutionEvent::Work)?;
     let size = match &query.node {
-        SetNode::Values => 1,
+        SetNode::Values => Amount::ONE,
         SetNode::CrossJoin { left, right } => {
             let left = count(left, source, meter, operand)?;
             // Do not short-circuit zero, overflow or a parent LIMIT 0. The
             // right source can fail and its negative-read witnesses matter.
             let right = count(right, source, meter, operand)?;
-            left.saturating_mul(right)
+            left.multiply(right)
         }
         SetNode::Binary {
             operation: GraphSetOperation::Union,
@@ -115,13 +114,13 @@ where
         } => {
             let left = count(left, source, meter, operand)?;
             let right = count(right, source, meter, operand)?;
-            left.saturating_add(right)
+            left.add(right)
         }
         SetNode::Scope(input) => count(input, source, meter, operand)?,
         SetNode::Unwind { input, value } if constant(value) => {
             let input_size = count(input, source, meter, operand)?;
-            if input_size == 0 {
-                0 // An empty input never evaluates a downstream expression.
+            if input_size.is_zero() {
+                Amount::ZERO // An empty input never evaluates a downstream expression.
             } else {
                 let column = input.types.len();
                 let value = projection::evaluate_value(
@@ -138,7 +137,7 @@ where
                         },
                     })),
                 };
-                input_size.saturating_mul(elements)
+                input_size.multiply(Amount::from_u128(elements))
             }
         }
         SetNode::Project {
@@ -154,18 +153,18 @@ where
             // Existing visit/run owns every value-sensitive barrier, including
             // DISTINCT, filters, computed projections and dynamic UNWIND.
             // Its page has already been applied; do not apply it twice.
-            let mut size = 0_u128;
+            let mut size = Amount::ZERO;
             visit(query, source, meter, operand, &mut |_, meter| {
                 meter.event(GlaExecutionEvent::Work)?;
-                size = size.saturating_add(1);
+                size = size.add(Amount::ONE);
                 Ok(())
             })?;
             return Ok(size);
         }
     };
     meter.event(GlaExecutionEvent::Work)?;
-    let selected = size.saturating_sub(u128::from(query.offset));
-    Ok(query.count.map_or(selected, |limit| selected.min(u128::from(limit))))
+    let selected = size.subtract(query.offset);
+    Ok(query.count.map_or(selected, |limit| selected.limit(limit)))
 }
 
 #[cfg(test)]

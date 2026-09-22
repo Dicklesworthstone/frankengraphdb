@@ -10,6 +10,8 @@ use crate::stream::VertexScanEvent;
 use crate::stream::aggregate::{Input, NumericState};
 use std::collections::btree_map;
 
+mod repeated;
+
 type Failure<E, C> = GqlQueryError<GraphAggregateError<E>, C>;
 type Groups = BTreeMap<Vec<GraphValue>, Vec<NumericState>>;
 
@@ -47,13 +49,25 @@ fn push<E, C>(
     row: GraphValueRow,
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), Failure<E, C>>,
 ) -> Result<(), Failure<E, C>> {
+    push_values(query, groups, largest_key, |column| &row.values()[column], Some(1), control)
+}
+
+fn push_values<'a, E, C>(
+    query: &PreparedGraphAggregate,
+    groups: &mut Groups,
+    largest_key: &mut usize,
+    mut value: impl FnMut(usize) -> &'a GraphValue,
+    repetitions: Option<u128>,
+    control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), Failure<E, C>>,
+) -> Result<(), Failure<E, C>> {
+    if repetitions == Some(0) { return Ok(()); }
     control(GlaExecutionEvent::Work)?;
     control(GlaExecutionEvent::ScratchEntry)?;
     let mut key = Vec::new();
     let mut units = 0_usize;
     for &column in query.group_key_columns() {
         control(GlaExecutionEvent::Work)?;
-        let value = &row.values()[column];
+        let value = value(column);
         units = units.saturating_add(value.payload_units()).saturating_add(1);
         key.push(value.copy_with_control(control)?);
     }
@@ -72,14 +86,7 @@ fn push<E, C>(
             entry.insert(new_states(query, control)?)
         }
     };
-    for (at, (aggregate, state)) in query.aggregates().iter().zip(states).enumerate() {
-        control(GlaExecutionEvent::Work)?;
-        let value = aggregate.argument_column().map_or(Input::Identity, |column| {
-            Input::from_value(&row.values()[column])
-        });
-        state.update_governed(value, at, &mut |event| control(input_event(event)))?;
-    }
-    Ok(())
+    repeated::update(query, states, &mut value, repetitions, control)
 }
 
 impl PreparedGraphAggregate {
@@ -104,7 +111,7 @@ impl PreparedGraphAggregate {
         if self.uses_factorized_cardinality() {
             return self.prepare_complete_group_output();
         }
-        if !input.has_foldable_expansion()
+        if !(input.has_foldable_expansion() || input.has_repeated_factor(&self.repeated_columns()))
             || !self.aggregates().iter().all(|aggregate| {
                 match aggregate.function() {
                     GraphAggregateFunction::Collect | GraphAggregateFunction::CollectDistinct => false,
@@ -144,6 +151,10 @@ impl PreparedGraphAggregate {
             return self.finish_relational_folded(
                 policy, checkpoint, rows, evaluator, FoldedGroups::Cardinality(cardinality),
             );
+        }
+        let columns = self.repeated_columns();
+        if relation.has_repeated_factor(&columns) {
+            return self.execute_repeated_groups(&columns, policy, source, checkpoint);
         }
         let mut groups = Groups::new();
         let mut largest_key = 0;
