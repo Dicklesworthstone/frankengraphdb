@@ -7,7 +7,9 @@
 //!
 //! This is the safe reference-counted residency path, not an unsafe pointer
 //! swizzler or an EBR/OLC implementation. Misses require exclusive access to the
-//! manager; already-pinned reads do not. Policy metadata has explicit cardinality
+//! manager only for prepare/complete; owned PendingExtent values carry admitted
+//! storage across asynchronous reads without a manager borrow or cache pin.
+//! Already-pinned reads do not borrow the manager. Policy metadata has explicit cardinality
 //! limits. Payload capacity and frame metadata share MemoryPool admission; this
 //! module does not claim that BTreeMap/allocator overhead is byte-exact RSS.
 
@@ -106,6 +108,8 @@ pub struct BufferStats {
 pub enum BufferError {
     InvalidLimits,
     InvalidExtent,
+    /// Foreign, retired, or substituted load reservation.
+    InvalidLoad,
     ExtentTooLarge { bytes: usize, limit: usize },
     CacheSlotsExhausted { limit: usize },
     Memory(MemoryError),
@@ -176,6 +180,34 @@ impl AsRef<[u8]> for BufferHandle {
     }
 }
 
+/// The payload is allocated and charged, but has not passed read integrity
+/// checks and is not a resident frame. Dropping this affine token refunds it.
+/// It borrows neither the manager nor an existing cache frame.
+#[derive(Debug)]
+pub struct PendingExtent {
+    key: ExtentKey,
+    admission: Admission,
+    data: TrackedBytes,
+    generation: Arc<()>,
+}
+
+impl PendingExtent {
+    pub const fn key(&self) -> ExtentKey { self.key }
+    pub fn len(&self) -> usize { self.data.len() }
+    pub fn is_empty(&self) -> bool { self.data.is_empty() }
+    pub fn charged_bytes(&self) -> usize { self.data.charged_bytes() }
+}
+
+impl AsMut<[u8]> for PendingExtent {
+    fn as_mut(&mut self) -> &mut [u8] { self.data.as_mut() }
+}
+
+#[derive(Debug)]
+pub enum PreparedExtent {
+    Resident(BufferHandle),
+    Load(PendingExtent),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Queue {
     Small,
@@ -202,6 +234,7 @@ pub struct ExtentBuffer {
     ghost: BTreeSet<ExtentKey>,
     ghost_order: VecDeque<ExtentKey>,
     stats: BufferStats,
+    load_generation: Arc<()>,
 }
 
 impl ExtentBuffer {
@@ -219,6 +252,7 @@ impl ExtentBuffer {
             ghost: BTreeSet::new(),
             ghost_order: VecDeque::new(),
             stats: BufferStats::default(),
+            load_generation: Arc::new(()),
         })
     }
 
@@ -258,6 +292,56 @@ impl ExtentBuffer {
         )
     }
 
+    /// Acquire an already resident frame or an owned, pre-admitted load
+    /// reservation. A caller may release its manager lock after this method,
+    /// perform asynchronous I/O into the token, then reacquire it for complete.
+    pub fn prepare(
+        &mut self,
+        cx: &QueryCx,
+        key: ExtentKey,
+        admission: Admission,
+    ) -> Result<PreparedExtent, BufferError> {
+        cx.with_restriction(|| self.prepare_inner(key, admission,
+            &mut || cx.checkpoint().map_err(BufferError::Cancelled)))
+    }
+
+    /// Verify and publish a prepared load. Foreign tokens and tokens predating
+    /// object retirement cannot publish. Parallel misses deduplicate here, and
+    /// a last-slot race is a typed refusal rather than unbounded cache growth.
+    pub fn complete(&mut self, cx: &QueryCx, pending: PendingExtent) -> Result<BufferHandle, BufferError> {
+        cx.with_restriction(|| self.complete_inner(pending,
+            &mut || cx.checkpoint().map_err(BufferError::Cancelled)))
+    }
+
+    /// Asynchronous convenience path using the same prepare/complete protocol.
+    /// The loader OWNS the token and returns it after filling its exact-size
+    /// storage. Both loader construction and every future poll run restricted.
+    /// Use prepare/complete directly to avoid holding the exclusive manager
+    /// borrow while awaiting. No cache pin is created before verification.
+    pub async fn pin_async<F, Fut>(
+        &mut self,
+        cx: &QueryCx,
+        key: ExtentKey,
+        admission: Admission,
+        load: F,
+    ) -> Result<BufferHandle, BufferError>
+    where
+        F: FnOnce(PendingExtent) -> Fut,
+        Fut: std::future::Future<Output = io::Result<PendingExtent>>,
+    {
+        match self.prepare(cx, key, admission)? {
+            PreparedExtent::Resident(handle) => Ok(handle),
+            PreparedExtent::Load(pending) => {
+                let future = cx.with_restriction(|| load(pending));
+                let pending = cx.with_restriction_async(future).await.map_err(BufferError::Load)?;
+                if pending.key != key || pending.admission != admission {
+                    return Err(BufferError::InvalidLoad);
+                }
+                self.complete(cx, pending)
+            }
+        }
+    }
+
     fn pin_inner(
         &mut self,
         key: ExtentKey,
@@ -265,6 +349,21 @@ impl ExtentBuffer {
         load: impl FnOnce(&mut [u8]) -> io::Result<()>,
         mut checkpoint: impl FnMut() -> Result<(), BufferError>,
     ) -> Result<BufferHandle, BufferError> {
+        match self.prepare_inner(key, admission, &mut checkpoint)? {
+            PreparedExtent::Resident(handle) => Ok(handle),
+            PreparedExtent::Load(mut pending) => {
+                load(pending.as_mut()).map_err(BufferError::Load)?;
+                self.complete_inner(pending, &mut checkpoint)
+            }
+        }
+    }
+
+    fn prepare_inner(
+        &mut self,
+        key: ExtentKey,
+        admission: Admission,
+        checkpoint: &mut impl FnMut() -> Result<(), BufferError>,
+    ) -> Result<PreparedExtent, BufferError> {
         checkpoint()?;
         if key.len > self.limits.max_extent_bytes {
             return Err(BufferError::ExtentTooLarge {
@@ -277,15 +376,15 @@ impl ExtentBuffer {
                 resident.frequency = resident.frequency.saturating_add(1).min(MAX_FREQUENCY);
             }
             self.stats.hits = self.stats.hits.saturating_add(1);
-            return Ok(BufferHandle { frame: Arc::clone(&resident.frame) });
+            return Ok(PreparedExtent::Resident(BufferHandle { frame: Arc::clone(&resident.frame) }));
         }
         self.stats.misses = self.stats.misses.saturating_add(1);
         let required = key.len.checked_add(FRAME_METADATA_CHARGE).ok_or(MemoryError::SizeOverflow)?;
-        if required > self.pool.limit() {
+        if required > self.pool.effective_limit() {
             return Err(MemoryError::ResourceExhausted {
                 requested: required,
                 available: self.pool.available(),
-                limit: self.pool.limit(),
+                limit: self.pool.effective_limit(),
             }.into());
         }
         let admitted = admission == Admission::Normal;
@@ -300,20 +399,51 @@ impl ExtentBuffer {
                 return Err(MemoryError::ResourceExhausted {
                     requested: required,
                     available: self.pool.available(),
-                    limit: self.pool.limit(),
+                    limit: self.pool.effective_limit(),
                 }.into());
             }
         }
         // A racing user of the shared pool can still win this reservation.
         // That is an ordinary typed refusal, never oversubscription.
-        let mut data = self.pool.allocate_inner(key.len, FRAME_METADATA_CHARGE)?;
+        let data = self.pool.allocate_inner(key.len, FRAME_METADATA_CHARGE)?;
         checkpoint()?;
-        load(data.as_mut()).map_err(BufferError::Load)?;
+        Ok(PreparedExtent::Load(PendingExtent {
+            key, admission, data, generation: Arc::clone(&self.load_generation),
+        }))
+    }
+
+    fn complete_inner(
+        &mut self,
+        pending: PendingExtent,
+        checkpoint: &mut impl FnMut() -> Result<(), BufferError>,
+    ) -> Result<BufferHandle, BufferError> {
         checkpoint()?;
+        if !Arc::ptr_eq(&pending.generation, &self.load_generation) {
+            return Err(BufferError::InvalidLoad);
+        }
+        let PendingExtent { key, admission, data, .. } = pending;
         if extent_checksum(data.as_ref()) != key.checksum {
             return Err(BufferError::ChecksumMismatch);
         }
         checkpoint()?;
+        if let Some(resident) = self.frames.get_mut(&key) {
+            if admission == Admission::Normal {
+                resident.frequency = resident.frequency.saturating_add(1).min(MAX_FREQUENCY);
+            }
+            self.stats.hits = self.stats.hits.saturating_add(1);
+            // Another prepared miss won publication. Drop this duplicate's
+            // charged allocation and reuse the already authenticated frame.
+            return Ok(BufferHandle { frame: Arc::clone(&resident.frame) });
+        }
+        let admitted = admission == Admission::Normal;
+        // Slots are not held across I/O. Another completion may have occupied
+        // the last one, so recheck the bound without reserving memory twice.
+        while admitted && self.frames.len() >= self.limits.max_frames {
+            checkpoint()?;
+            if !self.evict_one() {
+                return Err(BufferError::CacheSlotsExhausted { limit: self.limits.max_frames });
+            }
+        }
         let frame = Arc::new(Frame { key, data });
         if !admitted {
             self.stats.bypasses = self.stats.bypasses.saturating_add(1);
@@ -357,7 +487,7 @@ impl ExtentBuffer {
     }
 
     fn evict_one(&mut self) -> bool {
-        let preferred = if self.small_bytes > self.pool.limit() / 10 || self.main.is_empty() {
+        let preferred = if self.small_bytes > self.pool.effective_limit() / 10 || self.main.is_empty() {
             Queue::Small
         } else {
             Queue::Main
@@ -428,6 +558,10 @@ impl ExtentBuffer {
     }
 
     fn forget_inner(&mut self, object: ObjectId) {
+        // A fresh identity invalidates all earlier pending loads, including
+        // unrelated objects conservatively. No unbounded retired-ID registry
+        // or wrapping epoch is needed, and old handles remain independently live.
+        self.load_generation = Arc::new(());
         let mut small_bytes = 0;
         self.frames.retain(|key, entry| {
             if key.object == object {
@@ -610,5 +744,145 @@ mod tests {
         assert!(matches!(result, Err(BufferError::ExtentTooLarge { .. })));
         assert!(!called.get());
         assert_eq!(cache.pool.used(), 0);
+    }
+
+    fn pending(cache: &mut ExtentBuffer, id: u8) -> PendingExtent {
+        match cache.prepare_inner(key(id, &[id; 64]), Admission::Normal, &mut || Ok(())).unwrap() {
+            PreparedExtent::Load(mut pending) => {
+                pending.as_mut().fill(id);
+                pending
+            }
+            PreparedExtent::Resident(_) => panic!("expected a cold extent"),
+        }
+    }
+
+    #[test]
+    fn pending_load_drop_refunds_without_publishing() {
+        let mut cache = cache(1);
+        let load = pending(&mut cache, 1);
+        assert_eq!(cache.resident_frames(), 0);
+        assert_eq!(cache.pool.used(), load.charged_bytes());
+        drop(load);
+        assert_eq!(cache.pool.used(), 0);
+    }
+
+    #[test]
+    fn parallel_misses_deduplicate_their_resident_allocation() {
+        let mut cache = cache(2);
+        let a = pending(&mut cache, 1);
+        let b = pending(&mut cache, 1);
+        let charge = a.charged_bytes();
+        assert_eq!(cache.pool.used(), charge * 2);
+        let a = cache.complete_inner(a, &mut || Ok(())).unwrap();
+        let b = cache.complete_inner(b, &mut || Ok(())).unwrap();
+        assert!(Arc::ptr_eq(&a.frame, &b.frame));
+        assert_eq!(cache.resident_frames(), 1);
+        assert_eq!(cache.pool.used(), charge);
+    }
+
+    #[test]
+    fn retired_and_foreign_pending_loads_cannot_publish() {
+        let mut a = cache(1);
+        let mut b = cache(1);
+        let load = pending(&mut a, 1);
+        assert!(matches!(b.complete_inner(load, &mut || Ok(())), Err(BufferError::InvalidLoad)));
+        assert_eq!(a.pool.used(), 0);
+        let load = pending(&mut a, 1);
+        a.forget_inner(ObjectId([1; 32]));
+        assert!(matches!(a.complete_inner(load, &mut || Ok(())), Err(BufferError::InvalidLoad)));
+        assert_eq!((a.resident_frames(), b.resident_frames(), a.pool.used()), (0, 0, 0));
+    }
+
+    #[test]
+    fn completions_recheck_slot_limits_after_other_io_wins() {
+        let pool = MemoryPool::new((FRAME_METADATA_CHARGE + 64) * 2, 0).unwrap();
+        let mut cache = ExtentBuffer::new(pool.clone(), BufferLimits {
+            max_frames: 1, max_ghost_entries: 1, max_extent_bytes: 64,
+        }).unwrap();
+        let first = pending(&mut cache, 1);
+        let second = pending(&mut cache, 2);
+        let held = cache.complete_inner(first, &mut || Ok(())).unwrap();
+        assert!(matches!(cache.complete_inner(second, &mut || Ok(())),
+            Err(BufferError::CacheSlotsExhausted { limit: 1 })));
+        assert_eq!(cache.resident_frames(), 1);
+        assert_eq!(pool.used(), held.frame.data.charged_bytes());
+    }
+
+    #[test]
+    fn impossible_ancestor_extent_does_not_flush_useful_cache_entries() {
+        let root = MemoryPool::new(FRAME_METADATA_CHARGE + 64, 0).unwrap();
+        let pool = root.child(10000, 0).unwrap();
+        let mut cache = ExtentBuffer::new(pool, BufferLimits {
+            max_frames: 4, max_ghost_entries: 4, max_extent_bytes: 128,
+        }).unwrap();
+        drop(pin(&mut cache, 1, &[1; 64], Admission::Normal));
+        let used = root.used();
+        assert!(matches!(cache.prepare_inner(key(2, &[2; 128]), Admission::Normal, &mut || Ok(())),
+            Err(BufferError::Memory(MemoryError::ResourceExhausted { .. }))));
+        assert_eq!(cache.resident_frames(), 1);
+        assert_eq!(cache.stats().evictions, 0);
+        assert_eq!(root.used(), used);
+    }
+
+    fn under_lab<Fut>(test: impl FnOnce(QueryCx) -> Fut + Send + 'static)
+    where
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let (_, report) = asupersync::lab::run_async_under_lab(20260923, |root| async move {
+            test(fgdb_types::PurposeContexts::narrow_runtime_root(&root).query()).await;
+        });
+        assert!(report.invariant_violations.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn async_loader_is_not_called_for_hits_and_failed_reads_refund() {
+        under_lab(|cx| async move {
+            let mut cache = cache(2);
+            let first = cache.pin_async(&cx, key(1, &[1; 64]), Admission::Normal,
+                |mut pending| async move { pending.as_mut().fill(1); Ok(pending) }).await.unwrap();
+            let second = cache.pin_async(&cx, key(1, &[1; 64]), Admission::Normal,
+                |_| async { panic!("a cache hit must not invoke the loader") }).await.unwrap();
+            assert!(Arc::ptr_eq(&first.frame, &second.frame));
+            let before = cache.pool.used();
+            let failed = cache.pin_async(&cx, key(2, &[2; 64]), Admission::Normal,
+                |pending| async move { drop(pending); Err(io::Error::other("read failed")) }).await;
+            assert!(matches!(failed, Err(BufferError::Load(_))));
+            assert_eq!(cache.pool.used(), before);
+            let corrupt = cache.pin_async(&cx, key(2, &[2; 64]), Admission::Normal,
+                |mut pending| async move { pending.as_mut().fill(3); Ok(pending) }).await;
+            assert!(matches!(corrupt, Err(BufferError::ChecksumMismatch)));
+            assert_eq!(cache.pool.used(), before);
+        });
+    }
+
+    #[test]
+    fn dropped_async_load_refunds_the_owned_staging_allocation() {
+        under_lab(|cx| async move {
+            use std::future::Future;
+            use std::task::{Context, Waker};
+            let mut cache = cache(1);
+            {
+                let future = cache.pin_async(&cx, key(1, &[1; 64]), Admission::Normal,
+                    |pending| async move {
+                        std::future::pending::<()>().await;
+                        Ok(pending)
+                    });
+                let mut future = std::pin::pin!(future);
+                assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            }
+            assert_eq!((cache.pool.used(), cache.resident_frames()), (0, 0));
+        });
+    }
+
+    #[test]
+    fn async_loader_cannot_substitute_another_valid_extent() {
+        under_lab(|cx| async move {
+            let mut cache = cache(2);
+            let other = pending(&mut cache, 2);
+            let result = cache.pin_async(&cx, key(1, &[1; 64]), Admission::Normal,
+                |requested| async move { drop(requested); Ok(other) }).await;
+            assert!(matches!(result, Err(BufferError::InvalidLoad)));
+            assert_eq!((cache.pool.used(), cache.resident_frames()), (0, 0));
+        });
     }
 }
