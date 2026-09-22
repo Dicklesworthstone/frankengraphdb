@@ -16,6 +16,9 @@ use fgdb_types::QueryCx;
 use std::convert::Infallible;
 use std::mem::size_of;
 
+#[path = "sealed_components.rs"]
+mod components;
+
 /// Additional admission for native compressed CALLs. These account for
 /// graph-size-dependent vector/string backing stores, not allocator overhead,
 /// fixed metadata (including witness labels), or RSS.
@@ -293,11 +296,14 @@ impl SealedGraphView {
 impl FnxCallSpec {
     pub fn supports_sealed_execution(&self) -> bool {
         matches!(self.algorithm(), FnxAlgorithm::PageRank(_)
-            | FnxAlgorithm::SingleSourceShortestPathLength { .. })
+            | FnxAlgorithm::SingleSourceShortestPathLength { .. }
+            | FnxAlgorithm::WeaklyConnectedComponents
+            | FnxAlgorithm::StronglyConnectedComponents)
     }
 
-    /// Execute PageRank or outgoing hop distances directly from authenticated
-    /// compressed rows. Every kernel graph pass and row pull is fallible.
+    /// Execute PageRank, outgoing hop distances, or directed weak/strong
+    /// components directly from authenticated compressed rows. Every kernel
+    /// graph pass and row pull is fallible; component labels are stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
     pub fn execute_sealed(
@@ -324,6 +330,13 @@ impl FnxCallSpec {
                 ("fgdb-prism/sealed-bfs-v1", pass,
                     mul(n, size_of::<usize>() + size_of::<Option<usize>>())?, Some(ordinal))
             }
+            algorithm @ (FnxAlgorithm::WeaklyConnectedComponents | FnxAlgorithm::StronglyConnectedComponents) => {
+                admission.rows(n)?;
+                let strong = matches!(algorithm, FnxAlgorithm::StronglyConnectedComponents);
+                let kernel = if strong { "fgdb-prism/sealed-tarjan-v1" } else { "fgdb-prism/sealed-union-find-v1" };
+                (kernel, components::work(n, graph.edge_count(), pass, strong)?,
+                    components::workspace(n, strong)?, None)
+            }
             other => return Err(Error::UnsupportedAlgorithm(other)),
         };
         admit("estimated work", estimated_work, limits.max_estimated_work)?;
@@ -335,6 +348,8 @@ impl FnxCallSpec {
             FnxAlgorithm::SingleSourceShortestPathLength { cutoff, .. } => {
                 bfs(&rows, source.ok_or(ExecutionError::InvalidUpstreamResult)?, cutoff, &admission, &mut control)?
             }
+            FnxAlgorithm::WeaklyConnectedComponents => components::weak(&rows, &admission, &mut control)?,
+            FnxAlgorithm::StronglyConnectedComponents => components::strong(&rows, &admission, &mut control)?,
             other => return Err(Error::UnsupportedAlgorithm(other)),
         };
         finish(self, graph, output, kernel, estimated_work, workspace, &admission, &mut control)
@@ -366,6 +381,10 @@ fn finish(
                 let Some(distance) = *values.get(index).ok_or(ExecutionError::InvalidUpstreamResult)? else { continue; };
                 FnxValue::Integer(u64::try_from(distance).map_err(|_| ExecutionError::SizeOverflow)?)
             }
+            KernelValues::Components(values) => {
+                let label = *values.get(index).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                FnxValue::Vertex(graph.vertex_id(label).ok_or(ExecutionError::InvalidUpstreamResult)?)
+            }
             _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
         };
         let vertex = graph.vertex_id(index).ok_or(ExecutionError::InvalidUpstreamResult)?;
@@ -376,6 +395,7 @@ fn finish(
                 (FnxOutput::Vertex, _) => FnxValue::Vertex(vertex),
                 (FnxOutput::Score, FnxValue::Score(value)) => FnxValue::Score(value),
                 (FnxOutput::Distance, FnxValue::Integer(value)) => FnxValue::Integer(value),
+                (FnxOutput::Component, FnxValue::Vertex(value)) => FnxValue::Vertex(value),
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
             };
             match value {
@@ -442,7 +462,7 @@ fn source_digest() -> Digest {
     *DIGEST.get_or_init(|| {
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:sealed-kernel-source:v1");
-        for source in [include_str!("sealed_execute.rs"), include_str!("sealed.rs"),
+        for source in [include_str!("sealed_execute.rs"), include_str!("sealed_components.rs"), include_str!("sealed.rs"),
             include_str!("call.rs"), include_str!("input.rs"), include_str!("projection.rs")] {
             hash_text(&mut hash, source);
         }
@@ -624,5 +644,196 @@ mod tests {
         assert!(pass_work(3, 1000).unwrap() > pass_work(3, 3).unwrap());
         assert!(matches!(pass_work(usize::MAX, usize::MAX), Err(Error::Execution(ExecutionError::SizeOverflow))));
         assert!(matches!(mul(usize::MAX, 2), Err(Error::Execution(ExecutionError::SizeOverflow))));
+    }
+
+    fn component_call(strong: bool) -> FnxCallSpec {
+        let name = if strong { "strongly_connected_components" } else { "weakly_connected_components" };
+        FnxCallSpec::bind(&format!("CALL fnx.{name}() YIELD vertex,component"), &FnxParameters::new()).unwrap()
+    }
+    fn run_components(
+        graph: &impl Rows, strong: bool, admission: &ResultAdmission,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+    ) -> Result<KernelOutput> {
+        if strong { components::strong(graph, admission, checkpoint) }
+        else { components::weak(graph, admission, checkpoint) }
+    }
+
+    #[test]
+    fn cursor_components_match_decoded_calls_on_all_three_node_topologies() {
+        for strong in [false, true] {
+            let call = component_call(strong);
+            assert!(call.supports_sealed_execution());
+            let admission = ResultAdmission::new(&call, limits(), memory()).unwrap();
+            for mask in 0..512 {
+                let graph = projection(mask);
+                let output = run_components(&DecodedRows(&graph), strong, &admission, &mut || Ok(())).unwrap();
+                let expected = call.execute(&graph, limits(), || Ok::<(), Infallible>(())).unwrap();
+                assert_eq!(output.row_count, 3);
+                // Each directed edge and vertex is visited exactly once, even
+                // for WCC; no synthetic reverse adjacency is scanned.
+                assert_eq!(output.witness.nodes_touched, 3);
+                assert_eq!(output.witness.edges_scanned, graph.edge_count());
+                let KernelValues::Components(labels) = output.values else { panic!("components"); };
+                let rows: Vec<_> = labels.iter().enumerate().map(|(vertex, &label)| vec![
+                    FnxValue::Vertex(graph.vertex_id(vertex).unwrap()),
+                    FnxValue::Vertex(graph.vertex_id(label).unwrap()),
+                ]).collect();
+                assert_eq!(rows, expected.rows, "mask={mask} strong={strong}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_component_checkpoint_cancels_without_publishing_labels() {
+        let graph = projection(511);
+        for strong in [false, true] {
+            let admission = ResultAdmission::new(&component_call(strong), limits(), memory()).unwrap();
+            let mut count = 0;
+            run_components(&DecodedRows(&graph), strong, &admission, &mut || { count += 1; Ok(()) }).unwrap();
+            assert!(count > 20);
+            for stop in 1..=count {
+                let mut seen = 0;
+                let result = run_components(&DecodedRows(&graph), strong, &admission, &mut || {
+                    seen += 1;
+                    if seen == stop { Err(Error::Cancelled(std::io::Error::other("component stop").into())) }
+                    else { Ok(()) }
+                });
+                assert!(matches!(result, Err(Error::Cancelled(_))));
+                assert_eq!(seen, stop);
+            }
+        }
+    }
+
+    struct PathRows { n: usize, cycle: bool }
+    struct PathRow(Option<(usize, f64)>);
+    impl Cursor for PathRow {
+        fn next(&mut self) -> Result<Option<(usize, f64)>> { Ok(self.0.take()) }
+    }
+    impl Rows for PathRows {
+        type Cursor<'a> = PathRow where Self: 'a;
+        fn node_count(&self) -> usize { self.n }
+        fn degree(&self, source: usize) -> Option<usize> {
+            if source >= self.n { return None; }
+            Some(usize::from(source + 1 < self.n || self.cycle))
+        }
+        fn open(&self, source: usize) -> Result<PathRow> {
+            if source >= self.n { return Err(ExecutionError::InvalidUpstreamResult.into()); }
+            Ok(PathRow(if source + 1 < self.n { Some((source + 1, 1.0)) }
+                else if self.cycle { Some((0, 1.0)) } else { None }))
+        }
+    }
+
+    #[test]
+    fn deep_component_dfs_is_iterative_and_does_not_materialize_rows() {
+        let n = 20_000;
+        for strong in [false, true] {
+            let admission = ResultAdmission::new(&component_call(strong),
+                FnxExecutionLimits { max_result_rows: n, ..limits() },
+                FnxMemoryLimits { max_result_bytes: usize::MAX, ..memory() }).unwrap();
+            for cycle in [false, true] {
+                let output = run_components(&PathRows { n, cycle }, strong, &admission, &mut || Ok(())).unwrap();
+                assert_eq!(output.witness.edges_scanned, if cycle { n } else { n - 1 });
+                assert_eq!(output.witness.queue_peak, if strong { n } else { 0 });
+                let KernelValues::Components(labels) = output.values else { panic!("components"); };
+                for (vertex, label) in labels.into_iter().enumerate() {
+                    assert_eq!(label, if strong && !cycle { vertex } else { 0 });
+                }
+            }
+        }
+    }
+
+    fn fault_step(calls: &std::cell::Cell<usize>, fail_at: usize) -> Result<()> {
+        let next = calls.get() + 1;
+        calls.set(next);
+        if next == fail_at { Err(Error::Source(SealedProjectionError::UnknownOrdinal(usize::MAX))) }
+        else { Ok(()) }
+    }
+    struct FaultRows<'a> {
+        graph: &'a SnapshotGraphView,
+        calls: std::cell::Cell<usize>,
+        fail_at: usize,
+    }
+    struct FaultRow<'a> {
+        row: DecodedRow<'a>,
+        calls: &'a std::cell::Cell<usize>,
+        fail_at: usize,
+    }
+    impl Cursor for FaultRow<'_> {
+        fn next(&mut self) -> Result<Option<(usize, f64)>> {
+            fault_step(self.calls, self.fail_at)?;
+            self.row.next()
+        }
+    }
+    impl Rows for FaultRows<'_> {
+        type Cursor<'a> = FaultRow<'a> where Self: 'a;
+        fn node_count(&self) -> usize { self.graph.node_count() }
+        fn degree(&self, source: usize) -> Option<usize> {
+            self.graph.neighbors_indices(source).map(<[usize]>::len)
+        }
+        fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
+            fault_step(&self.calls, self.fail_at)?;
+            let (targets, weights) = self.graph.projected_row(source).ok_or(ExecutionError::InvalidUpstreamResult)?;
+            Ok(FaultRow { row: DecodedRow { row: targets.iter().zip(weights) },
+                calls: &self.calls, fail_at: self.fail_at })
+        }
+    }
+
+    #[test]
+    fn every_component_source_open_and_pull_failure_is_terminal() {
+        let graph = projection(511);
+        for strong in [false, true] {
+            let admission = ResultAdmission::new(&component_call(strong), limits(), memory()).unwrap();
+            let source = FaultRows { graph: &graph, calls: std::cell::Cell::new(0), fail_at: usize::MAX };
+            run_components(&source, strong, &admission, &mut || Ok(())).unwrap();
+            let operations = source.calls.get();
+            assert_eq!(operations, 3 + 9 + 3); // opens, edges, EOFs
+            for fail_at in 1..=operations {
+                let source = FaultRows { graph: &graph, calls: std::cell::Cell::new(0), fail_at };
+                assert!(matches!(run_components(&source, strong, &admission, &mut || Ok(())),
+                    Err(Error::Source(SealedProjectionError::UnknownOrdinal(usize::MAX)))));
+                assert_eq!(source.calls.get(), fail_at, "no cursor may resume after failure");
+            }
+        }
+    }
+
+    #[test]
+    fn component_admission_precedes_source_access_and_counts_isolates() {
+        let graph = projection(0);
+        for strong in [false, true] {
+            let mut admission = ResultAdmission::new(&component_call(strong), limits(), memory()).unwrap();
+            let source = FaultRows { graph: &graph, calls: std::cell::Cell::new(0), fail_at: 1 };
+            admission.max_rows = 2;
+            assert!(matches!(run_components(&source, strong, &admission, &mut || Ok(())),
+                Err(Error::Execution(ExecutionError::LimitExceeded { resource: "result rows", .. }))));
+            admission.max_rows = 3;
+            admission.max_bytes = admission.column_bytes + 3 * admission.row_bytes - 1;
+            assert!(matches!(run_components(&source, strong, &admission, &mut || Ok(())),
+                Err(Error::Execution(ExecutionError::LimitExceeded { resource: "result bytes", .. }))));
+            assert_eq!(source.calls.get(), 0);
+            assert!(components::workspace(usize::MAX, strong).is_err());
+            assert!(components::work(usize::MAX, usize::MAX, usize::MAX, strong).is_err());
+            assert_eq!(components::workspace(0, strong).unwrap(), 0);
+        }
+        assert_eq!(components::workspace(3, false).unwrap(), 6 * size_of::<usize>());
+    }
+
+    #[test]
+    fn empty_component_graphs_succeed_and_invalid_ordinals_refuse() {
+        struct InvalidRows;
+        impl Rows for InvalidRows {
+            type Cursor<'a> = PathRow where Self: 'a;
+            fn node_count(&self) -> usize { 1 }
+            fn degree(&self, _: usize) -> Option<usize> { Some(1) }
+            fn open(&self, _: usize) -> Result<PathRow> { Ok(PathRow(Some((usize::MAX, 1.0)))) }
+        }
+        for strong in [false, true] {
+            let admission = ResultAdmission::new(&component_call(strong), limits(), memory()).unwrap();
+            let output = run_components(&PathRows { n: 0, cycle: false }, strong, &admission, &mut || Ok(())).unwrap();
+            assert_eq!(output.row_count, 0);
+            let KernelValues::Components(labels) = output.values else { panic!("components"); };
+            assert!(labels.is_empty());
+            assert!(matches!(run_components(&InvalidRows, strong, &admission, &mut || Ok(())),
+                Err(Error::Execution(ExecutionError::InvalidUpstreamResult))));
+        }
     }
 }
