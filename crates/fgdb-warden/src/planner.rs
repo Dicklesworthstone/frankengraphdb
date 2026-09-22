@@ -1,5 +1,8 @@
 //! Mandatory object predicates, separate from ordinary query WHERE clauses.
 
+mod write;
+pub use write::{EdgeWriteImage, VertexWriteFields, VertexWriteImage, WriteEndpoint};
+
 use crate::{Authority, Error, LimitDimension, QueryLimits, Rights, Scope};
 use core::marker::PhantomData;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};

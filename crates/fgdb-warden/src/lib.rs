@@ -35,7 +35,10 @@
 mod planner;
 mod token;
 
-pub use planner::{ExecutionPermit, PlannerPredicates, ReadAccess, Usage, WriteAccess};
+pub use planner::{
+    EdgeWriteImage, ExecutionPermit, PlannerPredicates, ReadAccess, Usage, VertexWriteFields,
+    VertexWriteImage, WriteAccess, WriteEndpoint,
+};
 pub use token::{Authority, CapabilityToken, VerifiedCapability};
 
 use core::fmt;
@@ -209,6 +212,7 @@ pub enum Error {
     NotYetValid,
     ClockWentBackwards,
     PermissionDenied,
+    InvalidWriteImage,
     LimitExceeded(LimitDimension),
     ExecutionStopped,
 }
@@ -228,6 +232,7 @@ impl fmt::Display for Error {
             Self::NotYetValid => "Warden capability is not yet valid",
             Self::ClockWentBackwards => "Warden execution clock moved backwards",
             Self::PermissionDenied => "Warden operation denied",
+            Self::InvalidWriteImage => "Warden write image is invalid",
             Self::LimitExceeded(_) => "Warden execution budget exceeded",
             Self::ExecutionStopped => "Warden execution already stopped",
         };
