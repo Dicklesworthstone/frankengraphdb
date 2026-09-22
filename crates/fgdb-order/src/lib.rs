@@ -6,6 +6,8 @@
 //! payload closures: consensus is NOT a payload-availability certificate.
 //! Autonomous election deadlines use [`Event::LivenessTimeout`]'s pre-vote;
 //! [`Event::ElectionTimeout`] remains the explicit unconditional campaign input.
+//! Leaders elected through that path also probe a fresh quorum each election
+//! interval and step down if it is absent. The runtime still owns every timer.
 //! Neither suspicion nor pre-votes change configuration or grant read authority.
 //!
 //! Every transition yields a [`Persistence`] view. If it requires a write,
@@ -389,6 +391,16 @@ pub enum Message<C> {
         round: u64,
         granted: bool,
     },
+    /// Term-bearing liveness only, independent of log/snapshot backpressure.
+    /// A reply never acknowledges an append, payload, snapshot or read barrier.
+    QuorumProbe {
+        term: u64,
+        round: u64,
+    },
+    QuorumReply {
+        term: u64,
+        round: u64,
+    },
     RequestVote {
         term: u64,
         last_index: u64,
@@ -432,6 +444,8 @@ impl<C> Message<C> {
             // Never follow a term that a pre-candidate has not entered.
             Self::PreVoteRequest { .. } => 0,
             Self::PreVoteReply { term, .. }
+            | Self::QuorumProbe { term, .. }
+            | Self::QuorumReply { term, .. }
             | Self::RequestVote { term, .. }
             | Self::Vote { term, .. }
             | Self::Append { term, .. }
@@ -459,6 +473,11 @@ pub enum Event<C> {
     /// The runtime's seeded election deadline expired without a leader reset.
     /// Discover a voter quorum before incrementing the term. Pre-vote traffic
     /// itself never refreshes a receiver's election deadline.
+    /// For leaders, check the preceding fresh-probe interval and begin the next
+    /// one, or step down without changing durable state. A host must deliver
+    /// this periodically to leaders too (at its election-interval cadence),
+    /// not just send Heartbeat. A directly elected leader's first such event
+    /// starts its initial interval; protected elections start it at election.
     LivenessTimeout,
     Heartbeat,
     Propose(C),
@@ -786,10 +805,11 @@ impl<C: Clone + Eq> Raft<C> {
         self.generation = generation;
         match event {
             Event::ElectionTimeout => self.campaign(&mut output)?,
-            Event::LivenessTimeout => self.pre_campaign(&mut output)?,
+            Event::LivenessTimeout => self.liveness_timeout(&mut output)?,
             Event::Heartbeat => {
                 if self.role == Role::Leader {
                     self.broadcast(&mut output)?;
+                    self.retry_quorum_probe(&mut output);
                 }
             }
             Event::Propose(command) => {
@@ -1162,7 +1182,11 @@ impl<C: Clone + Eq> Raft<C> {
             });
         }
         self.advance_commit();
-        self.broadcast(output)
+        self.broadcast(output)?;
+        if self.liveness.enabled() {
+            self.start_quorum_probe(output);
+        }
+        Ok(())
     }
 
     fn advance_commit(&mut self) -> bool {
@@ -1391,6 +1415,12 @@ impl<C: Clone + Eq> Raft<C> {
             }
             Message::PreVoteReply { prospective_term, round, granted, .. } => {
                 self.pre_vote_reply(from, prospective_term, round, granted, output)?;
+            }
+            Message::QuorumProbe { round, .. } => {
+                self.quorum_probe(from, term, round, output);
+            }
+            Message::QuorumReply { round, .. } => {
+                self.quorum_reply(from, term, round);
             }
             Message::RequestVote {
                 last_index,

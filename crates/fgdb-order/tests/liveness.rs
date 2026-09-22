@@ -344,3 +344,280 @@ fn exhaustive_stable_and_joint_pre_votes_match_independent_majority_counting() {
         }
     }
 }
+
+fn probes(output: &Output<u64>) -> Vec<Envelope<u64>> {
+    output.messages.iter().filter(|m| matches!(m.message, Message::QuorumProbe { .. })).cloned().collect()
+}
+
+fn protected_leader(configuration: &Configuration) -> (Vec<Node>, Output<u64>) {
+    let mut nodes: Vec<_> = configuration.voters().iter().chain(configuration.learners())
+        .map(|id| Node::recovered(id.0, configuration.clone())).collect();
+    let output = nodes[0].step(Event::LivenessTimeout);
+    // Explicitly deliver the pre-election and actual votes, retaining the
+    // initial leader output so each test controls every post-election response.
+    let mut queue: VecDeque<_> = output.messages.into();
+    while let Some(message) = queue.pop_front() {
+        let index = nodes.iter().position(|node| node.raft.id() == message.to).unwrap();
+        let output = nodes[index].step(Event::Receive(message));
+        if output.role == Role::Leader {
+            return (nodes, output);
+        }
+        queue.extend(output.messages);
+    }
+    panic!("configuration did not elect the test leader");
+}
+
+#[test]
+fn absent_fresh_quorum_steps_down_without_mutating_log_term_or_vote() {
+    let configuration = config();
+    let (mut nodes, election) = protected_leader(&configuration);
+    assert_eq!(probes(&election).len(), 2);
+    let pending = nodes[0].step(Event::Propose(77));
+    assert!(pending.committed.is_empty());
+    let before = nodes[0].disk.clone();
+    let writes = nodes[0].writes;
+    let output = nodes[0].step(Event::LivenessTimeout);
+    assert_eq!(output.role, Role::Follower);
+    assert_eq!(output.leader, None);
+    assert!(output.messages.is_empty());
+    assert!(output.reset_election_timer);
+    assert_eq!(nodes[0].disk, before);
+    assert_eq!(nodes[0].writes, writes);
+    assert_eq!(nodes[0].raft.step(Event::Propose(88)).unwrap_err(), Error::NotLeader);
+    assert!(nodes[0].disk.entries().iter().any(|entry| entry.command == Some(77)),
+        "timeout cannot decide or abandon a proposed payload");
+}
+
+#[test]
+fn healthy_quorum_remains_leader_with_no_periodic_root_writes() {
+    let configuration = config();
+    let (mut nodes, output) = protected_leader(&configuration);
+    pump(&mut nodes, output.messages, &[1, 2]);
+    let committed = nodes[0].disk.commit_index();
+    let writes: Vec<_> = nodes.iter().map(|node| node.writes).collect();
+    let mut rounds = BTreeSet::new();
+    for _ in 0..20 {
+        let output = nodes[0].step(Event::LivenessTimeout);
+        assert_eq!(output.role, Role::Leader);
+        assert!(output.reset_election_timer);
+        for message in probes(&output) {
+            let Message::QuorumProbe { round, .. } = message.message else { unreachable!() };
+            rounds.insert(round);
+        }
+        pump(&mut nodes, output.messages, &[1, 2]);
+        assert_eq!(nodes[0].disk.commit_index(), committed);
+    }
+    assert_eq!(rounds.len(), 20);
+    assert_eq!(nodes.iter().map(|node| node.writes).collect::<Vec<_>>(), writes);
+}
+
+#[test]
+fn old_round_and_duplicate_replies_cannot_keep_an_isolated_leader_alive() {
+    let configuration = config();
+    let (mut nodes, output) = protected_leader(&configuration);
+    let probe = probes(&output).into_iter().find(|message| message.to == MemberId(2)).unwrap();
+    let reply = nodes[1].step(Event::Receive(probe)).messages.remove(0);
+    nodes[0].step(Event::Receive(reply.clone()));
+    assert_eq!(nodes[0].step(Event::LivenessTimeout).role, Role::Leader);
+    for _ in 0..100 { nodes[0].step(Event::Receive(reply.clone())); }
+    let output = nodes[0].step(Event::LivenessTimeout);
+    assert_eq!(output.role, Role::Follower);
+    assert_eq!(nodes[0].disk.term(), 1);
+}
+
+#[test]
+fn heartbeat_retries_only_unconfirmed_voters_without_extending_the_interval() {
+    let configuration = config();
+    let (mut nodes, output) = protected_leader(&configuration);
+    let original = probes(&output);
+    let heartbeat = nodes[0].step(Event::Heartbeat);
+    assert_eq!(probes(&heartbeat), original);
+    assert!(!heartbeat.reset_election_timer);
+    let reply = nodes[1].step(Event::Receive(original[0].clone())).messages.remove(0);
+    nodes[0].step(Event::Receive(reply));
+    let heartbeat = nodes[0].step(Event::Heartbeat);
+    assert_eq!(probes(&heartbeat), vec![original[1].clone()]);
+    assert!(!heartbeat.reset_election_timer);
+}
+
+#[test]
+fn liveness_quorum_is_not_append_commit_or_snapshot_evidence() {
+    let configuration = config();
+    let (mut nodes, output) = protected_leader(&configuration);
+    // Only liveness probes are delivered: all no-op and user append messages
+    // are withheld. Even a unanimous liveness quorum cannot commit either.
+    pump(&mut nodes, probes(&output), &[1, 2, 3]);
+    nodes[0].step(Event::Propose(42));
+    for _ in 0..4 {
+        let output = nodes[0].step(Event::LivenessTimeout);
+        assert_eq!(output.role, Role::Leader);
+        assert_eq!(nodes[0].disk.commit_index(), 0);
+        assert!(output.committed.is_empty());
+        pump(&mut nodes, probes(&output), &[1, 2, 3]);
+    }
+    assert_eq!(nodes[1].disk.entries().len(), 0);
+    assert_eq!(nodes[2].disk.entries().len(), 0);
+}
+
+#[test]
+fn joint_quorum_checks_both_sides_and_rejects_learner_liveness() {
+    let configuration = Configuration::joint(Domain([1; 32]), [2; 32],
+        [1, 2, 3].map(MemberId), [3, 4, 5].map(MemberId), [MemberId(6)]).unwrap();
+    for (reachable, expected) in [(vec![1, 2, 3], Role::Follower), (vec![1, 3, 4], Role::Leader)] {
+        let (mut nodes, output) = protected_leader(&configuration);
+        assert!(probes(&output).iter().all(|message| message.to != MemberId(6)));
+        let Message::QuorumProbe { term, round } = probes(&output)[0].message else { unreachable!() };
+        let before = nodes[0].disk.clone();
+        let error = nodes[0].raft.step(Event::Receive(envelope(&configuration, 6, 1,
+            Message::QuorumReply { term, round }))).unwrap_err();
+        assert_eq!(error, Error::NotVoter);
+        assert_eq!(nodes[0].raft.durable_state().unwrap(), &before);
+        pump(&mut nodes, probes(&output), &reachable);
+        assert_eq!(nodes[0].step(Event::LivenessTimeout).role, expected);
+    }
+}
+
+#[test]
+fn actual_higher_term_probe_is_published_before_reply_and_leader_reset() {
+    let configuration = config();
+    let mut node = Node::recovered(2, configuration.clone());
+    let pending = node.raft.step(Event::Receive(envelope(&configuration, 1, 2,
+        Message::QuorumProbe { term: 9, round: 81 }))).unwrap();
+    assert!(pending.requires_write());
+    assert_eq!(pending.state().term(), 9);
+    assert_eq!(pending.state().commit_index(), 0);
+    node.disk = pending.state().clone();
+    let id = pending.id();
+    assert_eq!(node.raft.role(), Err(Error::AwaitingDurability));
+    let output = node.raft.persisted(id).unwrap();
+    assert_eq!(output.leader, Some(MemberId(1)));
+    assert!(output.reset_election_timer);
+    assert_eq!(output.messages[0].message, Message::QuorumReply { term: 9, round: 81 });
+    let stale = node.step(Event::Receive(envelope(&configuration, 3, 2,
+        Message::QuorumProbe { term: 8, round: 1 })));
+    assert!(!stale.reset_election_timer);
+    assert_eq!(stale.leader, Some(MemberId(1)));
+    assert_eq!(stale.messages[0].message, Message::QuorumReply { term: 9, round: 1 });
+}
+
+#[test]
+fn malformed_or_foreign_liveness_traffic_cannot_change_the_term() {
+    let configuration = config();
+    let mut node = Node::recovered(2, configuration.clone());
+    for message in [Message::QuorumProbe { term: 9, round: 0 }, Message::QuorumReply { term: 9, round: 0 },
+        Message::QuorumProbe { term: 0, round: 1 }, Message::QuorumReply { term: 0, round: 1 }]
+    {
+        assert_eq!(node.raft.step(Event::Receive(envelope(&configuration, 1, 2, message))).unwrap_err(), Error::InvalidMessage);
+        assert_eq!(node.raft.durable_state().unwrap(), &node.disk);
+    }
+    let mut foreign = envelope(&configuration, 1, 2, Message::QuorumProbe { term: 9, round: 1 });
+    foreign.configuration = [9; 32];
+    assert_eq!(node.raft.step(Event::Receive(foreign)).unwrap_err(), Error::WrongConfiguration);
+    assert_eq!(node.raft.durable_state().unwrap(), &node.disk);
+}
+
+#[test]
+fn probes_keep_snapshot_transfer_alive_without_acknowledging_its_installation() {
+    let configuration = config();
+    let mut node = Node::recovered(2, configuration.clone());
+    let cut = SnapshotCut::from_authenticated_parts(&configuration, [3; 32], [4; 32], [5; 32], 12, 3).unwrap();
+    let offered = node.step(Event::Receive(envelope(&configuration, 1, 2,
+        Message::InstallSnapshot { term: 3, request: 1, snapshot: cut })));
+    let transfer = offered.snapshot_transfers[0].id();
+    let writes = node.writes;
+    for round in 1..=5 {
+        let output = node.step(Event::Receive(envelope(&configuration, 1, 2,
+            Message::QuorumProbe { term: 3, round })));
+        assert!(output.reset_election_timer);
+        assert!(output.cancelled_snapshot_transfers.is_empty());
+        assert!(output.installed_snapshot.is_none());
+        assert!(output.committed.is_empty());
+        assert!(output.messages.iter().all(|m| matches!(m.message, Message::QuorumReply { .. })));
+    }
+    assert_eq!(node.writes, writes);
+    let installed = node.step(Event::SnapshotReady(transfer));
+    assert!(installed.installed_snapshot.is_some());
+}
+
+#[test]
+fn direct_election_can_enable_checks_but_gets_one_complete_probe_interval() {
+    let configuration = config();
+    let mut nodes: Vec<_> = (1..=3).map(|id| Node::recovered(id, configuration.clone())).collect();
+    let output = nodes[0].step(Event::ElectionTimeout);
+    pump(&mut nodes, output.messages, &[1, 2, 3]);
+    let initial = nodes[0].step(Event::LivenessTimeout);
+    assert_eq!(initial.role, Role::Leader);
+    assert_eq!(probes(&initial).len(), 2);
+    assert_eq!(nodes[0].step(Event::LivenessTimeout).role, Role::Follower);
+}
+
+#[test]
+fn quorum_one_periodic_checks_do_not_add_log_entries_or_syncs() {
+    let configuration = Configuration::stable(Domain([1; 32]), [2; 32], [MemberId(1)], []).unwrap();
+    let mut node = Node::recovered(1, configuration);
+    node.step(Event::LivenessTimeout);
+    let before = node.disk.clone();
+    for _ in 0..20 {
+        let output = node.step(Event::LivenessTimeout);
+        assert_eq!(output.role, Role::Leader);
+        assert!(output.messages.is_empty());
+        assert!(output.committed.is_empty());
+        assert_eq!(node.disk, before);
+    }
+    assert_eq!(node.writes, 1);
+}
+
+#[test]
+fn failover_after_quorum_loss_preserves_commits_and_stale_probes_do_not_revive_leader() {
+    let configuration = config();
+    let (mut nodes, election) = protected_leader(&configuration);
+    pump(&mut nodes, election.messages, &[1, 2, 3]);
+    let proposal = nodes[0].step(Event::Propose(101));
+    pump(&mut nodes, proposal.messages, &[1, 2, 3]);
+    let heartbeat = nodes[0].step(Event::Heartbeat);
+    pump(&mut nodes, heartbeat.messages, &[1, 2, 3]);
+    let pending = nodes[0].step(Event::LivenessTimeout);
+    let old_probe = probes(&pending)[0].clone();
+    // Partition 1 away. Both followers first observe their expired leader
+    // deadline; the second can obtain a pre-vote from the leader-free first.
+    nodes[1].step(Event::LivenessTimeout);
+    let election = nodes[2].step(Event::LivenessTimeout);
+    pump(&mut nodes, election.messages, &[2, 3]);
+    assert_eq!(nodes[2].raft.role(), Ok(Role::Leader));
+    assert_eq!(nodes[0].step(Event::LivenessTimeout).role, Role::Follower);
+    let proposal = nodes[2].step(Event::Propose(202));
+    pump(&mut nodes, proposal.messages, &[2, 3]);
+    let heartbeat = nodes[2].step(Event::Heartbeat);
+    pump(&mut nodes, heartbeat.messages, &[2, 3]);
+    for node in &nodes[1..] {
+        let commands: Vec<_> = node.raft.committed_after(0).unwrap().into_iter().filter_map(|e| e.entry.command).collect();
+        assert_eq!(commands, vec![101, 202]);
+    }
+    let output = nodes[1].step(Event::Receive(old_probe));
+    assert!(!output.reset_election_timer);
+    assert_eq!(output.leader, Some(MemberId(3)));
+    pump(&mut nodes, output.messages, &[1, 2, 3]);
+    assert_eq!(nodes[0].raft.role(), Ok(Role::Follower));
+    assert_eq!(nodes[0].disk.term(), nodes[2].disk.term());
+    assert!(nodes[0].raft.step(Event::Propose(303)).is_err());
+}
+
+#[test]
+fn granting_an_actual_vote_cancels_same_term_preview_without_double_voting() {
+    let configuration = config();
+    let disk = PersistentState::from_authenticated_parts(configuration.clone(), 7, None, 0, vec![]);
+    let mut node = Node { raft: Raft::recover(MemberId(1), disk.clone(), Limits::default()).unwrap(), disk, writes: 0 };
+    let (term, round) = preview(&node.step(Event::LivenessTimeout));
+    let voted = node.step(Event::Receive(envelope(&configuration, 2, 1,
+        Message::RequestVote { term: 7, last_index: 0, last_term: 0 })));
+    assert_eq!(voted.role, Role::Follower);
+    assert!(matches!(voted.messages[0].message, Message::Vote { term: 7, granted: true }));
+    assert_eq!(node.disk.voted_for(), Some(MemberId(2)));
+    node.step(approval(&configuration, 3, 1, term, round));
+    assert_eq!(node.disk.term(), 7);
+    node.step(Event::LivenessTimeout);
+    let rejected = node.step(Event::Receive(envelope(&configuration, 3, 1,
+        Message::RequestVote { term: 7, last_index: 0, last_term: 0 })));
+    assert!(matches!(rejected.messages[0].message, Message::Vote { term: 7, granted: false }));
+    assert_eq!(node.disk.voted_for(), Some(MemberId(2)));
+}
