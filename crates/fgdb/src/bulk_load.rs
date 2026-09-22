@@ -4,8 +4,11 @@
 //! transcript; replay verifies it before allocating identities or preparing a
 //! write. Malformed preflight input leaves the graph unchanged. A changed replay
 //! returns only the already committed prefix. Payload memory is one chunk plus
-//! one scalar encoding; caller-key maps and chunk seals grow with
-//! the load. Edges name preceding vertices. Keys are unique across both kinds.
+//! one admitted scalar encoding. Explicit logical source/key/chunk bounds cover
+//! both passes, including resumed prefixes. These are not allocator-byte or
+//! external-memory guarantees. Edges name preceding vertices; keys are unique
+//! across both kinds. Sources must make each next()/clone() call finite and
+//! enforce their own I/O and decoding limits; the loader checkpoints around next().
 //!
 //! Resume supplies the same source and policy plus a checkpoint. After an
 //! uncertain commit, reopen first: choose `pending` only if its frontier equals
@@ -49,15 +52,50 @@ pub struct BulkLoadPolicy {
     /// Coordinate for vertex-only chunks and shared vertex initialization.
     pub vertex_relation: RelationId,
     pub resume: Option<BulkLoadCheckpoint>,
+    /// Whole-source row/key count, including a resumed prefix; not a chunk quota.
+    pub max_source_rows: usize,
+    /// UTF-8 bytes of each caller key or endpoint reference.
+    pub max_key_bytes: usize,
+    /// Sum of unique caller-key bytes over the complete source. Internal maps
+    /// may retain multiple copies; this is not an allocator-byte measurement.
+    pub max_total_key_bytes: usize,
+    /// Per-chunk source transcript bytes: row tags, framed keys, labels,
+    /// property keys and canonical scalar encodings. Excludes the fixed chunk
+    /// header/trailer and caller-allocated spare capacities. Chunk boundaries
+    /// remain rows_per_chunk; refusal never silently splits a transaction.
+    pub max_chunk_bytes: usize,
 }
 impl BulkLoadPolicy {
+    pub const MAX_ROWS_PER_CHUNK: usize = 65_536;
+
     #[must_use]
     pub const fn new(rows_per_chunk: usize, vertex_relation: RelationId) -> Self {
         Self {
             rows_per_chunk,
             vertex_relation,
             resume: None,
+            max_source_rows: 1_000_000,
+            max_key_bytes: 1024,
+            max_total_key_bytes: 64 * 1024 * 1024,
+            max_chunk_bytes: 8 * 1024 * 1024,
         }
+    }
+
+    /// Inclusive, independent bounds; zero is a valid fail-closed limit.
+    /// The whole-source limits include previously committed rows on resume.
+    #[must_use]
+    pub const fn with_source_limits(
+        mut self,
+        max_source_rows: usize,
+        max_key_bytes: usize,
+        max_total_key_bytes: usize,
+        max_chunk_bytes: usize,
+    ) -> Self {
+        self.max_source_rows = max_source_rows;
+        self.max_key_bytes = max_key_bytes;
+        self.max_total_key_bytes = max_total_key_bytes;
+        self.max_chunk_bytes = max_chunk_bytes;
+        self
     }
 }
 #[derive(Clone, Debug, Default)]
@@ -77,6 +115,12 @@ pub enum BulkLoadErrorKind {
     SourceChanged { row: usize },
     SourceEncoding { row: usize, source: fgdb_types::ScalarEncodeError },
     CounterOverflow,
+    /// A source reader/decoder failed. No partially read chunk was submitted.
+    Source { row: usize, source: Box<dyn core::error::Error + Send + Sync> },
+    /// Exact observed logical admission count, never estimated resident bytes.
+    /// Dimensions are source_rows, key_bytes, total_key_bytes or chunk_bytes.
+    SourceLimit { row: usize, dimension: &'static str, limit: usize, observed: usize },
+    SourceAllocation { row: usize },
     DuplicateCallerKey {
         key: String,
     },
@@ -113,7 +157,17 @@ impl core::fmt::Display for BulkLoadError {
         )
     }
 }
-impl core::error::Error for BulkLoadError {}
+impl core::error::Error for BulkLoadError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match &self.kind {
+            BulkLoadErrorKind::Source { source, .. } => Some(source.as_ref()),
+            BulkLoadErrorKind::SourceEncoding { source, .. } => Some(source),
+            BulkLoadErrorKind::Write(source) => Some(source),
+            BulkLoadErrorKind::Checkpoint(source) => Some(source),
+            _ => None,
+        }
+    }
+}
 
 impl<V: Vfs + Clone> Database<V> {
     pub async fn bulk_load<I>(
@@ -162,44 +216,96 @@ impl<V: Vfs + Clone> Database<V> {
         source: I,
         policy: BulkLoadPolicy,
         crash: Option<(usize, CrashPoint)>,
-        mut acknowledged: F,
+        acknowledged: F,
     ) -> Result<BulkLoadCheckpoint, BulkLoadError>
     where
         I: IntoIterator<Item = BulkRow>,
         I::IntoIter: Clone,
         F: FnMut(&BulkLoadCheckpoint) -> Result<(), std::io::Error>,
     {
-        let mut committed = policy.resume.clone().unwrap_or_default();
+        self.try_bulk_load_with_checkpoint(
+            cx, commit_cx, source.into_iter().map(Ok::<_, core::convert::Infallible>),
+            policy, crash, acknowledged,
+        ).await
+    }
+
+    /// Replayable, fallible ingestion without converting a decoder error to EOF
+    /// or buffering an entire decoded input. All preflight source failures leave
+    /// this invocation's graph unchanged. Replay failures preserve the completed
+    /// prefix and never mint a pending candidate for an unread or unchecked chunk.
+    pub async fn try_bulk_load<I, E>(
+        &mut self,
+        cx: &QueryCx,
+        commit_cx: &CommitCx,
+        source: I,
+        policy: BulkLoadPolicy,
+    ) -> Result<BulkLoadCheckpoint, BulkLoadError>
+    where
+        I: IntoIterator<Item = Result<BulkRow, E>>,
+        I::IntoIter: Clone,
+        E: core::error::Error + Send + Sync + 'static,
+    {
+        self.try_bulk_load_with_checkpoint(cx, commit_cx, source, policy, None, |_| Ok(())).await
+    }
+
+    /// Fallible counterpart of bulk_load_with_checkpoint, using the very same
+    /// preparation/publication loop, limits and acknowledgement boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn try_bulk_load_with_checkpoint<I, E, F>(
+        &mut self,
+        cx: &QueryCx,
+        commit_cx: &CommitCx,
+        source: I,
+        mut policy: BulkLoadPolicy,
+        crash: Option<(usize, CrashPoint)>,
+        mut acknowledged: F,
+    ) -> Result<BulkLoadCheckpoint, BulkLoadError>
+    where
+        I: IntoIterator<Item = Result<BulkRow, E>>,
+        I::IntoIter: Clone,
+        E: core::error::Error + Send + Sync + 'static,
+        F: FnMut(&BulkLoadCheckpoint) -> Result<(), std::io::Error>,
+    {
+        let resuming = policy.resume.is_some();
+        // Move, do not duplicate, caller-owned checkpoint maps before admission.
+        let mut committed = policy.resume.take().unwrap_or_default();
         let mut source = source.into_iter();
         let preflight = (|| {
+            source::checkpoint(cx)?;
             self.ensure_writable()
                 .map_err(|e| BulkLoadErrorKind::Write(e.into()))?;
-            if policy.rows_per_chunk == 0 {
+            if policy.rows_per_chunk == 0 || policy.rows_per_chunk > BulkLoadPolicy::MAX_ROWS_PER_CHUNK {
                 return Err(BulkLoadErrorKind::InvalidPolicy);
             }
             let frontier = self
                 .frontier()
                 .map_err(|e| BulkLoadErrorKind::Write(e.into()))?;
-            if policy.resume.is_some() && committed.frontier != frontier {
+            if resuming && committed.frontier != frontier {
                 return Err(BulkLoadErrorKind::InvalidResume);
             }
-            if policy.resume.is_none() {
+            if !resuming {
                 committed.frontier = frontier;
             }
+            source::admit_checkpoint(cx, &committed, &policy)?;
             let mut keys = BTreeSet::new();
             let mut vertices = BTreeSet::new();
             let mut prefix_vertices = BTreeSet::new();
             let mut prefix_edges = BTreeSet::new();
-            let mut count = 0;
+            let mut count = 0usize;
             let mut seals = Vec::new();
             let mut transcript = source::ChunkHasher::new(0, &policy);
-            for (index, row) in source.clone().enumerate() {
-                cx.checkpoint()
-                    .map_err(|e| BulkLoadErrorKind::Write(WriteTxnError::Interrupted(e)))?;
+            let mut total_key_bytes = 0usize;
+            let mut audit = source.clone();
+            loop {
+                let index = count;
+                let Some(row) = source::next_row(cx, &mut audit, index)? else { break; };
                 count = index.checked_add(1).ok_or(BulkLoadErrorKind::CounterOverflow)?;
+                source::limit(index, "source_rows", policy.max_source_rows, count)?;
+                source::admit_keys(index, &row, &policy)?;
                 source::admit_row(&row)?;
                 transcript.push(cx, &row)?;
                 if count.is_multiple_of(policy.rows_per_chunk) {
+                    seals.try_reserve(1).map_err(|_| BulkLoadErrorKind::SourceAllocation { row: index })?;
                     seals.push(transcript.finish());
                     transcript = source::ChunkHasher::new(count, &policy);
                 }
@@ -207,6 +313,9 @@ impl<V: Vfs + Clone> Database<V> {
                     BulkRow::Vertex(v) => &v.key,
                     BulkRow::Edge(e) => &e.key,
                 };
+                total_key_bytes = total_key_bytes.checked_add(key.len())
+                    .ok_or(BulkLoadErrorKind::CounterOverflow)?;
+                source::limit(index, "total_key_bytes", policy.max_total_key_bytes, total_key_bytes)?;
                 if !keys.insert(key.clone()) {
                     return Err(BulkLoadErrorKind::DuplicateCallerKey { key: key.clone() });
                 }
@@ -270,6 +379,7 @@ impl<V: Vfs + Clone> Database<V> {
                 return Err(BulkLoadErrorKind::InvalidResume);
             }
             if !count.is_multiple_of(policy.rows_per_chunk) {
+                seals.try_reserve(1).map_err(|_| BulkLoadErrorKind::SourceAllocation { row: count })?;
                 seals.push(transcript.finish());
             }
             Ok(seals)
