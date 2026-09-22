@@ -38624,7 +38624,7 @@ name = "Probe"
         let workspace = workspace_package_names(&root).expect("workspace packages resolve");
         assert!(workspace.contains("fgdb-types"));
         assert!(
-            !workspace.contains("fgdb-warden"),
+            !workspace.contains("fgdb-privacy"),
             "planned crates must not masquerade as present implementation owners"
         );
         let checkers = load_appendix_checker_index(&root).expect("checker index loads");

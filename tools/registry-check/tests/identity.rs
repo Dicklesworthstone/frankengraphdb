@@ -2275,7 +2275,7 @@ fn appendix_a_repository_bindings_resolve_beads_crates_checkers_and_events() {
     );
 
     let mut merely_planned_owner = catalog.clone();
-    merely_planned_owner.semantic_bindings[0].owner_crate = "fgdb-warden".to_owned();
+    merely_planned_owner.semantic_bindings[0].owner_crate = "fgdb-privacy".to_owned();
     let violations = appendix_a::verify_repository_bindings(&root, &merely_planned_owner);
     assert!(
         violations
