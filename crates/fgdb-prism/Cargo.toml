@@ -1,0 +1,14 @@
+[package]
+name = "fgdb-prism"
+version = "0.0.1"
+edition = "2024"
+description = "Snapshot-pinned decoded projections and the FrankenNetworkX analytics bridge"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fgdb-crypto = { path = "../fgdb-crypto" }
+fgdb-types = { path = "../fgdb-types" }
+fnx-algorithms = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f", default-features = false }
