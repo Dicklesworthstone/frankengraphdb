@@ -57,7 +57,10 @@ impl Parser<'_> {
     fn single_path_count(&mut self) -> Result<(), GraphPatternTextError> {
         let at = self.current.at;
         match self.current.kind {
-            TokenKind::Digits(digits) if digits.parse::<u64>() == Ok(1) => self.advance(),
+            TokenKind::Digits(digits) if matches!(digits.parse::<u64>(), Ok(1)) => {
+                self.advance()?;
+                Ok(())
+            }
             TokenKind::Digits(_) | TokenKind::Parameter(_) => Err(error(
                 at,
                 GraphPatternTextErrorKind::Expected("supported literal path count (1)"),
@@ -151,10 +154,10 @@ mod tests {
             .unwrap()
             .bind_parameters(arguments)
             .unwrap();
-        pattern
+        let mut rows: Vec<_> = pattern
             .plan()
             .execute_governed_with_properties(
-                5,
+                10,
                 (1..=5).map(VId),
                 [
                     (VId(1), RelationId(1), VId(2)),
@@ -179,7 +182,10 @@ mod tests {
             .value
             .iter()
             .map(|row| row.values().iter().map(|value| value.as_vertex()).collect())
-            .collect()
+            .collect();
+        // Assert bag contents without inventing an implicit ORDER BY contract.
+        rows.sort();
+        rows
     }
 
     #[test]
@@ -440,6 +446,95 @@ mod tests {
                 "MATCH {selector} (a)-[:R]->{{1,2}}(b)-[:R]->{{1,2}}(c) RETURN c"
             );
             assert!(Parser::new(&text).unwrap().parse().is_err());
+        }
+    }
+
+    #[test]
+    fn equivalent_spellings_bind_to_identical_parameterized_property_plans() {
+        let arguments = GqlParameters::new()
+            .with_int64("key", 1)
+            .unwrap()
+            .with_uint64("skip", 0)
+            .unwrap()
+            .with_uint64("take", 10)
+            .unwrap();
+        for (selector, legacy) in [
+            ("ALL PATHS", "WALK"),
+            ("ANY 1", "ANY SHORTEST WALK"),
+            ("SHORTEST 1", "ANY SHORTEST WALK"),
+            ("ALL SHORTEST", "ALL SHORTEST WALK"),
+            ("SHORTEST 1 GROUP", "ALL SHORTEST WALK"),
+        ] {
+            let tail = "WHERE a.n=$key RETURN b.n AS number,b SKIP $skip LIMIT $take";
+            let original = format!("MATCH {legacy} (a)-[:R*0..3]->(b) {tail}");
+            let expanded = format!("MATCH {selector} (a)-[:R]->{{0,3}}(b) {tail}");
+            let before = PreparedGraphText::prepare(&original, symbols)
+                .unwrap()
+                .bind_parameters(&arguments)
+                .unwrap();
+            let after = PreparedGraphText::prepare(&expanded, symbols)
+                .unwrap()
+                .bind_parameters(&arguments)
+                .unwrap();
+            assert_eq!(before, after, "{selector}");
+            assert_eq!(before.canonical_bytes(), after.canonical_bytes());
+        }
+    }
+
+    #[test]
+    fn expanded_syntax_keeps_work_result_and_cancellation_governance() {
+        for selector in ["ALL", "ANY", "ALL SHORTEST", "SHORTEST 1"] {
+            let text = format!("MATCH {selector} (a)-[:R]->{{1,3}}(b) RETURN b");
+            let prepared = PreparedGraphText::prepare(&text, symbols)
+                .unwrap()
+                .bind_parameters(&GqlParameters::new())
+                .unwrap();
+            for policy in [
+                GqlQueryPolicy::new(100, 100, 0, 100_000),
+                GqlQueryPolicy::new(100, 0, 100_000, 100_000),
+            ] {
+                let result = prepared.plan().execute_governed_with_properties(
+                    3,
+                    [VId(1)],
+                    [(VId(1), RelationId(1), VId(1)); 2],
+                    |_, _| Ok::<_, ()>(true),
+                    |_, _| Ok(None),
+                    policy,
+                    || Ok::<_, ()>(()),
+                );
+                assert!(result.is_err(), "{selector} ignored its execution budget");
+            }
+            let mut polls = 0;
+            let cancelled = prepared.plan().execute_governed_with_properties(
+                3,
+                [VId(1)],
+                [(VId(1), RelationId(1), VId(1)); 2],
+                |_, _| Ok::<_, ()>(true),
+                |_, _| Ok(None),
+                GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                || {
+                    polls += 1;
+                    Err::<(), ()>(())
+                },
+            );
+            assert!(cancelled.is_err(), "{selector} ignored cancellation");
+            assert!(polls > 0);
+        }
+    }
+
+    #[test]
+    fn expanded_syntax_preserves_original_utf8_parameter_and_bound_offsets() {
+        let text = "\u{2003}MATCH SHORTEST 1 (a)-[:R]->{1,3}(b) \
+                    WHERE a.n=$key RETURN b LIMIT $count";
+        let prepared = PreparedGraphText::prepare(text, symbols).unwrap();
+        let missing = prepared.bind_parameters(&GqlParameters::new()).unwrap_err();
+        assert_eq!(missing.offset, text.find('$').unwrap());
+        assert_eq!(missing.kind, GraphPatternTextErrorKind::MissingParameter);
+        let reversed = "\u{2003}MATCH ALL (a)-[:R]->{3,1}(b) RETURN b LIMIT 0";
+        let failure = PreparedGraphText::prepare(reversed, symbols).unwrap_err();
+        assert_eq!(failure.offset, reversed.find('{').unwrap());
+        for at in (0..=text.len()).filter(|at| text.is_char_boundary(*at)) {
+            let _ = PreparedGraphText::prepare(&text[..at], symbols);
         }
     }
 }
