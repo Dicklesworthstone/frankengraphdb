@@ -5,6 +5,35 @@
 **Latest verified green: 2026-09-08**, at clean source commit
 `9adf484d3b9a521b22f171b42e62eaccf02726c3`.
 
+## Follow-through — 2026-09-22 evening
+
+Owner rulings, given in-session and recorded on their beads:
+- the toolchain-less stream lands through `staging` and a verified merge train;
+- `crates/fgdb-cli` is folded into the tested binary and then deleted;
+- Prism keeps its native kernels as a gated subset and also pursues the fnx
+  upstream cursor;
+- the two accidentally merged CI red-proof probes are reverted.
+
+Landed on `main`:
+
+| Commit | What |
+|---|---|
+| `68f27704`, `7a1deb54` | Revert the two probe merges a branch sync pulled in (a planted unformatted function; a test that no longer compiled). The file deletion was owner-authorized under RULE 1. |
+| `b36d556a` | `scripts/merge_train.sh` (`run`/`audit`), `scripts/merge_train_selftest.sh` (7 scenarios green; 4 of 4 planted train defects turn it red), checker-index rows, and the AGENTS.md rule. `origin/staging` created. |
+| `c89a9068` | The negative-evidence gate verifies a revert whose target is declared by its ledger row. Needed because my two reverts lacked git's canonical line. Every check still runs, and a planted wrong target is refused. |
+| `c2760421` | NE-0046. |
+| `4d0e5dd8` | rustfmt of 14 newly unformatted files. On that tree `fmt --check`, `check --workspace --all-targets` and `clippy -D warnings` all exit 0. |
+| `351decfa` | `deny.toml` bans doctrine-#1 crates transitively (serde family with exact wrapper lists), plus a permanent negative control. It also repairs a pre-existing red in `dependency_policy_e2e`, which now reports 6 passed, 0 failed. |
+
+Measured along the way:
+- The merge-train audit over live history since 09-08 counts 607 first-parent
+  commits, 0 proven, and 628 toolchain-less commits outside a proven merge.
+- The "last verified green" `9adf484d` cited below is not an ancestor of
+  `main`: that proof certified a commit later rebased away.
+- The throughput finding was corrected in place (finding 3).
+- The swarm resolved the `parameterized_queries` pin with a cited cause and a
+  test that runs the example (`c395d04c`).
+
 ## Current delta — 2026-09-22
 
 Measured at `ec7be2181ddfc0f66143c7316e792a68d1fa81c3` (2026-09-22 13:22 −0400),
@@ -59,9 +88,11 @@ Five facts govern what should happen next:
    tests. None is on a path a database user reaches. Every product commit
    still stamps a zeroed authorization digest (`fgdb/src/lib.rs:4647-4655`),
    and `BranchId(1)` is still a constant (`lib.rs:236`).
-3. **Durable ingest runs at 19–40 edges/s**, about 10⁶× below the §17
-   cold-load gate. The cause is measured, and the plan-conformant fix is
-   unbuilt (see "The throughput collapse" below).
+3. **Durable ingest was last measured at 19–40 edges/s**, about 10⁶× below
+   the §17 cold-load gate. That measurement is from 09-17 and predates
+   `60e31934` (batch publication behind one directory barrier). There is no
+   measurement at current HEAD. The levers are identified but unbuilt; see
+   "The throughput collapse", corrected the same evening.
 4. **Verification has stopped advancing.** Every registry count is identical
    to 2026-09-07:
    - Invariants: 8 of 28 clauses live; 13 of 20 IDs have no live clause,
@@ -152,7 +183,7 @@ MEASURED FAILING.
 | 17 | Runtime exposed as a secured temporal system graph (§16) | NOT INTEGRATED | **unchanged** | No system graph, metrics or OTel. |
 | 18 | Closed dependency universe, forbidden unsafe, ledgered islands (§1, §18) | WORKING | **WORKING, first-party** | No first-party crate names a third-party dependency. All 7 unsafe sites match the 7 ledger rows. Transitively, the foundations bring 204 other packages, including `serde`, `rand`, `rayon`, `prost` and a second `blake3`. `deny.toml` bans nothing, so "no serde, ever" is enforced for first-party code only. |
 | 19 | Lab, reference oracle, fault campaigns, formal anchors, live invariants (§15) | SUBSTANTIAL BUT PARTIAL | **STALLED** | Registries identical to 09-07. Reference oracle frozen since 08-13. 0 TLA+, 1 toy Lean lane. DPOR and the sim are genuinely active: 41 fgdb-sim commits. |
-| 20 | Published, durable, scale-qualified §17 performance | UNPROVEN | **MEASURED FAILING** | Bulk load: 19–40 edges/s with fsync on, against a ≥40M edges/s gate. Point reads: p99 152 µs (August) against p99 < 15 µs. Nothing is committed, and every harness event reports `empirical_gate_activated=false`. README line 382 ("every gate has a bench binary, a committed baseline, a variance budget, and a flamegraph") is false. |
+| 20 | Published, durable, scale-qualified §17 performance | UNPROVEN | **MEASURED FAILING (stale)** | Bulk load: 19–40 edges/s with fsync on, measured 09-17 before the `60e31934` batch-publication change, against a ≥40M edges/s gate; not re-measured at HEAD. Point reads: p99 152 µs (August) against p99 < 15 µs. Nothing is committed, and every harness event reports `empirical_gate_activated=false`. README line 382 ("every gate has a bench binary, a committed baseline, a variance budget, and a flamegraph") is false. |
 
 ### Five structural findings
 
@@ -208,10 +239,15 @@ honestly. But the vision rows move only when a consumer path exists, and
 **a consumer census is missing from the gate set.** Bridge step 2 adds
 one.
 
-#### 3. The throughput collapse has a plan-conformant cause and fix
+#### 3. The throughput collapse: measured cause, and a corrected bridge
 
-`fgdb-commit-path-throughput-lemf` (AmberCrane, 09-17) measured the cost of
-a 256-row chunk commit:
+> **Corrected in place, 2026-09-22 evening.** The first version of this finding
+> used a stale cost model and overstated what a drain actor alone can buy. A
+> file:line map of the commit path at `351decfa` found both errors; the text
+> below is the corrected account.
+
+`fgdb-commit-path-throughput-lemf` (AmberCrane, 09-17, around 12:36Z) measured
+the cost of a 256-row chunk commit:
 
 | Stage | Cost |
 |---|---|
@@ -220,43 +256,51 @@ a 256-row chunk commit:
 | Fold and seal | ~3 ms |
 | Block and property-patch publication | **~10.4 s** |
 
-Publication creates about 213 objects per commit: one tiny, roughly 226-byte
-Tier-D block per descriptor family, plus a matching `EdgePropertyPatch`.
-Each object pays a staging fsync, a canonical fsync and a directory fsync.
-Under strace, 82% of the wall time was Strata sync. SnowyRidge's follow-up
-null result independently confirms this attribution.
+Publication created about 213 objects per commit: one ~226-byte Tier-D block
+per `(src, relation)` family, plus an `EdgePropertyPatch` each. Each object
+paid a staging fsync, a canonical fsync and a directory fsync. SnowyRidge's
+null result confirmed the attribution.
 
-The plan does not ask for this:
+**What changed since, and what that measurement no longer shows.**
+`60e31934` (09-17 18:32 −0400) moved the commit path to batch publication.
+Each object now pays one staging-inode fsync plus a read-back, and there is
+one directory fsync per commit. The three-fsync path now runs only at open
+(suffix republish) and at compaction. So the 19–40 edges/s figure is stale,
+and current throughput is **unmeasured**. It must be re-measured on the same
+box before any number is quoted.
+
+**Why the plan does not require this cost.**
 - §5.2 D1 makes durable "the final semantic capsule and its entire mandatory
-  strong closure". It says physical patches "carry an apply-basis digest and
-  may be ignored". Capsule durability is the commit.
-- §6.2 sizes Tier-D blocks at about 4 KiB and at most 256 entries. It
-  specifies a bounded per-partition overflow log (volatile staging only) and a
-  drain actor that "preserves commit order and verifies the canonical logical
-  digest while producing immutable blocks".
+  strong closure", and says physical patches "may be ignored".
+- §6.2 sizes Tier-D blocks at about 4 KiB and ≤256 entries, produced by a
+  bounded overflow log and a drain actor.
 - Doctrine 5 and FG-INV-18 make derived structures rebuildable from the
   commit stream.
 
-So the per-commit synchronous per-family publication is an implementation
-choice, the **per-commit seal law** introduced during `fgdb-ge6a` to make
-durable layout a pure function of the stream. It is not a plan requirement.
+The capsule stream does carry the full canonical `LogicalDeltaTemplate`, and
+the rebuild paths (`fold_stream`, `rebuild`, suffix replay on open) already
+reconstruct Tier-D state from it.
 
-The arithmetic decides the direction:
-- **Fixing within the per-commit law caps out around 3.6k edges/s.**
-  Intra-commit family coalescing (`fgdb-gcm3`) removes at most the ~90×
-  object fan-out, giving about 40 × 90 ≈ 3.6k edges/s. That is still three
-  orders of magnitude below the small-transaction gate.
-- **Removing Strata from the commit path clears the gate in principle.** A
-  commit that pays only the capsule and marker (about 22 ms per 256 rows as
-  measured, or about 30 µs per fsync on this NVMe with group commit) bounds
-  one stream at the order of 10⁴–10⁶ edges/s. §7.5's bulk path to sealed runs
-  (`fgdb-w3-bulk-staging-tta`) is what the 40M/s cold-load gate actually
+**What each lever can and cannot buy.** Every commit seals its own blocks
+(`fold_stream`, `commit_template`), and blocks are single-descriptor. So:
+- A **drain window of K commits** publishes the same per-family objects
+  later. It cuts latency, the per-commit directory fsync, and the O(history)
+  root/manifest/slot writes. It reduces object count only as far as families
+  recur within the window: about 9× for the 1,024-vertex bench even at a
+  10k-edge window. It cannot reach ≥1000× on its own
+  (`fgdb-tier-d-drain-off-commit-path-tw7fo`, now re-scoped with a concrete
+  design).
+- **Intra-commit coalescing** (`fgdb-gcm3`) reduces objects but keeps a
+  per-object fsync term.
+- **Per-object fsync amortization** is the plan's `PackedObjectGroup` with
+  D1-boundary packing (`fgdb-w2-object-packing-d31`, currently G0-blocked).
+- **Bulk load** must bypass Tier D and write sealed runs directly (§7.5,
+  `fgdb-w3-bulk-staging-tta`). That, not Tier D, is what the 40M edges/s gate
   names.
 
-The deterministic-layout concern that motivated the per-commit seal law is
-preserved if drain boundaries are themselves a pure function of the stream:
-seal at every N committed statements per family, or at checkpoint cuts. The
-drain actor's output is then as reproducible as today's per-commit layout.
+The deterministic-layout concern behind the per-commit seal law survives any
+of these if the boundaries are a pure function of the stream. At K=1, every
+existing law stays byte-identical.
 
 #### 4. Verification stopped at the 09-07 frontier
 
@@ -470,20 +514,32 @@ Then burn the current orphans down, in the plan's own dependency order:
 4. **Raft (`fgdb-order`) as the W2 quorum-one order** (`fgdb-w2-order-raft-0a90`)
    before any multi-member use. Everything W11 in `fgdb-repl` waits for G2.
 
-**Step 3 — Take Strata publication off the commit path**
-(`fgdb-w3-tier-d-ctj` §6.2 item 4, `fgdb-w2-group-commit-8zwd`,
-`fgdb-w3-bulk-staging-tta`; reshape `fgdb-gcm3` and
-`fgdb-commit-path-throughput-lemf` around it):
-- The commit becomes capsule D1 plus marker D2, group-committed.
-- Tier-D blocks are drained asynchronously at stream-determined boundaries.
-- Recovery replays the capsule suffix past the last drained root.
-- Bulk load writes sealed runs directly.
-- Acceptance:
-  - The existing crash matrix, spine differential and bulk-load equivalence
-    suites stay green.
-  - A growth law holds: per-commit cost is independent of history.
-  - `fgdb-bench` bulk-load, with fsync on, improves by ≥1000× over the 40
-    edges/s baseline, measured in the same invocation as the incumbent.
+**Step 3 — Re-measure, then attack each ingest cost with the lever that owns it**
+(corrected 2026-09-22 evening; see finding 3):
+1. **Re-measure first.** Run `fgdb-bench` bulk-load and small-transaction
+   shapes, fsync on, at HEAD, with a per-stage breakdown. The 19–40 edges/s
+   figure predates `60e31934`. (`fgdb-commit-path-throughput-lemf`.)
+2. **Drain windows** (`fgdb-tier-d-drain-off-commit-path-tw7fo`, re-scoped with
+   a concrete design):
+   - Replace the per-commit seal law with a stream-determined boundary rule,
+     K under a policy epoch.
+   - Readers see a volatile tail. Open publishes through the last boundary and
+     rebuilds the tail from the capsule suffix. Compaction drains first.
+   - K=1 keeps every existing law byte-identical; K>1 adds equivalence, crash
+     and differential variants.
+   - It buys latency and amortizes the per-commit directory fsync and root
+     writes. It reduces object count only as families recur.
+3. **Per-object fsync amortization**: `PackedObjectGroup` with D1-boundary
+   packing (`fgdb-w2-object-packing-d31`, G0-blocked). Its G0 prerequisites
+   are the critical path for small-transaction ingest.
+4. **Bulk load writes sealed runs directly** (§7.5,
+   `fgdb-w3-bulk-staging-tta`). This is what the 40M edges/s gate names.
+5. **Group commit** (`fgdb-w2-group-commit-8zwd`) amortizes D1/D2 across
+   concurrent transactions.
+- Acceptance: each lever is measured against the incumbent in the same
+  invocation, with the crash matrix, spine differential, bulk-load
+  equivalence and growth laws green. There is no single ≥1000× promise
+  attached to any one lever.
 
 **Step 4 — Consolidate one language path** (`fgdb-w5-parsers-nje`,
 `fgdb-w5-binder-bt5`, `fgdb-boundplan-gla-lowering-seam-r2kd`,
@@ -531,11 +587,16 @@ Then burn the current orphans down, in the plan's own dependency order:
   of asserting it.
 
 **Round 2 — let arithmetic choose the storage direction.**
-- Step 3 is justified by a model, not a hope. Per-commit cost is
-  `c_capsule + k_families × c_object`, and `c_object` (three fsyncs) is two
-  orders of magnitude above `c_capsule / rows`.
-- Only removing `k_families × c_object` from the critical path meets the
-  ingest gate. Coalescing reduces `k_families` but keeps the term.
+- Step 3 is justified by a model, not a hope. Per-commit cost is roughly
+  `c_capsule + k_objects × c_object + c_dir + c_root(history)`. Each lever
+  attacks exactly one term:
+  - drain windows attack `c_dir`, `c_root`, and `k_objects` only through
+    family recurrence;
+  - packing attacks `c_object`;
+  - sealed-run bulk load removes Tier D from bulk ingest entirely.
+- The first version of this round treated deferral as removing
+  `k_objects × c_object`. It only moves it. The correction came from mapping
+  the code, not from re-reading the plan: mechanism beats prose.
 - The same model prices the §17 gates before anyone runs them. Recording it
   in the Appendix G operation-cost registry (`fgdb-g0-cost-registry-idt`, P0,
   still absent) gives every future throughput claim a derivation to check
