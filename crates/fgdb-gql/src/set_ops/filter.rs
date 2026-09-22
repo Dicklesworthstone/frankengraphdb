@@ -69,6 +69,28 @@ impl GraphSetPredicateOp {
         row: &GraphValueRow,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<bool, E> {
+        Self::evaluate_cells_with_control(code, row.values(), &[], control)
+    }
+
+    /// Evaluate the same checked IR over a borrowed concatenation. Join ON
+    /// predicates see left columns followed by right columns, without cloning
+    /// either payload or constructing a candidate result row. The caller must
+    /// validate the full concatenated schema, including for semi/anti output.
+    pub(crate) fn evaluate_pair_with_control<E>(
+        code: &[Self],
+        left: &GraphValueRow,
+        right: &GraphValueRow,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        Self::evaluate_cells_with_control(code, left.values(), right.values(), control)
+    }
+
+    fn evaluate_cells_with_control<E>(
+        code: &[Self],
+        left_cells: &[GraphValue],
+        right_cells: &[GraphValue],
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<bool, E> {
         let mut stack: [Option<bool>; MAX_PATTERN_PREDICATES] = [None; MAX_PATTERN_PREDICATES];
         let mut depth = 0;
         for op in code {
@@ -79,8 +101,8 @@ impl GraphSetPredicateOp {
                     comparison,
                     right,
                 } => {
-                    let left = resolve(left, row, control)?;
-                    let right = resolve(right, row, control)?;
+                    let left = resolve(left, left_cells, right_cells, control)?;
+                    let right = resolve(right, left_cells, right_cells, control)?;
                     for value in [left, right] {
                         if let Cell::Scalar(value) = value {
                             crate::algebra_exec::charge_payload(value, control)?;
@@ -89,7 +111,7 @@ impl GraphSetPredicateOp {
                     compare(left, right, *comparison)
                 }
                 GraphSetPredicateOp::IsNull { operand, is_null } => {
-                    Some(resolve(operand, row, control)?.is_null() == *is_null)
+                    Some(resolve(operand, left_cells, right_cells, control)?.is_null() == *is_null)
                 }
                 GraphSetPredicateOp::Truth(value) => *value,
                 GraphSetPredicateOp::Not => {
@@ -302,12 +324,17 @@ impl Cell<'_> {
 }
 fn resolve<'a, E>(
     operand: &'a GraphSetOperand,
-    row: &'a GraphValueRow,
+    left: &'a [GraphValue],
+    right: &'a [GraphValue],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<Cell<'a>, E> {
     control(GlaExecutionEvent::Work)?;
     Ok(match operand {
-        GraphSetOperand::Column(column) => match &row.values()[*column] {
+        GraphSetOperand::Column(column) => match if *column < left.len() {
+            &left[*column]
+        } else {
+            &right[*column - left.len()]
+        } {
             GraphValue::Vertex(value) => Cell::Vertex(*value),
             GraphValue::Scalar(value) => Cell::Scalar(value),
             GraphValue::Path(_)

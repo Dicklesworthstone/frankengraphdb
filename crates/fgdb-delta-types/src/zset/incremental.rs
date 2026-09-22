@@ -61,6 +61,17 @@ impl<K: Ord, L: Ord, R: Ord> IncrementalJoin<K, L, R> {
         self.right.get(key).and_then(|group| group.weight(value))
     }
 
+    /// Borrow one integrated key group without scanning unrelated keys.
+    /// Consumers must meter their own iteration and cannot mutate retained state.
+    pub fn left_group(&self, key: &K) -> Option<&ZSet<L>> {
+        self.left.get(key)
+    }
+
+    /// Right-side counterpart of `left_group`, in canonical value order.
+    pub fn right_group(&self, key: &K) -> Option<&ZSet<R>> {
+        self.right.get(key)
+    }
+
     /// Explicit input export in canonical key/value order.
     pub fn left_rows(&self) -> impl Iterator<Item = (&K, &L, &ZWeight)> {
         self.left.iter().flat_map(|(key, group)| {

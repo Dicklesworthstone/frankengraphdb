@@ -8,9 +8,12 @@ use fgdb_delta_types::zset::incremental::presence::{
 use fgdb_delta_types::zset::incremental::{IncrementalJoin, JoinUpdate};
 use fgdb_types::CanonicalScalar;
 
+mod predicate;
+
 #[derive(PartialEq, Eq)]
 pub(super) enum Input {
     Inner(IncrementalJoin<Key, Row, Row>),
+    Predicated(IncrementalJoin<Key, Row, Row>),
     Left(IncrementalLeftJoin<Key, Row, Row>),
     // The kernel's left input is the declared RIGHT operand. Projection and
     // diagnostics restore the declared operand order at this boundary.
@@ -53,7 +56,11 @@ fn reversed_bag_error<E>(error: BagJoinError<E>) -> RowJoinError<E> {
 }
 
 impl Input {
-    pub(super) fn new(kind: RowJoinKind) -> Self {
+    pub(super) fn new(spec: &RowJoinSpec) -> Self {
+        if spec.predicate.is_some() {
+            return Self::Predicated(IncrementalJoin::new());
+        }
+        let kind = spec.kind;
         match kind {
             RowJoinKind::Inner => Self::Inner(IncrementalJoin::new()),
             RowJoinKind::Left => Self::Left(IncrementalLeftJoin::new()),
@@ -75,7 +82,7 @@ impl Input {
 
     pub(super) fn left_weight(&self, key: &Key, row: &Row) -> Option<&ZWeight> {
         match self {
-            Self::Inner(input) => input.left_weight(key, row),
+            Self::Inner(input) | Self::Predicated(input) => input.left_weight(key, row),
             Self::Left(input) => input.left_weight(key, row),
             Self::Right(input) => input.right_weight(key, row),
             Self::Full { left_outer, .. } => left_outer.left_weight(key, row),
@@ -85,7 +92,7 @@ impl Input {
 
     pub(super) fn right_weight(&self, key: &Key, row: &Row) -> Option<&ZWeight> {
         match self {
-            Self::Inner(input) => input.right_weight(key, row),
+            Self::Inner(input) | Self::Predicated(input) => input.right_weight(key, row),
             Self::Left(input) => input.right_weight(key, row),
             Self::Right(input) => input.left_weight(key, row),
             Self::Full { left_outer, .. } => left_outer.right_weight(key, row),
@@ -95,12 +102,25 @@ impl Input {
 
     pub(super) fn prepare<E>(
         &mut self,
+        spec: &RowJoinSpec,
         left: &Arranged,
         right: &Arranged,
         limbs: LimbLimit,
         control: &mut impl FnMut(ZSetEvent) -> Result<(), E>,
     ) -> Result<InputUpdate<'_>, RowJoinError<E>> {
         match self {
+            Self::Predicated(input) => {
+                let presence = predicate::presence_delta(input, spec, left, right, limbs, control)?;
+                let pairs = spec.kind.includes_right();
+                let matched = input.prepare_filtered(
+                    left, right, limbs, control,
+                    |_, left, right, control| {
+                        // Existence never needs a product of occurrence counts.
+                        if pairs { spec.matches(left, right, control) } else { Ok(false) }
+                    },
+                )?;
+                Ok(InputUpdate::Predicated { matched, presence })
+            }
             Self::Inner(input) => Ok(InputUpdate::Inner(
                 input.prepare(left, right, limbs, control)?,
             )),
@@ -154,6 +174,10 @@ impl Input {
 
 pub(super) enum InputUpdate<'a> {
     Inner(JoinUpdate<'a, Key, Row, Row>),
+    Predicated {
+        matched: JoinUpdate<'a, Key, Row, Row>,
+        presence: ZSet<GraphValueRow>,
+    },
     Left(LeftJoinUpdate<'a, Key, Row, Row>),
     Right(LeftJoinUpdate<'a, Key, Row, Row>),
     Full {
@@ -175,7 +199,7 @@ impl InputUpdate<'_> {
     ) -> Result<ZSet<GraphValueRow>, RowJoinError<E>> {
         let mut updates = Vec::new();
         match self {
-            Self::Inner(input) => {
+            Self::Inner(input) | Self::Predicated { matched: input, .. } => {
                 for ((_, left, right), weight) in input.delta().iter() {
                     append(
                         &mut updates,
@@ -227,12 +251,20 @@ impl InputUpdate<'_> {
         }
         // Null-extended payloads from different arms can be identical (including
         // zero-column cross joins), so consolidate before output admission.
-        Ok(ZSet::from_updates(updates, limbs, control)?)
+        let output = ZSet::from_updates(updates, limbs, control)?;
+        if let Self::Predicated { presence, .. } = self {
+            for (row, _) in output.iter().chain(presence.iter()) {
+                reserve_row(row, control)?;
+            }
+            Ok(output.plus(presence, limbs, control)?)
+        } else {
+            Ok(output)
+        }
     }
 
     pub(super) fn commit(self) {
         match self {
-            Self::Inner(input) => {
+            Self::Inner(input) | Self::Predicated { matched: input, .. } => {
                 let _ = input.commit();
             }
             Self::Left(input) | Self::Right(input) => {
