@@ -151,3 +151,169 @@ fn false_on_discards_pairs_but_empty_left_cannot_hide_unsupported_right_input() 
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+fn projected_query() -> PreparedGraphSet {
+    use fgdb_gql::{GraphSetProjection, GraphSetValue};
+    leaf("L").cross_join(leaf("R")).unwrap().project(vec![
+        GraphSetProjection::new("right_value", GraphSetValue::Column(3)),
+        GraphSetProjection::new("left_key", GraphSetValue::Column(0)),
+        GraphSetProjection::new("left_value", GraphSetValue::Column(1)),
+        GraphSetProjection::new("right_key", GraphSetValue::Column(2)),
+        GraphSetProjection::new("again", GraphSetValue::Column(1)),
+    ], GraphSetQuantifier::All).unwrap().filter(&[equal(1, 3), GraphSetPredicateOp::Compare {
+        left: GraphSetOperand::Column(2), comparison: IntegerComparison::Less,
+        right: GraphSetOperand::Column(0),
+    }, GraphSetPredicateOp::And]).unwrap()
+}
+
+#[test]
+fn reordered_and_repeated_with_columns_survive_commits_and_whole_circuit_rebuild() {
+    let ((), report) = run_async_under_lab(0x6f6e_0603, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query(); let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xb3)).await.unwrap();
+        db.write(&commit, seed(64)).await.unwrap();
+        let query = projected_query();
+        let first = db.standing_queries.len();
+        let handle = db.register_standing_relation(&cx, &query, policy()).unwrap();
+        assert_eq!(db.standing_queries.len(), first + 4);
+        assert_eq!(query.columns(), &["right_value", "left_key", "left_value", "right_key", "again"]);
+        assert_eq!(check(&db, &cx, &query, &handle).values().sum::<i128>(), 64);
+        let StandingQuery::Join(join) = &db.standing_queries[first + 2] else { panic!() };
+        assert_eq!(join.spec().keys(), &[(0, 0)]);
+        let frozen_spec = join.spec().clone();
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(10_008), P, Some(CanonicalScalar::Int(-1)));
+        db.write(&commit, change).await.unwrap();
+        assert_eq!(check(&db, &cx, &query, &handle).values().sum::<i128>(), 63);
+        let expected = plain(sets::rows(&db.standing_queries[handle.index]).unwrap());
+        db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
+        assert_eq!(check(&db, &cx, &query, &handle), expected);
+        let StandingQuery::Join(join) = &db.standing_queries[first + 2] else { panic!() };
+        assert_eq!(join.spec(), &frozen_spec);
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(10_008), P, Some(CanonicalScalar::Int(1007)));
+        db.write(&commit, change).await.unwrap();
+        assert_eq!(check(&db, &cx, &query, &handle).values().sum::<i128>(), 64);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn native_unwind_match_with_where_uses_selected_maintenance_without_new_syntax() {
+    use fgdb_gql::PreparedGraphSetText;
+    use fgdb_gql::algebra::GraphValue;
+    let value_row = |cells: &[i64]| GraphValueRow::from_owned_values(cells.iter()
+        .map(|&cell| GraphValue::Scalar(CanonicalScalar::Int(cell))).collect());
+    let ((), report) = run_async_under_lab(0x6f6e_0604, move |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query(); let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xb4)).await.unwrap();
+        db.write(&commit, seed(200)).await.unwrap();
+        // A raw product has 600 occurrences and fails the 256-row policy;
+        // both the 200-row graph child and selected three-row bag fit it.
+        let query = PreparedGraphSetText::prepare(
+            "UNWIND [2, 1, 2] AS wanted MATCH (n:L) WITH n.k AS actual, wanted, n.p AS payload WHERE wanted = actual RETURN actual, wanted, payload",
+            symbols,
+        ).unwrap().bind_parameters(&GqlParameters::new()).unwrap();
+        let handle = db.register_standing_relation(&cx, &query, policy()).unwrap();
+        let expected = Bag::from([(value_row(&[1, 1, 1]), 1), (value_row(&[2, 2, 2]), 2)]);
+        assert_eq!(check(&db, &cx, &query, &handle), expected);
+        let joins: Vec<_> = db.standing_queries.iter().filter_map(|state| {
+            if let StandingQuery::Join(join) = state { Some(join) } else { None }
+        }).collect();
+        assert_eq!(joins.len(), 1);
+        assert!(joins[0].spec().predicate().is_some());
+        // The UNWIND domain remains Any; it is not silently narrowed to Scalar.
+        assert_eq!(joins[0].spec().left_types(), &[fgdb_gql::GraphSetColumnType::Any]);
+        assert!(joins[0].spec().keys().is_empty());
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_property(VId(3), K, Some(CanonicalScalar::Int(777)));
+        db.write(&commit, change).await.unwrap();
+        assert_eq!(check(&db, &cx, &query, &handle), Bag::from([(value_row(&[1, 1, 1]), 1)]));
+        let mut change = WriteBatch::new(RelationId(1));
+        change.create_vertex(VId(500_000), vec![LabelId(1)], vec![
+            (K, CanonicalScalar::Int(2)), (P, CanonicalScalar::Int(99)),
+        ]);
+        db.write(&commit, change).await.unwrap();
+        let expected = Bag::from([(value_row(&[1, 1, 1]), 1), (value_row(&[2, 2, 99]), 2)]);
+        assert_eq!(check(&db, &cx, &query, &handle), expected);
+        db.rebuild_standing_query(&cx, &handle, policy()).unwrap();
+        assert_eq!(check(&db, &cx, &query, &handle), expected);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+type SavedState = (GqlQueryPolicy, CommitSeq, Option<StandingQueryFailure>, Bag, Vec<usize>);
+fn saved(states: &[StandingQuery]) -> Vec<SavedState> {
+    states.iter().map(|state| {
+        let (policy, frontier, failure) = state.status();
+        let inputs = match state {
+            StandingQuery::Join(join) => join.inputs.to_vec(),
+            StandingQuery::Projection(projection) => vec![projection.input],
+            StandingQuery::Window(window) => vec![window.input],
+            _ => Vec::new(),
+        };
+        (policy, frontier, failure, plain(sets::rows(state).unwrap()), inputs)
+    }).collect()
+}
+
+#[test]
+fn every_selected_circuit_registration_and_rebuild_checkpoint_preserves_previous_states() {
+    let ((), report) = run_async_under_lab(0x6f6e_0605, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query(); let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys(0xb5)).await.unwrap();
+        db.write(&commit, seed(8)).await.unwrap();
+        let sibling = db.register_standing_relation(&cx, &leaf("R"), policy()).unwrap();
+        let query = projected_query();
+        let before = saved(&db.standing_queries);
+        let mut total = 0;
+        {
+            let mut staged = Staging::new(&mut db);
+            staged.compile_root(&cx, &query, policy(), &mut || {
+                total += 1; Ok(())
+            }).unwrap();
+            // No accepted handle; Drop must discard the complete private suffix.
+        }
+        assert_eq!(saved(&db.standing_queries), before);
+        // register_checked has one final checkpoint after compile_root.
+        for stop in 1..=total + 1 {
+            let mut seen = 0;
+            assert!(matches!(register_checked(&mut db, &cx, &query, policy(), &mut || {
+                seen += 1;
+                if seen == stop {
+                    Err(StandingQueryError::Maintenance(StandingQueryFailure::Interrupted))
+                } else { Ok(()) }
+            }), Err(StandingQueryError::Maintenance(StandingQueryFailure::Interrupted))));
+            assert_eq!(seen, stop);
+            assert_eq!(saved(&db.standing_queries), before);
+        }
+        let first = db.standing_queries.len();
+        let handle = db.register_standing_relation(&cx, &query, policy()).unwrap();
+        let expected = check(&db, &cx, &query, &handle);
+        let mut total = 0;
+        rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
+            total += 1; Ok(())
+        }).unwrap();
+        let before = saved(&db.standing_queries);
+        for stop in 1..=total {
+            let mut seen = 0;
+            assert!(matches!(rebuild_checked(&mut db, &cx, first, handle.index, policy(), &mut || {
+                seen += 1;
+                if seen == stop {
+                    Err(StandingQueryError::Maintenance(StandingQueryFailure::Interrupted))
+                } else { Ok(()) }
+            }), Err(StandingQueryError::Maintenance(StandingQueryFailure::Interrupted))));
+            assert_eq!(seen, stop);
+            assert_eq!(saved(&db.standing_queries), before);
+        }
+        assert_eq!(check(&db, &cx, &query, &handle), expected);
+        assert!(db.standing_native_query(&cx, &sibling, policy()).is_ok());
+        let mut change = WriteBatch::new(RelationId(1));
+        change.delete_vertex(VId(10_001));
+        db.write(&commit, change).await.unwrap();
+        assert_eq!(check(&db, &cx, &query, &handle).values().sum::<i128>(), 7);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

@@ -26,10 +26,13 @@ impl PreparedGraphSet {
     /// ON. In particular an equality under NOT or only one OR arm is not an
     /// arrangement key. No authorization or source support is inferred here.
     ///
-    /// This node's order/page, and any intervening order/page, DISTINCT,
-    /// projection or computed expression, refuse. The circuit owner must
-    /// handle such boundaries independently rather than dropping them. The
-    /// returned output stage retains original names, including duplicates.
+    /// One column-only ALL projection and transparent scopes may be crossed.
+    /// The complete predicate is rebound to original left-then-right columns;
+    /// the returned output stage restores reordered/repeated output cells and
+    /// aliases. This node's order/page, and any intervening order/page,
+    /// DISTINCT, second projection or computed expression, refuse. The owner
+    /// must admit those boundaries separately, not drop them. This supplies a
+    /// bag only: it does not establish a comparator for positional pagination.
     ///
     /// The callback governs bounded definition work and retained metadata;
     /// no input rows are read. An error returns no prepared stages. None means
@@ -46,10 +49,8 @@ impl PreparedGraphSet {
         let Some((left, right, code, projection)) = self.filtered_cross_inputs() else {
             return Ok(None);
         };
-        if projection.is_some() {
-            return Ok(None);
-        }
-        let mut keys = required_keys(left.types.len(), code, None, control)?;
+        let slots = columns(projection, control)?;
+        let mut keys = required_keys(left.types.len(), code, slots.as_deref(), control)?;
         // A necessary dynamic equality is still enforced by ON. It cannot
         // widen RowJoinSpec's declared key domains or change NULL semantics.
         keys.retain(|&(a, b)| {
@@ -66,22 +67,47 @@ impl PreparedGraphSet {
             RowJoinSpec::new(&left.types, &right.types, &keys)
         };
         let Ok(spec) = spec else { return Ok(None) };
-        for _ in code {
+        let mut rebound = Vec::new();
+        for op in code {
             control(GlaExecutionEvent::Work)?;
             control(GlaExecutionEvent::ScratchEntry)?;
+            let mut op = op.clone();
+            if let Some(slots) = slots.as_deref() {
+                let remap = |operand: &mut GraphSetOperand| {
+                    if let GraphSetOperand::Column(column) = operand {
+                        *column = slots[*column];
+                    }
+                };
+                match &mut op {
+                    GraphSetPredicateOp::Compare { left, right, .. } => {
+                        remap(left);
+                        remap(right);
+                    }
+                    GraphSetPredicateOp::IsNull { operand, .. } => remap(operand),
+                    _ => {}
+                }
+            }
+            rebound.push(op);
         }
-        let Ok(spec) = spec.with_predicate(code) else { return Ok(None) };
+        let Ok(spec) = spec.with_predicate(&rebound) else { return Ok(None) };
         for name in &self.columns {
             control(GlaExecutionEvent::Work)?;
             for _ in 0..=name.len().div_ceil(crate::algebra::GRAPH_VALUE_PAYLOAD_UNIT_BYTES) {
                 control(GlaExecutionEvent::ScratchEntry)?;
             }
         }
-        let output = RowProjectionSpec::selection(
-            spec.column_types().collect(),
-            self.columns.clone(),
-            &[GraphSetPredicateOp::Truth(Some(true))],
-        );
+        let output = match projection {
+            Some(projection) => RowProjectionSpec::new(
+                spec.column_types().collect(),
+                projection.to_vec(),
+                GraphSetQuantifier::All,
+            ),
+            None => RowProjectionSpec::selection(
+                spec.column_types().collect(),
+                self.columns.clone(),
+                &[GraphSetPredicateOp::Truth(Some(true))],
+            ),
+        };
         let Ok(output) = output else { return Ok(None) };
         control(GlaExecutionEvent::Work)?;
         Ok(Some((left, right, spec, output)))

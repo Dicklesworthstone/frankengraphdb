@@ -189,3 +189,116 @@ fn every_preparation_checkpoint_refuses_without_mutating_the_definition() {
     }
     assert_eq!(query.incremental_selected_join_with_control(&mut allow).unwrap().unwrap(), expected);
 }
+
+fn selected_bag(
+    query: &PreparedGraphSet, left: &ZSet<GraphValueRow>, right: &ZSet<GraphValueRow>,
+) -> Bag {
+    let (_, _, spec, output) = query.incremental_selected_join_with_control(&mut allow).unwrap().unwrap();
+    let mut joined = IncrementalRowJoin::new(spec);
+    let mut projected = IncrementalRowProjection::new(output);
+    let delta = joined.prepare(left, right, LIMBS, None, &mut |_| Ok::<_, ()>(())).unwrap().commit();
+    projected.prepare(&delta, LIMBS, None, &mut |_| Ok::<_, ()>(())).unwrap().commit();
+    plain(projected.rows())
+}
+
+#[test]
+fn every_projected_operand_remaps_without_changing_nullable_bag_semantics() {
+    let left = bag([(row(&[Some(1), Some(10)]), 2), (row(&[None, Some(10)]), 1)]);
+    let right = bag([(row(&[Some(1), Some(30)]), 3),
+        (row(&[Some(1), None]), 1), (row(&[Some(2), Some(10)]), 2)]);
+    for a in 0..4 {
+        for b in 0..4 {
+            for c in 0..4 {
+                let slots = [a, b, c, a];
+                let projection = slots.iter().enumerate().map(|(at, &input)| {
+                    GraphSetProjection::new(format!("c{at}"), GraphSetValue::Column(input))
+                }).collect();
+                let query = leaf().cross_join(leaf()).unwrap()
+                    .project(projection, GraphSetQuantifier::All).unwrap()
+                    .nested().unwrap().filter(&[equal(0, 1), GraphSetPredicateOp::IsNull {
+                        operand: GraphSetOperand::Column(2), is_null: false,
+                    }, GraphSetPredicateOp::And]).unwrap();
+                let mut expected = Bag::new();
+                for (l, lw) in left.iter() {
+                    for (r, rw) in right.iter() {
+                        let cells: Vec<_> = l.values().iter().chain(r.values()).collect();
+                        if !cells[a].is_null() && cells[a] == cells[b] && !cells[c].is_null() {
+                            let result = GraphValueRow::from_owned_values(slots.iter()
+                                .map(|&at| (*cells[at]).clone()).collect());
+                            *expected.entry(result).or_default() += lw.to_i128().unwrap() * rw.to_i128().unwrap();
+                        }
+                    }
+                }
+                assert_eq!(selected_bag(&query, &left, &right), expected, "slots {slots:?}");
+                let (_, _, _, output) = query.incremental_selected_join_with_control(&mut allow).unwrap().unwrap();
+                assert_eq!(output.columns().collect::<Vec<_>>(), vec!["c0", "c1", "c2", "c3"]);
+            }
+        }
+    }
+}
+
+#[test]
+fn projected_collisions_integrate_both_parent_retractions_before_publication() {
+    let query = leaf().cross_join(leaf()).unwrap().project(vec![
+        GraphSetProjection::new("left_key", GraphSetValue::Column(0)),
+        GraphSetProjection::new("right_key", GraphSetValue::Column(2)),
+    ], GraphSetQuantifier::All).unwrap().filter(&[equal(0, 1)]).unwrap();
+    let (_, _, spec, output) = query.incremental_selected_join_with_control(&mut allow).unwrap().unwrap();
+    assert_eq!(spec.keys(), &[(0, 0)]);
+    assert_eq!(spec.predicate(), Some([equal(0, 2)].as_slice()));
+    let mut joined = IncrementalRowJoin::new(spec);
+    let mut projected = IncrementalRowProjection::new(output);
+    let left = bag([(row(&[Some(1), Some(10)]), 2), (row(&[Some(1), Some(30)]), 1)]);
+    let right = bag([(row(&[Some(1), Some(20)]), 1), (row(&[Some(1), Some(50)]), 3)]);
+    let initial = joined.prepare(&left, &right, LIMBS, None, &mut |_| Ok::<_, ()>(())).unwrap().commit();
+    projected.prepare(&initial, LIMBS, None, &mut |_| Ok::<_, ()>(())).unwrap().commit();
+    assert_eq!(plain(projected.rows()), Bag::from([(row(&[Some(1), Some(1)]), 12)]));
+    let left_delta = bag([(row(&[Some(1), Some(10)]), -2)]);
+    let right_delta = bag([(row(&[Some(1), Some(50)]), -3)]);
+    let pending = joined.prepare(&left_delta, &right_delta, LIMBS, None, &mut |_| Ok::<_, ()>(())).unwrap().commit();
+    let delta = projected.prepare(&pending, LIMBS, None, &mut |_| Ok::<_, ()>(())).unwrap().commit();
+    assert_eq!(plain(&delta), Bag::from([(row(&[Some(1), Some(1)]), -11)]));
+    assert_eq!(plain(projected.rows()), Bag::from([(row(&[Some(1), Some(1)]), 1)]));
+}
+
+#[test]
+fn projection_lowering_preserves_barriers_and_refuses_at_every_metadata_checkpoint() {
+    let projection = vec![
+        GraphSetProjection::new("right_value", GraphSetValue::Column(3)),
+        GraphSetProjection::new("left_key", GraphSetValue::Column(0)),
+        GraphSetProjection::new("left_value", GraphSetValue::Column(1)),
+        GraphSetProjection::new("right_key", GraphSetValue::Column(2)),
+    ];
+    let projected = leaf().cross_join(leaf()).unwrap().project(projection, GraphSetQuantifier::All).unwrap();
+    let query = projected.clone().filter(&[equal(1, 3)]).unwrap();
+    let frozen = query.canonical_bytes();
+    let mut total = 0;
+    let expected = query.incremental_selected_join_with_control(&mut |_| {
+        total += 1; Ok::<_, usize>(())
+    }).unwrap().unwrap();
+    for stop in 1..=total {
+        let mut seen = 0;
+        assert!(matches!(query.incremental_selected_join_with_control(&mut |_| {
+            seen += 1;
+            if seen == stop { Err(stop) } else { Ok(()) }
+        }), Err(at) if at == stop));
+        assert_eq!(query.canonical_bytes(), frozen);
+    }
+    assert_eq!(query.incremental_selected_join_with_control(&mut allow).unwrap().unwrap(), expected);
+    let second = projected.clone().project(vec![
+        GraphSetProjection::new("a", GraphSetValue::Column(1)),
+        GraphSetProjection::new("b", GraphSetValue::Column(3)),
+    ], GraphSetQuantifier::All).unwrap().filter(&[equal(0, 1)]).unwrap();
+    assert!(second.incremental_selected_join_with_control(&mut allow).unwrap().is_none());
+    for query in [
+        projected.clone().with_page(0, Some(0)).filter(&[equal(1, 3)]).unwrap(),
+        projected.with_order_by(&[GraphValueOrder::descending(0)]).unwrap().filter(&[equal(1, 3)]).unwrap(),
+    ] {
+        assert!(query.incremental_selected_join_with_control(&mut allow).unwrap().is_none());
+    }
+    let computed = leaf().cross_join(leaf()).unwrap().project(vec![
+        GraphSetProjection::new("k", GraphSetValue::Column(0)),
+        GraphSetProjection::new("r", GraphSetValue::Value(GraphValue::Scalar(CanonicalScalar::Int(1)))),
+    ], GraphSetQuantifier::All).unwrap().filter(&[equal(0, 1)]).unwrap();
+    assert!(computed.incremental_selected_join_with_control(&mut allow).unwrap().is_none());
+}
