@@ -77,6 +77,18 @@ impl Layout {
         })
     }
 
+    /// Copy one systematic symbol without materializing its siblings. The
+    /// batch encoder and request-driven donor share this byte mapping.
+    pub(crate) fn copy_source_symbol(
+        self,
+        protected: &[u8],
+        block: u32,
+        esi: u32,
+        output: &mut [u8],
+    ) -> Result<(), SymbolizeError> {
+        self.block(block)?.copy_source_symbol(protected, esi as usize, output)
+    }
+
     fn block(self, number: u32) -> Result<Block, SymbolizeError> {
         let symbols = self.source_symbols(number).ok_or(SymbolizeError::InvalidParameters)?;
         let number = number as usize;
@@ -109,27 +121,39 @@ impl Block {
         )
     }
 
-    fn materialize(self, protected: &[u8]) -> Result<Vec<Vec<u8>>, SymbolizeError> {
+    fn copy_source_symbol(
+        self,
+        protected: &[u8],
+        esi: usize,
+        symbol: &mut [u8],
+    ) -> Result<(), SymbolizeError> {
+        if esi >= self.symbols || symbol.len() != self.layout.symbol_size {
+            return Err(SymbolizeError::InvalidParameters);
+        }
         let source_bytes = protected.get(self.start..self.end)
             .ok_or(SymbolizeError::InvalidParameters)?;
+        symbol.fill(0);
+        for n in 0..self.layout.sub_blocks {
+            let (offset, width) = self.sub_symbol(n);
+            let begin = offset * self.symbols + esi * width;
+            if begin < source_bytes.len() {
+                let length = width.min(source_bytes.len() - begin);
+                symbol[offset..offset + length].copy_from_slice(&source_bytes[begin..begin + length]);
+            }
+        }
+        Ok(())
+    }
+
+    fn materialize(self, protected: &[u8]) -> Result<Vec<Vec<u8>>, SymbolizeError> {
         let mut source = Vec::new();
         source.try_reserve_exact(self.symbols).map_err(|_| SymbolizeError::AllocationFailed)?;
-        for _ in 0..self.symbols {
+        for esi in 0..self.symbols {
             let mut symbol = Vec::new();
             symbol.try_reserve_exact(self.layout.symbol_size)
                 .map_err(|_| SymbolizeError::AllocationFailed)?;
             symbol.resize(self.layout.symbol_size, 0);
+            self.copy_source_symbol(protected, esi, &mut symbol)?;
             source.push(symbol);
-        }
-        for n in 0..self.layout.sub_blocks {
-            let (offset, width) = self.sub_symbol(n);
-            for (esi, symbol) in source.iter_mut().enumerate() {
-                let begin = offset * self.symbols + esi * width;
-                if begin < source_bytes.len() {
-                    let length = width.min(source_bytes.len() - begin);
-                    symbol[offset..offset + length].copy_from_slice(&source_bytes[begin..begin + length]);
-                }
-            }
         }
         Ok(source)
     }
@@ -145,7 +169,7 @@ impl Block {
         for n in 0..self.layout.sub_blocks {
             let (offset, width) = self.sub_symbol(n);
             for (esi, symbol) in source.iter().enumerate() {
-                let begin = offset * self.symbols + esi * width;
+                let begin = offset *self.symbols + esi * width;
                 let length = width.min(target.len().saturating_sub(begin));
                 if length != 0 {
                     target[begin..begin + length].copy_from_slice(&symbol[offset..offset + length]);
@@ -159,6 +183,22 @@ impl Block {
         }
         Ok(())
     }
+}
+
+/// Keep request-driven and batch repair generation on the same foundation
+/// seed/parameter path. The donor admits solver resources before calling this.
+pub(crate) fn repair_encoder(
+    encoding: &EncodedObject,
+    source: &[Vec<u8>],
+) -> Result<SystematicEncoder, SymbolizeError> {
+    let size = usize::from(encoding.descriptor().symbol_size);
+    if source.is_empty() || source.len() > MAX_SOURCE_SYMBOLS_PER_BLOCK
+        || size == 0 || source.iter().any(|symbol| symbol.len() != size)
+    {
+        return Err(SymbolizeError::InvalidParameters);
+    }
+    SystematicEncoder::new(source, size, code_seed(encoding))
+        .ok_or(SymbolizeError::EncoderUnavailable)
 }
 
 pub(super) fn encode_block(
@@ -176,8 +216,7 @@ pub(super) fn encode_block(
     // the foundation encoder, whose systematic table has a finite K ceiling.
     let source = block.materialize(protected)?;
     let encoder = if repair_symbols == 0 { None } else {
-        Some(SystematicEncoder::new(&source, block.layout.symbol_size, code_seed(encoding))
-            .ok_or(SymbolizeError::EncoderUnavailable)?)
+        Some(repair_encoder(encoding, &source)?)
     };
     let mut records = Vec::new();
     records.try_reserve_exact(count as usize).map_err(|_| SymbolizeError::AllocationFailed)?;

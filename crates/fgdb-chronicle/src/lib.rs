@@ -35,6 +35,8 @@
 
 pub mod capsule;
 pub mod commit;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod donor;
 pub mod identity;
 pub mod marker;
 pub mod pack;
