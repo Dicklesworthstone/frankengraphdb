@@ -11,6 +11,7 @@ use core::fmt;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId, SchemaEpoch};
 use fgdb_types::ids::DatabaseSecurityNamespaceId;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const LOCATION: &str = "fgdb/warden/v1";
 const MAX_IDENTIFIER_BYTES: usize = 1024;
@@ -85,11 +86,15 @@ impl CapabilityToken {
 /// catalog epoch and policy epoch. Location hints are deliberately NOT used
 /// for authorization: the foundation does not authenticate those hints.
 /// Changing either epoch rejects earlier tokens on subsequent admissions.
-/// Already borrowed execution permits remain subject to their own expiry;
-/// epoch changes alone do not interrupt in-flight executions.
+/// Retire the old Authority when installing a new catalog/policy epoch.
+/// Retirement stops subsequent admission and is observed by already borrowed
+/// permits at their next checkpoint. This is a local, cooperative fence, not
+/// a durable revocation registry or a barrier against uncheckpointed effects.
 pub struct Authority {
     key: AuthKey,
     identifier: String,
+    namespace: DatabaseSecurityNamespaceId,
+    retired: AtomicBool,
 }
 
 impl fmt::Debug for Authority {
@@ -119,12 +124,56 @@ impl Authority {
         if identifier.len() > MAX_IDENTIFIER_BYTES {
             return Err(Error::TooLarge);
         }
-        Ok(Self { key, identifier })
+        Ok(Self {
+            key,
+            identifier,
+            namespace,
+            retired: AtomicBool::new(false),
+        })
+    }
+
+    /// Public storage binding already authenticated by the signed identifier.
+    /// This reveals no signing or attenuation key.
+    #[must_use]
+    pub const fn namespace(&self) -> DatabaseSecurityNamespaceId {
+        self.namespace
+    }
+
+    /// Irreversibly stop this issuer incarnation, including all its borrowed
+    /// capabilities and execution permits. Returns true only for the first
+    /// retirement; repeated or concurrent retirement is idempotent.
+    ///
+    /// The trusted host calls this after ordering the governing policy change
+    /// and before releasing work under the new policy. Existing operators must
+    /// checkpoint before effects and result release. A checkpoint racing this
+    /// call may finish first; retirement neither waits for quiescence nor undoes
+    /// earlier effects. No clock, allocation, I/O, or hidden worker is involved.
+    ///
+    /// Restart must reconstruct only the current authoritative epoch/key. A
+    /// newly constructed Authority with the OLD key and identity would still
+    /// authenticate old bearer bytes; this in-memory bit is not durable state.
+    pub fn retire(&self) -> bool {
+        !self.retired.swap(true, Ordering::AcqRel)
+    }
+
+    /// Informational state only; callers must use the checked admission APIs.
+    #[must_use]
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn check_active(&self) -> Result<(), Error> {
+        if self.is_retired() {
+            Err(Error::AuthorityRetired)
+        } else {
+            Ok(())
+        }
     }
 
     /// Mint all mandatory root restrictions atomically: no unrestricted
     /// intermediate macaroon is returned to the caller.
     pub fn issue_at(&self, grant: &Grant, now_ms: u64) -> Result<CapabilityToken, Error> {
+        self.check_active()?;
         validate_name(&grant.branch)?;
         validate_scope(&grant.labels)?;
         validate_scope(&grant.relations)?;
@@ -160,6 +209,7 @@ impl Authority {
         }
         // Do not issue something that this authority cannot subsequently use.
         compile(&token)?.check_at(&grant.branch, now_ms)?;
+        self.check_active()?;
         Ok(CapabilityToken { token })
     }
 
@@ -172,6 +222,7 @@ impl Authority {
         branch: &str,
         now_ms: u64,
     ) -> Result<VerifiedCapability<'_>, Error> {
+        self.check_active()?;
         if token.token.identifier() != self.identifier {
             return Err(Error::WrongAuthority);
         }
@@ -183,6 +234,7 @@ impl Authority {
         }
         let program = compile(&token.token)?;
         program.check_at(branch, now_ms)?;
+        self.check_active()?;
         Ok(VerifiedCapability {
             _authority: self,
             program,
@@ -201,6 +253,7 @@ impl Authority {
         if !core::ptr::eq(self, capability._authority) {
             return Err(Error::WrongAuthority);
         }
+        self.check_active()?;
         capability.program.check_at(branch, now_ms)
     }
 }
@@ -229,11 +282,12 @@ impl VerifiedCapability<'_> {
         branch: &str,
         now_ms: u64,
     ) -> Result<ExecutionPermit<'_, ReadAccess>, Error> {
+        self._authority.check_active()?;
         self.program.check_at(branch, now_ms)?;
         if !self.program.rights.can_read() {
             return Err(Error::PermissionDenied);
         }
-        Ok(ExecutionPermit::new(&self.program))
+        Ok(ExecutionPermit::new(&self.program, self._authority, now_ms))
     }
 
     /// This grants an operation allowance, not authority over arbitrary
@@ -244,11 +298,12 @@ impl VerifiedCapability<'_> {
         branch: &str,
         now_ms: u64,
     ) -> Result<ExecutionPermit<'_, WriteAccess>, Error> {
+        self._authority.check_active()?;
         self.program.check_at(branch, now_ms)?;
         if !self.program.rights.can_write() {
             return Err(Error::PermissionDenied);
         }
-        Ok(ExecutionPermit::new(&self.program))
+        Ok(ExecutionPermit::new(&self.program, self._authority, now_ms))
     }
 }
 

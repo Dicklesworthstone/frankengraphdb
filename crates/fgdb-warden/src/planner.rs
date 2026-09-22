@@ -1,6 +1,6 @@
 //! Mandatory object predicates, separate from ordinary query WHERE clauses.
 
-use crate::{Error, LimitDimension, QueryLimits, Rights, Scope};
+use crate::{Authority, Error, LimitDimension, QueryLimits, Rights, Scope};
 use core::marker::PhantomData;
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
 use std::collections::BTreeSet;
@@ -130,20 +130,31 @@ pub enum WriteAccess {}
 /// an error does not permit continued work or a later smaller charge. A new
 /// execution must receive a newly issued permit from the verified capability.
 /// The ceilings are intentionally per execution, not a global rate limiter.
+/// Retirement is checked at every boundary; host time cannot move backwards
+/// within a permit. Equal timestamps are valid. Predicates are definition
+/// metadata, not an independent live execution allowance.
 #[derive(Debug)]
 pub struct ExecutionPermit<'a, Access> {
     program: &'a PlannerPredicates,
+    authority: &'a Authority,
     usage: Usage,
     stopped: bool,
+    last_now_ms: u64,
     access: PhantomData<Access>,
 }
 
 impl<'a, Access> ExecutionPermit<'a, Access> {
-    pub(crate) fn new(program: &'a PlannerPredicates) -> Self {
+    pub(crate) fn new(
+        program: &'a PlannerPredicates,
+        authority: &'a Authority,
+        now_ms: u64,
+    ) -> Self {
         Self {
             program,
+            authority,
             usage: Usage::default(),
             stopped: false,
+            last_now_ms: now_ms,
             access: PhantomData,
         }
     }
@@ -162,10 +173,19 @@ impl<'a, Access> ExecutionPermit<'a, Access> {
         if self.stopped {
             return Err(Error::ExecutionStopped);
         }
+        if let Err(error) = self.authority.check_active() {
+            self.stopped = true;
+            return Err(error);
+        }
+        if now_ms < self.last_now_ms {
+            self.stopped = true;
+            return Err(Error::ClockWentBackwards);
+        }
         if let Err(error) = self.program.check_at(&self.program.branch, now_ms) {
             self.stopped = true;
             return Err(error);
         }
+        self.last_now_ms = now_ms;
         Ok(())
     }
 
@@ -212,6 +232,9 @@ impl ExecutionPermit<'_, ReadAccess> {
     /// The trusted source supplies the opener; its returned data stays behind
     /// that source boundary. This is NOT a raw-adjacency API for token holders.
     /// Visible degree must additionally count only `allows_edge` endpoints.
+    /// Retirement during the opener drops its returned value instead of
+    /// releasing it. The opener must not itself publish externally observable
+    /// effects. A caller must still sample fresh trusted time after slow I/O.
     pub fn with_relation_at<T>(
         &mut self,
         now_ms: u64,
@@ -227,6 +250,8 @@ impl ExecutionPermit<'_, ReadAccess> {
             return Ok(None);
         }
         self.charge_work_at(now_ms, 1)?;
-        Ok(Some(open()))
+        let value = open();
+        self.checkpoint_at(now_ms)?;
+        Ok(Some(value))
     }
 }

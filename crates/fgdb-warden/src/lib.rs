@@ -8,7 +8,8 @@
 //!
 //! Clock values passed to the `*_at` methods MUST come from the trusted host's
 //! `Cx` clock in the same epoch as issuance, never from request payloads. These
-//! methods are pure: they do not acquire locks, read clocks, or perform I/O.
+//! methods do not acquire locks, read clocks, or perform I/O. Admission and
+//! permit checkpoints also observe the issuer's atomic retirement fence.
 //! Long-running operators must recheck at their existing cancellation/work
 //! checkpoints. This keeps the boundary usable with deterministic lab time.
 //!
@@ -25,7 +26,9 @@
 //! Third-party discharges, runtime region/task constraints, use-count/rate
 //! limits and unknown caveats are rejected, not ignored. Budgets here are
 //! per-execution ceilings, NOT lifetime quotas. Revocation is an authority
-//! policy-epoch change; this crate does not claim per-token revocation.
+//! policy-epoch change; retire the old Authority to stop its in-flight permits
+//! cooperatively. The fence is local and not durable. This crate does not
+//! claim per-token revocation or synchronous quiescence after retirement.
 
 #![forbid(unsafe_code)]
 
@@ -199,10 +202,12 @@ pub enum Error {
     UnsupportedCaveat,
     Unauthenticated,
     WrongAuthority,
+    AuthorityRetired,
     MissingRestriction,
     ScopeDenied,
     Expired,
     NotYetValid,
+    ClockWentBackwards,
     PermissionDenied,
     LimitExceeded(LimitDimension),
     ExecutionStopped,
@@ -216,10 +221,12 @@ impl fmt::Display for Error {
             Self::UnsupportedCaveat => "unsupported Warden caveat",
             Self::Unauthenticated => "Warden signature verification failed",
             Self::WrongAuthority => "Warden authority identity mismatch",
+            Self::AuthorityRetired => "Warden authority retired",
             Self::MissingRestriction => "Warden token lacks a required root restriction",
             Self::ScopeDenied => "Warden scope denied",
             Self::Expired => "Warden capability expired",
             Self::NotYetValid => "Warden capability is not yet valid",
+            Self::ClockWentBackwards => "Warden execution clock moved backwards",
             Self::PermissionDenied => "Warden operation denied",
             Self::LimitExceeded(_) => "Warden execution budget exceeded",
             Self::ExecutionStopped => "Warden execution already stopped",
