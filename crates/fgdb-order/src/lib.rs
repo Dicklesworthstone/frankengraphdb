@@ -13,6 +13,15 @@
 //! recovery; cancellation leaves the node blocked, never able to vote or
 //! reply from speculative state.
 //!
+//! Snapshot offers are not installations. [`SnapshotTransfer`] asks the runtime
+//! to acquire and verify the exact snapshot closure using ATP. Only after that
+//! succeeds may it submit [`Event::SnapshotReady`]; publication of the resulting
+//! persistence view must atomically install the application snapshot and Raft
+//! state before the successful reply can escape. [`Event::Compact`] likewise
+//! requires the generated log-to-state and complete retention-floor verifiers,
+//! including the audit-visible applied cut. A committed index alone is NOT
+//! permission to compact. No snapshot operation changes configuration.
+//!
 //! These are in-process transition types, NOT an alternate durable/wire format.
 //! The Appendix A serializer, payload certificate verifier, root publisher,
 //! authenticated transport, and application state machine remain separate
@@ -105,8 +114,79 @@ impl Configuration {
     }
 }
 
+/// A verifier-produced view of an exact canonical Raft snapshot, not a format.
+/// Full object identities are retained; numeric positions are never authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotCut {
+    domain: Domain,
+    configuration: [u8; 32],
+    manifest: [u8; 32],
+    state_root: [u8; 32],
+    retention_floor: [u8; 32],
+    index: u64,
+    term: u64,
+}
+
+impl SnapshotCut {
+    /// Call only after authenticating the canonical snapshot manifest and
+    /// proving its role/configuration, exact state-at-cut and retention floor.
+    /// For Compact, the cut must additionally be locally applied and visible.
+    /// Structural validation here cannot replace either proof. An offered cut
+    /// still needs its complete closure transferred and verified before Ready.
+    pub fn from_authenticated_parts(
+        configuration: &Configuration,
+        manifest: [u8; 32],
+        state_root: [u8; 32],
+        retention_floor: [u8; 32],
+        index: u64,
+        term: u64,
+    ) -> Result<Self, Error> {
+        if index == 0 || index == u64::MAX || term == 0 {
+            return Err(Error::InvalidSnapshot);
+        }
+        Ok(Self {
+            domain: configuration.domain,
+            configuration: configuration.identity,
+            manifest,
+            state_root,
+            retention_floor,
+            index,
+            term,
+        })
+    }
+
+    pub fn domain(&self) -> Domain {
+        self.domain
+    }
+
+    pub fn configuration(&self) -> [u8; 32] {
+        self.configuration
+    }
+
+    pub fn manifest(&self) -> [u8; 32] {
+        self.manifest
+    }
+
+    pub fn state_root(&self) -> [u8; 32] {
+        self.state_root
+    }
+
+    pub fn retention_floor(&self) -> [u8; 32] {
+        self.retention_floor
+    }
+
+    pub fn index(&self) -> u64 {
+        self.index
+    }
+
+    pub fn term(&self) -> u64 {
+        self.term
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
+    /// Bounds the retained suffix, not the lifetime absolute Raft index.
     pub max_log_entries: usize,
     pub max_append_entries: usize,
 }
@@ -135,6 +215,7 @@ pub struct PersistentState<C> {
     term: u64,
     voted_for: Option<MemberId>,
     commit_index: u64,
+    snapshot: Option<SnapshotCut>,
     entries: Vec<Entry<C>>,
 }
 
@@ -151,15 +232,20 @@ impl<C> PersistentState<C> {
         self.commit_index
     }
 
+    /// The suffix starts at snapshot.index + 1, or at index 1 without a snapshot.
     pub fn entries(&self) -> &[Entry<C>] {
         &self.entries
+    }
+
+    pub fn snapshot(&self) -> Option<&SnapshotCut> {
+        self.snapshot.as_ref()
     }
 
     pub fn configuration(&self) -> &Configuration {
         &self.configuration
     }
 
-    /// Construct after the durable decoder has authenticated the entire closure.
+    /// Construct an uncompacted state after authenticating the entire closure.
     /// Structural validation still occurs in [`Raft::recover`].
     pub fn from_authenticated_parts(
         configuration: Configuration,
@@ -173,8 +259,38 @@ impl<C> PersistentState<C> {
             term,
             voted_for,
             commit_index,
+            snapshot: None,
             entries,
         }
+    }
+
+    /// Recover a verified installed snapshot plus its contiguous retained suffix.
+    /// The application root and Raft cut must have been published together;
+    /// merely downloading a snapshot does not license this constructor.
+    pub fn from_authenticated_snapshot(
+        configuration: Configuration,
+        term: u64,
+        voted_for: Option<MemberId>,
+        commit_index: u64,
+        snapshot: SnapshotCut,
+        entries: Vec<Entry<C>>,
+    ) -> Self {
+        Self {
+            configuration,
+            term,
+            voted_for,
+            commit_index,
+            snapshot: Some(snapshot),
+            entries,
+        }
+    }
+
+    fn base_index(&self) -> u64 {
+        self.snapshot.as_ref().map_or(0, SnapshotCut::index)
+    }
+
+    fn base_term(&self) -> u64 {
+        self.snapshot.as_ref().map_or(0, SnapshotCut::term)
     }
 }
 
@@ -211,6 +327,17 @@ pub enum Message<C> {
         /// Advisory next-index hint; never authority for match_index.
         conflict_next: u64,
     },
+    /// Offer only. Receipt of this message never installs application state.
+    InstallSnapshot {
+        term: u64,
+        request: u64,
+        snapshot: SnapshotCut,
+    },
+    /// Acknowledges the exact in-flight cut, not an arbitrary reported index.
+    SnapshotInstalled {
+        term: u64,
+        request: u64,
+    },
 }
 
 impl<C> Message<C> {
@@ -219,7 +346,9 @@ impl<C> Message<C> {
             Self::RequestVote { term, .. }
             | Self::Vote { term, .. }
             | Self::Append { term, .. }
-            | Self::Appended { term, .. } => *term,
+            | Self::Appended { term, .. }
+            | Self::InstallSnapshot { term, .. }
+            | Self::SnapshotInstalled { term, .. } => *term,
         }
     }
 }
@@ -239,6 +368,16 @@ pub enum Event<C> {
     Heartbeat,
     Propose(C),
     Receive(Envelope<C>),
+    /// The verifier-proved applied/visible cut and complete floor permit retiring
+    /// this log prefix. Runtime publication must retain the snapshot closure.
+    Compact(SnapshotCut),
+    /// The exact requested closure has been acquired, authenticated and durably
+    /// owned. The resulting Persistence still needs atomic application/Raft
+    /// installation before persisted may release the successful response.
+    SnapshotReady(SnapshotTransferId),
+    /// Cancel one transfer, without acknowledging or changing committed state.
+    /// A later retransmitted offer can start a fresh transfer.
+    SnapshotFailed(SnapshotTransferId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,6 +400,10 @@ pub enum Error {
     CommittedConflict,
     EntryIdentityConflict,
     CounterExhausted,
+    InvalidSnapshot,
+    SnapshotRequired,
+    SnapshotConflict,
+    StaleSnapshotTransfer,
 }
 
 impl core::fmt::Display for Error {
@@ -282,12 +425,37 @@ pub struct PersistenceId {
 
 impl PartialEq for PersistenceId {
     fn eq(&self, other: &Self) -> bool {
-        self.generation == other.generation
-            && Arc::ptr_eq(&self.incarnation, &other.incarnation)
+        self.generation == other.generation && Arc::ptr_eq(&self.incarnation, &other.incarnation)
     }
 }
 
 impl Eq for PersistenceId {}
+
+/// An in-process transfer capability. It cannot be decoded from network bytes
+/// or reused on another voter, after recovery, or after a newer leader offer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotTransferId(PersistenceId);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotTransfer {
+    id: SnapshotTransferId,
+    source: MemberId,
+    snapshot: SnapshotCut,
+}
+
+impl SnapshotTransfer {
+    pub fn id(&self) -> SnapshotTransferId {
+        self.id.clone()
+    }
+
+    pub fn source(&self) -> MemberId {
+        self.source
+    }
+
+    pub fn snapshot(&self) -> &SnapshotCut {
+        &self.snapshot
+    }
+}
 
 /// Contains no outbound messages or apply-ready commands.
 #[derive(Debug)]
@@ -324,24 +492,39 @@ pub struct Committed<C> {
 pub struct Output<C> {
     pub messages: Vec<Envelope<C>>,
     pub committed: Vec<Committed<C>>,
+    /// Start or idempotently resume each exact transfer. No donor bytes are yet
+    /// considered installed, committed or available for reads/voting.
+    pub snapshot_transfers: Vec<SnapshotTransfer>,
+    /// Cancel the matching transfer region after its leader/request is fenced.
+    /// Cancellation retires no durable object or prepared ownership promise.
+    pub cancelled_snapshot_transfers: Vec<SnapshotTransferId>,
+    /// Notification of the atomically published application/Raft snapshot cut.
+    /// Compaction alone does not produce an application installation event.
+    pub installed_snapshot: Option<SnapshotCut>,
     /// A granted vote, campaign, or non-stale leader append resets the timer.
     pub reset_election_timer: bool,
     pub role: Role,
     pub leader: Option<MemberId>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct InFlight {
-    request: u64,
-    prev: u64,
-    last: u64,
+#[derive(Clone, Debug)]
+enum InFlight {
+    Append { request: u64, prev: u64, last: u64 },
+    Snapshot { request: u64, snapshot: SnapshotCut },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Progress {
     matched: u64,
     next: u64,
     in_flight: Option<InFlight>,
+}
+
+#[derive(Clone, Debug)]
+struct IncomingSnapshot {
+    transfer: SnapshotTransfer,
+    term: u64,
+    request: u64,
 }
 
 /// One owned transition machine. Copying a live voter would duplicate voting
@@ -360,6 +543,7 @@ pub struct Raft<C> {
     initialized: bool,
     log_changed: bool,
     request: u64,
+    incoming_snapshot: Option<IncomingSnapshot>,
     pending: Option<(PersistenceId, Output<C>)>,
     poisoned: bool,
 }
@@ -385,8 +569,19 @@ impl<C: Clone + Eq> Raft<C> {
         if !state.configuration.contains(id) {
             return Err(Error::UnknownMember);
         }
+        let last = state
+            .base_index()
+            .checked_add(state.entries.len() as u64)
+            .filter(|last| *last < u64::MAX)
+            .ok_or(Error::InvalidRecoveryState)?;
         if state.entries.len() > limits.max_log_entries
-            || state.commit_index > state.entries.len() as u64
+            || state.commit_index < state.base_index()
+            || state.commit_index > last
+            || state.base_term() > state.term
+            || state.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.domain != state.configuration.domain
+                    || snapshot.configuration != state.configuration.identity
+            })
             || (state.term == 0 && state.voted_for.is_some())
             || state
                 .voted_for
@@ -394,7 +589,7 @@ impl<C: Clone + Eq> Raft<C> {
         {
             return Err(Error::InvalidRecoveryState);
         }
-        let mut previous = 0;
+        let mut previous = state.base_term();
         for entry in &state.entries {
             if entry.term == 0 || entry.term < previous || entry.term > state.term {
                 return Err(Error::InvalidRecoveryState);
@@ -414,6 +609,7 @@ impl<C: Clone + Eq> Raft<C> {
             initialized: true,
             log_changed: false,
             request: 0,
+            incoming_snapshot: None,
             pending: None,
             poisoned: false,
         })
@@ -435,11 +631,15 @@ impl<C: Clone + Eq> Raft<C> {
     }
 
     /// Replay is bounded by the durable committed prefix. The application owns
-    /// a durable applied cursor and applies entries idempotently.
+    /// a durable applied cursor and applies entries idempotently. A cursor below
+    /// the retained log requires installation of the published snapshot first.
     pub fn committed_after(&self, applied: u64) -> Result<Vec<Committed<C>>, Error> {
         self.available()?;
         if applied > self.state.commit_index {
             return Err(Error::InvalidRecoveryState);
+        }
+        if applied < self.state.base_index() {
+            return Err(Error::SnapshotRequired);
         }
         Ok(self.committed_range(applied))
     }
@@ -465,17 +665,22 @@ impl<C: Clone + Eq> Raft<C> {
         self.validate_event(&event)?;
         let generation = self.generation.checked_add(1).ok_or(Error::CounterExhausted)?;
         let before = self.state.commit_index;
+        let previous_transfer = self.incoming_snapshot.as_ref().map(|pending| pending.transfer.id());
         let old_hard = (self.state.term, self.state.voted_for, before);
         self.log_changed = false;
         let mut output = Output {
             messages: Vec::new(),
             committed: Vec::new(),
+            snapshot_transfers: Vec::new(),
+            cancelled_snapshot_transfers: Vec::new(),
+            installed_snapshot: None,
             reset_election_timer: false,
             role: self.role,
             leader: self.leader,
         };
         // Unexpected exhaustion after an internal transition fails closed.
         self.poisoned = true;
+        self.generation = generation;
         match event {
             Event::ElectionTimeout => self.campaign(&mut output)?,
             Event::Heartbeat => {
@@ -493,6 +698,16 @@ impl<C: Clone + Eq> Raft<C> {
                 self.broadcast(&mut output)?;
             }
             Event::Receive(envelope) => self.receive(envelope, &mut output)?,
+            Event::Compact(snapshot) => self.compact(snapshot),
+            Event::SnapshotReady(_) => self.install_snapshot(&mut output)?,
+            Event::SnapshotFailed(_) => self.incoming_snapshot = None,
+        }
+        if let Some(previous) = previous_transfer {
+            if output.installed_snapshot.is_none()
+                && !self.incoming_snapshot.as_ref().is_some_and(|pending| pending.transfer.id == previous)
+            {
+                output.cancelled_snapshot_transfers.push(previous);
+            }
         }
         output.committed = self.committed_range(before);
         output.role = self.role;
@@ -504,7 +719,6 @@ impl<C: Clone + Eq> Raft<C> {
             incarnation: Arc::clone(&self.incarnation),
             generation,
         };
-        self.generation = generation;
         self.pending = Some((id.clone(), output));
         self.poisoned = false;
         Ok(Persistence {
@@ -514,9 +728,10 @@ impl<C: Clone + Eq> Raft<C> {
         })
     }
 
-    /// Call after the exact state from `step` has completed root publication,
-    /// or immediately when `requires_write` was false. Stale tokens cannot
-    /// release a later transition, another node, or a recovered incarnation.
+    /// Call after the exact state from step has completed root publication,
+    /// or immediately when requires_write was false. Snapshot installation must
+    /// publish BOTH the verified application cut and this Raft state. Stale
+    /// tokens cannot release a later transition, node, or recovered incarnation.
     pub fn persisted(&mut self, id: PersistenceId) -> Result<Output<C>, Error> {
         if self.poisoned {
             return Err(Error::RecoveryRequired);
@@ -532,6 +747,16 @@ impl<C: Clone + Eq> Raft<C> {
         Ok(output)
     }
 
+    fn validate_snapshot(&self, snapshot: &SnapshotCut) -> Result<(), Error> {
+        if snapshot.domain != self.state.configuration.domain {
+            return Err(Error::WrongDomain);
+        }
+        if snapshot.configuration != self.state.configuration.identity {
+            return Err(Error::WrongConfiguration);
+        }
+        Ok(())
+    }
+
     fn validate_event(&self, event: &Event<C>) -> Result<(), Error> {
         match event {
             Event::ElectionTimeout if !self.state.configuration.voters.contains(&self.id) => {
@@ -543,6 +768,28 @@ impl<C: Clone + Eq> Raft<C> {
                 }
                 if self.state.entries.len() >= self.limits.max_log_entries {
                     return Err(Error::LogFull);
+                }
+                if self.last_index() == u64::MAX - 1 {
+                    return Err(Error::CounterExhausted);
+                }
+            }
+            Event::Compact(snapshot) => {
+                self.validate_snapshot(snapshot)?;
+                if self.state.snapshot.as_ref() != Some(snapshot)
+                    && (snapshot.index <= self.state.base_index()
+                        || snapshot.index > self.state.commit_index
+                        || self.term_at(snapshot.index) != Some(snapshot.term))
+                {
+                    return Err(Error::InvalidSnapshot);
+                }
+            }
+            Event::SnapshotReady(id) | Event::SnapshotFailed(id) => {
+                if !self.incoming_snapshot.as_ref().is_some_and(|pending| {
+                    pending.transfer.id == *id
+                        && pending.term == self.state.term
+                        && self.leader == Some(pending.transfer.source)
+                }) {
+                    return Err(Error::StaleSnapshotTransfer);
                 }
             }
             Event::Receive(envelope) => {
@@ -558,67 +805,93 @@ impl<C: Clone + Eq> Raft<C> {
                 if !self.state.configuration.contains(envelope.from) {
                     return Err(Error::UnknownMember);
                 }
-                if !matches!(&envelope.message, Message::Appended { .. })
-                    && !self.state.configuration.voters.contains(&envelope.from)
+                if !matches!(
+                    &envelope.message,
+                    Message::Appended { .. } | Message::SnapshotInstalled { .. }
+                ) && !self.state.configuration.voters.contains(&envelope.from)
                 {
                     return Err(Error::NotVoter);
                 }
                 if envelope.message.term() == 0 {
                     return Err(Error::InvalidMessage);
                 }
-                if let Message::Append {
-                    term,
-                    prev_index,
-                    prev_term,
-                    entries,
-                    ..
-                } = &envelope.message
-                {
-                    if entries.len() > self.limits.max_append_entries {
-                        return Err(Error::AppendTooLarge);
-                    }
-                    if (*prev_index == 0) != (*prev_term == 0) || prev_term > term {
-                        return Err(Error::InvalidMessage);
-                    }
-                    let last = prev_index
-                        .checked_add(entries.len() as u64)
-                        .ok_or(Error::InvalidMessage)?;
-                    if last > self.limits.max_log_entries as u64 {
-                        return Err(Error::LogFull);
-                    }
-                    let mut previous = *prev_term;
-                    for entry in entries {
-                        if entry.term == 0 || entry.term < previous || entry.term > *term {
+                match &envelope.message {
+                    Message::Append {
+                        term,
+                        prev_index,
+                        prev_term,
+                        entries,
+                        ..
+                    } => {
+                        if entries.len() > self.limits.max_append_entries {
+                            return Err(Error::AppendTooLarge);
+                        }
+                        if (*prev_index == 0) != (*prev_term == 0) || prev_term > term {
                             return Err(Error::InvalidMessage);
                         }
-                        previous = entry.term;
-                    }
-                    if *term >= self.state.term && self.term_at(*prev_index) == Some(*prev_term) {
-                        for (offset, entry) in entries.iter().enumerate() {
-                            let index = *prev_index + offset as u64 + 1;
-                            if let Some(local) = self.entry_at(index) {
-                                if local.term != entry.term {
-                                    if index <= self.state.commit_index {
-                                        return Err(Error::CommittedConflict);
+                        let last = prev_index
+                            .checked_add(entries.len() as u64)
+                            .filter(|last| *last < u64::MAX)
+                            .ok_or(Error::InvalidMessage)?;
+                        let mut previous = *prev_term;
+                        for entry in entries {
+                            if entry.term == 0 || entry.term < previous || entry.term > *term {
+                                return Err(Error::InvalidMessage);
+                            }
+                            previous = entry.term;
+                        }
+                        // A distant predecessor needs a conflict reply, not a
+                        // capacity error: it does not allocate the absent gap.
+                        if *term >= self.state.term && self.term_at(*prev_index) == Some(*prev_term) {
+                            if last - self.state.base_index() > self.limits.max_log_entries as u64 {
+                                return Err(Error::LogFull);
+                            }
+                            for (offset, entry) in entries.iter().enumerate() {
+                                let index = *prev_index + offset as u64 + 1;
+                                if let Some(local) = self.entry_at(index) {
+                                    if local.term != entry.term {
+                                        if index <= self.state.commit_index {
+                                            return Err(Error::CommittedConflict);
+                                        }
+                                        break;
                                     }
-                                    break;
-                                }
-                                if local.command != entry.command {
-                                    return Err(Error::EntryIdentityConflict);
+                                    if local.command != entry.command {
+                                        return Err(Error::EntryIdentityConflict);
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                if let Message::RequestVote {
-                    term,
-                    last_index,
-                    last_term,
-                } = &envelope.message
-                {
-                    if (*last_index == 0) != (*last_term == 0) || last_term > term {
-                        return Err(Error::InvalidMessage);
+                    Message::RequestVote { term, last_index, last_term } => {
+                        if (*last_index == 0) != (*last_term == 0)
+                            || last_term > term
+                            || *last_index == u64::MAX
+                        {
+                            return Err(Error::InvalidMessage);
+                        }
                     }
+                    Message::InstallSnapshot { term, request, snapshot } => {
+                        self.validate_snapshot(snapshot)?;
+                        if snapshot.term > *term {
+                            return Err(Error::InvalidSnapshot);
+                        }
+                        if *term >= self.state.term {
+                            if snapshot.index <= self.state.commit_index
+                                && self.term_at(snapshot.index).is_some_and(|local| local != snapshot.term)
+                            {
+                                return Err(Error::SnapshotConflict);
+                            }
+                            if self.incoming_snapshot.as_ref().is_some_and(|pending| {
+                                pending.term == *term
+                                    && pending.transfer.source == envelope.from
+                                    && pending.request == *request
+                                    && pending.transfer.snapshot != *snapshot
+                            }) {
+                                return Err(Error::SnapshotConflict);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}
@@ -627,28 +900,30 @@ impl<C: Clone + Eq> Raft<C> {
     }
 
     fn last_index(&self) -> u64 {
-        self.state.entries.len() as u64
+        self.state.base_index() + self.state.entries.len() as u64
     }
 
     fn entry_at(&self, index: u64) -> Option<&Entry<C>> {
-        let position = usize::try_from(index.checked_sub(1)?).ok()?;
-        self.state.entries.get(position)
+        let position = index.checked_sub(self.state.base_index())?.checked_sub(1)?;
+        self.state.entries.get(usize::try_from(position).ok()?)
     }
 
     fn term_at(&self, index: u64) -> Option<u64> {
-        if index == 0 {
-            Some(0)
+        if index == self.state.base_index() {
+            Some(self.state.base_term())
         } else {
             self.entry_at(index).map(|entry| entry.term)
         }
     }
 
     fn last_term(&self) -> u64 {
-        self.state.entries.last().map_or(0, |entry| entry.term)
+        self.state.entries.last().map_or(self.state.base_term(), |entry| entry.term)
     }
 
     fn committed_range(&self, after: u64) -> Vec<Committed<C>> {
-        self.state.entries[after as usize..self.state.commit_index as usize]
+        let base = self.state.base_index();
+        let after = after.max(base);
+        self.state.entries[(after - base) as usize..(self.state.commit_index - base) as usize]
             .iter()
             .enumerate()
             .map(|(offset, entry)| Committed {
@@ -672,11 +947,21 @@ impl<C: Clone + Eq> Raft<C> {
         if term > self.state.term {
             self.state.term = term;
             self.state.voted_for = None;
+            self.incoming_snapshot = None;
         }
         self.role = Role::Follower;
         self.leader = None;
         self.votes.clear();
         self.progress.clear();
+    }
+
+    fn accept_leader(&mut self, from: MemberId, term: u64, output: &mut Output<C>) {
+        self.follow(term);
+        if self.incoming_snapshot.as_ref().is_some_and(|pending| pending.transfer.source != from) {
+            self.incoming_snapshot = None;
+        }
+        self.leader = Some(from);
+        output.reset_election_timer = true;
     }
 
     fn campaign(&mut self, output: &mut Output<C>) -> Result<(), Error> {
@@ -711,27 +996,17 @@ impl<C: Clone + Eq> Raft<C> {
     fn become_leader(&mut self, output: &mut Output<C>) -> Result<(), Error> {
         self.role = Role::Leader;
         self.leader = Some(self.id);
-        let next = self.last_index().checked_add(1).ok_or(Error::CounterExhausted)?;
+        let next = self.last_index() + 1;
         for member in self.state.configuration.members() {
             if member != self.id {
-                self.progress.insert(
-                    member,
-                    Progress {
-                        matched: 0,
-                        next,
-                        in_flight: None,
-                    },
-                );
+                self.progress.insert(member, Progress { matched: 0, next, in_flight: None });
             }
         }
-        // Current-term no-op commits inherited entries. At capacity, never
-        // commit an old term by replica counting; checkpointing must free space.
-        if self.state.entries.len() < self.limits.max_log_entries {
+        // Only a current-term quorum commits inherited entries. At capacity or
+        // absolute-index exhaustion, never infer commitment from older terms.
+        if self.state.entries.len() < self.limits.max_log_entries && next < u64::MAX {
             self.log_changed = true;
-            self.state.entries.push(Entry {
-                term: self.state.term,
-                command: None,
-            });
+            self.state.entries.push(Entry { term: self.state.term, command: None });
         }
         self.advance_commit();
         self.broadcast(output)
@@ -770,40 +1045,149 @@ impl<C: Clone + Eq> Raft<C> {
     }
 
     fn send_append(&mut self, peer: MemberId, output: &mut Output<C>) -> Result<(), Error> {
-        let Some(progress) = self.progress.get(&peer).copied() else {
+        let Some(progress) = self.progress.get(&peer).cloned() else {
             return Ok(());
         };
         let flight = if let Some(flight) = progress.in_flight {
             flight
         } else {
             self.request = self.request.checked_add(1).ok_or(Error::CounterExhausted)?;
-            let prev = progress.next - 1;
-            let last = self
-                .last_index()
-                .min(prev.saturating_add(self.limits.max_append_entries as u64));
-            InFlight {
-                request: self.request,
-                prev,
-                last,
+            if progress.next <= self.state.base_index() {
+                let snapshot = self.state.snapshot.clone().ok_or(Error::InvalidRecoveryState)?;
+                InFlight::Snapshot { request: self.request, snapshot }
+            } else {
+                let prev = progress.next - 1;
+                let last = self.last_index().min(prev.saturating_add(self.limits.max_append_entries as u64));
+                InFlight::Append { request: self.request, prev, last }
             }
         };
-        let prev_term = self.term_at(flight.prev).ok_or(Error::InvalidRecoveryState)?;
-        let entries = self.state.entries[flight.prev as usize..flight.last as usize].to_vec();
+        let message = match &flight {
+            InFlight::Append { request, prev, last } => {
+                let prev_term = self.term_at(*prev).ok_or(Error::InvalidRecoveryState)?;
+                let base = self.state.base_index();
+                let entries = self.state.entries[(*prev - base) as usize..(*last - base) as usize].to_vec();
+                Message::Append {
+                    term: self.state.term,
+                    request: *request,
+                    prev_index: *prev,
+                    prev_term,
+                    entries,
+                    leader_commit: self.state.commit_index,
+                }
+            }
+            InFlight::Snapshot { request, snapshot } => Message::InstallSnapshot {
+                term: self.state.term,
+                request: *request,
+                snapshot: snapshot.clone(),
+            },
+        };
         if let Some(progress) = self.progress.get_mut(&peer) {
             progress.in_flight = Some(flight);
         }
+        self.emit(peer, message, output);
+        Ok(())
+    }
+
+    fn compact(&mut self, snapshot: SnapshotCut) {
+        if self.state.snapshot.as_ref() == Some(&snapshot) {
+            return;
+        }
+        let count = (snapshot.index - self.state.base_index()) as usize;
+        self.state.entries.drain(..count);
+        self.state.snapshot = Some(snapshot);
+        self.log_changed = true;
+        // A retransmission may name a now-retired predecessor or old snapshot.
+        // Invalidate request IDs without fabricating any new match evidence.
+        for progress in self.progress.values_mut() {
+            progress.in_flight = None;
+        }
+    }
+
+    fn offer_snapshot(
+        &mut self,
+        from: MemberId,
+        term: u64,
+        request: u64,
+        snapshot: SnapshotCut,
+        output: &mut Output<C>,
+    ) {
+        if term < self.state.term {
+            // Use an ordinary term-bearing rejection, never a successful seed ack.
+            self.emit(from, Message::Appended {
+                term: self.state.term, request, success: false, conflict_next: self.last_index() + 1,
+            }, output);
+            return;
+        }
+        self.accept_leader(from, term, output);
+        if snapshot.index <= self.state.commit_index {
+            // The already-durable committed prefix covers this cut. Never roll
+            // back the application root or replay snapshot-covered commands.
+            self.emit(from, Message::SnapshotInstalled { term, request }, output);
+            return;
+        }
+        if let Some(pending) = &self.incoming_snapshot {
+            if pending.term == term
+                && pending.request == request
+                && pending.transfer.source == from
+                && pending.transfer.snapshot == snapshot
+            {
+                output.snapshot_transfers.push(pending.transfer.clone());
+                return;
+            }
+            // Old retransmissions must not continually cancel a newer transfer.
+            if pending.term == term && pending.transfer.source == from && request < pending.request {
+                return;
+            }
+        }
+        let transfer = SnapshotTransfer {
+            id: SnapshotTransferId(PersistenceId {
+                incarnation: Arc::clone(&self.incarnation),
+                generation: self.generation,
+            }),
+            source: from,
+            snapshot,
+        };
+        self.incoming_snapshot = Some(IncomingSnapshot { transfer: transfer.clone(), term, request });
+        output.snapshot_transfers.push(transfer);
+    }
+
+    fn install_snapshot(&mut self, output: &mut Output<C>) -> Result<(), Error> {
+        let pending = self.incoming_snapshot.take().ok_or(Error::StaleSnapshotTransfer)?;
+        let snapshot = pending.transfer.snapshot;
+        if snapshot.index <= self.state.commit_index {
+            return Err(Error::StaleSnapshotTransfer);
+        }
+        // Retain the suffix only when the exact included index AND term match.
+        // Otherwise every discarded entry is uncommitted (validated cut > commit).
+        if self.term_at(snapshot.index) == Some(snapshot.term) {
+            let count = (snapshot.index - self.state.base_index()) as usize;
+            self.state.entries.drain(..count);
+        } else {
+            self.state.entries.clear();
+        }
+        self.state.commit_index = snapshot.index;
+        self.state.snapshot = Some(snapshot.clone());
+        self.log_changed = true;
+        output.installed_snapshot = Some(snapshot);
         self.emit(
-            peer,
-            Message::Append {
-                term: self.state.term,
-                request: flight.request,
-                prev_index: flight.prev,
-                prev_term,
-                entries,
-                leader_commit: self.state.commit_index,
-            },
+            pending.transfer.source,
+            Message::SnapshotInstalled { term: self.state.term, request: pending.request },
             output,
         );
+        Ok(())
+    }
+
+    fn acknowledge(&mut self, from: MemberId, last: u64, output: &mut Output<C>) -> Result<(), Error> {
+        if let Some(progress) = self.progress.get_mut(&from) {
+            progress.matched = progress.matched.max(last);
+            progress.next = progress.matched + 1;
+            progress.in_flight = None;
+        }
+        if self.advance_commit() {
+            self.broadcast(output)?;
+        } else if last < self.last_index() {
+            self.send_append(from, output)?;
+        }
         Ok(())
     }
 
@@ -814,11 +1198,7 @@ impl<C: Clone + Eq> Raft<C> {
             self.follow(term);
         }
         match envelope.message {
-            Message::RequestVote {
-                last_index,
-                last_term,
-                ..
-            } => {
+            Message::RequestVote { last_index, last_term, .. } => {
                 let granted = term == self.state.term
                     && self.state.configuration.voters.contains(&self.id)
                     && (self.state.voted_for.is_none() || self.state.voted_for == Some(from))
@@ -827,14 +1207,7 @@ impl<C: Clone + Eq> Raft<C> {
                     self.state.voted_for = Some(from);
                     output.reset_election_timer = true;
                 }
-                self.emit(
-                    from,
-                    Message::Vote {
-                        term: self.state.term,
-                        granted,
-                    },
-                    output,
-                );
+                self.emit(from, Message::Vote { term: self.state.term, granted }, output);
             }
             Message::Vote { granted, .. } => {
                 if term == self.state.term && self.role == Role::Candidate && granted {
@@ -844,52 +1217,30 @@ impl<C: Clone + Eq> Raft<C> {
                     }
                 }
             }
-            Message::Append {
-                request,
-                prev_index,
-                prev_term,
-                entries,
-                leader_commit,
-                ..
-            } => {
+            Message::Append { request, prev_index, prev_term, entries, leader_commit, .. } => {
                 if term < self.state.term {
-                    self.emit(
-                        from,
-                        Message::Appended {
-                            term: self.state.term,
-                            request,
-                            success: false,
-                            conflict_next: self.last_index() + 1,
-                        },
-                        output,
-                    );
+                    self.emit(from, Message::Appended {
+                        term: self.state.term, request, success: false, conflict_next: self.last_index() + 1,
+                    }, output);
                     return Ok(());
                 }
-                self.follow(term);
-                self.leader = Some(from);
-                output.reset_election_timer = true;
+                self.accept_leader(from, term, output);
                 if self.term_at(prev_index) != Some(prev_term) {
+                    let base = self.state.base_index();
                     let mut next = self.last_index().saturating_add(1).min(prev_index.max(1));
-                    if let Some(conflict_term) = self.term_at(prev_index) {
-                        while next > 1 && self.term_at(next - 1) == Some(conflict_term) {
+                    if prev_index < base {
+                        next = base + 1;
+                    } else if let Some(conflict_term) = self.term_at(prev_index) {
+                        while next > base + 1 && self.term_at(next - 1) == Some(conflict_term) {
                             next -= 1;
                         }
                     }
-                    self.emit(
-                        from,
-                        Message::Appended {
-                            term,
-                            request,
-                            success: false,
-                            conflict_next: next,
-                        },
-                        output,
-                    );
+                    self.emit(from, Message::Appended { term, request, success: false, conflict_next: next }, output);
                     return Ok(());
                 }
                 let matched = prev_index + entries.len() as u64;
                 for (offset, entry) in entries.into_iter().enumerate() {
-                    let position = prev_index as usize + offset;
+                    let position = (prev_index - self.state.base_index()) as usize + offset;
                     if self.state.entries.get(position).is_some_and(|local| local.term != entry.term) {
                         self.log_changed = true;
                         self.state.entries.truncate(position);
@@ -901,50 +1252,59 @@ impl<C: Clone + Eq> Raft<C> {
                 }
                 // A short append proves only its prefix, not our divergent tail.
                 self.state.commit_index = self.state.commit_index.max(leader_commit.min(matched));
-                self.emit(
-                    from,
-                    Message::Appended {
-                        term,
-                        request,
-                        success: true,
-                        conflict_next: 0,
-                    },
-                    output,
-                );
+                if self.incoming_snapshot.as_ref().is_some_and(|pending| {
+                    pending.transfer.snapshot.index <= self.state.commit_index
+                }) {
+                    self.incoming_snapshot = None;
+                }
+                self.emit(from, Message::Appended { term, request, success: true, conflict_next: 0 }, output);
             }
-            Message::Appended {
-                request,
-                success,
-                conflict_next,
-                ..
-            } => {
+            Message::Appended { request, success, conflict_next, .. } => {
                 if term != self.state.term || self.role != Role::Leader {
                     return Ok(());
                 }
-                let Some(progress) = self.progress.get(&from).copied() else {
+                let Some(progress) = self.progress.get(&from).cloned() else {
                     return Ok(());
                 };
-                let Some(flight) = progress.in_flight.filter(|flight| flight.request == request) else {
+                let Some(InFlight::Append { request: expected, prev, last }) = progress.in_flight else {
                     return Ok(());
                 };
+                if expected != request {
+                    return Ok(());
+                }
                 if success {
-                    if let Some(progress) = self.progress.get_mut(&from) {
-                        progress.matched = progress.matched.max(flight.last);
-                        progress.next = progress.matched + 1;
-                        progress.in_flight = None;
-                    }
-                    if self.advance_commit() {
-                        self.broadcast(output)?;
-                    } else if flight.last < self.last_index() {
-                        self.send_append(from, output)?;
-                    }
+                    self.acknowledge(from, last, output)?;
                 } else {
+                    let ceiling = self.last_index() + 1;
                     if let Some(progress) = self.progress.get_mut(&from) {
-                        let backoff = flight.prev.max(1);
-                        progress.next = conflict_next.max(1).min(backoff).max(progress.matched + 1);
+                        // A follower that compacted ahead can suggest a forward
+                        // probe. This changes next only, never matched/commit.
+                        let hint = if conflict_next > prev + 1 {
+                            conflict_next.min(ceiling)
+                        } else {
+                            conflict_next.max(1).min(prev.max(1))
+                        };
+                        progress.next = hint.max(progress.matched + 1);
                         progress.in_flight = None;
                     }
                     self.send_append(from, output)?;
+                }
+            }
+            Message::InstallSnapshot { request, snapshot, .. } => {
+                self.offer_snapshot(from, term, request, snapshot, output);
+            }
+            Message::SnapshotInstalled { request, .. } => {
+                if term != self.state.term || self.role != Role::Leader {
+                    return Ok(());
+                }
+                let Some(InFlight::Snapshot { request: expected, snapshot }) = self
+                    .progress.get(&from).and_then(|progress| progress.in_flight.as_ref())
+                else {
+                    return Ok(());
+                };
+                if *expected == request {
+                    let index = snapshot.index;
+                    self.acknowledge(from, index, output)?;
                 }
             }
         }
