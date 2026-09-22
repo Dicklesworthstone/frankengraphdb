@@ -9,6 +9,7 @@ use fgdb_gql::{GqlParameters, GraphAggregateTextSlot, GraphSymbolResolver};
 pub(super) mod set;
 mod changes;
 mod cursor;
+mod row_handle;
 pub use cursor::{StandingNativeCursor, StandingNativeDeltaCursor};
 
 pub(super) enum Layout {
@@ -329,27 +330,34 @@ impl<V: Vfs + Clone> Database<V> {
             } else {
                 match layout {
                     Layout::Rows { .. } | Layout::Circuit { .. } => {
-                        let mut view = match self.admitted_standing_query(cx, handle)? {
+                        let rows = match root {
                             StandingQuery::Rows { .. } | StandingQuery::Constant(_) => {
-                                self.standing_rows(cx, handle)?
+                                let mut view = self.standing_rows(cx, handle)?;
+                                if matches!(layout, Layout::Circuit { .. })
+                                    && !matches!(root, StandingQuery::Constant(_))
+                                {
+                                    // A compound scope canonicalizes its selected
+                                    // bag, but a folded constant retains its sequence.
+                                    view.ordered = None;
+                                }
+                                collect(&view, layout.columns().len(), &mut meter, copy_values)
                             }
-                            StandingQuery::Set(_) => self.standing_set(cx, handle)?,
-                            StandingQuery::Join(_) => self.standing_join(cx, handle)?,
-                            StandingQuery::Projection(_) => self.standing_projection(cx, handle)?,
-                            _ => return Err(StandingQueryError::Unsupported),
-                        };
-                        if matches!(layout, Layout::Circuit { .. })
-                            && !matches!(root, StandingQuery::Constant(_))
-                        {
-                            // PreparedGraphSet canonicalizes a pattern's selected
-                            // bag before set composition. Do not leak the leaf's
-                            // pre-wrapper ordering from a transparent root scope.
-                            view.ordered = None;
+                            _ => {
+                                // Share row-domain admission with pull/replay
+                                // delivery, including filters and recursive closure.
+                                // Ranked windows were handled above.
+                                let rows = sets::rows(root)
+                                    .ok_or(StandingQueryError::Unsupported)?;
+                                collect_runs(
+                                    rows.iter().map(|(row, weight)| (row, Some(weight))),
+                                    layout.columns().len(),
+                                    &mut meter,
+                                    copy_values,
+                                )
+                            }
                         }
-                        let rows =
-                            collect(&view, layout.columns().len(), &mut meter, copy_values)
-                            .map_err(StandingQueryError::Delivery)?;
-                        (view.frontier(), rows)
+                        .map_err(StandingQueryError::Delivery)?;
+                        (root.status().1, rows)
                     }
                     Layout::Aggregate { slots, .. } | Layout::GroupCircuit { slots, .. } => {
                         let view = self.standing_query(cx, handle)?;
