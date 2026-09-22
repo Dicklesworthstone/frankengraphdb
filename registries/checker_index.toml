@@ -1042,6 +1042,16 @@ role = "advisory"
 reason = "fgdb-l9r3: verifies a proof bundle supplied as an argument (format, internal consistency, and optionally the commit/tree/blob binding against a repository). No bundle exists inside this repository for it to verify, so registration would exercise a synthetic invocation; its mutation-sensitive controls are scripts/local_proof_selftest.sh"
 
 [[script_disposition]]
+path = "scripts/merge_train.sh"
+role = "advisory"
+reason = "fgdb-verified-landing-queue-kqglu (owner ruling 2026-09-22: staging branch + local merge train): the operator command that promotes the staging branch to main only through a verified scripts/local_proof.sh pass bundle and records every verdict as a git note, plus the audit that measures unproven first-parent commits on main. It runs check.sh itself and pushes to the remote, so executing it inside check.sh would recurse and publish from inside a gate; it asserts no property of the tree it sits in. Its mutation-sensitive controls are scripts/merge_train_selftest.sh"
+
+[[script_disposition]]
+path = "scripts/merge_train_selftest.sh"
+role = "candidate"
+reason = "fgdb-verified-landing-queue-kqglu: seven-scenario controls for scripts/merge_train.sh over a throwaway remote with a fake check.sh (nothing to promote, --no-ff promotion with pass note, red bounce with FAIL-line note, no re-proof of a bounced pair, conflict note, audit violation for a direct toolchain-less push, --no-push dry run), MEASURED green (exit 0) on 2026-09-22 and mutation-proven (4 of 4 planted train defects turn it red). Not promoted for the same retained-fixture reason as scripts/local_proof_selftest.sh"
+
+[[script_disposition]]
 path = "scripts/git_hooks/install.sh"
 role = "advisory"
 reason = "fgdb-eesn: an explicit operator installer/status command for the landing-lease pre-commit hook. Its --install mode mutates the repository's shared Git hook directory, so executing it inside check.sh would be an unauthorized state change rather than an assertion"

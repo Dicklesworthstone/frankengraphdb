@@ -264,6 +264,20 @@ so a reader who greps anyway gets a true answer. `$?` is still the verdict.
 
 Beyond the bare gate, **every verification domain in §15 is a permanent CI gate** — semantics conformance, transaction-anomaly oracles, the crash-point matrix, format fuzzers, representation-equivalence, incremental correctness, and complexity-witness regression locks (an operator whose observed op-count exceeds its declared bound *fails CI*). A release may bypass a gate only with a public, expiring waiver recorded in the ledger.
 
+### No toolchain? Push to `staging`, never `main` (owner ruling 2026-09-22)
+
+**An environment that cannot run the pinned Rust toolchain must push only to the `staging` branch.** This applies whenever `cargo` is absent, or when checks would otherwise be recorded as UNRUN. `bash scripts/merge_train.sh run` is the only path from `staging` to `main`:
+
+1. It merges `main` + `staging` with `--no-ff` in a private clone.
+2. It proves that exact tree with `scripts/local_proof.sh` and verifies the bundle.
+3. It fast-forwards `main` **only** on a verified pass.
+
+Every verdict is written as a git note under the notes ref named merge-train. A promoted merge carries `verdict=pass`. A bounced `staging` tip carries `verdict=red`, `conflict` or `void`, plus the gate's `FAIL` lines. Read them with `git fetch origin refs/notes/*:refs/notes/*` and then `git notes --ref=merge-train show <staging-sha>`. Fix the batch on `staging`; a batch that bounced against the same `main` is not re-proved.
+
+Why this exists: 662 of 912 commits between 2026-09-08 and 2026-09-22 reached `main` uncompiled, and `cargo test --workspace` ran zero tests at HEAD (NE-0045 recurring; bead `fgdb-verified-landing-queue-kqglu`). An honest "UNRUN" paragraph in a commit message is a disclosure, not a verdict.
+
+`bash scripts/merge_train.sh audit --since <rev>` measures the rule. It reports every first-parent commit on `main` without a pass note, and exits 1 when one carries commits by the toolchain-less identity. Its controls are `scripts/merge_train_selftest.sh`.
+
 ---
 
 ## Testing Policy — the Verification Ladder (plan §15)
