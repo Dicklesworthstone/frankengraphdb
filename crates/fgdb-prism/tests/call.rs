@@ -167,7 +167,7 @@ fn weighted_parallel_edges_and_dangling_vertices_match_dense_oracle() {
         for t in 0..3 {
             for s in 0..3 { next[t] += 0.85 * expected[s] * matrix[s][t]; }
         }
-        let residual: f64 = next.iter().zip(expected).map(|(a,b)| (a-b).abs()).sum();
+        let residual: f64 = next.iter().zip(expected).map(|(&a, b)| f64::abs(a - b)).sum();
         expected = next;
         if residual < 1e-14 { break; }
     }

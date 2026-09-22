@@ -286,7 +286,7 @@ mod tests {
     use super::super::SpillableBytes;
     use asupersync::io::ReadBuf;
     use std::future::Future;
-    use std::io::{Cursor, Seek, Write};
+    use std::io::{Cursor, Seek};
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
 

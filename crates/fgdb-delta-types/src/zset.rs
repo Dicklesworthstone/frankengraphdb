@@ -153,7 +153,7 @@ impl<T: Ord> ZSet<T> {
         Ok(result)
     }
 
-    fn accumulate<E>(
+    pub fn accumulate<E>(
         &mut self,
         key: T,
         weight: ZWeight,

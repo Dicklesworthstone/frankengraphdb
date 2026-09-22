@@ -477,7 +477,7 @@ impl Default for Hasher {
 }
 
 /// A 256-bit BLAKE3 digest.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Digest(pub [u8; 32]);
 
 impl Digest {
