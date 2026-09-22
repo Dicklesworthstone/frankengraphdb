@@ -6,7 +6,7 @@ use crate::execute::{KernelOutput, KernelValues};
 use crate::{
     AdapterPath, ComplexityWitness, FNX_IMPLEMENTATION_REVISION, FNX_SIGNATURE_REGISTRY_VERSION,
     FnxAlgorithm, FnxBindError, FnxCallSpec, FnxCertificate, FnxExecutionError, FnxExecutionLimits,
-    FnxOutput, FnxParameters, FnxResult, FnxValue, PageRankOptions, SealedGraphView,
+    Directedness, FnxGraphKind, FnxOutput, FnxParameters, FnxResult, FnxValue, PageRankOptions, SealedGraphView,
     SealedNeighborCursor, SealedProjectionError,
 };
 use fgdb_crypto::{Digest, Hasher};
@@ -206,6 +206,21 @@ fn pass_work(n: usize, retained: usize) -> Result<usize> {
     )
 }
 
+// Incoming locators additionally search the source descriptor prefix directory.
+// An undirected pass visits both faces and merges RAW incidences, not reduced
+// edges. H includes excluded endpoints, relations and invisible history.
+fn directional_pass_work(n: usize, retained: usize, direction: Directedness) -> Result<usize> {
+    let forward = pass_work(n, retained)?;
+    if n == 0 || direction == Directedness::Directed { return Ok(forward); }
+    let height = (usize::BITS - retained.leading_zeros()) as usize;
+    let incoming = add(forward, add(mul(retained, add(8, height)?)?, mul(n, 4)?)?)?;
+    if direction == Directedness::Undirected {
+        add(add(forward, incoming)?, mul(retained, 2)?)
+    } else {
+        Ok(incoming)
+    }
+}
+
 fn pagerank(
     graph: &impl Rows,
     options: PageRankOptions,
@@ -398,12 +413,32 @@ impl FnxCallSpec {
             FnxAlgorithm::PageRank(_)
                 | FnxAlgorithm::SingleSourceShortestPathLength { .. }
                 | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
+                | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
         )
     }
 
-    /// Execute PageRank, outgoing hop/weighted distances, or directed weak/strong
+    /// Preflight the registered graph-kind law before a host seals a source.
+    /// Execution repeats this check, so using a prepared projection cannot
+    /// bypass it. No graph content or resource allocation is required.
+    pub fn validate_sealed_projection(&self, direction: Directedness) -> Result<()> {
+        if !self.supports_sealed_execution() {
+            return Err(Error::UnsupportedAlgorithm(self.algorithm()));
+        }
+        let required = self.signature().graph_kind;
+        let compatible = match required {
+            FnxGraphKind::Any => true,
+            FnxGraphKind::Directed => direction != Directedness::Undirected,
+            FnxGraphKind::Undirected => direction == Directedness::Undirected,
+        };
+        if !compatible {
+            return Err(ExecutionError::GraphKindMismatch { required, actual: direction }.into());
+        }
+        Ok(())
+    }
+
+    /// Execute PageRank, outgoing hop/weighted distances, or undirected/weak/strong
     /// components directly from authenticated compressed rows. Every graph pass
     /// and row pull is fallible; component labels and sources are stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
@@ -416,12 +451,10 @@ impl FnxCallSpec {
         memory: FnxMemoryLimits,
     ) -> Result<FnxResult> {
         checkpoint(cx)?;
-        if !self.supports_sealed_execution() {
-            return Err(Error::UnsupportedAlgorithm(self.algorithm()));
-        }
+        self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
         let admission = ResultAdmission::new(self, limits, memory)?;
-        let pass = pass_work(n, graph.scan_incidence_bound())?;
+        let pass = directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
             FnxAlgorithm::PageRank(options) => {
                 admit("iterations", options.max_iter(), limits.max_iterations)?;
@@ -452,12 +485,12 @@ impl FnxCallSpec {
                 admission.rows(1)?;
                 (
                     "fgdb-prism/sealed-dijkstra-indexed-heap-v1",
-                    shortest_path::work(n, graph.edge_count(), pass)?,
+                    shortest_path::work(n, graph.adjacency_entry_count(), pass)?,
                     shortest_path::workspace(n)?,
                     Some(ordinal),
                 )
             }
-            algorithm @ (FnxAlgorithm::WeaklyConnectedComponents
+            algorithm @ (FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents
             | FnxAlgorithm::StronglyConnectedComponents) => {
                 admission.rows(n)?;
                 let strong = matches!(algorithm, FnxAlgorithm::StronglyConnectedComponents);
@@ -468,7 +501,7 @@ impl FnxCallSpec {
                 };
                 (
                     kernel,
-                    components::work(n, graph.edge_count(), pass, strong)?,
+                    components::work(n, graph.adjacency_entry_count(), pass, strong)?,
                     components::workspace(n, strong)?,
                     None,
                 )
@@ -499,7 +532,7 @@ impl FnxCallSpec {
                 &admission,
                 &mut control,
             )?,
-            FnxAlgorithm::WeaklyConnectedComponents => {
+            FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
                 components::weak(&rows, &admission, &mut control)?
             }
             FnxAlgorithm::StronglyConnectedComponents => {
@@ -637,7 +670,12 @@ fn finish(
     let kernel_source_digest = source_digest();
     let numeric_profile = call.numeric_profile();
     let adapter = AdapterPath::CompressedCursor;
-    let witness = output.witness;
+    let mut witness = output.witness;
+    if graph.spec().directedness != Directedness::Directed {
+        witness.complexity_claim.push_str(
+            "; plus O(p * H * log(1+H)) incoming locator work, p = graph passes",
+        );
+    }
     let mut hash = Hasher::new();
     hash.update(b"fgdb:prism:call-certificate:v3");
     hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
@@ -703,6 +741,8 @@ fn source_digest() -> Digest {
             include_str!("sealed_shortest_path.rs"),
             include_str!("shortest_path.rs"),
             include_str!("sealed.rs"),
+            include_str!("sealed_direction.rs"),
+            include_str!("../../fgdb-strata/src/tiered/sealed/incoming.rs"),
             include_str!("call.rs"),
             include_str!("input.rs"),
             include_str!("projection.rs"),
@@ -1035,6 +1075,43 @@ mod tests {
             mul(usize::MAX, 2),
             Err(Error::Execution(ExecutionError::SizeOverflow))
         ));
+    }
+
+    #[test]
+    fn incoming_work_accounts_for_both_faces_and_retained_locator_searches() {
+        for n in [1, 3, 100] {
+            for history in [0, 1, 8, 10_000] {
+                let directed = directional_pass_work(n, history, Directedness::Directed).unwrap();
+                let reversed = directional_pass_work(n, history, Directedness::Reversed).unwrap();
+                let undirected = directional_pass_work(n, history, Directedness::Undirected).unwrap();
+                assert_eq!(directed, pass_work(n, history).unwrap());
+                assert!(reversed >= directed);
+                assert!(undirected >= directed + reversed);
+            }
+        }
+        for direction in [Directedness::Reversed, Directedness::Undirected] {
+            assert_eq!(directional_pass_work(0, usize::MAX, direction).unwrap(), 0);
+            assert!(directional_pass_work(1, usize::MAX, direction).is_err());
+        }
+    }
+
+    #[test]
+    fn compressed_calls_enforce_the_same_registered_graph_kinds_before_source_access() {
+        let undirected = FnxCallSpec::connected_components();
+        assert!(undirected.supports_sealed_execution());
+        for direction in [Directedness::Directed, Directedness::Reversed, Directedness::Undirected] {
+            assert_eq!(undirected.validate_sealed_projection(direction).is_ok(),
+                direction == Directedness::Undirected);
+            for call in [FnxCallSpec::weakly_connected_components(), FnxCallSpec::strongly_connected_components()] {
+                assert_eq!(call.validate_sealed_projection(direction).is_ok(),
+                    direction != Directedness::Undirected);
+            }
+            for call in [FnxCallSpec::pagerank(PageRankOptions::default()), bfs_call(VId(0), None)] {
+                call.validate_sealed_projection(direction).unwrap();
+            }
+            assert!(matches!(FnxCallSpec::triangles().validate_sealed_projection(direction),
+                Err(Error::UnsupportedAlgorithm(FnxAlgorithm::Triangles))));
+        }
     }
 
     fn component_call(strong: bool) -> FnxCallSpec {
