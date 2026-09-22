@@ -282,3 +282,12 @@ fn parameter_queries_preserve_owner_fences_and_empty_scan_conflicts() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+mod example {
+    include!("../examples/parameterized_queries.rs");
+}
+
+#[test]
+fn parameterized_queries_example_executes_cleanly() {
+    example::run().expect("parameterized_queries example must execute without error");
+}

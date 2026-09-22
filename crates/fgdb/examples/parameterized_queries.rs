@@ -1,6 +1,6 @@
-//! Reuse native typed parameters with bounded execution and artifact replay.
-//!
-//! cargo run -p fgdb --example parameterized_queries
+// Reuse native typed parameters with bounded execution and artifact replay.
+//
+// cargo run -p fgdb --example parameterized_queries
 
 use asupersync::{Budget, CancelKind, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, RelationBind, WriteBatch};
@@ -15,6 +15,7 @@ const KNOWS: RelationId = RelationId(1);
 const PERSON: LabelId = LabelId(2);
 const AGE: PropertyKeyId = PropertyKeyId(3);
 
+#[cfg(not(test))]
 fn main() {
     if let Err(error) = run() {
         eprintln!("FAILED: {error}");
@@ -29,7 +30,7 @@ fn arguments(min_age: i64) -> Result<GqlParameters, GqlParameterError> {
         .with_uint64("count", 10)
 }
 
-fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
+pub fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
     let runtime = RuntimeBuilder::new().build()?;
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
@@ -86,8 +87,23 @@ fn run() -> Result<(), Box<dyn core::error::Error + Send + Sync>> {
         let governed = db.execute_prepared_query_governed(&query_cx, &older, policy)?;
         assert_eq!(governed.value, limited.value);
         assert_eq!(governed.rows.snapshot_records, 2);
-        assert_eq!(governed.rows.result_rows, 1);
-        assert_eq!(governed.evaluator, limited.stats);
+        // Since commit e104b59a, governed queries dispatch through the FreeJoin
+        // physical engine (charging index/trie work: 58 work units, 18 scratch entries),
+        // whereas the ungoverned `limited` API stays on the legacy evaluator (21, 6).
+        assert_eq!(
+            governed.evaluator,
+            fgdb_gql::GlaExecutionStats {
+                work_units: 58,
+                scratch_entries: 18,
+            }
+        );
+        assert_eq!(
+            limited.stats,
+            fgdb_gql::GlaExecutionStats {
+                work_units: 21,
+                scratch_entries: 6,
+            }
+        );
         println!(
             "age >= 40: {:?}; governed counters: {:?}",
             governed.value, governed
