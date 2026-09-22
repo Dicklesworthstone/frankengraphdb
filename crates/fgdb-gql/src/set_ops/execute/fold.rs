@@ -148,7 +148,7 @@ fn projected<E, C>(
     }
 }
 
-fn visit<E, C, S, Checkpoint>(
+pub(super) fn visit<E, C, S, Checkpoint>(
     query: &PreparedGraphSet,
     source: &mut S,
     meter: &mut Meter<Checkpoint>,

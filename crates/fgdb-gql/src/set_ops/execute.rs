@@ -1,6 +1,7 @@
 //! One cumulative allowance for GLA operands and relational set execution.
 
 mod fold;
+mod page;
 mod selected_cross;
 
 use super::*;
@@ -220,6 +221,9 @@ where
     Checkpoint: FnMut() -> Result<(), C>,
 {
     meter.event(GlaExecutionEvent::Work)?;
+    if page::supports(query) {
+        return page::collect(query, source, meter, operand);
+    }
     let mut rows = if let Some((left, right, code, projection)) = query.filtered_cross_inputs() {
         // Admit and finish both original children once, even if the left bag
         // is empty. Do not allocate rejected Cartesian candidate rows.
