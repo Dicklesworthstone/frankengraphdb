@@ -5,6 +5,8 @@
 //! transport deadline, not a requirement that every donor answer. Immutable
 //! authenticated symbols survive timeouts, donor failures and cancelled futures.
 
+pub mod streaming;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
@@ -147,7 +149,7 @@ pub async fn recover<T: PullTransport>(
         for reply in replies {
             match reply.outcome {
                 ReplyOutcome::Record(bytes) => {
-                    match window.pull.accept(reply.request.donor, &bytes, verification) {
+                    match window.pull.accept_reply(reply.request, &bytes, verification) {
                         Ok(SymbolAdmission::Added | SymbolAdmission::Duplicate) => {}
                         Err(PullError::RecordLength
                             | PullError::UnrequestedSymbol
