@@ -406,6 +406,17 @@ impl SnapshotGraphView {
     pub fn charged_workspace_bytes(&self) -> usize { self.0.workspace_bytes }
     pub fn shares_cache_with(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
 
+    /// Borrow one canonical outgoing row and its position-aligned weights.
+    /// The two slices have equal length and share the immutable cache lifetime;
+    /// no per-edge lookup, allocation, string conversion or adjacency copy is
+    /// needed. This borrows DECODED_CACHE, not compressed Strata storage.
+    pub fn projected_row(&self, source: usize) -> Option<(&[usize], &[f64])> {
+        let end = source.checked_add(1)?;
+        let start = *self.0.outgoing.offsets.get(source)?;
+        let end = *self.0.outgoing.offsets.get(end)?;
+        Some((self.0.outgoing.neighbors.get(start..end)?, self.0.weights.get(start..end)?))
+    }
+
     pub fn projected_weight(&self, source: usize, target: usize) -> Option<f64> {
         let row = self.0.outgoing.row(source)?;
         let index = row.binary_search(&target).ok()?;
