@@ -33,6 +33,35 @@ pub(super) fn total_projection(projection: &[GraphSetProjection]) -> bool {
     ))
 }
 
+/// Evaluate the already-checked row-independent expression exactly once, but
+/// only AFTER its entire nonempty input succeeds. Both cardinality and repeated
+/// value execution use this helper; neither substitutes a syntactic list size
+/// for evaluation (which could conceal arithmetic/index/type failures).
+pub(super) fn constant_unwind_size<E, C, Checkpoint>(
+    value: &GraphSetValue,
+    column: usize,
+    meter: &mut Meter<Checkpoint>,
+) -> SetResult<Amount, E, C>
+where
+    Checkpoint: FnMut() -> Result<(), C>,
+{
+    let value = projection::evaluate_value(
+        value, &GraphValueRow::unit(), column, &mut |event| meter.event(event),
+    ).map_err(|error| projected(error, 0))?;
+    let elements = match value {
+        GraphValue::List(values) => values.len() as u128,
+        value if value.is_null() => 0,
+        _ => return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
+            row: 0, column,
+            error: crate::GraphIntegerError {
+                instruction: 0,
+                kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
+            },
+        })),
+    };
+    Ok(Amount::from_u128(elements))
+}
+
 impl PreparedGraphSet {
     pub(crate) fn has_factorized_cardinality(&self) -> bool {
         match &self.node {
@@ -122,22 +151,8 @@ where
             if input_size.is_zero() {
                 Amount::ZERO // An empty input never evaluates a downstream expression.
             } else {
-                let column = input.types.len();
-                let value = projection::evaluate_value(
-                    value, &GraphValueRow::unit(), column, &mut |event| meter.event(event),
-                ).map_err(|error| projected(error, 0))?;
-                let elements = match value {
-                    GraphValue::List(values) => values.len() as u128,
-                    value if value.is_null() => 0,
-                    _ => return Err(GqlQueryError::Source(GraphSetExecutionError::Projection {
-                        row: 0, column,
-                        error: crate::GraphIntegerError {
-                            instruction: 0,
-                            kind: crate::GraphIntegerErrorKind::IncompatibleOperands,
-                        },
-                    })),
-                };
-                input_size.multiply(Amount::from_u128(elements))
+                let elements = constant_unwind_size(value, input.types.len(), meter)?;
+                input_size.multiply(elements)
             }
         }
         SetNode::Project {

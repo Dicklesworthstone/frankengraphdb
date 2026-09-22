@@ -11,6 +11,20 @@ use super::cardinality::{self, Amount};
 
 type RepeatedRows = Vec<(GraphValueRow, Amount)>;
 
+// Definition-only mapping, bounded by the admitted row schema. Literal
+// columns need no child value. Duplicate aliases share one retained input.
+fn projection_inputs(projection: &[GraphSetProjection], columns: &[usize]) -> Vec<usize> {
+    let mut inputs = Vec::new();
+    for &column in columns {
+        if let GraphSetValue::Column(input) = projection[column].value() {
+            inputs.push(*input);
+        }
+    }
+    inputs.sort_unstable();
+    inputs.dedup();
+    inputs
+}
+
 impl PreparedGraphSet {
     pub(crate) fn has_repeated_factor(&self, columns: &[usize]) -> bool {
         if !self.order.is_empty() || columns.iter().any(|&at| at >= self.types.len()) {
@@ -18,6 +32,15 @@ impl PreparedGraphSet {
         }
         match &self.node {
             SetNode::CrossJoin { left, .. } => columns.iter().all(|&at| at < left.types.len()),
+            SetNode::Unwind { input, value } => {
+                cardinality::constant(value)
+                    && columns.iter().all(|&at| at < input.types.len())
+            }
+            SetNode::Project { input, projection, quantifier: GraphSetQuantifier::All }
+                if input.preserves_row_order() && cardinality::total_projection(projection) =>
+            {
+                input.has_repeated_factor(&projection_inputs(projection, columns))
+            }
             SetNode::Scope(input) => input.has_repeated_factor(columns),
             _ => false,
         }
@@ -104,6 +127,50 @@ where
             rows
         }
         SetNode::Scope(input) => collect(input, columns, source, meter, operand)?,
+        SetNode::Unwind { input, value } => {
+            let mut rows = collect(input, columns, source, meter, operand)?;
+            // The appended value is not observed. Evaluate its complete list
+            // once only after every input row succeeds, using the same checked
+            // interpreter as COUNT. An empty input does not evaluate it at all.
+            if !rows.is_empty() {
+                let repetitions = cardinality::constant_unwind_size(value, input.types.len(), meter)?;
+                for (_, weight) in &mut rows {
+                    meter.event(GlaExecutionEvent::Work)?;
+                    *weight = weight.multiply(repetitions);
+                }
+            }
+            rows
+        }
+        SetNode::Project { input, projection, .. } => {
+            // Admission checked ALL, preserved order and EVERY expression's
+            // totality, not just observed columns. An unused division, index,
+            // list constructor, filter or DISTINCT can never disappear here.
+            meter.event(GlaExecutionEvent::ScratchEntry)?;
+            for _ in columns { meter.event(GlaExecutionEvent::ScratchEntry)?; }
+            let inputs = projection_inputs(projection, columns);
+            let rows = collect(input, &inputs, source, meter, operand)?;
+            let mut output = Vec::new();
+            for (row_at, (row, weight)) in rows.into_iter().enumerate() {
+                meter.event(GlaExecutionEvent::ScratchEntry)?;
+                let mut values = Vec::new();
+                for &column in columns {
+                    let value = projection[column].value();
+                    // Rebind only the private compact slot. Literal/value
+                    // payloads remain borrowed until their metered copy.
+                    let rebound;
+                    let expression = if let GraphSetValue::Column(input) = value {
+                        rebound = GraphSetValue::Column(inputs.binary_search(input)
+                            .expect("the projection retained every demanded input"));
+                        &rebound
+                    } else { value };
+                    values.push(projection::evaluate_value(expression, &row, column,
+                        &mut |event| meter.event(event))
+                        .map_err(|error| projected(error, row_at))?);
+                }
+                output.push((GraphValueRow::from_owned_values(values), weight));
+            }
+            output
+        }
         _ => unreachable!("the repeated-factor admission profile is closed"),
     };
     // Split occurrence windows through run lengths, not carrier-row indices.

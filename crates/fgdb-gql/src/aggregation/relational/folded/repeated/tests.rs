@@ -277,3 +277,5 @@ fn observed_right_columns_and_explicit_input_sort_remain_value_barriers() {
     let ordered = relation.with_order_by(&[crate::algebra::GraphValueOrder::descending(0)]).unwrap();
     assert!(!ordered.has_repeated_factor(&[0]));
 }
+
+mod pipeline;
