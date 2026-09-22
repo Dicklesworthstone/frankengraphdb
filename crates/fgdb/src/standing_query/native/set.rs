@@ -188,6 +188,20 @@ impl<'a, V: Vfs + Clone> Staging<'a, V> {
                 self.database.standing_queries.len(),
             )?;
             self.append(StandingQuery::Projection(Box::new(query)))
+        } else if let Some((left, right, spec)) = query.incremental_join() {
+            // Match the completed child bags, not extracted graph leaves.
+            // Keep the checked ON program intact through initialization and
+            // the same dependency-ordered committed-delta publication path.
+            let left = self.compile(cx, left, policy, checkpoint)?;
+            let right = self.compile(cx, right, policy, checkpoint)?;
+            let query = self.database.prepare_standing_join_spec(
+                cx,
+                [left, right],
+                spec,
+                policy,
+                self.database.standing_queries.len(),
+            )?;
+            self.append(StandingQuery::Join(Box::new(query)))
         } else if let Some((left, right)) = query.incremental_cross_join() {
             // Never short-circuit the other operand when one result is empty:
             // its schema, definition and failures are still part of the query.
@@ -427,11 +441,10 @@ fn rebuild_checked<V: Vfs + Clone>(
                         .checked_add(input - first)
                         .ok_or(StandingQueryError::Unsupported)?;
                 }
-                StandingQuery::Join(Box::new(staged.database.prepare_standing_join(
+                StandingQuery::Join(Box::new(staged.database.prepare_standing_join_spec(
                     cx,
                     inputs,
-                    query.spec().keys(),
-                    query.spec().kind(),
+                    query.spec(),
                     policy,
                     staged.database.standing_queries.len(),
                 )?))
@@ -568,3 +581,6 @@ mod group_tests;
 
 #[cfg(test)]
 mod constant_tests;
+
+#[cfg(test)]
+mod join_tests;
