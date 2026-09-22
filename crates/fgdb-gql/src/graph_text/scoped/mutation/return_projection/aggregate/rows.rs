@@ -62,6 +62,14 @@ pub(super) fn finish<'a>(
 }
 
 impl PreparedGraphPipelineAggregateText {
+    /// Whether the admitted definition contains no graph source. This is a
+    /// structural property of the prepared plan, not a probe of current data.
+    /// Hosts use it to preserve the existing graph-backed execution lane.
+    #[must_use]
+    pub fn is_source_free(&self) -> bool {
+        self.input.singleton && self.input.selection.is_none()
+    }
+
     /// Bind the entire relational pipeline, including zero-source WITH/UNWIND
     /// and standalone aggregate RETURN. Execute through the set-aggregate API:
     /// source callbacks run only for actual graph leaves, never for Singleton.

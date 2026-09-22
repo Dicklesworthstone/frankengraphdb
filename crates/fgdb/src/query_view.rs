@@ -92,12 +92,22 @@ impl PreparedNativeRead {
                 ))
             }
             Self::PipelineAggregate(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::PipelineText)?;
-                let result = view
-                    .execute_graph_aggregate_governed_at(cx, &query, as_of, policy)
-                    .map_err(QueryError::Aggregate)?;
+                // Select from the admitted definition, never from source data
+                // or a failed execution. Existing graph-backed counters and
+                // source-error nesting stay on their original adapter.
+                let result = if prepared.is_source_free() {
+                    let query = prepared
+                        .bind_relation_parameters(params)
+                        .map_err(QueryError::PipelineText)?;
+                    view.execute_graph_set_aggregate_governed_at(cx, &query, as_of, policy)
+                        .map_err(QueryError::Aggregate)?
+                } else {
+                    let query = prepared
+                        .bind_parameters(params)
+                        .map_err(QueryError::PipelineText)?;
+                    view.execute_graph_aggregate_governed_at(cx, &query, as_of, policy)
+                        .map_err(QueryError::Aggregate)?
+                };
                 Ok(aggregates(
                     prepared.columns().to_vec(),
                     prepared.output_slots(),
