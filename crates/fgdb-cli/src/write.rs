@@ -211,7 +211,9 @@ mod tests {
             &GqlParameters::new(), Some(csv), Some("text\tname")).unwrap();
         let script = PreparedGraphWriteScript::prepare_with_parameter_types(statement,
             fgdb_delta_types::RelationId(1),
-            &[("name", GqlParameterType::Scalar(CanonicalScalarKind::Text))], &symbols).unwrap();
+            &[("name", GqlParameterType::Scalar(CanonicalScalarKind::Text))],
+            |kind, name| symbols.resolve(kind, name),
+        ).unwrap();
         let arguments = [
             GqlParameters::new().with_int64("key", 1).unwrap().with_text("name", "'; MATCH (n) DELETE n; --").unwrap(),
             GqlParameters::new().with_int64("key", 2).unwrap().with_null("name").unwrap(),

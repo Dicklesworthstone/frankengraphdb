@@ -191,7 +191,8 @@ impl Reader {
     ) -> io::Result<Option<String>> {
         control()?;
         if self.offset == self.image.len {
-            check_length(&self.file()?, self.image.len)?;
+            let file = self.file()?;
+            check_length(&file, self.image.len)?;
             return Ok(None);
         }
         let mut row = Vec::new();
