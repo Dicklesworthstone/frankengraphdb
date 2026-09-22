@@ -1,0 +1,12 @@
+[package]
+name = "fgdb-beacon"
+version = "0.0.1"
+edition = "2024"
+description = "Derived, snapshot-preserving HNSW and BM25 index slices for FrankenGraphDB."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+fgdb-types = { path = "../fgdb-types" }
