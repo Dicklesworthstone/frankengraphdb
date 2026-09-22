@@ -32,6 +32,14 @@ impl PreparedGraphAggregate {
         if self.relational_input.is_some() {
             return None;
         }
+        self.prepare_complete_group_output()
+    }
+
+    /// Normalize only completed-group output. The caller separately admits its
+    /// source and accumulator profile. Relational folding may reuse this result
+    /// stage without widening vertex/edge pull-source admission above.
+    pub(crate) fn prepare_complete_group_output(&self) -> Option<Self> {
+        if self.supports_row_local_aggregate_stream() { return Some(self.clone()); }
         let mut physical = self.clone();
         if !self.having.is_empty() {
             let mut program = Vec::new();

@@ -2,7 +2,11 @@
 //!
 //! Single-source callers retain their admitted graph contract. Compound callers
 //! supply every actual leaf through the set engine's source adapter. Both paths
-//! feed the SAME borrowed-row group/result engine, never a synthetic graph.
+//! feed the existing exact group/result engines, never a synthetic graph.
+//! Eligible order-preserving expansions fold into the owned numeric states;
+//! sorting barriers and unsupported functions retain the materialized path.
+
+mod folded;
 
 use super::*;
 use crate::PreparedGraphSet;
@@ -21,7 +25,8 @@ impl PreparedGraphAggregate {
     ///
     /// Binary set inputs still refuse at this single-source boundary. Use
     /// PreparedGraphSetAggregate for a relation with multiple graph operands.
-    /// This path materializes bounded rows, not spill storage.
+    /// Eligible row expansions fold without an expanded intermediate bag.
+    /// Leaves, sorting barriers and group state remain in memory, not spill.
     pub fn prepare_relation(
         relation: PreparedGraphSet,
         keys: &[usize],
@@ -125,6 +130,24 @@ impl PreparedGraphAggregate {
     /// Called only by the single-source entrypoint above or the compound type.
     /// The trusted host adapter pins one snapshot/overlay for ALL leaf calls.
     pub(crate) fn execute_relational_with_source<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        source: impl FnMut(
+            &PreparedGraphPattern<GraphValueRow>,
+            GqlQueryPolicy,
+        ) -> Result<GqlQueryExecution<GraphValueRow>, GqlQueryError<E, C>>,
+        checkpoint: impl FnMut() -> Result<(), C>,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, GqlQueryError<GraphAggregateError<E>, C>>
+    {
+        // Select before observing a source. A runtime failure never falls
+        // back, repeats a graph read, or starts a fresh allowance.
+        if let Some(physical) = self.folded_definition() {
+            return physical.execute_relational_folded(policy, source, checkpoint);
+        }
+        self.execute_relational_materialized(policy, source, checkpoint)
+    }
+
+    fn execute_relational_materialized<E, C>(
         &self,
         policy: GqlQueryPolicy,
         source: impl FnMut(

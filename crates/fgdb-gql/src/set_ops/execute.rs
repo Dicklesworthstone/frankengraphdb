@@ -1,5 +1,7 @@
 //! One cumulative allowance for GLA operands and relational set execution.
 
+mod fold;
+
 use super::*;
 use crate::algebra::{GraphValue, GraphValueRow};
 use crate::algebra_exec::charge_payload;
