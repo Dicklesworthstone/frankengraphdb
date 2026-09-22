@@ -19,6 +19,7 @@ members = [
     "crates/fgdb-calibrate",
     "crates/fgdb-chronicle",
     "crates/fgdb-claim",
+    "crates/fgdb-cli",
     "crates/fgdb-codec",
     "crates/fgdb-collections",
     "crates/fgdb-crypto",

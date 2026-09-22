@@ -1,0 +1,20 @@
+[package]
+name = "fgdb-cli"
+version = "0.0.1"
+edition = "2024"
+description = "Local-owner FrankenGraphDB command-line interface"
+publish = false
+
+[[bin]]
+name = "fgdb"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "78b64636e99fea4ea2d868096576021dd3b8e519", version = "=0.5.0", default-features = false }
+fgdb = { path = "../fgdb" }
+fgdb-delta-types = { path = "../fgdb-delta-types" }
+fgdb-gql = { path = "../fgdb-gql" }
+fgdb-types = { path = "../fgdb-types" }
