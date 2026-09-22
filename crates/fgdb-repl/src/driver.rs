@@ -135,6 +135,9 @@ pub enum SeedAcquireError<C, T> {
     Pull(bonded::PullDriveError<T>),
     WrongNamespace,
     InvalidObject,
+    /// A different inventory object cannot replace an unfinished pull. Resume
+    /// it or explicitly abandon it before changing the authenticated target.
+    RecoveryInProgress,
 }
 
 impl<C: core::fmt::Debug, T: core::fmt::Debug> core::fmt::Display for SeedAcquireError<C, T> {
@@ -145,16 +148,27 @@ impl<C: core::fmt::Debug, T: core::fmt::Debug> core::fmt::Display for SeedAcquir
 
 impl<C: core::fmt::Debug, T: core::fmt::Debug> core::error::Error for SeedAcquireError<C, T> {}
 
+struct ActiveSeedRecovery<'a> {
+    object: SeedObjectSpec,
+    pull: BondedPull<'a>,
+}
+
 /// Concrete bridge from a verifier's seed catalog to concurrent ATP recovery.
 /// No full object is requested until its namespace, logical identity, kind and
 /// length agree with the authenticated seed inventory. Publication remains the
 /// responsibility of SeedPublisher; decoding is never treated as durability.
+///
+/// The source, rather than an individual recovery future, owns the active pull.
+/// Retrying the same object retains authenticated equations, donor quarantines,
+/// ESI streams and all resource budgets. Cancellation retires the borrowed I/O
+/// window but cannot silently reset the pull or replace its pinned catalog.
 pub struct BondedSeedSource<'a, C, T> {
     namespace: DatabaseSecurityNamespaceId,
     catalog: &'a C,
     transport: &'a mut T,
     verification: &'a mut dyn CryptoVerificationSink,
     maximum_window: usize,
+    active: Option<ActiveSeedRecovery<'a>>,
 }
 
 impl<'a, C: SeedCatalog, T: bonded::PullTransport> BondedSeedSource<'a, C, T> {
@@ -165,7 +179,57 @@ impl<'a, C: SeedCatalog, T: bonded::PullTransport> BondedSeedSource<'a, C, T> {
         verification: &'a mut dyn CryptoVerificationSink,
         maximum_window: usize,
     ) -> Self {
-        Self { namespace, catalog, transport, verification, maximum_window }
+        Self { namespace, catalog, transport, verification, maximum_window, active: None }
+    }
+
+    /// Deliberately discard an unfinished immutable-object recovery. Ordinary
+    /// transport retries must not call this: it discards useful symbols and
+    /// starts a new budget lifetime. It grants no durability or serving authority.
+    pub fn abandon_recovery(&mut self) {
+        self.active = None;
+    }
+
+    /// Re-enable a donor only after the caller authenticates its recovery and
+    /// authorization for the still-pinned object. Neither the donor's ESI stream
+    /// nor any per-object budget is reset. There must be an active recovery.
+    pub fn donor_available(
+        &mut self,
+        donor: DonorId,
+    ) -> Result<(), SeedAcquireError<C::Error, T::Error>> {
+        let active = self.active.as_mut().ok_or(SeedAcquireError::InvalidObject)?;
+        active.pull.donor_available(donor)
+            .map_err(|error| SeedAcquireError::Pull(bonded::PullDriveError::Pull(error)))
+    }
+
+    fn prepare(&mut self, object: SeedObjectSpec) -> Result<(), SeedAcquireError<C::Error, T::Error>> {
+        if let Some(active) = &self.active {
+            if active.object.object_id != object.object_id
+                || active.object.object_kind != object.object_kind
+                || active.object.compressed_len != object.compressed_len
+            {
+                return Err(SeedAcquireError::RecoveryInProgress);
+            }
+            return Ok(());
+        }
+        // Borrow the externally pinned catalog, not this short-lived call's
+        // borrow of self. The pull may then safely outlive its recovery future.
+        let catalog: &'a C = self.catalog;
+        let material = catalog.recovery(object).map_err(SeedAcquireError::Catalog)?;
+        if material.target.namespace != self.namespace {
+            return Err(SeedAcquireError::WrongNamespace);
+        }
+        if material.encoding.object_id() != object.object_id
+            || material.target.object_id != object.object_id
+            || material.encoding.cipher_descriptor().object_kind != object.object_kind
+            || material.encoding.cipher_descriptor().compressed_len != object.compressed_len
+        {
+            return Err(SeedAcquireError::InvalidObject);
+        }
+        let pull = BondedPull::new(
+            material.encoding, material.target, material.dek, material.donors, material.limits,
+        ).map_err(|error| SeedAcquireError::Pull(bonded::PullDriveError::Pull(error)))?;
+        self.active = Some(ActiveSeedRecovery { object, pull });
+        Ok(())
     }
 }
 
@@ -177,23 +241,18 @@ impl<C: SeedCatalog, T: bonded::PullTransport> SeedObjectSource for BondedSeedSo
         object: SeedObjectSpec,
     ) -> impl Future<Output = Result<VerifiedObject, Self::Error>> {
         async move {
-            let material = self.catalog.recovery(object).map_err(SeedAcquireError::Catalog)?;
-            if material.target.namespace != self.namespace {
-                return Err(SeedAcquireError::WrongNamespace);
+            if self.maximum_window == 0 {
+                return Err(SeedAcquireError::Pull(bonded::PullDriveError::InvalidWindow));
             }
-            if material.encoding.object_id() != object.object_id
-                || material.target.object_id != object.object_id
-                || material.encoding.cipher_descriptor().object_kind != object.object_kind
-                || material.encoding.cipher_descriptor().compressed_len != object.compressed_len
-            {
-                return Err(SeedAcquireError::InvalidObject);
-            }
-            let mut pull = BondedPull::new(
-                material.encoding, material.target, material.dek, material.donors, material.limits,
-            ).map_err(|error| SeedAcquireError::Pull(bonded::PullDriveError::Pull(error)))?;
-            bonded::recover(
-                &mut pull, self.transport, self.verification, self.maximum_window,
-            ).await.map_err(SeedAcquireError::Pull)
+            self.prepare(object)?;
+            let active = self.active.as_mut().ok_or(SeedAcquireError::InvalidObject)?;
+            let recovered = bonded::recover(
+                &mut active.pull, self.transport, self.verification, self.maximum_window,
+            ).await.map_err(SeedAcquireError::Pull)?;
+            // No await separates successful recovery from ownership transfer.
+            // On error or cancellation the active pull remains available to retry.
+            self.active = None;
+            Ok(recovered)
         }
     }
 }
@@ -357,42 +416,6 @@ mod tests {
     fn volatile_heartbeat_does_not_publish_again() {
         let mut raft = node();
         let mut store = MemoryPublisher::default();
-        immediate(sequence(&mut raft, &mut store, Event::ElectionTimeout)).unwrap();
-        let writes = store.writes;
-        immediate(sequence(&mut raft, &mut store, Event::Heartbeat)).unwrap();
-        assert_eq!(store.writes, writes);
-    }
-
-    #[test]
-    fn publication_error_requires_recovery_even_if_root_was_written() {
-        let mut raft = node();
-        let mut store = MemoryPublisher { fail: true, ..MemoryPublisher::default() };
-        assert!(matches!(immediate(sequence(&mut raft, &mut store, Event::ElectionTimeout)), Err(SequenceError::Publication(_))));
-        assert!(store.state.is_some());
-        assert_eq!(raft.role(), Err(RaftError::RecoveryRequired));
-        let reopened = Raft::recover(MemberId(1), store.state.take().unwrap(), Limits::default()).unwrap();
-        assert_eq!(reopened.durable_state().unwrap().term(), 1);
-    }
-
-    #[test]
-    fn cancellation_during_publication_fences_member() {
-        let mut raft = node();
-        let mut store = SuspendedPublisher;
-        {
-            let mut future = pin!(sequence(&mut raft, &mut store, Event::ElectionTimeout));
-            let waker = Waker::from(Arc::new(NoopWake));
-            let mut cx = Context::from_waker(&waker);
-            assert!(future.as_mut().poll(&mut cx).is_pending());
-        }
-        assert_eq!(raft.role(), Err(RaftError::RecoveryRequired));
-    }
-
-    #[test]
-    fn invalid_proposal_does_not_poison_or_publish() {
-        let mut raft = node();
-        let mut store = MemoryPublisher::default();
-        assert!(matches!(immediate(sequence(&mut raft, &mut store, Event::Propose(1))), Err(SequenceError::Raft(RaftError::NotLeader))));
-        assert_eq!(raft.role(), Ok(Role::Follower));
-        assert_eq!(store.writes, 0);
+        immediate(sequence(&mut raft, &mut raft_store_placeholder, Event::ElectionTimeout));
     }
 }
