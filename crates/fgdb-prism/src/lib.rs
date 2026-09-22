@@ -24,12 +24,13 @@ mod call;
 mod execute;
 mod input;
 mod projection;
+mod traversal;
 
 pub use call::{
-    FNX_NUMERIC_PROFILE, FNX_SIGNATURE_REGISTRY_VERSION, MAX_FNX_CALL_BYTES,
-    FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallSpec, FnxImplementationClass,
-    FnxOutput, FnxOutputColumn, FnxParameterSpec, FnxParameterType, FnxParameters,
-    FnxSignature, FnxSignatureRegistry, PageRankOptions,
+    FNX_DISCRETE_PROFILE, FNX_NUMERIC_PROFILE, FNX_SIGNATURE_REGISTRY_VERSION, MAX_FNX_CALL_BYTES,
+    FnxAlgorithm, FnxArgument, FnxBindError, FnxBindErrorKind, FnxCallSpec, FnxGraphKind,
+    FnxImplementationClass, FnxOutput, FnxOutputColumn, FnxParameterSpec, FnxParameterType,
+    FnxParameters, FnxSignature, FnxSignatureRegistry, PageRankOptions,
 };
 pub use execute::{
     ComplexityWitness, FnxCertificate, FnxExecutionError, FnxExecutionLimits,

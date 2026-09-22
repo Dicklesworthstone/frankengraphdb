@@ -27,9 +27,9 @@ fn scores(result: &FnxResult) -> Vec<f64> {
 }
 
 #[test]
-fn registry_describes_only_the_implemented_in_core_signature() {
-    assert_eq!(FnxSignatureRegistry::version(), 1);
-    assert_eq!(FnxSignatureRegistry::signatures().len(), 1);
+fn registry_describes_only_the_implemented_in_core_signatures() {
+    assert_eq!(FnxSignatureRegistry::version(), 2);
+    assert_eq!(FnxSignatureRegistry::signatures().len(), 5);
     let signature = FnxSignatureRegistry::lookup("fnx.pagerank").unwrap();
     assert_eq!(signature.graph_input_arity, 1);
     assert_eq!(signature.parameters.len(), 4);
@@ -52,7 +52,7 @@ fn literals_parameters_defaults_and_whitespace_bind_identically() {
     let prepared = FnxCallSpec::bind(" CALL fnx.pagerank($a, $k, $t, $w) YIELD * ; ", &params).unwrap();
     assert_eq!(default.digest(), prepared.digest());
     params.insert("a".to_owned(), FnxArgument::Float(0.5));
-    assert_eq!(prepared.options().alpha(), 0.85); // frozen, not a late parameter lookup
+    assert_eq!(prepared.options().unwrap().alpha(), 0.85); // frozen, not a late parameter lookup
     assert_eq!(bind("CALL fnx.pagerank(0.85)").digest(), default.digest());
     assert_eq!(bind("CALL fnx.pagerank(-0.0)").digest(), bind("CALL fnx.pagerank(0)").digest());
 }
@@ -244,7 +244,7 @@ fn cancellation_at_every_adapter_checkpoint_discards_results() {
         });
         assert!(matches!(result, Err(FnxExecutionError::Cancelled("cancel"))));
     }
-    // This is checkpoint coverage, not a claim of cancellation inside fnx.
+    // Includes checkpoints inside the native, fnx-differential kernel.
     assert!(count > 5);
 }
 

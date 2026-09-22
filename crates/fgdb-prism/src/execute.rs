@@ -3,21 +3,21 @@
 //! their own source instead of claiming that fnx executed the computation.
 
 use crate::{
-    AdapterPath, FNX_IMPLEMENTATION_REVISION, FNX_NUMERIC_PROFILE,
-    FNX_SIGNATURE_REGISTRY_VERSION, FnxCallSpec, FnxOutput, GraphView,
+    AdapterPath, FNX_IMPLEMENTATION_REVISION,
+    FNX_SIGNATURE_REGISTRY_VERSION, FnxAlgorithm, FnxCallSpec, FnxGraphKind, FnxOutput, GraphView,
     SnapshotBinding, SnapshotGraphView,
 };
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_types::VId;
 pub use fnx_algorithms::ComplexityWitness;
 
-const EXECUTION_KERNEL: &str = "fgdb-prism/pagerank-row-cursor-v1";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FnxExecutionLimits {
+    /// Iterative kernels only; traversal kernels have a fixed pass count.
     pub max_iterations: usize,
     pub max_result_rows: usize,
-    /// Admission model: (n + directed adjacency entries) * (max_iter + 1).
+    /// Admission model: PageRank (n + arcs) * (max_iter + 1), BFS/CC n + arcs,
+    /// WCC n + 2*arcs, SCC 2*(n + arcs). Arcs are directed adjacency entries.
     /// Not an observed CPU counter, hard memory quota, or deadline guarantee.
     pub max_estimated_work: usize,
 }
@@ -36,6 +36,8 @@ pub enum FnxExecutionError<C> {
     NonFiniteWeightSum,
     InvalidNumericResult,
     InvalidUpstreamResult,
+    UnknownSource(VId),
+    GraphKind { required: FnxGraphKind },
     NotConverged {
         max_iterations: usize,
         witness: ComplexityWitness,
@@ -53,7 +55,9 @@ impl<C: core::fmt::Display> core::fmt::Display for FnxExecutionError<C> {
             Self::NegativeWeight => f.write_str("PageRank requires nonnegative projected weights"),
             Self::NonFiniteWeightSum => f.write_str("PageRank outgoing weight sum is non-finite"),
             Self::InvalidNumericResult => f.write_str("invalid PageRank score"),
-            Self::InvalidUpstreamResult => f.write_str("analytics output does not cover the projection exactly once"),
+            Self::InvalidUpstreamResult => f.write_str("invalid projected analytics state or output"),
+            Self::UnknownSource(_) => f.write_str("analytics source vertex is absent from the projection"),
+            Self::GraphKind { required } => write!(f, "analytics requires a {required:?} projection"),
             Self::NotConverged { max_iterations, .. } => {
                 write!(f, "PageRank did not converge within {max_iterations} iterations")
             }
@@ -73,6 +77,8 @@ impl<C: core::error::Error + 'static> core::error::Error for FnxExecutionError<C
 pub enum FnxValue {
     Vertex(VId),
     Score(f64),
+    /// Exact hop count, never rounded through an f64 score column.
+    Integer(u64),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnxCertificate {
@@ -110,17 +116,53 @@ pub struct FnxResult {
     pub certificate: FnxCertificate,
 }
 
-fn admit<C>(resource: &'static str, requested: usize, limit: usize) -> Result<(), FnxExecutionError<C>> {
+pub(crate) fn admit<C>(resource: &'static str, requested: usize, limit: usize) -> Result<(), FnxExecutionError<C>> {
     if requested > limit {
         Err(FnxExecutionError::LimitExceeded { resource, limit, requested })
     } else {
         Ok(())
     }
 }
-fn reserve<T, C>(length: usize) -> Result<Vec<T>, FnxExecutionError<C>> {
+pub(crate) fn reserve<T, C>(length: usize) -> Result<Vec<T>, FnxExecutionError<C>> {
     let mut result = Vec::new();
     result.try_reserve_exact(length).map_err(|_| FnxExecutionError::AllocationFailed)?;
     Ok(result)
+}
+
+pub(crate) enum KernelValues {
+    Scores(Vec<f64>),
+    Distances(Vec<Option<usize>>),
+    Components(Vec<usize>),
+}
+pub(crate) struct KernelOutput {
+    pub values: KernelValues,
+    pub row_count: usize,
+    pub witness: ComplexityWitness,
+}
+impl KernelValues {
+    fn contains(&self, index: usize) -> bool {
+        match self {
+            Self::Scores(values) => index < values.len(),
+            Self::Distances(values) => values.get(index).is_some_and(Option::is_some),
+            Self::Components(values) => index < values.len(),
+        }
+    }
+    fn value<C>(&self, index: usize, field: FnxOutput, graph: &SnapshotGraphView) -> Result<FnxValue, FnxExecutionError<C>> {
+        match (field, self) {
+            (FnxOutput::Vertex, _) => graph.vertex_id(index).map(FnxValue::Vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult),
+            (FnxOutput::Score, Self::Scores(values)) => values.get(index).copied().map(FnxValue::Score)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult),
+            (FnxOutput::Distance, Self::Distances(values)) => {
+                let distance = values.get(index).copied().flatten().ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+                Ok(FnxValue::Integer(u64::try_from(distance).map_err(|_| FnxExecutionError::SizeOverflow)?))
+            }
+            (FnxOutput::Component, Self::Components(values)) => values.get(index)
+                .and_then(|&label| graph.vertex_id(label)).map(FnxValue::Vertex)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult),
+            _ => Err(FnxExecutionError::InvalidUpstreamResult),
+        }
+    }
 }
 
 /// Preserve the pinned fnx scalar evaluation order exactly: ascending fixed-
@@ -225,7 +267,7 @@ fn pagerank<C>(
 impl FnxCallSpec {
     /// Execute a bound in-core call with cancellation inside every graph pass,
     /// not merely before/after an uninterruptible foundation call. Kernel
-    /// workspace is three O(n) vectors; projection adjacency remains borrowed.
+    /// workspace is O(n); projection adjacency remains borrowed.
     /// The callback may cancel but this synchronous API does not provide an
     /// asynchronous bulkhead, a deadline guarantee or external-memory spill.
     pub fn execute<C>(
@@ -235,59 +277,90 @@ impl FnxCallSpec {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<FnxResult, FnxExecutionError<C>> {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        let options = self.options();
+        let algorithm = self.algorithm();
+        let signature = self.signature();
         let n = graph.node_count();
-        admit("iterations", options.max_iter(), limits.max_iterations)?;
-        admit("result rows", n, limits.max_result_rows)?;
+        match signature.graph_kind {
+            FnxGraphKind::Directed if !graph.is_directed() => return Err(FnxExecutionError::GraphKind { required: FnxGraphKind::Directed }),
+            FnxGraphKind::Undirected if graph.is_directed() => return Err(FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected }),
+            _ => {}
+        }
+        if let FnxAlgorithm::PageRank(options) = algorithm {
+            admit("iterations", options.max_iter(), limits.max_iterations)?;
+        }
+        if !matches!(algorithm, FnxAlgorithm::SingleSourceShortestPathLength { .. }) {
+            admit("result rows", n, limits.max_result_rows)?;
+        }
         let mut arcs = 0usize;
         for source in 0..n {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
             let neighbors = graph.neighbors_indices(source).ok_or(FnxExecutionError::InvalidUpstreamResult)?;
             arcs = arcs.checked_add(neighbors.len()).ok_or(FnxExecutionError::SizeOverflow)?;
         }
-        let estimated_work = n.checked_add(arcs)
-            .and_then(|step| options.max_iter().checked_add(1).and_then(|iterations| step.checked_mul(iterations)))
-            .ok_or(FnxExecutionError::SizeOverflow)?;
+        let estimated_work = match algorithm {
+            FnxAlgorithm::PageRank(options) => n.checked_add(arcs)
+                .and_then(|step| options.max_iter().checked_add(1).and_then(|iterations| step.checked_mul(iterations))),
+            FnxAlgorithm::WeaklyConnectedComponents => arcs.checked_mul(2).and_then(|arcs| n.checked_add(arcs)),
+            FnxAlgorithm::StronglyConnectedComponents => n.checked_add(arcs).and_then(|step| step.checked_mul(2)),
+            _ => n.checked_add(arcs),
+        }.ok_or(FnxExecutionError::SizeOverflow)?;
         admit("estimated work", estimated_work, limits.max_estimated_work)?;
-        let kernel_workspace_bytes = n.checked_mul(3 * std::mem::size_of::<f64>())
+        let word = std::mem::size_of::<usize>();
+        let bytes_per_vertex = match algorithm {
+            FnxAlgorithm::PageRank(_) => 3 * std::mem::size_of::<f64>(),
+            FnxAlgorithm::SingleSourceShortestPathLength { .. } => word + std::mem::size_of::<Option<usize>>(),
+            FnxAlgorithm::StronglyConnectedComponents => 4 * word + std::mem::size_of::<bool>(),
+            _ => 2 * word,
+        };
+        let kernel_workspace_bytes = n.checked_mul(bytes_per_vertex)
             .ok_or(FnxExecutionError::SizeOverflow)?;
-        let (scores, witness) = pagerank(graph, options, arcs, &mut checkpoint)?;
+        let output = match algorithm {
+            FnxAlgorithm::PageRank(options) => {
+                let (scores, witness) = pagerank(graph, options, arcs, &mut checkpoint)?;
+                KernelOutput { values: KernelValues::Scores(scores), row_count: n, witness }
+            }
+            _ => crate::traversal::run(graph, algorithm, limits.max_result_rows, &mut checkpoint)?,
+        };
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        let mut rows = reserve(n)?;
+        let mut rows = reserve(output.row_count)?;
         let mut result_hash = Hasher::new();
-        result_hash.update(b"fgdb:prism:result-rows:v1");
-        result_hash.update(&(n as u128).to_le_bytes());
+        result_hash.update(b"fgdb:prism:result-rows:v2");
+        result_hash.update(&(output.row_count as u128).to_le_bytes());
         result_hash.update(&self.digest().0);
-        for (index, score) in scores.into_iter().enumerate() {
+        for index in 0..n {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
-            let vertex = graph.vertex_id(index).ok_or(FnxExecutionError::InvalidUpstreamResult)?;
+            if !output.values.contains(index) { continue; }
             let mut row = reserve(self.outputs().len())?;
             for column in self.outputs() {
-                row.push(match column.field {
-                    FnxOutput::Vertex => {
+                let value = output.values.value(index, column.field, graph)?;
+                match value {
+                    FnxValue::Vertex(vertex) => {
+                        result_hash.update(&[0]);
                         result_hash.update(&vertex.0.to_le_bytes());
-                        FnxValue::Vertex(vertex)
                     }
-                    FnxOutput::Score => {
+                    FnxValue::Score(score) => {
+                        result_hash.update(&[1]);
                         result_hash.update(&score.to_bits().to_le_bytes());
-                        FnxValue::Score(score)
                     }
-                });
+                    FnxValue::Integer(value) => {
+                        result_hash.update(&[2]);
+                        result_hash.update(&value.to_le_bytes());
+                    }
+                }
+                row.push(value);
             }
             rows.push(row);
         }
-        let mut source_hash = Hasher::new();
-        source_hash.update(b"fgdb:prism:kernel-source:v1");
-        hash_text(&mut source_hash, include_str!("execute.rs"));
-        hash_text(&mut source_hash, include_str!("projection.rs"));
-        let kernel_source_digest = source_hash.finalize();
+        if rows.len() != output.row_count { return Err(FnxExecutionError::InvalidUpstreamResult); }
+        let witness = output.witness;
+        let kernel_source_digest = kernel_source_digest();
         let mut hash = Hasher::new();
         hash.update(b"fgdb:prism:call-certificate:v2");
         hash.update(&FNX_SIGNATURE_REGISTRY_VERSION.to_le_bytes());
         hash.update(FNX_IMPLEMENTATION_REVISION.as_bytes());
-        hash_text(&mut hash, EXECUTION_KERNEL);
+        hash_text(&mut hash, signature.execution_kernel);
         hash.update(&kernel_source_digest.0);
-        hash_text(&mut hash, FNX_NUMERIC_PROFILE);
+        hash_text(&mut hash, signature.numeric_profile);
         hash.update(&graph.digest().0);
         hash.update(&self.digest().0);
         let result_digest = result_hash.finalize();
@@ -302,9 +375,9 @@ impl FnxCallSpec {
         let certificate = FnxCertificate {
             registry_version: FNX_SIGNATURE_REGISTRY_VERSION,
             implementation_revision: FNX_IMPLEMENTATION_REVISION,
-            execution_kernel: EXECUTION_KERNEL,
+            execution_kernel: signature.execution_kernel,
             kernel_source_digest,
-            numeric_profile: FNX_NUMERIC_PROFILE,
+            numeric_profile: signature.numeric_profile,
             snapshot: graph.binding(),
             projection_digest: graph.digest(),
             call_digest: self.digest(),
@@ -329,6 +402,21 @@ impl FnxCallSpec {
 fn hash_text(hash: &mut Hasher, text: &str) {
     hash.update(&(text.len() as u128).to_le_bytes());
     hash.update(text.as_bytes());
+}
+
+fn kernel_source_digest() -> Digest {
+    // The embedded sources are immutable. Do not hash the same source bundle
+    // on every tiny graph call (or every differential fixture).
+    static DIGEST: std::sync::OnceLock<Digest> = std::sync::OnceLock::new();
+    *DIGEST.get_or_init(|| {
+        let mut hash = Hasher::new();
+        hash.update(b"fgdb:prism:kernel-source:v1");
+        hash_text(&mut hash, include_str!("execute.rs"));
+        hash_text(&mut hash, include_str!("projection.rs"));
+        hash_text(&mut hash, include_str!("traversal.rs"));
+        hash_text(&mut hash, include_str!("call.rs"));
+        hash.finalize()
+    })
 }
 
 #[cfg(test)]
@@ -423,7 +511,7 @@ mod tests {
         let result = call.execute(&graph, FnxExecutionLimits {
             max_iterations: 100, max_result_rows: 3, max_estimated_work: 10000,
         }, || Ok::<(), Infallible>(())).unwrap();
-        assert_eq!(result.certificate.execution_kernel, EXECUTION_KERNEL);
+        assert_eq!(result.certificate.execution_kernel, call.signature().execution_kernel);
         assert_eq!(result.certificate.kernel_workspace_bytes, 3 * 3 * std::mem::size_of::<f64>());
     }
 }

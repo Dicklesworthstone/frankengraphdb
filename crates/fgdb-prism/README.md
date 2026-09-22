@@ -6,26 +6,56 @@ mapped to dense snapshot-local indices; compressed storage ordinals are never
 cast into fnx indices. Forward/reverse adjacency, isolates, explicit multigraph
 reductions and resolved weights belong to the same snapshot binding.
 
-## Embedded entrypoints
+## Embedded entrypoints and registered calls
 
 `Database::call_fnx` and `EmbeddedReadView::call_fnx` bind a registered statement
-and execute it with an explicit `FnxReadOptions`. `execute_fnx` accepts a reusable
+and execute it with explicit `FnxReadOptions`. `execute_fnx` accepts a reusable
 `FnxCallSpec`. A retained view remains the only data source after the writer
 advances or drops; `as_of` selects history no later than that view's frontier.
 
-The current registry contains **`fnx.pagerank`**:
+Registry version 2 contains these in-core procedures:
+
+| Procedure | Arguments | Output fields | Projection requirement |
+| --- | --- | --- | --- |
+| `fnx.pagerank` | `alpha=0.85, max_iter=100, tol=1e-6, weighted=true` | `vertex, score` | Any direction; finite nonnegative weights when weighted |
+| `fnx.single_source_shortest_path_length` | Required `source`, `cutoff=NULL` | `vertex, distance` | Any direction; unweighted outgoing reachability |
+| `fnx.connected_components` | None | `vertex, component` | Explicitly undirected |
+| `fnx.weakly_connected_components` | None | `vertex, component` | Directed or reversed |
+| `fnx.strongly_connected_components` | None | `vertex, component` | Directed or reversed |
 
 ```text
 CALL fnx.pagerank($alpha, 1000, 1e-12, true)
 YIELD vertex AS id, score AS rank
+
+CALL fnx.single_source_shortest_path_length($source, 3)
+YIELD distance AS hops, vertex
+
+CALL fnx.strongly_connected_components()
+YIELD vertex, component AS group_id
 ```
 
-Arguments are `alpha`, `max_iter`, `tol`, and `weighted`; omitted trailing
-arguments use `0.85`, `100`, `1e-6`, and `true`. The projection is the implicit,
-explicitly supplied graph input. `YIELD *` and a single output column are also
-supported. Unknown procedures, unknown/duplicate outputs, missing parameters,
-wrong types, invalid numerical domains, and trailing statements refuse during
-binding, before graph access.
+The projection is the explicitly supplied graph input; no call silently chooses
+multigraph or directedness laws. Arguments are positional and omitted trailing
+arguments use registered defaults. A source is a full-width `FnxArgument::Vertex`
+or a nonnegative integer; decimal literals cover the entire `u128` VId domain
+without conversion through f64 or usize. An absent source returns `UnknownSource`.
+The optional cutoff is an inclusive nonnegative hop count; zero yields only the
+source. Unreachable vertices are omitted, not emitted with a fabricated distance.
+
+All result rows are in ascending VId order. Distance values are exact `u64`
+`FnxValue::Integer`s. Each component is represented by one row per member and
+labelled with its minimum member VId, never a transient ordinal. Isolates remain
+single-vertex components. Components and BFS ignore projected weights; their
+source selection/weight recipe remains explicit and is still validated while
+building the projection. Use `FnxWeightSpec::Unit` when properties are irrelevant.
+
+`YIELD *`, output reordering, aliases and a single output column are supported.
+Each procedure has its own output schema. Unknown procedures, unknown/duplicate
+outputs, missing parameters or required arguments, wrong types, invalid numeric
+domains and trailing statements refuse during binding, before graph access.
+Graph-kind checks refuse incompatible projections instead of silently reducing
+them. `FnxCallSpec::algorithm()` exposes the bound typed selector; `options()`
+returns `Some(PageRankOptions)` only for PageRank.
 
 The host chooses every graph law and resource allowance; there is deliberately
 no default multigraph projection:
@@ -68,7 +98,7 @@ let options = FnxReadOptions {
 };
 // Given a Database, QueryCx and FnxParameters:
 // let result = database.call_fnx(&query_cx, statement, &parameters, options)?;
-// result.analytics contains typed rows and the original fnx complexity witness.
+// result.analytics contains typed rows and evidence identifying the actual kernel.
 ```
 
 These numbers are example **admission allowances**, not recommended production
@@ -81,39 +111,64 @@ selected projection fail. `CollapseUnit` never reads weights; `Drop` never reads
 self-loop weights. A property weight accepts finite floats or exactly
 representable integers, never silent decimal/string/boolean coercion.
 
+## Execution, resources and evidence
+
 `EmbeddedReadView::prism_projection_at` prepares a cache for several bound calls.
-Clones share it without rebuilding adjacency. Calling `FnxCallSpec::execute`
-directly on that cache returns projection/call/result evidence; the higher-level
-embedded result additionally binds the selection recipe. Different roots or
-historical cuts never share a projection digest, even when scores coincide.
-Neither digest is an authorization token, signed proof, or durable CGSE record.
+Clones share it without rebuilding adjacency. `projected_row` borrows a target
+slice and its position-aligned weights. No executing kernel constructs a second
+Graph/DiGraph or normalized adjacency copy. PageRank uses three O(n) f64 vectors;
+BFS and components use O(n) arrays and queues. Strong components use iterative
+Kosaraju with explicit bounded stacks, not recursive process-stack traversal.
 
-## Boundaries
+Every kernel checks cancellation during vertex and edge passes, including hub
+rows, PageRank iterations and SCC discovery/relabeling. An observed cancellation
+or admission failure discards the entire result. These synchronous checkpoints
+do not promise async scheduling, interruption of allocation/cache sorting, a
+hard deadline or a constant wall-clock checkpoint interval. Nonconvergence and
+invalid numeric results are typed errors, not successful scores.
 
-This is the **in-core decoded compatibility path**, not a zero-copy Strata
-adapter. It does not add secure-view enforcement, PrismRegion scheduling,
-external-memory spill, a durable materialization lifecycle, or a general GQL
-procedure catalog. `Database::query` is unchanged: use the explicit analytics
-entrypoint so graph policies and limits cannot be silently invented. The pinned
-fnx revision exposes generic PageRank entrypoints; algorithms whose public APIs
-still require concrete fnx graphs are not advertised as implemented calls.
+With n projected vertices and m outgoing adjacency entries, execution work
+admission is `(n+m)*(max_iter+1)` for PageRank, `n+m` for BFS/CC, `n+2*m` for WCC,
+and `2*(n+m)` for SCC. These are declared models, not CPU instruction counts;
+source traversal, initialization and output conversion are separate work.
+The iteration cap applies only to PageRank. Component/PageRank row counts are
+admitted before execution; BFS admits each newly reached row before enqueueing,
+so a small reachable result is not rejected solely because many isolates exist.
+Kernel workspace evidence reports requested vector backing bytes, excluding the
+existing cache, result rows and allocator overhead. It is not a process-memory
+quota. Visitor scratch and staging are governed by their separate allowances.
 
-Cancellation is checked throughout borrowed-source traversal and at adapter
-boundaries. The unmodified upstream PageRank loop cannot be interrupted in its
-interior. Cancellation observed after fnx returns discards the whole result.
-Nonconvergence and invalid numeric results also return typed errors, not scores
-masquerading as a successful computation. Upstream fnx working allocations and
-visitor scratch are not governed by the projection-byte admission model.
+Certificates bind the snapshot, projection, typed call, canonical typed rows,
+actual kernel identifier, source-bundle digest, numeric profile, workspace model
+and observed traversal counters. The pinned fnx revision identifies the semantic
+differential oracle, not a claim that fnx executed a native computation. Native
+counters use fnx's `ComplexityWitness` schema. PageRank preserves the pinned fnx
+scalar evaluation order; exact traversal outputs are normalized to the registered
+VId row and component-label laws. Neither digest is a signed proof, executable
+artifact hash, authorization token or durable CGSE record.
 
-## Validation
+The higher-level embedded result additionally binds the selection recipe.
+Different roots or historical cuts never share a projection digest, even when
+the resulting values coincide.
+
+## Boundaries and validation
+
+This is the **in-core decoded compatibility path**, not a zero-copy compressed
+Strata adapter. It does not add secure-view enforcement, PrismRegion scheduling,
+external-memory spill, a durable materialization lifecycle or general GQL CALL
+composition. `Database::query` is unchanged: use the explicit analytics entrypoint
+so graph policies and limits cannot be silently invented. Only registered calls
+are executable; no arbitrary fnx procedure is claimed to be supported.
 
 Regression sources cover all 512 three-node topologies in three directions,
-standalone fnx and dense-matrix parity, sparse 128-bit identities, multigraph and
-weight laws, immutable caches, typed binding/refusal, all available cancellation
-checkpoints, real Chronicle/Strata snapshots, historical property successors,
-retirements and writer-independent reads.
+weighted/unweighted bitwise PageRank parity, standalone fnx BFS/component parity,
+dense-matrix PageRank checks, full-width IDs, multigraph laws, typed refusal,
+every available cancellation checkpoint, deep 25,000-vertex SCC chains/cycles,
+and real Chronicle/Strata historical generations that survive writer progress.
 
-Run `cargo test -p fgdb-prism` and `cargo test -p fgdb --test prism_bridge` in the
-repository's supported Rust environment, followed by its prescribed formatting,
-Clippy and registry gates. These Rust commands have **not been run** in the
-connector-only implementation environment; no W8 acceptance bead is closed.
+Run `cargo test -p fgdb-prism`, `cargo test -p fgdb --test prism_bridge` and
+`cargo test -p fgdb --test prism_traversal` in the supported Rust environment,
+followed by the prescribed formatting, Clippy and registry gates. These Rust
+commands have **not been run** in the connector-only implementation environment.
+Independent Python algorithm-model comparisons are not Rust execution or W8
+acceptance evidence. No W8 acceptance bead is closed by these changes.
