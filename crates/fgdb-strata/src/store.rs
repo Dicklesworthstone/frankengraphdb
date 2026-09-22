@@ -78,6 +78,12 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod bounded_read;
+pub use bounded_read::{ReopenedAdjacency, RootReadError, RootReadLimits};
+use bounded_read::RootReadEvent;
+
+type ResolvedBlocks = Vec<(Vec<crate::AdjacencyEntry>, Option<BlockProps>)>;
+
 /// Directory holding a database's Strata blocks.
 pub const BLOCK_DIR: &str = "strata-blocks";
 
@@ -1188,6 +1194,20 @@ impl<V: Vfs> BlockStore<V> {
         partition: u64,
         reference: &crate::root::BlockRef,
     ) -> Result<ResolvedBlock, StoreError> {
+        self.resolve_root_block_observed(
+            cx, at, partition, reference, &mut |_| Ok::<(), StoreError>(()),
+        ).await
+    }
+
+    async fn resolve_root_block_observed<E: From<StoreError>>(
+        &self,
+        cx: &impl StorageReadCx,
+        at: usize,
+        partition: u64,
+        reference: &crate::root::BlockRef,
+        observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
+    ) -> Result<ResolvedBlock, E> {
+        observe(RootReadEvent::ObjectStart)?;
         let bytes = self
             .get_bytes(cx, DeltaBlockVersion(reference.block_id))
             .await
@@ -1195,6 +1215,7 @@ impl<V: Vfs> BlockStore<V> {
                 at,
                 error: Box::new(error),
             })?;
+        observe(RootReadEvent::SourceBytes(bytes.len()))?;
         let entries = crate::root::resolve_block_ref(
             self.k_oid.expose(),
             self.namespace,
@@ -1203,6 +1224,7 @@ impl<V: Vfs> BlockStore<V> {
             &bytes,
         )
         .map_err(StoreError::MalformedRoot)?;
+        observe(RootReadEvent::Incidences(entries.len()))?;
         // The block's hosted property patch is part of the block's truth
         // (fgdb-yqor): reachability is root -> block -> patch, so admitting
         // the block admits its patch — identity, format, and the joint
@@ -1222,9 +1244,10 @@ impl<V: Vfs> BlockStore<V> {
                     root_partition: partition,
                     block_partition,
                 },
-            ));
+            ).into());
         }
         let props = if let Some((patch_id, locators)) = patch {
+            observe(RootReadEvent::ObjectStart)?;
             let patch_bytes = self
                 .read_object_bytes(cx, patch_id, MAX_STORED_OBJECT_BYTES)
                 .await
@@ -1232,6 +1255,7 @@ impl<V: Vfs> BlockStore<V> {
                     at,
                     error: Box::new(error),
                 })?;
+            observe(RootReadEvent::SourceBytes(patch_bytes.len()))?;
             let rows = read_property_patch_inner(
                 self.k_oid.expose(),
                 self.namespace,
@@ -1254,7 +1278,7 @@ impl<V: Vfs> BlockStore<V> {
                         declared: declared_digest,
                         recomputed,
                     },
-                ));
+                ).into());
             }
             Some(BlockProps { locators, rows })
         } else {
@@ -1277,8 +1301,20 @@ impl<V: Vfs> BlockStore<V> {
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
-        mut retain: impl FnMut(usize, &crate::root::BlockRef) -> bool,
+        retain: impl FnMut(usize, &crate::root::BlockRef) -> bool,
     ) -> Result<Vec<(Vec<crate::AdjacencyEntry>, Option<BlockProps>)>, StoreError> {
+        self.inspect_root_blocks_observed(
+            cx, root, retain, &mut |_| Ok::<(), StoreError>(()),
+        ).await
+    }
+
+    async fn inspect_root_blocks_observed<E: From<StoreError>>(
+        &self,
+        cx: &impl StorageReadCx,
+        root: &crate::root::PartitionRoot,
+        mut retain: impl FnMut(usize, &crate::root::BlockRef) -> bool,
+        observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
+    ) -> Result<ResolvedBlocks, E> {
         crate::root::validate_root(root).map_err(StoreError::MalformedRoot)?;
 
         let mut blocks = Vec::new();
@@ -1289,7 +1325,7 @@ impl<V: Vfs> BlockStore<V> {
         > = std::collections::BTreeMap::new();
         for (at, reference) in root.blocks.iter().enumerate() {
             let (entries, props, predecessor) = self
-                .resolve_root_block(cx, at, root.partition, reference)
+                .resolve_root_block_observed(cx, at, root.partition, reference, observe)
                 .await?;
             // THE CHAIN LAW (V6, fgdb-4391): a family's blocks link in exactly
             // this root's publication order — finite, acyclic, newer-first by
@@ -1305,7 +1341,7 @@ impl<V: Vfs> BlockStore<V> {
                             declared: predecessor.map(|link| link.0),
                             expected,
                         },
-                    ));
+                    ).into());
                 }
                 chain_heads.insert(family, reference.block_id);
             }
@@ -1313,6 +1349,9 @@ impl<V: Vfs> BlockStore<V> {
                 .observe_block(at, &entries)
                 .map_err(StoreError::MalformedRoot)?;
             if retain(at, reference) {
+                blocks.try_reserve(1).map_err(|_| StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory, "root block collection allocation failed",
+                )))?;
                 blocks.push((entries, props));
             }
         }
@@ -1335,6 +1374,19 @@ impl<V: Vfs> BlockStore<V> {
         at: usize,
         reference: &crate::root::PatchRef,
     ) -> Result<VertexPatchRows, StoreError> {
+        self.resolve_root_patch_observed(
+            cx, at, reference, &mut |_| Ok::<(), StoreError>(()),
+        ).await
+    }
+
+    async fn resolve_root_patch_observed<E: From<StoreError>>(
+        &self,
+        cx: &impl StorageReadCx,
+        at: usize,
+        reference: &crate::root::PatchRef,
+        observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
+    ) -> Result<VertexPatchRows, E> {
+        observe(RootReadEvent::ObjectStart)?;
         let bytes = self
             .get_patch_bytes(cx, VertexPatchVersion(reference.patch_id))
             .await
@@ -1342,7 +1394,8 @@ impl<V: Vfs> BlockStore<V> {
                 at,
                 error: Box::new(error),
             })?;
-        crate::root::resolve_patch_ref(
+        observe(RootReadEvent::SourceBytes(bytes.len()))?;
+        let rows = crate::root::resolve_patch_ref(
             self.k_oid.expose(),
             self.namespace,
             at,
@@ -1350,7 +1403,9 @@ impl<V: Vfs> BlockStore<V> {
             &bytes,
             self.decode_resolver(),
         )
-        .map_err(StoreError::MalformedRoot)
+        .map_err(StoreError::MalformedRoot)?;
+        observe(RootReadEvent::VertexVersions(rows.len()))?;
+        Ok(rows)
     }
 
     /// Prove every vertex patch named by an already-structural root while
@@ -1362,16 +1417,31 @@ impl<V: Vfs> BlockStore<V> {
         &self,
         cx: &impl StorageReadCx,
         root: &crate::root::PartitionRoot,
-        mut retain: impl FnMut(usize, &crate::root::PatchRef) -> bool,
+        retain: impl FnMut(usize, &crate::root::PatchRef) -> bool,
     ) -> Result<Vec<VertexPatchRows>, StoreError> {
+        self.inspect_root_patches_observed(
+            cx, root, retain, &mut |_| Ok::<(), StoreError>(()),
+        ).await
+    }
+
+    async fn inspect_root_patches_observed<E: From<StoreError>>(
+        &self,
+        cx: &impl StorageReadCx,
+        root: &crate::root::PartitionRoot,
+        mut retain: impl FnMut(usize, &crate::root::PatchRef) -> bool,
+        observe: &mut impl FnMut(RootReadEvent) -> Result<(), E>,
+    ) -> Result<Vec<VertexPatchRows>, E> {
         let mut patches = Vec::new();
         let mut history = crate::root::VertexHistoryValidator::default();
         for (at, reference) in root.vertex_patches.iter().enumerate() {
-            let rows = self.resolve_root_patch(cx, at, reference).await?;
+            let rows = self.resolve_root_patch_observed(cx, at, reference, observe).await?;
             history
                 .observe_patch(at, &rows)
                 .map_err(StoreError::MalformedRoot)?;
             if retain(at, reference) {
+                patches.try_reserve(1).map_err(|_| StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory, "root patch collection allocation failed",
+                )))?;
                 patches.push(rows);
             }
         }
@@ -1709,11 +1779,8 @@ impl<V: Vfs> BlockStore<V> {
         cx: &impl StorageReadCx,
         id: PartitionRootVersion,
     ) -> Result<crate::root::PartitionRoot, StoreError> {
-        let bytes = self
-            .read_object_bytes(cx, id.0, crate::root::MAX_ENCODED_ROOT_BYTES as u64)
-            .await?;
-        crate::root::read_root(self.k_oid.expose(), self.namespace, &bytes, id.0)
-            .map_err(StoreError::MalformedRoot)
+        self.get_root_with_byte_limit(cx, id, crate::root::MAX_ENCODED_ROOT_BYTES)
+            .await
     }
 
     /// Reopen a whole partition: the root, every block, and every vertex

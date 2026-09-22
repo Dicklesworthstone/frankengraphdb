@@ -212,8 +212,11 @@ fn check_limit(resource: &'static str, requested: usize, limit: usize) -> Result
 impl<V: Vfs> BlockStore<V> {
     /// Authenticate a real stored partition, apply its established history and
     /// property precedence, and seal an immutable adjacency image. The original
-    /// root/blocks remain untouched. Source reopen/compaction currently retain
-    /// the admitted source in RAM; this method is NOT a streaming external seal.
+    /// root/blocks remain untouched. Source traversal uses `RootReadLimits`'s
+    /// default source-byte, reference and vertex-version ceilings; raw edge
+    /// statements additionally obey `limits.max_incidences` BEFORE collection.
+    /// Use `seal_partition_with_source_limits` to supply another source profile.
+    /// Reopen/compaction retain admitted adjacency in RAM, not external storage.
     pub async fn seal_partition(
         &self,
         cx: &QueryCx,
@@ -221,20 +224,39 @@ impl<V: Vfs> BlockStore<V> {
         floor: CommitSeq,
         limits: SealedLimits,
     ) -> Result<SealedPartition, SealedError> {
-        cx.checkpoint().map_err(SealedError::Interrupted)?;
-        let (root, blocks, properties, vertices) = self
-            .reopen(cx, root_id)
+        let source = crate::store::RootReadLimits {
+            max_incidences: limits.max_incidences,
+            ..crate::store::RootReadLimits::default()
+        };
+        self.seal_partition_with_source_limits(cx, root_id, floor, limits, source)
             .await
-            .map_err(|error| SealedError::Store(Box::new(error)))?;
-        drop(vertices);
-        if floor > root.published_at {
-            return Err(SealedError::InvalidFloor);
-        }
-        let source_count = blocks
-            .iter()
-            .try_fold(0usize, |count, block| count.checked_add(block.len()))
-            .ok_or(SealedError::SizeOverflow)?;
-        check_limit("source incidences", source_count, limits.max_incidences)?;
+    }
+
+    /// Bound the authenticated input separately from the sealed output. Root
+    /// bytes are capped before decoding; a future floor is rejected before any
+    /// payload I/O. All referenced blocks, properties and vertex histories are
+    /// still verified. No second vertex-patch collection is kept, although the
+    /// existing validator retains per-version payloads during admission.
+    ///
+    /// A refusal may have read/decoded one format-bounded source object before
+    /// learning its exact byte/row charge. Refused rows never enter the retained
+    /// adjacency or history maps, and no partial image or anchor escapes. These
+    /// source limits bound populations, not allocator overhead or process RSS.
+    pub async fn seal_partition_with_source_limits(
+        &self,
+        cx: &QueryCx,
+        root_id: PartitionRootVersion,
+        floor: CommitSeq,
+        limits: SealedLimits,
+        mut source: crate::store::RootReadLimits,
+    ) -> Result<SealedPartition, SealedError> {
+        // Preserve the existing source-incidence contract even when a caller
+        // offers a looser explicit source profile than the image allowance.
+        source.max_incidences = source.max_incidences.min(limits.max_incidences);
+        let (root, blocks, properties) = self
+            .reopen_adjacency_bounded(cx, root_id, floor, source)
+            .await
+            .map_err(sealed_source_error)?;
         cx.checkpoint().map_err(SealedError::Interrupted)?;
         let compacted = crate::compact::compact_with_props(&blocks, &properties, floor)
             .map_err(SealedError::History)?;
@@ -251,6 +273,20 @@ impl<V: Vfs> BlockStore<V> {
         let mut checkpoint = || cx.checkpoint().map_err(SealedError::Interrupted);
         let image = image::build(compacted, limits, &mut checkpoint)?;
         SealedPartition::finish(scope, image, limits, &mut checkpoint)
+    }
+}
+
+fn sealed_source_error(error: crate::store::RootReadError) -> SealedError {
+    use crate::store::RootReadError;
+    match error {
+        RootReadError::Store(error) => SealedError::Store(error),
+        RootReadError::Interrupted(error) => SealedError::Interrupted(error),
+        RootReadError::Limit { resource, requested, limit } => {
+            SealedError::Limit { resource, requested, limit }
+        }
+        RootReadError::BeyondPublication { .. } => SealedError::InvalidFloor,
+        RootReadError::SizeOverflow => SealedError::SizeOverflow,
+        RootReadError::AllocationFailed => SealedError::AllocationFailed,
     }
 }
 

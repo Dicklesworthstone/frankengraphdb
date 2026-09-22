@@ -2,6 +2,9 @@
 //! Private store access below only obtains an image through the actual sealer;
 //! no test fabricates an anchor, root receipt, vertex directory or graph source.
 
+#[path = "query_prism_source_tests.rs"]
+mod source_admission;
+
 use super::*;
 use crate::{DatabaseKeys, DatabaseState, MemVfs, WriteBatch};
 use asupersync::{Budget, runtime::RuntimeBuilder};
