@@ -77,7 +77,7 @@ impl PreparedGraphSet {
                 SetNode::Scope(input)
                 | SetNode::Filter { input, .. }
                 | SetNode::Project { input, .. } => shape(input),
-                SetNode::Binary { left, right, .. } => {
+                SetNode::Binary { left, right, .. } | SetNode::Join { left, right, .. } => {
                     let a = shape(left);
                     let b = shape(right);
                     (a.0 || b.0, a.1 || b.1)
@@ -182,6 +182,20 @@ impl PreparedGraphSet {
         }
         match &self.node {
             SetNode::CrossJoin { left, right } => Some((left, right)),
+            _ => None,
+        }
+    }
+
+    /// Borrow a checked join of complete relations, not their first leaves.
+    /// The frozen definition includes both schemas, kind, keys and ON program.
+    /// Ordering/pages at this scope (including LIMIT 0) must be peeled by their
+    /// own admission path; they are never discarded by this accessor.
+    pub fn incremental_join(&self) -> Option<(&Self, &Self, &crate::row_join::RowJoinSpec)> {
+        if !self.unadorned_incremental_node() {
+            return None;
+        }
+        match &self.node {
+            SetNode::Join { left, right, spec } => Some((left, right, spec)),
             _ => None,
         }
     }

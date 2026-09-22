@@ -180,7 +180,9 @@ impl PreparedGraphSet {
             | SetNode::Project { input, .. }
             | SetNode::Unwind { input, .. }
             | SetNode::Filter { input, .. } => input.first_pattern_input(),
-            SetNode::Binary { left, right, .. } | SetNode::CrossJoin { left, right } => left
+            SetNode::Binary { left, right, .. }
+            | SetNode::Join { left, right, .. }
+            | SetNode::CrossJoin { left, right } => left
                 .first_pattern_input()
                 .or_else(|| right.first_pattern_input()),
         }
