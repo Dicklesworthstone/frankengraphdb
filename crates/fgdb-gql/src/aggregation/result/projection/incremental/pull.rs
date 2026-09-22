@@ -4,8 +4,8 @@
 //! borrows the exact finalized cells through the existing HAVING interpreter
 //! and the same result-projection evaluator as incremental/batch consumers.
 
-use super::*;
 use super::super::super::having::GroupCells;
+use super::*;
 
 #[derive(Clone, Copy)]
 struct CompleteGroup<'a>(&'a GraphAggregateRow);
@@ -25,7 +25,9 @@ impl PreparedGraphAggregate {
     /// including hidden keys and summaries, address the full evaluation schema.
     /// This private gate does not widen any incremental-maintenance contract.
     pub(crate) fn prepare_streamed_output(&self) -> Option<Self> {
-        if self.supports_row_local_aggregate_stream() { return Some(self.clone()); }
+        if self.supports_row_local_aggregate_stream() {
+            return Some(self.clone());
+        }
         if self.relational_input.is_some() || self.output_distinct || !self.ordering.is_empty() {
             return None;
         }
@@ -35,13 +37,23 @@ impl PreparedGraphAggregate {
             for (at, filter) in self.having.iter().enumerate() {
                 let operand = GraphHavingOperand::Column(filter.column);
                 program.push(match filter.test {
-                    GraphAggregateTest::IsNull => GraphHavingOp::IsNull { operand, is_null: true },
-                    GraphAggregateTest::IsNotNull => GraphHavingOp::IsNull { operand, is_null: false },
+                    GraphAggregateTest::IsNull => GraphHavingOp::IsNull {
+                        operand,
+                        is_null: true,
+                    },
+                    GraphAggregateTest::IsNotNull => GraphHavingOp::IsNull {
+                        operand,
+                        is_null: false,
+                    },
                     GraphAggregateTest::Integer { comparison, value } => GraphHavingOp::Compare {
-                        left: operand, comparison, right: GraphHavingOperand::Integer(value),
+                        left: operand,
+                        comparison,
+                        right: GraphHavingOperand::Integer(value),
                     },
                 });
-                if at != 0 { program.push(GraphHavingOp::And); }
+                if at != 0 {
+                    program.push(GraphHavingOp::And);
+                }
             }
             physical.having_expression = Some(GraphHavingExpression::prepare(&program).ok()?);
             physical.having.clear();
@@ -75,10 +87,14 @@ impl PreparedGraphAggregate {
         debug_assert_eq!(row.values.len(), self.aggregates.len());
         control(GlaExecutionEvent::Work)?;
         if let Some(having) = &self.having_expression {
-            if !having.evaluate(CompleteGroup(&row), control)? { return Ok(None); }
+            if !having.evaluate(CompleteGroup(&row), control)? {
+                return Ok(None);
+            }
         }
-        if self.output_projection.is_none() && self.key_output.is_none()
-            && self.output_aggregates == self.aggregates.len() {
+        if self.output_projection.is_none()
+            && self.key_output.is_none()
+            && self.output_aggregates == self.aggregates.len()
+        {
             return Ok(Some(row));
         }
         self.project_complete_output(&row, control).map(Some)

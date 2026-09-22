@@ -95,6 +95,15 @@ impl GraphPatternBuilder {
 }
 
 impl PreparedGraphPattern<GraphValueRow> {
+    pub(crate) fn empty() -> Self {
+        Self {
+            logical: GlaPlan::from_operators(Vec::new()),
+            variable_count: 0,
+            edge_count: 0,
+            columns: Vec::new(),
+        }
+    }
+
     pub(crate) fn with_visible_columns(mut self, width: usize) -> Self {
         assert!(width > 0 && width <= self.columns.len());
         assert!(self.preserves_duplicates());

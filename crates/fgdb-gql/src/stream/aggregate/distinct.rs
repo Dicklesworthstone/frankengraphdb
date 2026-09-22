@@ -38,7 +38,9 @@ impl DistinctState {
         &mut self,
         input: Input<'_>,
         aggregate: usize,
-        control: &mut impl FnMut(VertexScanEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
         let input = input.normalized();
         if matches!(input, Input::Scalar(None | Some(CanonicalScalar::Null))) {

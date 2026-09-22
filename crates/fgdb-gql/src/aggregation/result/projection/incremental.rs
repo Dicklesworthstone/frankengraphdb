@@ -4,8 +4,8 @@
 //! the same expression evaluator as snapshot results. DISTINCT consumers retain
 //! complete groups to select the first ranked representative after deletes.
 
-mod ranking;
 mod pull;
+mod ranking;
 
 use super::*;
 use core::convert::Infallible;
@@ -121,10 +121,7 @@ impl PreparedGraphAggregate {
         if let Some(projection) = &self.output_projection {
             for (column, output) in projection.iter().enumerate() {
                 govern(GlaExecutionEvent::ScratchEntry)?;
-                values.push(
-                    expression(output.value(), input, column, govern)?
-                        .into_owned(govern)?,
-                );
+                values.push(expression(output.value(), input, column, govern)?.into_owned(govern)?);
             }
         } else {
             if let Some(projection) = &self.key_output {

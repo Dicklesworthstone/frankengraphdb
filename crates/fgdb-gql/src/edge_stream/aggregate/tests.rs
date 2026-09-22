@@ -1,8 +1,8 @@
 use super::*;
-mod groups;
-mod grouped;
-mod output;
 mod computed;
+mod grouped;
+mod groups;
+mod output;
 use crate::algebra::GraphValue;
 use crate::{
     GqlParameters, GraphAggregateValue, GraphSymbol, GraphSymbolKind, PreparedGraphAggregateText,

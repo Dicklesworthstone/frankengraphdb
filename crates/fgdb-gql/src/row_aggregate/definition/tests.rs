@@ -245,17 +245,13 @@ fn having_and_output_expressions_share_exact_domains_and_every_control_refusal()
 
 #[test]
 fn unsupported_schema_never_becomes_an_admitted_group_even_when_hidden() {
-    let relation = input()
-        .project(
-            vec![GraphSetProjection::new(
-                "hidden",
-                GraphSetValue::List(vec![]),
-            )],
-            GraphSetQuantifier::All,
-        )
-        .unwrap();
-    let query = PreparedGraphSetAggregate::prepare(
-        relation,
+    let graph = input().incremental_pattern().unwrap().clone();
+    let query = PreparedGraphAggregate::prepare_projected(
+        graph,
+        vec![GraphSetProjection::new(
+            "hidden",
+            GraphSetValue::List(vec![]),
+        )],
         &[],
         &[GraphAggregate::count_rows("n")],
         0,

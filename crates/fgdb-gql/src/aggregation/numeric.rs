@@ -209,7 +209,10 @@ impl GraphAggregateRow {
         values: Vec<GraphAggregateValue>,
     ) -> Self {
         debug_assert!(keys.len() + values.len() <= MAX_PATTERN_VERTICES);
-        Self { keys: keys.into_boxed_slice(), values: values.into_boxed_slice() }
+        Self {
+            keys: keys.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+        }
     }
 
     /// Internal result assembly for a checked global physical operator. The
@@ -280,8 +283,7 @@ impl PreparedGraphAggregate {
                     aggregate.column.is_none() && matches!(value, GraphAggregateValue::Count(_))
                 }
                 GraphAggregateFunction::Count | GraphAggregateFunction::CountDistinct => {
-                    argument.is_some()
-                        && matches!(value, GraphAggregateValue::Count(_))
+                    argument.is_some() && matches!(value, GraphAggregateValue::Count(_))
                 }
                 GraphAggregateFunction::SumInt | GraphAggregateFunction::SumIntDistinct => {
                     matches!(argument, Some(Scalar | Any))

@@ -248,13 +248,18 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 // computed columns before a group can see this occurrence.
                 let computed = if self.plan.aggregate.input_projection().is_some() {
                     let input = project_input_row::<GraphValueRow, _>(
-                        vid, row, &self.plan.input.projection,
+                        vid,
+                        row,
+                        &self.plan.input.projection,
                         &mut |event| meter.event(event).map_err(lift),
                     )?;
-                    Some(self.plan.aggregate.evaluate_streamed_input(
-                        input,
-                        &mut |event| meter.event(input_event(event)).map_err(lift),
-                    )?)
+                    Some(
+                        self.plan
+                            .aggregate
+                            .evaluate_streamed_input(input, &mut |event| {
+                                meter.event(input_event(event)).map_err(lift)
+                            })?,
+                    )
                 } else {
                     None
                 };
@@ -268,7 +273,12 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                     for &column in self.plan.aggregate.group_key_columns() {
                         meter.event(VertexScanEvent::Work).map_err(lift)?;
                         let value = match projected_argument(
-                            column, computed.as_ref(), columns, vid, row, meter,
+                            column,
+                            computed.as_ref(),
+                            columns,
+                            vid,
+                            row,
+                            meter,
                         )? {
                             Input::Vertex(vid) => GraphValue::Vertex(vid),
                             Input::Identity => unreachable!("a key has a checked input column"),
@@ -295,11 +305,14 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                         // comparison work for this logical lookup/insertion;
                         // this is not std::BTreeMap allocator accounting.
                         let units = key.iter().fold(0_usize, |total, value| {
-                            total.saturating_add(value.payload_units()).saturating_add(1)
+                            total
+                                .saturating_add(value.payload_units())
+                                .saturating_add(1)
                         });
                         largest_computed_key = largest_computed_key.max(units);
                         let levels = groups.len().saturating_add(1).ilog2() as usize + 1;
-                        for _ in 0..levels.saturating_mul(24)
+                        for _ in 0..levels
+                            .saturating_mul(24)
                             .saturating_mul(largest_computed_key.saturating_add(1))
                         {
                             meter.event(VertexScanEvent::Work).map_err(lift)?;
@@ -340,9 +353,9 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                     meter.event(VertexScanEvent::Work).map_err(lift)?;
                     let input = match spec.argument_column() {
                         None => Input::Identity,
-                        Some(column) => projected_argument(
-                            column, computed.as_ref(), columns, vid, row, meter,
-                        )?,
+                        Some(column) => {
+                            projected_argument(column, computed.as_ref(), columns, vid, row, meter)?
+                        }
                     };
                     state.update_governed(input, aggregate, &mut |event| {
                         meter.event(event).map_err(lift)
@@ -368,9 +381,7 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
             self.meter
                 .event(VertexScanEvent::ScratchEntry)
                 .map_err(lift)?;
-            values.push(
-                state.finish_governed(&mut |event| self.meter.event(event).map_err(lift))?,
-            );
+            values.push(state.finish_governed(&mut |event| self.meter.event(event).map_err(lift))?);
         }
         let row = if keys.is_empty() {
             // Preserve empty global SUM/AVG over a nonnumeric static domain:
@@ -617,7 +628,9 @@ impl NumericState {
         &mut self,
         input: Input<'_>,
         aggregate: usize,
-        control: &mut impl FnMut(VertexScanEvent) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
+        control: &mut impl FnMut(
+            VertexScanEvent,
+        ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>>,
     ) -> Result<(), GqlQueryError<GraphAggregateError<E>, C>> {
         let input = input.normalized();
         if let Self::Distinct(state) = self {
