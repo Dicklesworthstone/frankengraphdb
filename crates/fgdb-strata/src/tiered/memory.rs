@@ -17,7 +17,10 @@ use core::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fgdb_types::StorageReadCx;
+use fgdb_types::{QueryCx, StorageReadCx};
+
+pub mod spill;
+pub use spill::{SpillError, SpillFile, SpillLimits, SpillRun, SpillStats};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryError {
@@ -141,6 +144,11 @@ impl MemoryPool {
         self.budget.limit
     }
 
+    /// Largest reservation this hierarchy can ever admit, even when empty.
+    pub fn effective_limit(&self) -> usize {
+        self.ancestors.iter().fold(self.limit(), |limit, ancestor| limit.min(ancestor.limit))
+    }
+
     pub fn emergency_reserve(&self) -> usize {
         self.budget.emergency
     }
@@ -175,6 +183,40 @@ impl MemoryPool {
         bytes: usize,
     ) -> Result<TrackedBytes, MemoryError> {
         cx.with_restriction(|| self.allocate_inner(bytes, 0))
+    }
+
+    /// Try resident admission, then spill one caller-selected victim and retry
+    /// once. Arithmetic/allocator errors and intrinsically impossible requests
+    /// never cause scratch I/O. Operators choose the victim and may invoke this
+    /// again with another batch; there is no hidden eviction loop or victim list.
+    pub async fn allocate_spilling<F>(
+        &self,
+        cx: &QueryCx,
+        bytes: usize,
+        victim: &mut SpillableBytes,
+        scratch: &mut SpillFile<F>,
+    ) -> Result<TrackedBytes, SpillError>
+    where
+        F: asupersync::io::AsyncRead + asupersync::io::AsyncWrite
+            + asupersync::io::AsyncSeek + Unpin,
+    {
+        cx.checkpoint().map_err(SpillError::Interrupted)?;
+        if bytes > self.effective_limit() {
+            return Err(MemoryError::ResourceExhausted {
+                requested: bytes, available: self.available(), limit: self.effective_limit(),
+            }.into());
+        }
+        match self.allocate_zeroed(cx, bytes) {
+            Ok(allocation) => Ok(allocation),
+            Err(error @ MemoryError::ResourceExhausted { .. }) => {
+                if !victim.spill(cx, scratch).await? {
+                    return Err(error.into());
+                }
+                cx.checkpoint().map_err(SpillError::Interrupted)?;
+                self.allocate_zeroed(cx, bytes).map_err(SpillError::Memory)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn acquire(&self, bytes: usize) -> Result<(), MemoryError> {
@@ -290,6 +332,84 @@ impl fmt::Debug for TrackedBytes {
     }
 }
 
+/// An operator-owned batch that moves between accounted RAM and query scratch.
+/// No transition takes the old state out before awaiting: failed or dropped
+/// spill futures keep the source bytes, and failed/dropped restores keep the run.
+#[derive(Debug)]
+pub struct SpillableBytes {
+    state: SpillableState,
+}
+
+#[derive(Debug)]
+enum SpillableState {
+    Resident(TrackedBytes),
+    Spilled(SpillRun),
+}
+
+impl SpillableBytes {
+    pub fn new(bytes: TrackedBytes) -> Self { Self { state: SpillableState::Resident(bytes) } }
+
+    pub fn len(&self) -> usize {
+        match &self.state {
+            SpillableState::Resident(bytes) => bytes.len(),
+            SpillableState::Spilled(run) => run.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_spilled(&self) -> bool { matches!(&self.state, SpillableState::Spilled(_)) }
+
+    pub fn resident(&self) -> Option<&[u8]> {
+        match &self.state {
+            SpillableState::Resident(bytes) => Some(bytes.as_ref()),
+            SpillableState::Spilled(_) => None,
+        }
+    }
+
+    pub fn resident_mut(&mut self) -> Option<&mut [u8]> {
+        match &mut self.state {
+            SpillableState::Resident(bytes) => Some(bytes.as_mut()),
+            SpillableState::Spilled(_) => None,
+        }
+    }
+
+    pub fn charged_bytes(&self) -> usize {
+        match &self.state {
+            SpillableState::Resident(bytes) => bytes.charged_bytes(),
+            SpillableState::Spilled(_) => 0,
+        }
+    }
+
+    /// Returns false when already spilled. Source memory is freed only after
+    /// scratch publishes a complete run; there is no second payload allocation.
+    pub async fn spill<F>(&mut self, cx: &QueryCx, scratch: &mut SpillFile<F>) -> Result<bool, SpillError>
+    where
+        F: asupersync::io::AsyncRead + asupersync::io::AsyncWrite
+            + asupersync::io::AsyncSeek + Unpin,
+    {
+        cx.checkpoint().map_err(SpillError::Interrupted)?;
+        let SpillableState::Resident(bytes) = &self.state else { return Ok(false); };
+        let run = scratch.append(cx, bytes.as_ref()).await?;
+        self.state = SpillableState::Spilled(run);
+        Ok(true)
+    }
+
+    /// Returns false when already resident. The old run remains available on
+    /// admission failure, corrupt/truncated I/O, or cancellation, permitting a
+    /// retry once another batch has released its resident charge.
+    pub async fn restore<F>(&mut self, cx: &QueryCx, scratch: &mut SpillFile<F>) -> Result<bool, SpillError>
+    where
+        F: asupersync::io::AsyncRead + asupersync::io::AsyncWrite
+            + asupersync::io::AsyncSeek + Unpin,
+    {
+        cx.checkpoint().map_err(SpillError::Interrupted)?;
+        let SpillableState::Spilled(run) = &self.state else { return Ok(false); };
+        let bytes = scratch.restore(cx, run).await?;
+        self.state = SpillableState::Resident(bytes);
+        Ok(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +491,7 @@ mod tests {
         let a = left.reserve_inner(50).unwrap();
         assert_eq!((shard.used(), query.used(), left.used(), right.used()), (50, 50, 50, 0));
         assert_eq!(right.available(), 20);
+        assert_eq!(right.effective_limit(), 60);
         assert!(matches!(right.reserve_inner(21), Err(MemoryError::ResourceExhausted { limit: 70, .. })));
         assert_eq!((shard.used(), query.used(), right.used()), (50, 50, 0));
         let b = right.reserve_inner(20).unwrap();
@@ -403,6 +524,7 @@ mod tests {
         assert!(b.reserve_inner(1).is_err());
         assert_eq!(b.used(), 0);
         assert_eq!(b.available(), 0);
+        assert_eq!(b.effective_limit(), 10);
         drop(charge);
         assert_eq!(b.available(), 10);
     }
