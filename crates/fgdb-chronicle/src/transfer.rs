@@ -184,6 +184,16 @@ impl core::fmt::Debug for BondedPull<'_> {
     }
 }
 
+// Each pending coordinate needs one ingress authentication attempt. Do not
+// issue work whose valid response cannot fit in the remaining verification
+// budget. Expiration frees a reservation, but never refunds work already done.
+fn verification_capacity(limit: u64, used: u64, pending: usize) -> Result<usize, PullError> {
+    let remaining = limit.checked_sub(used).filter(|remaining| *remaining != 0)
+        .ok_or(PullError::VerificationBudget)?;
+    let reserved = u64::try_from(pending).unwrap_or(u64::MAX);
+    Ok(usize::try_from(remaining.saturating_sub(reserved)).unwrap_or(usize::MAX))
+}
+
 impl<'a> BondedPull<'a> {
     /// `encoding` and the recovery target must originate in the authenticated
     /// root/descriptor chain, never be selected by donor agreement or gossip.
@@ -313,7 +323,12 @@ impl<'a> BondedPull<'a> {
         if budget == 0 {
             return Err(PullError::RequestBudget);
         }
-        let count = capacity.min(usize::try_from(budget).unwrap_or(usize::MAX));
+        let authentication = verification_capacity(
+            self.limits.max_verifications, self.verifications, self.pending.len(),
+        )?;
+        let count = capacity
+            .min(usize::try_from(budget).unwrap_or(usize::MAX))
+            .min(authentication);
         let mut out = Vec::new();
         out.try_reserve_exact(count)
             .map_err(|_| PullError::AllocationFailed)?;
@@ -487,6 +502,49 @@ impl<'a> BondedPull<'a> {
             Err(error) => {
                 self.closed = true;
                 Err(PullError::Recovery(error))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod verification_budget_tests {
+    use super::{PullError, verification_capacity};
+
+    #[test]
+    fn overlapping_windows_cannot_double_reserve_verification_work() {
+        assert_eq!(verification_capacity(17, 0, 0).unwrap(), 17);
+        assert_eq!(verification_capacity(17, 0, 8).unwrap(), 9);
+        assert_eq!(verification_capacity(17, 0, 17).unwrap(), 0);
+        // Admission consumes one attempt while releasing its pending slot.
+        assert_eq!(verification_capacity(17, 8, 9).unwrap(), 0);
+        // Cancelling the remaining window releases reservations, not spent work.
+        assert_eq!(verification_capacity(17, 8, 0).unwrap(), 9);
+    }
+
+    #[test]
+    fn exhausted_or_overdrawn_verification_budget_fails_closed() {
+        for (limit, used) in [(0, 0), (17, 17), (17, 18)] {
+            assert!(matches!(verification_capacity(limit, used, 0), Err(PullError::VerificationBudget)));
+        }
+        // Duplicate or unsolicited authentication attempts can consume work
+        // while other requests remain pending. Never underflow or issue more.
+        assert_eq!(verification_capacity(17, 16, 8).unwrap(), 0);
+    }
+
+    #[test]
+    fn every_reserved_attempt_is_accounted_for() {
+        for limit in 1..64_u64 {
+            for used in 0..limit {
+                for pending in 0..64_usize {
+                    let available = verification_capacity(limit, used, pending).unwrap();
+                    assert!(available as u64 <= limit - used);
+                    if pending as u64 <= limit - used {
+                        assert_eq!(available as u64 + pending as u64 + used, limit);
+                    } else {
+                        assert_eq!(available, 0);
+                    }
+                }
             }
         }
     }
