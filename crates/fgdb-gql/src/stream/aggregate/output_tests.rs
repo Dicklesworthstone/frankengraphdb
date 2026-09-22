@@ -2,7 +2,7 @@
 use super::*;
 use crate::{GraphAggregate, GraphAggregateColumn, GraphAggregateFilter, GraphAggregateOrder,
     GraphAggregateTest, GraphNullPlacement, GqlParameters, PreparedGraphAggregateText,
-    RelationBind};
+    RelationBind, GraphSymbolResolver};
 use crate::algebra::IntegerComparison;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -29,8 +29,8 @@ impl VertexScanSource for Source {
         if next.is_some() { self.at += 1; }
         Ok(next)
     }
-    fn vertex<C>(&self, id: VId, control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>)
-        -> Result<Option<VertexScanRow<'_>>, VertexScanSourceError<Self::Error, C>> {
+    fn vertex<'a, C>(&'a self, id: VId, control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>)
+        -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<Self::Error, C>> {
         control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
         self.reads.set(self.reads.get() + 1);
         let record = &self.rows[self.at - 1];
@@ -42,11 +42,11 @@ impl Drop for Source { fn drop(&mut self) { self.dropped.set(true); } }
 fn source(rows: Vec<Record>) -> Source {
     Source { rows, at: 0, fail_at: None, reads: Rc::new(Cell::new(0)), dropped: Rc::new(Cell::new(false)) }
 }
-fn record(id: u128, key: Option<i64>, value: Option<i64>) -> Record {
+fn record(vid: u128, k: Option<i64>, v: Option<i64>) -> Record {
     let mut props = Vec::new();
-    if let Some(k) = key { props.push((K, CanonicalScalar::Int(k))); }
-    if let Some(v) = value { props.push((V, CanonicalScalar::Int(v))); }
-    (VId(id), props)
+    if let Some(k) = k { props.push((K, CanonicalScalar::Int(k))); }
+    if let Some(v) = v { props.push((V, CanonicalScalar::Int(v))); }
+    (VId(vid), props)
 }
 fn fixture(mask: u32) -> Vec<Record> {
     [(Some(0), Some(-2)), (Some(0), Some(4)), (Some(1), Some(4)),
@@ -56,8 +56,8 @@ fn fixture(mask: u32) -> Vec<Record> {
 }
 fn wide() -> GqlQueryPolicy { GqlQueryPolicy::new(u64::MAX, u64::MAX, u64::MAX, u64::MAX) }
 fn prepare(text: &str) -> PreparedGraphAggregate {
-    PreparedGraphAggregateText::prepare(text,
-        RelationBind::new().with_label("L", L).with_property("k", K).with_property("v", V))
+    let mut bind = RelationBind::new().with_label("L", L).with_property("k", K).with_property("v", V);
+    PreparedGraphAggregateText::prepare(text, move |kind, name| bind.resolve_symbol(kind, name))
         .unwrap().bind_parameters(&GqlParameters::new()).unwrap()
 }
 fn run(q: &PreparedGraphAggregate, rows: Vec<Record>, policy: GqlQueryPolicy)
@@ -244,7 +244,8 @@ fn private_groups_and_duplicate_classes_do_not_spend_the_selected_row_allowance(
     ] {
         assert!(run(&prepare(text), vec![], GqlQueryPolicy::new(0,0,u64::MAX,u64::MAX)).next().is_none());
     }
-    let mut global = run(&prepare("MATCH (n:L) RETURN COUNT(*) AS n ORDER BY n LIMIT 1"), vec![], wide());
+    let q = prepare("MATCH (n:L) RETURN COUNT(*) AS n ORDER BY n LIMIT 1");
+    let mut global = run(&q, vec![], wide());
     assert_eq!(global.next().unwrap().unwrap().values(), &[GraphAggregateValue::Count(0)]);
     assert!(global.next().is_none());
 }

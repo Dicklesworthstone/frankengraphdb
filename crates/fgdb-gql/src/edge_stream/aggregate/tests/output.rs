@@ -213,7 +213,8 @@ fn close_discards_validated_pages_without_more_demand_and_other_profiles_remain_
     assert_eq!((cursor.row_stats(),cursor.evaluator_stats()),before);
     let s=source(63);let reads=s.reads.clone();let mut cursor=run(&q,s,wide());cursor.close();
     assert_eq!(reads.load(Ordering::SeqCst),0);
-    let distinct = q.with_distinct_output(true);
+    drop(cursor);
+    let distinct = q.clone().with_distinct_output(true);
     let s = source(63); let expected = eager(&distinct, &s);
     assert_eq!(run(&distinct, s, wide()).collect::<Result<Vec<_>, _>>().unwrap(), expected);
     assert!(EdgeAggregatePlan::compile(&prepare("MATCH (a)-[r:R]->(b) RETURN COLLECT(r.p) AS values")).is_err());

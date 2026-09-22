@@ -155,7 +155,7 @@ fn vertex_collections_match_independent_ordered_groups_and_batch_without_input_b
                 let bucket = match props.last().unwrap().1 { CanonicalScalar::Int(n) => n, _ => panic!() };
                 let (all, ids) = groups.entry(grouped.then_some(bucket)).or_default();
                 ids.push(GraphValue::Vertex(vid));
-                if let Some((_, value)) = props.iter().find(|(k, v)| *k == P && !v.is_null()) {
+                if let Some((_, value)) = props.iter().find(|(k, v)| *k == P && !matches!(v, CanonicalScalar::Null)) {
                     all.push(GraphValue::Scalar(value.clone()));
                 }
             }
