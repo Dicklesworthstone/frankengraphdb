@@ -18,9 +18,10 @@ use crate::identity::{
     VerificationOperation, VerificationOutcome, verification_event,
 };
 use crate::symbol::{SymbolError, SymbolRecord};
-use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::systematic::SystematicEncoder;
 use fgdb_types::ids::{DatabaseSecurityNamespaceId, ObjectId};
+
+pub(crate) mod blocks;
 
 /// Why symbolization or recovery failed. Every variant is fail-closed: a
 /// caller never receives plaintext from a decode that did not fully verify.
@@ -177,8 +178,10 @@ impl ValidatedSourceBlock {
     }
 }
 
-/// Encode one protected object into authenticated symbol records: every source
-/// symbol, plus `repair_symbols` repair symbols.
+/// Encode the selected source block of one complete protected object. For a
+/// multi-block encoding, pass the SAME whole protected object for every block;
+/// the authenticated OTI determines its partition and sub-symbol interleaving.
+/// Returns that block's source symbols plus `repair_symbols` repair symbols.
 ///
 /// `repair_symbols` is the object's share of the configured repair overhead
 /// (`fgdb.toml`'s `repair_overhead`); the caller prices it, because the plan
@@ -196,6 +199,12 @@ pub fn encode_object(
     // Keep this caller-facing cross-check while callers still carry an object
     // kind for their own contracts, but never pass it into `SymbolRecord`.
     if object_kind != encoding.cipher_descriptor().object_kind {
+        return Err(SymbolizeError::InvalidParameters);
+    }
+    if encoding.descriptor().source_block_count != 1 {
+        return blocks::encode_block(encoding, protected, source_block, repair_symbols, dek);
+    }
+    if source_block != 0 {
         return Err(SymbolizeError::InvalidParameters);
     }
     // asupersync's parameter builder accepts k = 1..=56403 and PANICS outside
@@ -362,71 +371,13 @@ fn decode_object_inner(
         canonical_header,
         protected_len,
     } = target;
-    let symbol_size = usize::from(encoding.descriptor().symbol_size);
-    if symbol_size == 0 || protected_len == 0 {
-        return Err(SymbolizeError::InvalidParameters);
-    }
-    let k = protected_len.div_ceil(symbol_size);
-
-    // Every symbol is authenticated against the encoding BEFORE it can
-    // influence a decode: a forged or foreign symbol must not even enter the
-    // linear system, let alone perturb the recovered bytes.
-    //
-    // `EncodingId` is an unkeyed digest, so descriptor self-consistency does
-    // not authenticate `k`. Use the fallible constructor before it can turn an
-    // attacker-rewritten transfer length into a process panic.
-    let decoder = InactivationDecoder::try_new(k, symbol_size, code_seed(encoding))
-        .map_err(|_| SymbolizeError::InvalidParameters)?;
-
-    // The decoder's own LDPC/HDPC constraint equations seed the system. They
-    // are derived from the code parameters, never transmitted, so they cost no
-    // durable bytes and cannot be forged by supplying symbols.
-    let mut received = decoder.constraint_symbols();
-    for bytes in serialized_symbols {
-        // Authenticate BEFORE the symbol can influence the decode: a forged or
-        // foreign symbol must not enter the linear system at all.
-        let record = SymbolRecord::verify(bytes, encoding, dek, verification)?;
-        if (record.esi as usize) < k {
-            received.push(ReceivedSymbol::source(record.esi, record.payload));
-        } else {
-            let (columns, coefficients) = decoder
-                .repair_equation(record.esi)
-                .map_err(|_| SymbolizeError::InvalidParameters)?;
-            received.push(ReceivedSymbol::repair(
-                record.esi,
-                columns,
-                coefficients,
-                record.payload,
-            ));
-        }
-    }
-
-    let decoded = decoder
-        // This is the RFC 6330 erasure decoder; no JWT or signature state exists here.
-        // ubs:ignore -- exact false match is `InactivationDecoder::decode`, not a JWT decoder.
-        .decode(&received)
-        .map_err(|error| match error {
-            // Rank deficiency — too few independent equations — is the one
-            // outcome "beyond the repair budget" honestly names: scrub must
-            // route it to repair, not to the corruption path.
-            DecodeError::InsufficientSymbols { .. } | DecodeError::SingularMatrix { .. } => {
-                SymbolizeError::InsufficientSymbols
-            }
-            // Everything else is structural (size/arity/column/ESI/output
-            // violations) or a budget/rate-limit refusal: the received set is
-            // unusable, and calling it "insufficient" would have a scrubber
-            // fetch MORE copies of poison.
-            _ => SymbolizeError::DecodeFailed,
-        })?;
-    if decoded.source.len() < k {
-        return Err(SymbolizeError::InsufficientSymbols);
-    }
-
-    let mut protected = Vec::with_capacity(k * symbol_size);
-    for symbol in decoded.source.iter().take(k) {
-        protected.extend_from_slice(symbol);
-    }
-    protected.truncate(protected_len);
+    // The same partition-aware path handles one and many source blocks. It
+    // authenticates every input, deduplicates exact (block, ESI) coordinates,
+    // decodes independent systems, and restores RFC sub-block byte order.
+    // No partial block result escapes the complete-object identity boundary.
+    let protected = blocks::decode_protected(
+        encoding, serialized_symbols, protected_len, dek, verification,
+    )?;
 
     // Layer 1 of the check: the AEAD must open. This already rejects any
     // decode that produced different ciphertext.

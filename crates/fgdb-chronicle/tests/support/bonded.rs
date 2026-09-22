@@ -52,8 +52,15 @@ impl Fixture {
             source_block_count,
             symbol_auth_profile: 1,
         });
-        let records =
-            encode_object(&encoding, protected.protected_bytes(), KIND, 0, 128, &DEK).unwrap();
+        let encoded = encode_object(&encoding, protected.protected_bytes(), KIND, 0, 128, &DEK);
+        let records = if source_block_count == 1 {
+            encoded.unwrap()
+        } else {
+            // This fixture deliberately retains opaque one-block OTI while
+            // changing Z. It is malformed, not a valid multi-block fixture.
+            assert!(encoded.is_err());
+            Vec::new()
+        };
         Self {
             encoding,
             records,
