@@ -7,6 +7,8 @@
 
 use super::*;
 
+mod cardinality;
+
 type Consumer<'a, Checkpoint, E, C> =
     dyn FnMut(GraphValueRow, &mut Meter<Checkpoint>) -> SetResult<(), E, C> + 'a;
 

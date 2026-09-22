@@ -13,6 +13,11 @@ use std::collections::btree_map;
 type Failure<E, C> = GqlQueryError<GraphAggregateError<E>, C>;
 type Groups = BTreeMap<Vec<GraphValue>, Vec<NumericState>>;
 
+enum FoldedGroups {
+    Rows(Groups),
+    Cardinality(Option<u64>),
+}
+
 fn input_event(event: VertexScanEvent) -> GlaExecutionEvent {
     match event {
         VertexScanEvent::Work => GlaExecutionEvent::Work,
@@ -78,11 +83,27 @@ fn push<E, C>(
 }
 
 impl PreparedGraphAggregate {
+    fn uses_factorized_cardinality(&self) -> bool {
+        self.group_key_columns().is_empty()
+            && !self.aggregates().is_empty()
+            && self.aggregates().iter().all(|aggregate| {
+                aggregate.function() == GraphAggregateFunction::CountRows
+            })
+            && self.relational_input.as_ref().is_some_and(|input| {
+                input.has_factorized_cardinality()
+            })
+    }
+
     /// Physical admission only. COLLECT retains visitation-ordered lists and
     /// remains on its ordinary implementation; no function is approximated.
     /// A missing fusion opportunity is not retried after runtime failure.
     pub(super) fn folded_definition(&self) -> Option<Self> {
         let input = self.relational_input.as_ref()?;
+        // COUNT(*) depends on bag cardinality, not the order or values of
+        // Cartesian pairs. Value-sensitive barriers still execute normally.
+        if self.uses_factorized_cardinality() {
+            return self.prepare_complete_group_output();
+        }
         if !input.has_foldable_expansion()
             || !self.aggregates().iter().all(|aggregate| {
                 match aggregate.function() {
@@ -116,10 +137,18 @@ impl PreparedGraphAggregate {
         mut checkpoint: impl FnMut() -> Result<(), C>,
     ) -> Result<GqlQueryExecution<GraphAggregateRow>, Failure<E, C>> {
         let relation = self.relational_input.as_ref().expect("admitted relational fold");
+        if self.uses_factorized_cardinality() {
+            let (cardinality, rows, evaluator) = relation.count_governed(
+                policy, source, &mut checkpoint,
+            ).map_err(|error| error.map_source(GraphAggregateError::InputRelation))?;
+            return self.finish_relational_folded(
+                policy, checkpoint, rows, evaluator, FoldedGroups::Cardinality(cardinality),
+            );
+        }
         let mut groups = Groups::new();
         let mut largest_key = 0;
         let mut deferred = None;
-        let (mut rows, mut evaluator) = relation.fold_governed(
+        let (rows, evaluator) = relation.fold_governed(
             policy,
             source,
             &mut checkpoint,
@@ -148,6 +177,19 @@ impl PreparedGraphAggregate {
             return Err(GqlQueryError::Source(error));
         }
 
+        self.finish_relational_folded(
+            policy, checkpoint, rows, evaluator, FoldedGroups::Rows(groups),
+        )
+    }
+
+    fn finish_relational_folded<E, C>(
+        &self,
+        policy: GqlQueryPolicy,
+        mut checkpoint: impl FnMut() -> Result<(), C>,
+        mut rows: GqlExecutionStats,
+        mut evaluator: GlaExecutionStats,
+        input: FoldedGroups,
+    ) -> Result<GqlQueryExecution<GraphAggregateRow>, Failure<E, C>> {
         // Continue the original allowance, not a fresh quota for the result
         // stage. Private row occurrences did not consume ResultRows above.
         let mut control = |event| {
@@ -165,6 +207,30 @@ impl PreparedGraphAggregate {
             evaluator.charge_event(policy.evaluator, event).map_err(GqlQueryError::Evaluator)?;
             rows.result_rows = next;
             Ok(())
+        };
+        let mut groups = match input {
+            FoldedGroups::Rows(groups) => groups,
+            FoldedGroups::Cardinality(cardinality) => {
+                control(GlaExecutionEvent::Work)?;
+                // Overflow is a terminal aggregate error, never an early
+                // source failure. All factors and local pages completed above,
+                // including a zero factor that can annihilate a huge product.
+                let count = cardinality.ok_or_else(|| {
+                    GqlQueryError::Source(GraphAggregateError::ArithmeticOverflow { aggregate: 0 })
+                })?;
+                let mut states = new_states(self, &mut control)?;
+                for state in &mut states {
+                    control(GlaExecutionEvent::Work)?;
+                    let NumericState::Count(value) = state else {
+                        unreachable!("factorized cardinality admits only COUNT(*)")
+                    };
+                    *value = count;
+                }
+                control(GlaExecutionEvent::ScratchEntry)?;
+                let mut groups = Groups::new();
+                groups.insert(Vec::new(), states);
+                groups
+            }
         };
         if groups.is_empty() && self.group_key_columns().is_empty() {
             control(GlaExecutionEvent::ScratchEntry)?;
@@ -190,3 +256,6 @@ impl PreparedGraphAggregate {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cardinality_tests;
