@@ -302,15 +302,53 @@ impl<'a> BondedPull<'a> {
         self.decode_attempts
     }
 
+    /// Number of fixed ESI residue owners, including temporarily failed donors.
+    /// Quarantining a donor never renumbers the other donors' streams.
+    pub fn donor_count(&self) -> usize {
+        self.donors.len()
+    }
+
+    pub fn in_flight_limit(&self) -> usize {
+        self.limits.max_in_flight
+    }
+
     /// Fair bounded scheduling. Donor slots and their residue classes do not
     /// change when another donor fails; surviving streams produce repair ESIs.
     pub fn schedule(&mut self, maximum: usize) -> Result<Vec<PullRequest>, PullError> {
+        self.schedule_inner(maximum, None)
+    }
+
+    /// Refill a streaming pull without letting slow donors accumulate every
+    /// global request credit. Divide `window` across available donors, including
+    /// outstanding requests, distributing remainder slots in stable donor order.
+    /// A window smaller than the donor count allows one request per donor and
+    /// relies on ordinary round-robin scheduling and request deadlines.
+    /// Throttling is not donor failure or ESI exhaustion: a fully occupied
+    /// per-donor window returns an empty batch and preserves each ESI stream.
+    pub fn schedule_bonded(
+        &mut self,
+        maximum: usize,
+        window: usize,
+    ) -> Result<Vec<PullRequest>, PullError> {
+        self.open()?;
+        if window == 0 {
+            return Err(PullError::InvalidLimits);
+        }
+        self.schedule_inner(maximum, Some(window))
+    }
+
+    fn schedule_inner(
+        &mut self,
+        maximum: usize,
+        window: Option<usize>,
+    ) -> Result<Vec<PullRequest>, PullError> {
         self.open()?;
         // Every pending request reserves one symbol slot and one complete wire
         // record. Admission exchanges that reservation for owned bytes, so all
         // three differences remain nonnegative even when replies are reordered.
         let capacity = maximum
             .min(self.limits.max_in_flight - self.pending.len())
+            .min(window.unwrap_or(self.limits.max_in_flight).saturating_sub(self.pending.len()))
             .min(self.limits.max_symbols - self.records.len() - self.pending.len())
             .min(
                 (self.limits.max_wire_bytes - self.stored_bytes) / self.record_len
@@ -332,13 +370,38 @@ impl<'a> BondedPull<'a> {
         let mut out = Vec::new();
         out.try_reserve_exact(count)
             .map_err(|_| PullError::AllocationFailed)?;
+        // Derived once per refill; no second persistent credit ledger can drift
+        // from pending during admission, expiration or donor quarantine.
+        let mut outstanding = BTreeMap::<DonorId, usize>::new();
+        for donor in self.pending.values() {
+            *outstanding.entry(*donor).or_default() += 1;
+        }
+        let mut caps = BTreeMap::new();
+        if let Some(window) = window {
+            let window = window.min(self.limits.max_in_flight);
+            let available = self.donors.iter().filter(|donor| donor.available).count();
+            if available != 0 {
+                let quotient = window / available;
+                let remainder = window % available;
+                for (rank, donor) in self.donors.iter().filter(|donor| donor.available).enumerate() {
+                    let extra = usize::from(quotient != 0 && rank < remainder);
+                    caps.insert(donor.id, quotient.max(1) + extra);
+                }
+            }
+        }
         for _ in 0..count {
             let mut selected = None;
+            let mut throttled = false;
             for _ in 0..self.donors.len() {
                 let slot = self.next_donor;
                 self.next_donor = (slot + 1) % self.donors.len();
                 let donor = &mut self.donors[slot];
                 if !donor.available || donor.exhausted {
+                    continue;
+                }
+                let cap = caps.get(&donor.id).copied().unwrap_or(usize::MAX);
+                if outstanding.get(&donor.id).copied().unwrap_or(0) >= cap {
+                    throttled = true;
                     continue;
                 }
                 match donor.stream.next() {
@@ -350,7 +413,7 @@ impl<'a> BondedPull<'a> {
                 }
             }
             let Some((donor, esi)) = selected else {
-                if !out.is_empty() {
+                if !out.is_empty() || throttled {
                     break;
                 }
                 return Err(if self.donors.iter().any(|donor| donor.available) {
@@ -360,6 +423,7 @@ impl<'a> BondedPull<'a> {
                 });
             };
             self.pending.insert(esi, donor);
+            *outstanding.entry(donor).or_default() += 1;
             self.requests += 1;
             out.push(PullRequest {
                 donor,
@@ -421,6 +485,39 @@ impl<'a> BondedPull<'a> {
         bytes: &[u8],
         verification: &mut dyn CryptoVerificationSink,
     ) -> Result<SymbolAdmission, PullError> {
+        self.accept_inner(donor, None, bytes, verification)
+    }
+
+    /// Admit a response to one exact, locally issued request.
+    ///
+    /// Unlike donor-stream ingress through `accept`, an RPC response must also
+    /// match its request's ESI. A correctly authenticated record for another
+    /// outstanding request (or an already accepted record) must not consume that
+    /// other request's credit or masquerade as this request's successful reply.
+    /// The record is authenticated before any admission or credit mutation.
+    pub fn accept_reply(
+        &mut self,
+        request: PullRequest,
+        bytes: &[u8],
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<SymbolAdmission, PullError> {
+        self.open()?;
+        if request.object_id != self.encoding.object_id()
+            || request.encoding_id != self.encoding.encoding_id()
+            || request.source_block != 0
+        {
+            return Err(PullError::UnrequestedSymbol);
+        }
+        self.accept_inner(request.donor, Some(request.esi), bytes, verification)
+    }
+
+    fn accept_inner(
+        &mut self,
+        donor: DonorId,
+        expected_esi: Option<u32>,
+        bytes: &[u8],
+        verification: &mut dyn CryptoVerificationSink,
+    ) -> Result<SymbolAdmission, PullError> {
         self.open()?;
         let slot = self
             .donors
@@ -438,6 +535,7 @@ impl<'a> BondedPull<'a> {
             .map_err(PullError::Symbol)?;
         if record.source_block != 0
             || record.esi > self.limits.max_esi
+            || expected_esi.is_some_and(|expected| expected != record.esi)
             || !owns_esi(slot as u32, self.donors.len() as u32, record.esi)
         {
             return Err(PullError::UnrequestedSymbol);
