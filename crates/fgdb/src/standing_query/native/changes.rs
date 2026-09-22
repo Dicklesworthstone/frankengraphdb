@@ -1,6 +1,8 @@
 //! Compressed native baseline and one-tick delivery from published maintained
 //! bags. No graph source, expression evaluator or result re-execution occurs.
 
+mod subscription;
+
 use super::*;
 use super::{copy_group as aggregate_cells, copy_values as row_cells};
 use fgdb_delta_types::LimbLimit;
