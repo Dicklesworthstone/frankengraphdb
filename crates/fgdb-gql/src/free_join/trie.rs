@@ -8,6 +8,8 @@ pub enum TrieBuildError<E> {
     Control(E),
     Schema(JoinPlanError),
     RowArity { row: usize, expected: usize, actual: usize },
+    ZeroMultiplicity { row: usize },
+    MultiplicityOverflow,
 }
 impl<E: core::fmt::Display> core::fmt::Display for TrieBuildError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -17,6 +19,10 @@ impl<E: core::fmt::Display> core::fmt::Display for TrieBuildError<E> {
             Self::RowArity { row, expected, actual } => {
                 write!(f, "FreeJoin row {row} has {actual} columns, expected {expected}")
             }
+            Self::ZeroMultiplicity { row } => {
+                write!(f, "FreeJoin row {row} has zero multiplicity")
+            }
+            Self::MultiplicityOverflow => f.write_str("FreeJoin input multiplicity exceeds usize"),
         }
     }
 }
@@ -101,6 +107,27 @@ impl<K: Ord + Clone> ColumnarTrie<K> {
         generation: u64,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, TrieBuildError<E>> {
+        Self::new_weighted(
+            schema,
+            order,
+            rows.into_iter().map(|values| (values, 1)),
+            generation,
+            control,
+        )
+    }
+
+    /// Build directly from positive occurrence counts without expanding them.
+    /// Equal tuples share a leaf whose weight is added with checked arithmetic.
+    /// Input weights obey the existing `TrieCursor` usize contract; joined
+    /// products and factorized cardinalities retain their checked u128 boundary.
+    /// Construction work depends on supplied tuples, not their multiplicities.
+    pub fn new_weighted<E>(
+        schema: &[JoinVariable],
+        order: &[JoinVariable],
+        rows: impl IntoIterator<Item = (Vec<K>, usize)>,
+        generation: u64,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
+    ) -> Result<Self, TrieBuildError<E>> {
         if schema.len() > MAX_JOIN_VARIABLES || order.len() > MAX_JOIN_VARIABLES {
             return Err(TrieBuildError::Schema(JoinPlanError::TooManyVariables));
         }
@@ -129,16 +156,19 @@ impl<K: Ord + Clone> ColumnarTrie<K> {
             meter(GlaExecutionEvent::ScratchEntry)?;
         }
         let mut admitted = Vec::new();
-        for (row, values) in rows.into_iter().enumerate() {
+        for (row, (values, multiplicity)) in rows.into_iter().enumerate() {
             meter(GlaExecutionEvent::Work)?;
             if values.len() != schema.len() {
                 return Err(TrieBuildError::RowArity { row, expected: schema.len(), actual: values.len() });
+            }
+            if multiplicity == 0 {
+                return Err(TrieBuildError::ZeroMultiplicity { row });
             }
             meter(GlaExecutionEvent::ScratchEntry)?;
             for _ in &values {
                 meter(GlaExecutionEvent::ScratchEntry)?;
             }
-            admitted.push(values);
+            admitted.push((values, multiplicity));
         }
         if !order.is_empty() {
             sort_rows(&mut admitted, &permutation, &mut meter)?;
@@ -147,25 +177,28 @@ impl<K: Ord + Clone> ColumnarTrie<K> {
             keys: Vec::new(),
             child_starts: Vec::new(),
         }).collect();
-        let mut weights = Vec::new();
-        for (row_index, row) in admitted.iter().enumerate() {
+        let mut weights: Vec<usize> = Vec::new();
+        let mut nullary_weight = 0_usize;
+        for (row_index, (row, multiplicity)) in admitted.iter().enumerate() {
             meter(GlaExecutionEvent::Work)?;
             let mut common = 0;
             if row_index != 0 {
                 while common < order.len() {
                     meter(GlaExecutionEvent::Work)?;
-                    if row[permutation[common]] != admitted[row_index - 1][permutation[common]] {
+                    if row[permutation[common]] != admitted[row_index - 1].0[permutation[common]] {
                         break;
                     }
                     common += 1;
                 }
             }
             if common == order.len() {
-                if !order.is_empty() {
+                if order.is_empty() {
+                    nullary_weight = nullary_weight.checked_add(*multiplicity)
+                        .ok_or(TrieBuildError::MultiplicityOverflow)?;
+                } else {
                     let weight = weights.last_mut().expect("a duplicate has an earlier leaf");
-                    // Every unit comes from a distinct entry of admitted, so
-                    // no weight can exceed admitted.len() (or usize::MAX).
-                    *weight += 1;
+                    *weight = weight.checked_add(*multiplicity)
+                        .ok_or(TrieBuildError::MultiplicityOverflow)?;
                 }
                 continue;
             }
@@ -174,7 +207,7 @@ impl<K: Ord + Clone> ColumnarTrie<K> {
                 columns[depth].keys.push(row[permutation[depth]].clone());
                 meter(GlaExecutionEvent::ScratchEntry)?;
                 if depth + 1 == order.len() {
-                    weights.push(1_usize);
+                    weights.push(*multiplicity);
                 } else {
                     let start = columns[depth + 1].keys.len();
                     columns[depth].child_starts.push(start);
@@ -190,7 +223,7 @@ impl<K: Ord + Clone> ColumnarTrie<K> {
             order: order.to_vec(),
             columns,
             weights,
-            nullary_weight: if order.is_empty() { admitted.len() } else { 0 },
+            nullary_weight,
             generation,
         })
     }
@@ -219,12 +252,12 @@ fn compare_rows<K: Ord, E>(
 }
 
 fn sort_rows<K: Ord, E>(
-    rows: &mut [Vec<K>],
+    rows: &mut [(Vec<K>, usize)],
     order: &[usize],
     control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     fn sift<K: Ord, E>(
-        rows: &mut [Vec<K>],
+        rows: &mut [(Vec<K>, usize)],
         order: &[usize],
         mut root: usize,
         end: usize,
@@ -232,10 +265,10 @@ fn sort_rows<K: Ord, E>(
     ) -> Result<(), E> {
         while root < end / 2 {
             let mut child = root * 2 + 1;
-            if child + 1 < end && compare_rows(&rows[child], &rows[child + 1], order, control)? == Ordering::Less {
+            if child + 1 < end && compare_rows(&rows[child].0, &rows[child + 1].0, order, control)? == Ordering::Less {
                 child += 1;
             }
-            if compare_rows(&rows[root], &rows[child], order, control)? != Ordering::Less {
+            if compare_rows(&rows[root].0, &rows[child].0, order, control)? != Ordering::Less {
                 break;
             }
             control(GlaExecutionEvent::Work)?;
