@@ -210,7 +210,9 @@ pub enum FnxSealedReadError<S, C> {
     SourceMismatch,
 }
 impl<S, C> From<FnxReadError<S, C>> for FnxSealedReadError<S, C> {
-    fn from(error: FnxReadError<S, C>) -> Self { Self::Input(error) }
+    fn from(error: FnxReadError<S, C>) -> Self {
+        Self::Input(error)
+    }
 }
 impl<S: core::fmt::Display, C: core::fmt::Display> core::fmt::Display for FnxSealedReadError<S, C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -219,11 +221,15 @@ impl<S: core::fmt::Display, C: core::fmt::Display> core::fmt::Display for FnxSea
             Self::Seal(error) => error.fmt(f),
             Self::Projection(error) => error.fmt(f),
             Self::Execution(error) => error.fmt(f),
-            Self::SourceMismatch => f.write_str("Prism sealed source does not match the admitted read view"),
+            Self::SourceMismatch => {
+                f.write_str("Prism sealed source does not match the admitted read view")
+            }
         }
     }
 }
-impl<S: core::error::Error + 'static, C: core::error::Error + 'static> core::error::Error for FnxSealedReadError<S, C> {
+impl<S: core::error::Error + 'static, C: core::error::Error + 'static> core::error::Error
+    for FnxSealedReadError<S, C>
+{
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Input(error) => Some(error),

@@ -7,8 +7,8 @@
 
 use crate::execute::{admit, reserve};
 use crate::{
-    ComplexityWitness, FnxBindError, FnxBindErrorKind, FnxExecutionError,
-    FnxExecutionLimits, GraphView, SnapshotGraphView,
+    ComplexityWitness, FnxBindError, FnxBindErrorKind, FnxExecutionError, FnxExecutionLimits,
+    GraphView, SnapshotGraphView,
 };
 use fgdb_types::VId;
 
@@ -94,11 +94,18 @@ pub fn dijkstra<C>(
     let mut arcs = 0usize;
     for node in 0..n {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        let row = graph.neighbors_indices(node)
+        let row = graph
+            .neighbors_indices(node)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
-        arcs = arcs.checked_add(row.len()).ok_or(FnxExecutionError::SizeOverflow)?;
+        arcs = arcs
+            .checked_add(row.len())
+            .ok_or(FnxExecutionError::SizeOverflow)?;
     }
-    admit("estimated work", estimated_work(n, arcs)?, limits.max_estimated_work)?;
+    admit(
+        "estimated work",
+        estimated_work(n, arcs)?,
+        limits.max_estimated_work,
+    )?;
     workspace_bytes::<C>(n)?;
     run(graph, options, limits.max_result_rows, &mut checkpoint)
 }
@@ -107,17 +114,23 @@ pub fn dijkstra<C>(
 /// directions. It is a work model, not an instruction count or wall-clock bound.
 pub(crate) fn estimated_work<C>(n: usize, arcs: usize) -> Result<usize, FnxExecutionError<C>> {
     let height = (usize::BITS - n.leading_zeros()) as usize;
-    let factor = height.checked_mul(2).and_then(|value| value.checked_add(3))
+    let factor = height
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(3))
         .ok_or(FnxExecutionError::SizeOverflow)?;
-    n.checked_add(arcs).and_then(|value| value.checked_mul(factor))
+    n.checked_add(arcs)
+        .and_then(|value| value.checked_mul(factor))
         .ok_or(FnxExecutionError::SizeOverflow)
 }
 
 pub(crate) fn workspace_bytes<C>(n: usize) -> Result<usize, FnxExecutionError<C>> {
     // Heap entries, inverse positions, final distances, overflow reachability.
-    let per_vertex = std::mem::size_of::<Entry>() + std::mem::size_of::<usize>()
-        + std::mem::size_of::<Option<f64>>() + std::mem::size_of::<bool>();
-    n.checked_mul(per_vertex).ok_or(FnxExecutionError::SizeOverflow)
+    let per_vertex = std::mem::size_of::<Entry>()
+        + std::mem::size_of::<usize>()
+        + std::mem::size_of::<Option<f64>>()
+        + std::mem::size_of::<bool>();
+    n.checked_mul(per_vertex)
+        .ok_or(FnxExecutionError::SizeOverflow)
 }
 
 #[derive(Clone, Copy)]
@@ -164,25 +177,41 @@ impl IndexedHeap {
     ) -> Result<Self, HeapError<C>> {
         checkpoint().map_err(HeapError::Cancelled)?;
         let mut entries = Vec::new();
-        entries.try_reserve_exact(n).map_err(|_| HeapError::AllocationFailed)?;
+        entries
+            .try_reserve_exact(n)
+            .map_err(|_| HeapError::AllocationFailed)?;
         checkpoint().map_err(HeapError::Cancelled)?;
         let mut positions = Vec::new();
-        positions.try_reserve_exact(n).map_err(|_| HeapError::AllocationFailed)?;
+        positions
+            .try_reserve_exact(n)
+            .map_err(|_| HeapError::AllocationFailed)?;
         for _ in 0..n {
             checkpoint().map_err(HeapError::Cancelled)?;
             positions.push(usize::MAX);
         }
-        Ok(Self { entries, positions, sequence: 0, comparison })
+        Ok(Self {
+            entries,
+            positions,
+            sequence: 0,
+            comparison,
+        })
     }
 
-    pub(crate) fn len(&self) -> usize { self.entries.len() }
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
 
     pub(crate) fn contains(&self, node: usize) -> Option<bool> {
-        self.positions.get(node).map(|&position| position != usize::MAX)
+        self.positions
+            .get(node)
+            .map(|&position| position != usize::MAX)
     }
 
     fn before(left: Entry, right: Entry) -> bool {
-        left.cost.total_cmp(&right.cost).then(left.sequence.cmp(&right.sequence)).is_lt()
+        left.cost
+            .total_cmp(&right.cost)
+            .then(left.sequence.cmp(&right.sequence))
+            .is_lt()
     }
 
     fn swap(&mut self, left: usize, right: usize) {
@@ -205,10 +234,19 @@ impl IndexedHeap {
                 DijkstraComparison::Strict => previous,
                 DijkstraComparison::FnxEpsilon => previous - FNX_DIJKSTRA_EPSILON,
             };
-            if cost >= threshold { return Ok(()); }
+            if cost >= threshold {
+                return Ok(());
+            }
         }
-        self.sequence = self.sequence.checked_add(1).ok_or(HeapError::SizeOverflow)?;
-        let entry = Entry { node, cost, sequence: self.sequence };
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(HeapError::SizeOverflow)?;
+        let entry = Entry {
+            node,
+            cost,
+            sequence: self.sequence,
+        };
         if position == usize::MAX {
             position = self.entries.len();
             self.positions[node] = position;
@@ -272,7 +310,8 @@ pub(crate) fn run<C>(
     row_limit: usize,
     checkpoint: &mut impl FnMut() -> Result<(), C>,
 ) -> Result<DijkstraOutput, FnxExecutionError<C>> {
-    let source = graph.vertex_ordinal(options.source)
+    let source = graph
+        .vertex_ordinal(options.source)
         .ok_or(FnxExecutionError::UnknownSource(options.source))?;
     admit("result rows", 1, row_limit)?;
     let n = graph.node_count();
@@ -280,7 +319,8 @@ pub(crate) fn run<C>(
     // before a cutoff. Otherwise an early exit could hide an invalid weight.
     for node in 0..n {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        let (_, weights) = graph.projected_row(node)
+        let (_, weights) = graph
+            .projected_row(node)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         for &weight in weights {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
@@ -311,27 +351,45 @@ pub(crate) fn run<C>(
     };
     loop {
         checkpoint().map_err(FnxExecutionError::Cancelled)?;
-        let Some(Entry { node, cost, .. }) = heap.pop(checkpoint)? else { break; };
+        let Some(Entry { node, cost, .. }) = heap.pop(checkpoint)? else {
+            break;
+        };
         distances[node] = Some(cost);
-        witness.nodes_touched = witness.nodes_touched.checked_add(1)
+        witness.nodes_touched = witness
+            .nodes_touched
+            .checked_add(1)
             .ok_or(FnxExecutionError::SizeOverflow)?;
-        let (targets, weights) = graph.projected_row(node)
+        let (targets, weights) = graph
+            .projected_row(node)
             .ok_or(FnxExecutionError::InvalidUpstreamResult)?;
         for (&target, &weight) in targets.iter().zip(weights) {
             checkpoint().map_err(FnxExecutionError::Cancelled)?;
-            witness.edges_scanned = witness.edges_scanned.checked_add(1)
+            witness.edges_scanned = witness
+                .edges_scanned
+                .checked_add(1)
                 .ok_or(FnxExecutionError::SizeOverflow)?;
-            if distances[target].is_some() { continue; }
+            if distances[target].is_some() {
+                continue;
+            }
             let candidate = cost + weight;
             if !candidate.is_finite() {
                 // An overflowing alternative must not reject a later finite
                 // shortest path. With a finite cutoff it is simply out of range.
-                if options.cutoff.is_none() { overflowed[target] = true; }
+                if options.cutoff.is_none() {
+                    overflowed[target] = true;
+                }
                 continue;
             }
-            if options.cutoff.is_some_and(|cutoff| candidate > cutoff) { continue; }
-            if !heap.contains(target).ok_or(FnxExecutionError::InvalidUpstreamResult)? {
-                let requested = discovered.checked_add(1).ok_or(FnxExecutionError::SizeOverflow)?;
+            if options.cutoff.is_some_and(|cutoff| candidate > cutoff) {
+                continue;
+            }
+            if !heap
+                .contains(target)
+                .ok_or(FnxExecutionError::InvalidUpstreamResult)?
+            {
+                let requested = discovered
+                    .checked_add(1)
+                    .ok_or(FnxExecutionError::SizeOverflow)?;
                 admit("result rows", requested, row_limit)?;
                 discovered = requested;
             }
@@ -346,48 +404,92 @@ pub(crate) fn run<C>(
             return Err(FnxExecutionError::InvalidNumericResult);
         }
     }
-    Ok(DijkstraOutput { distances, row_count: discovered, witness })
+    Ok(DijkstraOutput {
+        distances,
+        row_count: discovered,
+        witness,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Directedness, ParallelEdgePolicy, ProjectionEdge, ProjectionLimits,
-        ProjectionSpec, SelfLoopPolicy, SnapshotBinding};
+    use crate::{
+        Directedness, ParallelEdgePolicy, ProjectionEdge, ProjectionLimits, ProjectionSpec,
+        SelfLoopPolicy, SnapshotBinding,
+    };
     use fgdb_types::{CommitSeq, EId, ids::ObjectId};
     use fnx_classes::{Graph, digraph::DiGraph};
     use std::convert::Infallible;
 
-    fn graph(n: usize, edges: &[(usize, usize, f64)], direction: Directedness) -> SnapshotGraphView {
-        let vertices: Vec<_> = (0..n).map(|i| VId(u128::MAX - n as u128 + i as u128)).collect();
-        let edges: Vec<_> = edges.iter().enumerate().map(|(id, &(s, t, weight))| ProjectionEdge {
-            eid: EId(id as u128), source: vertices[s], target: vertices[t], weight,
-        }).collect();
+    fn graph(
+        n: usize,
+        edges: &[(usize, usize, f64)],
+        direction: Directedness,
+    ) -> SnapshotGraphView {
+        let vertices: Vec<_> = (0..n)
+            .map(|i| VId(u128::MAX - n as u128 + i as u128))
+            .collect();
+        let edges: Vec<_> = edges
+            .iter()
+            .enumerate()
+            .map(|(id, &(s, t, weight))| ProjectionEdge {
+                eid: EId(id as u128),
+                source: vertices[s],
+                target: vertices[t],
+                weight,
+            })
+            .collect();
         SnapshotGraphView::build(
-            SnapshotBinding { root: ObjectId([7; 32]), as_of: CommitSeq(9) },
-            &vertices, &edges,
-            ProjectionSpec { directedness: direction, parallel_edges: ParallelEdgePolicy::Minimum,
-                self_loops: SelfLoopPolicy::Keep },
-            ProjectionLimits { max_vertices: n, max_input_edges: edges.len(),
-                max_adjacency_entries: edges.len() * 2, max_workspace_bytes: 1 << 24 },
-        ).unwrap()
+            SnapshotBinding {
+                root: ObjectId([7; 32]),
+                as_of: CommitSeq(9),
+            },
+            &vertices,
+            &edges,
+            ProjectionSpec {
+                directedness: direction,
+                parallel_edges: ParallelEdgePolicy::Minimum,
+                self_loops: SelfLoopPolicy::Keep,
+            },
+            ProjectionLimits {
+                max_vertices: n,
+                max_input_edges: edges.len(),
+                max_adjacency_entries: edges.len() * 2,
+                max_workspace_bytes: 1 << 24,
+            },
+        )
+        .unwrap()
     }
     fn limits() -> FnxExecutionLimits {
-        FnxExecutionLimits { max_iterations: 0, max_result_rows: 100, max_estimated_work: 1 << 24 }
+        FnxExecutionLimits {
+            max_iterations: 0,
+            max_result_rows: 100,
+            max_estimated_work: 1 << 24,
+        }
     }
     fn options(graph: &SnapshotGraphView, source: usize, cutoff: Option<f64>) -> DijkstraOptions {
         DijkstraOptions::new(graph.vertex_id(source).unwrap(), cutoff).unwrap()
     }
     fn execute(graph: &SnapshotGraphView, source: usize, cutoff: Option<f64>) -> DijkstraOutput {
-        dijkstra(graph, options(graph, source, cutoff), limits(), || Ok::<(), Infallible>(())).unwrap()
+        dijkstra(graph, options(graph, source, cutoff), limits(), || {
+            Ok::<(), Infallible>(())
+        })
+        .unwrap()
     }
 
     #[test]
     fn all_small_weighted_topologies_match_independent_dense_floyd_warshall() {
         for mask in 0u16..512 {
-            let edges: Vec<_> = (0..9).filter(|bit| mask & (1 << bit) != 0)
-                .map(|bit| (bit / 3, bit % 3, [0.0, 0.5, 3.0, 7.0][bit % 4])).collect();
-            for direction in [Directedness::Directed, Directedness::Reversed, Directedness::Undirected] {
+            let edges: Vec<_> = (0..9)
+                .filter(|bit| mask & (1 << bit) != 0)
+                .map(|bit| (bit / 3, bit % 3, [0.0, 0.5, 3.0, 7.0][bit % 4]))
+                .collect();
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
                 let view = graph(3, &edges, direction);
                 let mut dense = [[f64::INFINITY; 3]; 3];
                 for i in 0..3 {
@@ -399,17 +501,31 @@ mod tests {
                 }
                 for k in 0..3 {
                     for i in 0..3 {
-                        for j in 0..3 { dense[i][j] = dense[i][j].min(dense[i][k] + dense[k][j]); }
+                        for j in 0..3 {
+                            dense[i][j] = dense[i][j].min(dense[i][k] + dense[k][j]);
+                        }
                     }
                 }
                 for source in 0..3 {
                     for cutoff in [None, Some(0.0), Some(0.5), Some(3.0)] {
                         let actual = execute(&view, source, cutoff);
-                        let expected: Vec<_> = dense[source].iter().copied().map(|distance| {
-                            (distance.is_finite() && cutoff.is_none_or(|limit| distance <= limit)).then_some(distance)
-                        }).collect();
-                        assert_eq!(actual.distances, expected, "mask={mask} {direction:?} source={source} cutoff={cutoff:?}");
-                        assert_eq!(actual.row_count, expected.iter().filter(|value| value.is_some()).count());
+                        let expected: Vec<_> = dense[source]
+                            .iter()
+                            .copied()
+                            .map(|distance| {
+                                (distance.is_finite()
+                                    && cutoff.is_none_or(|limit| distance <= limit))
+                                .then_some(distance)
+                            })
+                            .collect();
+                        assert_eq!(
+                            actual.distances, expected,
+                            "mask={mask} {direction:?} source={source} cutoff={cutoff:?}"
+                        );
+                        assert_eq!(
+                            actual.row_count,
+                            expected.iter().filter(|value| value.is_some()).count()
+                        );
                         assert_eq!(actual.witness.nodes_touched, actual.row_count);
                         assert!(actual.witness.queue_peak <= 3);
                     }
@@ -421,9 +537,15 @@ mod tests {
     #[test]
     fn all_small_unit_topologies_match_pinned_standalone_fnx() {
         for mask in 0u16..512 {
-            let edges: Vec<_> = (0..9).filter(|bit| mask & (1 << bit) != 0)
-                .map(|bit| (bit / 3, bit % 3, 1.0)).collect();
-            for direction in [Directedness::Directed, Directedness::Reversed, Directedness::Undirected] {
+            let edges: Vec<_> = (0..9)
+                .filter(|bit| mask & (1 << bit) != 0)
+                .map(|bit| (bit / 3, bit % 3, 1.0))
+                .collect();
+            for direction in [
+                Directedness::Directed,
+                Directedness::Reversed,
+                Directedness::Undirected,
+            ] {
                 let view = graph(3, &edges, direction);
                 let mut directed = DiGraph::strict();
                 let mut undirected = Graph::strict();
@@ -436,15 +558,23 @@ mod tests {
                         let s = view.get_node_name(source).unwrap();
                         let t = view.get_node_name(target).unwrap();
                         directed.add_edge(s, t).unwrap();
-                        if source <= target { undirected.add_edge(s, t).unwrap(); }
+                        if source <= target {
+                            undirected.add_edge(s, t).unwrap();
+                        }
                     }
                 }
                 for source in 0..3 {
                     let name = view.get_node_name(source).unwrap();
                     let oracle = if direction == Directedness::Undirected {
-                        fnx_algorithms::single_source_dijkstra_path_length(&undirected, name, "weight")
+                        fnx_algorithms::single_source_dijkstra_path_length(
+                            &undirected,
+                            name,
+                            "weight",
+                        )
                     } else {
-                        fnx_algorithms::single_source_dijkstra_path_length_directed(&directed, name, "weight")
+                        fnx_algorithms::single_source_dijkstra_path_length_directed(
+                            &directed, name, "weight",
+                        )
                     };
                     let mut expected = vec![None; 3];
                     for (node, distance) in oracle {
@@ -458,20 +588,40 @@ mod tests {
 
     #[test]
     fn cutoff_keeps_zero_cost_closure_and_minimum_parallel_edge_law() {
-        let view = graph(5, &[(0, 1, 20.0), (0, 1, 2.0), (1, 2, 0.0),
-            (2, 1, 0.0), (2, 3, 0.5)], Directedness::Directed);
-        assert_eq!(execute(&view, 0, Some(2.0)).distances,
-            vec![Some(0.0), Some(2.0), Some(2.0), None, None]);
-        assert_eq!(execute(&view, 1, Some(0.0)).distances,
-            vec![None, Some(0.0), Some(0.0), None, None]);
+        let view = graph(
+            5,
+            &[
+                (0, 1, 20.0),
+                (0, 1, 2.0),
+                (1, 2, 0.0),
+                (2, 1, 0.0),
+                (2, 3, 0.5),
+            ],
+            Directedness::Directed,
+        );
+        assert_eq!(
+            execute(&view, 0, Some(2.0)).distances,
+            vec![Some(0.0), Some(2.0), Some(2.0), None, None]
+        );
+        assert_eq!(
+            execute(&view, 1, Some(0.0)).distances,
+            vec![None, Some(0.0), Some(0.0), None, None]
+        );
     }
 
     #[test]
     fn overflow_alternatives_do_not_poison_finite_paths_or_cutoffs() {
         let overflow = [(0, 1, f64::MAX * 0.75), (1, 3, f64::MAX * 0.75)];
         let view = graph(4, &overflow, Directedness::Directed);
-        assert!(matches!(dijkstra(&view, options(&view, 0, None), limits(), || Ok::<(), Infallible>(())),
-            Err(FnxExecutionError::InvalidNumericResult)));
+        assert!(matches!(
+            dijkstra(&view, options(&view, 0, None), limits(), || Ok::<
+                (),
+                Infallible,
+            >(
+                ()
+            )),
+            Err(FnxExecutionError::InvalidNumericResult)
+        ));
         assert_eq!(execute(&view, 0, Some(f64::MAX)).row_count, 2);
         let mut finite = overflow.to_vec();
         finite.extend([(0, 2, f64::MAX * 0.875), (2, 3, 0.0)]);
@@ -484,19 +634,68 @@ mod tests {
         for cutoff in [f64::NAN, f64::INFINITY, -1.0] {
             assert!(DijkstraOptions::new(VId(1), Some(cutoff)).is_err());
         }
-        assert_eq!(DijkstraOptions::new(VId(1), Some(-0.0)).unwrap().cutoff().unwrap().to_bits(), 0);
+        assert_eq!(
+            DijkstraOptions::new(VId(1), Some(-0.0))
+                .unwrap()
+                .cutoff()
+                .unwrap()
+                .to_bits(),
+            0
+        );
         let view = graph(4, &[(2, 3, -1.0)], Directedness::Directed);
-        assert!(matches!(dijkstra(&view, options(&view, 0, Some(0.0)), limits(), || Ok::<(), Infallible>(())),
-            Err(FnxExecutionError::NegativeWeight)));
+        assert!(matches!(
+            dijkstra(&view, options(&view, 0, Some(0.0)), limits(), || Ok::<
+                (),
+                Infallible,
+            >(
+                ()
+            )),
+            Err(FnxExecutionError::NegativeWeight)
+        ));
         let view = graph(4, &[], Directedness::Directed);
-        assert!(matches!(dijkstra(&view, DijkstraOptions::new(VId(0), None).unwrap(), limits(), || Ok::<(), Infallible>(())),
-            Err(FnxExecutionError::UnknownSource(VId(0)))));
-        let tight = FnxExecutionLimits { max_result_rows: 1, ..limits() };
-        assert_eq!(dijkstra(&view, options(&view, 0, None), tight, || Ok::<(), Infallible>(())).unwrap().row_count, 1);
-        for cap in [FnxExecutionLimits { max_result_rows: 0, ..limits() },
-            FnxExecutionLimits { max_estimated_work: 0, ..limits() }] {
-            assert!(matches!(dijkstra(&view, options(&view, 0, None), cap, || Ok::<(), Infallible>(())),
-                Err(FnxExecutionError::LimitExceeded { .. })));
+        assert!(matches!(
+            dijkstra(
+                &view,
+                DijkstraOptions::new(VId(0), None).unwrap(),
+                limits(),
+                || Ok::<(), Infallible>(())
+            ),
+            Err(FnxExecutionError::UnknownSource(VId(0)))
+        ));
+        let tight = FnxExecutionLimits {
+            max_result_rows: 1,
+            ..limits()
+        };
+        assert_eq!(
+            dijkstra(
+                &view,
+                options(&view, 0, None),
+                tight,
+                || Ok::<(), Infallible>(())
+            )
+            .unwrap()
+            .row_count,
+            1
+        );
+        for cap in [
+            FnxExecutionLimits {
+                max_result_rows: 0,
+                ..limits()
+            },
+            FnxExecutionLimits {
+                max_estimated_work: 0,
+                ..limits()
+            },
+        ] {
+            assert!(matches!(
+                dijkstra(
+                    &view,
+                    options(&view, 0, None),
+                    cap,
+                    || Ok::<(), Infallible>(())
+                ),
+                Err(FnxExecutionError::LimitExceeded { .. })
+            ));
         }
         assert!(estimated_work::<Infallible>(usize::MAX, 1).is_err());
         assert!(workspace_bytes::<Infallible>(usize::MAX).is_err());
@@ -504,17 +703,34 @@ mod tests {
 
     #[test]
     fn every_checkpoint_including_heap_sifts_cancels_without_partial_results() {
-        let view = graph(5, &[(0, 1, 8.0), (0, 2, 4.0), (0, 3, 2.0),
-            (3, 1, 1.0), (1, 2, 0.0), (2, 4, 1.0)], Directedness::Directed);
+        let view = graph(
+            5,
+            &[
+                (0, 1, 8.0),
+                (0, 2, 4.0),
+                (0, 3, 2.0),
+                (3, 1, 1.0),
+                (1, 2, 0.0),
+                (2, 4, 1.0),
+            ],
+            Directedness::Directed,
+        );
         let mut total = 0;
-        dijkstra(&view, options(&view, 0, None), limits(), || { total += 1; Ok::<(), &'static str>(()) }).unwrap();
+        dijkstra(&view, options(&view, 0, None), limits(), || {
+            total += 1;
+            Ok::<(), &'static str>(())
+        })
+        .unwrap();
         for stop in 1..=total {
             let mut count = 0;
             let result = dijkstra(&view, options(&view, 0, None), limits(), || {
                 count += 1;
                 if count == stop { Err("cancel") } else { Ok(()) }
             });
-            assert!(matches!(result, Err(FnxExecutionError::Cancelled("cancel"))));
+            assert!(matches!(
+                result,
+                Err(FnxExecutionError::Cancelled("cancel"))
+            ));
             assert_eq!(count, stop);
         }
     }
