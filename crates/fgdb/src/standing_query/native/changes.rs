@@ -1,6 +1,7 @@
 //! Compressed native baseline and one-tick delivery from published maintained
 //! bags. No graph source, expression evaluator or result re-execution occurs.
 
+mod statement;
 mod subscription;
 
 use super::*;
