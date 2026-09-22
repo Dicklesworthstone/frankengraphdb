@@ -22,7 +22,7 @@ use fgdb_types::context::QueryCx;
 use fgdb_types::ids::ObjectId;
 use fgdb_types::StorageReadCx;
 
-use super::memory::{MemoryError, MemoryPool, TrackedBytes};
+use super::memory::{MemoryCharge, MemoryError, MemoryPool, TrackedBytes};
 
 const MAX_FREQUENCY: u8 = 3;
 const FRAME_METADATA_CHARGE: usize = core::mem::size_of::<Frame>() + 2 * core::mem::size_of::<usize>();
@@ -270,6 +270,79 @@ impl ExtentBuffer {
 
     pub const fn stats(&self) -> BufferStats {
         self.stats
+    }
+
+    /// Reserve operator scratch from the shared pool, reclaiming unpinned
+    /// cache frames before asking the operator to spill or refuse work.
+    ///
+    /// Snapshot/anchor lifetime is not an eviction veto; BufferHandle pins are.
+    /// The emergency reserve remains inaccessible. Oversized requests fail
+    /// before eviction, and pool races cannot oversubscribe the budget or make
+    /// reclamation spin without progress.
+    ///
+    /// Keep the returned charge alive until the actual scratch is freed.
+    /// Prefer `allocate_scratch` for byte buffers whose charge should remain
+    /// structurally attached to their allocation. ResourceExhausted is the
+    /// operator's signal to use its spill path; this method performs no spill
+    /// I/O itself.
+    pub fn reserve_scratch(
+        &mut self,
+        cx: &QueryCx,
+        bytes: usize,
+    ) -> Result<MemoryCharge, BufferError> {
+        cx.with_restriction(|| self.admit_scratch_inner(
+            bytes,
+            |pool| pool.reserve_inner(bytes),
+            || cx.checkpoint().map_err(BufferError::Cancelled),
+        ))
+    }
+
+    /// Allocate charged, zeroed query workspace, reclaiming cache residency
+    /// through the same deterministic policy as `reserve_scratch`.
+    pub fn allocate_scratch(
+        &mut self,
+        cx: &QueryCx,
+        bytes: usize,
+    ) -> Result<TrackedBytes, BufferError> {
+        cx.with_restriction(|| self.admit_scratch_inner(
+            bytes,
+            |pool| pool.allocate_inner(bytes, 0),
+            || cx.checkpoint().map_err(BufferError::Cancelled),
+        ))
+    }
+
+    fn admit_scratch_inner<T>(
+        &mut self,
+        bytes: usize,
+        mut admit: impl FnMut(&MemoryPool) -> Result<T, MemoryError>,
+        mut checkpoint: impl FnMut() -> Result<(), BufferError>,
+    ) -> Result<T, BufferError> {
+        checkpoint()?;
+        if bytes > self.pool.limit() {
+            return Err(MemoryError::ResourceExhausted {
+                requested: bytes,
+                available: self.pool.available(),
+                limit: self.pool.limit(),
+            }.into());
+        }
+        loop {
+            checkpoint()?;
+            match admit(&self.pool) {
+                Ok(value) => {
+                    checkpoint()?;
+                    return Ok(value);
+                }
+                Err(error @ MemoryError::ResourceExhausted { .. }) => {
+                    // Each retry evicts one resident frame owned by this
+                    // exclusively borrowed manager. Pinned frames survive;
+                    // once no victim remains, return pressure to the operator.
+                    if !self.evict_one() {
+                        return Err(error.into());
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     /// Pin an extent, invoking `load` at most once and only after admission.
@@ -885,4 +958,95 @@ mod tests {
             assert_eq!((cache.pool.used(), cache.resident_frames()), (0, 0));
         });
     }
+    fn scratch(cache: &mut ExtentBuffer, bytes: usize) -> Result<MemoryCharge, BufferError> {
+        cache.admit_scratch_inner(bytes, |pool| pool.reserve_inner(bytes), || Ok(()))
+    }
+
+    #[test]
+    fn query_scratch_reclaims_cache_without_revoking_pinned_inputs() {
+        let mut cache = cache(3);
+        let held = pin(&mut cache, 1, &[1; 64], Admission::Normal);
+        drop(pin(&mut cache, 2, &[2; 64], Admission::Normal));
+        drop(pin(&mut cache, 3, &[3; 64], Admission::Normal));
+        let bytes = cache.pool.limit() - held.frame.data.charged_bytes();
+        let charge = scratch(&mut cache, bytes).unwrap();
+        assert_eq!(charge.bytes(), bytes);
+        assert_eq!(cache.resident_frames(), 1);
+        assert_eq!(cache.stats.evictions, 2);
+        assert_eq!(held.as_ref(), &[1; 64]);
+        assert_eq!(cache.pool.available(), 0);
+        drop(charge);
+        assert_eq!(cache.pool.used(), held.frame.data.charged_bytes());
+    }
+
+    #[test]
+    fn oversized_scratch_does_not_destroy_useful_residency() {
+        let mut cache = cache(2);
+        drop(pin(&mut cache, 1, &[1; 64], Admission::Normal));
+        drop(pin(&mut cache, 2, &[2; 64], Admission::Normal));
+        let used = cache.pool.used();
+        let before = cache.stats();
+        let called = Cell::new(false);
+        let bytes = cache.pool.limit() + 1;
+        let result = cache.admit_scratch_inner(bytes, |pool| {
+            called.set(true);
+            pool.reserve_inner(bytes)
+        }, || Ok(()));
+        assert!(matches!(result, Err(BufferError::Memory(MemoryError::ResourceExhausted { .. }))));
+        assert!(!called.get());
+        assert_eq!(cache.pool.used(), used);
+        assert_eq!(cache.stats(), before);
+        assert_eq!(cache.resident_frames(), 2);
+    }
+
+    #[test]
+    fn pinned_memory_forces_typed_scratch_refusal() {
+        let mut cache = cache(1);
+        let held = pin(&mut cache, 1, &[1; 64], Admission::Normal);
+        let used = cache.pool.used();
+        let result = scratch(&mut cache, 1);
+        assert!(matches!(result,
+            Err(BufferError::Memory(MemoryError::ResourceExhausted { .. }))));
+        assert_eq!(cache.pool.used(), used);
+        assert_eq!(cache.stats.evictions, 0);
+        assert_eq!(held.as_ref(), &[1; 64]);
+    }
+
+    #[test]
+    fn losing_every_pool_race_has_a_finite_reclamation_bound() {
+        let mut cache = cache(4);
+        for id in 1..=4 {
+            drop(pin(&mut cache, id, &[id; 64], Admission::Normal));
+        }
+        let attempts = Cell::new(0);
+        let result: Result<MemoryCharge, BufferError> = cache.admit_scratch_inner(1, |pool| {
+            attempts.set(attempts.get() + 1);
+            Err(MemoryError::ResourceExhausted {
+                requested: 1, available: 0, limit: pool.limit(),
+            })
+        }, || Ok(()));
+        assert!(matches!(result, Err(BufferError::Memory(MemoryError::ResourceExhausted { .. }))));
+        assert_eq!(attempts.get(), 5);
+        assert_eq!(cache.stats.evictions, 4);
+        assert_eq!(cache.resident_frames(), 0);
+        assert_eq!(cache.pool.used(), 0);
+    }
+
+    #[test]
+    fn query_scratch_never_spends_the_emergency_reserve() {
+        let regular = FRAME_METADATA_CHARGE + 64;
+        let pool = MemoryPool::new(regular + 4096, 4096).unwrap();
+        let mut cache = ExtentBuffer::new(pool, BufferLimits {
+            max_frames: 1, max_ghost_entries: 1, max_extent_bytes: 64,
+        }).unwrap();
+        drop(pin(&mut cache, 1, &[1; 64], Admission::Normal));
+        let charge = scratch(&mut cache, regular).unwrap();
+        assert_eq!(cache.pool.used(), regular);
+        assert_eq!(cache.pool.emergency_reserve(), 4096);
+        assert!(matches!(scratch(&mut cache, 1),
+            Err(BufferError::Memory(MemoryError::ResourceExhausted { .. }))));
+        drop(charge);
+        assert_eq!(cache.pool.available(), regular);
+    }
+
 }
