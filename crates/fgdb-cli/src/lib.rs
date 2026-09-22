@@ -11,7 +11,8 @@
 pub mod output;
 
 use fgdb_delta_types::{LabelId, PropertyKeyId, RelationId};
-use fgdb_gql::{GqlParameterValue, GqlParameters, GqlScalarParameter, GraphSymbol, GraphSymbolKind};
+use fgdb_gql::{GqlParameterValue, GqlParameters, GqlScalarParameter, GraphSymbol, GraphSymbolKind,
+    GraphSymbolResolver, ReverseSymbolCatalog};
 use fgdb_types::CanonicalScalar;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -158,7 +159,10 @@ fn bounded_number(value: Option<&str>, default: u64, limit: u64) -> Result<u64, 
 
 /// Explicit per-invocation schema bindings. Names never become invented IDs.
 #[derive(Default)]
-pub struct Symbols(BTreeMap<(GraphSymbolKind, String), GraphSymbol>);
+pub struct Symbols {
+    forward: BTreeMap<(GraphSymbolKind, String), GraphSymbol>,
+    reverse: ReverseSymbolCatalog,
+}
 impl Symbols {
     pub fn parse(text: &str) -> Result<Self, Error> {
         if text.len() > MAX_INPUT_BYTES { return Err(Error::Input); }
@@ -179,15 +183,41 @@ impl Symbols {
                 "property" => GraphSymbol::Property(PropertyKeyId(number.parse().map_err(|_| Error::Input)?)),
                 _ => return Err(Error::Input),
             };
-            if symbols.0.len() == MAX_SYMBOLS
-                || symbols.0.insert((symbol.kind(), name.to_owned()), symbol).is_some() {
+            if symbols.forward.len() == MAX_SYMBOLS
+                || symbols.forward.insert((symbol.kind(), name.to_owned()), symbol).is_some() {
                 return Err(Error::Input);
             }
+            // This format declares canonical names, not aliases. A second
+            // label/relation name for one ID has no unambiguous reflection.
+            let previous = match symbol {
+                GraphSymbol::Label(id) => symbols.reverse.labels.insert(id, name.to_owned()),
+                GraphSymbol::Relation(id) => symbols.reverse.relations.insert(id, name.to_owned()),
+                GraphSymbol::Property(_) => None,
+            };
+            if previous.is_some() { return Err(Error::Input); }
         }
         Ok(symbols)
     }
     pub fn resolve(&self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
-        self.0.get(&(kind, name.to_owned())).copied()
+        self.forward.get(&(kind, name.to_owned())).copied()
+    }
+}
+
+// Supply the complete catalog to reflective queries. A resolver closure only
+// supports forward lookup and makes the engine fall back to probing names
+// mentioned in the query/common-name list, which loses unrelated stored labels.
+impl GraphSymbolResolver for &Symbols {
+    fn resolve_symbol(&mut self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        self.resolve(kind, name)
+    }
+    fn reverse_catalog(&self) -> Option<ReverseSymbolCatalog> {
+        Some(self.reverse.clone())
+    }
+    fn reverse_label(&self, id: LabelId) -> Option<String> {
+        self.reverse.labels.get(&id).cloned()
+    }
+    fn reverse_relation(&self, id: RelationId) -> Option<String> {
+        self.reverse.relations.get(&id).cloned()
     }
 }
 
@@ -242,6 +272,19 @@ mod tests {
         assert!(Symbols::parse("label\tX\t1\nlabel\tX\t2").is_err());
         assert!(Symbols::parse("unknown\tX\t1").is_err());
         assert!(Symbols::parse("relation\tX\t1\textra").is_err());
+    }
+    #[test]
+    fn full_reverse_catalog_preserves_names_absent_from_the_statement() {
+        let symbols = Symbols::parse("label\tUnmentionedLabel\t17\nrelation\tUnmentionedRelation\t29\n").unwrap();
+        let resolver = &symbols;
+        let catalog = resolver.reverse_catalog().unwrap();
+        assert_eq!(catalog.labels.get(&LabelId(17)).map(String::as_str), Some("UnmentionedLabel"));
+        assert_eq!(resolver.reverse_relation(RelationId(29)).as_deref(), Some("UnmentionedRelation"));
+        for ambiguous in ["label\tA\t1\nlabel\tB\t1", "relation\tR\t1\nrelation\tS\t1"] {
+            assert!(Symbols::parse(ambiguous).is_err());
+        }
+        // IDs remain independent across the two domains.
+        assert!(Symbols::parse("label\tA\t1\nrelation\tR\t1").is_ok());
     }
     #[test]
     fn typed_parameters_use_engine_duplicate_and_range_checks() {

@@ -41,6 +41,9 @@ stdin are capped at 65,536 bytes, including before UTF-8 decoding.
 
 A symbols file has one `kind<TAB>name<TAB>decimal-id` per line, where kind is
 `relation`, `label`, or `property`. Duplicate names in the same domain refuse.
+Label and relation IDs must also have a unique canonical name within their
+domain; ambiguous aliases refuse. The full catalog is supplied to native
+`labels()`/`type()` reflection, including names absent from the query text.
 Names are case-sensitive; no dynamic schema catalog is implied. Blank lines
 are ignored. A parameters file uses `kind<TAB>name<TAB>value`; supported kinds
 are `int64`, `uint64`, `text` (UCS_BASIC), `bool` (`true`/`false`) and `null`
@@ -77,11 +80,15 @@ Native admission defaults are 1,000,000 snapshot records/work units/scratch
 entries and 10,000 result rows. `--max-rows` and `--max-work` set finite logical
 limits; these are not wall-clock or exact allocator-byte limits. The complete
 encoded response defaults to at most 8 MiB (`--max-output-bytes`, maximum 64
-MiB), with at most 1 MiB per record. All rows are rendered before any stdout
-record is released. Input validation and success-envelope sizing precede
-`init`/`compact` effects. Consumers must still require `complete`: a broken pipe
-or process termination can interrupt OS output. No automatic retry follows any
-failure, especially one after a mutating operation may have committed.
+MiB), with at most 1 MiB per record. Before allocating canonical temporary
+bytes, each cell must also fit the native 4,096 logical payload-unit bound
+(one per nested cell plus one per additional 64 bytes of variable payload).
+This separate admission bound is intentionally not an exact allocator-byte or
+query-peak-memory claim. All rows are rendered before any stdout record is
+released. Input validation and success-envelope sizing precede `init`/`compact`
+effects. Consumers must still require `complete`: a broken pipe or process
+termination can interrupt OS output. No automatic retry follows any failure,
+especially one after a mutating operation may have committed.
 
 Exit status: `0` completed; `2` usage/input/key refusal; `3` query/output-limit
 refusal; `1` database/runtime/output failure. These are local CLI results, not

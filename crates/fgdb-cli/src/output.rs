@@ -11,6 +11,13 @@ use fgdb_gql::algebra::GraphValue;
 use fgdb_types::CanonicalScalar;
 use std::fmt::{self, Write};
 
+/// Native logical cell admission, independent of the final encoded-byte cap.
+/// Each nested cell costs one unit; variable payload costs an additional unit
+/// per 64 bytes through GraphValue::payload_units. Check BEFORE canonical
+/// encoding so a refused cell cannot allocate a large temporary byte vector.
+/// This is not a claim about allocator overhead or total query peak memory.
+pub const MAX_CELL_UNITS: usize = 4096;
+
 struct Buffer {
     text: String,
     limit: usize,
@@ -104,7 +111,17 @@ pub fn render_result(result: &QueryResult, format: Format, limit: usize) -> Resu
     Ok(out.text)
 }
 
+fn admit_cell(value: &QueryValue) -> fmt::Result {
+    if let QueryValue::Value(graph) = value {
+        if !graph.validate_bounds() || graph.payload_units() > MAX_CELL_UNITS {
+            return Err(fmt::Error);
+        }
+    }
+    Ok(())
+}
+
 fn value(out: &mut Buffer, value: &QueryValue, format: Format) -> fmt::Result {
+    admit_cell(value)?;
     match value {
         QueryValue::Count(n) => tagged_number(out, "count", n, format),
         QueryValue::Integer(n) => tagged_number(out, "integer", n, format),
@@ -128,7 +145,6 @@ fn value(out: &mut Buffer, value: &QueryValue, format: Format) -> fmt::Result {
             encoded(out, "scalar", "strict-portable-v1", &bytes, format)
         }
         QueryValue::Value(graph) => {
-            if !graph.validate_bounds() { return Err(fmt::Error); }
             let bytes = graph.canonical_bytes().map_err(|_| fmt::Error)?;
             encoded(out, "graph", "graph-value-v1", &bytes, format)
         }
@@ -208,6 +224,23 @@ mod tests {
         assert!(rendered.contains("strict-portable-v1"));
         assert!(rendered.contains("graph-value-v1"));
         assert!(!rendered.contains("secret"));
+    }
+    #[test]
+    fn canonical_cell_admission_checks_payload_before_encoding() {
+        let scalar = QueryValue::Value(GraphValue::Scalar(
+            CanonicalScalar::bytes(vec![7; MAX_CELL_UNITS * 64]).unwrap()));
+        assert!(admit_cell(&scalar).is_err());
+        let exact = QueryValue::Value(GraphValue::List(
+            vec![GraphValue::Scalar(CanonicalScalar::Null); MAX_CELL_UNITS - 1].into_boxed_slice()));
+        assert!(admit_cell(&exact).is_ok());
+        let over = QueryValue::Value(GraphValue::List(
+            vec![GraphValue::Scalar(CanonicalScalar::Null); MAX_CELL_UNITS].into_boxed_slice()));
+        assert!(admit_cell(&over).is_err());
+        for format in [Format::Human, Format::Ndjson] {
+            assert_eq!(render_result(&result(vec![scalar.clone()]), format, MAX_OUTPUT_BYTES), Err(Error::OutputLimit));
+            assert_eq!(render_result(&result(vec![over.clone()]), format, MAX_OUTPUT_BYTES), Err(Error::OutputLimit));
+            assert!(render_result(&result(vec![exact.clone()]), format, MAX_OUTPUT_BYTES).is_ok());
+        }
     }
     #[test]
     fn malformed_rows_and_oversized_records_never_release_a_prefix() {

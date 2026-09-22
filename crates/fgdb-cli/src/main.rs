@@ -86,7 +86,7 @@ fn run(options: Options) -> Result<String, Error> {
             Command::Query => {
                 let db = Database::open(&commit, &options.db, keys).await.map_err(|_| Error::Database)?;
                 let result = db.query(&query, statement.as_deref().ok_or(Error::Usage)?, &parameters,
-                    |kind, name: &str| symbols.resolve(kind, name),
+                    &symbols,
                     GqlQueryPolicy::new(options.max_work, options.max_rows, options.max_work, options.max_work))
                     .map_err(|_| Error::Query)?;
                 root.checkpoint().map_err(|_| Error::Context)?;

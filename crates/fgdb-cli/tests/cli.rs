@@ -1,7 +1,7 @@
 //! End-to-end process tests over the actual durable engine, not a fake backend.
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
-use fgdb_delta_types::RelationId;
+use fgdb_delta_types::{LabelId, RelationId};
 use fgdb_types::{EId, VId, context::PurposeContexts, ids::DatabaseSecurityNamespaceId};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -24,7 +24,7 @@ impl Fixture {
         file.write_all(&[0x77; 32]).unwrap();
         file.write_all(&[0x3c; 32]).unwrap();
         file.sync_all().unwrap();
-        fs::write(home.join("symbols"), "relation\tKNOWS\t1\n").unwrap();
+        fs::write(home.join("symbols"), "relation\tKNOWS\t1\nlabel\tUnmentionedStoredLabel\t17\n").unwrap();
         Self { home }
     }
     fn path(&self, name: &str) -> PathBuf { self.home.join(name) }
@@ -46,7 +46,7 @@ impl Fixture {
         runtime.block_on(async {
             let mut db = Database::open(&cx, &self.path("db"), keys()).await.unwrap();
             let mut batch = WriteBatch::new(RelationId(1));
-            batch.create_vertex(VId(1), vec![], vec![]);
+            batch.create_vertex(VId(1), vec![LabelId(17)], vec![]);
             batch.create_vertex(VId(2), vec![], vec![]);
             batch.add_edge(EId(10), VId(1), VId(2), vec![]);
             db.write(&cx, batch).await.unwrap();
@@ -73,6 +73,21 @@ fn create_query_compact_reopen_uses_the_real_durable_engine() {
     success(&after);
     assert_eq!(before.stdout, after.stdout);
     success(&fixture.query("EXPLAIN MATCH (a)-[:KNOWS]->(b) RETURN b"));
+}
+
+#[test]
+fn labels_reflection_uses_the_supplied_catalog_not_name_probing() {
+    let fixture = Fixture::new();
+    success(&fixture.command("init").output().unwrap());
+    fixture.seed();
+    let output = fixture.query("MATCH (a)-[:KNOWS]->(b) RETURN labels(a)");
+    success(&output);
+    let expected = fgdb_gql::algebra::GraphValue::List(vec![
+        fgdb_gql::algebra::GraphValue::Scalar(
+            fgdb_types::CanonicalScalar::ucs_basic_text("UnmentionedStoredLabel").unwrap())
+    ].into_boxed_slice()).canonical_bytes().unwrap();
+    let hex: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("\"hex\":\"{hex}\"")));
 }
 
 #[test]
