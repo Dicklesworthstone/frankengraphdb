@@ -4,6 +4,8 @@
 //! a second snapshot. The host fixes the catalog, branch, clock and native
 //! policy once. Request code can supply only query text/arguments and QueryCx.
 
+mod stream;
+
 use super::*;
 use crate::EmbeddedReadView;
 use fgdb_gql::{GraphSymbol, GraphSymbolKind, ReverseSymbolCatalog};
@@ -11,7 +13,7 @@ use fgdb_warden::{Error as AuthorizationError, VerifiedCapability};
 use std::sync::Arc;
 
 struct State<'a, Resolver, Clock> {
-    view: EmbeddedReadView,
+    view: Option<EmbeddedReadView>,
     capability: VerifiedCapability<'a>,
     branch: String,
     resolver: Resolver,
@@ -57,7 +59,7 @@ impl core::fmt::Debug for AuthorizedPreparedRead {
 impl<R, C> core::fmt::Debug for AuthorizedReadSession<'_, R, C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedReadSession")
-            .field("closed", &self.state.is_none())
+            .field("closed", &self.is_closed())
             .field("authority_and_generation", &"[REDACTED]")
             .finish()
     }
@@ -102,7 +104,7 @@ fn check_branch(selected: &fgdb_gql::BoundGraphBranchText<'_>, branch: &str) -> 
 }
 fn terminal<T>(result: &Result<T, QueryError>) -> bool {
     matches!(result, Err(QueryError::Authorization(
-        AuthorizationError::Expired | AuthorizationError::NotYetValid
+        AuthorizationError::ExecutionStopped | AuthorizationError::Expired | AuthorizationError::NotYetValid
         | AuthorizationError::AuthorityRetired | AuthorizationError::ClockWentBackwards
     )))
 }
@@ -133,6 +135,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         let mut state = self.state.take().ok_or(QueryError::Authorization(
             AuthorizationError::ExecutionStopped,
         ))?;
+        if state.view.is_none() {
+            return Err(QueryError::Authorization(AuthorizationError::ExecutionStopped));
+        }
         let result = (|| {
             let State { view, capability, branch, resolver, policy, clock, last_now_ms } = &mut state;
             let now = clock();
@@ -150,6 +155,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 cx, permit, clock: &mut tracked_clock as &mut dyn FnMut() -> u64,
             });
             execution.borrow_mut().checkpoint()?;
+            let view = view.as_ref().ok_or(QueryError::Authorization(
+                AuthorizationError::ExecutionStopped,
+            ))?;
             let result = cx.with_restriction(|| action(
                 view, branch, capability.predicates(), resolver, *policy, &execution,
             ));
@@ -229,7 +237,7 @@ impl<R, C> AuthorizedReadSession<'_, R, C> {
         self.state = None;
     }
     pub fn is_closed(&self) -> bool {
-        self.state.is_none()
+        self.state.as_ref().is_none_or(|state| state.view.is_none())
     }
 }
 
@@ -271,7 +279,7 @@ impl<V: Vfs + Clone> Database<V> {
         };
         Ok(AuthorizedReadSession {
             state: Some(State {
-                view, capability, branch: branch.to_owned(), resolver, policy, clock, last_now_ms,
+                view: Some(view), capability, branch: branch.to_owned(), resolver, policy, clock, last_now_ms,
             }),
             owner: Arc::new(()),
         })

@@ -328,6 +328,23 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 impl EmbeddedReadView {
+    // Reuse the real ordered-history source behind a trusted source adapter.
+    // This only clones a pin after exact-cut admission: no candidate histories,
+    // graph rows or query results are scanned or collected at construction.
+    pub(crate) fn vertex_scan_source<'q>(
+        &self,
+        cx: &'q QueryCx,
+        as_of: CommitSeq,
+    ) -> Result<SnapshotVertexSource<'q>, ReadError> {
+        self.snapshot.check_frontier(as_of)?;
+        Ok(SnapshotVertexSource {
+            view: self.clone(),
+            cx,
+            as_of,
+            after: None,
+        })
+    }
+
     pub fn stream_graph_values_governed<'q>(
         &self,
         cx: &'q QueryCx,

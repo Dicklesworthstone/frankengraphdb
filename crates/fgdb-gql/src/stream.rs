@@ -31,7 +31,9 @@ use std::sync::Arc;
 pub mod aggregate;
 mod output;
 mod probe;
+mod record;
 pub use output::VertexScanOutput;
+pub use record::VertexScanRecord;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VertexScanBuildError {
@@ -313,6 +315,19 @@ pub trait VertexScanSource {
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<Self::Error, C>>;
 
+    /// Resolve the root candidate as borrowed fields or an owned, source-masked
+    /// record. The default preserves the original zero-copy path and controls.
+    /// An owned record lives only through this candidate's predicates/projection;
+    /// it cannot silently change probe or aggregate source admission contracts.
+    fn vertex_record<'a, C>(
+        &'a self,
+        vid: VId,
+        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+    ) -> Result<Option<VertexScanRecord<'a>>, VertexScanSourceError<Self::Error, C>> {
+        self.vertex(vid, control)
+            .map(|row| row.map(VertexScanRecord::Borrowed))
+    }
+
     /// Strict successor for an independent probe's caller-owned VId position.
     /// Unlike next_vertex(), this never moves the outer scan. Yield candidate
     /// histories (including isolates), resolving visibility through vertex().
@@ -469,8 +484,9 @@ impl<F> Meter<F> {
 /// eager executor's complete-table admission count. Work/scratch are logical
 /// controls, not allocator bytes, source residency, or caller collection space.
 ///
-/// At most one borrowed row and one projected result are live in the pull
-/// path; the source may retain an entire shared immutable database generation.
+/// At most one source record (borrowed or owned) and one projected result are
+/// live in the root pull path; the source may retain an entire shared immutable
+/// database generation. Probe sources retain their separate borrowing contract.
 /// LIMIT exhaustion does not prefetch a later candidate. Natural EOF is known
 /// on the first pull past the final result. An error is terminal, never EOF.
 pub struct VertexScanCursor<S, F, Row = VId> {
@@ -557,10 +573,11 @@ impl<S: VertexScanSource, F, Row: VertexScanOutput> VertexScanCursor<S, F, Row> 
             }
             self.last = Some(vid);
             meter.record()?;
-            let row = flatten(source.vertex(vid, &mut |event| meter.event(event)))?;
-            let Some(row) = row else {
+            let record = flatten(source.vertex_record(vid, &mut |event| meter.event(event)))?;
+            let Some(record) = record else {
                 continue;
             };
+            let row = record.as_row();
             // Probe work and candidate admission share the original meter.
             // These callback borrows are sequential; none spans a source call.
             let accepted = {

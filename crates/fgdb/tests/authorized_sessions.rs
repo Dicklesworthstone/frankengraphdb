@@ -1,4 +1,7 @@
 //! Public read-only sessions over actual committed generations and Warden.
+#[path = "authorized_sessions/streams.rs"]
+mod streams;
+
 use asupersync::lab::run_async_under_lab;
 use asupersync::security::key::AuthKey;
 use fgdb::{Database, DatabaseKeys, MemVfs, QueryError, QueryResult, QueryValue, WriteBatch};
