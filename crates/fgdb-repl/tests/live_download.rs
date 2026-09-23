@@ -382,3 +382,6 @@ fn command_clone_panic_during_preparation_fences_the_affected_voter() {
 
 #[path = "live_download/member.rs"]
 mod member;
+
+#[path = "live_download/refresh.rs"]
+mod refresh;

@@ -89,6 +89,16 @@ impl SnapshotDownload {
     }
     pub fn published_count(&self) -> usize { self.seed.published_count() }
 
+    /// Rebind a completed download to a freshly verified destination closure
+    /// after intervening local publications. Preserve the exact source cut and
+    /// transfer capability, and reuse shared durable objects without another
+    /// pull. New destination objects must be recovered/published before prepare.
+    /// This is explicit replanning, not an ordinary retry or authority refresh;
+    /// the caller must authenticate and resource-admit the new canonical plan.
+    pub fn refresh_plan(&mut self, plan: SeedPlan) -> Result<(), CatchupError> {
+        self.seed.refresh_plan(plan).map_err(CatchupError::Seed)
+    }
+
     pub(crate) fn validate_for<C: Clone + Eq>(&self, raft: &Raft<C>) -> Result<(), CatchupError> {
         validate(raft, self.namespace, &self.transfer, self.seed.plan())
     }

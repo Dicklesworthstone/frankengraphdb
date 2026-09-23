@@ -290,6 +290,61 @@ impl ReplicaSeed {
         &self.plan
     }
 
+    /// Adopt a newly verified destination plan for the SAME immutable snapshot.
+    ///
+    /// The canonical verifier must rebuild the complete destination closure for
+    /// the current Raft suffix/root generation and re-admit it under SeedLimits.
+    /// This operation does not construct that closure, authenticate a peer list,
+    /// or authorize retirement. Every snapshot/source coordinate stays fixed;
+    /// only the destination root/generation and its verified inventory may change.
+    ///
+    /// Finish all objects in the old plan first. A refresh cannot discard an
+    /// unfinished pull, pending object, uncertain install or its spent budgets.
+    /// Retain existing durable acknowledgements for byte-identical shared specs;
+    /// newly required objects remain missing. Repeating the exact plan is a no-op.
+    /// Session identity and acknowledgement serials are never reset. Removing a
+    /// staging inventory entry does NOT release a durable ownership promise or
+    /// delete any object: the backend's ownership/retention protocol still owns it.
+    pub fn refresh_plan(&mut self, plan: SeedPlan) -> Result<(), SeedError> {
+        self.open()?;
+        if self.installing.is_some() {
+            return Err(SeedError::InstallPending);
+        }
+        if self.plan.anchor == plan.anchor && self.plan.inventory == plan.inventory {
+            return Ok(());
+        }
+        if self.pending_object.is_some() {
+            return Err(SeedError::AwaitingObjectPublication);
+        }
+        let remaining = self.plan.inventory.len() - self.published.len();
+        if remaining != 0 {
+            return Err(SeedError::MissingObjects { remaining });
+        }
+        let mut source = self.plan.anchor.clone();
+        source.publication_root = plan.anchor.publication_root;
+        source.publication_generation = plan.anchor.publication_generation;
+        if source != plan.anchor
+            || plan.anchor.publication_generation <= self.plan.anchor.publication_generation
+        {
+            return Err(SeedError::InvalidAnchor);
+        }
+        // Validate every reused identity BEFORE mutating either the old plan
+        // or its acknowledgement map. A failure preserves the exact old owner.
+        for (oid, spec) in &plan.inventory {
+            if let Some(previous) = self.plan.inventory.get(oid) {
+                if spec.object_kind != previous.object_kind {
+                    return Err(SeedError::KindMismatch);
+                }
+                if spec.compressed_len != previous.compressed_len {
+                    return Err(SeedError::LengthMismatch);
+                }
+            }
+        }
+        self.published.retain(|oid, _| plan.inventory.contains_key(oid));
+        self.plan = plan;
+        Ok(())
+    }
+
     pub fn missing_objects(&self) -> impl Iterator<Item = &SeedObjectSpec> {
         self.plan
             .inventory

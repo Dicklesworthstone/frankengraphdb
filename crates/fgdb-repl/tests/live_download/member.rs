@@ -267,3 +267,35 @@ fn bound_and_independent_installs_share_exact_application_activation_checks() {
     }
     assert_eq!(results[0], results[1]);
 }
+
+#[test]
+fn refresh_after_live_apply_reuses_objects_and_installs_the_current_plan() {
+    let objects: Vec<_> = (51..55).map(Fixture::new).collect();
+    let extra = Fixture::new(90);
+    let (mut member, shared, transfer) = member(&objects);
+    let mut download = start(&member, transfer, &objects);
+    finish_objects(&mut member, &mut download, &objects);
+    for index in 1..=8 {
+        append(&mut member, index);
+        immediate(member.apply_next()).unwrap();
+    }
+    let mut a = download.anchor().clone();
+    assert!(member.progress().unwrap().publication_generation >= a.publication_generation);
+    a.publication_generation = 30;
+    a.publication_root = extra.encoding.object_id();
+    let plan = SeedPlan::from_authenticated_inventory(a, objects[..3].iter().chain(std::iter::once(&extra)).map(|o| SeedObjectSpec {
+        object_id: o.encoding.object_id(), object_kind: KIND, compressed_len: o.plaintext.len() as u64,
+    }), SeedLimits::default()).unwrap();
+    download.refresh_plan(plan).unwrap();
+    assert_eq!(download.published_count(), 3);
+    let mut source = Source { objects: std::slice::from_ref(&extra), calls: 0, suspend: false, fail: false };
+    assert!(immediate(download.recover_next(&mut source)).unwrap().is_some());
+    immediate(member.publish_download_object(&mut download)).unwrap();
+    assert!(immediate(download.recover_next(&mut source)).unwrap().is_none());
+    immediate(member.install_download(download)).unwrap();
+    assert_eq!(source.calls, 1); // No replay of the large shared snapshot closure.
+    assert_eq!(shared.borrow().objects, 5); // four original plus one refreshed root
+    assert_eq!(member.progress().unwrap().publication_generation, 30);
+    assert_eq!(member.progress().unwrap().publication_root, extra.encoding.object_id());
+    assert_eq!(member.progress().unwrap().applied.index, 93);
+}
