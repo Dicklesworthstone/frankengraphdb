@@ -306,40 +306,90 @@ fn decode_protected_observed(
     protected.resize(bytes, 0);
     for (number, group) in groups.into_iter().enumerate() {
         let block = layout.block(number as u32)?;
-        if complete_systematic(&group, block.symbols) {
-            // A systematic code transmits original symbols unchanged. All MACs,
-            // duplicate conflicts and block identities were checked above. Move
-            // each original directly into the protected object, without building
-            // constraint equations, a decoding matrix or a second source vector.
-            // Extra repair equations retain the existing native validation path.
-            for (esi, (_, payload)) in group {
-                block.restore_symbol(esi as usize, &payload, &mut protected)?;
-            }
-            continue;
-        }
-        before_erasure_decode(number as u32);
-        let decoder = InactivationDecoder::try_new(block.symbols, layout.symbol_size, code_seed(encoding))
-            .map_err(|_| SymbolizeError::InvalidParameters)?;
-        let mut received = decoder.constraint_symbols();
-        received.try_reserve_exact(group.len()).map_err(|_| SymbolizeError::AllocationFailed)?;
-        for (esi, (_, payload)) in group {
-            if (esi as usize) < block.symbols {
-                received.push(ReceivedSymbol::source(esi, payload));
-            } else {
-                let (columns, coefficients) = decoder.repair_equation(esi)
-                    .map_err(|_| SymbolizeError::InvalidParameters)?;
-                received.push(ReceivedSymbol::repair(esi, columns, coefficients, payload));
-            }
-        }
-        // ubs:ignore -- foundation erasure decoder, not JWT/signature decoding.
-        let decoded = decoder.decode(&received).map_err(|error| match error {
-            DecodeError::InsufficientSymbols { .. } | DecodeError::SingularMatrix { .. } =>
-                SymbolizeError::InsufficientSymbols,
-            _ => SymbolizeError::DecodeFailed,
+        restore_group(encoding, block, group, &mut protected, || {
+            before_erasure_decode(number as u32);
         })?;
-        block.restore(&decoded.source, &mut protected)?;
     }
     Ok(protected)
+}
+
+/// Decode exactly one block selected by BondedPull's immutable, authenticated
+/// coordinate index. The index is private to the pull; it is not donor metadata.
+/// Each selected record is reauthenticated and byte-bound to its indexed key.
+/// No partial protected bytes are exposed outside Chronicle.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn recover_indexed_block(
+    encoding: &EncodedObject,
+    number: u32,
+    serialized: &[Vec<u8>],
+    coordinates: &BTreeMap<(u32, u32), usize>,
+    expected_count: usize,
+    protected: &mut [u8],
+    dek: &[u8; 32],
+    verification: &mut dyn CryptoVerificationSink,
+) -> Result<(), SymbolizeError> {
+    let layout = Layout::new(encoding, protected.len())?;
+    let block = layout.block(number)?;
+    let record_len = usize::from(HEADER_LEN_V1) + layout.symbol_size + usize::from(SYMBOL_MAC_LEN_V1);
+    let mut group = BTreeMap::new();
+    for (&(source_block, esi), &index) in coordinates.range((number, 0)..=(number, MAX_ESI)) {
+        let raw = serialized.get(index).ok_or(SymbolizeError::InvalidParameters)?;
+        if raw.len() != record_len {
+            return Err(SymbolizeError::Symbol(SymbolError::InconsistentLengths));
+        }
+        let record = SymbolRecord::verify(raw, encoding, dek, verification)?;
+        if record.source_block != source_block || record.esi != esi {
+            return Err(SymbolizeError::InvalidParameters);
+        }
+        group.insert(esi, (index, record.payload));
+    }
+    if group.len() != expected_count || group.len() < block.symbols {
+        return Err(SymbolizeError::InvalidParameters);
+    }
+    restore_group(encoding, block, group, protected, || {})
+}
+
+// The batch and resumable paths share the actual source/erasure decoder, not
+// just its parameter calculations. Keep extra repair equations on this path.
+fn restore_group(
+    encoding: &EncodedObject,
+    block: Block,
+    group: BTreeMap<u32, (usize, Vec<u8>)>,
+    protected: &mut [u8],
+    before_erasure_decode: impl FnOnce(),
+) -> Result<(), SymbolizeError> {
+    if complete_systematic(&group, block.symbols) {
+        // A systematic code transmits original symbols unchanged. All MACs,
+        // duplicate conflicts and block identities were checked above. Move
+        // each original directly into the protected object, without building
+        // constraint equations, a decoding matrix or a second source vector.
+        // Extra repair equations retain the existing native validation path.
+        for (esi, (_, payload)) in group {
+            block.restore_symbol(esi as usize, &payload, protected)?;
+        }
+        return Ok(());
+    }
+    before_erasure_decode();
+    let decoder = InactivationDecoder::try_new(block.symbols, block.layout.symbol_size, code_seed(encoding))
+        .map_err(|_| SymbolizeError::InvalidParameters)?;
+    let mut received = decoder.constraint_symbols();
+    received.try_reserve_exact(group.len()).map_err(|_| SymbolizeError::AllocationFailed)?;
+    for (esi, (_, payload)) in group {
+        if (esi as usize) < block.symbols {
+            received.push(ReceivedSymbol::source(esi, payload));
+        } else {
+            let (columns, coefficients) = decoder.repair_equation(esi)
+                .map_err(|_| SymbolizeError::InvalidParameters)?;
+            received.push(ReceivedSymbol::repair(esi, columns, coefficients, payload));
+        }
+    }
+    // ubs:ignore -- foundation erasure decoder, not JWT/signature decoding.
+    let decoded = decoder.decode(&received).map_err(|error| match error {
+        DecodeError::InsufficientSymbols { .. } | DecodeError::SingularMatrix { .. } =>
+            SymbolizeError::InsufficientSymbols,
+        _ => SymbolizeError::DecodeFailed,
+    })?;
+    block.restore(&decoded.source, protected)
 }
 
 fn complete_systematic(group: &BTreeMap<u32, (usize, Vec<u8>)>, sources: usize) -> bool {

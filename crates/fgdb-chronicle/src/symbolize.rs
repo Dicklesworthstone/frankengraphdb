@@ -317,6 +317,17 @@ pub fn decode_object(
     verification: &mut dyn CryptoVerificationSink,
 ) -> Result<Vec<u8>, SymbolizeError> {
     let result = decode_object_inner(encoding, serialized_symbols, target, dek, verification);
+    report_recovery(encoding, target, result, verification)
+}
+
+/// One terminal observation per attempted object-recovery round. A cached
+/// block is not an accepted object; only complete-object verification is.
+pub(crate) fn report_recovery(
+    encoding: &EncodedObject,
+    target: RecoveryTarget<'_>,
+    result: Result<Vec<u8>, SymbolizeError>,
+    verification: &mut dyn CryptoVerificationSink,
+) -> Result<Vec<u8>, SymbolizeError> {
     let outcome = match result.as_ref() {
         Ok(_) => VerificationOutcome::Accepted,
         Err(SymbolizeError::InvalidParameters)
@@ -364,25 +375,36 @@ fn decode_object_inner(
     dek: &[u8; 32],
     verification: &mut dyn CryptoVerificationSink,
 ) -> Result<Vec<u8>, SymbolizeError> {
-    let RecoveryTarget {
-        k_oid,
-        namespace,
-        object_id: expected_object_id,
-        canonical_header,
-        protected_len,
-    } = target;
     // The same partition-aware path handles one and many source blocks. It
     // authenticates every input, deduplicates exact (block, ESI) coordinates,
     // decodes independent systems, and restores RFC sub-block byte order.
     // No partial block result escapes the complete-object identity boundary.
     let protected = blocks::decode_protected(
-        encoding, serialized_symbols, protected_len, dek, verification,
+        encoding, serialized_symbols, target.protected_len, dek, verification,
     )?;
+    verify_recovered_protected(encoding, &protected, target, dek, verification)
+}
+
+/// Shared final boundary for batch and retained-block reconstruction. This is
+/// crate-private: a protected block/cache never constructs a VerifiedObject.
+pub(crate) fn verify_recovered_protected(
+    encoding: &EncodedObject,
+    protected: &[u8],
+    target: RecoveryTarget<'_>,
+    dek: &[u8; 32],
+    verification: &mut dyn CryptoVerificationSink,
+) -> Result<Vec<u8>, SymbolizeError> {
+    let RecoveryTarget {
+        k_oid, namespace, object_id: expected_object_id, canonical_header, protected_len,
+    } = target;
+    if protected.len() != protected_len {
+        return Err(SymbolizeError::InvalidParameters);
+    }
 
     // Layer 1 of the check: the AEAD must open. This already rejects any
     // decode that produced different ciphertext.
     let compressed = encoding
-        .open_recovered(&protected, dek, verification)
+        .open_recovered(protected, dek, verification)
         .map_err(|error| match error {
             RecoveredObjectError::AuthenticationFailed => SymbolizeError::AuthenticationFailed,
             RecoveredObjectError::CiphertextIdentityMismatch => {

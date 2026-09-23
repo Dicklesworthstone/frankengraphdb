@@ -10,13 +10,15 @@
 use crate::identity::{CryptoVerificationSink, EncodedObject};
 use crate::symbol::{HEADER_LEN_V1, SYMBOL_MAC_LEN_V1, SymbolError, SymbolRecord};
 use crate::symbolize::{
-    MAX_SOURCE_SYMBOLS_PER_BLOCK, RecoveryTarget, SymbolizeError, decode_object,
+    MAX_SOURCE_SYMBOLS_PER_BLOCK, RecoveryTarget, SymbolizeError,
 };
 use crate::symbolize::blocks::{Layout, MAX_SOURCE_BLOCKS};
 use asupersync::net::atp::channel_bonding::{DonorEsiStream, MAX_STATIC_RESIDUE_DONORS, owns_esi};
 use fgdb_crypto::Digest;
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod recovery;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DonorId(pub u128);
@@ -25,6 +27,9 @@ pub struct DonorId(pub u128);
 /// workspace: `max_source_symbols` bounds the total source-symbol population
 /// across all blocks, not a separate allowance for every block. Each block
 /// additionally obeys the foundation decoder's 56,403-source-symbol ceiling.
+/// Reconstruction retains at most `protected_len` additional protected bytes
+/// across retries. This is separate from raw-wire storage and native workspace,
+/// and bounded by the admitted total source population and symbol size.
 #[derive(Clone, Copy, Debug)]
 pub struct PullLimits {
     pub max_source_symbols: usize,
@@ -37,6 +42,8 @@ pub struct PullLimits {
     /// Recovery's additional authentication work is bounded by the product of
     /// `max_decode_attempts` and `max_symbols`.
     pub max_verifications: u64,
+    /// Object-wide recovery rounds. A round visits each changed block at most
+    /// once; every still-deficient block must gain an equation before a retry.
     pub max_decode_attempts: u32,
     pub max_esi: u32,
 }
@@ -161,7 +168,6 @@ pub struct BondedPull<'a> {
     target: RecoveryTarget<'a>,
     dek: &'a [u8; 32],
     limits: PullLimits,
-    source_symbols: usize,
     block_sources: Vec<usize>,
     block_received: Vec<usize>,
     record_len: usize,
@@ -174,7 +180,7 @@ pub struct BondedPull<'a> {
     requests: u64,
     verifications: u64,
     decode_attempts: u32,
-    last_decode_count: usize,
+    recovery: recovery::Recovery,
     closed: bool,
 }
 
@@ -291,7 +297,6 @@ impl<'a> BondedPull<'a> {
             target,
             dek,
             limits,
-            source_symbols,
             block_sources,
             block_received,
             record_len,
@@ -304,7 +309,7 @@ impl<'a> BondedPull<'a> {
             requests: 0,
             verifications: 0,
             decode_attempts: 0,
-            last_decode_count: 0,
+            recovery: recovery::Recovery::new(layout.blocks())?,
             closed: false,
         })
     }
@@ -331,11 +336,18 @@ impl<'a> BondedPull<'a> {
         self.block_received.get(block as usize).copied()
     }
 
+    /// Reconstructed blocks at their exact current input sets. This is progress
+    /// only: the whole-object AEAD and keyed logical identity may still fail.
+    pub fn recovered_block_count(&self) -> usize {
+        self.recovery.cached_blocks(&self.block_received)
+    }
+
     fn block_targets(&self) -> Result<Vec<usize>, PullError> {
         let mut targets = Vec::new();
         targets.try_reserve_exact(self.block_sources.len()).map_err(|_| PullError::AllocationFailed)?;
-        for sources in &self.block_sources {
-            targets.push(sources.checked_add(self.decode_attempts as usize).ok_or(PullError::DecodeBudget)?);
+        for (block, sources) in self.block_sources.iter().enumerate() {
+            targets.push(self.recovery.target(block, *sources, self.block_received[block])
+                .ok_or(PullError::DecodeBudget)?);
         }
         Ok(targets)
     }
@@ -657,6 +669,7 @@ impl<'a> BondedPull<'a> {
         self.seen.insert(coordinate, self.records.len());
         self.records.push(owned);
         self.block_received[record.source_block as usize] += 1;
+        self.recovery.input_changed();
         self.stored_bytes += bytes.len();
         self.pending.remove(&coordinate);
         Ok(SymbolAdmission::Added)
@@ -665,53 +678,26 @@ impl<'a> BondedPull<'a> {
     /// Rank deficiency asks for more equations. Every other recovery failure
     /// closes this attempt; corruption is never relabeled as insufficient data.
     /// Repeated polling without another accepted symbol performs no new decode.
+    /// Successful blocks survive rank failures in other blocks. Only changed
+    /// blocks are retried, and every remaining deficiency must gain an equation
+    /// before another object-wide round is charged. A late extra equation for a
+    /// decoded block invalidates that block's cache rather than being ignored.
     pub fn try_recover(
         &mut self,
         verification: &mut dyn CryptoVerificationSink,
     ) -> Result<Option<VerifiedObject>, PullError> {
-        self.open()?;
-        if self.records.len() < self.source_symbols || self.records.len() == self.last_decode_count
-        {
-            return Ok(None);
-        }
-        if self.block_sources.len() > 1 {
-            let targets = self.block_targets()?;
-            if self.block_received.iter().zip(&targets).any(|(count, target)| count < target) {
-                // Another block's surplus cannot repeatedly burn decoder work
-                // while this block still lacks its first K equations. After a
-                // rank failure ask each block for another distinct equation.
-                return Ok(None);
-            }
-        }
-        if self.decode_attempts >= self.limits.max_decode_attempts {
-            return Err(PullError::DecodeBudget);
-        }
-        self.decode_attempts += 1;
-        self.last_decode_count = self.records.len();
-        match decode_object(
-            self.encoding,
-            &self.records,
-            self.target,
-            self.dek,
-            verification,
-        ) {
-            Ok(plaintext) => {
-                self.closed = true;
-                self.pending.clear();
-                Ok(Some(VerifiedObject {
-                    namespace: self.target.namespace,
-                    encoding: self.encoding.clone(),
-                    plaintext,
-                }))
-            }
-            Err(SymbolizeError::InsufficientSymbols) => Ok(None),
-            Err(error) => {
-                self.closed = true;
-                Err(PullError::Recovery(error))
+        loop {
+            match self.advance_recovery(verification)? {
+                recovery::Advance::Progress => {}
+                recovery::Advance::AwaitingSymbols => return Ok(None),
+                recovery::Advance::Complete(object) => return Ok(Some(object)),
             }
         }
     }
 }
+
+#[cfg(test)]
+mod recovery_tests;
 
 #[cfg(test)]
 mod verification_budget_tests {
