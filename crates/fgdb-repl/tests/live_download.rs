@@ -379,3 +379,6 @@ fn command_clone_panic_during_preparation_fences_the_affected_voter() {
     })).is_err());
     assert_eq!(raft.role(), Err(Error::RecoveryRequired));
 }
+
+#[path = "live_download/member.rs"]
+mod member;

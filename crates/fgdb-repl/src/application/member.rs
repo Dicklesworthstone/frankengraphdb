@@ -9,13 +9,15 @@
 
 use std::future::Future;
 
+mod download;
+
 use fgdb_chronicle::seed::SeedPlan;
 use fgdb_order::{Event, MemberId, Output, PersistentState, Role, SnapshotTransfer};
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
 
 use super::{
     Application, ApplicationDriver, ApplicationError, ApplicationProgress, ApplicationStateError,
-    AppliedPosition, position_at, validate_progress,
+    AppliedPosition, position_at,
 };
 use crate::driver::{RaftPublisher, SeedDriveError, SeedObjectSource, SeedPublisher};
 use crate::replica::{
@@ -294,35 +296,9 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
             )
             .await
             .map_err(MemberSeedError::Seed)?;
-        // The atomic root may already be current. Fence BEFORE invoking load,
-        // including a synchronous panic or cancellation of the reload future.
-        self.application.poisoned = true;
-        let progress = self
-            .application
-            .application
-            .load()
+        self.complete_snapshot(output, expected_root, expected_generation)
             .await
-            .map_err(|error| MemberSeedError::Application(ApplicationError::Backend(error)))?;
-        let state = self.replica.durable_state().map_err(|error| {
-            MemberSeedError::Application(ApplicationStateError::Raft(error).into())
-        })?;
-        validate_progress(state, &progress)
-            .map_err(|error| MemberSeedError::Application(error.into()))?;
-        if progress.applied.index != state.commit_index()
-            || progress.visible_index != progress.applied.index
-            || progress.publication_root != expected_root
-            || progress.publication_generation != expected_generation
-        {
-            return Err(MemberSeedError::Application(
-                ApplicationStateError::InvalidPublication.into(),
-            ));
-        }
-        self.application.progress = progress;
-        let output = self
-            .absorb(output)
-            .map_err(|error| MemberSeedError::Application(error.into()))?;
-        self.application.poisoned = false;
-        Ok(output)
+            .map_err(MemberSeedError::Application)
     }
 
     fn available(&self) -> Result<(), ApplicationStateError> {

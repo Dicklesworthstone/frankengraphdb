@@ -16,6 +16,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod download;
+
 use fgdb_chronicle::seed::SeedPlan;
 use fgdb_order::{
     Committed, Configuration, Domain, Error as RaftError, Event, Limits, MemberId, Message, Output,

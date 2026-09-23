@@ -89,6 +89,10 @@ impl SnapshotDownload {
     }
     pub fn published_count(&self) -> usize { self.seed.published_count() }
 
+    pub(crate) fn validate_for<C: Clone + Eq>(&self, raft: &Raft<C>) -> Result<(), CatchupError> {
+        validate(raft, self.namespace, &self.transfer, self.seed.plan())
+    }
+
     pub fn stage(&mut self, object: VerifiedObject) -> Result<ObjectPublication<'_>, CatchupError> {
         self.seed.stage(object).map_err(CatchupError::Seed)
     }
