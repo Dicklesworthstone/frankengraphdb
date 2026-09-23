@@ -6,6 +6,7 @@
 //! built, and neither source matching nor aggregate semantics are reimplemented.
 
 mod incremental;
+mod source;
 
 #[cfg(test)]
 mod stream_tests;

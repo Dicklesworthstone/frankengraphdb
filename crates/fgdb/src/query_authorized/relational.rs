@@ -3,6 +3,8 @@
 //! leaf does spend the same signed node/work allowance. No source can grant
 //! itself a fresh permit by being nested below a join, set or aggregate.
 
+mod graph;
+
 use super::*;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{
