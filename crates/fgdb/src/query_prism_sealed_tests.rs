@@ -765,7 +765,9 @@ fn host_sealing_projection_and_kernel_admissions_do_not_fall_back_to_decoded() {
             )
             .await,
             Err(SealedReadError::Execution(
-                FnxSealedExecutionError::UnsupportedAlgorithm(_)
+                FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind {
+                    required: fgdb_prism::FnxGraphKind::Undirected,
+                })
             ))
         ));
         db.execute_fnx_sealed(

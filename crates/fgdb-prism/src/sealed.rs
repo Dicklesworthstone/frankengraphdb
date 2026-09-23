@@ -349,6 +349,28 @@ impl SealedGraphView {
     pub fn scan_incidence_bound(&self) -> usize {
         self.0.scan_bound
     }
+    /// Internal physical scan bound for repeat-row kernels. Includes invisible
+    /// versions and excluded neighbors; never exposed as a visible degree.
+    pub(crate) fn retained_row_incidence_bound(
+        &self,
+        ordinal: usize,
+    ) -> Result<usize, SealedProjectionError> {
+        let vertex = self.vertex_id(ordinal)
+            .ok_or(SealedProjectionError::UnknownOrdinal(ordinal))?;
+        let relation = self.0.config.selection.relation
+            .ok_or(SealedProjectionError::RelationRequired)?;
+        let direction = self.0.config.projection.directedness;
+        let outgoing = if direction == Directedness::Reversed { 0 } else {
+            self.0.partition.retained_row_len(vertex, relation)
+        };
+        let incoming = if direction == Directedness::Directed { 0 } else {
+            self.0.incoming.as_ref()
+                .ok_or(SealedProjectionError::UnsupportedDirectedness(direction))?
+                .retained_row_len(vertex, relation)
+        };
+        add(outgoing, incoming)
+    }
+
     pub fn shares_storage_with(&self, partition: &SealedPartition) -> bool {
         self.0.partition.shares_image_with(partition)
     }

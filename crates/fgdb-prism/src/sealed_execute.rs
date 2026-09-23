@@ -15,6 +15,8 @@ use fgdb_types::QueryCx;
 use std::convert::Infallible;
 use std::mem::size_of;
 
+#[path = "sealed_clustering.rs"]
+mod clustering;
 #[path = "sealed_components.rs"]
 mod components;
 #[path = "sealed_shortest_path.rs"]
@@ -416,6 +418,8 @@ impl FnxCallSpec {
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
+                | FnxAlgorithm::Triangles
+                | FnxAlgorithm::ClusteringCoefficient
         )
     }
 
@@ -438,8 +442,8 @@ impl FnxCallSpec {
         Ok(())
     }
 
-    /// Execute PageRank, outgoing hop/weighted distances, or undirected/weak/strong
-    /// components directly from authenticated compressed rows. Every graph pass
+    /// Execute registered ranks, distances, components and local triangles or
+    /// clustering directly from authenticated compressed rows. Every graph pass
     /// and row pull is fallible; component labels and sources are stable VIds.
     /// Unsupported procedures refuse; they never allocate decoded adjacency.
     /// This synchronous API does not claim async scheduling or disk spill.
@@ -454,6 +458,9 @@ impl FnxCallSpec {
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
         let admission = ResultAdmission::new(self, limits, memory)?;
+        if matches!(self.algorithm(), FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient) {
+            return clustering::execute(self, cx, graph, limits, memory, &admission);
+        }
         let pass = directional_pass_work(n, graph.scan_incidence_bound(), graph.spec().directedness)?;
         let (kernel, estimated_work, workspace, source) = match self.algorithm() {
             FnxAlgorithm::PageRank(options) => {
@@ -616,7 +623,9 @@ fn finish(
                 }
                 FnxValue::Float(distance)
             }
-            _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
+            KernelValues::Counts(values) => FnxValue::Integer(
+                *values.get(index).ok_or(ExecutionError::InvalidUpstreamResult)?,
+            ),
         };
         let vertex = graph
             .vertex_id(index)
@@ -630,6 +639,7 @@ fn finish(
                 (FnxOutput::Distance, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 (FnxOutput::Distance, FnxValue::Float(value)) => FnxValue::Float(value),
                 (FnxOutput::Component, FnxValue::Vertex(value)) => FnxValue::Vertex(value),
+                (FnxOutput::Triangles, FnxValue::Integer(value)) => FnxValue::Integer(value),
                 _ => return Err(ExecutionError::InvalidUpstreamResult.into()),
             };
             match value {
@@ -671,7 +681,9 @@ fn finish(
     let numeric_profile = call.numeric_profile();
     let adapter = AdapterPath::CompressedCursor;
     let mut witness = output.witness;
-    if graph.spec().directedness != Directedness::Directed {
+    if graph.spec().directedness != Directedness::Directed
+        && !matches!(call.algorithm(), FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient)
+    {
         witness.complexity_claim.push_str(
             "; plus O(p * H * log(1+H)) incoming locator work, p = graph passes",
         );
@@ -737,6 +749,7 @@ fn source_digest() -> Digest {
         hash.update(b"fgdb:prism:sealed-kernel-source:v1");
         for source in [
             include_str!("sealed_execute.rs"),
+            include_str!("sealed_clustering.rs"),
             include_str!("sealed_components.rs"),
             include_str!("sealed_shortest_path.rs"),
             include_str!("shortest_path.rs"),
@@ -1109,8 +1122,11 @@ mod tests {
             for call in [FnxCallSpec::pagerank(PageRankOptions::default()), bfs_call(VId(0), None)] {
                 call.validate_sealed_projection(direction).unwrap();
             }
-            assert!(matches!(FnxCallSpec::triangles().validate_sealed_projection(direction),
-                Err(Error::UnsupportedAlgorithm(FnxAlgorithm::Triangles))));
+            for call in [FnxCallSpec::triangles(), FnxCallSpec::clustering_coefficient()] {
+                assert!(call.supports_sealed_execution());
+                assert_eq!(call.validate_sealed_projection(direction).is_ok(),
+                    direction == Directedness::Undirected);
+            }
         }
     }
 
