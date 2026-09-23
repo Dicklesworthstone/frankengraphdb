@@ -4,6 +4,7 @@
 //! itself a fresh permit by being nested below a join, set or aggregate.
 
 mod graph;
+mod native;
 
 use super::*;
 use fgdb_gql::algebra::GraphValueRow;
