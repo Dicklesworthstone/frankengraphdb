@@ -3,6 +3,7 @@
 //! an independent differential oracle, not a hidden fallback.
 
 use crate::execute::{KernelOutput, KernelValues};
+use crate::sealed_control::Control;
 use crate::{
     AdapterPath, ComplexityWitness, FNX_IMPLEMENTATION_REVISION, FNX_SIGNATURE_REGISTRY_VERSION,
     FnxAlgorithm, FnxBindError, FnxCallSpec, FnxCertificate, FnxExecutionError, FnxExecutionLimits,
@@ -13,6 +14,7 @@ use fgdb_crypto::{Digest, Hasher};
 use fgdb_strata::tiered::sealed::SealedError;
 use fgdb_types::QueryCx;
 use std::convert::Infallible;
+use std::cell::RefCell;
 use std::mem::size_of;
 
 #[path = "sealed_clustering.rs"]
@@ -87,8 +89,8 @@ type Error = FnxSealedExecutionError;
 type Result<T> = std::result::Result<T, Error>;
 type ExecutionError = FnxExecutionError<Infallible>;
 
-fn checkpoint(cx: &QueryCx) -> Result<()> {
-    cx.checkpoint().map_err(|error| Error::Cancelled(error))
+fn checkpoint(cx: &Control<'_>) -> Result<()> {
+    cx.checkpoint().map_err(Into::into)
 }
 fn add(left: usize, right: usize) -> Result<usize> {
     left.checked_add(right)
@@ -120,16 +122,16 @@ trait Rows {
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>>;
 }
 struct SealedRows<'a> {
-    cx: &'a QueryCx,
+    cx: &'a Control<'a>,
     graph: &'a SealedGraphView,
 }
 struct SealedRow<'a> {
-    cx: &'a QueryCx,
+    cx: &'a Control<'a>,
     row: SealedNeighborCursor<'a>,
 }
 impl Cursor for SealedRow<'_> {
     fn next(&mut self) -> Result<Option<(usize, f64)>> {
-        self.row.next(self.cx).map_err(Into::into)
+        self.row.next_controlled(self.cx).map_err(Into::into)
     }
 }
 impl Rows for SealedRows<'_> {
@@ -146,7 +148,7 @@ impl Rows for SealedRows<'_> {
     fn open(&self, source: usize) -> Result<Self::Cursor<'_>> {
         Ok(SealedRow {
             cx: self.cx,
-            row: self.graph.neighbor_cursor(self.cx, source)?,
+            row: self.graph.neighbor_cursor_controlled(self.cx, source, None)?,
         })
     }
 }
@@ -454,6 +456,35 @@ impl FnxCallSpec {
         limits: FnxExecutionLimits,
         memory: FnxMemoryLimits,
     ) -> Result<FnxResult> {
+        self.execute_sealed_with_checkpoint(cx, graph, limits, memory, || Ok(()))
+    }
+
+    /// Execute the ordinary compressed kernels under an additional live guard.
+    /// It spans admission, every raw row open/pull, kernel passes and result
+    /// conversion. QueryCx cancellation always runs independently. A refusal
+    /// returns no result prefix and preserves its SealedProjectionError cause.
+    /// This does not authorize a caller-supplied graph or retain the guard in it.
+    pub fn execute_sealed_with_checkpoint(
+        &self,
+        cx: &QueryCx,
+        graph: &SealedGraphView,
+        limits: FnxExecutionLimits,
+        memory: FnxMemoryLimits,
+        guard: impl FnMut() -> std::result::Result<(), SealedProjectionError>,
+    ) -> Result<FnxResult> {
+        let guard = RefCell::new(guard);
+        let invoke = || (guard.borrow_mut())();
+        let control = Control::new(cx, &invoke);
+        self.execute_controlled(&control, graph, limits, memory)
+    }
+
+    fn execute_controlled(
+        &self,
+        cx: &Control<'_>,
+        graph: &SealedGraphView,
+        limits: FnxExecutionLimits,
+        memory: FnxMemoryLimits,
+    ) -> Result<FnxResult> {
         checkpoint(cx)?;
         self.validate_sealed_projection(graph.spec().directedness)?;
         let n = graph.node_count();
@@ -755,6 +786,8 @@ fn source_digest() -> Digest {
             include_str!("shortest_path.rs"),
             include_str!("sealed.rs"),
             include_str!("sealed_direction.rs"),
+            include_str!("sealed_control.rs"),
+            include_str!("../../fgdb-strata/src/tiered/sealed/mod.rs"),
             include_str!("../../fgdb-strata/src/tiered/sealed/incoming.rs"),
             include_str!("call.rs"),
             include_str!("input.rs"),

@@ -31,6 +31,7 @@ mod execute;
 mod input;
 mod projection;
 mod sealed;
+mod sealed_control;
 mod sealed_execute;
 mod shortest_path;
 mod traversal;
@@ -50,7 +51,8 @@ pub use input::{
     FnxWeightError, FnxWeightSpec, MissingWeightPolicy,
 };
 pub use sealed::{
-    SealedGraphView, SealedNeighborCursor, SealedProjectionError, SealedProjectionSpec,
+    SealedGraphView, SealedNeighborCursor, SealedProjectionError, SealedProjectionMask,
+    SealedProjectionSpec,
 };
 pub use sealed_execute::{FnxMemoryLimits, FnxSealedExecutionError};
 pub use shortest_path::{

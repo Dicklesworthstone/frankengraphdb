@@ -13,14 +13,15 @@
 
 use super::{
     ComplexityWitness, Cursor, ExecutionError, FnxAlgorithm, FnxCallSpec, FnxExecutionLimits,
-    FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, QueryCx, Result, ResultAdmission,
+    FnxMemoryLimits, FnxResult, KernelOutput, KernelValues, Result, ResultAdmission,
     Rows, SealedGraphView, SealedRows, add, admit, checkpoint, finish, mul, reserve,
 };
+use crate::sealed_control::Control;
 use std::mem::size_of;
 
 pub(super) fn execute(
     call: &FnxCallSpec,
-    cx: &QueryCx,
+    cx: &Control<'_>,
     graph: &SealedGraphView,
     limits: FnxExecutionLimits,
     memory: FnxMemoryLimits,

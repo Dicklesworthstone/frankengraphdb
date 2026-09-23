@@ -441,10 +441,31 @@ impl<'a> SealedCursor<'a> {
         self.next_inner(&mut || cx.checkpoint().map_err(SealedError::Interrupted))
     }
 
+    /// Preserve a caller's typed live refusal inside hidden-history scans.
+    /// The real query checkpoint always runs first. A failed pull is terminal
+    /// even when the caller subsequently supplies a different checkpoint.
+    pub fn next_with_checkpoint<E: From<SealedError>>(
+        &mut self,
+        cx: &QueryCx,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<SealedEdge<'a>>, E> {
+        self.next_controlled(&mut || {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            checkpoint()
+        })
+    }
+
     fn next_inner(
         &mut self,
         checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
     ) -> Result<Option<SealedEdge<'a>>, SealedError> {
+        self.next_controlled(checkpoint)
+    }
+
+    fn next_controlled<E>(
+        &mut self,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<SealedEdge<'a>>, E> {
         if self.finished {
             return Ok(None);
         }

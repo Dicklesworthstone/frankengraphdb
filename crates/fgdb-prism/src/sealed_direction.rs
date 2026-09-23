@@ -3,10 +3,11 @@
 //! selected by this projection changes. At most two raw lookaheads are retained.
 
 use super::{Directedness, SealedProjectionError, SealedProjectionSpec};
+use crate::sealed_control::Control;
 use fgdb_strata::tiered::sealed::{
     SealedCursor, SealedEdge, SealedIncomingCursor, SealedIncomingIndex, SealedPartition,
 };
-use fgdb_types::{CommitSeq, EId, QueryCx, VId};
+use fgdb_types::{CommitSeq, EId, VId};
 
 pub(super) struct Incidences<'a> {
     outgoing: Option<SealedCursor<'a>>,
@@ -20,19 +21,32 @@ pub(super) struct Incidences<'a> {
 
 impl<'a> Incidences<'a> {
     pub(super) fn open(
-        cx: &QueryCx,
+        cx: &Control<'_>,
         partition: &'a SealedPartition,
         incoming: Option<&'a SealedIncomingIndex>,
         source: VId,
         config: &SealedProjectionSpec,
+        relation_visible: bool,
         lower: Option<VId>,
     ) -> Result<Self, SealedProjectionError> {
+        cx.checkpoint()?;
         let relation = config.selection.relation.ok_or(SealedProjectionError::RelationRequired)?;
         let direction = config.projection.directedness;
+        if !relation_visible {
+            // A forbidden relation never opens either incidence face. Keep the
+            // original authenticated image untouched, rather than inventing
+            // an empty source or filtering a computed neighbor/degree result.
+            return Ok(Self {
+                outgoing: None, incoming: None, out_head: None, in_head: None,
+                source, undirected: direction == Directedness::Undirected,
+                finished: false,
+            });
+        }
         let outgoing = if direction == Directedness::Reversed {
             None
         } else {
-            Some(partition.row_from(cx, source, relation, config.as_of, lower)
+            cx.checkpoint()?;
+            Some(partition.row_from(cx.query, source, relation, config.as_of, lower)
                 .map_err(SealedProjectionError::Read)?)
         };
         let incoming = if direction == Directedness::Directed {
@@ -48,7 +62,8 @@ impl<'a> Incidences<'a> {
                     fgdb_strata::tiered::sealed::SealedError::ImageMismatch,
                 ));
             }
-            Some(index.row_from(cx, source, relation, config.as_of, lower)
+            cx.checkpoint()?;
+            Some(index.row_from(cx.query, source, relation, config.as_of, lower)
                 .map_err(SealedProjectionError::Read)?)
         };
         Ok(Self {
@@ -59,7 +74,7 @@ impl<'a> Incidences<'a> {
 
     pub(super) fn next(
         &mut self,
-        cx: &QueryCx,
+        cx: &Control<'_>,
     ) -> Result<Option<(VId, SealedEdge<'a>)>, SealedProjectionError> {
         if self.finished { return Ok(None); }
         let result = self.next_inner(cx);
@@ -75,19 +90,19 @@ impl<'a> Incidences<'a> {
 
     fn next_inner(
         &mut self,
-        cx: &QueryCx,
+        cx: &Control<'_>,
     ) -> Result<Option<(VId, SealedEdge<'a>)>, SealedProjectionError> {
         super::checkpoint(cx)?;
         if self.out_head.is_none() {
             if let Some(cursor) = &mut self.outgoing {
-                self.out_head = cursor.next(cx).map_err(SealedProjectionError::Read)?;
+                self.out_head = cursor.next_with_checkpoint(cx.query, || cx.guard())?;
                 if self.out_head.is_none() { self.outgoing = None; }
             }
         }
         if self.in_head.is_none() {
             if let Some(cursor) = &mut self.incoming {
                 loop {
-                    let edge = cursor.next(cx).map_err(SealedProjectionError::Read)?;
+                    let edge = cursor.next_with_checkpoint(cx.query, || cx.guard())?;
                     match edge {
                         // The outgoing face owns a loop. Skip its incoming copy
                         // before property observation or any input-edge counting.

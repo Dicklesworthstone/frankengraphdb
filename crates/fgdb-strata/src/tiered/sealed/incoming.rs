@@ -143,6 +143,22 @@ impl SealedPartition {
             cx.checkpoint().map_err(SealedError::Interrupted)
         })
     }
+
+    /// Derive the same source-bound index under an additional live checkpoint.
+    /// The query context is always checked first; the caller cannot replace
+    /// cancellation or image admission. A typed checkpoint failure abandons
+    /// all partial sort/directory/encoding state without returning an index.
+    pub fn incoming_index_with_checkpoint<E: From<SealedError>>(
+        &self,
+        cx: &QueryCx,
+        limits: IncomingIndexLimits,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<SealedIncomingIndex, E> {
+        SealedIncomingIndex::build_controlled(self, limits, &mut || {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            checkpoint()
+        })
+    }
 }
 
 impl SealedIncomingIndex {
@@ -151,6 +167,14 @@ impl SealedIncomingIndex {
         limits: IncomingIndexLimits,
         checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
     ) -> Result<Self, SealedError> {
+        Self::build_controlled(source, limits, checkpoint)
+    }
+
+    fn build_controlled<E: From<SealedError>>(
+        source: &SealedPartition,
+        limits: IncomingIndexLimits,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Self, E> {
         checkpoint()?;
         let count = source.image.incidences;
         check_limit("incoming incidences", count, limits.max_incidences)?;
@@ -178,9 +202,9 @@ impl SealedIncomingIndex {
             }
         }
         if refs.len() != count {
-            return Err(SealedError::NonCanonical);
+            return Err(SealedError::NonCanonical.into());
         }
-        sort(&mut refs, checkpoint)?;
+        sort_controlled(&mut refs, checkpoint)?;
 
         // Preflight every requested output allocation before retaining any
         // directory or compressed chunk. Scratch remains live through encoding.
@@ -360,11 +384,11 @@ impl SealedIncomingIndex {
     }
 }
 
-fn group_end(
+fn group_end<E>(
     refs: &[IncidenceRef],
     start: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
-) -> Result<usize, SealedError> {
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<usize, E> {
     let key = (refs[start].destination, refs[start].relation);
     let mut end = start + 1;
     while end < refs.len() && (refs[end].destination, refs[end].relation) == key {
@@ -378,10 +402,10 @@ fn group_end(
 
 // Constant-scratch heapsort. No allocation or uninterruptible whole-population
 // sort hides between the surrounding checkpoints. Input keys are total/unique.
-fn sort<T: Ord>(
+fn sort_controlled<T: Ord, E>(
     values: &mut [T],
-    checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
-) -> Result<(), SealedError> {
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     let mut ordered = true;
     for pair in values.windows(2) {
         checkpoint()?;
@@ -403,11 +427,19 @@ fn sort<T: Ord>(
     Ok(())
 }
 
-fn sift<T: Ord>(
+#[cfg(test)]
+fn sort<T: Ord>(
     values: &mut [T],
-    mut root: usize,
     checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
 ) -> Result<(), SealedError> {
+    sort_controlled(values, checkpoint)
+}
+
+fn sift<T: Ord, E>(
+    values: &mut [T],
+    mut root: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     while root < values.len() / 2 {
         checkpoint()?;
         let left = 2 * root + 1;
@@ -442,10 +474,31 @@ impl<'a> SealedIncomingCursor<'a> {
         self.next_inner(&mut || cx.checkpoint().map_err(SealedError::Interrupted))
     }
 
+    /// Check live caller policy at the same boundaries as source cancellation,
+    /// including invisible versions and transitions between compressed chunks.
+    /// A failure is terminal even when a later call supplies another callback.
+    pub fn next_with_checkpoint<E: From<SealedError>>(
+        &mut self,
+        cx: &QueryCx,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<SealedEdge<'a>>, E> {
+        self.next_controlled(&mut || {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            checkpoint()
+        })
+    }
+
     fn next_inner(
         &mut self,
         checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
     ) -> Result<Option<SealedEdge<'a>>, SealedError> {
+        self.next_controlled(checkpoint)
+    }
+
+    fn next_controlled<E: From<SealedError>>(
+        &mut self,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<SealedEdge<'a>>, E> {
         if self.finished {
             return Ok(None);
         }
@@ -456,10 +509,10 @@ impl<'a> SealedIncomingCursor<'a> {
         result
     }
 
-    fn pull(
+    fn pull<E: From<SealedError>>(
         &mut self,
-        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
-    ) -> Result<Option<SealedEdge<'a>>, SealedError> {
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<SealedEdge<'a>>, E> {
         checkpoint()?;
         while let Some(chunk) = self.chunks.get(self.chunk) {
             checkpoint()?;
@@ -514,3 +567,7 @@ impl<'a> SealedIncomingCursor<'a> {
 #[cfg(test)]
 #[path = "incoming_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "checkpoint_tests.rs"]
+mod checkpoint_tests;
