@@ -12,8 +12,10 @@ use fgdb_prism::{
     FnxValue, FnxWeightError, FnxWeightSpec, MissingWeightPolicy, ParallelEdgePolicy,
     ProjectionError, ProjectionLimits, ProjectionSpec, SelfLoopPolicy,
 };
-use fgdb_types::{CanonicalScalar, CommitCx, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId};
-use fgdb_warden::{Authority, CapabilityToken, Error, Grant, LimitDimension, QueryLimits, Restriction, Scope};
+use fgdb_types::context::SimulationCheckpointProbe;
+use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId};
+use fgdb_warden::{Authority, CapabilityToken, Error, Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
+use std::sync::Arc;
 
 type Failure = FnxReadError<ReadError, QueryError>;
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x39; 32]);
@@ -260,6 +262,208 @@ fn signed_limits_and_native_limits_are_cumulative_and_independent() {
         let node_limit = token.attenuate(Restriction::MaxNodes(3)).unwrap();
         authorization(db.call_fnx_authorized(&cx, &issuer, &node_limit, BRANCH, CC,
             &FnxParameters::new(), empty, || 100).unwrap_err(), Error::LimitExceeded(LimitDimension::Nodes));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn authentication_precedes_frontier_and_projection_and_hidden_sources_are_absent() {
+    let ((), report) = run_async_under_lab(0x5ec0_3004, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let db = database(&c.commit(), true).await;
+        let issuer = authority(304, NS); let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut opt = options(Directedness::Directed);
+        opt.as_of = Some(CommitSeq(u64::MAX));
+        opt.source_limits.max_work_units = 0;
+        let foreign = authority(304, DatabaseSecurityNamespaceId([0x40; 32]));
+        authorization(db.call_fnx_authorized(&cx, &foreign, &token, BRANCH, CC,
+            &FnxParameters::new(), opt, || panic!("namespace refusal must precede clock access")).unwrap_err(),
+            Error::WrongAuthority);
+        let forged = authority(305, NS).issue_at(&grant(), 100).unwrap();
+        authorization(db.call_fnx_authorized(&cx, &issuer, &forged, BRANCH, CC,
+            &FnxParameters::new(), opt, || 100).unwrap_err(), Error::Unauthenticated);
+        authorization(db.call_fnx_authorized(&cx, &issuer, &token, "other-branch", CC,
+            &FnxParameters::new(), opt, || 100).unwrap_err(), Error::ScopeDenied);
+        let denied = token.attenuate(Restriction::Rights(Rights::Write)).unwrap();
+        authorization(db.call_fnx_authorized(&cx, &issuer, &denied, BRANCH, CC,
+            &FnxParameters::new(), opt, || 100).unwrap_err(), Error::PermissionDenied);
+        authorization(db.call_fnx_authorized(&cx, &issuer, &token, BRANCH, CC,
+            &FnxParameters::new(), opt, || 1000).unwrap_err(), Error::Expired);
+        assert!(matches!(db.call_fnx_authorized(&cx, &issuer, &token, BRANCH, CC,
+            &FnxParameters::new(), opt, || 100), Err(FnxReadError::Read(ReadError::BeyondFrontier { .. }))));
+        opt.as_of = None;
+        assert!(matches!(db.call_fnx_authorized(&cx, &issuer, &token, BRANCH, CC,
+            &FnxParameters::new(), opt, || 100),
+            Err(FnxReadError::Execution(FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected }))));
+        // Binding has no catalog callbacks or source access. This is a public
+        // syntax refusal, not permission to execute an unregistered procedure.
+        assert!(matches!(db.call_fnx_authorized(&cx, &issuer, &token, BRANCH,
+            "CALL fnx.not_registered()", &FnxParameters::new(), opt,
+            || panic!("binding must not read the graph or clock")), Err(FnxReadError::Bind(_))));
+        opt = options(Directedness::Directed);
+        for id in [99, 100] { // hidden existing identity and absent identity
+            let call = FnxCallSpec::single_source_shortest_path_length(VId(id), None);
+            assert!(matches!(db.execute_fnx_authorized(&cx, &issuer, &token, BRANCH,
+                &call, opt, || 100), Err(FnxReadError::Execution(
+                    FnxExecutionError::UnknownSource(actual))) if actual == VId(id)));
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn historical_winners_cannot_resurrect_a_hidden_successor_even_after_compaction() {
+    let ((), report) = run_async_under_lab(0x5ec0_3005, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let commit = c.commit();
+        let mut db = database(&commit, true).await;
+        let issuer = authority(306, NS); let token = issuer.issue_at(&grant(), 100).unwrap();
+        let before = db.frontier().unwrap();
+        let mut opt = options(Directedness::Undirected);
+        opt.selection.weight = FnxWeightSpec::Unit;
+        let original = read(&db, &cx, &issuer, &token, TRIANGLES, opt);
+        assert_eq!(original, vec![
+            vec![FnxValue::Vertex(VId(1)), FnxValue::Integer(1)],
+            vec![FnxValue::Vertex(VId(2)), FnxValue::Integer(1)],
+            vec![FnxValue::Vertex(VId(3)), FnxValue::Integer(1)],
+            vec![FnxValue::Vertex(VId(u128::MAX)), FnxValue::Integer(0)],
+        ]);
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_label(VId(2), LabelId(1), false);
+        change.set_vertex_label(VId(2), LabelId(99), true);
+        change.set_edge_property(EId(3), PropertyKeyId(1), Some(CanonicalScalar::Int(99)));
+        db.write(&commit, change).await.unwrap();
+        let hidden_at = db.frontier().unwrap();
+        let hidden = vec![
+            vec![FnxValue::Vertex(VId(1)), FnxValue::Integer(0)],
+            vec![FnxValue::Vertex(VId(3)), FnxValue::Integer(0)],
+            vec![FnxValue::Vertex(VId(u128::MAX)), FnxValue::Integer(0)],
+        ];
+        assert_eq!(read(&db, &cx, &issuer, &token, TRIANGLES, opt), hidden);
+        // The raw graph still has the triangle and its transit vertex: absence
+        // above must come from the winning labels, not a physical deletion.
+        let raw = db.call_fnx(&cx, TRIANGLES, &FnxParameters::new(), opt).unwrap().analytics.rows;
+        assert!(raw.iter().any(|row| row[0] == FnxValue::Vertex(VId(2)) && row[1] == FnxValue::Integer(1)));
+        let mut restore = WriteBatch::new(RelationId(1));
+        restore.set_vertex_label(VId(2), LabelId(1), true);
+        db.write(&commit, restore).await.unwrap();
+        let denied = token.attenuate(Restriction::Labels(Scope::only([]))).unwrap();
+        for compacted in [false, true] {
+            if compacted { db.compact(&commit).await.unwrap(); }
+            assert_eq!(read(&db, &cx, &issuer, &token, TRIANGLES, opt), original);
+            for (at, expected) in [(before, &original), (hidden_at, &hidden)] {
+                let historical = FnxReadOptions { as_of: Some(at), ..opt };
+                assert_eq!(&read(&db, &cx, &issuer, &token, TRIANGLES, historical), expected);
+                assert!(read(&db, &cx, &issuer, &denied, TRIANGLES, historical).is_empty(),
+                    "a historical cut cannot retain previously wider permissions");
+                authorization(db.call_fnx_authorized(&cx, &issuer, &token, BRANCH,
+                    TRIANGLES, &FnxParameters::new(), historical, || 1000).unwrap_err(), Error::Expired);
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn every_source_builder_kernel_and_delivery_clock_observes_expiry_and_retirement() {
+    let ((), report) = run_async_under_lab(0x5ec0_3006, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let db = database(&c.commit(), true).await;
+        for empty in [false, true] {
+            let issuer = authority(307 + u64::from(empty), NS);
+            let token = issuer.issue_at(&grant(), 100).unwrap();
+            let mut opt = options(Directedness::Undirected);
+            if empty { opt.selection.vertex_label = Some(LabelId(99)); }
+            let mut calls = 0;
+            let expected = db.call_fnx_authorized(&cx, &issuer, &token, BRANCH,
+                TRIANGLES, &FnxParameters::new(), opt, || { calls += 1; 100 }).unwrap();
+            assert_eq!(expected.is_empty(), empty);
+            assert!(calls > 10);
+            for stop in 1..=calls {
+                let mut seen = 0;
+                let error = db.call_fnx_authorized(&cx, &issuer, &token, BRANCH,
+                    TRIANGLES, &FnxParameters::new(), opt, || {
+                        seen += 1; if seen == stop { 1000 } else { 100 }
+                    }).unwrap_err();
+                authorization(error, Error::Expired);
+                assert_eq!(seen, stop, "no successful-prefix continuation after expiry");
+            }
+            let mut seen = 0;
+            authorization(db.call_fnx_authorized(&cx, &issuer, &token, BRANCH,
+                TRIANGLES, &FnxParameters::new(), opt, || {
+                    seen += 1; if seen == 2 { 99 } else { 100 }
+                }).unwrap_err(), Error::ClockWentBackwards);
+            assert_eq!(read(&db, &cx, &issuer, &token, TRIANGLES, opt), expected);
+            let mut seen = 0;
+            authorization(db.call_fnx_authorized(&cx, &issuer, &token, BRANCH,
+                TRIANGLES, &FnxParameters::new(), opt, || {
+                    seen += 1; if seen == calls { issuer.retire(); } 100
+                }).unwrap_err(), Error::AuthorityRetired);
+            assert_eq!(seen, calls, "retire at final delivery, even for an empty result");
+            authorization(db.call_fnx_authorized(&cx, &issuer, &token, BRANCH,
+                TRIANGLES, &FnxParameters::new(), opt, || 100).unwrap_err(), Error::AuthorityRetired);
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn every_query_context_checkpoint_discards_partial_analytics_without_changing_the_database() {
+    let ((), report) = run_async_under_lab(0x5ec0_3007, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let db = database(&c.commit(), true).await;
+        let issuer = authority(309, NS); let token = issuer.issue_at(&grant(), 100).unwrap();
+        let root_id = db.read_session().unwrap().partition_root();
+        for (text, direction) in [(BFS, Directedness::Reversed), (TRIANGLES, Directedness::Undirected)] {
+            let opt = options(direction);
+            let probe = Arc::new(SimulationCheckpointProbe::new(None));
+            let observed = cx.with_checkpoint_probe(Arc::clone(&probe));
+            let expected = read(&db, &observed, &issuer, &token, text, opt);
+            let calls = probe.calls();
+            assert!(calls > 10);
+            for stop in 1..=calls {
+                let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+                let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
+                assert!(matches!(db.call_fnx_authorized(&controlled, &issuer, &token, BRANCH,
+                    text, &FnxParameters::new(), opt, || 100), Err(FnxReadError::Cancelled(
+                        QueryError::Pattern(fgdb_gql::GqlQueryError::Interrupted(_))))));
+                assert_eq!(probe.calls(), stop, "stop at the first failed source/build/kernel checkpoint");
+                assert_eq!(db.read_session().unwrap().partition_root(), root_id);
+            }
+            assert_eq!(read(&db, &cx, &issuer, &token, text, opt), expected);
+        }
+        assert_eq!(c.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn signed_rows_admit_only_reachable_output_and_empty_sources_still_require_authority() {
+    let ((), report) = run_async_under_lab(0x5ec0_3008, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let db = database(&c.commit(), true).await;
+        let issuer = authority(310, NS); let token = issuer.issue_at(&grant(), 100).unwrap();
+        let one = token.attenuate(Restriction::MaxRows(1)).unwrap();
+        let opt = options(Directedness::Directed);
+        let call = FnxCallSpec::single_source_shortest_path_length(VId(1), Some(0));
+        assert_eq!(db.execute_fnx_authorized(&cx, &issuer, &one, BRANCH, &call, opt, || 100).unwrap(),
+            vec![vec![FnxValue::Vertex(VId(1)), FnxValue::Integer(0)]]);
+        let isolated = FnxCallSpec::single_source_shortest_path_length(VId(u128::MAX), None);
+        assert_eq!(db.execute_fnx_authorized(&cx, &issuer, &one, BRANCH, &isolated, opt, || 100).unwrap(),
+            vec![vec![FnxValue::Vertex(VId(u128::MAX)), FnxValue::Integer(0)]]);
+        authorization(db.call_fnx_authorized(&cx, &issuer, &one, BRANCH, BFS,
+            &FnxParameters::new(), opt, || 100).unwrap_err(), Error::LimitExceeded(LimitDimension::Rows));
+        let zero = token.attenuate(Restriction::MaxRows(0)).unwrap();
+        authorization(db.execute_fnx_authorized(&cx, &issuer, &zero, BRANCH,
+            &call, opt, || 100).unwrap_err(), Error::LimitExceeded(LimitDimension::Rows));
+        let empty = Database::<MemVfs>::open_memory(&c.commit(),
+            DatabaseKeys::new([0x31; 32], NS, [0x32; 32])).await.unwrap();
+        for text in [CC, TRIANGLES, "CALL fnx.pagerank()"] {
+            let opt = options(Directedness::Undirected);
+            assert!(read(&empty, &cx, &issuer, &zero, text, opt).is_empty());
+            authorization(empty.call_fnx_authorized(&cx, &issuer, &zero, BRANCH,
+                text, &FnxParameters::new(), opt, || 1000).unwrap_err(), Error::Expired);
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
