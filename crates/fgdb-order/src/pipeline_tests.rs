@@ -402,3 +402,26 @@ fn inherited_old_term_windows_do_not_commit_until_a_current_term_entry_is_matche
         assert_eq!(nodes[&MemberId(1)].durable_state().unwrap().commit_index(), if last < 7 { 0 } else { 7 });
     }
 }
+
+#[test]
+fn draining_an_older_window_propagates_commit_without_waiting_for_another_heartbeat() {
+    for window in [1, 2, 4, 16] {
+        let mut nodes = elected(window);
+        // Both peers initially receive data carrying the old commit frontier.
+        // One peer commits it; the other's outstanding request cannot be
+        // replaced or called acknowledged merely to advertise that new value.
+        let messages = burst(&mut nodes, 20);
+        pump(&mut nodes, messages, &[1, 2, 3]);
+        for node in nodes.values() {
+            assert_eq!(node.durable_state().unwrap().commit_index(), 21);
+        }
+        // Replies to the final notification must quiesce, not cause a new
+        // empty append on every empty-append acknowledgement forever.
+        for value in 30..40 {
+            let output = publish(nodes.get_mut(&MemberId(1)).unwrap(), Event::Propose(value));
+            pump(&mut nodes, output.messages, &[1, 2, 3]);
+            let committed = nodes[&MemberId(1)].durable_state().unwrap().commit_index();
+            assert!(nodes.values().all(|node| node.durable_state().unwrap().commit_index() == committed));
+        }
+    }
+}

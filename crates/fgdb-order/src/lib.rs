@@ -203,6 +203,7 @@ pub struct SnapshotCut {
 impl SnapshotCut {
     /// Call only after authenticating the canonical snapshot manifest and
     /// proving its role/configuration, exact state-at-cut and retention floor.
+    /// For Compact, the cut must additionally be locally applied and visible.
     /// Structural validation here cannot replace either proof. An offered cut
     /// still needs its complete closure transferred and verified before Ready.
     pub fn from_authenticated_parts(
@@ -636,6 +637,9 @@ struct Progress {
     in_flight: VecDeque<InFlight>,
     /// Probe a newly elected or rejected peer one RPC at a time until matched.
     probing: bool,
+    /// Largest commit frontier advertised in an Append. A peer that drains
+    /// an older window still needs a fresh notification of a newer commit.
+    sent_commit: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1178,6 +1182,7 @@ impl<C: Clone + Eq> Raft<C> {
                         next,
                         in_flight: VecDeque::new(),
                         probing: true,
+                        sent_commit: 0,
                     },
                 );
             }
@@ -1352,7 +1357,11 @@ impl<C: Clone + Eq> Raft<C> {
         }
         if self.advance_commit() {
             self.broadcast(output, false)?;
-        } else if last < self.last_index() {
+        } else if last < self.last_index()
+            || self.progress.get(&from).is_some_and(|progress| {
+                progress.in_flight.is_empty() && progress.sent_commit < self.state.commit_index
+            })
+        {
             self.send_append(from, output, false)?;
         }
         Ok(())

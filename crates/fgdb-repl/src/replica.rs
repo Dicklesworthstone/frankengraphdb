@@ -3,9 +3,9 @@
 //! The driver owns its Raft machine from creation/recovery and observes EVERY
 //! released outbound request. This is essential: a retransmitted Append can
 //! have a delayed pre-read reply, so only request IDs first issued after a read
-//! began can confirm it. Existing in-flight appends continue normally; subsequent
-//! heartbeats/proposals issue fresh probes when those appends finish. A healthy,
-//! quiescent quorum needs one heartbeat round, without a read-only log entry.
+//! began can confirm it. Existing in-flight appends continue normally; newly
+//! issued pipeline ranges can also confirm a read without draining the window.
+//! A healthy, quiescent quorum needs one heartbeat round, without a read-only log entry.
 //!
 //! A read barrier establishes only a consensus data floor. The application must
 //! apply through that floor, wait for audit visibility, pin the chosen snapshot,
@@ -108,19 +108,6 @@ impl<E: core::fmt::Debug> core::fmt::Display for ReplicaError<E> {
 }
 impl<E: core::fmt::Debug> core::error::Error for ReplicaError<E> {}
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FlightKind {
-    Append,
-    Snapshot,
-}
-
-#[derive(Clone, Copy)]
-struct Sent {
-    term: u64,
-    request: u64,
-    kind: FlightKind,
-}
-
 struct PendingRead {
     id: ReadIndexId,
     term: u64,
@@ -136,7 +123,6 @@ struct PendingRead {
 /// this driver does not authorize live reconfiguration or service promotion.
 pub struct Replica<C> {
     raft: Raft<C>,
-    sent: BTreeMap<MemberId, Sent>,
     highest_request: u64,
     incarnation: Arc<()>,
     next_read: u64,
@@ -171,7 +157,6 @@ impl<C: Clone + Eq> Replica<C> {
         }
         Ok(Self {
             raft,
-            sent: BTreeMap::new(),
             highest_request: 0,
             incarnation: Arc::new(()),
             next_read: 0,
@@ -196,6 +181,18 @@ impl<C: Clone + Eq> Replica<C> {
         self.reads.len()
     }
 
+    /// Configure bounded pipelining before campaigning. The kernel refuses
+    /// reconfiguration of a leader, candidate or unpublished transition. Keep
+    /// this owner for all subsequent outputs: read freshness uses every issued
+    /// append identity, not just the last request sent to each peer.
+    pub fn configure_append_pipeline(&mut self, maximum: usize) -> Result<(), RaftError> {
+        self.raft.configure_append_pipeline(maximum)
+    }
+
+    pub fn append_pipeline_window(&self) -> usize {
+        self.raft.append_pipeline_window()
+    }
+
     /// Local request cancellation affects no log entry or durable obligation.
     pub fn cancel_read(&mut self, id: &ReadIndexId) -> bool {
         Arc::ptr_eq(&id.incarnation, &self.incarnation) && self.reads.remove(&id.serial).is_some()
@@ -213,17 +210,10 @@ impl<C: Clone + Eq> Replica<C> {
         event: Event<C>,
     ) -> Result<ReplicaOutput<C>, ReplicaError<P::Error>> {
         let reply = self.matching_reply(&event);
-        let compact = matches!(&event, Event::Compact(_));
         let output = sequence(&mut self.raft, publisher, event)
             .await
             .map_err(ReplicaError::Sequence)?;
         // No await separates durability from observation of the released output.
-        if compact {
-            self.sent.clear();
-        }
-        if let Some((member, _, _, _)) = reply {
-            self.sent.remove(&member);
-        }
         self.observe(output, reply).map_err(ReplicaError::Raft)
     }
 
@@ -303,25 +293,19 @@ impl<C: Clone + Eq> Replica<C> {
         let Event::Receive(envelope) = event else {
             return None;
         };
-        let sent = self.sent.get(&envelope.from)?;
-        let (term, request, kind, success) = match &envelope.message {
-            Message::Appended {
-                term,
-                request,
-                success,
-                ..
-            } => (*term, *request, FlightKind::Append, *success),
-            Message::SnapshotInstalled { term, request } => {
-                (*term, *request, FlightKind::Snapshot, false)
-            }
-            _ => return None,
+        let Message::Appended {
+            term, request, success, ..
+        } = &envelope.message else {
+            return None;
         };
-        (term == sent.term && request == sent.request && kind == sent.kind).then_some((
-            envelope.from,
-            term,
-            request,
-            success,
-        ))
+        // The kernel owns the whole bounded window and its retirement rules.
+        // Keeping only a peer's last request loses earlier valid confirmations;
+        // retaining a second window ledger risks reviving invalidated requests.
+        // Snapshot and quorum-probe replies never satisfy this append query.
+        self.raft
+            .pending_append_reply(envelope.from, *term, *request)
+            .ok()?
+            .then_some((envelope.from, *term, *request, *success))
     }
 
     fn observe(
@@ -333,7 +317,6 @@ impl<C: Clone + Eq> Replica<C> {
         let state = self.raft.durable_state()?;
         let configuration = state.configuration();
         if output.role != Role::Leader {
-            self.sent.clear();
             for (_, read) in std::mem::take(&mut self.reads) {
                 resolutions.push(ReadResolution::LeadershipLost(read.id));
             }
@@ -369,22 +352,10 @@ impl<C: Clone + Eq> Replica<C> {
             }
         }
         for envelope in &output.messages {
-            let sent = match &envelope.message {
-                Message::Append { term, request, .. } => Some(Sent {
-                    term: *term,
-                    request: *request,
-                    kind: FlightKind::Append,
-                }),
-                Message::InstallSnapshot { term, request, .. } => Some(Sent {
-                    term: *term,
-                    request: *request,
-                    kind: FlightKind::Snapshot,
-                }),
-                _ => None,
-            };
-            if let Some(sent) = sent {
-                self.highest_request = self.highest_request.max(sent.request);
-                self.sent.insert(envelope.to, sent);
+            if let Message::Append { request, .. } | Message::InstallSnapshot { request, .. } =
+                &envelope.message
+            {
+                self.highest_request = self.highest_request.max(*request);
             }
         }
         Ok(ReplicaOutput {

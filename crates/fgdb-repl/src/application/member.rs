@@ -182,6 +182,16 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
     pub fn pending_reads(&self) -> usize {
         self.waiting.len()
     }
+
+    /// Configure the consensus append bound without exposing mutable Raft or
+    /// application state. Only a healthy follower can change this volatile
+    /// setting; applying or installing still uses the same publication backend.
+    pub fn configure_append_pipeline(&mut self, maximum: usize) -> Result<(), ApplicationStateError> {
+        self.available()?;
+        self.replica
+            .configure_append_pipeline(maximum)
+            .map_err(ApplicationStateError::Raft)
+    }
     pub fn progress(&self) -> Result<ApplicationProgress, ApplicationStateError> {
         self.available()?;
         self.application.progress()
