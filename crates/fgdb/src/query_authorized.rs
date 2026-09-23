@@ -23,6 +23,7 @@ use fgdb_warden::{Authority, CapabilityToken, ExecutionPermit, PlannerPredicates
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+mod analytics;
 mod relational;
 
 type Fault = GqlQueryError<ReadError, QueryError>;
@@ -77,7 +78,7 @@ fn authorized<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
     token: &CapabilityToken,
     branch: &str,
     as_of: Option<CommitSeq>,
-    mut clock: Clock,
+    clock: Clock,
     evaluate: impl FnOnce(
         &Snapshot,
         CommitSeq,
@@ -85,25 +86,52 @@ fn authorized<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
         &RefCell<Execution<'_, '_, Clock>>,
     ) -> Result<Vec<Row>, QueryError>,
 ) -> Result<Vec<Row>, QueryError> {
+    authorized_with_errors(
+        database, cx, authority, token, branch, as_of, clock,
+        core::convert::identity, evaluate,
+    )
+}
+
+// All governed consumers share authentication, one live allowance and final
+// delivery. Only their typed error carrier differs; no source/permit escapes.
+#[allow(clippy::too_many_arguments)]
+fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
+    database: &Database<V>,
+    cx: &QueryCx,
+    authority: &Authority,
+    token: &CapabilityToken,
+    branch: &str,
+    as_of: Option<CommitSeq>,
+    mut clock: Clock,
+    map_error: fn(QueryError) -> Error,
+    evaluate: impl FnOnce(
+        &Snapshot,
+        CommitSeq,
+        &PlannerPredicates,
+        &RefCell<Execution<'_, '_, Clock>>,
+    ) -> Result<Vec<Row>, Error>,
+) -> Result<Vec<Row>, Error> {
     // The host picks its issuer, not the request. Reject a different database
     // namespace before reading a frontier, source, or catalog. Graph/catalog/
     // branch-name routing remains the host's trusted registry responsibility.
     if authority.namespace() != database.keys.namespace {
-        return Err(QueryError::Authorization(fgdb_warden::Error::WrongAuthority));
+        return Err(map_error(QueryError::Authorization(fgdb_warden::Error::WrongAuthority)));
     }
     let now = clock();
-    let verified = authority.verify_at(token, branch, now).map_err(QueryError::Authorization)?;
-    let permit = verified.begin_read_at(branch, now).map_err(QueryError::Authorization)?;
+    let verified = authority.verify_at(token, branch, now)
+        .map_err(QueryError::Authorization).map_err(map_error)?;
+    let permit = verified.begin_read_at(branch, now)
+        .map_err(QueryError::Authorization).map_err(map_error)?;
     let execution = RefCell::new(Execution { cx, permit, clock });
-    execution.borrow_mut().checkpoint()?;
-    database.ensure_readable().map_err(QueryError::Read)?;
+    execution.borrow_mut().checkpoint().map_err(map_error)?;
+    database.ensure_readable().map_err(QueryError::Read).map_err(map_error)?;
     let at = as_of.unwrap_or(database.snapshot.frontier);
-    database.snapshot.check_frontier(at).map_err(QueryError::Read)?;
+    database.snapshot.check_frontier(at).map_err(QueryError::Read).map_err(map_error)?;
     cx.with_restriction(|| {
         let rows = evaluate(&database.snapshot, at, verified.predicates(), &execution)?;
         // No result prefix, source rows or private statistics were released.
         // Empty outputs still recheck expiry, retirement and cancellation.
-        execution.borrow_mut().deliver(rows.len())?;
+        execution.borrow_mut().deliver(rows.len()).map_err(map_error)?;
         Ok(rows)
     })
 }

@@ -515,7 +515,11 @@ fn source_control(
     }
 }
 
-fn source_admit(resource: &'static str, requested: u128, limit: u128) -> Result<(), Error> {
+pub(super) fn source_admit<C>(
+    resource: &'static str,
+    requested: u128,
+    limit: u128,
+) -> Result<(), FnxReadError<ReadError, C>> {
     if requested > limit {
         Err(FnxReadError::SourceLimit {
             resource,
@@ -530,14 +534,14 @@ fn source_admit(resource: &'static str, requested: u128, limit: u128) -> Result<
 /// Geometric growth with count admission BEFORE allocation; never reserve the
 /// caller's entire maximum for a tiny projection. Charge the conservative
 /// old+new backing-store peak while a growth might relocate the allocation.
-fn push_staged<T>(
+pub(super) fn push_staged<T, C>(
     output: &mut Vec<T>,
     value: T,
     resource: &'static str,
     maximum: usize,
     staged_bytes: &mut usize,
     byte_limit: usize,
-) -> Result<(), Error> {
+) -> Result<(), FnxReadError<ReadError, C>> {
     let next = output
         .len()
         .checked_add(1)
