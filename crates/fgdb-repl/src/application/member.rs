@@ -10,6 +10,7 @@
 use std::future::Future;
 
 mod download;
+pub mod proposal;
 
 use fgdb_chronicle::seed::SeedPlan;
 use fgdb_order::{Event, MemberId, Output, PersistentState, Role, SnapshotTransfer};
