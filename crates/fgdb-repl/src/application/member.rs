@@ -294,6 +294,13 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
         let anchor = plan.anchor();
         let expected_root = anchor.publication_root;
         let expected_generation = anchor.publication_generation;
+        let expected_audit = plan.audit_cut();
+        let visible = expected_audit.map_or(anchor.raft_index, |cut| cut.visible_index);
+        if visible < self.application.progress.visible_index {
+            return Err(MemberSeedError::Application(
+                ApplicationStateError::VisibilityRegression.into(),
+            ));
+        }
         if expected_generation <= self.application.progress.publication_generation {
             return Err(MemberSeedError::Application(
                 ApplicationStateError::InvalidPublication.into(),
@@ -310,7 +317,7 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
             )
             .await
             .map_err(MemberSeedError::Seed)?;
-        self.complete_snapshot(output, expected_root, expected_generation)
+        self.complete_snapshot(output, expected_root, expected_generation, expected_audit)
             .await
             .map_err(MemberSeedError::Application)
     }

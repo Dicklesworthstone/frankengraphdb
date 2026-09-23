@@ -1,5 +1,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
+#[path = "live_download/audit.rs"]
+mod audit;
+
 // Real Raft, Chronicle object crypto/FEC and seed gates. Storage below records
 // publication images; it is NOT a disk/fsync or production authority verifier.
 #[path = "../../fgdb-chronicle/tests/support/bonded.rs"]

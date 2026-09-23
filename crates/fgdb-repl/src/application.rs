@@ -19,6 +19,9 @@ use fgdb_types::ObjectId;
 use crate::replica::Replica;
 
 pub mod member;
+pub mod snapshot;
+
+use snapshot::{RestoredSnapshot, validate_restoration};
 
 /// Internal Raft coordinates. These are not public logical-command positions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +64,7 @@ pub enum ApplicationStateError {
     AppliedAheadOfCommit,
     SnapshotRequired,
     SnapshotStateMismatch,
+    SnapshotAuditMismatch,
     VisibilityRegression,
     InvalidPublication,
     PendingReadsAtAttach,
@@ -174,6 +178,16 @@ pub trait Application<C> {
 
     fn load(&mut self) -> impl Future<Output = Result<ApplicationProgress, Self::Error>>;
 
+    /// The exact installed applied-cut snapshot whose complete audit protocol
+    /// state and historical visible root were authenticated and restored by
+    /// `load`. Do not echo an offered snapshot or synthesize this from indexes.
+    /// No I/O occurs here: return owned metadata from the completed load.
+    /// None supports the fully-visible snapshot profile only. A hidden cut
+    /// requires this projection; an old backend cannot silently enable it.
+    fn restored_snapshot(&self) -> Option<RestoredSnapshot> {
+        None
+    }
+
     fn apply(
         &mut self,
         batch: ApplicationBatch<'_, C>,
@@ -188,6 +202,7 @@ pub trait Application<C> {
 pub struct ApplicationDriver<C, A> {
     application: A,
     progress: ApplicationProgress,
+    restored_snapshot: Option<RestoredSnapshot>,
     maximum_batch_entries: usize,
     poisoned: bool,
     command: PhantomData<fn(C)>,
@@ -211,10 +226,13 @@ impl<C: Clone + Eq, A: Application<C>> ApplicationDriver<C, A> {
             .load()
             .await
             .map_err(ApplicationError::Backend)?;
-        validate_progress(state, &progress)?;
+        let restored_snapshot = application.restored_snapshot();
+        validate_restoration(state, restored_snapshot.as_ref())?;
+        validate_progress(state, &progress, restored_snapshot.as_ref())?;
         Ok(Self {
             application,
             progress,
+            restored_snapshot,
             maximum_batch_entries,
             poisoned: false,
             command: PhantomData,
@@ -238,7 +256,7 @@ impl<C: Clone + Eq, A: Application<C>> ApplicationDriver<C, A> {
         let state = replica
             .durable_state()
             .map_err(ApplicationStateError::Raft)?;
-        validate_progress(state, &self.progress)?;
+        validate_progress(state, &self.progress, self.restored_snapshot.as_ref())?;
         if self.progress.applied.index == state.commit_index() {
             return Ok(None);
         }
@@ -277,7 +295,7 @@ impl<C: Clone + Eq, A: Application<C>> ApplicationDriver<C, A> {
             .apply(batch)
             .await
             .map_err(ApplicationError::Backend)?;
-        validate_progress(state, &published)?;
+        validate_progress(state, &published, self.restored_snapshot.as_ref())?;
         if published.applied != last
             || published.publication_generation <= self.progress.publication_generation
             || published.publication_root == self.progress.publication_root
@@ -304,6 +322,7 @@ impl<C: Clone + Eq, A: Application<C>> ApplicationDriver<C, A> {
 fn validate_progress<C>(
     state: &PersistentState<C>,
     progress: &ApplicationProgress,
+    restored: Option<&RestoredSnapshot>,
 ) -> Result<(), ApplicationStateError> {
     if progress.domain != state.configuration().domain() {
         return Err(ApplicationStateError::WrongDomain);
@@ -321,8 +340,16 @@ fn validate_progress<C>(
         return Err(ApplicationStateError::AppliedAheadOfCommit);
     }
     let base = state.snapshot().map_or(0, |cut| cut.index());
-    if progress.applied.index < base || progress.visible_index < base {
+    // A snapshot owns all applied planes, not only its visible sub-prefix.
+    // An older cached projection cannot authorize a newly compacted cut.
+    let audit = restored.filter(|restored| state.snapshot() == Some(restored.snapshot()))
+        .map(RestoredSnapshot::audit_cut);
+    let visible_floor = audit.map_or(base, |cut| cut.visible_index);
+    if progress.applied.index < base || progress.visible_index < visible_floor {
         return Err(ApplicationStateError::SnapshotRequired);
+    }
+    if progress.applied.index == base && progress.visible_index != visible_floor {
+        return Err(ApplicationStateError::SnapshotAuditMismatch);
     }
     if position_at(state, progress.applied.index) != Some(progress.applied) {
         return Err(ApplicationStateError::InvalidPosition);

@@ -7,7 +7,7 @@
 
 use core::convert::Infallible;
 
-use fgdb_chronicle::seed::{ObjectPublication, ReplicaSeed, SeedAnchor, SeedError, SeedObjectSpec, SeedPlan, SeedPublicationId};
+use fgdb_chronicle::seed::{ObjectPublication, ReplicaSeed, SeedAnchor, SeedAuditCut, SeedError, SeedObjectSpec, SeedPlan, SeedPublicationId};
 use fgdb_chronicle::transfer::VerifiedObject;
 use fgdb_order::{Event, Output, Raft, SnapshotTransfer, SnapshotTransferId};
 use fgdb_types::{DatabaseSecurityNamespaceId, ObjectId};
@@ -84,6 +84,9 @@ impl SnapshotDownload {
 
     pub fn transfer_id(&self) -> SnapshotTransferId { self.transfer.id() }
     pub fn anchor(&self) -> &SeedAnchor { self.seed.plan().anchor() }
+    /// The verifier-bound visible sub-prefix and complete audit-pipeline root.
+    /// None declares the ordinary fully-visible applied-cut profile.
+    pub fn audit_cut(&self) -> Option<SeedAuditCut> { self.seed.plan().audit_cut() }
     pub fn missing_objects(&self) -> impl Iterator<Item = &SeedObjectSpec> {
         self.seed.missing_objects()
     }

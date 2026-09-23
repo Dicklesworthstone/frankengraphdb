@@ -50,6 +50,41 @@ pub struct SeedObjectSpec {
     pub compressed_len: u64,
 }
 
+/// Authenticated projection of a snapshot's audit-visible sub-prefix. The
+/// snapshot remains an APPLIED cut: its audit protocol root owns every pending
+/// candidate and obligation through that cut, including effects not yet visible.
+/// These coordinates are not a new durable schema or an authorization token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeedAuditCut {
+    pub visible_index: u64,
+    pub visible_term: u64,
+    pub visible_state_root: ObjectId,
+    pub audit_state_root: ObjectId,
+}
+
+impl SeedAuditCut {
+    /// Structural checks only. The caller must authenticate the canonical
+    /// snapshot and its log-to-all-planes proof, including the entire unresolved
+    /// queue and the exact historical visible root. Equal numbers are not proof.
+    pub fn validate_at(
+        self,
+        applied_index: u64,
+        applied_term: u64,
+        applied_root: ObjectId,
+    ) -> Result<(), SeedError> {
+        if (applied_index == 0) != (applied_term == 0)
+            || self.visible_index > applied_index
+            || (self.visible_index == 0) != (self.visible_term == 0)
+            || self.visible_term > applied_term
+            || (self.visible_index == applied_index
+                && (self.visible_term != applied_term || self.visible_state_root != applied_root))
+        {
+            return Err(SeedError::InvalidAnchor);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SeedLimits {
     pub max_objects: usize,
@@ -104,6 +139,7 @@ pub struct SeedPlan {
     anchor: SeedAnchor,
     inventory: BTreeMap<[u8; 32], SeedObjectSpec>,
     total_bytes: u64,
+    audit_cut: Option<SeedAuditCut>,
 }
 
 impl SeedPlan {
@@ -156,7 +192,27 @@ impl SeedPlan {
             anchor,
             inventory,
             total_bytes,
+            audit_cut: None,
         })
+    }
+
+    /// Attach the verifier's complete audit-cut projection BEFORE starting a
+    /// seed. Both additional roots must already be in the admitted inventory;
+    /// their transitive closures are still the canonical verifier's obligation.
+    /// Without this projection the plan declares a fully visible applied cut.
+    pub fn with_authenticated_audit_cut(mut self, cut: SeedAuditCut) -> Result<Self, SeedError> {
+        cut.validate_at(self.anchor.raft_index, self.anchor.raft_term, self.anchor.state_root)?;
+        for root in [cut.visible_state_root, cut.audit_state_root] {
+            if !self.inventory.contains_key(&root.0) {
+                return Err(SeedError::MissingRoot);
+            }
+        }
+        self.audit_cut = Some(cut);
+        Ok(self)
+    }
+
+    pub fn audit_cut(&self) -> Option<SeedAuditCut> {
+        self.audit_cut
     }
 
     pub fn anchor(&self) -> &SeedAnchor {
@@ -310,7 +366,9 @@ impl ReplicaSeed {
         if self.installing.is_some() {
             return Err(SeedError::InstallPending);
         }
-        if self.plan.anchor == plan.anchor && self.plan.inventory == plan.inventory {
+        if self.plan.anchor == plan.anchor && self.plan.inventory == plan.inventory
+            && self.plan.audit_cut == plan.audit_cut
+        {
             return Ok(());
         }
         if self.pending_object.is_some() {
@@ -323,7 +381,7 @@ impl ReplicaSeed {
         let mut source = self.plan.anchor.clone();
         source.publication_root = plan.anchor.publication_root;
         source.publication_generation = plan.anchor.publication_generation;
-        if source != plan.anchor
+        if source != plan.anchor || self.plan.audit_cut != plan.audit_cut
             || plan.anchor.publication_generation <= self.plan.anchor.publication_generation
         {
             return Err(SeedError::InvalidAnchor);
