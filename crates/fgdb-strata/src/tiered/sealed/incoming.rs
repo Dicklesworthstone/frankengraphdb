@@ -7,7 +7,10 @@
 //! caller-supplied permutation or serialized index can acquire source authority.
 
 use super::image::reserved;
-use super::{Image, SealedAnchor, SealedEdge, SealedError, SealedPartition, check_limit};
+use super::{
+    Image, SealedAnchor, SealedEdge, SealedError, SealedPartition, SealedScanBudget,
+    SealedScanStep, check_limit,
+};
 use fgdb_codec::elias_fano::{EliasFano, EntryLimit};
 use fgdb_delta_types::RelationId;
 use fgdb_types::{CommitSeq, QueryCx, VId};
@@ -499,11 +502,52 @@ impl<'a> SealedIncomingCursor<'a> {
         &mut self,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<SealedEdge<'a>>, E> {
-        if self.finished {
-            return Ok(None);
+        loop {
+            match self.next_budgeted_inner(&mut SealedScanBudget::new(usize::MAX), checkpoint)? {
+                SealedScanStep::Item(edge) => return Ok(Some(edge)),
+                SealedScanStep::End => return Ok(None),
+                SealedScanStep::Yield => {}
+            }
         }
-        let result = self.pull(checkpoint);
-        if result.is_err() || matches!(&result, Ok(None)) {
+    }
+
+    /// Bound raw locator work, not merely visible edges. The exact chunk and
+    /// within-chunk position survive Yield; original property slices stay
+    /// borrowed from the authenticated source across every pause.
+    pub fn next_budgeted(
+        &mut self,
+        cx: &QueryCx,
+        budget: &mut SealedScanBudget,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, SealedError> {
+        self.next_budgeted_inner(budget, &mut || {
+            cx.checkpoint().map_err(SealedError::Interrupted)
+        })
+    }
+
+    /// Resume under both shared fuel and a typed live guard. Neither a Yield
+    /// nor supplying a different callback can revive an earlier failed cursor.
+    pub fn next_budgeted_with_checkpoint<E: From<SealedError>>(
+        &mut self,
+        cx: &QueryCx,
+        budget: &mut SealedScanBudget,
+        mut checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
+        self.next_budgeted_inner(budget, &mut || {
+            cx.checkpoint().map_err(SealedError::Interrupted)?;
+            checkpoint()
+        })
+    }
+
+    fn next_budgeted_inner<E: From<SealedError>>(
+        &mut self,
+        budget: &mut SealedScanBudget,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
+        if self.finished {
+            return Ok(SealedScanStep::End);
+        }
+        let result = self.pull(budget, checkpoint);
+        if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
             self.finished = true;
         }
         result
@@ -511,10 +555,14 @@ impl<'a> SealedIncomingCursor<'a> {
 
     fn pull<E: From<SealedError>>(
         &mut self,
+        budget: &mut SealedScanBudget,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
-    ) -> Result<Option<SealedEdge<'a>>, E> {
+    ) -> Result<SealedScanStep<SealedEdge<'a>>, E> {
         checkpoint()?;
         while let Some(chunk) = self.chunks.get(self.chunk) {
+            if !budget.spend() {
+                return Ok(SealedScanStep::Yield);
+            }
             checkpoint()?;
             let Some(position) = chunk.select(self.at) else {
                 self.chunk += 1;
@@ -557,10 +605,10 @@ impl<'a> SealedIncomingCursor<'a> {
                         .ok_or(SealedError::NonCanonical)?
                         .as_slice()
                 };
-                return Ok(Some(SealedEdge { entry, properties }));
+                return Ok(SealedScanStep::Item(SealedEdge { entry, properties }));
             }
         }
-        Ok(None)
+        Ok(SealedScanStep::End)
     }
 }
 

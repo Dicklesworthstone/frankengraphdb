@@ -6,6 +6,7 @@ use super::{Directedness, SealedProjectionError, SealedProjectionSpec};
 use crate::sealed_control::Control;
 use fgdb_strata::tiered::sealed::{
     SealedCursor, SealedEdge, SealedIncomingCursor, SealedIncomingIndex, SealedPartition,
+    SealedScanBudget, SealedScanStep,
 };
 use fgdb_types::{CommitSeq, EId, VId};
 
@@ -72,13 +73,14 @@ impl<'a> Incidences<'a> {
         })
     }
 
-    pub(super) fn next(
+    pub(super) fn next_budgeted(
         &mut self,
         cx: &Control<'_>,
-    ) -> Result<Option<(VId, SealedEdge<'a>)>, SealedProjectionError> {
-        if self.finished { return Ok(None); }
-        let result = self.next_inner(cx);
-        if result.is_err() || matches!(&result, Ok(None)) {
+        budget: &mut SealedScanBudget,
+    ) -> Result<SealedScanStep<(VId, SealedEdge<'a>)>, SealedProjectionError> {
+        if self.finished { return Ok(SealedScanStep::End); }
+        let result = self.next_inner(cx, budget);
+        if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
             self.finished = true;
             self.outgoing = None;
             self.incoming = None;
@@ -91,23 +93,36 @@ impl<'a> Incidences<'a> {
     fn next_inner(
         &mut self,
         cx: &Control<'_>,
-    ) -> Result<Option<(VId, SealedEdge<'a>)>, SealedProjectionError> {
+        budget: &mut SealedScanBudget,
+    ) -> Result<SealedScanStep<(VId, SealedEdge<'a>)>, SealedProjectionError> {
         super::checkpoint(cx)?;
+        if budget.remaining() == 0 {
+            return Ok(SealedScanStep::Yield);
+        }
         if self.out_head.is_none() {
             if let Some(cursor) = &mut self.outgoing {
-                self.out_head = cursor.next_with_checkpoint(cx.query, || cx.guard())?;
-                if self.out_head.is_none() { self.outgoing = None; }
+                match cursor.next_budgeted_with_checkpoint(cx.query, budget, || cx.guard())? {
+                    SealedScanStep::Item(edge) => self.out_head = Some(edge),
+                    SealedScanStep::End => self.outgoing = None,
+                    SealedScanStep::Yield => return Ok(SealedScanStep::Yield),
+                }
             }
         }
         if self.in_head.is_none() {
             if let Some(cursor) = &mut self.incoming {
                 loop {
-                    let edge = cursor.next_with_checkpoint(cx.query, || cx.guard())?;
+                    let edge = cursor.next_budgeted_with_checkpoint(cx.query, budget, || cx.guard())?;
                     match edge {
                         // The outgoing face owns a loop. Skip its incoming copy
                         // before property observation or any input-edge counting.
-                        Some(edge) if self.undirected && edge.entry.src == self.source => continue,
-                        other => { self.in_head = other; break; }
+                        SealedScanStep::Item(edge)
+                            if self.undirected && edge.entry.src == self.source => continue,
+                        SealedScanStep::Item(edge) => { self.in_head = Some(edge); break; }
+                        SealedScanStep::End => break,
+                        // A loaded outgoing lookahead MUST survive while the
+                        // incoming face pauses. It cannot be emitted until both
+                        // heads (or their EOFs) determine the canonical order.
+                        SealedScanStep::Yield => return Ok(SealedScanStep::Yield),
                     }
                 }
                 if self.in_head.is_none() { self.incoming = None; }
@@ -115,11 +130,12 @@ impl<'a> Incidences<'a> {
         }
         let out_key = self.out_head.as_ref().map(|edge| key(edge.entry.dst, edge));
         let in_key = self.in_head.as_ref().map(|edge| key(edge.entry.src, edge));
-        if prefer_outgoing(out_key, in_key) {
-            Ok(self.out_head.take().map(|edge| (edge.entry.dst, edge)))
+        let next = if prefer_outgoing(out_key, in_key) {
+            self.out_head.take().map(|edge| (edge.entry.dst, edge))
         } else {
-            Ok(self.in_head.take().map(|edge| (edge.entry.src, edge)))
-        }
+            self.in_head.take().map(|edge| (edge.entry.src, edge))
+        };
+        Ok(next.map_or(SealedScanStep::End, SealedScanStep::Item))
     }
 }
 

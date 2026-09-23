@@ -14,7 +14,7 @@ use crate::{
 use fgdb_crypto::{Digest, Hasher};
 use fgdb_strata::tiered::sealed::{
     IncomingIndexLimits, IncomingIndexStats, SealedEdge, SealedError, SealedIncomingIndex,
-    SealedPartition,
+    SealedPartition, SealedScanBudget, SealedScanStep,
 };
 use fgdb_types::{CommitSeq, EId, QueryCx, VId};
 use crate::sealed_control::Control;
@@ -498,6 +498,7 @@ pub struct SealedNeighborCursor<'a> {
     mask: SealedProjectionMask,
     source: VId,
     pending: Option<(usize, f64)>,
+    accumulating: Option<(usize, f64)>,
     finished: bool,
 }
 
@@ -528,6 +529,7 @@ impl<'a> SealedNeighborCursor<'a> {
             mask,
             source,
             pending: None,
+            accumulating: None,
             finished: false,
         })
     }
@@ -548,13 +550,53 @@ impl<'a> SealedNeighborCursor<'a> {
         cx: &Control<'_>,
         observe: &mut impl FnMut(EId, VId, Option<f64>) -> Result<(), SealedProjectionError>,
     ) -> Result<Option<(usize, f64)>, SealedProjectionError> {
-        if self.finished {
-            return Ok(None);
+        loop {
+            match self.next_budgeted_observed(
+                cx, &mut SealedScanBudget::new(usize::MAX), observe,
+            )? {
+                SealedScanStep::Item(value) => return Ok(Some(value)),
+                SealedScanStep::End => return Ok(None),
+                SealedScanStep::Yield => {}
+            }
         }
-        let result = self.next_inner(cx, observe);
-        if result.is_err() || matches!(&result, Ok(None)) {
+    }
+
+    /// Pull a COMPLETE reduced neighbor under shared raw-scan fuel. Invisible
+    /// versions, excluded endpoints, discarded loops and parallel-edge groups
+    /// can all yield without losing their precise cursor/reduction positions.
+    /// Partial sums never escape as neighbors. Mixing this method with `next`
+    /// preserves order and bits; neither method reopens or rescans a prefix.
+    /// Yield itself does not schedule a task: the owning driver must do that.
+    pub fn next_budgeted(
+        &mut self,
+        cx: &QueryCx,
+        budget: &mut SealedScanBudget,
+    ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
+        self.next_budgeted_controlled(&Control::new(cx, &|| Ok(())), budget)
+    }
+
+    pub(crate) fn next_budgeted_controlled(
+        &mut self,
+        cx: &Control<'_>,
+        budget: &mut SealedScanBudget,
+    ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
+        self.next_budgeted_observed(cx, budget, &mut |_, _, _| Ok(()))
+    }
+
+    fn next_budgeted_observed(
+        &mut self,
+        cx: &Control<'_>,
+        budget: &mut SealedScanBudget,
+        observe: &mut impl FnMut(EId, VId, Option<f64>) -> Result<(), SealedProjectionError>,
+    ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
+        if self.finished {
+            return Ok(SealedScanStep::End);
+        }
+        let result = self.next_inner(cx, budget, observe);
+        if result.is_err() || matches!(&result, Ok(SealedScanStep::End)) {
             self.finished = true;
             self.pending = None;
+            self.accumulating = None;
         }
         result
     }
@@ -562,38 +604,64 @@ impl<'a> SealedNeighborCursor<'a> {
     fn next_inner(
         &mut self,
         cx: &Control<'_>,
+        budget: &mut SealedScanBudget,
         observe: &mut impl FnMut(EId, VId, Option<f64>) -> Result<(), SealedProjectionError>,
-    ) -> Result<Option<(usize, f64)>, SealedProjectionError> {
+    ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
         checkpoint(cx)?;
-        let first = match self.pending.take() {
-            Some(value) => Some(value),
-            None => self.read_selected(cx, observe)?,
-        };
-        let Some((target, mut weight)) = first else {
-            return Ok(None);
-        };
-        while let Some((next_target, next_weight)) = self.read_selected(cx, observe)? {
+        if budget.remaining() == 0 {
+            return Ok(SealedScanStep::Yield);
+        }
+        if self.accumulating.is_none() {
+            let first = match self.pending.take() {
+                Some(value) => SealedScanStep::Item(value),
+                None => self.read_selected(cx, budget, observe)?,
+            };
+            match first {
+                SealedScanStep::Item(value) => self.accumulating = Some(value),
+                other => return Ok(other),
+            }
+        }
+        loop {
+            let next = self.read_selected(cx, budget, observe)?;
+            let (next_target, next_weight) = match next {
+                SealedScanStep::Yield => return Ok(SealedScanStep::Yield),
+                SealedScanStep::End => {
+                    return Ok(SealedScanStep::Item(
+                        self.accumulating.take().expect("started a neighbor group"),
+                    ));
+                }
+                SealedScanStep::Item(value) => value,
+            };
+            let (target, weight) = self.accumulating.expect("started a neighbor group");
             if target != next_target {
                 self.pending = Some((next_target, next_weight));
-                break;
+                return Ok(SealedScanStep::Item(
+                    self.accumulating.take().expect("started a neighbor group"),
+                ));
             }
-            weight = reduce_weight(
+            let weight = reduce_weight(
                 self.config.projection.parallel_edges,
                 self.source,
                 self.vertices[target],
                 weight,
                 next_weight,
             )?;
+            self.accumulating = Some((target, weight));
         }
-        Ok(Some((target, weight)))
     }
 
     fn read_selected(
         &mut self,
         cx: &Control<'_>,
+        budget: &mut SealedScanBudget,
         observe: &mut impl FnMut(EId, VId, Option<f64>) -> Result<(), SealedProjectionError>,
-    ) -> Result<Option<(usize, f64)>, SealedProjectionError> {
-        while let Some((neighbor, edge)) = self.raw.next(cx)? {
+    ) -> Result<SealedScanStep<(usize, f64)>, SealedProjectionError> {
+        loop {
+            let (neighbor, edge) = match self.raw.next_budgeted(cx, budget)? {
+                SealedScanStep::Item(value) => value,
+                SealedScanStep::Yield => return Ok(SealedScanStep::Yield),
+                SealedScanStep::End => return Ok(SealedScanStep::End),
+            };
             // The source was admitted before opening this descriptor. Mask an
             // excluded endpoint BEFORE resolving or inspecting its properties.
             let Ok(target) = self.vertices.binary_search(&neighbor) else {
@@ -602,10 +670,9 @@ impl<'a> SealedNeighborCursor<'a> {
             let weight = selected_weight(self.mask.weight_property_visible, self.config, &edge)?;
             observe(edge.entry.eid, neighbor, weight)?;
             if let Some(weight) = weight {
-                return Ok(Some((target, weight)));
+                return Ok(SealedScanStep::Item((target, weight)));
             }
         }
-        Ok(None)
     }
 }
 
