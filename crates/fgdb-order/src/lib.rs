@@ -34,10 +34,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 mod liveness;
+mod pipeline;
 
 /// A member coordinate resolved inside the authenticated consensus domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -202,7 +203,6 @@ pub struct SnapshotCut {
 impl SnapshotCut {
     /// Call only after authenticating the canonical snapshot manifest and
     /// proving its role/configuration, exact state-at-cut and retention floor.
-    /// For Compact, the cut must additionally be locally applied and visible.
     /// Structural validation here cannot replace either proof. An offered cut
     /// still needs its complete closure transferred and verified before Ready.
     pub fn from_authenticated_parts(
@@ -498,6 +498,7 @@ pub enum Event<C> {
 pub enum Error {
     InvalidConfiguration,
     InvalidLimits,
+    PipelineConfigurationBusy,
     InvalidRecoveryState,
     WrongDomain,
     WrongConfiguration,
@@ -630,8 +631,11 @@ enum InFlight {
 #[derive(Clone, Debug)]
 struct Progress {
     matched: u64,
+    /// Next unsent index; optimistic only while an append window is outstanding.
     next: u64,
-    in_flight: Option<InFlight>,
+    in_flight: VecDeque<InFlight>,
+    /// Probe a newly elected or rejected peer one RPC at a time until matched.
+    probing: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -652,6 +656,7 @@ pub struct Raft<C> {
     votes: BTreeSet<MemberId>,
     progress: BTreeMap<MemberId, Progress>,
     limits: Limits,
+    append_window: usize,
     generation: u64,
     incarnation: Arc<()>,
     initialized: bool,
@@ -719,6 +724,7 @@ impl<C: Clone + Eq> Raft<C> {
             votes: BTreeSet::new(),
             progress: BTreeMap::new(),
             limits,
+            append_window: 1,
             generation: 0,
             incarnation: Arc::new(()),
             initialized: true,
@@ -808,7 +814,7 @@ impl<C: Clone + Eq> Raft<C> {
             Event::LivenessTimeout => self.liveness_timeout(&mut output)?,
             Event::Heartbeat => {
                 if self.role == Role::Leader {
-                    self.broadcast(&mut output)?;
+                    self.broadcast(&mut output, true)?;
                     self.retry_quorum_probe(&mut output);
                 }
             }
@@ -819,7 +825,7 @@ impl<C: Clone + Eq> Raft<C> {
                     command: Some(command),
                 });
                 self.advance_commit();
-                self.broadcast(&mut output)?;
+                self.broadcast(&mut output, false)?;
             }
             Event::Receive(envelope) => self.receive(envelope, &mut output)?,
             Event::Compact(snapshot) => self.compact(snapshot),
@@ -1170,7 +1176,8 @@ impl<C: Clone + Eq> Raft<C> {
                     Progress {
                         matched: 0,
                         next,
-                        in_flight: None,
+                        in_flight: VecDeque::new(),
+                        probing: true,
                     },
                 );
             }
@@ -1185,7 +1192,7 @@ impl<C: Clone + Eq> Raft<C> {
             });
         }
         self.advance_commit();
-        self.broadcast(output)?;
+        self.broadcast(output, false)?;
         if self.liveness.enabled() {
             self.start_quorum_probe(output);
         }
@@ -1210,73 +1217,11 @@ impl<C: Clone + Eq> Raft<C> {
         }
     }
 
-    fn broadcast(&mut self, output: &mut Output<C>) -> Result<(), Error> {
+    fn broadcast(&mut self, output: &mut Output<C>, retry: bool) -> Result<(), Error> {
         let peers: Vec<_> = self.progress.keys().copied().collect();
         for peer in peers {
-            self.send_append(peer, output)?;
+            self.send_append(peer, output, retry)?;
         }
-        Ok(())
-    }
-
-    fn send_append(&mut self, peer: MemberId, output: &mut Output<C>) -> Result<(), Error> {
-        let Some(progress) = self.progress.get(&peer).cloned() else {
-            return Ok(());
-        };
-        let flight = if let Some(flight) = progress.in_flight {
-            flight
-        } else {
-            self.request = self.request.checked_add(1).ok_or(Error::CounterExhausted)?;
-            if progress.next <= self.state.base_index() {
-                let snapshot = self
-                    .state
-                    .snapshot
-                    .clone()
-                    .ok_or(Error::InvalidRecoveryState)?;
-                InFlight::Snapshot {
-                    request: self.request,
-                    snapshot,
-                }
-            } else {
-                let prev = progress.next - 1;
-                let last = self
-                    .last_index()
-                    .min(prev.saturating_add(self.limits.max_append_entries as u64));
-                InFlight::Append {
-                    request: self.request,
-                    prev,
-                    last,
-                }
-            }
-        };
-        let message = match &flight {
-            InFlight::Append {
-                request,
-                prev,
-                last,
-            } => {
-                let prev_term = self.term_at(*prev).ok_or(Error::InvalidRecoveryState)?;
-                let base = self.state.base_index();
-                let entries =
-                    self.state.entries[(*prev - base) as usize..(*last - base) as usize].to_vec();
-                Message::Append {
-                    term: self.state.term,
-                    request: *request,
-                    prev_index: *prev,
-                    prev_term,
-                    entries,
-                    leader_commit: self.state.commit_index,
-                }
-            }
-            InFlight::Snapshot { request, snapshot } => Message::InstallSnapshot {
-                term: self.state.term,
-                request: *request,
-                snapshot: snapshot.clone(),
-            },
-        };
-        if let Some(progress) = self.progress.get_mut(&peer) {
-            progress.in_flight = Some(flight);
-        }
-        self.emit(peer, message, output);
         Ok(())
     }
 
@@ -1291,7 +1236,11 @@ impl<C: Clone + Eq> Raft<C> {
         // A retransmission may name a now-retired predecessor or old snapshot.
         // Invalidate request IDs without fabricating any new match evidence.
         for progress in self.progress.values_mut() {
-            progress.in_flight = None;
+            progress.in_flight.clear();
+            // Optimistically sent entries are not match evidence. Re-probe the
+            // proved frontier (or offer the new snapshot) after retiring them.
+            progress.next = progress.matched + 1;
+            progress.probing = true;
         }
     }
 
@@ -1395,13 +1344,16 @@ impl<C: Clone + Eq> Raft<C> {
     ) -> Result<(), Error> {
         if let Some(progress) = self.progress.get_mut(&from) {
             progress.matched = progress.matched.max(last);
-            progress.next = progress.matched + 1;
-            progress.in_flight = None;
+            progress.next = progress.next.max(progress.matched + 1);
+            progress.probing = false;
+            // A later append's success proves the complete matching prefix.
+            // Retire covered requests, but retain later unacknowledged ranges.
+            progress.in_flight.retain(|flight| flight.last() > last);
         }
         if self.advance_commit() {
-            self.broadcast(output)?;
+            self.broadcast(output, false)?;
         } else if last < self.last_index() {
-            self.send_append(from, output)?;
+            self.send_append(from, output, false)?;
         }
         Ok(())
     }
@@ -1556,20 +1508,14 @@ impl<C: Clone + Eq> Raft<C> {
                 if term != self.state.term || self.role != Role::Leader {
                     return Ok(());
                 }
-                let Some(progress) = self.progress.get(&from).cloned() else {
-                    return Ok(());
-                };
                 let Some(InFlight::Append {
-                    request: expected,
                     prev,
                     last,
-                }) = progress.in_flight
+                    ..
+                }) = self.pending_append(from, request).cloned()
                 else {
                     return Ok(());
                 };
-                if expected != request {
-                    return Ok(());
-                }
                 if success {
                     self.acknowledge(from, last, output)?;
                 } else {
@@ -1583,9 +1529,10 @@ impl<C: Clone + Eq> Raft<C> {
                             conflict_next.max(1).min(prev.max(1))
                         };
                         progress.next = hint.max(progress.matched + 1);
-                        progress.in_flight = None;
+                        progress.in_flight.clear();
+                        progress.probing = true;
                     }
-                    self.send_append(from, output)?;
+                    self.send_append(from, output, false)?;
                 }
             }
             Message::InstallSnapshot {
@@ -1603,7 +1550,7 @@ impl<C: Clone + Eq> Raft<C> {
                 }) = self
                     .progress
                     .get(&from)
-                    .and_then(|progress| progress.in_flight.as_ref())
+                    .and_then(|progress| progress.in_flight.front())
                 else {
                     return Ok(());
                 };
