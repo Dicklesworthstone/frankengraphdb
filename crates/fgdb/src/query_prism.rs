@@ -16,8 +16,8 @@ use fgdb_prism::{
 use fgdb_strata::tiered::sealed::{SealedError, SealedLimits, SealedPartition};
 use fgdb_types::{CommitSeq, QueryCx, VId};
 use std::mem::size_of;
+use std::num::NonZeroUsize;
 
-#[cfg(test)]
 use fgdb_prism::FnxSealedExecutionError;
 
 type Error = FnxReadError<ReadError, Cancel>;
@@ -62,8 +62,65 @@ impl<V: Vfs + Clone> Database<V> {
         memory: FnxMemoryLimits,
         sealing: SealedLimits,
     ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
+        self.execute_fnx_sealed_scheduled(cx, call, options, memory, sealing, None).await
+    }
+
+    /// Opt into cooperative compressed BFS/PageRank execution. Binding still
+    /// precedes source access; all source, graph-law and memory limits remain
+    /// explicit. The quantum is a nonzero count of raw/scalar steps, not time.
+    /// No synchronous fallback exists for an unsupported cooperative procedure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_fnx_sealed_cooperative(
+        &self,
+        cx: &QueryCx,
+        text: &str,
+        parameters: &FnxParameters,
+        options: FnxReadOptions,
+        memory: FnxMemoryLimits,
+        sealing: SealedLimits,
+        quantum: NonZeroUsize,
+    ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
+        let call = FnxCallSpec::bind(text, parameters).map_err(Error::Bind)?;
+        self.execute_fnx_sealed_cooperative(cx, &call, options, memory, sealing, quantum).await
+    }
+
+    /// Use the pinned runtime's yield primitive between bounded kernel/scalar
+    /// steps, including invisible-incidence scans and result-row conversion.
+    /// This reuses the SAME pinned-source preparation as execute_fnx_sealed.
+    /// Preparation (sealing, compaction, projection and incoming-index building)
+    /// still has synchronous CPU stages; this is not an end-to-end poll-time
+    /// bound, external-memory operator, or capability-authorization entrypoint.
+    /// Existing entrypoints keep their synchronous mode and kernel identifiers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_fnx_sealed_cooperative(
+        &self,
+        cx: &QueryCx,
+        call: &FnxCallSpec,
+        options: FnxReadOptions,
+        memory: FnxMemoryLimits,
+        sealing: SealedLimits,
+        quantum: NonZeroUsize,
+    ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
+        self.execute_fnx_sealed_scheduled(cx, call, options, memory, sealing, Some(quantum)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_fnx_sealed_scheduled(
+        &self,
+        cx: &QueryCx,
+        call: &FnxCallSpec,
+        options: FnxReadOptions,
+        memory: FnxMemoryLimits,
+        sealing: SealedLimits,
+        quantum: Option<NonZeroUsize>,
+    ) -> Result<FnxReadResult, FnxSealedReadError<ReadError, Cancel>> {
         cx.with_restriction_async(async {
             cx.checkpoint().map_err(Error::Cancelled)?;
+            if quantum.is_some() && !call.supports_cooperative_sealed_execution() {
+                return Err(SealedReadError::Execution(
+                    FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(call.algorithm()),
+                ));
+            }
             supported_sealed_call(call, options.projection.directedness)?;
             let graph = self
                 .prism_sealed_projection_at(
@@ -76,7 +133,15 @@ impl<V: Vfs + Clone> Database<V> {
                     sealing,
                 )
                 .await?;
-            finish_sealed_read(cx, call, &graph, options, memory)
+            if let Some(quantum) = quantum {
+                let result = call.execute_sealed_cooperative(
+                    cx, &graph, options.execution_limits, memory, quantum,
+                    asupersync::runtime::yield_now::yield_now,
+                ).await.map_err(SealedReadError::Execution)?;
+                Ok(FnxReadResult::bind_selection(result, options.selection))
+            } else {
+                finish_sealed_read(cx, call, &graph, options, memory)
+            }
         })
         .await
     }

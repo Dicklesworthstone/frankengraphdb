@@ -19,6 +19,8 @@ use std::mem::size_of;
 
 #[path = "sealed_clustering.rs"]
 mod clustering;
+#[path = "sealed_cooperative.rs"]
+mod cooperative;
 #[path = "sealed_components.rs"]
 mod components;
 #[path = "sealed_shortest_path.rs"]
@@ -42,6 +44,8 @@ pub enum FnxSealedExecutionError {
     Execution(FnxExecutionError<Infallible>),
     /// No decoded fallback, fabricated incoming rows, or silent graph rewrite.
     UnsupportedAlgorithm(FnxAlgorithm),
+    /// No synchronous fallback when yielding execution was requested.
+    UnsupportedCooperativeAlgorithm(FnxAlgorithm),
 }
 
 impl core::fmt::Display for FnxSealedExecutionError {
@@ -57,6 +61,10 @@ impl core::fmt::Display for FnxSealedExecutionError {
                     "Prism compressed cursor kernel is unavailable for {algorithm:?}"
                 )
             }
+            Self::UnsupportedCooperativeAlgorithm(algorithm) => write!(
+                f,
+                "Prism cooperative compressed kernel is unavailable for {algorithm:?}"
+            ),
         }
     }
 }
@@ -67,7 +75,7 @@ impl std::error::Error for FnxSealedExecutionError {
             Self::Source(error) => Some(error),
             Self::Cancelled(error) => Some(error.as_ref()),
             Self::Execution(error) => Some(error),
-            Self::UnsupportedAlgorithm(_) => None,
+            Self::UnsupportedAlgorithm(_) | Self::UnsupportedCooperativeAlgorithm(_) => None,
         }
     }
 }
@@ -603,15 +611,42 @@ fn finish(
     checkpoint: &mut impl FnMut() -> Result<()>,
 ) -> Result<FnxResult> {
     checkpoint()?;
-    admission.rows(output.row_count)?;
-    let mut rows = reserve(output.row_count)?;
-    let mut result_hash = Hasher::new();
-    result_hash.update(b"fgdb:prism:result-rows:v3");
-    result_hash.update(&(output.row_count as u128).to_le_bytes());
-    result_hash.update(&call.digest().0);
+    let mut encoded = EncodedRows::new(call, output.row_count, admission)?;
     for index in 0..graph.node_count() {
+        encoded.push(call, graph, &output.values, index, checkpoint)?;
+    }
+    finish_encoded(call, graph, encoded, output.witness, kernel, estimated_work, workspace, checkpoint)
+}
+
+// Shared row/hash implementation for synchronous and cooperative execution.
+// Each push handles one vertex; cooperative callers yield BETWEEN pushes.
+// No rows escape this private builder before the final certificate is complete.
+struct EncodedRows {
+    rows: Vec<Vec<FnxValue>>,
+    result_hash: Hasher,
+    row_count: usize,
+}
+impl EncodedRows {
+    fn new(call: &FnxCallSpec, row_count: usize, admission: &ResultAdmission) -> Result<Self> {
+        admission.rows(row_count)?;
+        let rows = reserve(row_count)?;
+        let mut result_hash = Hasher::new();
+        result_hash.update(b"fgdb:prism:result-rows:v3");
+        result_hash.update(&(row_count as u128).to_le_bytes());
+        result_hash.update(&call.digest().0);
+        Ok(Self { rows, result_hash, row_count })
+    }
+
+    fn push(
+        &mut self,
+        call: &FnxCallSpec,
+        graph: &SealedGraphView,
+        values: &KernelValues,
+        index: usize,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
         checkpoint()?;
-        let value = match &output.values {
+        let value = match values {
             KernelValues::Scores(values) => {
                 let value = *values
                     .get(index)
@@ -626,7 +661,7 @@ fn finish(
                     .get(index)
                     .ok_or(ExecutionError::InvalidUpstreamResult)?
                 else {
-                    continue;
+                    return Ok(());
                 };
                 FnxValue::Integer(
                     u64::try_from(distance).map_err(|_| ExecutionError::SizeOverflow)?,
@@ -647,7 +682,7 @@ fn finish(
                     .get(index)
                     .ok_or(ExecutionError::InvalidUpstreamResult)?
                 else {
-                    continue;
+                    return Ok(());
                 };
                 if !distance.is_finite() || distance < 0.0 {
                     return Err(ExecutionError::InvalidNumericResult.into());
@@ -661,7 +696,12 @@ fn finish(
         let vertex = graph
             .vertex_id(index)
             .ok_or(ExecutionError::InvalidUpstreamResult)?;
+        // Refuse an extra row before allocating even its bounded field vector.
+        if self.rows.len() == self.row_count {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
         let mut row = reserve(call.outputs().len())?;
+        let result_hash = &mut self.result_hash;
         for column in call.outputs() {
             checkpoint()?;
             let value = match (column.field, value) {
@@ -693,9 +733,24 @@ fn finish(
             }
             row.push(value);
         }
-        rows.push(row);
+        self.rows.push(row);
+        Ok(())
     }
-    if rows.len() != output.row_count {
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_encoded(
+    call: &FnxCallSpec,
+    graph: &SealedGraphView,
+    encoded: EncodedRows,
+    mut witness: ComplexityWitness,
+    kernel: &'static str,
+    estimated_work: usize,
+    workspace: usize,
+    checkpoint: &mut impl FnMut() -> Result<()>,
+) -> Result<FnxResult> {
+    let EncodedRows { rows, result_hash, row_count } = encoded;
+    if rows.len() != row_count {
         return Err(ExecutionError::InvalidUpstreamResult.into());
     }
     let mut columns = reserve(call.outputs().len())?;
@@ -711,7 +766,6 @@ fn finish(
     let kernel_source_digest = source_digest();
     let numeric_profile = call.numeric_profile();
     let adapter = AdapterPath::CompressedCursor;
-    let mut witness = output.witness;
     if graph.spec().directedness != Directedness::Directed
         && !matches!(call.algorithm(), FnxAlgorithm::Triangles | FnxAlgorithm::ClusteringCoefficient)
     {
@@ -780,6 +834,7 @@ fn source_digest() -> Digest {
         hash.update(b"fgdb:prism:sealed-kernel-source:v1");
         for source in [
             include_str!("sealed_execute.rs"),
+            include_str!("sealed_cooperative.rs"),
             include_str!("sealed_clustering.rs"),
             include_str!("sealed_components.rs"),
             include_str!("sealed_shortest_path.rs"),
@@ -944,7 +999,7 @@ mod tests {
                     )
                     .unwrap();
                     let expected = call
-                        .execute(&graph, limits(), || Ok::<(), Infallible>(()))
+                        .execute(&graph, limits(), || Ok::<(), Infallible>(() ))
                         .unwrap();
                     let KernelValues::Distances(distances) = output.values else {
                         panic!("distances");
