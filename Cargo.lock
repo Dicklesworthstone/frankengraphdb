@@ -543,6 +543,7 @@ dependencies = [
  "fgdb-prism",
  "fgdb-strata",
  "fgdb-types",
+ "fgdb-warden",
 ]
 
 [[package]]

@@ -12,6 +12,8 @@ type Cancel = Box<asupersync::error::Error>;
 
 #[path = "query_aggregate_stream.rs"]
 mod aggregate_stream;
+#[path = "query_authorized.rs"]
+mod authorized;
 #[path = "query_diff.rs"]
 mod diff;
 #[path = "query_explain.rs"]
@@ -45,6 +47,8 @@ pub enum QueryResult {
 /// refusal. Unsupported includes structural parser diagnostics, never values.
 #[derive(Debug)]
 pub enum QueryError {
+    /// Signature, scope, expiry, retirement, or signed-budget refusal.
+    Authorization(fgdb_warden::Error),
     /// A native read could not admit its database generation or revision.
     Read(crate::ReadError),
     Unsupported {
@@ -99,6 +103,7 @@ pub enum QueryError {
 impl core::fmt::Display for QueryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Authorization(error) => error.fmt(f),
             Self::Read(error) => error.fmt(f),
             Self::Unsupported { diagnostics } => {
                 write!(f, "unsupported query construct: {}", diagnostics.join("; "))
@@ -135,6 +140,7 @@ impl core::fmt::Display for QueryError {
 impl core::error::Error for QueryError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::Authorization(error) => Some(error),
             Self::Read(error) => Some(error),
             Self::Refused { source, .. } => Some(source.as_ref()),
             Self::Stream(error) => Some(error),
