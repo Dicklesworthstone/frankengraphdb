@@ -11,6 +11,7 @@ use std::future::Future;
 
 mod download;
 pub mod proposal;
+pub mod write;
 
 use fgdb_chronicle::seed::SeedPlan;
 use fgdb_order::{Event, MemberId, Output, PersistentState, Role, SnapshotTransfer};
@@ -145,6 +146,7 @@ pub struct AppliedReplica<C, A> {
     application: ApplicationDriver<C, A>,
     waiting: Vec<WaitingRead>,
     maximum_reads: usize,
+    writes: write::WriteTracker,
 }
 
 impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
@@ -174,6 +176,7 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
             application,
             waiting,
             maximum_reads,
+            writes: write::WriteTracker::new(),
         })
     }
 
@@ -324,6 +327,10 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
         &mut self,
         output: ReplicaOutput<C>,
     ) -> Result<AppliedReplicaOutput<C>, ApplicationStateError> {
+        self.writes.observe(
+            self.replica.durable_state().map_err(ApplicationStateError::Raft)?,
+            output.consensus.role,
+        );
         let mut leadership_lost = Vec::new();
         if output.consensus.role != Role::Leader {
             // Include already-confirmed reads, which no longer live in the

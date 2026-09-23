@@ -23,6 +23,9 @@ use fgdb_repl::driver::RaftPublisher;
 use fgdb_repl::replica::Replica;
 use fgdb_types::ObjectId;
 
+#[path = "available_writes/tracked.rs"]
+mod tracked;
+
 struct NoopWake;
 impl Wake for NoopWake { fn wake(self: Arc<Self>) {} }
 fn immediate<F: Future>(future: F) -> F::Output {
@@ -171,7 +174,12 @@ impl Application<u64> for Backend {
             s.progress.publication_generation = s.generation;
             s.progress.publication_root = oid(s.generation, 41);
             s.progress.state_root = oid(s.generation, 42);
-            Ok(s.progress)
+            let progress = s.progress;
+            drop(s);
+            if mode == Mode::Panic { panic!("application publication panic"); }
+            if mode == Mode::SuspendAfter { pending::<()>().await; }
+            if mode == Mode::FailAfter { return Err("application publication uncertain"); }
+            Ok(progress)
         }
     }
 }
