@@ -482,6 +482,20 @@ pub enum Event<C> {
     LivenessTimeout,
     Heartbeat,
     Propose(C),
+    /// One bounded local append publication for several separately ordered
+    /// commands. Nonempty and at most `Limits::max_append_entries`; admission
+    /// checks the WHOLE range before any entry or request identity changes.
+    ///
+    /// As with Propose, the trusted host must validate and retain each command's
+    /// payload authority for its exact position through publication. This is
+    /// not a client transaction, availability certificate, or wire message.
+    /// Each command must be valid at its ordered predecessor, not merely at a
+    /// shared earlier basis. Configuration/authority barriers must be resolved
+    /// before forming a group; batching does not relax any per-command gate.
+    /// Followers may commit/apply prefixes independently; batching does not
+    /// make the commands one atomic transaction or imply client success.
+    /// Command bytes, preparation work and downstream queues need host budgets.
+    ProposeBatch(Vec<C>),
     Receive(Envelope<C>),
     /// The verifier-proved applied/visible cut and complete floor permit retiring
     /// this log prefix. Runtime publication must retain the snapshot closure.
@@ -823,14 +837,9 @@ impl<C: Clone + Eq> Raft<C> {
                 }
             }
             Event::Propose(command) => {
-                self.log_changed = true;
-                self.state.entries.push(Entry {
-                    term: self.state.term,
-                    command: Some(command),
-                });
-                self.advance_commit();
-                self.broadcast(&mut output, false)?;
+                self.append_proposals(std::iter::once(command), &mut output)?;
             }
+            Event::ProposeBatch(commands) => self.append_proposals(commands, &mut output)?,
             Event::Receive(envelope) => self.receive(envelope, &mut output)?,
             Event::Compact(snapshot) => self.compact(snapshot),
             Event::SnapshotReady(_) => self.install_snapshot(&mut output)?,
@@ -909,17 +918,8 @@ impl<C: Clone + Eq> Raft<C> {
             Event::LivenessTimeout if self.role != Role::Leader && self.state.term == u64::MAX => {
                 return Err(Error::CounterExhausted);
             }
-            Event::Propose(_) => {
-                if self.role != Role::Leader {
-                    return Err(Error::NotLeader);
-                }
-                if self.state.entries.len() >= self.limits.max_log_entries {
-                    return Err(Error::LogFull);
-                }
-                if self.last_index() == u64::MAX - 1 {
-                    return Err(Error::CounterExhausted);
-                }
-            }
+            Event::Propose(_) => self.validate_proposal_count(1)?,
+            Event::ProposeBatch(commands) => self.validate_proposal_count(commands.len())?,
             Event::Compact(snapshot) => {
                 self.validate_snapshot(snapshot)?;
                 if self.state.snapshot.as_ref() != Some(snapshot)
@@ -1065,6 +1065,46 @@ impl<C: Clone + Eq> Raft<C> {
 
     fn last_index(&self) -> u64 {
         self.state.base_index() + self.state.entries.len() as u64
+    }
+
+    fn validate_proposal_count(&self, count: usize) -> Result<(), Error> {
+        if self.role != Role::Leader {
+            return Err(Error::NotLeader);
+        }
+        if count == 0 {
+            return Err(Error::InvalidMessage);
+        }
+        if count > self.limits.max_append_entries {
+            return Err(Error::AppendTooLarge);
+        }
+        if count > self.limits.max_log_entries.saturating_sub(self.state.entries.len()) {
+            return Err(Error::LogFull);
+        }
+        let count = u64::try_from(count).map_err(|_| Error::CounterExhausted)?;
+        self.last_index()
+            .checked_add(count)
+            .filter(|last| *last < u64::MAX)
+            .ok_or(Error::CounterExhausted)?;
+        Ok(())
+    }
+
+    // Both proposal forms use the same evaluator inside step's existing
+    // publication/panic fence. Move commands into consecutive ordinary entries;
+    // calculate quorum and fill peer windows once, not once per command. No
+    // partial publication or extra marker/clock/sequence domain is introduced.
+    fn append_proposals(
+        &mut self,
+        commands: impl IntoIterator<Item = C>,
+        output: &mut Output<C>,
+    ) -> Result<(), Error> {
+        self.log_changed = true;
+        let term = self.state.term;
+        self.state.entries.extend(commands.into_iter().map(|command| Entry {
+            term,
+            command: Some(command),
+        }));
+        self.advance_commit();
+        self.broadcast(output, false)
     }
 
     fn entry_at(&self, index: u64) -> Option<&Entry<C>> {
@@ -1575,3 +1615,6 @@ impl<C: Clone + Eq> Raft<C> {
 
 #[cfg(test)]
 mod quorum_tests;
+
+#[cfg(test)]
+mod proposal_batch_tests;
