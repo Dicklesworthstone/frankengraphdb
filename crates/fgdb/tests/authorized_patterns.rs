@@ -8,6 +8,12 @@ use fgdb_gql::algebra::{GraphValue, GraphValueRow, PreparedGraphPattern};
 use fgdb_gql::{GqlParameters, GqlQueryError, GqlQueryPolicy, GraphSymbol, GraphSymbolKind, PreparedGraphText};
 use fgdb_types::{CanonicalScalar, CommitCx, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts, QueryCx, VId};
 use fgdb_warden::{Authority, CapabilityToken, Error, Grant, LimitDimension, QueryLimits, Restriction, Rights, Scope};
+use fgdb_gql::{
+    GraphAggregate, GraphAggregateError, GraphAggregateValue, GraphSetExecutionError,
+    GraphSetOperation, GraphSetQuantifier, GraphSetValue, PreparedGraphSet,
+    PreparedGraphSetAggregate,
+};
+use fgdb_gql::row_join::{RowJoinKind, RowJoinSpec};
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([7; 32]);
 const BRANCH: &str = "host-selected-branch";
@@ -232,6 +238,225 @@ fn every_clock_boundary_observes_expiry_and_final_delivery_observes_retirement()
         }), Err(QueryError::Authorization(Error::AuthorityRetired))));
         assert!(matches!(db.execute_graph_pattern_authorized(&cx, &issuer, &token, BRANCH, &p, policy(), || 100),
             Err(QueryError::Authorization(Error::AuthorityRetired))));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn all_six_set_and_join_kinds_consume_only_the_visible_complete_inputs() {
+    let ((), report) = run_async_under_lab(0x5ec0_2001, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let db = database(&c.commit()).await;
+        let issuer = authority(101, NS); let token = issuer.issue_at(&grant(), 100).unwrap();
+        let left = PreparedGraphSet::from(pattern("MATCH (n) RETURN n, n.p AS p, n.hidden AS hidden"));
+        let right = PreparedGraphSet::from(pattern("MATCH (n) WHERE n.p >= 20 RETURN n, n.p AS p, n.hidden AS hidden"));
+        let a = row(vec![vertex(1), scalar(10), null()]);
+        let b = row(vec![vertex(3), scalar(30), null()]);
+        for (operation, quantifier, expected) in [
+            (GraphSetOperation::Union, GraphSetQuantifier::All, vec![a.clone(), b.clone(), b.clone()]),
+            (GraphSetOperation::Union, GraphSetQuantifier::Distinct, vec![a.clone(), b.clone()]),
+            (GraphSetOperation::Intersect, GraphSetQuantifier::All, vec![b.clone()]),
+            (GraphSetOperation::Intersect, GraphSetQuantifier::Distinct, vec![b.clone()]),
+            (GraphSetOperation::Except, GraphSetQuantifier::All, vec![a.clone()]),
+            (GraphSetOperation::Except, GraphSetQuantifier::Distinct, vec![a.clone()]),
+        ] {
+            let query = left.clone().combine(operation, quantifier, right.clone()).unwrap();
+            assert_eq!(db.execute_graph_set_authorized(&cx, &issuer, &token, BRANCH, &query, policy(), || 100).unwrap(), expected);
+        }
+        let matched = row(vec![vertex(3), scalar(30), null(), vertex(3), scalar(30), null()]);
+        let unmatched = row(vec![vertex(1), scalar(10), null(), null(), null(), null()]);
+        for (kind, expected) in [
+            (RowJoinKind::Inner, vec![matched.clone()]),
+            (RowJoinKind::Left, vec![unmatched.clone(), matched.clone()]),
+            (RowJoinKind::Right, vec![matched.clone()]),
+            (RowJoinKind::Full, vec![unmatched, matched]),
+            (RowJoinKind::Semi, vec![b]),
+            (RowJoinKind::Anti, vec![a]),
+        ] {
+            let spec = RowJoinSpec::new(left.column_types(), right.column_types(), &[(0, 0)]).unwrap().with_kind(kind);
+            let query = left.clone().join(right.clone(), spec).unwrap();
+            assert_eq!(db.execute_graph_set_authorized(&cx, &issuer, &token, BRANCH, &query, policy(), || 100).unwrap(), expected);
+        }
+        // An equality on a forbidden key must not match two raw equal values.
+        let spec = RowJoinSpec::new(left.column_types(), right.column_types(), &[(2, 2)]).unwrap();
+        let query = left.join(right, spec).unwrap();
+        assert!(!db.execute_graph_set_governed(&cx, &query, policy()).unwrap().value.is_empty());
+        assert!(db.execute_graph_set_authorized(&cx, &issuer, &token, BRANCH, &query, policy(), || 100).unwrap().is_empty());
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+fn double_visible() -> PreparedGraphSet {
+    let leaf = PreparedGraphSet::from(pattern("MATCH (n) RETURN n.p AS p, n.hidden AS hidden"));
+    leaf.clone().combine(GraphSetOperation::Union, GraphSetQuantifier::All, leaf).unwrap()
+}
+fn totals(input: PreparedGraphSet) -> PreparedGraphSetAggregate {
+    PreparedGraphSetAggregate::prepare(input, &[], &[
+        GraphAggregate::count_rows("rows"), GraphAggregate::count("hidden_count", 1),
+        GraphAggregate::sum_int("sum", 0), GraphAggregate::collect("hidden_values", 1),
+    ], 0, None).unwrap()
+}
+
+#[test]
+fn signed_source_limits_span_leaves_while_delivery_counts_only_the_final_page_or_groups() {
+    let ((), report) = run_async_under_lab(0x5ec0_2002, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let db = database(&c.commit()).await;
+        let issuer = authority(102, NS); let token = issuer.issue_at(&grant(), 100).unwrap();
+        let all = double_visible();
+        let page = all.clone().with_page(1, Some(1));
+        let exact = token.attenuate(Restriction::MaxNodes(4)).unwrap().attenuate(Restriction::MaxRows(1)).unwrap();
+        assert_eq!(db.execute_graph_set_authorized(&cx, &issuer, &exact, BRANCH, &page, policy(), || 100).unwrap(),
+            vec![row(vec![scalar(10), null()])]);
+        let denied = exact.attenuate(Restriction::MaxNodes(3)).unwrap();
+        assert!(matches!(db.execute_graph_set_authorized(&cx, &issuer, &denied, BRANCH, &page, policy(), || 100),
+            Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Nodes)))));
+        assert!(matches!(db.execute_graph_set_authorized(&cx, &issuer, &exact, BRANCH, &all, policy(), || 100),
+            Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Rows)))));
+        let summary = totals(all.clone());
+        let result = db.execute_graph_set_aggregate_authorized(&cx, &issuer, &exact, BRANCH, &summary,
+            GqlQueryPolicy::new(4, 1, 1_000_000, 1_000_000), || 100).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].values(), &[
+            GraphAggregateValue::Count(4), GraphAggregateValue::Count(0),
+            GraphAggregateValue::Integer(80), GraphAggregateValue::Value(GraphValue::List(Box::new([]))),
+        ]);
+        assert!(matches!(db.execute_graph_set_aggregate_authorized(&cx, &issuer, &denied, BRANCH, &summary, policy(), || 100),
+            Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Nodes)))));
+        // The same native source limit is cumulative too; the second leaf
+        // reports the original 3-record allowance, not a reset or remainder.
+        for aggregate in [false, true] {
+            let limit = GqlQueryPolicy::new(3, 1000, 1_000_000, 1_000_000);
+            let error = if aggregate {
+                db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, BRANCH, &summary, limit, || 100).unwrap_err()
+            } else {
+                db.execute_graph_set_authorized(&cx, &issuer, &token, BRANCH, &all, limit, || 100).unwrap_err()
+            };
+            match error {
+                QueryError::Set(GqlQueryError::Rows(error)) | QueryError::Aggregate(GqlQueryError::Rows(error)) => {
+                    assert_eq!((error.limit, error.observed), (3, 4));
+                }
+                _ => panic!("native compound source budget must retain its error class"),
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn masked_values_define_groups_and_counts_instead_of_filtering_finished_aggregates() {
+    let ((), report) = run_async_under_lab(0x5ec0_2003, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let db = database(&c.commit()).await;
+        let issuer = authority(103, NS); let token = issuer.issue_at(&grant(), 100).unwrap();
+        let groups = PreparedGraphSetAggregate::prepare(double_visible(), &[1], &[
+            GraphAggregate::count_rows("rows"), GraphAggregate::sum_int("sum", 0),
+        ], 0, None).unwrap();
+        let actual = db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, BRANCH, &groups, policy(), || 100).unwrap();
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].keys(), &[null()]);
+        assert_eq!(actual[0].values(), &[GraphAggregateValue::Count(4), GraphAggregateValue::Integer(80)]);
+        let raw = db.execute_graph_set_aggregate_governed(&cx, &groups, policy()).unwrap().value;
+        assert_eq!(raw[0].keys(), &[scalar(777)]);
+        assert_eq!(raw[0].values(), &[GraphAggregateValue::Count(6), GraphAggregateValue::Integer(120)]);
+        // A denied relation contributes no inputs, but empty global COUNT
+        // still returns one authorized result row and spends a row allowance.
+        let hidden = PreparedGraphSet::from(pattern("MATCH (a)-[:S]->(b) RETURN a"));
+        let empty = PreparedGraphSetAggregate::prepare(hidden, &[], &[GraphAggregate::count_rows("rows")], 0, None).unwrap();
+        let actual = db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, BRANCH, &empty, policy(), || 100).unwrap();
+        assert_eq!(actual[0].get(0).unwrap().as_count(), Some(0));
+        let zero = token.attenuate(Restriction::MaxRows(0)).unwrap();
+        assert!(matches!(db.execute_graph_set_aggregate_authorized(&cx, &issuer, &zero, BRANCH, &empty, policy(), || 100),
+            Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Rows)))));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn every_leaf_and_group_uses_the_same_historical_cut_after_scope_changes() {
+    let ((), report) = run_async_under_lab(0x5ec0_2004, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query(); let commit = c.commit();
+        let mut db = database(&commit).await; let at = db.frontier().unwrap();
+        let issuer = authority(104, NS); let token = issuer.issue_at(&grant(), 100).unwrap();
+        let relation = double_visible(); let summary = totals(relation.clone());
+        let mut change = WriteBatch::new(RelationId(1));
+        change.set_vertex_label(VId(1), LabelId(1), false);
+        change.set_vertex_label(VId(2), LabelId(1), true);
+        change.set_vertex_property(VId(1), PropertyKeyId(1), Some(CanonicalScalar::Int(500)));
+        db.write(&commit, change).await.unwrap();
+        db.compact(&commit).await.unwrap();
+        let historical = db.execute_graph_set_authorized_at(&cx, &issuer, &token, BRANCH, &relation, at, policy(), || 100).unwrap();
+        assert_eq!(historical, vec![row(vec![scalar(10), null()]), row(vec![scalar(10), null()]),
+            row(vec![scalar(30), null()]), row(vec![scalar(30), null()])]);
+        let old = db.execute_graph_set_aggregate_authorized_at(&cx, &issuer, &token, BRANCH, &summary, at, policy(), || 100).unwrap();
+        let new = db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, BRANCH, &summary, policy(), || 100).unwrap();
+        assert_eq!(old[0].get(2).unwrap().as_integer(), Some(80));
+        assert_eq!(new[0].get(2).unwrap().as_integer(), Some(100));
+        issuer.retire();
+        assert!(matches!(db.execute_graph_set_aggregate_authorized_at(&cx, &issuer, &token, BRANCH, &summary, at, policy(), || 100),
+            Err(QueryError::Authorization(Error::AuthorityRetired))));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn source_free_queries_are_authenticated_and_late_errors_survive_empty_pages() {
+    let ((), report) = run_async_under_lab(0x5ec0_2005, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let db = database(&c.commit()).await;
+        let issuer = authority(105, NS); let token = issuer.issue_at(&grant(), 100).unwrap()
+            .attenuate(Restriction::MaxNodes(0)).unwrap();
+        let values = PreparedGraphSet::singleton().unwind("value".into(),
+            GraphSetValue::List(vec![GraphSetValue::Value(scalar(3)), GraphSetValue::Value(scalar(1))])).unwrap();
+        assert_eq!(db.execute_graph_set_authorized(&cx, &issuer, &token, BRANCH, &values, policy(), || 100).unwrap(),
+            vec![row(vec![scalar(3)]), row(vec![scalar(1)])]);
+        let total = PreparedGraphSetAggregate::prepare(values.clone(), &[], &[GraphAggregate::count_rows("rows")], 0, None).unwrap();
+        assert_eq!(db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, BRANCH, &total, policy(), || 100).unwrap()[0]
+            .get(0).unwrap().as_count(), Some(2));
+        // UNWIND a non-list is a late value error, not permission to omit
+        // the second child because the first child or final page is empty.
+        let bad = PreparedGraphSet::singleton().unwind("value".into(), GraphSetValue::Value(scalar(9))).unwrap();
+        let late = values.with_page(0, Some(0)).combine(GraphSetOperation::Union, GraphSetQuantifier::All, bad).unwrap()
+            .with_page(0, Some(0));
+        assert!(matches!(db.execute_graph_set_authorized(&cx, &issuer, &token, BRANCH, &late, policy(), || 100),
+            Err(QueryError::Set(GqlQueryError::Source(GraphSetExecutionError::Projection { .. })))));
+        let aggregate = PreparedGraphSetAggregate::prepare(late, &[], &[GraphAggregate::count_rows("rows")], 0, Some(0)).unwrap();
+        assert!(matches!(db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, BRANCH, &aggregate, policy(), || 100),
+            Err(QueryError::Aggregate(GqlQueryError::Source(GraphAggregateError::InputRelation(GraphSetExecutionError::Projection { .. }))))));
+        assert!(matches!(db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, "wrong", &aggregate, policy(), || 100),
+            Err(QueryError::Authorization(Error::ScopeDenied))));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn compound_work_and_expiry_and_final_group_delivery_use_one_live_permit() {
+    let ((), report) = run_async_under_lab(0x5ec0_2006, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root); let cx = c.query();
+        let db = database(&c.commit()).await; let query = totals(double_visible());
+        let issuer = authority(106, NS); let token = issuer.issue_at(&grant(), 100).unwrap();
+        let mut calls = 0;
+        let expected = db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, BRANCH, &query, policy(), || { calls += 1; 100 }).unwrap();
+        assert_eq!(expected.len(), 1);
+        // Four admitted vertices, one row-delivery charge and one verification
+        // sample are the six clock calls that are not work checkpoints.
+        let work = calls - 6;
+        let exact = token.attenuate(Restriction::MaxWork(work)).unwrap();
+        assert_eq!(db.execute_graph_set_aggregate_authorized(&cx, &issuer, &exact, BRANCH, &query, policy(), || 100).unwrap(), expected);
+        let short = token.attenuate(Restriction::MaxWork(work - 1)).unwrap();
+        assert!(matches!(db.execute_graph_set_aggregate_authorized(&cx, &issuer, &short, BRANCH, &query, policy(), || 100),
+            Err(QueryError::Authorization(Error::LimitExceeded(LimitDimension::Work)))));
+        for stop in 1..=calls {
+            let mut seen = 0;
+            assert!(matches!(db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, BRANCH, &query, policy(), || {
+                seen += 1; if seen == stop { 1000 } else { 100 }
+            }), Err(QueryError::Authorization(Error::Expired))), "stop={stop}");
+            assert_eq!(seen, stop);
+        }
+        let mut seen = 0;
+        assert!(matches!(db.execute_graph_set_aggregate_authorized(&cx, &issuer, &token, BRANCH, &query, policy(), || {
+            seen += 1; if seen == calls { issuer.retire(); } 100
+        }), Err(QueryError::Authorization(Error::AuthorityRetired))));
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

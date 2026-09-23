@@ -23,6 +23,8 @@ use fgdb_warden::{Authority, CapabilityToken, ExecutionPermit, PlannerPredicates
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+mod relational;
+
 type Fault = GqlQueryError<ReadError, QueryError>;
 type Governed<T> = Result<GqlQueryExecution<T>, Fault>;
 type Edge<'a> = ((EId, VId, RelationId, VId), &'a [(PropertyKeyId, CanonicalScalar)]);
