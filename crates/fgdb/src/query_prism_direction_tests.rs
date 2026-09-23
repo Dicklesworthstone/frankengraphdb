@@ -355,14 +355,12 @@ fn direction_specific_admission_counts_construction_workspace_and_both_incidence
         assert!(matches!(db.execute_fnx_sealed(&query, &FnxCallSpec::strongly_connected_components(),
             opt, memory(), SealedLimits::default()).await,
             Err(SealedReadError::Execution(FnxSealedExecutionError::Execution(
-                FnxExecutionError::GraphKindMismatch { required: FnxGraphKind::Directed,
-                    actual: Directedness::Undirected })))));
+                FnxExecutionError::GraphKind { required: FnxGraphKind::Directed })))));
         opt.projection.directedness = Directedness::Reversed;
         assert!(matches!(db.execute_fnx_sealed(&query, &FnxCallSpec::connected_components(),
             opt, memory(), SealedLimits::default()).await,
             Err(SealedReadError::Execution(FnxSealedExecutionError::Execution(
-                FnxExecutionError::GraphKindMismatch { required: FnxGraphKind::Undirected,
-                    actual: Directedness::Reversed })))));
+                FnxExecutionError::GraphKind { required: FnxGraphKind::Undirected })))));
     });
 }
 

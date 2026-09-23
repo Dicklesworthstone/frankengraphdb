@@ -433,7 +433,7 @@ impl FnxCallSpec {
             FnxGraphKind::Undirected => direction == Directedness::Undirected,
         };
         if !compatible {
-            return Err(ExecutionError::GraphKindMismatch { required, actual: direction }.into());
+            return Err(ExecutionError::GraphKind { required }.into());
         }
         Ok(())
     }
