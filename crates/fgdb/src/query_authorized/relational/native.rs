@@ -2,6 +2,8 @@
 //! Dispatch sees only the admitted generation and permit, not a Database, so
 //! no branch can fall back to privileged readers or reset an input's authority.
 
+mod session;
+
 use super::*;
 use crate::{PreparedNativeRead, QueryResult, QueryValue};
 use crate::query::{aggregates, values};
