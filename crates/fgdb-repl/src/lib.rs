@@ -18,6 +18,7 @@
 
 pub mod application;
 pub mod availability;
+pub mod download;
 pub mod driver;
 pub mod replica;
 
@@ -121,33 +122,7 @@ impl<'r, C: Clone + Eq> SnapshotCatchup<'r, C> {
         transfer: SnapshotTransfer,
         plan: SeedPlan,
     ) -> Result<Self, CatchupError> {
-        let cut = transfer.snapshot();
-        let anchor = plan.anchor();
-        if anchor.namespace != namespace {
-            return Err(CatchupError::WrongNamespace);
-        }
-        if anchor.consensus_domain != cut.domain().0
-            || anchor.configuration != cut.configuration()
-            || anchor.snapshot_manifest.0 != cut.manifest()
-            || anchor.state_root.0 != cut.state_root()
-            || anchor.retention_floor.0 != cut.retention_floor()
-            || anchor.raft_index != cut.index()
-            || anchor.raft_term != cut.term()
-        {
-            return Err(CatchupError::SnapshotBindingMismatch);
-        }
-        let state = raft.durable_state().map_err(CatchupError::Raft)?;
-        let configuration = state.configuration();
-        if cut.domain() != configuration.domain()
-            || cut.configuration() != configuration.identity()
-            || !configuration.voters().contains(&transfer.source())
-            || transfer.source() == raft.id()
-        {
-            return Err(CatchupError::WrongConfiguration);
-        }
-        if cut.term() > state.term() || cut.index() <= state.commit_index() {
-            return Err(CatchupError::StaleSnapshot);
-        }
+        download::validate(raft, namespace, &transfer, &plan)?;
         Ok(Self {
             raft,
             transfer,
