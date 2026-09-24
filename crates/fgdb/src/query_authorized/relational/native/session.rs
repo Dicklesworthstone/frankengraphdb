@@ -12,6 +12,8 @@ use fgdb_gql::{GraphSymbol, GraphSymbolKind, ReverseSymbolCatalog};
 use fgdb_warden::{Error as AuthorizationError, VerifiedCapability};
 use std::sync::Arc;
 
+mod batch;
+
 struct State<'a, Resolver, Clock> {
     view: Option<EmbeddedReadView>,
     capability: VerifiedCapability<'a>,
@@ -164,8 +166,11 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             // Also check after a resolver/parser/binder failed. Such a callback
             // cannot hide expiry/retirement by returning its own error first.
             execution.borrow_mut().checkpoint()?;
-            let (value, rows) = result?;
-            execution.borrow_mut().deliver(rows)?;
+            // The action reports final rows not yet reserved. A read batch
+            // reserves each completed result on this SAME permit before
+            // retaining it, then reports zero here; no result is double charged.
+            let (value, unreserved_rows) = result?;
+            execution.borrow_mut().deliver(unreserved_rows)?;
             Ok(value)
         })();
         if !terminal(&result) {
@@ -179,18 +184,7 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// choose another issuer, policy, catalog, branch mapping or clock.
     pub fn query(&mut self, cx: &QueryCx, text: &str, params: &GqlParameters) -> Result<QueryResult, QueryError> {
         self.run(cx, |view, branch, scope, resolver, policy, execution| {
-            let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
-            let selected = selector.bind_parameters(params).map_err(selector_error)?;
-            check_branch(&selected, branch)?;
-            execution.borrow_mut().checkpoint()?;
-            let prepared = PreparedNativeRead::prepare(
-                selected.statement(), selected.parameters(), BorrowedResolver(resolver),
-            );
-            execution.borrow_mut().checkpoint()?;
-            result_rows(native_at(
-                &prepared?, selected.parameters(), &view.snapshot, view.frontier(),
-                scope, execution, policy,
-            )?)
+            text_at(view, branch, scope, resolver, policy, execution, text, params)
         })
     }
 
@@ -218,17 +212,58 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     pub fn execute(&mut self, cx: &QueryCx, prepared: &AuthorizedPreparedRead, params: &GqlParameters) -> Result<QueryResult, QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |view, branch, scope, _, policy, execution| {
-            if !Arc::ptr_eq(&owner, &prepared.owner) {
-                return Err(QueryError::Authorization(AuthorizationError::WrongAuthority));
-            }
-            let selected = prepared.selector.bind_parameters(params).map_err(selector_error)?;
-            check_branch(&selected, branch)?;
-            result_rows(native_at(
-                &prepared.native, selected.parameters(), &view.snapshot, view.frontier(),
-                scope, execution, policy,
-            )?)
+            prepared_at(view, branch, scope, policy, execution, &owner, prepared, params)
         })
     }
+}
+
+// Single statements and batches use exactly the same selector, classification,
+// parameter binding and scoped execution path, not a second dispatcher.
+#[allow(clippy::too_many_arguments)]
+fn text_at<R: GraphSymbolResolver>(
+    view: &EmbeddedReadView,
+    branch: &str,
+    scope: &PlannerPredicates,
+    resolver: &mut R,
+    policy: GqlQueryPolicy,
+    execution: &Live<'_, '_, '_>,
+    text: &str,
+    params: &GqlParameters,
+) -> Result<(QueryResult, usize), QueryError> {
+    let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
+    let selected = selector.bind_parameters(params).map_err(selector_error)?;
+    check_branch(&selected, branch)?;
+    execution.borrow_mut().checkpoint()?;
+    let prepared = PreparedNativeRead::prepare(
+        selected.statement(), selected.parameters(), BorrowedResolver(resolver),
+    );
+    execution.borrow_mut().checkpoint()?;
+    result_rows(native_at(
+        &prepared?, selected.parameters(), &view.snapshot, view.frontier(),
+        scope, execution, policy,
+    )?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepared_at(
+    view: &EmbeddedReadView,
+    branch: &str,
+    scope: &PlannerPredicates,
+    policy: GqlQueryPolicy,
+    execution: &Live<'_, '_, '_>,
+    owner: &Arc<()>,
+    prepared: &AuthorizedPreparedRead,
+    params: &GqlParameters,
+) -> Result<(QueryResult, usize), QueryError> {
+    if !Arc::ptr_eq(owner, &prepared.owner) {
+        return Err(QueryError::Authorization(AuthorizationError::WrongAuthority));
+    }
+    let selected = prepared.selector.bind_parameters(params).map_err(selector_error)?;
+    check_branch(&selected, branch)?;
+    result_rows(native_at(
+        &prepared.native, selected.parameters(), &view.snapshot, view.frontier(),
+        scope, execution, policy,
+    )?)
 }
 impl<R, C> AuthorizedReadSession<'_, R, C> {
     /// Release the generation and trusted state, with no source reads or clock

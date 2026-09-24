@@ -9,11 +9,11 @@ use fgdb_warden::{Grant, LimitDimension, QueryLimits, Scope};
 use std::cell::Cell;
 
 const NS: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x63; 32]);
-const BRANCH: &str = "batch-owner";
-fn issuer(seed: u64) -> Authority {
+pub(super) const BRANCH: &str = "batch-owner";
+pub(super) fn issuer(seed: u64) -> Authority {
     Authority::new(AuthKey::from_seed(seed), NS, "graph", SchemaEpoch(0), 1).unwrap()
 }
-fn grant() -> Grant {
+pub(super) fn grant() -> Grant {
     let mut grant = Grant::read_only(BRANCH, 1000, QueryLimits {
         max_nodes: 1000, max_work: 1_000_000, max_rows: 1000,
     });
@@ -22,15 +22,15 @@ fn grant() -> Grant {
     grant.properties = Scope::only([PropertyKeyId(1)]);
     grant
 }
-fn policy() -> GqlQueryPolicy { GqlQueryPolicy::new(1000, 1000, 1_000_000, 1_000_000) }
-fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+pub(super) fn policy() -> GqlQueryPolicy { GqlQueryPolicy::new(1000, 1000, 1_000_000, 1_000_000) }
+pub(super) fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
     match (kind, name) {
         (GraphSymbolKind::Label, "L") => Some(GraphSymbol::Label(LabelId(1))),
         (GraphSymbolKind::Property, "p") => Some(GraphSymbol::Property(PropertyKeyId(1))),
         _ => None,
     }
 }
-async fn database(cx: &CommitCx) -> Database<MemVfs> {
+pub(super) async fn database(cx: &CommitCx) -> Database<MemVfs> {
     let mut db = Database::open_memory(cx, DatabaseKeys::new([0x37; 32], NS, [0x95; 32])).await.unwrap();
     let mut batch = WriteBatch::new(RelationId(1));
     for (id, label, p) in [(1, 1, 10), (2, 99, 20), (3, 1, 30)] {
@@ -39,7 +39,7 @@ async fn database(cx: &CommitCx) -> Database<MemVfs> {
     db.write(cx, batch).await.unwrap();
     db
 }
-fn refusal<T>(result: Result<T, QueryError>, expected: AuthorizationError) {
+pub(super) fn refusal<T>(result: Result<T, QueryError>, expected: AuthorizationError) {
     assert!(matches!(result, Err(QueryError::Authorization(actual)) if actual == expected));
 }
 
