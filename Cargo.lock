@@ -604,6 +604,7 @@ dependencies = [
  "fgdb-crypto",
  "fgdb-delta-types",
  "fgdb-gql",
+ "fgdb-prism",
  "fgdb-strata",
  "fgdb-types",
 ]

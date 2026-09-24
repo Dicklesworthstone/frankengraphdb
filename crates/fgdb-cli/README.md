@@ -17,6 +17,7 @@ machine-readable contract that the tests freeze.
 | `create` | Create a new database directory (refuses an existing one). |
 | `write <gql>` | Run one native write program in one transaction. |
 | `query <gql>` | Native read, including `EXPLAIN`. A write statement is refused (exit 3), never retried as a write. `--stream` flushes one row at a time on the streamable profiles; `--certify-to <file>` saves a replayable result certificate. |
+| `query 'CALL fnx.<procedure>(…) YIELD …'` | A registered Prism analytics procedure over an explicit projection of one committed sequence (see Analytics). |
 | `replay --certificate <file>` | Re-execute a certified query at its recorded sequence, byte for byte. |
 | `diff --before <seq> --after <seq> <gql>` | Net bag difference of one query's complete results at two committed sequences. |
 | `transaction --write <gql> --query <gql> …` | Ordered steps in ONE native transaction; `--rollback` discards everything. |
@@ -73,6 +74,43 @@ offset) without echoing its value.
   across the whole file, from 1 to 1,000,000 (default 100,000). It never resets
   per record.
 - `-` reads stdin, and at most one input may use it.
+
+## Analytics: `CALL fnx.*`
+
+`query` runs a registered Prism procedure when the statement is `CALL
+fnx.<procedure>(<args>) YIELD <output> [AS <alias>], ...`. The registered
+procedures are `pagerank`, `single_source_shortest_path_length`,
+`single_source_dijkstra_path_length`, `connected_components`,
+`weakly_connected_components`, `strongly_connected_components`, `triangles`
+and `clustering_coefficient`. The graph a procedure sees is an explicit
+projection that you choose. It is never an implicit collapse of the stored
+multigraph:
+
+- `--graph-label <label>` and `--graph-relation <relation>` select the induced
+  vertices and edges. The default is every vertex and every relation.
+- `--weight <property>` reads edge weights, with `--missing-weight
+  reject|unit|zero`. Without it, every edge weighs one.
+- `--direction directed|reversed|undirected` (default `directed`).
+- `--parallel-edges reject|collapse|min|max|sum` (default `reject`): a
+  multigraph is refused until you choose a law.
+- `--self-loops keep|drop|reject` (default `keep`).
+- `--as-of <seq>` analyses a committed sequence (time travel). The default is
+  the frontier.
+
+Arguments are literals or `$name` parameters: `--param name=vertex:<id>`,
+`int:`, `float:`, `bool:true|false` or `null`. A procedure whose graph laws
+the projection breaks, such as `connected_components` over a directed
+projection, is refused, never converted. Output uses the ordinary `columns`,
+`row` and `result kind=rows` records. The result's `seq` is the analysed
+sequence. Vertices and component labels are vertex identities, hop distances
+and triangle counts are exact `int`s, and scores and weighted distances are
+`float`s. `--stream` and `--certify-to` are not offered for analytics.
+
+```sh
+fgdb --robot query --db ./graph --key-file ./graph.keys --relation KNOWS=1 \
+  --graph-relation KNOWS --direction undirected \
+  'CALL fnx.connected_components() YIELD vertex, component'
+```
 
 ## Robot mode
 

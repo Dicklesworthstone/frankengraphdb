@@ -1,7 +1,7 @@
 //! Black-box CLI contracts: every database operation starts a fresh process.
 //! The dependency-free JSON reader checks the frozen schema, not substrings.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1782,4 +1782,244 @@ fn labels_and_type_output_in_robot_mode() {
         &["MATCH (a:Person)-[r:KNOWS]->(b) RETURN type(r) AS t"],
     );
     assert_rows(&edge_output, r#"[[{"type":"text","value":"KNOWS"}]]"#);
+}
+
+/// Vertex identity by name, read through an ordinary query so the test never
+/// assumes allocation order.
+fn vertex_ids(db: &TestDb) -> BTreeMap<String, String> {
+    let output = db.command(
+        "query",
+        &["MATCH (p:Person) RETURN p.name AS name, p AS id ORDER BY name"],
+    );
+    output.success();
+    output
+        .events
+        .iter()
+        .filter(|event| event.get("event").string() == "row")
+        .map(|event| {
+            let cells = event.get("cells").array();
+            (
+                cells[0].get("value").string().to_owned(),
+                cells[1].get("value").string().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// (column names, rows as [type, value] pairs) of a successful analytics call.
+fn analytics(db: &TestDb, args: &[&str]) -> (Vec<String>, Vec<Vec<(String, String)>>) {
+    let output = db.command("query", args);
+    output.success();
+    assert_eq!(output.terminal().get("kind").string(), "rows");
+    let columns = output.events[1]
+        .get("columns")
+        .array()
+        .iter()
+        .map(|column| column.string().to_owned())
+        .collect();
+    let rows: Vec<Vec<(String, String)>> = output
+        .events
+        .iter()
+        .filter(|event| event.get("event").string() == "row")
+        .map(|event| {
+            event
+                .get("cells")
+                .array()
+                .iter()
+                .map(|cell| {
+                    (
+                        cell.get("type").string().to_owned(),
+                        cell.get("value").string().to_owned(),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(output.terminal().get("count").unsigned(), rows.len() as u64);
+    (columns, rows)
+}
+
+#[test]
+fn prism_analytics_run_through_query_with_an_explicit_projection() {
+    let db = TestDb::new("prism");
+    db.create();
+    // A directed 3-cycle A->B->C->A plus a separate edge D->E.
+    let before_bridge = db.write(&[
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}),\
+         (d:Person {name:'D'}),(e:Person {name:'E'}),\
+         (a)-[:KNOWS]->(b),(b)-[:KNOWS]->(c),(c)-[:KNOWS]->(a),(d)-[:KNOWS]->(e)",
+    ]);
+    let id = vertex_ids(&db);
+    let vertex = |name: &str| ("vertex".to_owned(), id[name].clone());
+    let int = |value: u64| ("int".to_owned(), value.to_string());
+    let min_id = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| id[*name].parse::<u128>().unwrap())
+            .min()
+            .unwrap()
+            .to_string()
+    };
+    let (abc, de) = (min_id(&["A", "B", "C"]), min_id(&["D", "E"]));
+    let component = |name: &str| {
+        let label = if ["A", "B", "C"].contains(&name) {
+            &abc
+        } else {
+            &de
+        };
+        ("vertex".to_owned(), label.clone())
+    };
+    let mut by_id: Vec<&str> = vec!["A", "B", "C", "D", "E"];
+    by_id.sort_by_key(|name| id[*name].parse::<u128>().unwrap());
+
+    // Connected components over the undirected projection: every vertex, in
+    // VId order, labeled by the minimum member identity.
+    let undirected = [
+        "--graph-label",
+        "Person",
+        "--graph-relation",
+        "KNOWS",
+        "--direction",
+        "undirected",
+    ];
+    let mut args = undirected.to_vec();
+    args.push("CALL fnx.connected_components() YIELD vertex, component");
+    let (columns, rows) = analytics(&db, &args);
+    assert_eq!(columns, ["vertex", "component"]);
+    let expected: Vec<_> = by_id
+        .iter()
+        .map(|n| vec![vertex(n), component(n)])
+        .collect();
+    assert_eq!(rows, expected);
+
+    // Triangles: the 3-cycle closes one triangle per member; D and E none.
+    let mut args = undirected.to_vec();
+    args.push("CALL fnx.triangles() YIELD vertex, triangles");
+    let (_, rows) = analytics(&db, &args);
+    let expected: Vec<_> = by_id
+        .iter()
+        .map(|n| vec![vertex(n), int(u64::from(["A", "B", "C"].contains(n)))])
+        .collect();
+    assert_eq!(rows, expected);
+
+    // Directed hop distances from A, bound as a typed vertex parameter:
+    // reachable vertices only, in VId order.
+    let source = format!("source=vertex:{}", id["A"]);
+    let (columns, rows) = analytics(
+        &db,
+        &[
+            "--param",
+            &source,
+            "CALL fnx.single_source_shortest_path_length($source) YIELD vertex, distance",
+        ],
+    );
+    assert_eq!(columns, ["vertex", "distance"]);
+    let mut expected = vec![
+        (id["A"].clone(), 0),
+        (id["B"].clone(), 1),
+        (id["C"].clone(), 2),
+    ];
+    expected.sort_by_key(|(vid, _)| vid.parse::<u128>().unwrap());
+    let expected: Vec<_> = expected
+        .into_iter()
+        .map(|(vid, hops)| vec![("vertex".to_owned(), vid), int(hops)])
+        .collect();
+    assert_eq!(rows, expected);
+
+    // PageRank returns one finite score per vertex; scores sum to one.
+    let (columns, rows) = analytics(
+        &db,
+        &["CALL fnx.pagerank(0.85, 100, 1e-9, false) YIELD vertex, score"],
+    );
+    assert_eq!(columns, ["vertex", "score"]);
+    assert_eq!(rows.len(), 5);
+    let total: f64 = rows
+        .iter()
+        .map(|row| {
+            assert_eq!(row[1].0, "float");
+            row[1].1.parse::<f64>().unwrap()
+        })
+        .sum();
+    assert!((total - 1.0).abs() < 1e-9, "pagerank mass {total}");
+
+    // Time travel: bridge the two components, then ask both sequences.
+    let bridged =
+        db.write(&["MATCH (c:Person {name:'C'}),(d:Person {name:'D'}) INSERT (c)-[:KNOWS]->(d)"]);
+    assert!(bridged > before_bridge);
+    let components = |extra: &[&str]| {
+        let mut args = undirected.to_vec();
+        args.extend_from_slice(extra);
+        args.push("CALL fnx.connected_components() YIELD vertex, component");
+        let (_, rows) = analytics(&db, &args);
+        rows.iter()
+            .map(|row| row[1].1.clone())
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    let old = before_bridge.to_string();
+    assert_eq!(
+        components(&["--as-of", &old]),
+        2,
+        "history keeps two components"
+    );
+    assert_eq!(components(&[]), 1, "the frontier sees one");
+}
+
+#[test]
+fn prism_refuses_instead_of_silently_reshaping_the_graph() {
+    let db = TestDb::new("prism-refusals");
+    db.create();
+    db.write(&[
+        "INSERT (a:Person {name:'A'}),(b:Person {name:'B'}),(a)-[:KNOWS]->(b),(a)-[:KNOWS]->(b)",
+    ]);
+    // An undirected-only procedure over the default directed projection.
+    db.command(
+        "query",
+        &[
+            "--parallel-edges",
+            "collapse",
+            "CALL fnx.connected_components() YIELD vertex, component",
+        ],
+    )
+    .failure(3, "query");
+    // A parallel edge under the default law is refused, never collapsed...
+    db.command(
+        "query",
+        &["CALL fnx.pagerank(0.85, 100, 1e-9, false) YIELD vertex, score"],
+    )
+    .failure(3, "query");
+    // ...and runs once a law is chosen.
+    db.command(
+        "query",
+        &[
+            "--parallel-edges",
+            "collapse",
+            "CALL fnx.pagerank(0.85, 100, 1e-9, false) YIELD vertex, score",
+        ],
+    )
+    .success();
+    // Analytics flags are meaningless on an ordinary query.
+    db.command(
+        "query",
+        &["--direction", "undirected", "MATCH (p:Person) RETURN p"],
+    )
+    .failure(2, "usage");
+    // Unknown procedures and unbound symbols are refused, not guessed.
+    db.command("query", &["CALL fnx.no_such_procedure() YIELD vertex"])
+        .failure(3, "query");
+    db.command(
+        "query",
+        &[
+            "--graph-label",
+            "Robot",
+            "CALL fnx.pagerank() YIELD vertex, score",
+        ],
+    )
+    .failure(2, "usage");
+    // Streaming and certificates are not offered for analytics.
+    db.command(
+        "query",
+        &["--stream", "CALL fnx.pagerank() YIELD vertex, score"],
+    )
+    .failure(2, "usage");
 }

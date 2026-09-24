@@ -226,6 +226,10 @@ fgdb import-csv --db mydb.fgdbdir --key-file fgdb.keys --input edges.csv "<gql>"
 fgdb load       --db mydb.fgdbdir --key-file fgdb.keys --input batch.ndjson
 fgdb compact    --db mydb.fgdbdir --key-file fgdb.keys
 
+# In-database analytics over an explicit projection (registered Prism procedures)
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys --relation KNOWS=1 \
+  --graph-relation KNOWS --direction undirected "CALL fnx.connected_components() YIELD vertex, component"
+
 # Replay a saved certificate against the current database state
 fgdb replay --db mydb.fgdbdir --key-file fgdb.keys --certificate result.cert
 

@@ -19,6 +19,7 @@ fgdb-chronicle = { path = "../fgdb-chronicle" }
 fgdb-crypto = { path = "../fgdb-crypto" }
 fgdb-delta-types = { path = "../fgdb-delta-types" }
 fgdb-gql = { path = "../fgdb-gql" }
+fgdb-prism = { path = "../fgdb-prism" }
 fgdb-strata = { path = "../fgdb-strata" }
 fgdb-types = { path = "../fgdb-types" }
 
