@@ -80,9 +80,14 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             for &(prepared, params) in statements {
                 execution.borrow_mut().checkpoint()?;
                 if !Arc::ptr_eq(&owner, &prepared.owner) {
-                    return Err(QueryError::Authorization(AuthorizationError::WrongAuthority));
+                    return Err(QueryError::Authorization(
+                        AuthorizationError::WrongAuthority,
+                    ));
                 }
-                let selected = prepared.selector.bind_parameters(params).map_err(selector_error)?;
+                let selected = prepared
+                    .selector
+                    .bind_parameters(params)
+                    .map_err(selector_error)?;
                 check_branch(&selected, branch)?;
             }
             let mut results = Vec::new();
@@ -100,4 +105,5 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
 }
 
 #[cfg(test)]
+#[path = "batch/tests.rs"]
 mod tests;

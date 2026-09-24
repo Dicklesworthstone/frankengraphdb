@@ -12,7 +12,10 @@
 //! must not expose those APIs, its Authority, or its clock to token holders.
 
 use super::{Cancel, QueryError};
-use crate::gql_exec::{AdmissionUsage, source::{self, SourceEvent}};
+use crate::gql_exec::{
+    AdmissionUsage,
+    source::{self, SourceEvent},
+};
 use crate::{Database, GqlError, ReadError, Snapshot, VertexRow};
 use asupersync::fs::Vfs;
 use fgdb_delta_types::{PropertyKeyId, RelationId};
@@ -23,12 +26,17 @@ use fgdb_warden::{Authority, CapabilityToken, ExecutionPermit, PlannerPredicates
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+#[path = "query_authorized/analytics.rs"]
 mod analytics;
+#[path = "query_authorized/relational.rs"]
 mod relational;
 
 type Fault = GqlQueryError<ReadError, QueryError>;
 type Governed<T> = Result<GqlQueryExecution<T>, Fault>;
-type Edge<'a> = ((EId, VId, RelationId, VId), &'a [(PropertyKeyId, CanonicalScalar)]);
+type Edge<'a> = (
+    (EId, VId, RelationId, VId),
+    &'a [(PropertyKeyId, CanonicalScalar)],
+);
 
 // The sole live permit spans source admission, evaluation and final delivery.
 // RefCell permits sequential callbacks to share it, never concurrent borrowing
@@ -44,7 +52,12 @@ struct Execution<'cx, 'permit, Clock> {
 }
 impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
     fn new(cx: &'cx QueryCx, permit: ExecutionPermit<'permit, ReadAccess>, clock: Clock) -> Self {
-        Self { cx, permit, clock, failure: None }
+        Self {
+            cx,
+            permit,
+            clock,
+            failure: None,
+        }
     }
     fn refusal(&mut self, error: fgdb_warden::Error) -> QueryError {
         QueryError::Authorization(*self.failure.get_or_insert(error))
@@ -79,10 +92,14 @@ fn interrupted(error: Cancel) -> QueryError {
 fn query_error(error: GqlQueryError<ReadError, QueryError>) -> QueryError {
     match error {
         GqlQueryError::Interrupted(error) => error,
-        GqlQueryError::Source(error) => QueryError::Pattern(GqlQueryError::Source(GqlError::Read(error))),
+        GqlQueryError::Source(error) => {
+            QueryError::Pattern(GqlQueryError::Source(GqlError::Read(error)))
+        }
         GqlQueryError::Rows(error) => QueryError::Pattern(GqlQueryError::Rows(error)),
         GqlQueryError::Evaluator(error) => QueryError::Pattern(GqlQueryError::Evaluator(error)),
-        GqlQueryError::IdentifiedEdgesRequired => QueryError::Pattern(GqlQueryError::IdentifiedEdgesRequired),
+        GqlQueryError::IdentifiedEdgesRequired => {
+            QueryError::Pattern(GqlQueryError::IdentifiedEdgesRequired)
+        }
     }
 }
 
@@ -103,8 +120,15 @@ fn authorized<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
     ) -> Result<Vec<Row>, QueryError>,
 ) -> Result<Vec<Row>, QueryError> {
     authorized_with_errors(
-        database, cx, authority, token, branch, as_of, clock,
-        core::convert::identity, evaluate,
+        database,
+        cx,
+        authority,
+        token,
+        branch,
+        as_of,
+        clock,
+        core::convert::identity,
+        evaluate,
     )
 }
 
@@ -131,23 +155,39 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
     // namespace before reading a frontier, source, or catalog. Graph/catalog/
     // branch-name routing remains the host's trusted registry responsibility.
     if authority.namespace() != database.keys.namespace {
-        return Err(map_error(QueryError::Authorization(fgdb_warden::Error::WrongAuthority)));
+        return Err(map_error(QueryError::Authorization(
+            fgdb_warden::Error::WrongAuthority,
+        )));
     }
     let now = clock();
-    let verified = authority.verify_at(token, branch, now)
-        .map_err(QueryError::Authorization).map_err(map_error)?;
-    let permit = verified.begin_read_at(branch, now)
-        .map_err(QueryError::Authorization).map_err(map_error)?;
+    let verified = authority
+        .verify_at(token, branch, now)
+        .map_err(QueryError::Authorization)
+        .map_err(map_error)?;
+    let permit = verified
+        .begin_read_at(branch, now)
+        .map_err(QueryError::Authorization)
+        .map_err(map_error)?;
     let execution = RefCell::new(Execution::new(cx, permit, clock));
     execution.borrow_mut().checkpoint().map_err(map_error)?;
-    database.ensure_readable().map_err(QueryError::Read).map_err(map_error)?;
+    database
+        .ensure_readable()
+        .map_err(QueryError::Read)
+        .map_err(map_error)?;
     let at = as_of.unwrap_or(database.snapshot.frontier);
-    database.snapshot.check_frontier(at).map_err(QueryError::Read).map_err(map_error)?;
+    database
+        .snapshot
+        .check_frontier(at)
+        .map_err(QueryError::Read)
+        .map_err(map_error)?;
     cx.with_restriction(|| {
         let rows = evaluate(&database.snapshot, at, verified.predicates(), &execution)?;
         // No result prefix, source rows or private statistics were released.
         // Empty outputs still recheck expiry, retirement and cancellation.
-        execution.borrow_mut().deliver(rows.len()).map_err(map_error)?;
+        execution
+            .borrow_mut()
+            .deliver(rows.len())
+            .map_err(map_error)?;
         Ok(rows)
     })
 }
@@ -169,13 +209,18 @@ impl<'a> Tables<'a> {
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
     ) -> Result<Self, Fault> {
         let mut tables = Self {
-            vertices: BTreeMap::new(), edges: BTreeMap::new(),
-            labels: BTreeMap::new(), types: BTreeMap::new(), records: 0,
+            vertices: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            types: BTreeMap::new(),
+            records: 0,
         };
         source::visit_vertices(&snapshot.patches, at, control, |row, control| {
             // Authorization examines original labels; WHERE/labels() will not.
             control(SourceEvent::Work)?;
-            for _ in &row.labels { control(SourceEvent::Work)?; }
+            for _ in &row.labels {
+                control(SourceEvent::Work)?;
+            }
             if predicates.allows_vertex(&row.labels) {
                 node()?;
                 control(SourceEvent::SnapshotRecord)?;
@@ -186,19 +231,27 @@ impl<'a> Tables<'a> {
             Ok(())
         })?;
         if plan.reads_edges() {
-            source::visit_edges_with_properties(snapshot, at, control, |edge, properties, control| {
-                control(SourceEvent::Work)?;
-                if predicates.allows_relation(edge.relation)
-                    && tables.vertices.contains_key(&edge.src)
-                    && tables.vertices.contains_key(&edge.dst)
-                {
-                    control(SourceEvent::SnapshotRecord)?;
-                    control(SourceEvent::ScratchEntry)?;
-                    tables.records += 1;
-                    tables.edges.insert(edge.eid, ((edge.eid, edge.src, edge.relation, edge.dst), properties));
-                }
-                Ok(())
-            })?;
+            source::visit_edges_with_properties(
+                snapshot,
+                at,
+                control,
+                |edge, properties, control| {
+                    control(SourceEvent::Work)?;
+                    if predicates.allows_relation(edge.relation)
+                        && tables.vertices.contains_key(&edge.src)
+                        && tables.vertices.contains_key(&edge.dst)
+                    {
+                        control(SourceEvent::SnapshotRecord)?;
+                        control(SourceEvent::ScratchEntry)?;
+                        tables.records += 1;
+                        tables.edges.insert(
+                            edge.eid,
+                            ((edge.eid, edge.src, edge.relation, edge.dst), properties),
+                        );
+                    }
+                    Ok(())
+                },
+            )?;
         }
         // Resolve names only after both topology and metadata scopes apply.
         // A forbidden unmapped label/type cannot cause a data-dependent error.
@@ -208,8 +261,12 @@ impl<'a> Tables<'a> {
                 let mut labels = Vec::new();
                 for &label in &row.labels {
                     control(SourceEvent::Work)?;
-                    if !predicates.allows_label(label) { continue; }
-                    let name = plan.reverse_catalog.as_deref()
+                    if !predicates.allows_label(label) {
+                        continue;
+                    }
+                    let name = plan
+                        .reverse_catalog
+                        .as_deref()
                         .and_then(|catalog| catalog.labels.get(&label))
                         .ok_or_else(|| GqlQueryError::Source(ReadError::UnmappedLabel(label)))?;
                     let name = text(name, control).map_err(|error| match error {
@@ -225,7 +282,9 @@ impl<'a> Tables<'a> {
         if plan.projects_types() {
             for (&eid, ((_, _, relation, _), _)) in &tables.edges {
                 control(SourceEvent::Work)?;
-                let name = plan.reverse_catalog.as_deref()
+                let name = plan
+                    .reverse_catalog
+                    .as_deref()
                     .and_then(|catalog| catalog.relations.get(relation))
                     .ok_or_else(|| GqlQueryError::Source(ReadError::UnmappedRelation(*relation)))?;
                 let name = text(name, control).map_err(|error| match error {
@@ -240,22 +299,49 @@ impl<'a> Tables<'a> {
     }
 
     fn matches(&self, vid: VId, required: &[VertexPredicate], scope: &PlannerPredicates) -> bool {
-        self.vertices.get(&vid).is_some_and(|row| required.iter().all(|predicate| {
-            predicate.matches_borrowed(
-                row.labels.iter().copied().filter(|label| scope.allows_label(*label)),
-                row.props.iter().filter(|(key, _)| scope.allows_property(*key)).map(|(key, value)| (*key, value)),
-            )
-        }))
+        self.vertices.get(&vid).is_some_and(|row| {
+            required.iter().all(|predicate| {
+                predicate.matches_borrowed(
+                    row.labels
+                        .iter()
+                        .copied()
+                        .filter(|label| scope.allows_label(*label)),
+                    row.props
+                        .iter()
+                        .filter(|(key, _)| scope.allows_property(*key))
+                        .map(|(key, value)| (*key, value)),
+                )
+            })
+        })
     }
-    fn property(&self, vid: VId, key: PropertyKeyId, scope: &PlannerPredicates) -> Option<&CanonicalScalar> {
-        if !scope.allows_property(key) { return None; }
+    fn property(
+        &self,
+        vid: VId,
+        key: PropertyKeyId,
+        scope: &PlannerPredicates,
+    ) -> Option<&CanonicalScalar> {
+        if !scope.allows_property(key) {
+            return None;
+        }
         let row = self.vertices.get(&vid)?;
-        row.props.binary_search_by_key(&key, |(key, _)| *key).ok().map(|at| &row.props[at].1)
+        row.props
+            .binary_search_by_key(&key, |(key, _)| *key)
+            .ok()
+            .map(|at| &row.props[at].1)
     }
-    fn edge_property(&self, eid: EId, key: PropertyKeyId, scope: &PlannerPredicates) -> Option<&CanonicalScalar> {
-        if !scope.allows_property(key) { return None; }
+    fn edge_property(
+        &self,
+        eid: EId,
+        key: PropertyKeyId,
+        scope: &PlannerPredicates,
+    ) -> Option<&CanonicalScalar> {
+        if !scope.allows_property(key) {
+            return None;
+        }
         let (_, row) = self.edges.get(&eid)?;
-        row.binary_search_by_key(&key, |(key, _)| *key).ok().map(|at| &row[at].1)
+        row.binary_search_by_key(&key, |(key, _)| *key)
+            .ok()
+            .map(|at| &row[at].1)
     }
 }
 
@@ -282,10 +368,21 @@ fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
 ) -> Governed<Row> {
     let mut usage = AdmissionUsage::default();
     let tables = Tables::admit(
-        snapshot, pattern.plan(), at, scope,
-        || execution.borrow_mut().node().map_err(GqlQueryError::Interrupted),
+        snapshot,
+        pattern.plan(),
+        at,
+        scope,
+        || {
+            execution
+                .borrow_mut()
+                .node()
+                .map_err(GqlQueryError::Interrupted)
+        },
         &mut |event| {
-            execution.borrow_mut().checkpoint().map_err(GqlQueryError::Interrupted)?;
+            execution
+                .borrow_mut()
+                .checkpoint()
+                .map_err(GqlQueryError::Interrupted)?;
             usage.observe::<ReadError, QueryError>(policy, event)
         },
     )?;
@@ -332,13 +429,29 @@ impl<V: Vfs + Clone> Database<V> {
     /// charged. Keep the raw database and issuer in the trusted host.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_pattern_authorized<Row: GlaOutput>(
-        &self, cx: &QueryCx, authority: &Authority, token: &CapabilityToken,
-        branch: &str, pattern: &PreparedGraphPattern<Row>, policy: GqlQueryPolicy,
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        pattern: &PreparedGraphPattern<Row>,
+        policy: GqlQueryPolicy,
         clock: impl FnMut() -> u64,
     ) -> Result<Vec<Row>, QueryError> {
-        authorized(self, cx, authority, token, branch, None, clock, |snapshot, at, scope, execution| {
-            pattern_at(snapshot, at, pattern, scope, execution, policy).map(|value| value.value).map_err(query_error)
-        })
+        authorized(
+            self,
+            cx,
+            authority,
+            token,
+            branch,
+            None,
+            clock,
+            |snapshot, at, scope, execution| {
+                pattern_at(snapshot, at, pattern, scope, execution, policy)
+                    .map(|value| value.value)
+                    .map_err(query_error)
+            },
+        )
     }
 
     /// Apply the same current capability to an exact historical cut of this
@@ -347,12 +460,29 @@ impl<V: Vfs + Clone> Database<V> {
     /// A future cut refuses after authentication rather than being clamped.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_pattern_authorized_at<Row: GlaOutput>(
-        &self, cx: &QueryCx, authority: &Authority, token: &CapabilityToken,
-        branch: &str, pattern: &PreparedGraphPattern<Row>, as_of: CommitSeq,
-        policy: GqlQueryPolicy, clock: impl FnMut() -> u64,
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        pattern: &PreparedGraphPattern<Row>,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+        clock: impl FnMut() -> u64,
     ) -> Result<Vec<Row>, QueryError> {
-        authorized(self, cx, authority, token, branch, Some(as_of), clock, |snapshot, at, scope, execution| {
-            pattern_at(snapshot, at, pattern, scope, execution, policy).map(|value| value.value).map_err(query_error)
-        })
+        authorized(
+            self,
+            cx,
+            authority,
+            token,
+            branch,
+            Some(as_of),
+            clock,
+            |snapshot, at, scope, execution| {
+                pattern_at(snapshot, at, pattern, scope, execution, policy)
+                    .map(|value| value.value)
+                    .map_err(query_error)
+            },
+        )
     }
 }

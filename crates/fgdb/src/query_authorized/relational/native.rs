@@ -2,18 +2,25 @@
 //! Dispatch sees only the admitted generation and permit, not a Database, so
 //! no branch can fall back to privileged readers or reset an input's authority.
 
+#[path = "native/session.rs"]
 mod session;
 
 use super::*;
-use crate::{PreparedNativeRead, QueryResult, QueryValue};
 use crate::query::{aggregates, values};
+use crate::{PreparedNativeRead, QueryResult, QueryValue};
 use fgdb_gql::{GqlParameters, GraphSymbolResolver, PreparedGraphBranchText};
 
 // Only metadata and complete result rows leave the dispatcher. The outer
 // authorized owner still performs the sole signed delivery admission.
-fn rows_of(result: QueryResult, columns: &mut Vec<String>) -> Result<Vec<Vec<QueryValue>>, QueryError> {
+fn rows_of(
+    result: QueryResult,
+    columns: &mut Vec<String>,
+) -> Result<Vec<Vec<QueryValue>>, QueryError> {
     match result {
-        QueryResult::Rows { columns: names, rows } => {
+        QueryResult::Rows {
+            columns: names,
+            rows,
+        } => {
             *columns = names;
             Ok(rows)
         }
@@ -35,50 +42,107 @@ fn native_at<Clock: FnMut() -> u64>(
     execution.borrow_mut().checkpoint()?;
     let result = (|| match prepared {
         PreparedNativeRead::Pattern(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::PatternText)?;
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::PatternText)?;
             let rows = pattern_at(snapshot, at, &query, scope, execution, policy)
-                .map_err(query_error)?.value;
+                .map_err(query_error)?
+                .value;
             Ok(values(query.columns().to_vec(), rows))
         }
         PreparedNativeRead::Aggregate(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::PatternText)?;
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::PatternText)?;
             let rows = graph::graph_at(snapshot, at, &query, scope, execution, policy)?;
-            Ok(aggregates(prepared.columns().to_vec(), prepared.output_slots(), rows))
+            Ok(aggregates(
+                prepared.columns().to_vec(),
+                prepared.output_slots(),
+                rows,
+            ))
         }
         PreparedNativeRead::PipelineAggregate(prepared) => {
             // Exactly the native classifier's source-free distinction. A real
             // row pipeline is never reduced to its first MATCH leaf.
             let rows = if prepared.is_source_free() {
-                let query = prepared.bind_relation_parameters(params).map_err(QueryError::PipelineText)?;
+                let query = prepared
+                    .bind_relation_parameters(params)
+                    .map_err(QueryError::PipelineText)?;
                 aggregate_at(snapshot, at, &query, scope, execution, policy)?
             } else {
-                let query = prepared.bind_parameters(params).map_err(QueryError::PipelineText)?;
+                let query = prepared
+                    .bind_parameters(params)
+                    .map_err(QueryError::PipelineText)?;
                 graph::graph_at(snapshot, at, &query, scope, execution, policy)?
             };
-            Ok(aggregates(prepared.columns().to_vec(), prepared.output_slots(), rows))
+            Ok(aggregates(
+                prepared.columns().to_vec(),
+                prepared.output_slots(),
+                rows,
+            ))
         }
         PreparedNativeRead::Set(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::SetText)?;
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::SetText)?;
             let rows = set_at(snapshot, at, &query, scope, execution, policy)?;
             Ok(values(prepared.columns().to_vec(), rows))
         }
         PreparedNativeRead::TemporalPattern(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::TemporalText)?;
-            snapshot.check_frontier(query.as_of()).map_err(QueryError::Read)?;
-            let rows = pattern_at(snapshot, query.as_of(), query.pattern(), scope, execution, policy)
-                .map_err(query_error)?.value;
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalText)?;
+            snapshot
+                .check_frontier(query.as_of())
+                .map_err(QueryError::Read)?;
+            let rows = pattern_at(
+                snapshot,
+                query.as_of(),
+                query.pattern(),
+                scope,
+                execution,
+                policy,
+            )
+            .map_err(query_error)?
+            .value;
             Ok(values(query.pattern().columns().to_vec(), rows))
         }
         PreparedNativeRead::TemporalAggregate(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::TemporalText)?;
-            snapshot.check_frontier(query.as_of()).map_err(QueryError::Read)?;
-            let rows = graph::graph_at(snapshot, query.as_of(), query.aggregate(), scope, execution, policy)?;
-            Ok(aggregates(prepared.columns().to_vec(), prepared.output_slots(), rows))
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalText)?;
+            snapshot
+                .check_frontier(query.as_of())
+                .map_err(QueryError::Read)?;
+            let rows = graph::graph_at(
+                snapshot,
+                query.as_of(),
+                query.aggregate(),
+                scope,
+                execution,
+                policy,
+            )?;
+            Ok(aggregates(
+                prepared.columns().to_vec(),
+                prepared.output_slots(),
+                rows,
+            ))
         }
         PreparedNativeRead::TemporalSet(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::TemporalSetText)?;
-            snapshot.check_frontier(query.as_of()).map_err(QueryError::Read)?;
-            let rows = set_at(snapshot, query.as_of(), query.query(), scope, execution, policy)?;
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalSetText)?;
+            snapshot
+                .check_frontier(query.as_of())
+                .map_err(QueryError::Read)?;
+            let rows = set_at(
+                snapshot,
+                query.as_of(),
+                query.query(),
+                scope,
+                execution,
+                policy,
+            )?;
             Ok(values(prepared.columns().to_vec(), rows))
         }
     })();
@@ -113,29 +177,60 @@ impl<V: Vfs + Clone> Database<V> {
     /// server session, streaming delivery, spill or physical noninterference.
     #[allow(clippy::too_many_arguments)]
     pub fn query_authorized(
-        &self, cx: &QueryCx, authority: &Authority, token: &CapabilityToken,
-        branch: &str, text: &str, params: &GqlParameters,
-        resolver: impl GraphSymbolResolver, policy: GqlQueryPolicy,
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        text: &str,
+        params: &GqlParameters,
+        resolver: impl GraphSymbolResolver,
+        policy: GqlQueryPolicy,
         clock: impl FnMut() -> u64,
     ) -> Result<QueryResult, QueryError> {
         let mut columns = Vec::new();
-        let rows = authorized(self, cx, authority, token, branch, None, clock, |snapshot, at, scope, execution| {
-            let selector_error = |error: fgdb_gql::GraphBranchTextError| QueryError::Unsupported {
-                diagnostics: vec![error.to_string()],
-            };
-            let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
-            let selected = selector.bind_parameters(params).map_err(selector_error)?;
-            if selected.branch().is_some_and(|name| name != branch) {
-                return Err(QueryError::Authorization(fgdb_warden::Error::ScopeDenied));
-            }
-            execution.borrow_mut().checkpoint()?;
-            let prepared = PreparedNativeRead::prepare(selected.statement(), selected.parameters(), resolver);
-            // No RefCell borrow spans caller-controlled resolver code. Check
-            // invalidation even when preparation itself reports an error.
-            execution.borrow_mut().checkpoint()?;
-            let prepared = prepared?;
-            rows_of(native_at(&prepared, selected.parameters(), snapshot, at, scope, execution, policy)?, &mut columns)
-        })?;
+        let rows = authorized(
+            self,
+            cx,
+            authority,
+            token,
+            branch,
+            None,
+            clock,
+            |snapshot, at, scope, execution| {
+                let selector_error =
+                    |error: fgdb_gql::GraphBranchTextError| QueryError::Unsupported {
+                        diagnostics: vec![error.to_string()],
+                    };
+                let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
+                let selected = selector.bind_parameters(params).map_err(selector_error)?;
+                if selected.branch().is_some_and(|name| name != branch) {
+                    return Err(QueryError::Authorization(fgdb_warden::Error::ScopeDenied));
+                }
+                execution.borrow_mut().checkpoint()?;
+                let prepared = PreparedNativeRead::prepare(
+                    selected.statement(),
+                    selected.parameters(),
+                    resolver,
+                );
+                // No RefCell borrow spans caller-controlled resolver code. Check
+                // invalidation even when preparation itself reports an error.
+                execution.borrow_mut().checkpoint()?;
+                let prepared = prepared?;
+                rows_of(
+                    native_at(
+                        &prepared,
+                        selected.parameters(),
+                        snapshot,
+                        at,
+                        scope,
+                        execution,
+                        policy,
+                    )?,
+                    &mut columns,
+                )
+            },
+        )?;
         Ok(QueryResult::Rows { columns, rows })
     }
 }
@@ -154,14 +249,32 @@ impl PreparedNativeRead {
     /// a PreparedNativeRead already contains the branch-free native template.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_authorized<V: Vfs + Clone>(
-        &self, database: &Database<V>, cx: &QueryCx,
-        authority: &Authority, token: &CapabilityToken, branch: &str,
-        params: &GqlParameters, policy: GqlQueryPolicy, clock: impl FnMut() -> u64,
+        &self,
+        database: &Database<V>,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        params: &GqlParameters,
+        policy: GqlQueryPolicy,
+        clock: impl FnMut() -> u64,
     ) -> Result<QueryResult, QueryError> {
         let mut columns = Vec::new();
-        let rows = authorized(database, cx, authority, token, branch, None, clock, |snapshot, at, scope, execution| {
-            rows_of(native_at(self, params, snapshot, at, scope, execution, policy)?, &mut columns)
-        })?;
+        let rows = authorized(
+            database,
+            cx,
+            authority,
+            token,
+            branch,
+            None,
+            clock,
+            |snapshot, at, scope, execution| {
+                rows_of(
+                    native_at(self, params, snapshot, at, scope, execution, policy)?,
+                    &mut columns,
+                )
+            },
+        )?;
         Ok(QueryResult::Rows { columns, rows })
     }
 }

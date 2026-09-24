@@ -4,6 +4,7 @@
 //! a second snapshot. The host fixes the catalog, branch, clock and native
 //! policy once. Request code can supply only query text/arguments and QueryCx.
 
+#[path = "session/stream.rs"]
 mod stream;
 
 use super::*;
@@ -12,6 +13,7 @@ use fgdb_gql::{GraphSymbol, GraphSymbolKind, ReverseSymbolCatalog};
 use fgdb_warden::{Error as AuthorizationError, VerifiedCapability};
 use std::sync::Arc;
 
+#[path = "session/batch.rs"]
 mod batch;
 
 struct State<'a, Resolver, Clock> {
@@ -96,26 +98,39 @@ impl<R: GraphSymbolResolver> GraphSymbolResolver for BorrowedResolver<'_, R> {
 }
 
 fn selector_error(error: fgdb_gql::GraphBranchTextError) -> QueryError {
-    QueryError::Unsupported { diagnostics: vec![error.to_string()] }
+    QueryError::Unsupported {
+        diagnostics: vec![error.to_string()],
+    }
 }
-fn check_branch(selected: &fgdb_gql::BoundGraphBranchText<'_>, branch: &str) -> Result<(), QueryError> {
+fn check_branch(
+    selected: &fgdb_gql::BoundGraphBranchText<'_>,
+    branch: &str,
+) -> Result<(), QueryError> {
     if selected.branch().is_some_and(|name| name != branch) {
         return Err(QueryError::Authorization(AuthorizationError::ScopeDenied));
     }
     Ok(())
 }
 fn terminal<T>(result: &Result<T, QueryError>) -> bool {
-    matches!(result, Err(QueryError::Authorization(
-        AuthorizationError::ExecutionStopped | AuthorizationError::Expired | AuthorizationError::NotYetValid
-        | AuthorizationError::AuthorityRetired | AuthorizationError::ClockWentBackwards
-    )))
+    matches!(
+        result,
+        Err(QueryError::Authorization(
+            AuthorizationError::ExecutionStopped
+                | AuthorizationError::Expired
+                | AuthorizationError::NotYetValid
+                | AuthorizationError::AuthorityRetired
+                | AuthorizationError::ClockWentBackwards
+        ))
+    )
 }
 fn result_rows(result: QueryResult) -> Result<(QueryResult, usize), QueryError> {
     let count = match &result {
         QueryResult::Rows { rows, .. } => rows.len(),
-        QueryResult::Write { .. } => return Err(QueryError::Unsupported {
-            diagnostics: vec!["authorized session accepts reads only".to_owned()],
-        }),
+        QueryResult::Write { .. } => {
+            return Err(QueryError::Unsupported {
+                diagnostics: vec!["authorized session accepts reads only".to_owned()],
+            });
+        }
     };
     Ok((result, count))
 }
@@ -130,39 +145,66 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         &mut self,
         cx: &QueryCx,
         action: impl FnOnce(
-            &EmbeddedReadView, &str, &PlannerPredicates, &mut R,
-            GqlQueryPolicy, &Live<'_, '_, '_>,
+            &EmbeddedReadView,
+            &str,
+            &PlannerPredicates,
+            &mut R,
+            GqlQueryPolicy,
+            &Live<'_, '_, '_>,
         ) -> Result<(T, usize), QueryError>,
     ) -> Result<T, QueryError> {
         let mut state = self.state.take().ok_or(QueryError::Authorization(
             AuthorizationError::ExecutionStopped,
         ))?;
         if state.view.is_none() {
-            return Err(QueryError::Authorization(AuthorizationError::ExecutionStopped));
+            return Err(QueryError::Authorization(
+                AuthorizationError::ExecutionStopped,
+            ));
         }
         let result = (|| {
-            let State { view, capability, branch, resolver, policy, clock, last_now_ms } = &mut state;
+            let State {
+                view,
+                capability,
+                branch,
+                resolver,
+                policy,
+                clock,
+                last_now_ms,
+            } = &mut state;
             let now = clock();
             if now < *last_now_ms {
-                return Err(QueryError::Authorization(AuthorizationError::ClockWentBackwards));
+                return Err(QueryError::Authorization(
+                    AuthorizationError::ClockWentBackwards,
+                ));
             }
             *last_now_ms = now;
-            let permit = capability.begin_read_at(branch, now).map_err(QueryError::Authorization)?;
+            let permit = capability
+                .begin_read_at(branch, now)
+                .map_err(QueryError::Authorization)?;
             let mut tracked_clock = || {
                 let now = clock();
                 *last_now_ms = (*last_now_ms).max(now);
                 now // The existing live permit refuses a backwards sample.
             };
             let execution = RefCell::new(Execution::new(
-                cx, permit, &mut tracked_clock as &mut dyn FnMut() -> u64,
+                cx,
+                permit,
+                &mut tracked_clock as &mut dyn FnMut() -> u64,
             ));
             execution.borrow_mut().checkpoint()?;
             let view = view.as_ref().ok_or(QueryError::Authorization(
                 AuthorizationError::ExecutionStopped,
             ))?;
-            let result = cx.with_restriction(|| action(
-                view, branch, capability.predicates(), resolver, *policy, &execution,
-            ));
+            let result = cx.with_restriction(|| {
+                action(
+                    view,
+                    branch,
+                    capability.predicates(),
+                    resolver,
+                    *policy,
+                    &execution,
+                )
+            });
             // Also check after a resolver/parser/binder failed. Such a callback
             // cannot hide expiry/retirement by returning its own error first.
             execution.borrow_mut().checkpoint()?;
@@ -182,16 +224,28 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// Execute all seven existing native read classes against this one pin.
     /// Preparation and evaluation share a permit. Request arguments cannot
     /// choose another issuer, policy, catalog, branch mapping or clock.
-    pub fn query(&mut self, cx: &QueryCx, text: &str, params: &GqlParameters) -> Result<QueryResult, QueryError> {
+    pub fn query(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+    ) -> Result<QueryResult, QueryError> {
         self.run(cx, |view, branch, scope, resolver, policy, execution| {
-            text_at(view, branch, scope, resolver, policy, execution, text, params)
+            text_at(
+                view, branch, scope, resolver, policy, execution, text, params,
+            )
         })
     }
 
     /// Prepare once using only this session's fixed trusted catalog. Parameters
     /// supply declared types; payloads are rebound on execute. The original
     /// branch selector is retained, including shared/exclusive parameter rules.
-    pub fn prepare(&mut self, cx: &QueryCx, text: &str, params: &GqlParameters) -> Result<AuthorizedPreparedRead, QueryError> {
+    pub fn prepare(
+        &mut self,
+        cx: &QueryCx,
+        text: &str,
+        params: &GqlParameters,
+    ) -> Result<AuthorizedPreparedRead, QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |_, branch, _, resolver, _, execution| {
             let selector = PreparedGraphBranchText::prepare(text).map_err(selector_error)?;
@@ -199,20 +253,36 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             check_branch(&selected, branch)?;
             execution.borrow_mut().checkpoint()?;
             let native = PreparedNativeRead::prepare(
-                selected.statement(), selected.parameters(), BorrowedResolver(resolver),
+                selected.statement(),
+                selected.parameters(),
+                BorrowedResolver(resolver),
             );
             execution.borrow_mut().checkpoint()?;
-            Ok((AuthorizedPreparedRead { owner, selector, native: native? }, 0))
+            Ok((
+                AuthorizedPreparedRead {
+                    owner,
+                    selector,
+                    native: native?,
+                },
+                0,
+            ))
         })
     }
 
     /// Rebind an exact-session template without re-resolving its symbols.
     /// A template from another session refuses even for the same database and
     /// issuer; no cached plan may silently cross catalog or generation owners.
-    pub fn execute(&mut self, cx: &QueryCx, prepared: &AuthorizedPreparedRead, params: &GqlParameters) -> Result<QueryResult, QueryError> {
+    pub fn execute(
+        &mut self,
+        cx: &QueryCx,
+        prepared: &AuthorizedPreparedRead,
+        params: &GqlParameters,
+    ) -> Result<QueryResult, QueryError> {
         let owner = Arc::clone(&self.owner);
         self.run(cx, |view, branch, scope, _, policy, execution| {
-            prepared_at(view, branch, scope, policy, execution, &owner, prepared, params)
+            prepared_at(
+                view, branch, scope, policy, execution, &owner, prepared, params,
+            )
         })
     }
 }
@@ -235,12 +305,19 @@ fn text_at<R: GraphSymbolResolver>(
     check_branch(&selected, branch)?;
     execution.borrow_mut().checkpoint()?;
     let prepared = PreparedNativeRead::prepare(
-        selected.statement(), selected.parameters(), BorrowedResolver(resolver),
+        selected.statement(),
+        selected.parameters(),
+        BorrowedResolver(resolver),
     );
     execution.borrow_mut().checkpoint()?;
     result_rows(native_at(
-        &prepared?, selected.parameters(), &view.snapshot, view.frontier(),
-        scope, execution, policy,
+        &prepared?,
+        selected.parameters(),
+        &view.snapshot,
+        view.frontier(),
+        scope,
+        execution,
+        policy,
     )?)
 }
 
@@ -256,13 +333,23 @@ fn prepared_at(
     params: &GqlParameters,
 ) -> Result<(QueryResult, usize), QueryError> {
     if !Arc::ptr_eq(owner, &prepared.owner) {
-        return Err(QueryError::Authorization(AuthorizationError::WrongAuthority));
+        return Err(QueryError::Authorization(
+            AuthorizationError::WrongAuthority,
+        ));
     }
-    let selected = prepared.selector.bind_parameters(params).map_err(selector_error)?;
+    let selected = prepared
+        .selector
+        .bind_parameters(params)
+        .map_err(selector_error)?;
     check_branch(&selected, branch)?;
     result_rows(native_at(
-        &prepared.native, selected.parameters(), &view.snapshot, view.frontier(),
-        scope, execution, policy,
+        &prepared.native,
+        selected.parameters(),
+        &view.snapshot,
+        view.frontier(),
+        scope,
+        execution,
+        policy,
     )?)
 }
 impl<R, C> AuthorizedReadSession<'_, R, C> {
@@ -290,17 +377,29 @@ impl<V: Vfs + Clone> Database<V> {
     /// This does not authorize the original Database or create a server lease.
     #[allow(clippy::too_many_arguments)]
     pub fn authorized_read_session<'a, R: GraphSymbolResolver, C: FnMut() -> u64>(
-        &self, cx: &QueryCx, authority: &'a Authority, token: &CapabilityToken,
-        branch: &str, resolver: R, policy: GqlQueryPolicy, mut clock: C,
+        &self,
+        cx: &QueryCx,
+        authority: &'a Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        resolver: R,
+        policy: GqlQueryPolicy,
+        mut clock: C,
     ) -> Result<AuthorizedReadSession<'a, R, C>, QueryError> {
         if authority.namespace() != self.keys.namespace {
-            return Err(QueryError::Authorization(AuthorizationError::WrongAuthority));
+            return Err(QueryError::Authorization(
+                AuthorizationError::WrongAuthority,
+            ));
         }
         let now = clock();
-        let capability = authority.verify_at(token, branch, now).map_err(QueryError::Authorization)?;
+        let capability = authority
+            .verify_at(token, branch, now)
+            .map_err(QueryError::Authorization)?;
         let mut last_now_ms = now;
         let view = {
-            let permit = capability.begin_read_at(branch, now).map_err(QueryError::Authorization)?;
+            let permit = capability
+                .begin_read_at(branch, now)
+                .map_err(QueryError::Authorization)?;
             let mut tracked_clock = || {
                 let now = clock();
                 last_now_ms = last_now_ms.max(now);
@@ -314,7 +413,13 @@ impl<V: Vfs + Clone> Database<V> {
         };
         Ok(AuthorizedReadSession {
             state: Some(State {
-                view: Some(view), capability, branch: branch.to_owned(), resolver, policy, clock, last_now_ms,
+                view: Some(view),
+                capability,
+                branch: branch.to_owned(),
+                resolver,
+                policy,
+                clock,
+                last_now_ms,
             }),
             owner: Arc::new(()),
         })
@@ -322,4 +427,5 @@ impl<V: Vfs + Clone> Database<V> {
 }
 
 #[cfg(test)]
+#[path = "session/failure_tests.rs"]
 mod failure_tests;

@@ -3,14 +3,16 @@
 //! leaf does spend the same signed node/work allowance. No source can grant
 //! itself a fresh permit by being nested below a join, set or aggregate.
 
+#[path = "relational/graph.rs"]
 mod graph;
+#[path = "relational/native.rs"]
 mod native;
 
 use super::*;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::{
-    GraphAggregateError, GraphAggregateRow, GraphSetExecutionError,
-    PreparedGraphSet, PreparedGraphSetAggregate,
+    GraphAggregateError, GraphAggregateRow, GraphSetExecutionError, PreparedGraphSet,
+    PreparedGraphSetAggregate,
 };
 
 fn set_error(error: GqlQueryError<GraphSetExecutionError<ReadError>, QueryError>) -> QueryError {
@@ -21,7 +23,9 @@ fn set_error(error: GqlQueryError<GraphSetExecutionError<ReadError>, QueryError>
         }
         GqlQueryError::Rows(error) => QueryError::Set(GqlQueryError::Rows(error)),
         GqlQueryError::Evaluator(error) => QueryError::Set(GqlQueryError::Evaluator(error)),
-        GqlQueryError::IdentifiedEdgesRequired => QueryError::Set(GqlQueryError::IdentifiedEdgesRequired),
+        GqlQueryError::IdentifiedEdgesRequired => {
+            QueryError::Set(GqlQueryError::IdentifiedEdgesRequired)
+        }
     }
 }
 
@@ -33,7 +37,9 @@ fn aggregate_error(error: GqlQueryError<GraphAggregateError<ReadError>, QueryErr
         }
         GqlQueryError::Rows(error) => QueryError::Aggregate(GqlQueryError::Rows(error)),
         GqlQueryError::Evaluator(error) => QueryError::Aggregate(GqlQueryError::Evaluator(error)),
-        GqlQueryError::IdentifiedEdgesRequired => QueryError::Aggregate(GqlQueryError::IdentifiedEdgesRequired),
+        GqlQueryError::IdentifiedEdgesRequired => {
+            QueryError::Aggregate(GqlQueryError::IdentifiedEdgesRequired)
+        }
     }
 }
 
@@ -45,11 +51,14 @@ fn set_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphValueRow>, QueryError> {
-    query.execute_governed(
-        policy,
-        |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
-        || execution.borrow_mut().checkpoint(),
-    ).map(|result| result.value).map_err(set_error)
+    query
+        .execute_governed(
+            policy,
+            |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
+            || execution.borrow_mut().checkpoint(),
+        )
+        .map(|result| result.value)
+        .map_err(set_error)
 }
 
 fn aggregate_at<Clock: FnMut() -> u64>(
@@ -60,11 +69,14 @@ fn aggregate_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphAggregateRow>, QueryError> {
-    query.execute_governed(
-        policy,
-        |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
-        || execution.borrow_mut().checkpoint(),
-    ).map(|result| result.value).map_err(aggregate_error)
+    query
+        .execute_governed(
+            policy,
+            |pattern, remaining| pattern_at(snapshot, at, pattern, scope, execution, remaining),
+            || execution.borrow_mut().checkpoint(),
+        )
+        .map(|result| result.value)
+        .map_err(aggregate_error)
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -86,13 +98,25 @@ impl<V: Vfs + Clone> Database<V> {
     /// contract. No implicit token refresh, persistent session or spill is added.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_set_authorized(
-        &self, cx: &QueryCx, authority: &Authority, token: &CapabilityToken,
-        branch: &str, query: &PreparedGraphSet, policy: GqlQueryPolicy,
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphSet,
+        policy: GqlQueryPolicy,
         clock: impl FnMut() -> u64,
     ) -> Result<Vec<GraphValueRow>, QueryError> {
-        authorized(self, cx, authority, token, branch, None, clock, |snapshot, at, scope, execution| {
-            set_at(snapshot, at, query, scope, execution, policy)
-        })
+        authorized(
+            self,
+            cx,
+            authority,
+            token,
+            branch,
+            None,
+            clock,
+            |snapshot, at, scope, execution| set_at(snapshot, at, query, scope, execution, policy),
+        )
     }
 
     /// The same complete relational query at one exact retained historical cut.
@@ -100,13 +124,26 @@ impl<V: Vfs + Clone> Database<V> {
     /// live frontier or an independent allowance. Future history is refused.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_set_authorized_at(
-        &self, cx: &QueryCx, authority: &Authority, token: &CapabilityToken,
-        branch: &str, query: &PreparedGraphSet, as_of: CommitSeq,
-        policy: GqlQueryPolicy, clock: impl FnMut() -> u64,
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphSet,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+        clock: impl FnMut() -> u64,
     ) -> Result<Vec<GraphValueRow>, QueryError> {
-        authorized(self, cx, authority, token, branch, Some(as_of), clock, |snapshot, at, scope, execution| {
-            set_at(snapshot, at, query, scope, execution, policy)
-        })
+        authorized(
+            self,
+            cx,
+            authority,
+            token,
+            branch,
+            Some(as_of),
+            clock,
+            |snapshot, at, scope, execution| set_at(snapshot, at, query, scope, execution, policy),
+        )
     }
 
     /// Group an entire capability-scoped relation with the existing exact
@@ -123,13 +160,27 @@ impl<V: Vfs + Clone> Database<V> {
     /// original types; value-dependent arithmetic errors are not hidden.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_set_aggregate_authorized(
-        &self, cx: &QueryCx, authority: &Authority, token: &CapabilityToken,
-        branch: &str, query: &PreparedGraphSetAggregate, policy: GqlQueryPolicy,
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphSetAggregate,
+        policy: GqlQueryPolicy,
         clock: impl FnMut() -> u64,
     ) -> Result<Vec<GraphAggregateRow>, QueryError> {
-        authorized(self, cx, authority, token, branch, None, clock, |snapshot, at, scope, execution| {
-            aggregate_at(snapshot, at, query, scope, execution, policy)
-        })
+        authorized(
+            self,
+            cx,
+            authority,
+            token,
+            branch,
+            None,
+            clock,
+            |snapshot, at, scope, execution| {
+                aggregate_at(snapshot, at, query, scope, execution, policy)
+            },
+        )
     }
 
     /// Group the capability-visible graph at the supplied retained cut. Current
@@ -137,12 +188,27 @@ impl<V: Vfs + Clone> Database<V> {
     /// an old cut cannot revive an expired or retired credential.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_set_aggregate_authorized_at(
-        &self, cx: &QueryCx, authority: &Authority, token: &CapabilityToken,
-        branch: &str, query: &PreparedGraphSetAggregate, as_of: CommitSeq,
-        policy: GqlQueryPolicy, clock: impl FnMut() -> u64,
+        &self,
+        cx: &QueryCx,
+        authority: &Authority,
+        token: &CapabilityToken,
+        branch: &str,
+        query: &PreparedGraphSetAggregate,
+        as_of: CommitSeq,
+        policy: GqlQueryPolicy,
+        clock: impl FnMut() -> u64,
     ) -> Result<Vec<GraphAggregateRow>, QueryError> {
-        authorized(self, cx, authority, token, branch, Some(as_of), clock, |snapshot, at, scope, execution| {
-            aggregate_at(snapshot, at, query, scope, execution, policy)
-        })
+        authorized(
+            self,
+            cx,
+            authority,
+            token,
+            branch,
+            Some(as_of),
+            clock,
+            |snapshot, at, scope, execution| {
+                aggregate_at(snapshot, at, query, scope, execution, policy)
+            },
+        )
     }
 }

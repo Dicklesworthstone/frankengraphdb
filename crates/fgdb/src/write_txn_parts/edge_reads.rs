@@ -370,7 +370,7 @@ mod adjacency_overlay_tests {
     fn empty_adjacency_reads_detect_phantoms_without_global_scan_witnesses() {
         for incoming in [false, true] {
             for touches_anchor in [false, true] {
-                let ((), report) = run_async_under_lab(0xa91c_0003, |root| async move {
+                let ((), report) = run_async_under_lab(0xa91c_0003, move |root| async move {
                     let contexts = PurposeContexts::narrow_runtime_root(&root);
                     let commit = contexts.commit();
                     let txcx = contexts.txn();

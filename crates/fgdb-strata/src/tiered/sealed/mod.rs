@@ -281,9 +281,15 @@ fn sealed_source_error(error: crate::store::RootReadError) -> SealedError {
     match error {
         RootReadError::Store(error) => SealedError::Store(error),
         RootReadError::Interrupted(error) => SealedError::Interrupted(error),
-        RootReadError::Limit { resource, requested, limit } => {
-            SealedError::Limit { resource, requested, limit }
-        }
+        RootReadError::Limit {
+            resource,
+            requested,
+            limit,
+        } => SealedError::Limit {
+            resource,
+            requested,
+            limit,
+        },
         RootReadError::BeyondPublication { .. } => SealedError::InvalidFloor,
         RootReadError::SizeOverflow => SealedError::SizeOverflow,
         RootReadError::AllocationFailed => SealedError::AllocationFailed,
@@ -466,136 +472,6 @@ impl SealedScanBudget {
     }
 }
 
-#[cfg(test)]
-mod scan_budget_tests {
-    use super::SealedScanBudget;
-
-    #[test]
-    fn fuel_is_shared_exact_and_never_wraps() {
-        for count in 0..=256 {
-            let mut fuel = SealedScanBudget::new(count);
-            for remaining in (0..count).rev() {
-                assert!(fuel.spend());
-                assert_eq!(fuel.remaining(), remaining);
-            }
-            assert!(!fuel.spend());
-            assert!(!fuel.spend());
-            assert_eq!(fuel.remaining(), 0);
-        }
-        let mut fuel = SealedScanBudget::new(usize::MAX);
-        assert!(fuel.spend());
-        assert_eq!(fuel.remaining(), usize::MAX - 1);
-    }
-
-    #[derive(Debug)]
-    enum Refusal {
-        Source(super::SealedError),
-        Guard(usize),
-    }
-    impl From<super::SealedError> for Refusal {
-        fn from(error: super::SealedError) -> Self { Self::Source(error) }
-    }
-
-    #[test]
-    fn budgeted_raw_scans_keep_typed_guards_across_every_pause_and_fuse_on_refusal() {
-        use super::*;
-        use asupersync::{Budget, runtime::RuntimeBuilder};
-        use fgdb_types::{EId, ObjectId, PurposeContexts};
-
-        // Private storage-unit fixture, not a public source-authority receipt.
-        // All versions but the last are invisible at the requested cut; both
-        // the incoming chunk boundary and outgoing hidden scan must suspend.
-        let entries: Vec<_> = (0..261).map(|id| AdjacencyEntry {
-            src: VId(1), dst: VId(7), relation: RelationId(1), eid: EId(id),
-            created_at: CommitSeq(1), retired_at: (id < 260).then_some(CommitSeq(3)),
-        }).collect();
-        let blocks: Vec<_> = entries.chunks(120).map(<[AdjacencyEntry]>::to_vec).collect();
-        let block_props = (0..blocks.len()).map(|_| None).collect();
-        let limits = SealedLimits::default();
-        let image = image::build(crate::compact::Compaction {
-            blocks, block_props, dropped: 0, superseded: 0,
-        }, limits, &mut || Ok(())).unwrap();
-        let source = SealedPartition::finish(SealedScope {
-            source_root: PartitionRootVersion(ObjectId([0x63; 32])),
-            graph: GraphId(1), branch: BranchId(1), partition: 1,
-            floor: CommitSeq(1), publication: CommitSeq(10),
-        }, image, limits, &mut || Ok(())).unwrap();
-        let runtime = RuntimeBuilder::new().build().unwrap();
-        let root = runtime.request_cx_with_budget(Budget::INFINITE);
-        let cx = PurposeContexts::narrow_runtime_root(&root).query();
-        let incoming = source.incoming_index(&cx, IncomingIndexLimits::default()).unwrap();
-        assert!(incoming.stats().chunks > 1);
-
-        for reverse in [false, true] {
-            for quantum in [1, 2, 7, 64, 257] {
-                let run = |stop: usize| {
-                    let mut out = source.row(&cx, VId(1), RelationId(1), CommitSeq(5)).unwrap();
-                    let mut inc = incoming.row(&cx, VId(7), RelationId(1), CommitSeq(5)).unwrap();
-                    let mut calls = 0;
-                    let mut rows = Vec::new();
-                    let mut yields = 0;
-                    loop {
-                        let mut guard = || {
-                            calls += 1;
-                            if calls == stop { Err(Refusal::Guard(calls)) } else { Ok(()) }
-                        };
-                        let mut fuel = SealedScanBudget::new(quantum);
-                        let step = if reverse {
-                            inc.next_budgeted_with_checkpoint(&cx, &mut fuel, &mut guard)
-                        } else {
-                            out.next_budgeted_with_checkpoint(&cx, &mut fuel, &mut guard)
-                        };
-                        match step {
-                            Ok(SealedScanStep::Item(edge)) => rows.push(edge.entry.eid),
-                            Ok(SealedScanStep::Yield) => {
-                                assert_eq!(fuel.remaining(), 0);
-                                yields += 1;
-                                assert!(yields < 300, "resumption must advance the original scan");
-                            }
-                            Ok(SealedScanStep::End) => {
-                                assert_eq!(stop, usize::MAX);
-                                assert_eq!(rows, vec![EId(260)]);
-                                assert!(yields > 0);
-                                break;
-                            }
-                            Err(Refusal::Guard(at)) => {
-                                assert_eq!(at, stop);
-                                // A different callback and fresh budget cannot
-                                // turn an abandoned prefix into a valid suffix.
-                                let refuse = || -> Result<(), Refusal> { panic!("fused scan resumed") };
-                                let mut fuel = SealedScanBudget::new(1);
-                                let next = if reverse {
-                                    inc.next_budgeted_with_checkpoint(&cx, &mut fuel, refuse)
-                                } else { out.next_budgeted_with_checkpoint(&cx, &mut fuel, refuse) };
-                                assert!(matches!(next.unwrap(), SealedScanStep::End));
-                                let next = if reverse {
-                                    inc.next_with_checkpoint(&cx, refuse)
-                                } else { out.next_with_checkpoint(&cx, refuse) };
-                                assert!(next.unwrap().is_none());
-                                break;
-                            }
-                            Err(Refusal::Source(error)) => panic!("unexpected source failure: {error}"),
-                        }
-                    }
-                    calls
-                };
-                let calls = run(usize::MAX);
-                for stop in 1..=calls { assert_eq!(run(stop), stop); }
-            }
-
-            let mut out = source.row(&cx, VId(1), RelationId(1), CommitSeq(5)).unwrap();
-            let mut inc = incoming.row(&cx, VId(7), RelationId(1), CommitSeq(5)).unwrap();
-            let mut empty = SealedScanBudget::new(0);
-            let deny = || Err::<(), Refusal>(Refusal::Guard(1));
-            let step = if reverse {
-                inc.next_budgeted_with_checkpoint(&cx, &mut empty, deny)
-            } else { out.next_budgeted_with_checkpoint(&cx, &mut empty, deny) };
-            assert!(matches!(step, Err(Refusal::Guard(1))));
-            assert_eq!(empty.remaining(), 0);
-        }
-    }
-}
-
 /// Explicit fallible pull protocol: cancellation is an error, never clean EOF.
 /// A failed cursor stays failed/finished and cannot resume after skipping rows.
 pub struct SealedCursor<'a> {
@@ -713,5 +589,188 @@ impl<'a> SealedCursor<'a> {
         }
         self.finished = true;
         Ok(SealedScanStep::End)
+    }
+}
+
+#[cfg(test)]
+mod scan_budget_tests {
+    use super::SealedScanBudget;
+
+    #[test]
+    fn fuel_is_shared_exact_and_never_wraps() {
+        for count in 0..=256 {
+            let mut fuel = SealedScanBudget::new(count);
+            for remaining in (0..count).rev() {
+                assert!(fuel.spend());
+                assert_eq!(fuel.remaining(), remaining);
+            }
+            assert!(!fuel.spend());
+            assert!(!fuel.spend());
+            assert_eq!(fuel.remaining(), 0);
+        }
+        let mut fuel = SealedScanBudget::new(usize::MAX);
+        assert!(fuel.spend());
+        assert_eq!(fuel.remaining(), usize::MAX - 1);
+    }
+
+    #[derive(Debug)]
+    enum Refusal {
+        Source(super::SealedError),
+        Guard(usize),
+    }
+    impl From<super::SealedError> for Refusal {
+        fn from(error: super::SealedError) -> Self {
+            Self::Source(error)
+        }
+    }
+
+    #[test]
+    fn budgeted_raw_scans_keep_typed_guards_across_every_pause_and_fuse_on_refusal() {
+        use super::*;
+        use asupersync::{Budget, runtime::RuntimeBuilder};
+        use fgdb_types::{EId, ObjectId, PurposeContexts};
+
+        // Private storage-unit fixture, not a public source-authority receipt.
+        // All versions but the last are invisible at the requested cut; both
+        // the incoming chunk boundary and outgoing hidden scan must suspend.
+        let entries: Vec<_> = (0..261)
+            .map(|id| AdjacencyEntry {
+                src: VId(1),
+                dst: VId(7),
+                relation: RelationId(1),
+                eid: EId(id),
+                created_at: CommitSeq(1),
+                retired_at: (id < 260).then_some(CommitSeq(3)),
+            })
+            .collect();
+        let blocks: Vec<_> = entries
+            .chunks(120)
+            .map(<[AdjacencyEntry]>::to_vec)
+            .collect();
+        let block_props = (0..blocks.len()).map(|_| None).collect();
+        let limits = SealedLimits::default();
+        let image = image::build(
+            crate::compact::Compaction {
+                blocks,
+                block_props,
+                dropped: 0,
+                superseded: 0,
+            },
+            limits,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let source = SealedPartition::finish(
+            SealedScope {
+                source_root: PartitionRootVersion(ObjectId([0x63; 32])),
+                graph: GraphId(1),
+                branch: BranchId(1),
+                partition: 1,
+                floor: CommitSeq(1),
+                publication: CommitSeq(10),
+            },
+            image,
+            limits,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let runtime = RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(Budget::INFINITE);
+        let cx = PurposeContexts::narrow_runtime_root(&root).query();
+        let incoming = source
+            .incoming_index(&cx, IncomingIndexLimits::default())
+            .unwrap();
+        assert!(incoming.stats().chunks > 1);
+
+        for reverse in [false, true] {
+            for quantum in [1, 2, 7, 64, 257] {
+                let run = |stop: usize| {
+                    let mut out = source
+                        .row(&cx, VId(1), RelationId(1), CommitSeq(5))
+                        .unwrap();
+                    let mut inc = incoming
+                        .row(&cx, VId(7), RelationId(1), CommitSeq(5))
+                        .unwrap();
+                    let mut calls = 0;
+                    let mut rows = Vec::new();
+                    let mut yields = 0;
+                    loop {
+                        let mut guard = || {
+                            calls += 1;
+                            if calls == stop {
+                                Err(Refusal::Guard(calls))
+                            } else {
+                                Ok(())
+                            }
+                        };
+                        let mut fuel = SealedScanBudget::new(quantum);
+                        let step = if reverse {
+                            inc.next_budgeted_with_checkpoint(&cx, &mut fuel, &mut guard)
+                        } else {
+                            out.next_budgeted_with_checkpoint(&cx, &mut fuel, &mut guard)
+                        };
+                        match step {
+                            Ok(SealedScanStep::Item(edge)) => rows.push(edge.entry.eid),
+                            Ok(SealedScanStep::Yield) => {
+                                assert_eq!(fuel.remaining(), 0);
+                                yields += 1;
+                                assert!(yields < 300, "resumption must advance the original scan");
+                            }
+                            Ok(SealedScanStep::End) => {
+                                assert_eq!(stop, usize::MAX);
+                                assert_eq!(rows, vec![EId(260)]);
+                                assert!(yields > 0);
+                                break;
+                            }
+                            Err(Refusal::Guard(at)) => {
+                                assert_eq!(at, stop);
+                                // A different callback and fresh budget cannot
+                                // turn an abandoned prefix into a valid suffix.
+                                let refuse =
+                                    || -> Result<(), Refusal> { panic!("fused scan resumed") };
+                                let mut fuel = SealedScanBudget::new(1);
+                                let next = if reverse {
+                                    inc.next_budgeted_with_checkpoint(&cx, &mut fuel, refuse)
+                                } else {
+                                    out.next_budgeted_with_checkpoint(&cx, &mut fuel, refuse)
+                                };
+                                assert!(matches!(next.unwrap(), SealedScanStep::End));
+                                let next = if reverse {
+                                    inc.next_with_checkpoint(&cx, refuse)
+                                } else {
+                                    out.next_with_checkpoint(&cx, refuse)
+                                };
+                                assert!(next.unwrap().is_none());
+                                break;
+                            }
+                            Err(Refusal::Source(error)) => {
+                                panic!("unexpected source failure: {error}")
+                            }
+                        }
+                    }
+                    calls
+                };
+                let calls = run(usize::MAX);
+                for stop in 1..=calls {
+                    assert_eq!(run(stop), stop);
+                }
+            }
+
+            let mut out = source
+                .row(&cx, VId(1), RelationId(1), CommitSeq(5))
+                .unwrap();
+            let mut inc = incoming
+                .row(&cx, VId(7), RelationId(1), CommitSeq(5))
+                .unwrap();
+            let mut empty = SealedScanBudget::new(0);
+            let deny = || Err::<(), Refusal>(Refusal::Guard(1));
+            let step = if reverse {
+                inc.next_budgeted_with_checkpoint(&cx, &mut empty, deny)
+            } else {
+                out.next_budgeted_with_checkpoint(&cx, &mut empty, deny)
+            };
+            assert!(matches!(step, Err(Refusal::Guard(1))));
+            assert_eq!(empty.remaining(), 0);
+        }
     }
 }
