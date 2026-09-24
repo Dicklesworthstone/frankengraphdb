@@ -72,14 +72,14 @@ impl WriteTxn {
             });
         }
         if let Some(first) = self.staged.first()
-            && self.staged.iter().any(|staged| staged.relation != first.relation)
+            && (self.staged.iter().any(|staged| staged.relation != first.relation)
+                || (self.program_multi_relation && batch.relation != first.relation))
         {
+            // Mixed programs promise that each step sees its predecessor.
+            // Independent-group preparation would reject a later SET/CAS on
+            // an earlier creation or silently prevent a dependent relation.
+            // The program guard still owns all-or-nothing workspace acceptance.
             return self.write_ordered(database, vec![batch]);
-        }
-        if let Some(first) = self.staged.first()
-            && self.program_multi_relation && batch.relation != first.relation
-        {
-            return self.write_atomic(database, vec![batch]);
         }
         if let Some(expected) = self.staged.first().map(|staged| staged.relation)
             && batch.relation != expected
@@ -404,6 +404,123 @@ mod ordered_staging_tests {
             assert!(db.vertex(VId(5)).unwrap().is_some());
             assert!(db.vertex(VId(6)).unwrap().is_none());
             assert!(matches!(txn.write_ordered(&mut db, vec![]), Err(WriteTxnError::Finished)));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn mixed_workspace_admits_dependent_relations_and_does_not_leak_permission() {
+        let ((), report) = run_async_under_lab(0x6f74_0005, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = seeded(&cx).await;
+            let basis = db.frontier().unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let [first, second, last] = dependent_program();
+            txn.write(&mut db, first).unwrap();
+            {
+                // This is the same acceptance guard and ordinary write seam
+                // used by both public mixed-program execution adapters.
+                let workspace = MutationProgramWorkspace::new(&mut txn);
+                workspace.txn.program_multi_relation = true;
+                workspace.txn.write(&mut db, second).unwrap();
+                workspace.txn.write(&mut db, last).unwrap();
+                workspace.accept();
+            }
+            assert!(!txn.program_multi_relation);
+            assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(3))]);
+            assert_eq!(db.frontier().unwrap(), basis);
+            let seq = txn.commit(&mut db, &cx).await.unwrap();
+            assert_eq!(seq, CommitSeq(basis.0 + 1));
+            assert_eq!(db.edge(EId(50)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(11))]);
+            assert_eq!(db.delta_since(basis).unwrap().count(), 1);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn mixed_ordered_errors_and_unwinds_restore_the_original_workspace() {
+        let ((), report) = run_async_under_lab(0x6f74_0006, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            for unwind in [false, true] {
+                let mut db = seeded(&cx).await;
+                let mut txn = db.begin(&txcx).unwrap();
+                let [first, second, _] = dependent_program();
+                txn.write(&mut db, first).unwrap();
+                let prefix = txn.prepared.as_ref().unwrap().template.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let workspace = MutationProgramWorkspace::new(&mut txn);
+                    workspace.txn.program_multi_relation = true;
+                    workspace.txn.write(&mut db, second.clone())?;
+                    if unwind {
+                        panic!("injected unwind after dependent ordered staging");
+                    }
+                    let mut bad = WriteBatch::new(RelationId(3));
+                    bad.compare_and_set_vertex_property(
+                        VId(5), P, Some(CanonicalScalar::Int(999)), CanonicalScalar::Int(4),
+                        WriteMismatchPolicy::AbortWrite,
+                    );
+                    workspace.txn.write(&mut db, bad)?;
+                    workspace.accept();
+                    Ok::<(), WriteTxnError>(())
+                }));
+                if unwind {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.unwrap().is_err());
+                }
+                assert!(!txn.program_multi_relation);
+                assert_eq!(txn.staged.len(), 1);
+                assert_eq!(txn.prepared.as_ref().unwrap().template, prefix);
+                assert!(txn.vertex(&db, VId(6)).unwrap().is_none());
+                assert_eq!(txn.vertex(&db, VId(5)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(1))]);
+                // No remembered execution mode may outlive a rolled-back program.
+                assert!(matches!(txn.write(&mut db, second),
+                    Err(WriteTxnError::RelationMismatch { .. })));
+                txn.commit(&mut db, &cx).await.unwrap();
+                assert!(db.vertex(VId(6)).unwrap().is_none());
+                assert_eq!(db.edge(EId(50)).unwrap().unwrap().props,
+                    vec![(P, CanonicalScalar::Int(10))]);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn nested_mixed_workspace_rollback_retains_the_outer_scope_and_prefix() {
+        let ((), report) = run_async_under_lab(0x6f74_0007, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let cx = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = seeded(&cx).await;
+            let mut txn = db.begin(&txcx).unwrap();
+            let [first, second, last] = dependent_program();
+            {
+                let outer = MutationProgramWorkspace::new(&mut txn);
+                outer.txn.program_multi_relation = true;
+                outer.txn.write(&mut db, first).unwrap();
+                let prefix = outer.txn.prepared.as_ref().unwrap().template.clone();
+                {
+                    let inner = MutationProgramWorkspace::new(outer.txn);
+                    inner.txn.write(&mut db, second.clone()).unwrap();
+                    // Dropping an unaccepted inner operation restores only it.
+                }
+                assert!(outer.txn.program_multi_relation);
+                assert_eq!(outer.txn.prepared.as_ref().unwrap().template, prefix);
+                outer.txn.write(&mut db, second).unwrap();
+                outer.txn.write(&mut db, last).unwrap();
+                outer.accept();
+            }
+            assert!(!txn.program_multi_relation);
+            txn.commit(&mut db, &cx).await.unwrap();
+            assert_eq!(db.vertex(VId(5)).unwrap().unwrap().props,
+                vec![(P, CanonicalScalar::Int(3))]);
         });
         assert!(report.lab_test_passed(), "{report:?}");
     }
