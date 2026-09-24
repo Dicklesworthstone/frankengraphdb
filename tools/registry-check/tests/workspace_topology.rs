@@ -690,6 +690,7 @@ fn synthetic_crate(name: &str, deps: &[&str]) -> ScannedCrate {
             .collect(),
         lints_workspace: true,
         root_path: "src/lib.rs".to_string(),
+        binary_root: Some("src/main.rs".to_string()),
         root_forbids_unsafe: true,
         root_denies_unsafe: false,
         relaxes_unsafe: false,
@@ -1006,6 +1007,45 @@ mystery = { registry = "somewhere" }
     );
     let no_package = "[dependencies]\nfgdb-types = { path = \"../fgdb-types\" }\n";
     assert!(scan_manifest("crates/fgdb-example", no_package).is_err());
+}
+
+#[test]
+fn topology_manifest_scanner_records_the_binary_root_cargo_would_use() {
+    let bin_only = "[package]\nname = \"fgdb-example\"\n\n[[bin]]\nname = \"example\"\npath = \"src/cli.rs\"\n";
+    let scanned = scan_manifest("crates/fgdb-example", bin_only).expect("scans");
+    assert_eq!(
+        scanned.root_path, "src/lib.rs",
+        "an undeclared library is still looked for first, as Cargo does"
+    );
+    assert_eq!(scanned.binary_root.as_deref(), Some("src/cli.rs"));
+    let implicit = scan_manifest(
+        "crates/fgdb-example",
+        "[package]\nname = \"fgdb-example\"\n",
+    )
+    .expect("scans");
+    assert_eq!(implicit.binary_root.as_deref(), Some("src/main.rs"));
+    let declared = "[package]\nname = \"fgdb-example\"\n\n[lib]\npath = \"src/root.rs\"\n\n[[bin]]\nname = \"example\"\npath = \"src/cli.rs\"\n";
+    let scanned = scan_manifest("crates/fgdb-example", declared).expect("scans");
+    assert_eq!(scanned.root_path, "src/root.rs");
+    assert_eq!(
+        scanned.binary_root, None,
+        "a declared library root is authoritative even when it is missing"
+    );
+}
+
+#[test]
+fn topology_live_scan_reads_a_binary_only_crate_root() {
+    // fgdb-cli carries no library: its root is src/main.rs, and the scan must
+    // read that file's policy rather than fail on a missing src/lib.rs.
+    let scan = scan_workspace(&repo_root()).expect("workspace scans");
+    let cli = scan
+        .by_dir("crates/fgdb-cli")
+        .expect("fgdb-cli is a member");
+    assert_eq!(cli.root_path, "src/main.rs");
+    assert!(
+        cli.root_forbids_unsafe,
+        "src/main.rs carries #![forbid(unsafe_code)]"
+    );
 }
 
 #[test]

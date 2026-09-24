@@ -898,6 +898,10 @@ pub struct ScannedCrate {
     pub dependencies: Vec<ManifestDependency>,
     pub lints_workspace: bool,
     pub root_path: String,
+    /// The root Cargo uses when the package has no library target: the first
+    /// `[[bin]] path`, else `src/main.rs`. `None` when `[lib]` is declared,
+    /// because a declared library root is authoritative even when missing.
+    pub binary_root: Option<String>,
     pub root_forbids_unsafe: bool,
     /// `#![deny(unsafe_code)]` at the crate root. An island cannot inherit the
     /// workspace `forbid` — `forbid` cannot be lowered, so inheriting it would
@@ -1034,6 +1038,8 @@ pub fn scan_manifest(dir: &str, text: &str) -> Result<ScannedCrate, String> {
     // `[dependencies.foo]` form: the section itself names the dependency.
     let mut sub_dependency: Option<ManifestDependency> = None;
     let mut lib_path = String::new();
+    let mut lib_declared = false;
+    let mut bin_path = String::new();
 
     let flush = |sub: &mut Option<ManifestDependency>, out: &mut Vec<ManifestDependency>| {
         if let Some(dependency) = sub.take() {
@@ -1055,6 +1061,7 @@ pub fn scan_manifest(dir: &str, text: &str) -> Result<ScannedCrate, String> {
             flush(&mut sub_dependency, &mut dependencies);
             let header = header.trim_start_matches('[').trim_end_matches(']');
             section = header.to_string();
+            lib_declared |= header == "lib";
             if let Some((table, name)) = header.rsplit_once('.')
                 && table.ends_with("dependencies")
             {
@@ -1096,6 +1103,9 @@ pub fn scan_manifest(dir: &str, text: &str) -> Result<ScannedCrate, String> {
             "package" if key == "name" => package_name = unquote(value),
             "lints" if key == "workspace" => lints_workspace = value == "true",
             "lib" if key == "path" => lib_path = unquote(value),
+            // `[[bin]]` normalizes to `bin`; the first binary is the one Cargo
+            // would build for a package with a single binary target.
+            "bin" if key == "path" && bin_path.is_empty() => bin_path = unquote(value),
             table if table.ends_with("dependencies") => {
                 let table = table.rsplit('.').next().unwrap_or(table).to_string();
                 if let Some(body) = value.strip_prefix('{') {
@@ -1131,12 +1141,20 @@ pub fn scan_manifest(dir: &str, text: &str) -> Result<ScannedCrate, String> {
     } else {
         lib_path
     };
+    let binary_root = (!lib_declared).then(|| {
+        if bin_path.is_empty() {
+            "src/main.rs".to_string()
+        } else {
+            bin_path
+        }
+    });
     Ok(ScannedCrate {
         dir: dir.to_string(),
         package_name,
         dependencies,
         lints_workspace,
         root_path,
+        binary_root,
         root_forbids_unsafe: false,
         root_denies_unsafe: false,
         relaxes_unsafe: false,
@@ -1219,6 +1237,14 @@ pub fn scan_workspace(root: &Path) -> Result<WorkspaceScan, String> {
         let text = fs::read_to_string(&member_manifest)
             .map_err(|error| format!("{}: {error}", member_manifest.display()))?;
         let mut scanned = scan_manifest(member, &text)?;
+        // Cargo discovers a library only from `[lib]` or an existing
+        // `src/lib.rs`; a package with neither is binary-only and its crate
+        // root is the binary's (fgdb-cli since it stopped carrying a library).
+        if let Some(binary) = &scanned.binary_root
+            && !member_dir.join(&scanned.root_path).exists()
+        {
+            scanned.root_path = binary.clone();
+        }
         let root_file = member_dir.join(&scanned.root_path);
         // The root lint policy is read as an ATTRIBUTE, not as a line of text.
         // Whole-line equality against `#![forbid(unsafe_code)]` reported "no
