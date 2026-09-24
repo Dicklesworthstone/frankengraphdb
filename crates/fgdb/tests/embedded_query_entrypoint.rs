@@ -399,7 +399,13 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
         let db = seeded(&contexts.commit()).await;
         let cx = contexts.query();
         for (text, expected_facade) in [
-            ("EXPLAIN RETURN 1", fgdb::NativeReadClass::Set),
+            // The refusal names the facade whose parser got furthest. Since the
+            // source-free pipeline aggregates (df505256, 60d2041e), the pipeline
+            // facade reads further into `RETURN 1` than the set facade does. The
+            // laws below (typed refusal, in-text offset, deterministic diagnostics,
+            // cached misses) are unchanged. That the winner moves at all is the
+            // parser race tracked by fgdb-crate-layer-drift-phjcs.
+            ("EXPLAIN RETURN 1", fgdb::NativeReadClass::PipelineAggregate),
             (
                 "MATCH (n:Missing) RETURN n",
                 fgdb::NativeReadClass::Aggregate,
@@ -426,6 +432,7 @@ fn unsupported_diagnostics_are_deterministic_and_resolver_is_cached_across_probe
                 let offset = match source.as_ref() {
                     QueryError::SetText(error) => error.offset,
                     QueryError::PatternText(error) => error.offset,
+                    QueryError::PipelineText(error) => error.offset,
                     other => panic!("{text}: wrong typed source: {other:?}"),
                 };
                 assert!(offset > 0 && offset <= text.len(), "{text}: {offset}");

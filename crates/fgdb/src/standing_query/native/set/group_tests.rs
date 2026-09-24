@@ -812,6 +812,94 @@ fn output_errors_dependency_failure_and_quotas_fence_only_the_affected_circuit_a
 }
 
 #[test]
+fn collect_groups_follow_commits_and_match_a_from_scratch_snapshot() {
+    // b0c3bd5f turned COLLECT / COLLECT DISTINCT from a refused standing domain
+    // into a maintained aggregate. Its operator tests live in fgdb-gql, and no
+    // database-level law covered it. This test supplies that law. After every
+    // commit, the maintained rows must equal a from-scratch governed execution
+    // of the same definition. Integrating each published delta into the
+    // previous rows must reproduce the maintained rows. A rebuild must converge
+    // to the same answer.
+    let ((), report) = run_async_under_lab(0x6772_1018, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let commit = c.commit();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, seed()).await.unwrap();
+        let mut cases = Vec::new();
+        for group_keys in [&[][..], &[0][..]] {
+            let def = PreparedGraphSetAggregate::prepare(
+                leaf(),
+                group_keys,
+                &[
+                    GraphAggregate::collect("values", 1),
+                    GraphAggregate::collect_distinct("unique_values", 1),
+                    GraphAggregate::count_rows("rows"),
+                ],
+                0,
+                None,
+            )
+            .unwrap();
+            let handle = db
+                .register_standing_relation_aggregate(&cx, &def, policy())
+                .unwrap();
+            assert!(db.standing_group_delta(&cx, &handle).unwrap().is_none());
+            cases.push((def, handle));
+        }
+        for tick in 0..5 {
+            let mut previous = Vec::new();
+            for (def, handle) in &cases {
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                    snapshot(&db, &cx, def),
+                    "tick {tick}: maintained COLLECT differs from a from-scratch execution"
+                );
+                previous.push(copy(db.standing_query(&cx, handle).unwrap().rows()));
+            }
+            let mut change = WriteBatch::new(RelationId(1));
+            match tick {
+                0 => {
+                    change.set_vertex_property(VId(2), N, Some(CanonicalScalar::Int(11)));
+                }
+                1 => {
+                    change.delete_vertex(VId(1));
+                }
+                2 => {
+                    change.set_vertex_property(VId(4), B, Some(CanonicalScalar::Int(1)));
+                }
+                3 => {
+                    change.set_vertex_property(VId(u128::MAX), N, None);
+                }
+                _ => {
+                    change.set_vertex_property(VId(5), N, Some(CanonicalScalar::Int(3)));
+                }
+            }
+            let at = db.write(&commit, change).await.unwrap();
+            for ((def, handle), mut integrated) in cases.iter().zip(previous) {
+                let delta = db.standing_group_delta(&cx, handle).unwrap().unwrap();
+                assert_eq!(delta.frontier(), at);
+                integrated
+                    .integrate(delta.rows(), LIMBS, &mut |_| Ok::<_, ()>(()))
+                    .unwrap();
+                assert_eq!(&integrated, db.standing_query(&cx, handle).unwrap().rows());
+                assert_eq!(
+                    db.standing_native_query(&cx, handle, policy()).unwrap(),
+                    (at, snapshot(&db, &cx, def))
+                );
+            }
+        }
+        for (def, handle) in &cases {
+            db.rebuild_standing_query(&cx, handle, policy()).unwrap();
+            assert_eq!(
+                db.standing_native_query(&cx, handle, policy()).unwrap().1,
+                snapshot(&db, &cx, def)
+            );
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
 fn unsupported_domains_sources_and_bad_metadata_never_publish_a_partial_group_circuit() {
     let ((), report) = run_async_under_lab(0x6772_1016, |root| async move {
         let c = PurposeContexts::narrow_runtime_root(&root);
@@ -822,18 +910,9 @@ fn unsupported_domains_sources_and_bad_metadata_never_publish_a_partial_group_ci
             .register_standing_relation(&cx, &leaf(), policy())
             .unwrap();
         let before = saved(&db.standing_queries);
-        let collect = PreparedGraphSetAggregate::prepare(
-            leaf(),
-            &[],
-            &[GraphAggregate::collect("values", 1)],
-            0,
-            Some(0),
-        )
-        .unwrap();
-        assert!(
-            db.register_standing_relation_aggregate(&cx, &collect, policy())
-                .is_err()
-        );
+        // COLLECT used to be refused here. b0c3bd5f made ordered COLLECT and
+        // COLLECT DISTINCT maintained aggregates, so the refusal case moved to
+        // the positive law collect_groups_follow_commits_and_match_a_from_scratch_snapshot.
         let list = leaf()
             .project(
                 vec![GraphSetProjection::new("n", GraphSetValue::List(vec![]))],
