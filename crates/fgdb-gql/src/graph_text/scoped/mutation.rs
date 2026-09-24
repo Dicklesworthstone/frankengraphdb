@@ -85,9 +85,45 @@ impl<'a> Parser<'a> {
         variable: Name<'a>,
         property: Option<Name<'a>>,
     ) -> Result<usize, GraphPatternTextError> {
+        let path = if self
+            .syntax
+            .path
+            .is_some_and(|path| path.text == variable.text)
+        {
+            Some(GraphPathFunction::Value)
+        } else if self
+            .syntax
+            .edges
+            .iter()
+            .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text))
+        {
+            Some(GraphPathFunction::Edge)
+        } else {
+            None
+        };
+        self.projection_slot(
+            columns,
+            Projection {
+                variable,
+                property,
+                path,
+            },
+        )
+    }
+
+    /// A source slot denotes the complete projection, not just its variable.
+    /// In particular, a path, its length and its node/edge sequences are
+    /// different values even though all refer to the same captured path.
+    fn projection_slot(
+        &self,
+        columns: &mut Vec<Projection<'a>>,
+        projection: Projection<'a>,
+    ) -> Result<usize, GraphPatternTextError> {
         if let Some(at) = columns.iter().position(|column| {
-            column.variable.text == variable.text
-                && column.property.map(|key| key.text) == property.map(|key| key.text)
+            column.variable.text == projection.variable.text
+                && column.property.map(|key| key.text)
+                    == projection.property.map(|key| key.text)
+                && column.path == projection.path
         }) {
             return Ok(at);
         }
@@ -97,26 +133,7 @@ impl<'a> Parser<'a> {
             crate::algebra::PatternLimitDimension::Columns,
         )?;
         let at = columns.len();
-        columns.push(Projection {
-            variable,
-            property,
-            path: if self
-                .syntax
-                .path
-                .is_some_and(|path| path.text == variable.text)
-            {
-                Some(GraphPathFunction::Value)
-            } else if self
-                .syntax
-                .edges
-                .iter()
-                .any(|edge| edge.variable.is_some_and(|name| name.text == variable.text))
-            {
-                Some(GraphPathFunction::Edge)
-            } else {
-                None
-            },
-        });
+        columns.push(projection);
         Ok(at)
     }
 
@@ -134,6 +151,32 @@ impl<'a> Parser<'a> {
             let key = self.name()?;
             return self
                 .mutation_projection(columns, variable, Some(key))
+                .map(Operand::Column);
+        }
+        // Scalar functions have already been consumed by the shared precedence
+        // compiler. Graph metadata functions are source columns, not a second
+        // evaluator; reuse the native graph-function and variable-domain checks.
+        if matches!(self.current.kind, TokenKind::Word(_))
+            && matches!(self.lexer.clone().next()?.kind, TokenKind::Punct(b'('))
+        {
+            let name = self.name()?;
+            let function = Self::path_function(name)?;
+            self.punct(b'(', "(")?;
+            let variable = match function {
+                GraphPathFunction::Labels => self.vertex_variable()?,
+                GraphPathFunction::Type => self.edge_variable()?,
+                _ => self.path_variable()?,
+            };
+            self.punct(b')', ")")?;
+            return self
+                .projection_slot(
+                    columns,
+                    Projection {
+                        variable,
+                        property: None,
+                        path: Some(function),
+                    },
+                )
                 .map(Operand::Column);
         }
         let literal = match self.current.kind {
@@ -488,5 +531,138 @@ impl PreparedGraphMutationText {
         }
         PreparedGraphMutation::prepare(selection, self.relation, actions)
             .map_err(|error| build_error(at, error))
+    }
+}
+
+#[cfg(test)]
+mod graph_function_tests {
+    use super::*;
+    use crate::{GraphSetColumnType, PreparedGraphSetText};
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            (GraphSymbolKind::Property, "cost") => Some(GraphSymbol::Property(PropertyKeyId(1))),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn source_slots_distinguish_path_values_and_each_metadata_function() {
+        let mut parser = Parser::new(
+            "MATCH p = (a)-[:R]->{1,2}(b) RETURN path_length(p) + PATH_LENGTH(p)",
+        )
+        .unwrap();
+        parser.parse_match_prefix().unwrap();
+        parser.word("RETURN").unwrap();
+        let mut columns = Vec::new();
+        assert!(matches!(
+            parser.mutation_expression(&mut columns).unwrap(),
+            Operand::Integer { .. }
+        ));
+        parser.end().unwrap();
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].path, Some(GraphPathFunction::Length));
+        let path = parser.syntax.path.unwrap();
+        let entity = parser.mutation_projection(&mut columns, path, None).unwrap();
+        assert_eq!(entity, 1);
+        assert_eq!(columns[entity].path, Some(GraphPathFunction::Value));
+        for (function, expected) in [
+            (GraphPathFunction::Nodes, 2),
+            (GraphPathFunction::Edges, 3),
+            (GraphPathFunction::Length, 0),
+        ] {
+            assert_eq!(
+                parser
+                    .projection_slot(
+                        &mut columns,
+                        Projection {
+                            variable: path,
+                            property: None,
+                            path: Some(function),
+                        },
+                    )
+                    .unwrap(),
+                expected
+            );
+        }
+        assert_eq!(columns.len(), 4);
+    }
+
+    #[test]
+    fn computed_returns_and_lists_bind_native_graph_function_columns() {
+        let text = "MATCH p = (a)-[:R]->{1,2}(b) RETURN \
+                    path_length(p) + 1 AS score, p AS route, \
+                    nodes(p) AS vertices, edges(p) AS relationships, \
+                    [path_length(p), path_length(p) + 1] AS lengths";
+        let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
+        let expected = [
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Path,
+            GraphSetColumnType::Vertices,
+            GraphSetColumnType::Edges,
+            GraphSetColumnType::List,
+        ];
+        assert_eq!(prepared.column_types(), &expected);
+        let bound = prepared.bind_parameters(&GqlParameters::new()).unwrap();
+        assert_eq!(bound.column_types(), &expected);
+        let prepared = PreparedGraphSetText::prepare(
+            "MATCH (a)-[e:R]->(b) RETURN labels(a) AS names, type(e) AS relation, \
+             type(e) || '!' AS decorated, e AS edge",
+            symbols,
+        )
+        .unwrap();
+        let expected = [
+            GraphSetColumnType::List,
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Scalar,
+            GraphSetColumnType::Edge,
+        ];
+        assert_eq!(prepared.column_types(), &expected);
+        assert_eq!(
+            prepared
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+                .column_types(),
+            &expected
+        );
+    }
+
+    #[test]
+    fn path_length_assignments_share_the_existing_typed_parameter_contract() {
+        let prepared = PreparedGraphMutationText::prepare(
+            "MATCH p = (a)-[:R]->{1,2}(b) SET b.cost = path_length(p) + $extra",
+            RelationId(1),
+            symbols,
+        )
+        .unwrap();
+        assert_eq!(prepared.parameter_schema().len(), 1);
+        assert_eq!(prepared.parameter_schema()[0].name, "extra");
+        let arguments = GqlParameters::new().with_int64("extra", 1).unwrap();
+        assert!(prepared.bind_parameters(&arguments).is_ok());
+    }
+
+    #[test]
+    fn graph_function_domains_refuse_before_catalog_access() {
+        for expression in [
+            "nodes(a)",
+            "edges(a)",
+            "path_length(a)",
+            "labels(p)",
+            "type(a)",
+            "nodes(missing)",
+            "path_length(p, p)",
+        ] {
+            let text = format!(
+                "MATCH p = (a)-[:R]->{{1,2}}(b) RETURN {expression} AS value LIMIT 0"
+            );
+            let mut calls = 0;
+            let result = PreparedGraphSetText::prepare(&text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            });
+            assert!(result.is_err(), "{expression}");
+            assert_eq!(calls, 0, "{expression}");
+        }
     }
 }
