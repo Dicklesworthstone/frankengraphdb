@@ -323,3 +323,219 @@ mod vertex_overlay_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod bulk_vertex_overlay_tests {
+    use super::{WriteTxn, WriteTxnError};
+    use crate::{Database, DatabaseKeys, MemVfs, VertexRow, WriteBatch, WriteError};
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::{ElementId, LabelId, PropertyKeyId, RelationId};
+    use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, EId, PurposeContexts, VId};
+
+    const PROPERTY: PropertyKeyId = PropertyKeyId(1);
+
+    fn keys() -> DatabaseKeys {
+        DatabaseKeys::new([1; 32], DatabaseSecurityNamespaceId([2; 32]), [3; 32])
+    }
+
+    // Point reads retain the full-net traversal, independent of bulk routing.
+    // Compare the entire rows and exact observations, not just returned IDs.
+    fn compare_with_points(
+        transaction: &WriteTxn,
+        database: &Database<MemVfs>,
+        ids: &[VId],
+        label: Option<LabelId>,
+    ) -> Vec<VertexRow> {
+        let before = transaction.read_set.borrow().clone();
+        let mut expected: Vec<_> = ids
+            .iter()
+            .filter_map(|vid| transaction.vertex(database, *vid).expect("point read"))
+            .collect();
+        expected.sort_by_key(|row| row.vid);
+        let observed = transaction.read_set.borrow().clone();
+        *transaction.read_set.borrow_mut() = before;
+        let actual = transaction
+            .vertices_for_scan(database, label)
+            .expect("bulk read");
+        assert_eq!(actual, expected);
+        assert_eq!(&*transaction.read_set.borrow(), &observed);
+        actual
+    }
+
+    #[test]
+    fn mixed_bulk_effects_match_points_at_the_pinned_basis() {
+        let ((), report) = run_async_under_lab(0x7a_71, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txn_cx = contexts.txn();
+            let mut database = Database::open_memory(&commit, keys())
+                .await
+                .expect("open");
+            let mut seed = WriteBatch::new(RelationId(1));
+            for vid in [VId(1), VId(2), VId(3)] {
+                seed.create_vertex(
+                    vid,
+                    vec![LabelId(10), LabelId(20)],
+                    vec![(PROPERTY, CanonicalScalar::Int(10))],
+                );
+            }
+            // An edge and vertex share their numeric identity, but not a kind.
+            seed.add_edge(
+                EId(2),
+                VId(1),
+                VId(2),
+                vec![(PROPERTY, CanonicalScalar::Int(1))],
+            );
+            database.write(&commit, seed).await.expect("seed");
+            let mut transaction = database.begin(&txn_cx).expect("begin");
+            let mut staged = WriteBatch::new(RelationId(1));
+            staged.set_vertex_property(VId(1), PROPERTY, Some(CanonicalScalar::Int(77)));
+            staged.set_vertex_property(VId(2), PROPERTY, None);
+            staged.set_vertex_label(VId(1), LabelId(10), false);
+            staged.set_vertex_label(VId(2), LabelId(30), true);
+            staged.delete_vertex(VId(3));
+            staged.create_vertex(
+                VId(4),
+                vec![LabelId(20)],
+                vec![(PROPERTY, CanonicalScalar::Int(40))],
+            );
+            staged.create_vertex(VId(5), vec![], vec![]);
+            staged.delete_vertex(VId(5));
+            staged.delete_vertex_if_present(VId(6));
+            staged.ensure_vertex(VId(1), vec![LabelId(99)], vec![]);
+            staged.set_edge_property(EId(2), PROPERTY, Some(CanonicalScalar::Int(999)));
+            transaction.write(&mut database, staged).expect("stage");
+
+            let ids = [VId(1), VId(2), VId(3), VId(4), VId(5), VId(6)];
+            let rows = compare_with_points(&transaction, &database, &ids, Some(LabelId(20)));
+            assert_eq!(
+                rows.iter().map(|row| row.vid).collect::<Vec<_>>(),
+                vec![VId(1), VId(2), VId(4)]
+            );
+            assert_eq!(rows[0].labels, vec![LabelId(20)]);
+            assert_eq!(rows[0].props, vec![(PROPERTY, CanonicalScalar::Int(77))]);
+            assert_eq!(rows[1].labels, vec![LabelId(10), LabelId(20), LabelId(30)]);
+            assert!(rows[1].props.is_empty());
+            assert_eq!(rows[2].created_at, transaction.basis());
+            assert!(!transaction.scanned_vertices.get());
+            assert!(
+                transaction
+                    .scanned_vertex_labels
+                    .borrow()
+                    .contains(&LabelId(20))
+            );
+            assert!(
+                transaction
+                    .read_set
+                    .borrow()
+                    .contains(&ElementId::Vertex(VId(5)))
+            );
+            assert!(
+                transaction
+                    .read_set
+                    .borrow()
+                    .contains(&ElementId::Vertex(VId(6)))
+            );
+
+            let mut advance = WriteBatch::new(RelationId(1));
+            advance.create_vertex(VId(99), vec![LabelId(20)], vec![]);
+            database.write(&commit, advance).await.expect("advance");
+            assert_eq!(
+                compare_with_points(&transaction, &database, &ids, None),
+                rows
+            );
+            assert!(transaction.scanned_vertices.get());
+            transaction.abort();
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "lab run failed: {report:?}");
+    }
+
+    #[test]
+    fn relation_groups_keep_birth_ordinals_and_committed_contents() {
+        let ((), report) = run_async_under_lab(0x7a_72, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txn_cx = contexts.txn();
+            let mut database = Database::open_memory(&commit, keys())
+                .await
+                .expect("open");
+            let mut transaction = database.begin(&txn_cx).expect("begin");
+            let mut first = WriteBatch::new(RelationId(9));
+            first.create_vertex(VId(20), vec![LabelId(2)], vec![]);
+            first.create_vertex(VId(10), vec![LabelId(1)], vec![]);
+            let mut second = WriteBatch::new(RelationId(1));
+            second.create_vertex(VId(30), vec![LabelId(3)], vec![]);
+            second.add_edge(EId(30), VId(20), VId(30), vec![]);
+            let mut third = WriteBatch::new(RelationId(9));
+            third.set_vertex_property(VId(20), PROPERTY, Some(CanonicalScalar::Int(42)));
+            transaction
+                .write_ordered(&mut database, vec![first, second, third])
+                .expect("ordered relation groups");
+            let mut rows = compare_with_points(
+                &transaction,
+                &database,
+                &[VId(10), VId(20), VId(30)],
+                None,
+            );
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[1].props, vec![(PROPERTY, CanonicalScalar::Int(42))]);
+            let committed_at = transaction
+                .commit(&mut database, &commit)
+                .await
+                .expect("commit");
+            for row in &mut rows {
+                row.created_at = committed_at;
+            }
+            assert_eq!(database.vertices().expect("durable vertices"), rows);
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "lab run failed: {report:?}");
+    }
+
+    #[test]
+    fn normalized_away_identity_remains_a_negative_read_witness() {
+        let ((), report) = run_async_under_lab(0x7a_73, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txn_cx = contexts.txn();
+            let mut database = Database::open_memory(&commit, keys())
+                .await
+                .expect("open");
+            let mut transaction = database.begin(&txn_cx).expect("begin");
+            let mut staged = WriteBatch::new(RelationId(1));
+            staged.create_vertex(VId(9), vec![], vec![]);
+            staged.delete_vertex(VId(9));
+            transaction.write(&mut database, staged).expect("stage no-op");
+            assert!(
+                transaction
+                    .vertices_for_scan(&database, Some(LabelId(77)))
+                    .expect("empty scan")
+                    .is_empty()
+            );
+            assert!(
+                transaction
+                    .read_set
+                    .borrow()
+                    .contains(&ElementId::Vertex(VId(9)))
+            );
+            assert!(!transaction.scanned_vertices.get());
+
+            // No label-77 insertion occurs. READ-01 must therefore come from
+            // the absent identity, not the label or full-scan insertion guard.
+            let mut concurrent = WriteBatch::new(RelationId(1));
+            concurrent.create_vertex(VId(9), vec![], vec![]);
+            database
+                .write(&commit, concurrent)
+                .await
+                .expect("concurrent create");
+            assert!(matches!(
+                transaction.finish(&mut database, &commit).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { law, .. }))
+                    if law == "FG-LAW-FCW-READ-01"
+            ));
+            assert_eq!(txn_cx.outstanding_obligations(), 0);
+        });
+        assert!(report.lab_test_passed(), "lab run failed: {report:?}");
+    }
+}
