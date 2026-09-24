@@ -30,6 +30,13 @@ impl Fixture {
             ),
         )
         .unwrap();
+        // Key files must be owner-only (the CLI refuses group/other bits).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(home.join("keys"), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
         let fixture = Self { home };
         success(&fixture.command("create").output().unwrap());
         fixture

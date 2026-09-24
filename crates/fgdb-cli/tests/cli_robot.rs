@@ -675,6 +675,12 @@ impl TestDb {
             ),
         )
         .unwrap();
+        // Key files must be owner-only (the CLI refuses group/other bits).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         Self {
             db: root.join("db").to_str().unwrap().to_owned(),
             key: key.to_str().unwrap().to_owned(),

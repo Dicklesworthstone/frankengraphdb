@@ -34,9 +34,10 @@ The key file has three non-empty lines of 64 hexadecimal characters: the
 object-id key, the security namespace and the encryption key. `#` starts a
 comment. Keys are never accepted on the command line and never printed. The CLI
 neither generates nor stores keys. A new database needs independently generated
-keys, not the test keys. **The CLI does not check the key file's permissions**
-(the retired binary refused group- or world-readable key files; restoring that
-is fgdb-42wt4). Keep it mode `0600` yourself.
+keys, not the test keys. On Unix the key file must be a regular file with no
+group or other permission bits (`chmod 600`). Anything else is refused with
+exit 4 before the database is opened or created. The check reads the opened
+handle, not the path, and the file may be at most 64 KiB.
 
 ### Bindings: no implicit catalog
 

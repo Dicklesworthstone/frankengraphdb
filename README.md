@@ -201,7 +201,7 @@ Honest framing. `frankengraphdb` is the only one of these that composes durabili
 
 > The CLI mirrors the embedded surface. Robot mode emits line-oriented, versioned NDJSON so an agent can pipe and validate the stream against a frozen contract (`fgdb robot schema`); human output is the default.
 
-**Runs today** — one binary (`crates/fgdb-cli`), invoked below as `fgdb`. Prefix any invocation with `--robot` for the NDJSON contract. Stable exit codes: 0 success, 2 usage/schema, 3 query refusal, 4 open/key, 5 I/O/corruption. A key file is three nonempty lines of 64 hex characters (object-id key, security namespace, encryption key):
+**Runs today** — one binary (`crates/fgdb-cli`), invoked below as `fgdb`. Prefix any invocation with `--robot` for the NDJSON contract. Stable exit codes: 0 success, 2 usage/schema, 3 query refusal, 4 open/key, 5 I/O/corruption. A key file is three nonempty lines of 64 hex characters (object-id key, security namespace, encryption key), owner-only (`chmod 600`) on Unix:
 
 ```bash
 # Create a database directory under an explicit key file

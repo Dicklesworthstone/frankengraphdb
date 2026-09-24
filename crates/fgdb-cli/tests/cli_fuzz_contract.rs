@@ -667,6 +667,16 @@ impl Workspace {
         ];
         for (index, contents) in variants.iter().enumerate() {
             std::fs::write(root.join(format!("key-{index}")), contents).unwrap();
+            // Key files must be owner-only (the CLI refuses group/other bits).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    root.join(format!("key-{index}")),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+            }
         }
         std::fs::create_dir(root.join("key-dir")).unwrap();
         std::fs::create_dir(root.join("empty-db")).unwrap();

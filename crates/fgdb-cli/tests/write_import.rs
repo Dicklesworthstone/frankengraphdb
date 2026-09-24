@@ -38,6 +38,13 @@ impl Fixture {
             ),
         )
         .unwrap();
+        // Key files must be owner-only (the CLI refuses group/other bits).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join("keys"), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
         let mut fixture = Self { dir, created: 0 };
         fixture.created = seq(&success(fixture.run("create", &[])), "created");
         fixture

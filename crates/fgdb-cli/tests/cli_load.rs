@@ -366,6 +366,12 @@ impl Fixture {
             ),
         )
         .unwrap();
+        // Key files must be owner-only (the CLI refuses group/other bits).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let mut result = Self {
             db: root.join("db"),
             input: root.join("input.ndjson"),

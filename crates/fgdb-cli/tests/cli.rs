@@ -1,11 +1,8 @@
 //! Process-level lifecycle contracts for the local-owner `fgdb` binary:
 //! create, write, query, compact and reopen each run in a fresh process
 //! against the real durable engine. Temporary artifacts are retained for
-//! diagnosis; no fixture deletes files.
-//!
-//! The retired binary's group-readable key refusal is not ported: the
-//! surviving key-file contract does not check permissions (fgdb-42wt4 restores
-//! it with its test).
+//! diagnosis; no fixture deletes files. Key files are created owner-only
+//! (0600), as the CLI requires on Unix.
 
 use asupersync::{Budget, runtime::RuntimeBuilder};
 use fgdb::{Database, DatabaseKeys, WriteBatch};
@@ -44,6 +41,13 @@ impl Fixture {
             ),
         )
         .unwrap();
+        // Key files must be owner-only (the CLI refuses group/other bits).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join("keys"), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
         Self { dir }
     }
 
@@ -323,7 +327,7 @@ fn library_writes_are_read_by_cli_processes_with_catalog_reflection() {
 #[test]
 fn invalid_key_files_are_refused_without_creating_a_database() {
     let line = "ab".repeat(32);
-    let cases: [(&str, Vec<u8>); 6] = [
+    let cases: [(&str, Vec<u8>); 7] = [
         ("empty", Vec::new()),
         ("two lines", format!("{line}\n{line}\n").into_bytes()),
         (
@@ -340,6 +344,11 @@ fn invalid_key_files_are_refused_without_creating_a_database() {
         ),
         // The retired binary's raw 96-byte key file is not silently accepted.
         ("legacy raw 96 bytes", vec![0x41; 96]),
+        // Valid keys padded past the 64 KiB cap by a comment: refused unread.
+        (
+            "oversized",
+            format!("{line}\n{line}\n{line}\n# {}\n", "x".repeat(70_000)).into_bytes(),
+        ),
     ];
     for (name, bytes) in cases {
         let fixture = Fixture::new("bad-keys");
@@ -415,4 +424,81 @@ fn diff_output_cap_refuses_rather_than_reporting_a_partial_diff() {
     );
     assert!(!stdout.contains("\"event\":\"result\""), "{stdout}");
     assert!(!stdout.contains("\"event\":\"change\""), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn key_files_accessible_to_group_or_others_are_refused_without_creating_a_database() {
+    use std::os::unix::fs::PermissionsExt;
+    // Whoever can read the key file can read the database, so any group or
+    // other bit refuses, exactly as the retired binary did.
+    for mode in [0o640, 0o604, 0o620, 0o644, 0o660] {
+        let fixture = Fixture::new("key-mode");
+        std::fs::set_permissions(
+            fixture.dir.join("keys"),
+            std::fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+        let output = fixture.robot("create", &[]);
+        assert_eq!(output.status.code(), Some(4), "mode {mode:o}");
+        refused(&output, 4, "open");
+        assert!(!fixture.db().exists(), "mode {mode:o}");
+    }
+    // Control: the same bytes at 0600 create the database.
+    let fixture = Fixture::new("key-mode-owner");
+    succeeded(&fixture.robot("create", &[]), "created");
+    // A directory is not a key file, whatever its mode.
+    let fixture = Fixture::new("key-directory");
+    std::fs::create_dir(fixture.dir.join("key-directory")).unwrap();
+    std::fs::set_permissions(
+        fixture.dir.join("key-directory"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .current_dir(&fixture.dir)
+        .args(["--robot", "create", "--db"])
+        .arg(fixture.db())
+        .args(["--key-file", "key-directory"])
+        .output()
+        .unwrap();
+    refused(&output, 4, "open");
+    assert!(!fixture.db().exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fifo_key_file_is_refused_without_blocking() {
+    // Opening a FIFO blocks until a writer appears, so the refusal must come
+    // before the open. A regression shows up here as a hang, bounded below.
+    let fixture = Fixture::new("key-fifo");
+    let fifo = fixture.dir.join("key-fifo");
+    assert!(
+        Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .current_dir(&fixture.dir)
+        .args(["--robot", "create", "--db"])
+        .arg(fixture.db())
+        .args(["--key-file", "key-fifo"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            panic!("a FIFO key file must be refused, not opened and read");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    refused(&output, 4, "open");
+    assert!(!fixture.db().exists());
 }
