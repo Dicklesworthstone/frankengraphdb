@@ -1,9 +1,601 @@
 # Reality Check and Bridge Plan
 
-**Latest measurement: 2026-09-22**, at `ec7be2181ddfc0f66143c7316e792a68d1fa81c3`
-(verdict: red; no verified green tree since the 2026-09-08 proof below).
+**Latest measurement: 2026-09-23**, at `1a1cb2fed68a48049db4d2aa08566a14409ca550`.
+- Verdict there: red at the library level (E0583).
+- A repair landed during the pass. At `2d8928fe`, fmt, check and clippy exit 0
+  (re-verified), but the tests are not green: 30 failures and 1 hang in a
+  bounded census.
+
 **Latest verified green: 2026-09-08**, at clean source commit
-`9adf484d3b9a521b22f171b42e62eaccf02726c3`.
+`9adf484d3b9a521b22f171b42e62eaccf02726c3`. That commit is not an ancestor of
+`main` (NE-0046), so `main` has no verified green commit at all.
+
+## Current delta — 2026-09-23
+
+Measured at `1a1cb2fed68a48049db4d2aa08566a14409ca550` (2026-09-23 21:54 −0400),
+the `origin/main` HEAD when this pass pinned its tree. During the pass:
+- 11 more toolchain-less commits landed.
+- Another session repaired the compile red in `a51a6edd`, `f1c3776c`,
+  `ea250503` and `2d8928fe` (22:34–22:37).
+- This pass independently re-verified the repaired tip `2d8928fe`: fmt, check
+  and clippy all exit 0.
+
+Both states are reported below with their SHAs. This section supersedes the
+2026-09-22 verdicts; everything under it is historical.
+
+### Product verdict
+
+**One day after the owner ruled that uncompiled work must land through a
+verified merge train, the ruling had had no effect.** The product library
+stopped compiling for about 25 hours. The local swarm repaired it by hand,
+exactly as before the ruling, and seven more uncompiled commits landed on
+`main` while that repair was in flight.
+
+The code that landed moved three vision rows (Warden, Prism, the CLI layout)
+and left the other seventeen where they were. The first long-history
+measurement of the write path shows its cost growing with the size of the
+database itself: per-commit CPU, point reads, and stored bytes (finding 5).
+
+Six facts govern what should happen next:
+
+1. **The verified-landing ruling was bypassed from its first hour.**
+   - `b36d556a` (2026-09-22 16:17 −0400) created `staging` and the merge train.
+   - The toolchain-less identity resumed pushing to `main` at 17:32, while
+     `staging` still existed.
+   - GitHub records `staging` created at 20:18:15Z and **deleted at
+     2026-09-23T01:15:26Z** by the `Dicklesworthstone` account, never pushed
+     to. The event does not say which environment deleted it.
+   - `bash scripts/merge_train.sh audit --since b36d556a` reports proven=0,
+     unproven=51, **violations=45**, exit 1. The merge-train notes ref is empty,
+     so the train has never run.
+   - Commit bodies end with "Direct non-forced main publication."
+2. **At `1a1cb2fe` HEAD was red at the library level, not just in tests.**
+   `crates/fgdb/src/query.rs:15` loads `query_authorized.rs` through
+   `#[path]`. A path-loaded file resolves its child modules from its own
+   directory. So `mod relational;` (added by `1c45104a`, 09-22 21:44) and
+   `mod analytics;` (`3fb44ce2`, 09-23 12:30) point at files that do not
+   exist (E0583). The consequences:
+   - The `fgdb` library did not compile from 21:44 on 09-22 until the 22:34
+     repair on 09-23.
+   - Everything downstream (fgdb-cli, fgdb-bench, fgdb-sim) was unbuildable.
+   - `cargo test --workspace` executed **zero** tests.
+   - The unresolved modules also *hid* two more errors, which appear only once
+     the files are found: `failure_tests.rs:76` (E0308) and the
+     `authorized_sessions` test (a future that is not `Send`).
+   - Every Warden, session and Prism commit in that window was written against
+     a library that did not build.
+
+   At the repaired `2d8928fe`, fmt, check and clippy exit 0 (re-verified
+   here). But the tests are not green:
+   - `fgdb-cli`: 16 failures (`fgdb-up706`);
+   - `authorized_sessions` is still excluded pending
+     `fgdb-authorized-cursor-send-qbfn1`;
+   - one top-k test asserts grammar the parser rejects
+     (`fgdb-topk-with-where-grammar-3jx89`).
+
+   There is still no verified green tree since 2026-09-08.
+3. **What moved is real, but it has the wrong shape for the gates.**
+   - Warden is now on a product path: 12 `*_authorized` methods mask hidden data
+     *before* evaluation. But the path is opt-in beside ~240 unguarded public
+     methods, writes are not authorized, and the audit digest is still
+     `[0; 32]`.
+   - By code reading, the path also leaks, and a comment in the code admits
+     it (`session.rs:40-41`). Hidden records are charged work before the scope
+     check, and `MaxWork` is holder-attenuable. So a token holder can count data
+     they cannot see. No test has executed the attack yet; `fgdb-2qm4o` would.
+   - Prism's compressed kernels are reachable now, but each call re-reads and
+     re-seals the whole partition history from disk.
+   - The largest growth (+8.5k lines in fgdb-order/fgdb-repl) is W11/G3
+     multi-member Raft over test doubles. The W2 quorum-one prerequisite it sits
+     on has not started.
+4. **Durable ingest is still ~34 edges/s at HEAD.** This is re-measured today
+   in a release build with fsync on, on the real two-fsync path, on a
+   loaded machine; details are in finding 5. The per-commit path also clones
+   state proportional to the whole history on every commit, which two
+   independent code audits confirmed. Measured without disk, per-commit cost grows almost linearly with history (Theil–Sen log-log slope **0.86**), point reads grow from 17 µs to 37 ms by 64k edges, and stored bytes grow quadratically because every commit rewrites a root listing every block ever written (`fgdb-d5vo4`).
+5. **Verification is frozen at the 2026-09-07 frontier for the third day.**
+   - Invariants: 8 of 28 clauses live. Checker index: 74 of 120 rows. Proof
+     lanes: 1 of 10 (a toy Lean chain). TLA+ specs: 0.
+   - `fgdb-reference`: no commit for 41 days. `fgdb-sim`: 0 commits since
+     2026-09-22.
+   - FG-INV-20 cannot be promoted by the new Warden path, because its owner
+     crate (`fgdb-secure-view`) does not exist.
+6. **The tracker and the status docs disagree with the code.**
+   - Every one of the 12 beads the writing stream cites has 3–8 open blockers.
+     None is in `br ready`.
+   - `IMPLEMENTATION_STATUS.md` (rewritten today in `1207516b`) announces the
+     closure of `fgdb-w4-g1-txn-core-qpmg`. That bead is open, reopened
+     yesterday as a close-pump with 13 open blockers.
+   - `fgdb-red-head-0922-574u6` was closed on fmt/check/clippy alone. The test
+     census and proof bundle it required were never produced, and the tree it
+     certified went red 83 minutes later.
+
+Vision delivery: **1 of 20** checklist rows is WORKING (row 18, dependency and
+unsafe discipline, which is a static property). No behavioural row could be
+WORKING at `1a1cb2fe`, because nothing that exercises behaviour built. At
+`2d8928fe` the tree builds, but the test suite is not green and no proof bundle
+exists. No gate (G0,
+Genesis, G1–G4) has passed.
+
+### Evidence and reproducibility
+
+All measurements come from `git clone --local` roots pinned at `1a1cb2fe`,
+with private `CARGO_TARGET_DIR`s, `RCH_CARGO_WRAPPER_BYPASS=1`, the pinned
+`nightly-2026-08-31`, and `--locked`. `scripts/check.sh` and `local_proof.sh`
+were **not** run:
+- the compile stage is red, so no complete verdict could be green;
+- check.sh takes the shared landing lease;
+- the host was saturated by other projects' builds (load 43–163 during the
+  pass).
+
+| Check (exit code is the verdict) | Result |
+|---|---|
+| `cargo fmt --all --check` | **exit 1** — 70 files / 1,171 hunks (fgdb-repl 22, fgdb-chronicle 12, fgdb-gql 9, fgdb 8, fgdb-strata 7, fgdb-order 6, fgdb-prism 6); rustfmt also cannot resolve `mod analytics` |
+| `cargo check --workspace --all-targets --keep-going --locked` | **exit 101** — `fgdb` (lib) 2 errors: E0583 ×2, `query_authorized.rs:26-27`. `fgdb` (lib test) 6: the E0583s, plus E0277+E0599 at `query_prism_source_tests.rs:110` (from `7a737423`) and E0373 ×2 at `write_txn_parts/edge_reads.rs:326` (from `35f04918`). `fgdb-gql` (lib test) 1: E0308 at `set_ops/execute/page/topk/tests.rs:207` (from `c060cfd5`). |
+| `cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings` | **exit 101** — the above plus `await_holding_refcell_ref` (`fgdb-repl/tests/available_writes.rs:165`), `items_after_test_module` (`fgdb-strata/src/tiered/sealed/mod.rs:470`) and `duplicate_mod` (a cascade of the E0583s) |
+| `cargo test --workspace --no-fail-fast --locked` | **exit 101, zero tests executed** |
+| Second pass: copy the module files to the paths rustc resolves, plus 3 test-only one-line patches (census clone only) | `check --all-targets` **exit 101**. The library now builds. Two more errors had been masked: E0308 `failure_tests.rs:76` (lib test), and `authorized_sessions` (future not `Send`, `streams.rs:56`). |
+| Third pass: one more test-only patch (`failure_tests.rs:76`); exclude only `authorized_sessions` | **Bounded census.** The full 798-target census was not run: the disk was 96% full. Scope: fgdb-cli; all targets of fgdb-warden, order, repl, prism and gql; the fgdb lib; 13 fgdb integration targets; examples. Result: **174 binaries, 2,538 passed, 30 failed, 1 hung.** The hang is `prism_cooperative`: more than 10 min at ~6% CPU, test thread in a sleep-poll, stopped. The 30 failures break down as: 16 fgdb-cli (2 frozen-contract drifts + 14 on the removed interface; `fgdb-up706`); 7 from one pipeline-aggregate `IntegerOperand` grammar regression; 3 stale expectations after behaviour changes (COLLECT ×2, undirected Prism ×1); 2 `WITH … WHERE` grammar (`…-3jx89`); 1 repl seed-recovery auth-reset; 1 since fixed by `f1c3776c`. `fgdb-8p67r` owns the 11 unowned failures and the hang. Of note: of the ~26k lines the toolchain-less stream added, the tests in these crates mostly **pass** on first compile — e.g. Warden `security` 33/33, repl `live_download` 38/38. |
+| Growth probe: `fgdb-bench`'s own `load_model_durably`, release build, real fsync, 64-edge commits, preferential attachment (census clone example `growth_probe`) | 3,000 vertices / 8,994 edges / 141 commits: **34 edges/s**. Commit p50 is 10.9 s over commits 0–14 and 4.5 s over 14–28, then flat at 0.24–0.32 s. Same host: 4 KiB write+fsync p50 **185 ms**, dir fsync p50 97 ms (≈100× a healthy NVMe; disk 96% full), so this absolute number is environment-dominated. A 20,000-vertex run was stopped at 82 commits for the same reason. **In-memory** (`open_memory`, no disk), 1,000 commits × 64 edges: commit p50 16 ms (commits 0–100) → 108 ms (400–500) → 206 ms (900–1000), Theil–Sen log-log slope **0.864**; 471 edges/s with no disk at all; point read `neighbours(VId(1))` 17 µs → 37,462 µs; RSS 8 MB → 924 MB. On disk, the largest object per tenth of commits (the root) grows 14,494 B → 155,326 B, and bytes written per tenth grow 195 KB → 2,315 KB at constant edges per tenth. |
+| Repaired tip `2d8928fe` (another session's repair, re-verified in a private clone): fmt / check `--all-targets --keep-going` / clippy `-D warnings` | **exit 0 / 0 / 0** — the compile red is gone. Tests at this SHA were not run: disk headroom, and see the census rows. |
+| `bash scripts/merge_train.sh audit --since b36d556a` | **exit 1**: proven=0, unproven=51, violations=45 |
+| GitHub `repos/…/events` | `staging` CreateEvent 2026-09-22T20:18:15Z; DeleteEvent 2026-09-23T01:15:26Z (actor `Dicklesworthstone`). `git ls-remote`: only `main` and `master`. |
+
+The census patches changed no assertion. The patch file, logs and scripts are
+under this session's scratchpad `census/`. The main worktree was never
+modified.
+
+Commit-stream provenance, `ec7be218..1a1cb2fe`: 80 commits (77 non-merge,
+3 merges).
+- `35050222+Dicklesworthstone@users.noreply.github.com` (toolchain-less): 52
+  commits. 44 of them came after the staging ruling. They added +25,923 /
+  −1,208 lines under `crates/` and `tools/`, 60% of it in test files; none of
+  those tests has been compiled.
+- `jeff@jeffreyemanuel.com` (local swarm): 25, including the two Aug-23/24
+  red-proof probes a branch sync pulled in, and their reverts.
+
+Six independent read-only auditors covered the vision rows in parallel. Their
+citations were spot-checked against the tree, and one of my own census errors
+was caught this way: a grep missed the `[dependencies.fgdb-x]` table spelling
+and reported three false orphans.
+
+### Vision checklist — 2026-09-23
+
+Only the rows whose evidence changed get a new line. The rest are recorded as
+unchanged, with the auditor's confirmation. Status words follow the 2026-09-22
+vocabulary.
+
+| # | Promise | 09-22 | 09-23 | What changed, with evidence |
+|---|---|---|---|---|
+| 1 | Embedded open, sessions, typed preparation, transactions, streaming rows | PARTIAL, wide | **PARTIAL; HEAD does not compile** | New: `AuthorizedReadSession` (pins a read view; prepare/execute/batch ≤32; vertex-root streaming), `Database::open_memory`. The session exists only with a Warden capability and is read-only. Its types are not re-exported (query.rs:15 private module). Rows are `Vec<GraphAggregateValue>` with no typed accessors. Everything is still `async` with caller-threaded `Cx`. `Database` has 259 `pub fn`. |
+| 3 | `fgdb` CLI, robot NDJSON, installers, Python | PARTIAL + duplicate binary | **PARTIAL + fold residue** | One `[[bin]] fgdb` now (crates/fgdb-cli), `{"v":1,"event":…}` envelope. But `compact` and `import-csv` are in help, ROBOT_SCHEMA and the README, yet not dispatched (main.rs:573-655, exit 2). Both frozen robot-schema contract tests drift from ROBOT_SCHEMA. 16 tests drive the removed `init --keys-file` interface. Legacy modules are dead. fgdb-up706. |
+| 6 | Strata tiers, compressed scans, larger-than-memory | PARTIAL; tiered NOT INTEGRATED | **NOT INTEGRATED; new O(history) commit work** | Only `tiered::sealed` gained a consumer, and only for Prism, as a temporary in-RAM image rebuilt per call. Reopen still decodes everything twice (lib.rs:4770-4797). No read uses ExtentBuffer or MemoryPool. Point reads still collapse all history (root.rs:907). Newly found: each commit clones `delta_index` (all history), the whole `BlockWriter` twice (every sealed block's bytes), `versions`, and deep-copies the snapshot via `Arc::make_mut` while a view is pinned (lib.rs:3410-3482, 3645, 3712). It also rewrites a root listing every block (48 B each, ceiling 2^20 blocks, root.rs:72-75). |
+| 12 | Prism: fnx catalog in queries, zero-copy, CGSE witnesses | PARTIAL + deviation | **PARTIAL; compressed path reachable but rebuilt per call** | `call_fnx_sealed` and cooperative BFS/PageRank are reachable. 8 native procedures; 0 execute an fnx algorithm (fnx is the trait plus a `cfg(test)` oracle; pin unchanged). No GQL `CALL`. No certificate fold (the authorized path drops the certificate). Each sealed call re-reads and authenticates the entire partition history, compacts it, and builds and encodes an Elias-Fano image; it is refused beyond 1M incidences including history. |
+| 13 | Beacon: indexes, `hybrid.search` | PARTIAL (property index only) | **unchanged; orphan growing** | `fgdb-beacon` still has zero dependents. `ae0aa737` (after the pinned SHA) adds hybrid fusion to the orphan. |
+| 14 | Warden: caveats as planner predicates before expansion | NOT INTEGRATED | **PARTIAL (opt-in side API; leaks counts)** | The *_authorized path admits only visible records into private tables before the evaluator runs (query_authorized.rs:175-197); differential tests exist. **But** the ~240 other public read methods run with no capability. Writes are ungated. `authorization_decision_digest = [0;32]` (lib.rs:4653). No predicate pushdown: every query leaf rescans the visible graph. Work is charged before the scope check and `MaxWork` is holder-attenuable, so hidden records can be counted (session.rs:40-41 admits it); fgdb-37a3c. EXPLAIN and certified replay are refused on this path. |
+| 16 | Aegis: Raft markers, bulk plane, seeding, backup/restore | PARTIAL models, NOT INTEGRATED | **NOT INTEGRATED; +8.5k lines of G3 work over test doubles** | fgdb-order and fgdb-repl changed by +8,481/−456 (76% test lines, 326 `#[test]`s never compiled). Every seam has only test-model implementations. `PersistentState` is in-memory with no codec; `RootPublicationEvidence` is forgeable (all-pub fields). No seam takes `&Cx`. No product consumer, no transport, no disk. The W2 quorum-one prerequisite (0a90) has not started: the commit path takes its sequence from the local marker chain (chronicle/src/commit.rs:835-862). No backup/restore. |
+| 18 | Closed dependency universe, forbidden unsafe, ledgered islands | WORKING, first-party | **WORKING; transitive bans added** | `351decfa`: `deny.toml` bans doctrine-#1 crates transitively (13 entries incl. `serde`, wrapper allowlists). 7 unsafe sites = 7 ledger rows (the 8th grep hit, `unsafe fn deallocate`, sits inside the ledgered `unsafe impl Allocator`). |
+| 19 | Lab, oracle, fault campaigns, formal anchors, live invariants | STALLED | **STALLED (day 3)** | Registries unchanged: invariants.toml last touched 09-07, proof_lanes.toml 07-27. fgdb-reference frozen 41 days, with no GQL evaluator; its 92 consumers are all in fgdb-sim, and 77 use the legacy BoundPlan API. No post-09-19 feature has oracle coverage. 0 sim commits. |
+| 20 | Published §17 performance | MEASURED FAILING (stale) | **MEASURED FAILING (re-measured)** | 34 edges/s durable ingest at HEAD (release, fsync on, loaded box) against ≥40M edges/s bulk and ≥2M edges/s transactional. Steady-state commit p50 0.24–0.32 s per 64 edges. Without disk, per-commit cost grows with slope 0.864 against history, point reads grow 17 µs → 37 ms by 64k edges (gate: p99 < 15 µs), and stored bytes grow quadratically (the root is rewritten whole each commit) — `fgdb-d5vo4`. The bench's shipped "ingest" shape is 7 commits (150 vertices), too small to see growth. No baseline is committed; every event still says `empirical_gate_activated=false`. |
+
+Unchanged, confirmed by the auditors at `1a1cb2fe`:
+- Row 2 (server and protocols: `fgdb-protocol` has zero dependents; no `fgdbd`).
+- Row 4 (GQL surface). The grammar, the dispatcher (the seven-parser race, `query_explain.rs:78-236`) and `BoundPlan` export are byte-identical. Seven tokenizers disagree on comments, quotes and floats. The README quick example runs **4 of 11** statements: 2 as written, 2 only without the `;`. 2 more need other APIs and edits, and 5 are refused.
+- Row 5 (Chronicle B1). `BranchId(1)` is a constant (lib.rs:236). BranchManifest is "DELIBERATELY ABSENT" (chronicle/src/lib.rs:28). The compaction floor is `CommitSeq(0)`. The new multi-block RaptorQ recovery is reachable only from the replication pull path.
+- Row 7 (Loom). 27 MATCH-only GLA variants. FreeJoin is unreachable from labeled MATCH (topology.rs:51-120). No cost model, statistics, vectorization or threads. The new top-k, finite-page and maintained-join code is more `set_ops` side-engine, not GLA.
+- Row 8 (Ripple). About 677 lines of join maintenance were added. Still not durable; no MATERIALIZED VIEW; no `FixpointSpec`.
+- Row 9 (transactions). The single-writer lease plus backward OCC is unchanged. Any edge-reading GQL query sets a whole-graph flag (gql_overlay_graph.rs:170-174).
+- Row 10 (replay). Template digest only; no ReplayManifest.
+- Row 11 (decision cards). Zero emission outside the sim; `policy_epoch` is hard-coded to 1.
+- Rows 15 and 17 (agent-native; system graph).
+
+### Six structural findings from this pass
+
+#### 1. A landing rule in prose cannot bind a writer that does not read it
+
+The 2026-09-22 bridge made step 0 an owner decision, and the owner decided:
+land through `staging` and a verified merge train. The mechanism was built,
+self-tested (7 scenarios, 4 of 4 planted defects caught) and documented in
+AGENTS.md. It then had no effect at all:
+
+- The writing stream never pushed to `staging`.
+- The branch was deleted on GitHub five hours after creation.
+- 45 toolchain-less commits reached `main` directly; the repo's own audit
+  names each one.
+
+The only enforcement point that sees every push to `main` is GitHub itself.
+A ruleset on `main` requiring a status that only the merge train posts, with
+no bypass (every environment pushes as the same account), turns the ruling
+from etiquette into a property. That is `fgdb-4bpbn`, and it is an owner
+decision: it also constrains the owner's own direct pushes, which is the
+point.
+
+The train must also be workable at the stream's actual rate: about one
+commit every 2–3 minutes against a 35-minute full proof.
+- A fast Stage-1 gate runs first.
+- A red batch is bisected to its first bad commit.
+- The proven good prefix is promoted, and only the suffix is bounced, with its
+  exact FAIL lines (`fgdb-anmvu`).
+- A toolchain-free Python layout precheck (`fgdb-ld8x2`) would have caught
+  today's E0583 without cargo. That environment already runs Python.
+
+#### 2. Compile errors mask compile errors
+
+Today's red is a chain. The unresolved modules (E0583) kept rustc from
+type-checking their contents. Once the files were findable, a second layer
+appeared (E0308 in `failure_tests.rs`, and a non-`Send` future in
+`authorized_sessions`). So "one error left" at HEAD is never a measurement of
+how far the tree is from green, and a toolchain-less author cannot see the
+layers at all.
+
+The `#[path]` trap is also general. 10 files in the workspace are loaded by
+`#[path]` *and* declare child modules. Each compiles only while its children
+sit in the parent's directory.
+
+#### 3. Warden: real progress, the wrong shape for G1
+
+The new path is careful work. Hidden labels, relations and properties never
+reach the evaluator, and there are differential tests against a database
+with the hidden data physically removed. But G1 requires "embedded authorized
+path" with `fgdb-secure-view` as "the sole authorized storage/permit facade"
+(plan §18.1, §19), and it names "post-filter authorization" a gate failure.
+
+An opt-in API beside ~240 unguarded methods is not that facade. Neither is a
+full-scan admission whose resource accounting counts hidden records. The
+count channel is exact and cheap to exploit: binary-search the `MaxWork`
+attenuation. It is exactly the observation FG-INV-20 forbids. Filed as
+`fgdb-37a3c`, with the metamorphic law `fgdb-2qm4o`, which covers every
+observable including resource vectors and refusal thresholds. The route to
+G1 is `fgdb-w4-secure-view-v87`, which now depends on it.
+
+#### 4. The largest growth is the furthest from the critical path
+
+- **Where the code went.** Of ~26k lines added by the writing stream, the
+  single largest block (+8.5k) is W11 multi-member Raft: pre-vote, pipelined
+  append windows, leadership handoff, bonded seeding.
+- **Where the plan puts it.** The plan proves that at G3. It builds on W2
+  quorum-one Raft, which must order the local commit path first (`0a90`, open
+  and untouched).
+- **What it rests on.** Every seam is a trait whose only implementations are
+  test models, and the persistent state has no codec.
+- **What happens when W2 lands.** The seams will have to be reworked against
+  the real `CommitCoordinator` sequence allocation.
+- **Why the tracker didn't stop it.** The tracker knows all of this; its
+  readiness computation says so. Nothing consumes it (`fgdb-d8f52`).
+
+#### 5. The commit path: measured slow, and structurally O(history)
+
+Re-measured at HEAD, in a release build with fsync on, through the bench's own
+durable loader: **34 edges/s**. The per-commit cost is:
+- **I/O:** 13 + N fsyncs and N + 4 written objects. N is the new
+  block/patch objects, each fsynced and fully read back
+  (strata/src/store.rs:921-984, chronicle/src/commit.rs:974-1058).
+- **In-memory work proportional to the entire history:** four deep clones, the
+  snapshot copy-on-write while a view is pinned, and the whole-root rewrite.
+
+Measured, not inferred. The in-memory probe, with no disk and no fsync, shows commit p50 rising **16 ms → 206 ms** over 1,000 commits (robust log-log slope **0.864**), so total ingest cost is quadratic in history, and throughput is 471 edges/s *with no disk at all*. The point read `neighbours(VId(1))` rises **17 µs → 37 ms** by 64k edges (the §17 gate is p99 < 15 µs); `merge_neighbours` collapses every block's history (`fgdb-strata/src/root.rs:907`). On disk, the root grows linearly (14 KB → 155 KB over 141 commits; about 56 B per block ever published), and bytes written per commit grow linearly with it. With the compaction floor at `CommitSeq(0)`, stored bytes are therefore **quadratic**. Extrapolated (not measured): about 170 GB of retained roots per million edges at this commit size, and the root's 2^20-block ceiling is reached at roughly 42k commits.
+
+None of the four levers in yesterday's bridge (drain windows, object packing,
+sealed-run bulk load, group commit) removes the in-memory O(history) terms.
+They need their own bead, `fgdb-d5vo4`, and a regression lock that fits the
+growth exponent, so the property is gated rather than asserted.
+
+#### 6. Tracker and status-doc drift has become a pattern
+
+- The writing stream cites only blocked beads.
+- `IMPLEMENTATION_STATUS.md` announces a milestone closure that the tracker
+  reversed.
+- `fgdb-red-head-0922-574u6` closed on 3 of its 5 acceptance items. This
+  pass annotated it and carried the rest into `fgdb-7rqf3`.
+- `fgdb-boundplan-gla-lowering-seam-r2kd` is closed while its blocker
+  `fgdb-5vp9` (binary FreeJoin) is open.
+- `fgdb-deny-transitive-bans-wzw0x` stays open after its commit landed.
+
+Two new claims-lint laws (`fgdb-g0vnr`) make the checkable half mechanical:
+- README CLI verbs must be dispatched;
+- a status-doc milestone closure must match the tracker.
+
+A generated vision scorecard (`fgdb-faqwc`) computes each row from
+reachability, live invariant clauses and named e2e witnesses. Future
+reality checks would then diff a computed table instead of re-arguing it.
+
+### The five reality-check questions
+
+1. **What works?**
+   - **At `1a1cb2fe`:** nothing that needs the `fgdb` library, because it
+     did not compile.
+   - **At the repaired `2d8928fe`:** the workspace builds, and fmt, check and
+     clippy are green. The test suite is not green (see the census rows).
+   - **At the last compiling tree** (between `4d0e5dd8`, where fmt, check and
+     clippy were green on 09-22 at 16:24, and `1c45104a`), everything yesterday's
+     section lists: the embedded durable engine, broad GQL read/write, typed
+     parameters, transactions with savepoints, time travel by sequence,
+     certificate replay, session-local incremental views, embedded Prism calls,
+     and the robot CLI.
+   - **Added since, source only, not yet compiled:** a capability-scoped
+     authorized read path and session, compressed Prism kernels, and W11 Raft
+     kernels over test doubles. The third-pass census below shows how much of
+     that code actually passes once the tree builds.
+2. **What does not work, or is not implemented?**
+   - Building the product, which is today's P0.
+   - Mandatory authorization, including writes and a real audit digest.
+   - Branches, retention and GC; SSI witnesses; durable views and
+     subscriptions; the optimizer and Loom execution; larger-than-memory
+     reads.
+   - fnx-executed analytics; the server and protocols; replication on any
+     real transport; decision cards; the system graph.
+   - Every §17 number.
+3. **What blocks us?**
+   - (a) An unenforced landing rule, and today its direct result: a library
+     that does not build.
+   - (b) No integration gate. Orphans are growing: Beacon, Repl, Protocol,
+     Policy, the unsafe SIMD/VFS islands.
+   - (c) A commit path that is slow per object and does O(history) in-memory
+     work per commit.
+   - (d) A tracker whose readiness nobody consumes.
+   - (e) Stalled invariant promotion and an oracle 41 days behind.
+4. **Would completing every open and in-progress bead close the gap?**
+   - **No, and for a new reason.** Coverage by feature is broad, and this pass
+     added owners for the uncovered seams. But the dominant writer does not
+     work in dependency order, and no mechanism makes it.
+   - Completing every bead *as the stream picks them* builds W11 on an absent
+     W2, a Warden path beside an absent secure view, and Prism kernels without
+     fnx. Each lands with its own tests and leaves its row NOT INTEGRATED.
+   - With `fgdb-4bpbn` and `fgdb-anmvu` in place, landings are verified. With
+     `fgdb-d8f52` and an owner freeze on W11, work also follows readiness.
+     Under those two conditions the existing graph, plus this pass's beads,
+     is intended to reach the vision.
+5. **Which goals had no bead?** All filed by this pass:
+   - enforcement of the landing rule on GitHub (`fgdb-4bpbn`), a bisecting
+     train (`fgdb-anmvu`), and a toolchain-free layout precheck (`fgdb-ld8x2`);
+   - today's red HEAD (`fgdb-7rqf3`);
+   - the Warden count channel and its noninterference law (`fgdb-37a3c`,
+     `fgdb-2qm4o`);
+   - CLI fold residue (`fgdb-up706`), README/status truth-up with two lint laws
+     (`fgdb-g0vnr`), and the AGENTS.md RULE 0.5 dangling reference
+     (`fgdb-c7w6g`);
+   - steering from readiness (`fgdb-d8f52`) and a computed vision scorecard
+     (`fgdb-faqwc`);
+   - the O(history) commit-path clones and their growth-law lock
+     (`fgdb-d5vo4`, `fgdb-gjgmc`).
+
+### Dependency-ordered bridge (revised in place from 2026-09-22)
+
+Yesterday's steps 1–6 stand. Two changes, in order of vision impact: step 0
+becomes *enforced* rather than ruled, and the commit path gains a term the four
+throughput levers do not touch.
+
+**Step 0 — Make the verified stream a property (owner decision; blocks
+everything).**
+- `fgdb-4bpbn`: a GitHub ruleset on `main` requiring the status
+  `fgdb/local-proof`, with no bypass. `staging` is deletion-protected. The
+  merge train posts the status only after `local_proof.sh` passes.
+- `fgdb-anmvu`: a Stage-1 fast gate, then bisect-on-red, then promote the
+  proven prefix and bounce the suffix with its exact FAIL lines.
+- `fgdb-ld8x2`: a Python layout precheck the toolchain-less environment runs
+  before publishing.
+- Acceptance:
+  - a direct push of an unproven commit to `main` is refused by GitHub
+    (recorded transcript);
+  - `merge_train.sh audit` exits 0 for a week.
+
+**Step 1 — Restore green, and prove it (hours).**
+- `fgdb-7rqf3`: fix the `#[path]` layout, preferably as an ordinary
+  directory module; the four test errors; the RefCell-across-await and
+  items-after-test-module properly; and fmt ×70.
+- Then produce the **full test census** and one `local_proof.sh` pass
+  bundle. That would be the first verified green since 2026-09-08, and that
+  earlier proof's commit is not even an ancestor of `main`.
+
+**Step 2 — Integration before breadth.**
+- `fgdb-consumer-census-law-5pjdc`: compute reachability with
+  `cargo metadata`.
+- `fgdb-faqwc`: the scorecard.
+- Then burn down the orphans in the plan's order:
+  1. **Warden into the one facade.** `fgdb-w4-secure-view-v87` now depends on
+     `fgdb-37a3c`; its law is `fgdb-2qm4o`. Scope before charge. Every public
+     read goes through the facade, and writes too. The digest is stamped from
+     the real decision. Then promote FG-INV-20's degree clause.
+  2. **Tiered storage onto the read path** (`fgdb-w3-buffer-g2v`,
+     `fgdb-w3-tier-r-0tj`).
+  3. **A minimal `fgdbd`** only after 1 and 2.
+  4. **Raft as the W2 quorum-one order** (`fgdb-w2-order-raft-0a90`) before
+     any further W11 surface. The owner decides on a W11 freeze under
+     `fgdb-d8f52`.
+
+**Step 3 — The commit path, attacked term by term.** The cost model is now
+`c_capsule + k·(c_fsync + c_readback) + c_dir + c_root(history) + c_clone(history)`.
+- `fgdb-d5vo4` removes `c_clone(history)`: no deep clones of history-sized
+  state per commit, and a root that is not rewritten in full. Its lock,
+  `fgdb-gjgmc`, gates the fitted growth exponent.
+- Then, as before:
+  - drain windows (`fgdb-tier-d-drain-off-commit-path-tw7fo`) for
+    `c_dir`, `c_root` and latency;
+  - `PackedObjectGroup` (`fgdb-w2-object-packing-d31`) for per-object
+    `c_fsync`;
+  - sealed-run bulk load (`fgdb-w3-bulk-staging-tta`), which is what the
+    40M edges/s gate names;
+  - group commit (`fgdb-w2-group-commit-8zwd`).
+- Every lever is measured against the incumbent in the same invocation (RULE
+  0.5), with the growth probe as the long-history witness.
+
+**Step 4 — One language path.** Unchanged from yesterday: one lexer/grammar
+replaces the seven-parser race; retire or lower `BoundPlan`; GLA covers
+aggregates, sets and joins; then the optimizer. `fgdb-reference` grows a GQL
+evaluator before more syntax lands (`fgdb-verif-reference-3kkp`).
+
+**Step 5 — Resume the plan's gate path.** Unchanged: G0 catalog roots in
+parallel, then Genesis and G1 composing steps 1–4.
+
+**Step 6 — Truth-up.** `fgdb-g0vnr` covers the README (CLI verbs, sessions,
+the performance-method sentence, the "synchronous" FAQ, the "Honest framing"
+✓ column), `IMPLEMENTATION_STATUS.md` (the `qpmg` closure claim, the deleted
+`bin/fgdb.rs` path, the `9adf484d` proof), and the regenerated
+`docs/WORKSPACE_TOPOLOGY.md`. `fgdb-c7w6g` covers RULE 0.5.
+
+### Ambition rounds applied to this bridge (in place)
+
+**Round 1 — Make the remote writer's missing compiler a latency, not a
+blindness.**
+- Gating alone (`fgdb-4bpbn`) turns "red main" into "bounced batches". The
+  author still cannot see *why* a batch bounced.
+- The local proving host has the pinned toolchain. `fgdb-maj6s` makes it a
+  compile oracle: a push to `probe/*` gets a Stage-1 verdict as a GitHub status,
+  plus FAIL-line notes the writer can read without a toolchain, within minutes.
+- It shares one runner with the bisecting train (`fgdb-anmvu`).
+- Together with the Python layout precheck (`fgdb-ld8x2`), broken work stops
+  *arriving* instead of being bounced.
+
+**Round 2 — Quantify the train before building it, and gate growth instead of
+measuring it once.**
+- **Queueing model.** Arrival is λ ≈ 0.4 commits/min against a proof of
+  S ≈ 35 min, so a batch holds B ≈ 14 commits. With an observed compile-break
+  rate p ≳ 0.1, an all-or-nothing train is red 1 − 0.9¹⁴ ≈ **77%** of the time
+  on compile breaks alone. Formatter drift pushes that toward 100%.
+- **Bisection.** Cost falls to about 1 + 0.77·⌈log₂14⌉ ≈ 4 warm Stage-1 runs
+  per batch, plus one proof, which is sustainable at the arrival rate. The
+  arithmetic is recorded on `fgdb-anmvu`, with an optional owner policy: let
+  the train apply canonical `cargo fmt` as an attributed commit.
+- **Growth laws.** The growth defect was found by *fitting an exponent*, not
+  by a threshold. `fgdb-gjgmc` makes that a permanent gate: a Theil–Sen slope
+  of ln(metric) against ln(history), with a seeded bootstrap confidence
+  interval, failing on the interval's upper bound.
+  - It covers four metrics: commit latency, point reads, stored bytes per
+    commit, and resident bytes per edge.
+  - The robust estimator is what makes it usable on this shared host: load
+    ran 43–163 during the pass, and fsync was about 100× normal.
+
+**Round 3 — Make the contracts executable, and the unsafe states
+unexpressible.**
+- **The README as a ratchet** (`fgdb-7eayf`). Every gql, bash and rust block
+  runs against a fresh database. Per-statement outcomes are counted, and the
+  counts may only go up. That turns the README's declared target-state tense
+  into a measurable distance (4/11 today).
+- **Noninterference as a 2-safety hyperproperty.** `fgdb-2qm4o` compares the
+  whole observation trace, including where refusals can happen, between G and
+  G-with-hidden-data-removed, not just final results.
+- **Typestate for the secure view** (note on `v87`). Every read takes a
+  `ReadAccess` that only an `Authority` can mint, so "opt-in authorization"
+  becomes a compile error. The count of unguarded public read methods is a
+  law with target 0.
+- **One naive GQL evaluator in `fgdb-reference`**, plus grammar-driven
+  differential fuzzing (note on `3kkp`). This replaces 92 hand-written
+  per-test oracles, and it covers every future feature automatically.
+
+### Refinement passes on this revision
+
+Five passes, through `br`, checked with `br dep cycles` and `bv`:
+
+1. **Sense and scope.**
+   - The patched census found a second layer of compile errors, so
+     `fgdb-7rqf3` was amended with the masked errors.
+   - `fgdb-d5vo4` went from P0 to P1. P0 is kept for stop-the-line items that
+     block every agent within hours; the growth fix is weeks of structural work.
+   - Two edges were removed because they hid startable work: steering →
+     bisecting train, and compile oracle → bisecting train. The two share one
+     runner, and whichever lands first builds it. So did one from scorecard →
+     README contract.
+2. **Tests and logging.**
+   - Every implementation bead has a companion test bead, or a test plan with
+     NDJSON logging and a named mutation control that must turn it red:
+     `fgdb-37a3c` → `fgdb-2qm4o`, `fgdb-d5vo4` → `fgdb-gjgmc`,
+     `fgdb-4bpbn` / `fgdb-anmvu` / `fgdb-maj6s` → merge-train selftest
+     scenarios, `fgdb-g0vnr` → planted README verb, `fgdb-ld8x2` → the exact
+     1c45104a shape.
+   - Test beads depend on their fixes, not the reverse. One inverted edge was
+     caught and reversed.
+3. **Coordination.**
+   - Mid-pass, another session repaired the compile red: `a51a6edd`,
+     `f1c3776c`, `ea250503` and `2d8928fe`, citing
+     `fgdb-red-head-0922-574u6`. It also filed `fgdb-authorized-cursor-send-qbfn1`
+     (the non-`Send` cursor) and `fgdb-topk-with-where-grammar-3jx89` (a
+     never-compiled test asserting grammar the parser rejects).
+   - `fgdb-7rqf3` was re-scoped to what remains, *proving* HEAD green, and now
+     depends on those two beads, `fgdb-up706`, and the census's unowned-failure
+     bead `fgdb-8p67r`, instead of duplicating the repair.
+4. **Independent verification of the repair.** In a private clone of
+   `2d8928fe`: `fmt --check`, `check --workspace --all-targets --keep-going`
+   and `clippy -D warnings` all **exit 0**. The claim holds for those three
+   stages. Tests at that SHA are unmeasured, and the CLI failures below are
+   outside the repair's diff.
+5. **Graph validation and convergence.**
+   - `br dep cycles`: none.
+   - `br ready` went from 9 on 09-22 to 24. `4bpbn` and the step-2/3 beads
+     are ready. `7rqf3` is deliberately blocked on the four beads that stand
+     between HEAD and a green census (`up706`, `qbfn1`, `3jx89`, `8p67r`), so
+     that "proven green" cannot be closed early.
+   - A final read-through against the checklist found no row without an owner,
+     and nothing further to change.
+
+### Beads filed, re-scoped and annotated by this pass
+
+**Created:**
+
+| Bead | P | Gap |
+|---|---|---|
+| `fgdb-7rqf3` | 0 | Filed for the library-level red at `1a1cb2fe`. Re-scoped after the repair to *prove* HEAD green: a full test census plus one `local_proof.sh` pass bundle. Blocked by `fgdb-up706`, `…-qbfn1` and `…-3jx89`. |
+| `fgdb-4bpbn` | 0 | Owner decision: a GitHub ruleset on `main` requiring the merge-train status `fgdb/local-proof`, with no bypass; `staging` deletion-protected; the train posts the status. Blocks `…-kqglu`. |
+| `fgdb-anmvu` | 1 | Merge train: Stage-1 fast gate, bisect-on-red, promote the proven prefix, bounce the suffix with its FAIL lines. Blocks `…-kqglu`. |
+| `fgdb-maj6s` | 1 | Remote compile oracle: `probe/*` pushes get a Stage-1 verdict as a GitHub status plus notes. |
+| `fgdb-ld8x2` | 2 | Toolchain-free Python layout precheck: rustc-exact module resolution, the E0583 class. |
+| `fgdb-37a3c` | 1 | Warden count channel: work charged before the scope check, plus holder-attenuable `MaxWork`. Blocks `…-secure-view-v87`. |
+| `fgdb-2qm4o` | 1 | Test: FG-INV-20 noninterference hyperproperty over results, resource traces and refusal thresholds. |
+| `fgdb-d5vo4` | 1 | O(history) write path and point reads: per-commit clones, whole-root rewrite (quadratic bytes, 2^20 ceiling), whole-history read merge. |
+| `fgdb-gjgmc` | 1 | Test: growth-law locks (Theil–Sen slope with bootstrap CI) for commit cost, point reads, bytes per commit, and bytes per edge. |
+| `fgdb-up706` | 1 | CLI fold residue: `compact`/`import-csv` undispatched; contract drift; 16 failing tests measured; dead legacy modules. Blocks `…-v26vj`. |
+| `fgdb-7eayf` | 1 | The README as an executable, ratcheted contract. |
+| `fgdb-d8f52` | 1 | Steering: readiness annotation and a weekly report; owner decision on a W11 freeze. |
+| `fgdb-g0vnr` | 2 | README / IMPLEMENTATION_STATUS truth-up, plus two claims-lint laws: CLI verbs must be dispatched; status-doc closures must match the tracker. |
+| `fgdb-faqwc` | 2 | Vision scorecard computed from reachability, live clauses and witnesses. Depends on `…-5pjdc`. |
+| `fgdb-c7w6g` | 2 | AGENTS.md RULE 0.5 points at sections that do not exist (owner decision). |
+| `fgdb-8p67r` | 1 | Census: 11 unowned test failures (a pipeline-aggregate `IntegerOperand` regression ×7, stale expectations ×3, repl auth-reset ×1) and a hang in `prism_cooperative`. Blocks `…-7rqf3`. |
+
+**Annotated with measured evidence:**
+- `fgdb-red-head-0922-574u6`: closed without its census or proof; carried into `fgdb-7rqf3`.
+- `fgdb-verified-landing-queue-kqglu`: the ruling's day one, with the audit numbers.
+- `fgdb-w4-secure-view-v87`: the opt-in shape; the typestate design note.
+- `fgdb-consumer-census-law-5pjdc`: today's orphans; use `cargo metadata`; the registry's false `reciprocal_reason`.
+- `fgdb-topology-seven-crates-9n8ao`: `WORKSPACE_TOPOLOGY.md` not regenerated.
+- `fgdb-verif-reference-3kkp`: 41 days stale; the differential-fuzz design note.
+- `fgdb-w2-order-raft-0a90` and `fgdb-w11-raft-multi-aqw`: W11 surface over test doubles while W2 has not started.
+- `fgdb-epic-w8-syz`: sealed kernels reachable; per-call rebuild; no fnx execution.
+- `fgdb-deny-transitive-bans-wzw0x`: landed, still open.
+- `fgdb-commit-path-throughput-lemf` and `fgdb-tier-d-drain-off-commit-path-tw7fo`: the growth measurements.
+- `fgdb-anmvu` and `fgdb-2qm4o`: ambition-round refinements.
+
+**Owner decisions this pass cannot make:**
+- The GitHub ruleset (`fgdb-4bpbn`). It binds the owner's own pushes too.
+- Whether to freeze W11 surface until W2 quorum-one Raft lands (`fgdb-d8f52`).
+- Whether the train may apply canonical `cargo fmt` itself (`fgdb-anmvu`).
+- Where RULE 0.5's sections should live (`fgdb-c7w6g`).
+- Deleting the dead `fgdb-cli` legacy modules (RULE 1; `fgdb-up706`).
+- The standing Prism, catalog and verified-landing rulings from 09-22.
+
+### Evidence boundary
+
+What this pass did:
+- Read AGENTS.md, README.md, plan §17–§19, and this document's 09-22 section.
+- Ran six independent read-only code audits pinned to `1a1cb2fe`. One of them
+  corrected this pass's own consumer census.
+- Ran the raw cargo census at `1a1cb2fe`: unpatched, then patched in two
+  layers.
+- Re-verified the repaired `2d8928fe` for fmt, check and clippy.
+- Ran a bounded test census and three growth probes (disk ×2, memory ×1).
+- Ran the repo's own `merge_train.sh audit`, and read GitHub ref events.
+
+What it did not do:
+- Run `scripts/check.sh`, `local_proof.sh`, UBS, Miri, doctests, or the full
+  798-target test census. The host disk was 96% full (37–44 GB free) and
+  load was 20–160 from other projects, so a census of that size risked ENOSPC
+  for every agent on the machine.
+- Re-derive the per-bead acceptance of any bead the swarm closed.
+- Measure throughput on a quiet host. The absolute disk numbers are
+  environment-dominated; the growth shapes are not.
+
+Counts are as of the SHAs named. The writing stream landed at least 11
+commits during the pass.
+
+---
 
 ## Follow-through — 2026-09-22 evening
 
@@ -34,7 +626,7 @@ Measured along the way:
 - The swarm resolved the `parameterized_queries` pin with a cited cause and a
   test that runs the example (`c395d04c`).
 
-## Current delta — 2026-09-22
+## Historical delta — 2026-09-22 (superseded by 2026-09-23)
 
 Measured at `ec7be2181ddfc0f66143c7316e792a68d1fa81c3` (2026-09-22 13:22 −0400),
 the `main` HEAD when this pass started. Three commits landed during the pass
