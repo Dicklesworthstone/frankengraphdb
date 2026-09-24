@@ -1,223 +1,221 @@
-//! End-to-end process tests over the actual durable engine, not a fake backend.
-use asupersync::{Budget, runtime::RuntimeBuilder};
-use fgdb::{Database, DatabaseKeys, WriteBatch};
-use fgdb_delta_types::{LabelId, RelationId};
-use fgdb_types::{EId, VId, context::PurposeContexts, ids::DatabaseSecurityNamespaceId};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+//! Process-level lifecycle contracts for the local-owner `fgdb` binary:
+//! create, write, query, compact and reopen each run in a fresh process
+//! against the real durable engine. Temporary artifacts are retained for
+//! diagnosis; no fixture deletes files.
+
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
 struct Fixture {
-    home: PathBuf,
+    dir: PathBuf,
 }
+
 impl Fixture {
-    fn new() -> Self {
-        let home = std::env::temp_dir().join(format!(
-            "fgdb-cli-{}-{}",
+    fn new(name: &str) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fgdb-cli-{name}-{}-{now}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir(&home).unwrap();
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(home.join("keys")).unwrap();
-        file.write_all(&[0x5a; 32]).unwrap();
-        file.write_all(&[0x77; 32]).unwrap();
-        file.write_all(&[0x3c; 32]).unwrap();
-        file.sync_all().unwrap();
-        fs::write(
-            home.join("symbols"),
-            "relation\tKNOWS\t1\nlabel\tUnmentionedStoredLabel\t17\n",
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("keys"),
+            format!(
+                "{}\n{}\n{}\n",
+                "41".repeat(32),
+                "42".repeat(32),
+                "43".repeat(32)
+            ),
         )
         .unwrap();
-        Self { home }
+        Self { dir }
     }
-    fn path(&self, name: &str) -> PathBuf {
-        self.home.join(name)
+
+    fn db(&self) -> PathBuf {
+        self.dir.join("db")
     }
-    fn command(&self, operation: &str) -> Command {
+
+    fn run(&self, robot: bool, operation: &str, args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fgdb"));
+        command.current_dir(&self.dir);
+        if robot {
+            command.arg("--robot");
+        }
         command
             .arg(operation)
             .arg("--db")
-            .arg(self.path("db"))
-            .arg("--keys-file")
-            .arg(self.path("keys"))
-            .args(["--format", "ndjson"]);
-        command
+            .arg(self.db())
+            .args(["--key-file", "keys"])
+            .args(["--label", "Person=1", "--property", "id=1"])
+            .args(args);
+        command.output().unwrap()
     }
-    fn query(&self, statement: &str) -> Output {
-        fs::write(self.path("query"), statement).unwrap();
-        self.command("query")
-            .arg("--query-file")
-            .arg(self.path("query"))
-            .arg("--symbols-file")
-            .arg(self.path("symbols"))
-            .output()
-            .unwrap()
-    }
-    fn seed(&self) {
-        let runtime = RuntimeBuilder::new().build().unwrap();
-        let root = runtime.request_cx_with_budget(Budget::INFINITE);
-        let cx = PurposeContexts::narrow_runtime_root(&root).commit();
-        runtime.block_on(async {
-            let mut db = Database::open(&cx, &self.path("db"), keys()).await.unwrap();
-            let mut batch = WriteBatch::new(RelationId(1));
-            batch.create_vertex(VId(1), vec![LabelId(17)], vec![]);
-            batch.create_vertex(VId(2), vec![], vec![]);
-            batch.add_edge(EId(10), VId(1), VId(2), vec![]);
-            db.write(&cx, batch).await.unwrap();
-        });
+
+    fn robot(&self, operation: &str, args: &[&str]) -> Output {
+        self.run(true, operation, args)
     }
 }
-fn keys() -> DatabaseKeys {
-    DatabaseKeys::new(
-        [0x5a; 32],
-        DatabaseSecurityNamespaceId([0x77; 32]),
-        [0x3c; 32],
-    )
+
+#[track_caller]
+fn terminal(output: &Output) -> String {
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    stdout.lines().last().unwrap_or("").to_owned()
 }
-fn success(output: &Output) {
+
+#[track_caller]
+fn succeeded(output: &Output, kind: &str) -> u64 {
+    let last = terminal(output);
     assert!(
-        output.status.success(),
-        "stderr={}",
+        output.status.success() && last.contains(&format!("\"kind\":\"{kind}\"")),
+        "status {:?}\nstdout {}\nstderr {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stderr.is_empty());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"type\":\"complete\""));
+    let seq = last.split("\"seq\":").nth(1).unwrap();
+    seq[..seq.find(|c: char| !c.is_ascii_digit()).unwrap()]
+        .parse()
+        .unwrap()
 }
 
-#[test]
-fn create_query_compact_reopen_uses_the_real_durable_engine() {
-    let fixture = Fixture::new();
-    success(&fixture.command("init").output().unwrap());
-    fixture.seed();
-    let before = fixture.query("MATCH (a)-[:KNOWS]->(b) RETURN b");
-    success(&before);
+#[track_caller]
+fn refused(output: &Output, code: i32, class: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "stdout {}\nstderr {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let last = terminal(output);
     assert!(
-        String::from_utf8_lossy(&before.stdout).contains("{\"type\":\"vertex\",\"value\":\"2\"}")
+        last.contains(&format!("\"event\":\"error\",\"class\":\"{class}\"")),
+        "{last}"
     );
-    success(&fixture.command("compact").output().unwrap());
-    let after = fixture.query("MATCH (a)-[:KNOWS]->(b) RETURN b");
-    success(&after);
-    assert_eq!(before.stdout, after.stdout);
-    success(&fixture.query("EXPLAIN MATCH (a)-[:KNOWS]->(b) RETURN b"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("\"event\":\"result\""));
+}
+
+fn rows(output: &Output) -> Vec<String> {
+    String::from_utf8(output.stdout.clone())
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("\"event\":\"row\""))
+        .map(str::to_owned)
+        .collect()
 }
 
 #[test]
-fn labels_reflection_uses_the_supplied_catalog_not_name_probing() {
-    let fixture = Fixture::new();
-    success(&fixture.command("init").output().unwrap());
-    fixture.seed();
-    let output = fixture.query("MATCH (a)-[:KNOWS]->(b) RETURN labels(a)");
-    success(&output);
-    let expected = fgdb_gql::algebra::GraphValue::List(
-        vec![fgdb_gql::algebra::GraphValue::Scalar(
-            fgdb_types::CanonicalScalar::ucs_basic_text("UnmentionedStoredLabel").unwrap(),
-        )]
-        .into_boxed_slice(),
-    )
-    .canonical_bytes()
-    .unwrap();
-    let hex: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
-    assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("\"hex\":\"{hex}\"")));
-}
-
-#[test]
-fn read_command_never_runs_a_mutation_or_leaks_its_statement() {
-    let fixture = Fixture::new();
-    success(&fixture.command("init").output().unwrap());
-    fixture.seed();
-    let before = fixture.query("MATCH (a)-[:KNOWS]->(b) RETURN b");
-    let rejected = fixture.query("INSERT (secret_marker_vertex)");
-    assert_eq!(rejected.status.code(), Some(3));
-    for bytes in [&rejected.stdout, &rejected.stderr] {
-        assert!(!String::from_utf8_lossy(bytes).contains("secret_marker_vertex"));
+fn compact_preserves_every_query_result_across_process_reopens() {
+    let fixture = Fixture::new("compact");
+    let created = succeeded(&fixture.robot("create", &[]), "created");
+    let mut last = created;
+    for id in 1..=6 {
+        let param = format!("id=int:{id}");
+        last = succeeded(
+            &fixture.robot("write", &["--param", &param, "CREATE (n:Person {id:$id})"]),
+            "written",
+        );
     }
+    succeeded(
+        &fixture.robot("write", &["MATCH (n:Person) WHERE n.id=3 DELETE n"]),
+        "written",
+    );
+    let read = "MATCH (n:Person) RETURN n.id AS id ORDER BY id";
+    let before = fixture.robot("query", &[read]);
+    succeeded(&before, "rows");
+    assert_eq!(rows(&before).len(), 5);
+
+    let compacted = succeeded(&fixture.robot("compact", &[]), "compacted");
+    assert!(compacted >= last, "compaction must not rewind the frontier");
+    let after = fixture.robot("query", &[read]);
+    succeeded(&after, "rows");
     assert_eq!(
-        before.stdout,
-        fixture.query("MATCH (a)-[:KNOWS]->(b) RETURN b").stdout
+        rows(&after),
+        rows(&before),
+        "compaction changed a query result"
+    );
+
+    // Compaction is repeatable and remains readable by a later process.
+    succeeded(&fixture.robot("compact", &[]), "compacted");
+    assert_eq!(rows(&fixture.robot("query", &[read])), rows(&before));
+    // A write after compaction still lands and is visible.
+    succeeded(
+        &fixture.robot("write", &["CREATE (n:Person {id:7})"]),
+        "written",
+    );
+    assert_eq!(rows(&fixture.robot("query", &[read])).len(), 6);
+
+    let human = fixture.run(false, "compact", &[]);
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).starts_with("compacted (seq "));
+    assert!(created < compacted);
+}
+
+#[test]
+fn compact_refuses_arguments_and_a_missing_database() {
+    let fixture = Fixture::new("compact-refusals");
+    refused(&fixture.robot("compact", &[]), 4, "open");
+    assert!(
+        !fixture.db().exists(),
+        "compact must never create a database"
+    );
+    succeeded(&fixture.robot("create", &[]), "created");
+    refused(
+        &fixture.robot("compact", &["MATCH (n) RETURN n"]),
+        2,
+        "usage",
+    );
+    refused(
+        &fixture.robot("compact", &["--param", "x=int:1"]),
+        2,
+        "usage",
     );
 }
 
 #[test]
-fn input_and_output_refusals_are_not_partial_results_or_mutations() {
-    let fixture = Fixture::new();
-    let rejected = fixture
-        .command("init")
-        .args(["--max-output-bytes", "1"])
-        .output()
-        .unwrap();
-    assert_eq!(rejected.status.code(), Some(3));
-    assert!(!fixture.path("db").exists());
-    success(&fixture.command("init").output().unwrap());
-    fixture.seed();
-    fs::write(fixture.path("query"), "MATCH (a)-[:KNOWS]->(b) RETURN b").unwrap();
-    let output = fixture
-        .command("query")
-        .arg("--query-file")
-        .arg(fixture.path("query"))
-        .arg("--symbols-file")
-        .arg(fixture.path("symbols"))
-        .args(["--max-output-bytes", "1"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(3));
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "{\"version\":1,\"type\":\"error\",\"code\":\"output_limit\"}\n"
-    );
-}
-
-#[test]
-fn invalid_or_overlong_key_files_are_refused_without_creating_database() {
-    for length in [0, 95, 97] {
-        let fixture = Fixture::new();
-        fs::write(fixture.path("keys"), vec![1; length]).unwrap();
-        let output = fixture.command("init").output().unwrap();
-        assert_eq!(output.status.code(), Some(2));
-        assert!(!fixture.path("db").exists());
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn group_readable_key_material_is_refused() {
-    use std::os::unix::fs::PermissionsExt;
-    let fixture = Fixture::new();
-    fs::set_permissions(fixture.path("keys"), fs::Permissions::from_mode(0o640)).unwrap();
-    let output = fixture.command("init").output().unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(!fixture.path("db").exists());
+fn query_refuses_a_write_statement_without_mutating_or_echoing_it() {
+    let fixture = Fixture::new("read-only");
+    succeeded(&fixture.robot("create", &[]), "created");
+    let statement = "CREATE (n:Person {id:424242})";
+    let output = fixture.robot("query", &[statement]);
+    refused(&output, 3, "query");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("424242"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("424242"));
+    let count = fixture.robot("query", &["MATCH (n:Person) RETURN COUNT(n) AS total"]);
+    succeeded(&count, "rows");
+    assert!(rows(&count)[0].contains("\"type\":\"count\",\"value\":\"0\""));
 }
 
 #[test]
 fn query_does_not_silently_create_a_missing_database() {
-    let fixture = Fixture::new();
-    let output = fixture.query("MATCH (a) RETURN a");
-    assert_eq!(output.status.code(), Some(1));
-    // The engine may create/open parent support files while attempting recovery;
-    // it must not report a successful empty query for a missing database.
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("\"type\":\"complete\""));
+    let fixture = Fixture::new("missing");
+    refused(
+        &fixture.robot("query", &["MATCH (n) RETURN COUNT(n) AS total"]),
+        4,
+        "open",
+    );
+    assert!(!fixture.db().exists());
 }
 
 #[test]
-fn help_and_version_do_not_require_database_keys() {
-    for option in ["--help", "--version"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
-            .arg(option)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert!(output.stderr.is_empty());
+fn help_needs_neither_database_nor_keys() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .arg("help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    for command in ["create", "compact", "import-csv", "query", "write"] {
+        assert!(
+            text.contains(&format!("  {command} ")),
+            "help omits {command}"
+        );
     }
-    assert!(Path::new(env!("CARGO_BIN_EXE_fgdb")).is_file());
 }

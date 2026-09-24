@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod diff;
+mod import;
 mod load;
 mod stream;
 mod transaction;
@@ -36,7 +37,8 @@ Usage: fgdb [--robot] <command>
   compact --db <dir> --key-file <file>
   write --db <dir> --key-file <file> [bindings] [--param name=value]... <gql>
   query --db <dir> --key-file <file> [bindings] [--param name=value]... [--stream] <gql>
-  import-csv --db <dir> --key-file <file> [bindings] --input <file.csv> [--query-file <file.gql> | <gql>]
+  import-csv --db <dir> --key-file <file> [bindings] --input <file.csv|-> [--types-file <file>]
+             [--max-input-bytes N] [--max-changes N] (--query-file <file.gql|-> | <gql>)
   diff --db <dir> --key-file <file> [bindings] [--param name=value]... --before <seq> --after <seq> <gql>
   transaction --db <dir> --key-file <file> [bindings] --write <gql> --query <gql> ... [--rollback]
   replay --db <dir> --key-file <file> [bindings] [--param name=value]... --certificate <file>
@@ -69,6 +71,13 @@ It excludes invocation/error records and does not bound encoding scratch or sour
 Robot diff output uses diff_columns, signed change records, then result kind=diff.
 Revisions, weights and diff counters are decimal strings, never lossy JSON numbers.
 Only a final result AND successful exit confirm complete delivery; EOF/error is incomplete.
+import-csv binds every CSV record (header = parameter names) to the statement and
+runs the whole file as ONE atomic native program: any failure commits nothing.
+All input is read and bound before the database opens. - reads stdin (one input only).
+--types-file lines are kind<TAB>name (int64, uint64, int, text, bool, null); undeclared
+parameters keep native inference. --max-input-bytes bounds the CSV (default 16 MiB);
+--max-changes bounds effects/new vertices/new edges for the whole file (default 100000).
+compact rewrites the storage layout durably; query results are unchanged.
 transaction executes ordered --write/--query steps in one native transaction.
 Each --param belongs to the preceding step; parameter maps do not leak between steps.
 Success commits once; --rollback discards all effects and results. Errors abort before commit.
@@ -172,6 +181,7 @@ struct Options {
     rollback: bool,
     stream: bool,
     diff: diff::DiffOptions,
+    csv: import::CsvOptions,
 }
 impl Options {
     fn resolve(&self, kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
@@ -259,6 +269,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     let mut rollback = false;
     let mut stream = false;
     let mut diff = diff::DiffOptions::default();
+    let mut csv = import::CsvOptions::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg == "--stream" {
@@ -291,8 +302,13 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 {
                     diff.set(arg, value)?;
                 }
-                "--input" if command == "load" && input.is_none() => {
+                "--input" if matches!(command, "load" | "import-csv") && input.is_none() => {
                     input = Some(PathBuf::from(value))
+                }
+                "--types-file" | "--query-file" | "--max-input-bytes" | "--max-changes"
+                    if command == "import-csv" =>
+                {
+                    csv.set(arg, value)?;
                 }
                 "--checkpoint" if command == "load" && checkpoint.is_none() => {
                     checkpoint = Some(PathBuf::from(value))
@@ -312,7 +328,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 "--certificate" if command == "replay" && certificate.is_none() => {
                     certificate = Some(PathBuf::from(value));
                 }
-                "--param" if !create && command != "load" => {
+                "--param" if !create && !matches!(command, "load" | "import-csv" | "compact") => {
                     let (name, raw) = value
                         .split_once('=')
                         .ok_or_else(|| Failure::usage("expected --param name=value"))?;
@@ -356,7 +372,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                     }
                     map.insert(name.to_owned(), id);
                 }
-                "--write-relation" if command != "diff" => {
+                "--write-relation" if !matches!(command, "diff" | "compact") => {
                     let id: u32 = value
                         .parse()
                         .map_err(|_| Failure::usage("write relation must be u32"))?;
@@ -365,6 +381,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
                 _ => return Err(Failure::usage("unknown, duplicate, or inapplicable flag")),
             }
         } else if create
+            || command == "compact"
             || command == "transaction"
             || command == "replay"
             || command == "load"
@@ -378,8 +395,13 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     if command == "replay" && certificate.is_none() {
         return Err(Failure::usage("--certificate required"));
     }
-    if command == "load" && input.is_none() {
+    if matches!(command, "load" | "import-csv") && input.is_none() {
         return Err(Failure::usage("--input required"));
+    }
+    if command == "import-csv" && text.is_some() == csv.query_file().is_some() {
+        return Err(Failure::usage(
+            "import-csv takes exactly one statement: a GQL argument or --query-file",
+        ));
     }
     if command == "transaction" {
         transaction::validate_input(&steps)?;
@@ -395,7 +417,13 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
     Ok(Options {
         db: db.ok_or_else(|| Failure::usage("--db required"))?,
         key: key.ok_or_else(|| Failure::usage("--key-file required"))?,
-        text: if create || command == "replay" || command == "load" || command == "transaction" {
+        text: if create
+            || command == "compact"
+            || command == "replay"
+            || command == "load"
+            || command == "transaction"
+            || (command == "import-csv" && text.is_none())
+        {
             String::new()
         } else {
             text.ok_or_else(|| Failure::usage("GQL argument required"))?
@@ -416,6 +444,7 @@ fn parse(args: &[String], command: &str) -> Result<Options, Failure> {
         rollback,
         stream,
         diff,
+        csv,
     })
 }
 fn parameter(raw: &str, resolver: Option<&fgdb::PinnedTzdb>) -> Result<GqlParameterValue, Failure> {
@@ -588,7 +617,8 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
             Ok(())
         }
         Some(
-            command @ ("create" | "query" | "write" | "replay" | "load" | "transaction" | "diff"),
+            command @ ("create" | "query" | "write" | "replay" | "load" | "transaction" | "diff"
+            | "compact" | "import-csv"),
         ) => {
             let mut options = parse(&args[1..], command)?;
             let runtime = RuntimeBuilder::new().build().map_err(Failure::io)?;
@@ -606,10 +636,21 @@ fn dispatch(args: &[String], robot: bool, out: &mut impl Write) -> Result<(), Fa
                 for (name, raw) in &options.raw_params {
                     options.params.insert(name, parameter(raw, artifact.as_deref())?).map_err(Failure::query)?;
                 }
+                // Every CSV record is read and bound before storage is opened,
+                // so a refused input cannot leave any trace in the database.
+                let import = if command == "import-csv" { Some(import::prepare(&options, &contexts.query())?) } else { None };
                 let mut db = if command == "create" { Database::create(&contexts.commit(), &options.db, keys).await } else { Database::open(&contexts.commit(), &options.db, keys).await }.map_err(open_failure)?;
                 if command == "create" {
                     let seq = db.frontier().map_err(Failure::io)?.0;
                     return if robot { emit(out, &format!(r#"{{"v":1,"event":"result","kind":"created","seq":{seq}}}"#)) } else { writeln!(out, "created (seq {seq})").map_err(Failure::io) };
+                }
+                if command == "compact" {
+                    db.compact(&contexts.commit()).await.map_err(execution_failure)?;
+                    let seq = db.frontier().map_err(Failure::io)?.0;
+                    return if robot { emit(out, &format!(r#"{{"v":1,"event":"result","kind":"compacted","seq":{seq}}}"#)) } else { writeln!(out, "compacted (seq {seq})").map_err(Failure::io) };
+                }
+                if let Some(prepared) = import {
+                    return import::run(&mut db, &contexts, prepared, robot, out).await;
                 }
                 if command == "load" {
                     return load::run(&mut db, &contexts, &options, artifact.as_deref(), robot, out).await;
