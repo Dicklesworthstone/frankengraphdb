@@ -9,6 +9,9 @@ use fgdb_types::{CanonicalScalar, DatabaseSecurityNamespaceId, VId};
 use fgdb_warden::{Authority, Error, Grant, LimitDimension, QueryLimits, Rights, Scope};
 use std::path::PathBuf;
 
+#[path = "authorized_writes/graph.rs"]
+mod graph;
+
 const NAMESPACE: DatabaseSecurityNamespaceId = DatabaseSecurityNamespaceId([0x73; 32]);
 const L: LabelId = LabelId(1);
 const HIDDEN: LabelId = LabelId(2);

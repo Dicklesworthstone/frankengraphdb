@@ -16,6 +16,8 @@ use fgdb_warden::{
 };
 use std::collections::BTreeSet;
 
+mod graph;
+
 struct Workspace(Option<WriteTxn>);
 impl Workspace {
     fn transaction(&mut self) -> &mut WriteTxn {
@@ -164,22 +166,62 @@ fn stage_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
             return Err(denied());
         }
     }
+    stage_native(transaction, database, relation, row, execution)?;
+    let after = execution.vertex(transaction, database, vid)?;
+    execution.check_vertex(before.as_ref(), after.as_ref(), &fields)
+}
+
+fn stage_native<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    relation: fgdb_delta_types::RelationId,
+    row: PendingRow,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<(), WriteTxnError> {
     // Native staging replays the entire intent prefix. Charge that logical
     // input work, not merely one unit for a growing quadratic preparation.
     let prefix = u64::try_from(transaction.staged.len())
         .ok().and_then(|len| len.checked_add(1))
         .ok_or(WriteTxnError::Authorization(Error::TooLarge))?;
     execution.work(prefix)?;
-    transaction.write(database, WriteBatch { relation, rows: vec![row] }).map_err(redacted)?;
-    let after = execution.vertex(transaction, database, vid)?;
-    execution.check_vertex(before.as_ref(), after.as_ref(), &fields)
+    transaction.write(database, WriteBatch { relation, rows: vec![row] }).map_err(redacted)
+}
+
+fn stage<V: Vfs + Clone, Clock: FnMut() -> u64>(
+    transaction: &mut WriteTxn,
+    database: &mut Database<V>,
+    relation: fgdb_delta_types::RelationId,
+    row: PendingRow,
+    execution: &mut Execution<'_, '_, Clock>,
+) -> Result<(), WriteTxnError> {
+    // An added intent family must acquire an explicit authorization rule.
+    match &row {
+        PendingRow::Vertex { .. }
+        | PendingRow::SetLabel { .. }
+        | PendingRow::SetProperty { .. }
+        | PendingRow::CompareAndSet { elem: ElementId::Vertex(_), .. } => {
+            stage_vertex(transaction, database, relation, row, execution)
+        }
+        PendingRow::Edge { .. }
+        | PendingRow::DeleteEdge { .. }
+        | PendingRow::SetEdgeProperty { .. }
+        | PendingRow::CompareAndSet { elem: ElementId::Edge(_), .. } => {
+            graph::stage_edge(transaction, database, relation, row, execution)
+        }
+        PendingRow::DeleteVertex { .. } => {
+            graph::delete_vertex(transaction, database, relation, row, execution)
+        }
+    }
 }
 
 impl<V: Vfs + Clone> Database<V> {
-    /// Commit one capability-scoped vertex write batch through native Chronicle.
+    /// Commit one capability-scoped graph write batch through native Chronicle.
     ///
-    /// Supports vertex create/ensure, label and property updates, and vertex CAS.
-    /// Edge writes and deletion are refused, not delegated to privileged APIs.
+    /// Supports every native WriteBatch intent: vertex/edge creation and ensure,
+    /// label/property updates, CAS and deletion. Every cascade edge is checked
+    /// with both original endpoints; whole-object deletion needs authority over
+    /// every removed field. Missing and hidden non-create targets both refuse
+    /// ScopeDenied, including if-present deletes and removal of absent targets.
     /// The trusted host supplies its current issuer, exact branch routing and a
     /// monotone issuer-epoch clock. Never expose the raw Database or Authority
     /// to token holders. Namespace/signature/rights checks precede observation.
@@ -228,7 +270,7 @@ impl<V: Vfs + Clone> Database<V> {
             let mut workspace = Workspace(Some(self.begin(txn_cx)?));
             for row in batch.rows {
                 execution.checkpoint()?;
-                stage_vertex(workspace.transaction(), self, batch.relation, row, &mut execution)?;
+                stage(workspace.transaction(), self, batch.relation, row, &mut execution)?;
             }
             let completion = workspace.transaction().complete_controlled(
                 self, commit_cx, None, true, || execution.checkpoint(),
