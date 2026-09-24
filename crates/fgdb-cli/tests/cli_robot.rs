@@ -425,6 +425,7 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
     let mut columns = None;
     let mut rows = 0;
     let mut terminals = 0;
+    let mut repaired = 0;
     for (index, event) in events.iter().enumerate() {
         assert_eq!(event.get("v").unsigned(), 1);
         let name = event.get("event").string();
@@ -467,6 +468,35 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                 assert_eq!(index, 1);
                 assert_eq!(event, &schema);
             }
+            "scrub" => {
+                // One record per damaged object; `reason` exactly when lost.
+                let object = event.get("object").string();
+                assert!(object.len() == 64 && object.bytes().all(|b| b.is_ascii_hexdigit()));
+                assert!(matches!(event.get("kind").string(), "capsule" | "block"));
+                match event.get("state").string() {
+                    "repaired" => {
+                        exact_fields(event, &["v", "event", "object", "kind", "state"]);
+                        assert_eq!(
+                            event.get("kind").string(),
+                            "capsule",
+                            "blocks are never repaired"
+                        );
+                        repaired += 1;
+                    }
+                    "lost" => {
+                        exact_fields(event, &["v", "event", "object", "kind", "state", "reason"]);
+                        assert!(matches!(
+                            event.get("reason").string(),
+                            "insufficient_symbols"
+                                | "authentication_failed"
+                                | "identity_mismatch"
+                                | "conflicting_symbols"
+                                | "unusable"
+                        ));
+                    }
+                    state => fail(&format!("unknown scrub state {state}")),
+                }
+            }
             "result" => {
                 terminals += 1;
                 assert_eq!(index, events.len() - 1, "terminal must be last");
@@ -507,6 +537,24 @@ fn check_events(stdout: &str, code: i32) -> Vec<Json> {
                         event.get("seq").unsigned();
                         event.get("records").unsigned();
                         event.get("statements").unsigned();
+                    }
+                    "scrubbed" => {
+                        exact_fields(
+                            event,
+                            &[
+                                "v",
+                                "event",
+                                "kind",
+                                "seq",
+                                "objects",
+                                "repaired",
+                                "block_objects",
+                            ],
+                        );
+                        event.get("seq").unsigned();
+                        event.get("objects").unsigned();
+                        event.get("block_objects").unsigned();
+                        assert_eq!(event.get("repaired").unsigned(), repaired);
                     }
                     "help" => {
                         exact_fields(event, &["v", "event", "kind"]);
@@ -2028,4 +2076,103 @@ fn prism_refuses_instead_of_silently_reshaping_the_graph() {
         &["--stream", "CALL fnx.pagerank() YIELD vertex, score"],
     )
     .failure(2, "usage");
+}
+
+/// The committed capsule files, in name (object id) order.
+fn capsule_files(db: &TestDb) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = std::fs::read_dir(PathBuf::from(&db.db).join("capsules"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "capsule"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[test]
+fn scrub_verifies_repairs_in_place_and_never_overwrites_damage_beyond_repair() {
+    let db = TestDb::new("scrub");
+    db.create();
+    db.write(&["INSERT (a:Person {name:'Ada'}),(b:Person {name:'Grace'}),(a)-[:KNOWS]->(b)"]);
+    db.write(&["INSERT (:Person {name:'Alan'})"]);
+    let answer = |db: &TestDb| {
+        let output = db.command(
+            "query",
+            &["MATCH (p:Person) RETURN p.name AS name ORDER BY name"],
+        );
+        output.success();
+        output.stdout.clone()
+    };
+    let before = answer(&db);
+
+    // A healthy store: every capsule verified, the edge's block audited.
+    let clean = db.command("scrub", &[]);
+    clean.success();
+    assert_eq!(clean.terminal().get("kind").string(), "scrubbed");
+    assert_eq!(clean.terminal().get("repaired").unsigned(), 0);
+    assert_eq!(
+        clean.terminal().get("objects").unsigned(),
+        capsule_files(&db).len() as u64
+    );
+    assert!(clean.terminal().get("block_objects").unsigned() >= 1);
+
+    // One flipped byte: repaired in place, restoring the exact bytes.
+    let files = capsule_files(&db);
+    let target = &files[0];
+    let original = std::fs::read(target).unwrap();
+    let mut damaged = original.clone();
+    let middle = damaged.len() / 2;
+    damaged[middle] ^= 0x01;
+    std::fs::write(target, &damaged).unwrap();
+    let repair = db.command("scrub", &[]);
+    repair.success();
+    let records: Vec<_> = repair
+        .events
+        .iter()
+        .filter(|event| event.get("event").string() == "scrub")
+        .collect();
+    assert_eq!(records.len(), 1, "{}", repair.stdout);
+    let stem = target.file_stem().unwrap().to_str().unwrap();
+    assert_eq!(records[0].get("object").string(), stem);
+    assert_eq!(records[0].get("state").string(), "repaired");
+    assert_eq!(repair.terminal().get("repaired").unsigned(), 1);
+    assert_eq!(
+        std::fs::read(target).unwrap(),
+        original,
+        "identity-preserving repair"
+    );
+    let again = db.command("scrub", &[]);
+    again.success();
+    assert_eq!(
+        again.terminal().get("repaired").unsigned(),
+        0,
+        "the repair persisted"
+    );
+    assert_eq!(answer(&db), before, "answers are unchanged");
+
+    // Beyond the repair budget: refused when the database opens, naming no
+    // result, and the damaged bytes are left exactly as found.
+    let mut destroyed = original.clone();
+    for byte in destroyed.iter_mut().skip(200) {
+        *byte = 0;
+    }
+    std::fs::write(target, &destroyed).unwrap();
+    let refused = db.command("scrub", &[]);
+    assert!(matches!(refused.code, 4 | 5), "{}", refused.stdout);
+    assert_eq!(refused.terminal().get("event").string(), "error");
+    assert_eq!(
+        std::fs::read(target).unwrap(),
+        destroyed,
+        "never overwritten"
+    );
+
+    // Human mode states the same verdict.
+    std::fs::write(target, &original).unwrap();
+    let human = run(false, &["scrub", "--db", &db.db, "--key-file", &db.key]);
+    human.success();
+    assert!(
+        human.stdout.starts_with("scrubbed (seq "),
+        "{}",
+        human.stdout
+    );
 }

@@ -24,6 +24,7 @@ machine-readable contract that the tests freeze.
 | `load --input <file.ndjson>` | Chunked bulk load with an optional resumable `--checkpoint`. |
 | `import-csv --input <file.csv\|-> (--query-file <f> \| <gql>)` | Bind a native write script once per CSV record, and commit every record in ONE transaction or none. |
 | `compact` | Publish a consolidated storage generation. Answers at every retained sequence are unchanged, and the frontier does not move. |
+| `scrub` | Verify every capsule the history names and every published block. Damaged capsule redundancy is repaired in place, restoring the exact bytes. Each damaged object gets a `scrub` record; any loss exits 5 after the records, and lost objects are never overwritten. Damage beyond repair that already exists when the database opens is refused at open, naming the object. |
 | `robot schema`, `help` | Need no database or keys. |
 
 Every database command takes `--db <dir> --key-file <file>`.

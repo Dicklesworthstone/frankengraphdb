@@ -226,6 +226,9 @@ fgdb import-csv --db mydb.fgdbdir --key-file fgdb.keys --input edges.csv "<gql>"
 fgdb load       --db mydb.fgdbdir --key-file fgdb.keys --input batch.ndjson
 fgdb compact    --db mydb.fgdbdir --key-file fgdb.keys
 
+# Verify every capsule and block; repair damaged redundancy in place
+fgdb scrub --db mydb.fgdbdir --key-file fgdb.keys
+
 # In-database analytics over an explicit projection (registered Prism procedures)
 fgdb query --db mydb.fgdbdir --key-file fgdb.keys --relation KNOWS=1 \
   --graph-relation KNOWS --direction undirected "CALL fnx.connected_components() YIELD vertex, component"
@@ -237,7 +240,7 @@ fgdb replay --db mydb.fgdbdir --key-file fgdb.keys --certificate result.cert
 fgdb robot schema
 ```
 
-> **Target state.** The interactive shell, `branch`/`subscribe`, `backup`/`restore` archives, `doctor`/`scrub`/`analyze` operations, `robot health`, a `--json` output flag, and the `fgdbd` server binary remain W10 composition work (`registries/workspace_topology.toml`). The commands above are exactly the ones that run today.
+> **Target state.** The interactive shell, `branch`/`subscribe`, `backup`/`restore` archives, `doctor`/`analyze` operations, `robot health`, a `--json` output flag, and the `fgdbd` server binary remain W10 composition work (`registries/workspace_topology.toml`). The commands above are exactly the ones that run today.
 
 ## Installation
 
