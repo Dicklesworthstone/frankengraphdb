@@ -259,7 +259,10 @@ fn unsupported_schema_never_becomes_an_admitted_group_even_when_hidden() {
     )
     .unwrap();
     assert!(query.complete_groups().is_none());
-    let unsupported = PreparedGraphSetAggregate::prepare(
+    // b0c3bd5f made COLLECT incrementally maintained, so a row carrying a
+    // well-typed list is now admitted. Rows outside the collection schema
+    // still never become admitted groups: NULL items and non-list values.
+    let collect = PreparedGraphSetAggregate::prepare(
         input(),
         &[],
         &[GraphAggregate::collect("list", 1)],
@@ -268,11 +271,26 @@ fn unsupported_schema_never_becomes_an_admitted_group_even_when_hidden() {
     )
     .unwrap();
     assert!(
-        unsupported
+        collect
             .materialize_incremental_row(
                 vec![],
                 vec![GraphAggregateValue::Value(GraphValue::List(Box::new([])))]
             )
+            .is_some()
+    );
+    assert!(
+        collect
+            .materialize_incremental_row(
+                vec![],
+                vec![GraphAggregateValue::Value(GraphValue::List(Box::new([
+                    GraphValue::Scalar(CanonicalScalar::Null)
+                ])))]
+            )
+            .is_none()
+    );
+    assert!(
+        collect
+            .materialize_incremental_row(vec![], vec![GraphAggregateValue::Count(1)])
             .is_none()
     );
 }

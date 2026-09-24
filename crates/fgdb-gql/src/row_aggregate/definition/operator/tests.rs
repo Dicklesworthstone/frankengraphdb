@@ -452,10 +452,10 @@ fn complete_definition_admission_refuses_transforms_and_checks_empty_input_schem
         None,
     )
     .unwrap();
-    assert!(matches!(
-        Operator::new(query, &[GraphSetColumnType::Scalar; 2]),
-        Err(GroupBuildError::UnsupportedAggregate { .. })
-    ));
+    // b0c3bd5f made COLLECT over an input with a proved occurrence order an
+    // incrementally maintained aggregate. The UnsupportedAggregate refusal
+    // branch is witnessed by value_tests.rs and collection/tests.rs.
+    assert!(Operator::new(query, &[GraphSetColumnType::Scalar; 2]).is_ok());
     let state = seed(true, false, &ZSet::new());
     assert_eq!(state.rows().len(), 1);
     assert_eq!(

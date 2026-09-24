@@ -330,11 +330,16 @@ fn graph_kind_preflight_refuses_before_source_budgets_or_incoming_construction()
                 Err(FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind { required: actual }))
                     if actual == required));
         }
-        // These kernels are still unimplemented on compressed rows. New graph
-        // directions must not implicitly expose them or fall back to decoding.
+        // 0c285a92 implemented these kernels on compressed rows for undirected
+        // projections only. Other directions must refuse on graph kind, never
+        // silently serve a directed projection or fall back to decoding.
         for text in ["CALL fnx.triangles()", "CALL fnx.clustering_coefficient()"] {
-            assert!(matches!(call(text).validate_sealed_projection(Directedness::Undirected),
-                Err(FnxSealedExecutionError::UnsupportedAlgorithm(_))));
+            assert!(call(text).validate_sealed_projection(Directedness::Undirected).is_ok());
+            for direction in [Directedness::Directed, Directedness::Reversed] {
+                assert!(matches!(call(text).validate_sealed_projection(direction),
+                    Err(FnxSealedExecutionError::Execution(FnxExecutionError::GraphKind {
+                        required: FnxGraphKind::Undirected }))));
+            }
         }
     });
 }
