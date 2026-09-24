@@ -58,7 +58,7 @@ impl GqlSnapshotReader for EmbeddedReadView {
     }
 }
 fn bind_plan(statement: &str, bind: &RelationBind) -> Result<BoundPlan, GqlError> {
-    bind.bind(statement, bind).map_err(|error| match error {
+    bind.bind(statement).map_err(|error| match error {
         fgdb_gql::BindError::Parse(parse) => GqlError::Parse(parse),
         unbound => GqlError::Bind(unbound),
     })
