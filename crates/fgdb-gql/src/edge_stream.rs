@@ -8,6 +8,8 @@
 pub mod aggregate;
 mod join;
 pub(crate) use join::Probe;
+mod record;
+pub use record::EdgeScanRecord;
 
 use crate::algebra::{
     GlaDirection, GlaOperator, GlaOutput, GlaPlan, GraphPath, GraphPathFunction, GraphValueRow,
@@ -218,11 +220,53 @@ pub trait EdgeScanSource {
         &mut self,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>>;
+
+    /// Root scans name the plan's relation before opening its candidate index.
+    /// The default preserves next_edge's ordering and event transcript. A
+    /// scoped source may return EOF for a denied relation, but must propagate
+    /// failures for an allowed one; candidates still require visible edge and
+    /// endpoint admission. This is not authorization for a raw source.
+    fn next_edge_for_relation<C>(
+        &mut self,
+        _relation: RelationId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, EdgeScanSourceError<Self::Error, C>> {
+        self.next_edge(control)
+    }
     fn edge<'a, C>(
         &'a self,
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeScanSourceError<Self::Error, C>>;
+
+    /// Full fields for one root binding, borrowed or owned after source masking.
+    /// Topology-only edge() readers may redact properties and override this
+    /// route. Both routes must enforce the same cut and endpoint/relation scope.
+    fn edge_record<'a, C>(
+        &'a self,
+        eid: EId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EdgeScanRecord<'a>>, EdgeScanSourceError<Self::Error, C>> {
+        self.edge(eid, control)
+            .map(|row| row.map(EdgeScanRecord::Borrowed))
+    }
+
+    /// A joined/captured edge field, with the same scope as edge_record().
+    /// None means an absent edge, Some(None) an absent/masked property. An
+    /// absent bound edge is a structural failure, not a NULL property value.
+    fn edge_property<'a, C>(
+        &'a self,
+        eid: EId,
+        key: PropertyKeyId,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<Option<&'a CanonicalScalar>>, EdgeScanSourceError<Self::Error, C>> {
+        let Some(row) = self.edge(eid, control)? else {
+            return Ok(None);
+        };
+        seek(row.properties, &key, |entry| entry.0, control)
+            .map(|entry| Some(entry.map(|(_, value)| value)))
+            .map_err(EdgeScanSourceError::Control)
+    }
     fn vertex<'a, C>(
         &'a self,
         vid: VId,
@@ -488,7 +532,9 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             let (eid, second) = if let Some(eid) = self.reverse_pending.take() {
                 (eid, true)
             } else {
-                let Some(eid) = flatten(source.next_edge(&mut |event| meter.event(event)))? else {
+                let Some(eid) = flatten(source.next_edge_for_relation(
+                    self.plan.relation, &mut |event| meter.event(event),
+                ))? else {
                     return Ok(None);
                 };
                 meter.event(GlaExecutionEvent::Work)?;
@@ -502,9 +548,10 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                 )?;
                 (eid, false)
             };
-            let Some(edge) = flatten(source.edge(eid, &mut |event| meter.event(event)))? else {
+            let Some(record) = flatten(source.edge_record(eid, &mut |event| meter.event(event)))? else {
                 continue;
             };
+            let edge = record.as_row();
             meter.event(GlaExecutionEvent::Work)?;
             if edge.relation != self.plan.relation {
                 continue;
@@ -521,18 +568,18 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                     if second { (high, low) } else { (low, high) }
                 }
             };
-            let left = flatten(source.vertex(from, &mut |event| meter.event(event)))?
+            let left = flatten(source.vertex_record(from, &mut |event| meter.event(event)))?
                 .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))?;
             let right = if from == to {
-                left
+                None
             } else {
-                flatten(source.vertex(to, &mut |event| meter.event(event)))?
-                    .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))?
+                Some(flatten(source.vertex_record(to, &mut |event| meter.event(event)))?
+                    .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))?)
             };
             let image = Binding {
                 eid,
                 ids: [from, to],
-                vertices: [left, right],
+                vertices: [left.as_row(), right.as_ref().map_or_else(|| left.as_row(), |r| r.as_row())],
                 edge: edge.properties,
             };
             let Some(paths) = self.plan.test(&image, &mut |event| meter.event(event))? else {

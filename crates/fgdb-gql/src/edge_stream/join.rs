@@ -292,7 +292,9 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             let (eid, second) = if let Some(eid) = cursor.reverse_pending.take() {
                 (eid, true)
             } else {
-                let Some(eid) = flatten(source.next_edge(&mut |event| meter.event(event)))? else {
+                let Some(eid) = flatten(source.next_edge_for_relation(
+                    cursor.plan.relation, &mut |event| meter.event(event),
+                ))? else {
                     return Ok(None);
                 };
                 meter.event(GlaExecutionEvent::Work)?;
@@ -461,9 +463,8 @@ fn edge_property<'a, S: EdgeScanSource, C>(
     key: PropertyKeyId,
     control: &mut impl FnMut(GlaExecutionEvent) -> ScanResult<(), S::Error, C>,
 ) -> ScanResult<Option<&'a CanonicalScalar>, S::Error, C> {
-    let edge = flatten(source.edge(eid, control))?
-        .ok_or(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable))?;
-    seek(edge.properties, &key, |entry| entry.0, control).map(|row| row.map(|(_, value)| value))
+    flatten(source.edge_property(eid, key, control))?
+        .ok_or(GqlQueryError::Source(EdgeScanError::BoundEdgeUnavailable))
 }
 
 fn test_stage<S: EdgeScanSource, C>(
