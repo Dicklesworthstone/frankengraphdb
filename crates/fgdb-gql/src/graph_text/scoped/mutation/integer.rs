@@ -208,8 +208,15 @@ impl<'a> Parser<'a> {
                 }
                 ParsedOp::Coalesce => MutationIntegerTemplateOp::Bound(GraphIntegerOp::Coalesce),
                 ParsedOp::Atom(Operand::Column(column), at) => {
+                    // Refuse only columns that can never hold a scalar. A
+                    // dynamically typed column (an UNWIND element, an Any
+                    // projection) is checked per value by the evaluator, which
+                    // answers a typed NonScalar/NonInteger error, never a panic.
                     if let ExpressionColumns::Row(schema) = columns
-                        && schema[column].1 != crate::GraphSetColumnType::Scalar
+                        && !matches!(
+                            schema[column].1,
+                            crate::GraphSetColumnType::Scalar | crate::GraphSetColumnType::Any
+                        )
                     {
                         return Err(failure(at, GraphMutationTextErrorKind::IntegerOperand));
                     }
