@@ -42,23 +42,31 @@ struct GraphProjectionHead<'a> {
 }
 impl<'a> GraphProjectionHead<'a> {
     fn schema(&self, parameters: &[GqlParameterSpec]) -> pipeline::RowSchema<'a> {
+        // Match the native source-column domains. A property on an edge is
+        // still a scalar; the Edge marker selects its owner, not its value type.
+        let types: Vec<_> = self
+            .inputs
+            .iter()
+            .map(|input| {
+                if input.property.is_some() {
+                    return GraphSetColumnType::Scalar;
+                }
+                match input.path {
+                    Some(GraphPathFunction::Value) => GraphSetColumnType::Path,
+                    Some(GraphPathFunction::Length | GraphPathFunction::Type) => {
+                        GraphSetColumnType::Scalar
+                    }
+                    Some(GraphPathFunction::Nodes) => GraphSetColumnType::Vertices,
+                    Some(GraphPathFunction::Edges) => GraphSetColumnType::Edges,
+                    Some(GraphPathFunction::Edge) => GraphSetColumnType::Edge,
+                    Some(GraphPathFunction::Labels) => GraphSetColumnType::List,
+                    None => GraphSetColumnType::Vertex,
+                }
+            })
+            .collect();
         self.outputs
             .iter()
-            .map(|(name, operand)| {
-                let types: Vec<_> = self
-                    .inputs
-                    .iter()
-                    .map(|input| {
-                        if input.property.is_none() {
-                            GraphSetColumnType::Vertex
-                        } else {
-                            GraphSetColumnType::Scalar
-                        }
-                    })
-                    .collect();
-                let kind = operand.column_type(&types, parameters);
-                (*name, kind)
-            })
+            .map(|(name, operand)| (*name, operand.column_type(&types, parameters)))
             .collect()
     }
 }
@@ -159,27 +167,29 @@ impl<'a> Parser<'a> {
             correlations: Vec::new(),
         })
     }
+
+    /// Same public binding order as native RETURN *: named vertices, a
+    /// captured path, then named edges. Anonymous compiler slots stay private.
+    fn visible_graph_bindings(&self) -> impl Iterator<Item = Name<'a>> + '_ {
+        self.syntax
+            .variables
+            .iter()
+            .copied()
+            .filter(|name| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
+            .chain(self.syntax.path)
+            .chain(self.syntax.edges.iter().filter_map(|edge| edge.variable))
+    }
+
     /// Shared graph-to-row boundary. Exact grouped RETURN uses this same first
     /// WITH projection and row-stage parser, not a synthetic RETURN statement.
     fn graph_projection_head(&mut self) -> Result<GraphProjectionHead<'a>, GraphSetTextError> {
         if self.is_word("UNWIND") {
-            let inputs: Vec<_> = self
-                .syntax
-                .variables
-                .iter()
-                .map(|&variable| Projection {
-                    variable,
-                    property: None,
-                    path: None,
-                })
-                .collect();
-            let outputs = self
-                .syntax
-                .variables
-                .iter()
-                .enumerate()
-                .map(|(index, &name)| (name, ReadValueTemplate::Column(index)))
-                .collect();
+            let mut inputs = Vec::new();
+            let mut outputs = Vec::new();
+            for variable in self.visible_graph_bindings() {
+                let index = self.mutation_projection(&mut inputs, variable, None)?;
+                outputs.push((variable, ReadValueTemplate::Column(index)));
+            }
             return Ok(GraphProjectionHead {
                 with: true,
                 inputs,
@@ -197,7 +207,7 @@ impl<'a> Parser<'a> {
         let mut inputs = Vec::<Projection<'a>>::new();
         let mut outputs = Vec::<(Name<'a>, ReadValueTemplate)>::new();
         if self.take(b'*')? {
-            for &variable in &self.syntax.variables {
+            for variable in self.visible_graph_bindings() {
                 let at = self.mutation_projection(&mut inputs, variable, None)?;
                 outputs.push((variable, ReadValueTemplate::Column(at)));
             }
@@ -648,4 +658,161 @@ pub(in crate::graph_text) fn bind_read_value(
             GraphSetValue::Size(Box::new(bind_read_value(value, values)?))
         }
     })
+}
+
+#[cfg(test)]
+mod graph_scope_tests {
+    use super::*;
+    use crate::algebra::{GraphValue, GraphValueRow};
+    use crate::{
+        GqlExecutionStats, GqlQueryError, GqlQueryExecution, GqlQueryPolicy, PreparedGraphSetText,
+    };
+
+    fn symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+        match (kind, name) {
+            (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+            _ => None,
+        }
+    }
+
+    fn check_schema(text: &str, expected: &[GraphSetColumnType]) {
+        let prepared = PreparedGraphSetText::prepare(text, symbols).unwrap();
+        assert_eq!(prepared.column_types(), expected, "{text}");
+        assert_eq!(
+            prepared
+                .bind_parameters(&GqlParameters::new())
+                .unwrap()
+                .column_types(),
+            expected,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn metadata_scalars_keep_their_types_through_filters_and_alias_shadowing() {
+        for text in [
+            "MATCH p = (a)-[:R]->{1,2}(b) WITH path_length(p) AS hops \
+             WHERE hops > 0 ORDER BY hops DESC LIMIT 1 RETURN hops + 1 AS score",
+            "MATCH p = (a)-[:R]->{1,2}(b) WITH path_length(p) AS p RETURN p + 1 AS score",
+            "MATCH (a)-[e:R]->(b) WITH type(e) AS name RETURN upper(name) AS value",
+        ] {
+            check_schema(text, &[GraphSetColumnType::Scalar]);
+        }
+        check_schema(
+            "MATCH p = (a)-[:R]->{1,2}(b) WITH p AS route, nodes(p) AS vertices, \
+             edges(p) AS relationships RETURN route, vertices, relationships",
+            &[
+                GraphSetColumnType::Path,
+                GraphSetColumnType::Vertices,
+                GraphSetColumnType::Edges,
+            ],
+        );
+        check_schema(
+            "MATCH (a) WITH labels(a) AS names RETURN names",
+            &[GraphSetColumnType::List],
+        );
+    }
+
+    #[test]
+    fn wildcards_and_implicit_unwind_preserve_named_graph_bindings() {
+        for terminal in ["RETURN *", "WITH * RETURN *"] {
+            check_schema(
+                &format!("MATCH p = (a)-[:R]->{{1,2}}(b) {terminal}"),
+                &[
+                    GraphSetColumnType::Vertex,
+                    GraphSetColumnType::Vertex,
+                    GraphSetColumnType::Path,
+                ],
+            );
+            check_schema(
+                &format!("MATCH (a)-[e:R]->(b) {terminal}"),
+                &[
+                    GraphSetColumnType::Vertex,
+                    GraphSetColumnType::Vertex,
+                    GraphSetColumnType::Edge,
+                ],
+            );
+        }
+        check_schema(
+            "MATCH (a)-[e:R]->(b) UNWIND [1] AS value RETURN e, value",
+            &[GraphSetColumnType::Edge, GraphSetColumnType::Any],
+        );
+        check_schema(
+            "MATCH p = (a)-[:R]->{1,2}(b) UNWIND [1] AS value RETURN p, value",
+            &[GraphSetColumnType::Path, GraphSetColumnType::Any],
+        );
+        let prepared = PreparedGraphSetText::prepare(
+            "MATCH ()-[e:R]->() WITH * RETURN *",
+            symbols,
+        )
+        .unwrap();
+        assert_eq!(prepared.columns(), &["e".to_owned()]);
+        assert_eq!(prepared.column_types(), &[GraphSetColumnType::Edge]);
+        assert!(prepared.bind_parameters(&GqlParameters::new()).is_ok());
+    }
+
+    #[test]
+    fn metadata_pipeline_executes_filter_page_and_arithmetic_in_written_order() {
+        let query = PreparedGraphSetText::prepare(
+            "MATCH p = (a)-[:R]->{0,3}(b) WITH path_length(p) AS hops \
+             WHERE hops > 0 ORDER BY hops DESC SKIP 1 LIMIT 1 RETURN hops + 10 AS score",
+            symbols,
+        )
+        .unwrap()
+        .bind_parameters(&GqlParameters::new())
+        .unwrap();
+        // Inject the native source's single path-length column to isolate the
+        // row stages from graph traversal. All post-source work stays governed.
+        let mut calls = 0;
+        let result = query
+            .execute_governed(
+                GqlQueryPolicy::new(100, 100, 100_000, 100_000),
+                |_, _| {
+                    calls += 1;
+                    Ok::<_, GqlQueryError<(), ()>>(GqlQueryExecution {
+                        value: [0, 1, 3, 2]
+                            .into_iter()
+                            .map(|value| {
+                                GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                                    CanonicalScalar::Int(value),
+                                )])
+                            })
+                            .collect(),
+                        rows: GqlExecutionStats {
+                            snapshot_records: 4,
+                            result_rows: 4,
+                        },
+                        evaluator: Default::default(),
+                    })
+                },
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(
+            result.value,
+            vec![GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                CanonicalScalar::Int(12),
+            )])]
+        );
+        assert_eq!(result.rows.result_rows, 1);
+    }
+
+    #[test]
+    fn graph_identity_aliases_are_not_reclassified_as_scalars() {
+        for text in [
+            "MATCH p = (a)-[:R]->{1,2}(b) WITH p AS route RETURN route + 1 AS bad",
+            "MATCH (a)-[e:R]->(b) WITH e AS edge RETURN edge + 1 AS bad",
+            "MATCH p = (a)-[:R]->{1,2}(b) WITH nodes(p) AS vertices \
+             RETURN vertices + 1 AS bad",
+        ] {
+            let mut calls = 0;
+            let result = PreparedGraphSetText::prepare(text, |kind, name| {
+                calls += 1;
+                symbols(kind, name)
+            });
+            assert!(result.is_err(), "{text}");
+            assert_eq!(calls, 0, "{text}");
+        }
+    }
 }
