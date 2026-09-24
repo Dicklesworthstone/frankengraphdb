@@ -26,6 +26,9 @@ use fgdb_types::ObjectId;
 #[path = "available_writes/tracked.rs"]
 mod tracked;
 
+#[path = "available_writes/leadership.rs"]
+mod leadership;
+
 struct NoopWake;
 impl Wake for NoopWake { fn wake(self: Arc<Self>) {} }
 fn immediate<F: Future>(future: F) -> F::Output {

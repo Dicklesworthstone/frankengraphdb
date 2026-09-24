@@ -72,6 +72,14 @@ where
         F: FnMut() -> Result<(), I>,
     {
         self.available().map_err(MemberProposalError::State)?;
+        // Do not spend payload-assessment work or acquire a publication permit
+        // for a proposal the frozen handoff endpoint cannot admit. The kernel
+        // also enforces this for privileged direct scalar/batch callers.
+        if self.leadership_transfer().map_err(MemberProposalError::State)?.is_some() {
+            return Err(MemberProposalError::Proposal(ProposalError::Raft(
+                fgdb_order::Error::LeadershipTransferInProgress,
+            )));
+        }
         let output = propose(
             &mut self.replica,
             command,

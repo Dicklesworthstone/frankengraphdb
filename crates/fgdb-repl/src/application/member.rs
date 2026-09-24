@@ -187,6 +187,14 @@ impl<C: Clone + Eq, A: Application<C> + RaftPublisher<C>> AppliedReplica<C, A> {
         self.waiting.len()
     }
 
+    /// Handoff stays on the ordinary step/publication/output path. Inspect its
+    /// bounded local attempt without exposing mutable consensus or application
+    /// state. Completion does not imply membership retirement or write success.
+    pub fn leadership_transfer(&self) -> Result<Option<&fgdb_order::LeadershipTransfer>, ApplicationStateError> {
+        self.available()?;
+        self.replica.leadership_transfer().map_err(ApplicationStateError::Raft)
+    }
+
     /// Configure the consensus append bound without exposing mutable Raft or
     /// application state. Only a healthy follower can change this volatile
     /// setting; applying or installing still uses the same publication backend.
