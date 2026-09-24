@@ -796,11 +796,16 @@ impl NumericState {
         }
         let replace = match (value.as_ref(), &input) {
             (None, _) => true,
-            (Some(GraphValue::Vertex(old)), Input::Vertex(next)) => {
+            (Some(old), Input::Vertex(next)) => {
+                // Indexing a native list can produce Any: one group may see
+                // scalars, vertices and collections from the SAME checked
+                // expression. A VId carrier is fixed-size; comparing it uses
+                // GraphValue's total order without copying a candidate payload.
+                let next = GraphValue::Vertex(*next);
                 if *maximum {
-                    next > old
+                    &next > old
                 } else {
-                    next < old
+                    &next < old
                 }
             }
             (Some(GraphValue::Scalar(old)), Input::Scalar(Some(next))) => {
@@ -817,7 +822,20 @@ impl NumericState {
                     *next < old
                 }
             }
-            _ => unreachable!("a checked aggregate has one immutable argument domain"),
+            (Some(old), Input::Scalar(Some(_))) => {
+                // The scalar/scalar arm above already compares real values.
+                // Here old is a DIFFERENT GraphValue variant, so only the
+                // native variant order participates. A payload-free scalar
+                // representative preserves that order without cloning text,
+                // bytes or timestamps merely to compare a losing candidate.
+                let scalar = GraphValue::Scalar(CanonicalScalar::Null);
+                if *maximum {
+                    &scalar > old
+                } else {
+                    &scalar < old
+                }
+            }
+            _ => unreachable!("MIN/MAX requires a nonnull argument, not COUNT(*)"),
         };
         if replace {
             control(VertexScanEvent::ScratchEntry)?;
@@ -992,3 +1010,6 @@ mod output_tests;
 
 #[cfg(test)]
 mod record_tests;
+
+#[cfg(test)]
+mod heterogeneous_tests;
