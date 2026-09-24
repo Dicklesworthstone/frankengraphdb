@@ -258,6 +258,41 @@ fn nullable_aliases_and_boolean_filters_do_not_turn_unknown_into_true() {
 }
 
 #[test]
+fn computed_with_predicates_filter_the_projected_rows() {
+    // 15c37d16 made computed WITH predicates and Boolean row aliases legal;
+    // both forms used to be on the refusal list below. A NULL input makes the
+    // comparison unknown, and unknown is filtered out, never kept.
+    let values = [
+        CanonicalScalar::Int(-3),
+        CanonicalScalar::Int(-1),
+        CanonicalScalar::Int(0),
+        CanonicalScalar::Int(4),
+        CanonicalScalar::Null,
+    ];
+    let query = prepare("MATCH (n) WITH n.p AS p WHERE p+1>0 RETURN p");
+    let result = run(&query, &values, wide(), &mut || Ok(())).unwrap();
+    let mut kept = ints(&result.value, 0);
+    kept.sort();
+    assert_eq!(kept, vec![Some(0), Some(4)]);
+
+    // A Boolean row alias is a predicate too: only true survives, and a
+    // non-Boolean value is a typed execution error, never coerced.
+    let alias = prepare("MATCH (n) WITH n.p AS p WHERE p RETURN p");
+    let booleans = [
+        CanonicalScalar::Bool(true),
+        CanonicalScalar::Bool(false),
+        CanonicalScalar::Null,
+    ];
+    let result = run(&alias, &booleans, wide(), &mut || Ok(())).unwrap();
+    assert_eq!(result.value.len(), 1);
+    assert_eq!(
+        result.value[0].get(0).unwrap().as_scalar(),
+        Some(&CanonicalScalar::Bool(true))
+    );
+    assert!(run(&alias, &[CanonicalScalar::Int(1)], wide(), &mut || Ok(())).is_err());
+}
+
+#[test]
 fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog() {
     for text in [
         "MATCH (n) WITH n.p AS score RETURN n",
@@ -265,9 +300,7 @@ fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog()
         "MATCH (n) WITH n.p AS score WITH score AS first,first+1 AS second RETURN second",
         "MATCH (n) WITH n RETURN n+1 AS bad",
         "MATCH (n) WITH n.p AS p WITH p AS x,p AS x RETURN x",
-        "MATCH (n) WITH n.p AS p WHERE p+1>0 RETURN p",
         "MATCH (n) WITH n MATCH (n)-[:R]->(m) RETURN m",
-        "MATCH (n) WITH n.p AS p WHERE p RETURN p",
         "MATCH (n) WITH n WHERE n > n RETURN n",
         "MATCH (n) WITH n.p AS p RETURN missing LIMIT 0",
         "MATCH (n) WITH n.p AS p ORDER BY missing RETURN p",
