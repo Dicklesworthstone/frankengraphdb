@@ -300,7 +300,9 @@ fn discarded_names_sibling_aliases_and_unsupported_forms_refuse_before_catalog()
         "MATCH (n) WITH n.p AS score WITH score AS first,first+1 AS second RETURN second",
         "MATCH (n) WITH n RETURN n+1 AS bad",
         "MATCH (n) WITH n.p AS p WITH p AS x,p AS x RETURN x",
-        "MATCH (n) WITH n MATCH (n)-[:R]->(m) RETURN m",
+        // Vertex-valued WITH imports now continue into MATCH; scalar imports
+        // still cannot become vertices. multipart_reads tests the positive form.
+        "MATCH (n) WITH n.p AS n MATCH (n)-[:R]->(m) RETURN m",
         "MATCH (n) WITH n WHERE n > n RETURN n",
         "MATCH (n) WITH n.p AS p RETURN missing LIMIT 0",
         "MATCH (n) WITH n.p AS p ORDER BY missing RETURN p",

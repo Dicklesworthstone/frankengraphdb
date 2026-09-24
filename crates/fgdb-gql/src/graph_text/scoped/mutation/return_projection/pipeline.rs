@@ -2,6 +2,7 @@
 //! Runtime receives only Project/Filter/page nodes in PreparedGraphSet. There
 //! are no graph-slot aliases, synthetic MATCH text, or source calls here.
 
+mod multipart;
 mod selection;
 
 use super::*;

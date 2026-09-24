@@ -1,6 +1,8 @@
 //! Compound query preparation over the shared graph-text lexer and compiler.
 //! Syntax is parsed before catalog access; execution sees only PreparedGraphSet.
 
+pub(crate) mod multipart;
+
 use crate::algebra::{GraphOrderError, GraphValueOrder, IntegerComparison};
 use crate::set_ops::MAX_GRAPH_SET_DEPTH;
 use crate::{
@@ -950,7 +952,7 @@ impl<'a> Composition<'a> {
 pub struct PreparedGraphSetText {
     statement: String,
     root: Node,
-    inputs: Vec<(usize, BoundSetTextInput)>,
+    inputs: Vec<(usize, multipart::BoundReadInput)>,
     columns: Vec<String>,
     types: Vec<GraphSetColumnType>,
     parameters: Vec<GqlParameterSpec>,
@@ -988,10 +990,15 @@ impl PreparedGraphSetText {
     /// in RETURN. A stage's page precedes its following WHERE and next stage;
     /// only explicitly projected names survive. WHERE supports comparisons,
     /// IS [NOT] NULL and NOT/AND/OR with three-valued semantics. Project computed
-    /// predicate operands first. Later row expressions never dereference graph
-    /// properties, reopen MATCH, aggregate, UNWIND or write. Those forms refuse
-    /// rather than silently escaping the row scope. Every leaf still executes
-    /// once under the existing materialized set engine and cumulative budget.
+    /// predicate operands first. A further MATCH joins against the completed
+    /// WITH rows: shared vertex names are identity correlations, while new
+    /// bindings expand each input occurrence. Earlier DISTINCT/filter/page
+    /// boundaries remain before that join. The next WITH or RETURN may combine
+    /// imported columns with the new pattern's properties. Every graph source
+    /// executes once under the existing set engine and cumulative budget.
+    /// Row-only stages do not dereference graph values; aggregate WITH,
+    /// writes and imported bindings used only inside a later scoped clause
+    /// remain unsupported and refuse before catalog access.
     /// Aggregate RETURN operands remain unsupported. Byte/token admission is
     /// definition-wide; no branch resets those caps.
     pub fn prepare(
@@ -1025,6 +1032,7 @@ impl PreparedGraphSetText {
         let mut pending = Vec::new();
         let mut schemas = Vec::new();
         let mut uses = parser.page_parameters;
+        let mut operands = 0;
         for span in &parser.spans {
             let names: BTreeSet<_> = parser.tokens[span.first_token..span.last_token]
                 .iter()
@@ -1038,11 +1046,22 @@ impl PreparedGraphSetText {
                 .copied()
                 .filter(|(name, _)| names.contains(name))
                 .collect();
-            let input = PreparedGraphText::unresolved_for_composition(
+            let input = PreparedGraphText::unresolved_read_input(
                 &statement[span.start..span.end],
                 &local,
+                &parser.tokens[span.first_token..span.last_token],
             )
             .map_err(|error| rebase_error(span.start, error))?;
+            operands += input.operand_count();
+            if operands > MAX_GRAPH_SET_OPERANDS {
+                return Err(fail(
+                    span.start,
+                    GraphSetTextErrorKind::SetBuild(GraphSetBuildError::TooManyOperands {
+                        limit: MAX_GRAPH_SET_OPERANDS,
+                        observed: operands,
+                    }),
+                ));
+            }
             let (columns, types) = input.column_schema();
             schemas.push(Schema {
                 columns,
