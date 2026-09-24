@@ -1,4 +1,4 @@
-//! Cooperative ranks, hop distances and connectivity on the admitted projection.
+//! Cooperative ranks, weighted/hop distances and connectivity on one projection.
 //!
 //! One fuel counter covers raw incidence decoding (including invisible history,
 //! excluded endpoints and parallel reductions), scalar passes and result rows.
@@ -17,8 +17,9 @@ use super::{
     QueryCx, Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add, admit,
     checkpoint, directional_pass_work, finish_encoded, mul, reserve,
 };
-use crate::SealedProjectionError;
+use crate::{DijkstraOptions, SealedProjectionError};
 use crate::sealed_control::Control;
+use crate::shortest_path::{Entry, IndexedHeap};
 use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
 use std::cell::RefCell;
 use std::future::Future;
@@ -67,6 +68,28 @@ where
             }
         }
     }
+
+    async fn offer(&mut self, heap: &mut IndexedHeap, node: usize, cost: f64) -> Result<()> {
+        self.tick().await?;
+        let mut repair = heap.offer_steps::<Error>(node, cost)?;
+        loop {
+            self.tick().await?;
+            if repair.step().is_some() {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn pop(&mut self, heap: &mut IndexedHeap) -> Result<Option<Entry>> {
+        self.tick().await?;
+        let mut repair = heap.pop_steps();
+        loop {
+            self.tick().await?;
+            if let Some(entry) = repair.step() {
+                return Ok(entry);
+            }
+        }
+    }
 }
 
 impl FnxCallSpec {
@@ -77,6 +100,7 @@ impl FnxCallSpec {
             self.algorithm(),
             FnxAlgorithm::PageRank(_)
                 | FnxAlgorithm::SingleSourceShortestPathLength { .. }
+                | FnxAlgorithm::SingleSourceDijkstraPathLength(_)
                 | FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents
@@ -182,6 +206,18 @@ impl FnxCallSpec {
                         Some(ordinal),
                     )
                 }
+                FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+                    let ordinal = graph
+                        .vertex_ordinal(options.source())
+                        .ok_or(ExecutionError::UnknownSource(options.source()))?;
+                    admission.rows(1)?;
+                    (
+                        "fgdb-prism/sealed-dijkstra-indexed-heap-cooperative-v1",
+                        super::shortest_path::work(n, graph.adjacency_entry_count(), pass)?,
+                        super::shortest_path::workspace(n)?,
+                        Some(ordinal),
+                    )
+                }
                 algorithm @ (FnxAlgorithm::ConnectedComponents
                 | FnxAlgorithm::WeaklyConnectedComponents
                 | FnxAlgorithm::StronglyConnectedComponents) => {
@@ -224,6 +260,16 @@ impl FnxCallSpec {
                     )
                     .await?
                 }
+                FnxAlgorithm::SingleSourceDijkstraPathLength(options) => {
+                    dijkstra(
+                        graph,
+                        source.ok_or(ExecutionError::InvalidUpstreamResult)?,
+                        options,
+                        &admission,
+                        &mut control,
+                    )
+                    .await?
+                }
                 FnxAlgorithm::ConnectedComponents | FnxAlgorithm::WeaklyConnectedComponents => {
                     weak(graph, &mut control).await?
                 }
@@ -250,6 +296,132 @@ impl FnxCallSpec {
         })
         .await
     }
+}
+
+// The heap and its exclusively borrowed repair both belong to this future.
+// A guard/source error or dropping during a sift discards them together; no
+// partially repaired queue, finalized prefix or partial row reaches the host.
+async fn dijkstra<Yield, YieldFuture>(
+    graph: &SealedGraphView,
+    source: usize,
+    options: DijkstraOptions,
+    admission: &ResultAdmission,
+    control: &mut Cooperate<'_, Yield>,
+) -> Result<KernelOutput>
+where
+    Yield: FnMut() -> YieldFuture,
+    YieldFuture: Future<Output = ()>,
+{
+    let n = graph.node_count();
+    if source >= n {
+        return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
+    admission.rows(1)?;
+    // A cutoff or unreachable component must not hide an incompatible weight.
+    // Validate the whole selected graph before allocating the queue. Raw cursor
+    // fuel still covers excluded endpoints, invisible versions and reductions.
+    for vertex in 0..n {
+        control.tick().await?;
+        let mut row = graph.neighbor_cursor_controlled(control.cx, vertex, None)?;
+        while let Some((target, weight)) = control.next(&mut row).await? {
+            control.tick().await?;
+            if target >= n {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            }
+            if !weight.is_finite() {
+                return Err(ExecutionError::InvalidNumericResult.into());
+            }
+            if weight < 0.0 {
+                return Err(ExecutionError::NegativeWeight.into());
+            }
+        }
+    }
+    control.tick().await?;
+    let mut distances = reserve(n)?;
+    let mut overflowed = reserve(n)?;
+    let mut initialization = IndexedHeap::initialize::<Error>(n, options.comparison())?;
+    loop {
+        control.tick().await?;
+        if initialization.step() {
+            break;
+        }
+    }
+    let mut heap = initialization.finish().ok_or(ExecutionError::InvalidUpstreamResult)?;
+    for _ in 0..n {
+        control.tick().await?;
+        distances.push(None);
+        overflowed.push(false);
+    }
+    control.offer(&mut heap, source, 0.0).await?;
+    let mut discovered = 1usize;
+    let mut witness = ComplexityWitness {
+        algorithm: "single_source_dijkstra_compressed_indexed_heap".to_owned(),
+        complexity_claim: "O(|V| log(1+H) + H log(1+|V|) + (|V|+|E|) log(1+|V|)) compressed row visits and queue work".to_owned(),
+        nodes_touched: 0,
+        edges_scanned: 0,
+        queue_peak: 1,
+    };
+    loop {
+        control.tick().await?;
+        let Some(Entry { node, cost, .. }) = control.pop(&mut heap).await? else {
+            break;
+        };
+        if node >= n || distances[node].is_some() || !cost.is_finite() || cost < 0.0 {
+            return Err(ExecutionError::InvalidUpstreamResult.into());
+        }
+        distances[node] = Some(cost);
+        witness.nodes_touched = add(witness.nodes_touched, 1)?;
+        let mut row = graph.neighbor_cursor_controlled(control.cx, node, None)?;
+        while let Some((target, weight)) = control.next(&mut row).await? {
+            control.tick().await?;
+            witness.edges_scanned = add(witness.edges_scanned, 1)?;
+            if !weight.is_finite() {
+                return Err(ExecutionError::InvalidNumericResult.into());
+            }
+            if weight < 0.0 {
+                return Err(ExecutionError::NegativeWeight.into());
+            }
+            if target >= n {
+                return Err(ExecutionError::InvalidUpstreamResult.into());
+            }
+            if distances[target].is_some() {
+                continue;
+            }
+            let candidate = cost + weight;
+            if !candidate.is_finite() {
+                if options.cutoff().is_none() {
+                    overflowed[target] = true;
+                }
+                continue;
+            }
+            // Inclusive cost bound: a vertex exactly at the cutoff can still
+            // reach new vertices through zero-weight edges and cycles.
+            if options.cutoff().is_some_and(|limit| candidate > limit) {
+                continue;
+            }
+            if !heap.contains(target).ok_or(ExecutionError::InvalidUpstreamResult)? {
+                let requested = add(discovered, 1)?;
+                admission.rows(requested)?;
+                discovered = requested;
+            }
+            control.offer(&mut heap, target, candidate).await?;
+            witness.queue_peak = witness.queue_peak.max(heap.len());
+        }
+    }
+    for vertex in 0..n {
+        control.tick().await?;
+        if overflowed[vertex] && distances[vertex].is_none() {
+            return Err(ExecutionError::InvalidNumericResult.into());
+        }
+    }
+    if witness.nodes_touched != discovered {
+        return Err(ExecutionError::InvalidUpstreamResult.into());
+    }
+    Ok(KernelOutput {
+        values: KernelValues::WeightedDistances(distances),
+        row_count: discovered,
+        witness,
+    })
 }
 
 // Keep union-by-size, ordinal tie breaks, path halving and canonical minimum

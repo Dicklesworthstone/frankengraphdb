@@ -1,5 +1,10 @@
 //! Production Chronicle -> Strata -> Prism pulls, paused inside raw history.
 //! Decoded projections are independent output oracles, not source substitutes.
+//!
+//! Use the foundation's registered current-thread driver for awaited kernels.
+//! Its generic unregistered-root runner treats repeated self-wakes as spinning
+//! and adds sleep backoff. Keep actual yield futures, the explicit poll/wake
+//! assertions, all cancellation cuts and the existing deadline unchanged.
 
 use asupersync::runtime::yield_now::yield_now;
 use asupersync::{Budget, runtime::RuntimeBuilder};
@@ -28,6 +33,8 @@ use std::task::{Context, Poll, Wake, Waker};
 
 #[path = "prism_cooperative/connectivity.rs"]
 mod connectivity;
+#[path = "prism_cooperative/dijkstra.rs"]
+mod dijkstra;
 
 fn options(direction: Directedness) -> FnxReadOptions {
     FnxReadOptions {
@@ -181,7 +188,7 @@ fn row(
 
 #[test]
 fn raw_history_faces_and_parallel_sums_resume_bit_exactly_at_every_small_quantum() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -246,7 +253,7 @@ fn raw_history_faces_and_parallel_sums_resume_bit_exactly_at_every_small_quantum
 
 #[test]
 fn a_pause_keeps_partial_groups_private_and_sync_resume_uses_the_same_positions() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -286,7 +293,7 @@ fn a_pause_keeps_partial_groups_private_and_sync_resume_uses_the_same_positions(
 
 #[test]
 fn cancellation_after_every_resumable_checkpoint_fuses_even_with_zero_fuel() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -430,7 +437,7 @@ fn compare_execution(actual: &FnxResult, expected: &FnxResult) {
 
 #[test]
 fn cooperative_bfs_and_pagerank_preserve_rows_scalar_bits_and_certificates_across_quanta() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -551,7 +558,7 @@ async fn small_database(cx: &CommitCx, n: usize, negative: bool) -> Database<Mem
 
 #[test]
 fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -608,7 +615,7 @@ fn cooperative_admission_has_no_sync_fallback_and_uses_exact_independent_limits(
 
 #[test]
 fn cooperative_numeric_refusal_nonconvergence_and_empty_or_isolated_populations_are_exact() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -713,7 +720,7 @@ fn cooperative_numeric_refusal_nonconvergence_and_empty_or_isolated_populations_
 
 #[test]
 fn every_cooperative_checkpoint_cancels_and_every_suspension_can_be_dropped_without_leaks() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -801,7 +808,7 @@ fn every_cooperative_checkpoint_cancels_and_every_suspension_can_be_dropped_with
 
 #[test]
 fn public_cooperative_calls_share_exact_source_preparation_and_keep_old_entrypoints_synchronous() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -813,6 +820,7 @@ fn public_cooperative_calls_share_exact_source_preparation_and_keep_old_entrypoi
         for text in [
             "CALL fnx.single_source_shortest_path_length($source) YIELD distance AS hops,vertex AS id",
             "CALL fnx.pagerank(0.85,1000,1e-9,true) YIELD score AS rank,vertex AS id",
+            "CALL fnx.single_source_dijkstra_path_length($source,NULL,true) YIELD distance AS cost,vertex AS id",
         ] {
             let call = FnxCallSpec::bind(text, &params).unwrap();
             let prepared = call.execute_sealed_cooperative(&cx, &graph, opt.execution_limits,
@@ -837,10 +845,10 @@ fn public_cooperative_calls_share_exact_source_preparation_and_keep_old_entrypoi
             forbidden, memory(), SealedLimits::default(), quantum(1)).await,
             Err(FnxSealedReadError::Input(fgdb_prism::FnxReadError::Bind(_)))));
         let dijkstra = FnxCallSpec::bind("CALL fnx.single_source_dijkstra_path_length($source)", &params).unwrap();
+        assert!(dijkstra.supports_cooperative_sealed_execution());
         assert!(matches!(db.execute_fnx_sealed_cooperative(&cx, &dijkstra, forbidden,
             memory(), SealedLimits::default(), quantum(1)).await,
-            Err(FnxSealedReadError::Execution(FnxSealedExecutionError::UnsupportedCooperativeAlgorithm(
-                FnxAlgorithm::SingleSourceDijkstraPathLength(_))))));
+            Err(FnxSealedReadError::Input(fgdb_prism::FnxReadError::SourceLimit { .. }))));
     });
 }
 
@@ -867,7 +875,7 @@ fn live_refusal(error: FnxSealedExecutionError, expected: usize) {
 
 #[test]
 fn cooperative_live_guards_span_every_checkpoint_without_changing_successful_results() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     // A stall guard, not a performance bound. This test once looped through
     // ~9,300 refusing checkpoints for over 30 minutes and stalled a whole test
     // census. Under a deadline, a runaway loop fails at its next checkpoint.
@@ -978,7 +986,7 @@ fn cooperative_live_guards_span_every_checkpoint_without_changing_successful_res
 
 #[test]
 fn revocation_during_each_suspension_precedes_any_resumed_source_or_result_work() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {

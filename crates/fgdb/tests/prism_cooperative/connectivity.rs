@@ -59,7 +59,7 @@ fn reference(n: usize, edges: &[(usize, usize)], strong: bool) -> Vec<Vec<FnxVal
 
 #[test]
 fn every_three_vertex_topology_has_identical_canonical_components_at_every_quantum() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -96,7 +96,7 @@ fn every_three_vertex_topology_has_identical_canonical_components_at_every_quant
 
 #[test]
 fn canonical_minima_are_not_union_roots_and_scalar_only_populations_still_yield() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -134,7 +134,7 @@ fn canonical_minima_are_not_union_roots_and_scalar_only_populations_still_yield(
 
 #[test]
 fn component_admission_is_exact_and_graph_kind_refusal_precedes_source_preparation() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -180,7 +180,7 @@ fn component_admission_is_exact_and_graph_kind_refusal_precedes_source_preparati
 
 #[test]
 fn every_component_checkpoint_and_suspension_retains_live_refusals_and_drop_safety() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -258,7 +258,7 @@ fn every_component_checkpoint_and_suspension_retains_live_refusals_and_drop_safe
 
 #[test]
 fn historical_hosted_connectivity_keeps_hidden_endpoints_and_aliases_out_of_the_kernel() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
@@ -293,7 +293,7 @@ fn historical_hosted_connectivity_keeps_hidden_endpoints_and_aliases_out_of_the_
 
 #[test]
 fn deep_dfs_and_whole_graph_scc_labeling_preserve_frames_across_actual_pending_polls() {
-    let runtime = RuntimeBuilder::new().build().unwrap();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let root = runtime.request_cx_with_budget(Budget::INFINITE);
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
