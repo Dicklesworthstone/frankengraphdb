@@ -536,6 +536,7 @@ name = "fgdb"
 version = "0.0.1"
 dependencies = [
  "asupersync",
+ "fgdb-beacon",
  "fgdb-chronicle",
  "fgdb-crypto",
  "fgdb-delta-types",
