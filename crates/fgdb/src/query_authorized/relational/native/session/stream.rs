@@ -232,7 +232,7 @@ fn open<'q, C: FnMut() -> u64>(
         *last_now_ms = (*last_now_ms).max(now);
         now
     });
-    let execution = Rc::new(RefCell::new(Execution { cx, permit, clock: tracked_clock }));
+    let execution = Rc::new(RefCell::new(Execution::new(cx, permit, tracked_clock)));
     execution.borrow_mut().checkpoint()?;
     let selected = (|| {
         if !Arc::ptr_eq(owner, &prepared.owner) {

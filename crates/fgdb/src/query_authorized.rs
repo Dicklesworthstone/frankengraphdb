@@ -37,20 +37,36 @@ struct Execution<'cx, 'permit, Clock> {
     cx: &'cx QueryCx,
     permit: ExecutionPermit<'permit, ReadAccess>,
     clock: Clock,
+    // Warden stops a permit after its first failed charge. Retain that exact
+    // cause across outer completion checks instead of losing expiry/retirement
+    // to ExecutionStopped and accidentally restoring a terminal session.
+    failure: Option<fgdb_warden::Error>,
 }
-impl<Clock: FnMut() -> u64> Execution<'_, '_, Clock> {
+impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
+    fn new(cx: &'cx QueryCx, permit: ExecutionPermit<'permit, ReadAccess>, clock: Clock) -> Self {
+        Self { cx, permit, clock, failure: None }
+    }
+    fn refusal(&mut self, error: fgdb_warden::Error) -> QueryError {
+        QueryError::Authorization(*self.failure.get_or_insert(error))
+    }
     fn checkpoint(&mut self) -> Result<(), QueryError> {
+        if let Some(error) = self.failure {
+            return Err(QueryError::Authorization(error));
+        }
         self.cx.checkpoint().map_err(interrupted)?;
-        self.permit.charge_work_at((self.clock)(), 1).map_err(QueryError::Authorization)
+        let charged = self.permit.charge_work_at((self.clock)(), 1);
+        charged.map_err(|error| self.refusal(error))
     }
     fn node(&mut self) -> Result<(), QueryError> {
         self.checkpoint()?;
-        self.permit.charge_nodes_at((self.clock)(), 1).map_err(QueryError::Authorization)
+        let charged = self.permit.charge_nodes_at((self.clock)(), 1);
+        charged.map_err(|error| self.refusal(error))
     }
     fn deliver(&mut self, rows: usize) -> Result<(), QueryError> {
         self.checkpoint()?;
-        let rows = u64::try_from(rows).map_err(|_| QueryError::Authorization(fgdb_warden::Error::TooLarge))?;
-        self.permit.charge_rows_at((self.clock)(), rows).map_err(QueryError::Authorization)?;
+        let rows = u64::try_from(rows).map_err(|_| self.refusal(fgdb_warden::Error::TooLarge))?;
+        let charged = self.permit.charge_rows_at((self.clock)(), rows);
+        charged.map_err(|error| self.refusal(error))?;
         self.checkpoint()
     }
 }
@@ -122,7 +138,7 @@ fn authorized_with_errors<V: Vfs + Clone, Row, Clock: FnMut() -> u64, Error>(
         .map_err(QueryError::Authorization).map_err(map_error)?;
     let permit = verified.begin_read_at(branch, now)
         .map_err(QueryError::Authorization).map_err(map_error)?;
-    let execution = RefCell::new(Execution { cx, permit, clock });
+    let execution = RefCell::new(Execution::new(cx, permit, clock));
     execution.borrow_mut().checkpoint().map_err(map_error)?;
     database.ensure_readable().map_err(QueryError::Read).map_err(map_error)?;
     let at = as_of.unwrap_or(database.snapshot.frontier);

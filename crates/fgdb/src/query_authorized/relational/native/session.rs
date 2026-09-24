@@ -151,9 +151,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
                 *last_now_ms = (*last_now_ms).max(now);
                 now // The existing live permit refuses a backwards sample.
             };
-            let execution = RefCell::new(Execution {
-                cx, permit, clock: &mut tracked_clock as &mut dyn FnMut() -> u64,
-            });
+            let execution = RefCell::new(Execution::new(
+                cx, permit, &mut tracked_clock as &mut dyn FnMut() -> u64,
+            ));
             execution.borrow_mut().checkpoint()?;
             let view = view.as_ref().ok_or(QueryError::Authorization(
                 AuthorizationError::ExecutionStopped,
@@ -271,7 +271,7 @@ impl<V: Vfs + Clone> Database<V> {
                 last_now_ms = last_now_ms.max(now);
                 now
             };
-            let mut execution = Execution { cx, permit, clock: &mut tracked_clock };
+            let mut execution = Execution::new(cx, permit, &mut tracked_clock);
             execution.checkpoint()?;
             let view = self.read_session().map_err(QueryError::Read)?;
             execution.deliver(0)?;
@@ -285,3 +285,6 @@ impl<V: Vfs + Clone> Database<V> {
         })
     }
 }
+
+#[cfg(test)]
+mod failure_tests;
