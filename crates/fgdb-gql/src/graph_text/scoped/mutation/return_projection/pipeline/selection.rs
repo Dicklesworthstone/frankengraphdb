@@ -1,6 +1,8 @@
 //! Computed WHERE operands lower to the existing Project/Filter/Project IR.
 //! All expressions read the original row. Private cells cannot become aliases,
 //! change multiplicity, escape into RETURN *, or move across an input page.
+//! IN accepts a bounded list of expressions; list parameters and subquery RHSs
+//! are not part of this profile. Text predicates use the shared scalar kernels.
 
 use super::*;
 use crate::algebra::IntegerComparison;
@@ -11,6 +13,28 @@ use crate::{GqlListParameter, GraphIntegerOp};
 struct Selection {
     code: Vec<ReadFilterOp>,
     values: Vec<ReadValueTemplate>,
+}
+
+// These are postfix construction instructions, not compiled jump offsets.
+// Concatenating operands preserves CASE/COALESCE laziness when the shared
+// scalar compiler subsequently constructs its checked execution program.
+fn scalar_program(
+    value: ReadValueTemplate,
+    at: usize,
+) -> Result<Vec<MutationIntegerTemplateOp>, GraphSetTextError> {
+    Ok(match value {
+        ReadValueTemplate::Column(column) => vec![MutationIntegerTemplateOp::Bound(
+            GraphIntegerOp::ScalarColumn(column),
+        )],
+        ReadValueTemplate::Literal(value) => vec![MutationIntegerTemplateOp::Bound(
+            GraphIntegerOp::Scalar(value.predicate(IntegerComparison::Equal)),
+        )],
+        ReadValueTemplate::Parameter { index, at } => {
+            vec![MutationIntegerTemplateOp::Parameter { index, at }]
+        }
+        ReadValueTemplate::Integer { program, .. } => program,
+        _ => return Err(expected(at, "scalar predicate expression")),
+    })
 }
 
 impl<'a> Parser<'a> {
@@ -30,8 +54,8 @@ impl<'a> Parser<'a> {
         if !selection.values.is_empty() {
             // NULL is a scalar shape witness, never a substituted execution
             // value. Lists need a list witness for SIZE/index schema admission.
-            // The shared expression parser already checked declared scalar
-            // kinds, every operator and every branch before reaching this point.
+            // The shared compiler checks every composed operator/branch below;
+            // no witness is retained in the prepared definition or executed.
             let null = GqlScalarParameter::new(CanonicalScalar::Null)
                 .expect("canonical null is a bounded scalar");
             let witnesses: Vec<_> = self
@@ -172,6 +196,37 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         let left = self.selection_value(schema)?;
+        if self.is_word("IN") || self.is_word("BETWEEN") || self.is_word("NOT") {
+            return self.selection_membership(schema, selection, left, at);
+        }
+        let text_op = if self.take_word("STARTS")? {
+            self.word("WITH")?;
+            Some(GraphIntegerOp::StartsWith)
+        } else if self.take_word("ENDS")? {
+            self.word("WITH")?;
+            Some(GraphIntegerOp::EndsWith)
+        } else if self.take_word("CONTAINS")? {
+            Some(GraphIntegerOp::Contains)
+        } else {
+            None
+        };
+        if let Some(op) = text_op {
+            let right = self.selection_value(schema)?;
+            self.selection_text_parameters(&left, &right, at)?;
+            let mut program = scalar_program(left, at)?;
+            program.extend(scalar_program(right, at)?);
+            program.push(MutationIntegerTemplateOp::Bound(op));
+            let value = ReadValueTemplate::Integer { program, at };
+            let test = ReadFilterOp::Compare {
+                left: self.selection_cell(schema, selection, value, at)?,
+                comparison: IntegerComparison::Equal,
+                right: ReadFilterOperand::Literal(
+                    GqlScalarParameter::new(CanonicalScalar::Bool(true))
+                        .expect("canonical true is a bounded scalar"),
+                ),
+            };
+            return emit(&mut selection.code, test, at);
+        }
         let op = if self.take_word("IS")? {
             let negate = self.take_word("NOT")?;
             self.word("NULL")?;
@@ -204,18 +259,7 @@ impl<'a> Parser<'a> {
                     // Double NOT checks the Boolean domain without changing
                     // TRUE/FALSE/UNKNOWN. Comparing an unchecked cell to TRUE
                     // would silently turn non-Boolean inputs into false.
-                    let mut program = match value {
-                        ReadValueTemplate::Column(column) => {
-                            vec![MutationIntegerTemplateOp::Bound(
-                                GraphIntegerOp::ScalarColumn(column),
-                            )]
-                        }
-                        ReadValueTemplate::Parameter { index, at } => {
-                            vec![MutationIntegerTemplateOp::Parameter { index, at }]
-                        }
-                        ReadValueTemplate::Integer { program, .. } => program,
-                        _ => return Err(expected(at, "Boolean scalar row predicate")),
-                    };
+                    let mut program = scalar_program(value, at)?;
                     program.push(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not));
                     program.push(MutationIntegerTemplateOp::Bound(GraphIntegerOp::Not));
                     let value = ReadValueTemplate::Integer { program, at };
@@ -231,6 +275,128 @@ impl<'a> Parser<'a> {
             }
         };
         emit(&mut selection.code, op, at)
+    }
+
+    fn selection_text_parameters(
+        &mut self,
+        left: &ReadValueTemplate,
+        right: &ReadValueTemplate,
+        at: usize,
+    ) -> Result<(), GraphSetTextError> {
+        use fgdb_types::CanonicalScalarKind;
+        let expected_type = GqlParameterType::Scalar(CanonicalScalarKind::Text);
+        let operands = [left, right];
+        for operand in operands {
+            let ReadValueTemplate::Parameter { index, .. } = operand else {
+                continue;
+            };
+            let local_uses = operands
+                .iter()
+                .filter(|value| {
+                    matches!(value,
+                        ReadValueTemplate::Parameter { index: other, .. } if other == index)
+                })
+                .count();
+            let spec = &mut self.syntax.parameters[*index];
+            // A direct parameter used only by this text predicate has a known
+            // required kind. Never reinterpret a declaration or an earlier
+            // numeric use; all other contexts still share one frozen schema.
+            if spec.parameter_type == GqlParameterType::Int64
+                && spec.occurrences == local_uses
+                && !self.parameter_types.contains_key(&spec.name)
+            {
+                spec.parameter_type = expected_type;
+                self.parameter_types.insert(spec.name.clone(), expected_type);
+            }
+            if !matches!(
+                spec.parameter_type,
+                GqlParameterType::Scalar(CanonicalScalarKind::Text | CanonicalScalarKind::Null)
+            ) {
+                return Err(GraphSetTextError {
+                    offset: at,
+                    kind: GraphSetTextErrorKind::Pattern(
+                        GraphPatternTextErrorKind::ParameterTypeMismatch {
+                            expected: expected_type,
+                            found: spec.parameter_type,
+                        },
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn selection_membership(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        selection: &mut Selection,
+        left: ReadValueTemplate,
+        at: usize,
+    ) -> Result<(), GraphSetTextError> {
+        let negate = self.take_word("NOT")?;
+        // A computed candidate is admitted/evaluated once, including for an
+        // empty IN list. Neither duplicate members nor negation duplicate rows.
+        let left = self.selection_cell(schema, selection, left, at)?;
+        if self.take_word("IN")? {
+            self.punct(b'[', "bounded IN expression list")?;
+            if self.take(b']')? {
+                emit(&mut selection.code, ReadFilterOp::Truth(Some(false)), at)?;
+            } else {
+                let mut first = true;
+                loop {
+                    let value = self.selection_value(schema)?;
+                    let right = self.selection_cell(schema, selection, value, at)?;
+                    emit(
+                        &mut selection.code,
+                        ReadFilterOp::Compare {
+                            left: left.clone(),
+                            comparison: IntegerComparison::Equal,
+                            right,
+                        },
+                        at,
+                    )?;
+                    if !first {
+                        emit(&mut selection.code, ReadFilterOp::Or, at)?;
+                    }
+                    first = false;
+                    if self.take(b']')? {
+                        break;
+                    }
+                    self.punct(b',', ", or ]")?;
+                }
+            }
+        } else if self.take_word("BETWEEN")? {
+            let value = self.selection_value(schema)?;
+            let lower = self.selection_cell(schema, selection, value, at)?;
+            self.word("AND")?;
+            let value = self.selection_value(schema)?;
+            let upper = self.selection_cell(schema, selection, value, at)?;
+            emit(
+                &mut selection.code,
+                ReadFilterOp::Compare {
+                    left: left.clone(),
+                    comparison: IntegerComparison::GreaterOrEqual,
+                    right: lower,
+                },
+                at,
+            )?;
+            emit(
+                &mut selection.code,
+                ReadFilterOp::Compare {
+                    left,
+                    comparison: IntegerComparison::LessOrEqual,
+                    right: upper,
+                },
+                at,
+            )?;
+            emit(&mut selection.code, ReadFilterOp::And, at)?;
+        } else {
+            return Err(expected(self.current.at, "IN or BETWEEN after NOT"));
+        }
+        if negate {
+            emit(&mut selection.code, ReadFilterOp::Not, at)?;
+        }
+        Ok(())
     }
 
     fn selection_value(
@@ -310,7 +476,11 @@ impl<'a> Parser<'a> {
             TokenKind::Punct(
                 b'+' | b'-' | b'*' | b'/' | b'%' | b'|' | b'[' | b'=' | b'!' | b'<' | b'>',
             ) => true,
-            TokenKind::Word(word) => word.eq_ignore_ascii_case("IS"),
+            TokenKind::Word(word) => {
+                ["IS", "IN", "BETWEEN", "NOT", "STARTS", "ENDS", "CONTAINS"]
+                    .iter()
+                    .any(|operator| word.eq_ignore_ascii_case(operator))
+            }
             _ => false,
         })
     }
@@ -573,5 +743,174 @@ mod tests {
             assert!(matches!(result, Err(GqlQueryError::Interrupted(value)) if value == stop));
             assert_eq!(seen, stop);
         }
+    }
+
+    #[test]
+    fn membership_preserves_null_logic_and_input_occurrences() {
+        assert_eq!(
+            execute("UNWIND [1, 2, 2, 3, NULL] AS n WITH n WHERE n IN [2, NULL] RETURN n"),
+            vec![row(2), row(2)]
+        );
+        assert!(
+            execute("UNWIND [1, 2, 3, NULL] AS n WITH n WHERE n NOT IN [2, NULL] RETURN n")
+                .is_empty()
+        );
+        assert_eq!(
+            execute("UNWIND [1, 2, 2] AS n WITH n WHERE n IN [n, n] RETURN n"),
+            vec![row(1), row(2), row(2)]
+        );
+        assert!(execute("UNWIND [1, NULL] AS n WITH n WHERE n IN [] RETURN n").is_empty());
+        assert_eq!(
+            execute("UNWIND [1, NULL] AS n WITH n WHERE n NOT IN [] RETURN n").len(),
+            2
+        );
+    }
+
+    #[test]
+    fn ranges_and_computed_members_keep_boolean_boundaries() {
+        assert_eq!(
+            execute(
+                "UNWIND [1, 2, 3, NULL] AS n WITH n \
+                 WHERE (n + 0) BETWEEN 2 AND 3 AND n < 3 RETURN n"
+            ),
+            vec![row(2)]
+        );
+        assert_eq!(
+            execute(
+                "UNWIND [1, 2, 3, NULL] AS n WITH n \
+                 WHERE (n + 0) NOT BETWEEN 2 AND 3 OR n IN [n + 1, 2] RETURN n"
+            ),
+            vec![row(1), row(2)]
+        );
+        assert_eq!(
+            execute("UNWIND [1, 2, NULL] AS n WITH n WHERE n NOT BETWEEN NULL AND 1 RETURN n"),
+            vec![row(2)]
+        );
+    }
+
+    #[test]
+    fn text_predicates_compose_with_functions_case_and_boolean_filters() {
+        let mut rows = execute(
+            "UNWIND ['Alpha', 'beta', 'alphabet', NULL] AS word WITH word \
+             WHERE LOWER(word) STARTS WITH 'al' AND word CONTAINS 'ph' \
+             OR word ENDS WITH 'ta' RETURN word",
+        );
+        let mut expected: Vec<_> = ["Alpha", "alphabet", "beta"]
+            .into_iter()
+            .map(|value| {
+                GraphValueRow::from_owned_values(vec![GraphValue::Scalar(
+                    CanonicalScalar::ucs_basic_text(value).unwrap(),
+                )])
+            })
+            .collect();
+        rows.sort();
+        expected.sort();
+        assert_eq!(rows, expected);
+        assert_eq!(
+            execute(
+                "UNWIND ['Alpha', 'beta', NULL] AS word WITH word \
+                 WHERE (CASE WHEN word IS NULL THEN '' ELSE LOWER(word) END) \
+                 STARTS WITH 'al' RETURN word"
+            ).len(),
+            1
+        );
+        assert_eq!(
+            execute(
+                "UNWIND ['éclair', 'plain'] AS word WITH word \
+                 WHERE word STARTS WITH 'é' AND word CONTAINS 'cl' RETURN word"
+            ).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn text_parameters_are_inferred_once_and_never_reinterpret_numeric_uses() {
+        use fgdb_types::CanonicalScalarKind;
+        for condition in ["word STARTS WITH $prefix", "$prefix STARTS WITH $prefix"] {
+            let statement = format!(
+                "UNWIND ['alpha'] AS word WITH word WHERE {condition} RETURN word"
+            );
+            let prepared = PreparedGraphSetText::prepare(&statement, |_, _| None).unwrap();
+            let schema = prepared.parameter_schema();
+            assert_eq!(schema.len(), 1);
+            assert_eq!(
+                schema[0].parameter_type,
+                GqlParameterType::Scalar(CanonicalScalarKind::Text)
+            );
+            let mut arguments = GqlParameters::new();
+            arguments.insert(
+                "prefix",
+                GqlParameterValue::Scalar(
+                    GqlScalarParameter::new(CanonicalScalar::ucs_basic_text("al").unwrap())
+                        .unwrap(),
+                ),
+            ).unwrap();
+            let result = prepared
+                .bind_parameters(&arguments)
+                .unwrap()
+                .execute_governed(
+                    policy(),
+                    |_, _| Err::<_, GqlQueryError<usize, usize>>(GqlQueryError::Source(1)),
+                    || Ok::<_, usize>(()),
+                )
+                .unwrap();
+            assert_eq!(result.value.len(), 1);
+            assert!(
+                prepared
+                    .bind_parameters(&GqlParameters::new().with_int64("prefix", 1).unwrap())
+                    .is_err()
+            );
+        }
+        let mut parser = Parser::new("$prefix STARTS WITH 'a'").unwrap();
+        parser.parameter_types.insert("prefix".into(), GqlParameterType::Int64);
+        let mut depth = 2;
+        assert!(parser.row_selection(&[], &mut Vec::new(), &mut depth, 0).is_err());
+        assert!(
+            PreparedGraphSetText::prepare(
+                "UNWIND [1] AS n WITH n WHERE n = $value AND 'a' STARTS WITH $value RETURN n",
+                |_, _| None,
+            ).is_err()
+        );
+    }
+
+    #[test]
+    fn empty_membership_does_not_hide_expression_errors_or_numeric_text_misuse() {
+        for operator in ["IN", "NOT IN"] {
+            let query = prepare(&format!(
+                "UNWIND [0] AS n WITH n WHERE 10 / n {operator} [] RETURN n LIMIT 0"
+            ));
+            assert!(matches!(
+                query.execute_governed(
+                    policy(),
+                    |_, _| Err::<_, GqlQueryError<usize, usize>>(GqlQueryError::Source(1)),
+                    || Ok::<_, usize>(()),
+                ),
+                Err(GqlQueryError::Source(
+                    crate::GraphSetExecutionError::Projection { .. }
+                ))
+            ));
+        }
+        let mut calls = 0;
+        let result = PreparedGraphSetText::prepare(
+            "MATCH (n) WITH n WHERE 1 STARTS WITH 'a' RETURN n",
+            |_, _| {
+                calls += 1;
+                None
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn membership_predicate_limit_is_enforced_without_widening_the_ir() {
+        let members = vec!["1"; crate::algebra::MAX_PATTERN_PREDICATES].join(",");
+        let allowed = format!("UNWIND [1] AS n WITH n WHERE n IN [{members}] RETURN n");
+        assert_eq!(execute(&allowed), vec![row(1)]);
+        let refused = format!("UNWIND [1] AS n WITH n WHERE n IN [{members},1] RETURN n");
+        assert!(matches!(
+            PreparedGraphSetText::prepare(&refused, |_, _| None).unwrap_err().kind,
+            GraphSetTextErrorKind::FilterBuild(GraphSetFilterError::TooManyPredicates { .. })
+        ));
     }
 }
