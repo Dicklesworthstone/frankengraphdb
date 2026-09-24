@@ -369,8 +369,11 @@ fn transaction_prefix_reuses_existing_staging_and_preserves_it_after_rejected_ed
         ));
         let mut invalid = WriteBatch::new(R);
         invalid.set_vertex_property(VId(4), P, Some(CanonicalScalar::Int(99)));
+        // Since 64556cb0 an ordinary `write` after multi-relation staging
+        // composes in source order (dependent edits are legal); the strict
+        // independent-group check lives on the explicit `write_atomic` API.
         assert!(matches!(
-            txn.write(&mut db, invalid),
+            txn.write_atomic(&mut db, vec![invalid]),
             Err(WriteTxnError::AtomicRelationConflict { .. })
         ));
         assert_eq!(txn.staged_effect_digest().unwrap(), before);

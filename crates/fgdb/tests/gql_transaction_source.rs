@@ -516,8 +516,11 @@ fn multi_relation_source_keeps_coordinates_and_failed_staging_leaves_it_unchange
         assert_eq!(before.rows.snapshot_records, 10);
         let mut overlap = WriteBatch::new(R);
         overlap.set_vertex_property(VId(4), N, Some(CanonicalScalar::Int(99)));
+        // Since 64556cb0 an ordinary `write` after multi-relation staging
+        // composes in source order; the strict independent-group refusal this
+        // test pins is the explicit `write_atomic` API.
         assert!(matches!(
-            txn.write(&mut db, overlap),
+            txn.write_atomic(&mut db, vec![overlap]),
             Err(WriteTxnError::AtomicRelationConflict { .. })
         ));
         assert_eq!(

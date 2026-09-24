@@ -736,7 +736,10 @@ mod admission_meter_tests {
                 for (statement, source_count) in [
                     ("MATCH (a:L) RETURN a", vertex_count),
                     ("MATCH (a)-[:R]->(b) RETURN b", edge_count),
-                    ("MATCH (a:L) RETURN a LIMIT 0", vertex_count),
+                    // A LIMIT never reduces source admission. The legacy
+                    // binder refuses LIMIT 0 by design (parser.rs pins it), so
+                    // the smallest admitted page carries the same property.
+                    ("MATCH (a:L) RETURN a LIMIT 1", vertex_count),
                 ] {
                     let query = PreparedGqlQuery::prepare(statement, &bind).unwrap();
                     for limit in [0, 1] {
@@ -782,7 +785,7 @@ mod admission_meter_tests {
             assert!(
                 matches!(result_limited, Err(BudgetedGqlError::Budget(error))
                 if error.dimension == GqlBudgetDimension::ResultRows
-                    && error.limit == 1 && error.observed == 5)
+                    && error.limit == 1 && error.observed == 2)
             );
             for result in [
                 db.execute_prepared_query_budgeted_at(
