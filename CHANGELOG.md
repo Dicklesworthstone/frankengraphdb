@@ -2,6 +2,31 @@
 
 This file records landed, executable, or mechanically enforced capability on unreleased `main`. Reserved registry rows, architectural plans, and unchecked acceptance tests are not treated as shipped behavior. FrankenGraphDB has not reached the planned 1.0 product surface.
 
+## Unreleased — 2026-09-22 milestone closures and seven new workspace crates
+
+Owning beads: `fgdb-w4-g1-txn-core-qpmg` (closed), `fgdb-boundplan-gla-lowering-seam-r2kd` (closed), `fgdb-w3-properties-gou.2` (closed), `fgdb-topology-seven-crates-9n8ao` (open).
+
+- **Milestone beads closed:** W4/G1 transaction core (`fgdb-w4-g1-txn-core-qpmg`) and the BoundPlan GLA lowering seam (`fgdb-boundplan-gla-lowering-seam-r2kd`); the vertex-patch-packing series residue `fgdb-w3-properties-gou.2` closed the same day.
+- **Seven new workspace crates** materialized 2026-09-21/22: `fgdb-cli`; `fgdb-order` (Aegis deterministic Raft transition kernel); `fgdb-policy` (capability policy verifier IR); `fgdb-prism` (snapshot projections + sealed-view FNX kernels including Dijkstra); `fgdb-repl` (bonded replica catch-up); `fgdb-warden` (macaroon issuance/attenuation); `fgdb-beacon` (memory-resident HNSW/BM25/hybrid index).
+- **Honest caveat:** the topology registry freeze is in flight (`fgdb-topology-seven-crates-9n8ao` open) and `g0_topology_e2e` is red for exactly that reason. The checker index reached 120 rows (74 live: 16 script, 11 binary, 47 cargo-test), up from 99 rows (57 live) at the 2026-09-07 census.
+
+## Unreleased — 2026-09-17 the robot CLI binary
+
+- `crates/fgdb/src/bin/fgdb.rs` landed (commit `79548aca`): `create`, `write`, `query --stream`, `--certify-to`, `diff`, `transaction`, `replay`, `load`, and `robot schema`, emitting the versioned NDJSON `{"v":1,...}` envelope.
+- The contract is frozen where it exists: `tests/cli_robot.rs` validates emitted events against the frozen schema fixture, backed by 33 process-level `cli_*` tests. Consolidation of the robot contract surface continues (see the 2026-09-22 entry).
+
+## Unreleased — 2026-09-08 full verification green, repairs landed in the same window
+
+Full verification at commit `9adf484d`: **9/9 core gates and 40/40 registered gates green**. The same window landed repairs rather than papering over what verification exposed:
+
+- identity-E2E pin fix;
+- cursor-policy export (`fgdb-w10-embedded-54r.1.1`);
+- txn bulk scans (`fgdb-w10-embedded-54r.1.2`);
+- handle ownership (`fgdb-w10-embedded-54r.1.3`);
+- vertex patch packing (`fgdb-w3-properties-gou.1`/`.2`/`.3` series; `.2` closed 2026-09-22).
+
+Later in the month, execution and kernel landings continued: FreeJoin joins compiled into maintained relational circuits (`c0f0740f`), six-kind checked joins over complete relational queries (`f8c37559`), GQL relational WHERE fused with ordered equality probes (`ee4d964d`), CSV incremental decode (`6ae9747f`), Prism weighted shortest paths directly over compressed Strata rows (`b2d7761c`), and Aegis payload-survival math across failure domains (`2f6abad0`, `d390c6bd`).
+
 ## Unreleased — 2026-09-04 the same overclaim class, twice more, closed by making the apparatus reach
 
 Owning beads: `fgdb-1sto`, `fgdb-j6aq`, `fgdb-owrc`. Found by a second independent verifier re-checking the first correction, not by self-review. Both residues are the same failure as the original: a statement reaching past what its bound symbols can observe.

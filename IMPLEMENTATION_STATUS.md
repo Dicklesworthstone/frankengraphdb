@@ -1,6 +1,6 @@
 # FrankenGraphDB Implementation Status
 
-Capability baseline: unreleased `main` through the 2026-09-02 resource-safe evidence-paging continuation.
+Capability baseline: unreleased `main` through the 2026-09-22 reality check.
 
 This document is the compact, agent-facing map of **what executes now**, **where each live behavior is owned**, **what its evidence proves**, and **what remains target architecture**. The comprehensive plan remains normative for the finished system; this file records the present inhabitable subset.
 
@@ -36,7 +36,7 @@ The live grammar is intentionally smaller than ISO GQL. It includes a determinis
 
 Parsing and binding live in `crates/fgdb-gql/src/parser.rs`. Live database reads, historical reads, and immutable read-view reads share one exact-sequence execution kernel in `crates/fgdb/src/gql_exec.rs`.
 
-Typed statement parameters are not yet implemented. Query values are still literals in the live grammar.
+Typed statement parameters have landed in `crates/fgdb-gql/src/parameters.rs` as structural parser operands, and the engine execution spine consumes them (see the 2026-09-08 → 2026-09-22 reality check below).
 
 ### Pinned embedded read views
 
@@ -78,7 +78,7 @@ Changing the original statement or bind map cannot change the prepared definitio
 
 The owned definition and query-budget vocabulary live in `crates/fgdb-gql/src/prepared.rs`. High-level adapters live in `crates/fgdb/src/write_txn_parts/owned_prepared.rs`. They reuse the existing binder and execution bodies rather than creating another query path.
 
-This is not yet the final parameterized prepared-statement protocol. Typed parameters, catalog epochs, authorization context, physical-plan selection, cursor lifecycle, invalidation, and a released persistence contract remain open.
+This is not yet the final parameterized prepared-statement protocol. Typed parameters have landed (`crates/fgdb-gql/src/parameters.rs`); canonical parameter evidence, catalog epochs, authorization context, physical-plan selection, cursor lifecycle, invalidation, and a released persistence contract remain open.
 
 ### Deterministic query-execution budgets
 
@@ -100,6 +100,48 @@ The current implementation materializes and counts the relevant table before ord
 Text execution binds once and delegates to the plan-only overlay executor. Owned preparation delegates to the same body. The implementation is decomposed under `crates/fgdb/src/write_txn_parts/` while retaining one private module and one `WriteTxn` state authority.
 
 This is not full SSI. Predicate/range conflict tracking, merge-ladder integration, transaction ownership/session policy, and multi-relation writes remain incomplete.
+
+## Reality check 2026-09-08 → 2026-09-22
+
+### 2026-09-08 — full verification green; repairs landed
+
+Full verification at commit `9adf484d`: **9/9 core gates and 40/40 registered gates green**. Repairs landed in the same window:
+
+- identity-E2E pin fix;
+- cursor-policy export (`fgdb-w10-embedded-54r.1.1`);
+- txn bulk scans (`fgdb-w10-embedded-54r.1.2`);
+- handle ownership (`fgdb-w10-embedded-54r.1.3`);
+- vertex patch packing (`fgdb-w3-properties-gou.1`/`.2`/`.3` series; `.2` closed 2026-09-22).
+
+### 2026-09-17 — robot CLI binary
+
+`crates/fgdb/src/bin/fgdb.rs` landed (commit `79548aca`): `create`/`write`/`query --stream`/`--certify-to`/`diff`/`transaction`/`replay`/`load`/`robot schema`, emitting the NDJSON `{"v":1,...}` envelope, with a frozen contract test (`tests/cli_robot.rs`) plus 33 process-level `cli_*` tests.
+
+### 2026-09-2x — execution, algorithm, and kernel landings
+
+- FreeJoin joins compiled into maintained relational circuits (`c0f0740f`); six-kind checked joins over complete relational queries (`f8c37559`).
+- GQL relational WHERE fused with ordered equality probes (`ee4d964d`).
+- CSV incremental decode (`6ae9747f`).
+- Prism weighted shortest paths directly over compressed Strata rows (`b2d7761c`).
+- Aegis payload-survival math across failure domains (`2f6abad0`, `d390c6bd`).
+
+### 2026-09-22 — milestone closures and seven new workspace crates
+
+Milestone beads closed: `fgdb-w4-g1-txn-core-qpmg` (W4/G1 transaction core) and `fgdb-boundplan-gla-lowering-seam-r2kd` (BoundPlan GLA lowering seam); `fgdb-w3-properties-gou.2` closed. Seven new workspace crates materialized 2026-09-21/22:
+
+- `fgdb-cli`;
+- `fgdb-order` — Aegis deterministic Raft transition kernel;
+- `fgdb-policy` — capability policy verifier IR;
+- `fgdb-prism` — snapshot projections + sealed-view FNX kernels including Dijkstra;
+- `fgdb-repl` — bonded replica catch-up;
+- `fgdb-warden` — macaroon issuance/attenuation;
+- `fgdb-beacon` — memory-resident HNSW/BM25/hybrid index.
+
+Honest caveat: the topology registry freeze is in flight (`fgdb-topology-seven-crates-9n8ao` open) and `g0_topology_e2e` is red for exactly that reason. The checker index grew from 99 rows (57 live) at the 2026-09-07 census to 120 rows (74 live: 16 script, 11 binary, 47 cargo-test) by 2026-09-22.
+
+### Posture claim, limited on purpose
+
+The embedded library posture is live. The CLI binary is real, but the robot contract is mid-consolidation. The server posture is absent. No claim beyond that is made here.
 
 ## Query evidence tower
 
@@ -286,6 +328,7 @@ The failure-path witness is `bash scripts/local_proof_selftest.sh`: it uses reta
 | durable database composition and temporal graph reads | `crates/fgdb/src/lib.rs` |
 | one exact-sequence GQL read kernel | `crates/fgdb/src/gql_exec.rs` |
 | parser, binder, `RelationBind`, `BoundPlan` | `crates/fgdb-gql/src/parser.rs` |
+| typed statement parameters | `crates/fgdb-gql/src/parameters.rs` |
 | `PreparedGqlQuery` and query-execution budgets | `crates/fgdb-gql/src/prepared.rs` |
 | staged-result transcript | `crates/fgdb-gql/src/overlay_evidence.rs` |
 | strict evidence framing and independent decoder | `crates/fgdb-gql/src/evidence_artifact.rs` |
@@ -346,7 +389,7 @@ A paragraph in this file or in `CHANGELOG.md` describing checks that were not ru
 
 The following remain incomplete or absent:
 
-- typed prepared-statement parameters and canonical parameter evidence;
+- canonical parameter evidence for the typed parameters that have landed;
 - typed rows/columns and genuine streaming cursors with backpressure;
 - full session ownership, authorization, renew/expiry/reattach, and synchronous facade;
 - full SSI, predicate/range conflicts, merge ladder, and general multi-relation transactions;
@@ -355,19 +398,18 @@ The following remain incomplete or absent:
 - storage/operator-level early resource enforcement;
 - full ISO GQL, GLA lowering, Loom operators, optimizer, spill, and larger-than-memory execution;
 - Strata tiers I/R/A and production compaction/migration policy;
-- Ripple, Beacon, Prism, Warden, Fabric, and Aegis;
-- CLI/robot mode, server, Python bindings, packaging, signed releases, installer, and upgrade tooling.
+- the Ripple crate, Fabric, and maturation of the 2026-09-21/22 crates (`fgdb-order`, `fgdb-policy`, `fgdb-prism`, `fgdb-repl`, `fgdb-warden`, `fgdb-beacon`) into their full planned subsystems;
+- server, Python bindings, packaging, signed releases, installer, and upgrade tooling (the robot CLI binary itself has landed — see the reality check).
 
 ## Dependency-ordered next work
 
 1. Establish a trustworthy evidence baseline before further feature landings: run the pinned toolchain through `scripts/local_proof.sh`, independently verify the complete bundle against the intended checkout, and distinguish a verified green result from a verified red/void result or aborted collection. Focused proof-wrapper tests do not discharge the whole-tree gate.
-2. Add typed parameters as structural parser operands; never use string substitution.
-3. Bind canonical parameter values into preparation identity, certificates, and evidence envelopes.
-4. Decide whether the application envelope and page token graduate into registered compatibility contracts; freeze ceilings and golden vectors first.
-5. Build a real cursor/session owner with cancellation, lease, bounded buffering, and backpressure.
-6. Move resource enforcement into storage/operator admission before full table/result materialization.
-7. Package staged template bytes and exact snapshot authority before claiming standalone transaction replay.
-8. Continue into full SSI and GLA/Loom lowering.
+2. Typed parameters landed as structural parser operands (`crates/fgdb-gql/src/parameters.rs`); bind canonical parameter values into preparation identity, certificates, and evidence envelopes.
+3. Decide whether the application envelope and page token graduate into registered compatibility contracts; freeze ceilings and golden vectors first.
+4. Build a real cursor/session owner with cancellation, lease, bounded buffering, and backpressure.
+5. Move resource enforcement into storage/operator admission before full table/result materialization.
+6. Package staged template bytes and exact snapshot authority before claiming standalone transaction replay.
+7. Continue into full SSI and GLA/Loom lowering.
 
 ## Recent evolution
 
@@ -379,5 +421,9 @@ The following remain incomplete or absent:
 - `97d09787` through `10871100` — strict application envelopes and replay audit.
 - `a3441930` through `f004bd1c` — pre-allocation evidence byte/row admission.
 - `901e4ef5` through `49adac5f` — result-bound stateless paging, audit adapters, progress metadata, and request-preflight laws.
+- `9adf484d` — 2026-09-08 full verification (9/9 core, 40/40 registered) with the same-window repair series.
+- `79548aca` — 2026-09-17 robot CLI binary with frozen NDJSON robot contract.
+- `c0f0740f`, `f8c37559`, `ee4d964d`, `6ae9747f`, `b2d7761c`, `2f6abad0`/`d390c6bd` — FreeJoin relational circuits, six-kind checked joins, WHERE/equality-probe fusion, CSV incremental decode, Prism sealed-kernel shortest paths, Aegis payload-survival math.
+- 2026-09-21/22 — seven new workspace crates (`fgdb-cli`, `fgdb-order`, `fgdb-policy`, `fgdb-prism`, `fgdb-repl`, `fgdb-warden`, `fgdb-beacon`); milestone closures `fgdb-w4-g1-txn-core-qpmg` and `fgdb-boundplan-gla-lowering-seam-r2kd`.
 
 Keep this file synchronized whenever a capability crosses from plan or red-bar acceptance test into an inhabitable public path.

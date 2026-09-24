@@ -208,12 +208,13 @@ bash scripts/check.sh > gate.log 2>&1; rc=$?      # rc is the answer
 ```
 
 `grep '^FAIL' gate.log` is the habit to unlearn, and it is why this section
-exists. MEASURED 2026-07-27 across `scripts/check.sh` plus the nine live
+exists. MEASURED 2026-07-27 across `scripts/check.sh` plus the sixteen live
 `kind = "script"` gates in `registries/checker_index.toml`: **no gate emitted a
 line beginning with `FAIL` at column 0**, so that grep returned `0` on a red run
-of all ten. Three different failure tokens are in use (`RED`, `FAIL`, `ERROR`),
-under two indentation conventions, and **seven of the ten wrote the failure to
-stderr only** — so `gate.sh > log` and then reading `log` yields a plausible,
+of all of them. (Count re-measured 2026-09-22: sixteen live script rows;
+sixteen live script-kind checkers.) Three different failure tokens are in use
+(`RED`, `FAIL`, `ERROR`), under two indentation conventions, and **seven of the
+ten wrote the failure to stderr only** — so `gate.sh > log` and then reading `log` yields a plausible,
 complete-looking, all-green transcript of a red run. A pane read
 `scripts/check.sh` that way and landed a commit on it.
 
@@ -224,7 +225,7 @@ every gate:
 - **One stream.** The verdict transcript is **stdout**. stderr carries only the
   diagnostics explaining *why*, and is unconstrained.
 - **One token.** Every failure emits an anchored `FAIL ` line at column 0.
-  `grep -c '^FAIL ' <stdout>` is the query, and it is total over all ten gates.
+  `grep -c '^FAIL ' <stdout>` is the query, and it is total over all gates.
   `PASS ` is its counterpart. `scripts/check.sh` additionally emits `RED ` and
   `UNRUN ` as refinements — always *beside* a `FAIL` line, never instead of one.
   The vocabulary is closed: `PASS`, `FAIL`, `RED`, `UNRUN`.

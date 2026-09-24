@@ -1291,7 +1291,7 @@ Method: every gate has a bench binary, a committed baseline, a variance budget, 
 | Txn + secure access | `fgdb-txn` (MVCC, Graph-SSI/witness lifecycle, coordinator, final-effect merge ladder), `fgdb-constraints` (branch-scoped canonical enforcement), `fgdb-secure-view` (sole authorized storage/permit facade); depends on Chronicle + Strata + foundation policy verifier |
 | Loom | `fgdb-gql` + `fgdb-cypher` (syntax only), `fgdb-bind`, `fgdb-algebra`, `fgdb-planner`, `fgdb-exec`, `fgdb-linalg`, `fgdb-datalog`; all reads flow through `fgdb-secure-view` |
 | Ripple | `fgdb-ripple` (Z-sets, circuits, incrementalizer), `fgdb-views`, `fgdb-subs` |
-| Beacon | `fgdb-index-core`, `fgdb-btree`, `fgdb-fts`, `fgdb-vector`, `fgdb-pathidx` (2-hop/landmark + the persistent-union-find temporal-connectivity index, §10.7) |
+| Beacon | `fgdb-beacon`, `fgdb-index-core`, `fgdb-btree`, `fgdb-fts`, `fgdb-vector`, `fgdb-pathidx` (2-hop/landmark + the persistent-union-find temporal-connectivity index, §10.7) |
 | Prism | `fgdb-prism` (authorized projection bridge, fnx cursor/cache/materialization paths, native kernels) |
 | Warden | `fgdb-warden` (issuance/revocation/discharges/policy admin), `fgdb-privacy`, `fgdb-redaction` |
 | Surface/operations | `fgdb-protocol` (FGP state machine), `fgdb-bolt`, `fgdb-formats`, `fgdb-udf-vm`, `fgdb-observatory`, `fgdb-system-graph` |

@@ -197,44 +197,41 @@ Honest framing. `frankengraphdb` is the only one of these that composes durabili
 
 ## The `fgdb` CLI
 
-> The CLI mirrors the server and embedded surfaces. Robot mode emits line-oriented, versioned NDJSON so an agent can pipe and validate the stream against a frozen contract (`fgdb robot schema`).
->
-> **Target state.** The `fgdb` and `fgdbd` binaries are not built yet (`registries/workspace_topology.toml` defers `fgdb-cli` and `fgdb-server` to W10 composition), so no command in this section runs today.
+> The CLI mirrors the embedded surface. Robot mode emits line-oriented, versioned NDJSON so an agent can pipe and validate the stream against a frozen contract (`fgdb robot schema`); human output is the default.
+
+**Runs today** — one binary (`crates/fgdb-cli`), invoked below as `fgdb`. Prefix any invocation with `--robot` for the NDJSON contract. Stable exit codes: 0 success, 2 usage/schema, 3 query refusal, 4 open/key, 5 I/O/corruption. A key file is three nonempty lines of 64 hex characters (object-id key, security namespace, encryption key):
 
 ```bash
-# Open a database and run a query (human output, or --json / --robot)
-fgdb query mydb.fgdbdir "MATCH (p:Person) RETURN p.name LIMIT 10"
-fgdb query mydb.fgdbdir --file traversal.gql --json
+# Create a database directory under an explicit key file
+fgdb create --db mydb.fgdbdir --key-file fgdb.keys
 
-# Interactive shell (GQL, with EXPLAIN / EXPLAIN (ANALYZE, CERTIFICATE))
-fgdb shell mydb.fgdbdir
+# Run a GQL query (human output; --robot for versioned NDJSON)
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys "<gql>"
 
-# Bulk-load a graph straight into sealed runs (bypasses the delta tier)
-fgdb load mydb.fgdbdir --edges edges.csv --vertices nodes.csv --format csv
-fgdb load mydb.fgdbdir --input graph.graphml          # GraphML/GEXF/GML/Pajek/edgelist/JSON node-link
+# Stream native rows one at a time, or save a portable result certificate
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys --stream "<gql>"
+fgdb query --db mydb.fgdbdir --key-file fgdb.keys --certify-to result.cert "<gql>"
 
-# Time travel, branches, and subscriptions from the shell or CLI
-fgdb query mydb.fgdbdir "MATCH (n) FOR SYSTEM_TIME AS OF '2026-01-01T00:00Z' RETURN count(n)"
-fgdb branch mydb.fgdbdir create experiment --from trunk
-fgdb subscribe mydb.fgdbdir "SUBSCRIBE TO CHANGES ON :Person"      # streams NDJSON deltas
+# Commit a write, then compare two committed revisions of one query
+fgdb write --db mydb.fgdbdir --key-file fgdb.keys "<gql>"
+fgdb diff  --db mydb.fgdbdir --key-file fgdb.keys --before <seq> --after <seq> "<gql>"
 
-# Backup to a verifiable, self-contained ECS archive (with decode proofs)
-fgdb backup mydb.fgdbdir -o snapshot.fgdb
-fgdb restore snapshot.fgdb -o restored.fgdbdir           # decode-proof-verified before it opens
+# Ordered multi-statement transaction (one commit; --rollback discards everything)
+fgdb transaction --db mydb.fgdbdir --key-file fgdb.keys --write "<gql>" --query "<gql>"
 
-# Serve it
-fgdbd --data ./mydb.fgdbdir --listen 0.0.0.0:7687 --protocols fgp,http2,grpc,ws,bolt
+# Bulk CSV import, NDJSON delta load with checkpoints, compaction
+fgdb import-csv --db mydb.fgdbdir --key-file fgdb.keys --input edges.csv "<gql>"
+fgdb load       --db mydb.fgdbdir --key-file fgdb.keys --input batch.ndjson
+fgdb compact    --db mydb.fgdbdir --key-file fgdb.keys
 
-# Agent-first surfaces (versioned NDJSON contract, stable exit codes)
-fgdb robot schema        # self-describing event/contract schema
-fgdb robot health        # data present? arch features? thread/memory budget?
+# Replay a saved certificate against the current database state
+fgdb replay --db mydb.fgdbdir --key-file fgdb.keys --certificate result.cert
 
-# Operations
-fgdb doctor mydb.fgdbdir            # manifest/chain/decode-proof verification (FG-INV-08/09/10)
-fgdb compact  mydb.fgdbdir
-fgdb scrub    mydb.fgdbdir          # sample symbols, verify XXH3 + decode proofs, re-encode losses
-fgdb analyze  mydb.fgdbdir          # refresh statistics segments
+# Agent-first surface: the self-describing, frozen event contract
+fgdb robot schema
 ```
+
+> **Target state.** The interactive shell, `branch`/`subscribe`, `backup`/`restore` archives, `doctor`/`scrub`/`analyze` operations, `robot health`, a `--json` output flag, and the `fgdbd` server binary remain W10 composition work (`registries/workspace_topology.toml`). The commands above are exactly the ones that run today.
 
 ## Installation
 
@@ -249,7 +246,7 @@ cargo build --release                        # builds the library workspace
 cargo run -p fgdb --example open_a_database  # a real main(): create, commit, reopen, verify
 ```
 
-The `fgdb` CLI and `fgdbd` server binaries are **not** produced yet: `registries/workspace_topology.toml` defers the `fgdb-cli` and `fgdb-server` entry crates to W10 composition.
+A `fgdb` CLI binary is produced today (`cargo build -p fgdb-cli`; [The `fgdb` CLI](#the-fgdb-cli) lists the commands it runs). The `fgdbd` server binary is **not** produced yet: `registries/workspace_topology.toml` defers `fgdb-server` to W10 composition.
 
 **3. Embedded, as a Rust library:**
 
@@ -294,7 +291,7 @@ for row in db.query("MATCH (p:Person) RETURN p.name LIMIT 5"):
 
 ## Quick start
 
-> **Target state.** Every command below invokes the `fgdb`/`fgdbd` binaries, which `registries/workspace_topology.toml` defers to W10 composition — none of them runs today. The runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
+> **Target state.** The workflow below shows the 1.0 shape. The `fgdb` binary is real today for `create`/`query`/`write`/`diff`/`transaction`/`import-csv`/`load`/`compact`/`replay` and `fgdb robot schema` (see [The `fgdb` CLI](#the-fgdb-cli)); the `--branch`, `subscribe`, and `fgdbd` steps below await W10 composition. The minimal runnable witness is `cargo run -p fgdb --example open_a_database` (see [Installation](#installation)).
 
 ```bash
 # 1. Create a database directory and bulk-load a graph

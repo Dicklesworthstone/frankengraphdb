@@ -107,9 +107,9 @@ embedded_source_blocks = [
 # Exact cardinalities the plan fixes by enumeration. A row added or dropped
 # without moving these is schema drift, not an edit.
 layer_count = 14
-crate_count = 70
-active_crate_count = 22
-planned_crate_count = 47
+crate_count = 71
+active_crate_count = 29
+planned_crate_count = 41
 reserved_crate_count = 1
 owner_scope_count = 14
 foundation_project_count = 3
@@ -764,12 +764,12 @@ layer_position = 6
 role = "restricted verifier IR"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "all"
 posture_basis = "product_shape"
 owner = "W1"
-owner_bead = ""
-manifest_dir = ""
+owner_bead = "fgdb-w1-authz-policy-10y"
+manifest_dir = "crates/fgdb-policy"
 
 [[crate]]
 name = "fgdb-resource"
@@ -941,12 +941,12 @@ layer_position = 2
 role = "durable Raft log/state core and quorum-one driver"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "all"
 posture_basis = "product_shape"
 owner = "W2"
 owner_bead = "fgdb-w2-order-raft-0a90"
-manifest_dir = ""
+manifest_dir = "crates/fgdb-order"
 
 [[crate]]
 name = "fgdb-chronicle"
@@ -1278,12 +1278,31 @@ owner = "W6"
 owner_bead = ""
 manifest_dir = ""
 
-# --- Beacon (5) ---------------------------------------------------------------
+# --- Beacon (6) ---------------------------------------------------------------
+# fgdb-beacon registered per fgdb-topology-seven-crates-9n8ao: the landed slice
+# is ONE memory-resident crate covering HNSW, BM25, and the hybrid fabric index.
+# The plan's §18.1 Beacon row gained the `fgdb-beacon` token at its head rather
+# than the crate being renamed or deleted; the finer index-crate split below
+# remains the planned shape it freezes.
+
+[[crate]]
+name = "fgdb-beacon"
+layer = "beacon"
+layer_position = 1
+role = "memory-resident search slices: HNSW generations, BM25, and the hybrid fabric index"
+role_basis = "layer_charter"
+unsafe_policy = "forbid"
+activation_status = "active"
+posture_participation = "all"
+posture_basis = "product_shape"
+owner = "W7"
+owner_bead = "fgdb-w7-hybrid-99if"
+manifest_dir = "crates/fgdb-beacon"
 
 [[crate]]
 name = "fgdb-index-core"
 layer = "beacon"
-layer_position = 1
+layer_position = 2
 role = "Shadow build, validate, activate, and watermark/tail-correctness shared by every index."
 role_basis = "layer_charter"
 unsafe_policy = "forbid"
@@ -1297,7 +1316,7 @@ manifest_dir = ""
 [[crate]]
 name = "fgdb-btree"
 layer = "beacon"
-layer_position = 2
+layer_position = 3
 role = "The in-house B-tree property index."
 role_basis = "layer_charter"
 unsafe_policy = "forbid"
@@ -1311,7 +1330,7 @@ manifest_dir = ""
 [[crate]]
 name = "fgdb-fts"
 layer = "beacon"
-layer_position = 3
+layer_position = 4
 role = "Segment-based inverted index, BM25, tokenizers, and Levenshtein automata."
 role_basis = "layer_charter"
 unsafe_policy = "forbid"
@@ -1325,7 +1344,7 @@ manifest_dir = ""
 [[crate]]
 name = "fgdb-vector"
 layer = "beacon"
-layer_position = 4
+layer_position = 5
 role = "HNSW generations, quantizers, and the IVF-PQ cold tier."
 role_basis = "layer_charter"
 unsafe_policy = "forbid"
@@ -1339,7 +1358,7 @@ manifest_dir = ""
 [[crate]]
 name = "fgdb-pathidx"
 layer = "beacon"
-layer_position = 5
+layer_position = 6
 role = "2-hop/landmark + the persistent-union-find temporal-connectivity index, §10.7"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
@@ -1359,12 +1378,12 @@ layer_position = 1
 role = "authorized projection bridge, fnx cursor/cache/materialization paths, native kernels"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "all"
 posture_basis = "product_shape"
 owner = "W8"
-owner_bead = ""
-manifest_dir = ""
+owner_bead = "fgdb-epic-w8-syz"
+manifest_dir = "crates/fgdb-prism"
 
 # --- Warden (3) ---------------------------------------------------------------
 
@@ -1375,12 +1394,12 @@ layer_position = 1
 role = "issuance/revocation/discharges/policy admin"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "all"
 posture_basis = "product_shape"
 owner = "W9"
-owner_bead = ""
-manifest_dir = ""
+owner_bead = "fgdb-w9-enforcement-j0fg"
+manifest_dir = "crates/fgdb-warden"
 
 [[crate]]
 name = "fgdb-privacy"
@@ -1519,12 +1538,12 @@ layer_position = 2
 role = "payload availability, anti-entropy, reconfiguration, fenced GC"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "all"
 posture_basis = "product_shape"
 owner = "W11"
-owner_bead = ""
-manifest_dir = ""
+owner_bead = "fgdb-w11-payload-availability-3y1"
+manifest_dir = "crates/fgdb-repl"
 
 # Named by §18.1 as belonging ONLY to W12. Registered so that creating it before
 # W12 is a violation naming its owner rather than an unremarkable new directory.
@@ -1552,6 +1571,12 @@ role = "embedded API"
 role_basis = "plan_parenthetical"
 unsafe_policy = "forbid"
 activation_status = "active"
+# fgdb-topology-seven-crates-9n8ao: the law binds the embedded posture's entry
+# crate to "entry_embedded", and the closure law bars entry_* crates from other
+# shipped closures — so the merged CLI binary (fgdb-cli) consuming THIS facade is
+# a recorded conflict: either the CLI ports onto the engine crates directly, or
+# the owner evolves the vocabulary. Tracked on the bead; gate is red by this one
+# violation until ruled.
 posture_participation = "entry_embedded"
 posture_basis = "composition_entry"
 owner = "W10"
@@ -1579,12 +1604,12 @@ layer_position = 3
 role = "The CLI binary with robot mode and a human mode."
 role_basis = "layer_charter"
 unsafe_policy = "forbid"
-activation_status = "planned"
+activation_status = "active"
 posture_participation = "entry_cli"
 posture_basis = "composition_entry"
 owner = "W10"
-owner_bead = ""
-manifest_dir = ""
+owner_bead = "fgdb-huu9"
+manifest_dir = "crates/fgdb-cli"
 
 [[crate]]
 name = "fgdb-python"
@@ -1734,8 +1759,8 @@ title = "CLI binary"
 entry_crate = "fgdb-cli"
 binary_name = "fgdb"
 plan_anchor = "§1 constraint 5(c)"
-status = "deferred"
-deferred_to = "the owner bead of fgdb-cli (W10 composition)"
+status = "live"
+deferred_to = ""
 
 # =============================================================================
 # NAMED CRATE-LEVEL EDGES
