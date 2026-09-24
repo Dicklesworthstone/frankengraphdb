@@ -601,15 +601,22 @@ impl<'a> BondedPull<'a> {
     /// Expiration abandons only this exact request. Late answers cannot consume
     /// another request's credit. The next schedule asks for a fresh equation.
     pub fn expire(&mut self, request: PullRequest) -> Result<(), PullError> {
-        self.open()?;
-        if request.object_id != self.encoding.object_id()
-            || request.encoding_id != self.encoding.encoding_id()
-            || self.pending.get(&(request.source_block, request.esi)) != Some(&request.donor)
-        {
-            return Err(PullError::UnrequestedSymbol);
+        let issued = request.object_id == self.encoding.object_id()
+            && request.encoding_id == self.encoding.encoding_id()
+            && self.pending.get(&(request.source_block, request.esi)) == Some(&request.donor);
+        // Retiring an issued credit stays legal after the pull closes: a
+        // failure (e.g. final-object authentication) must not strand request
+        // accounting, or a retry reports OutstandingRequests instead of Closed.
+        // A closed pull still answers Closed; nothing else is mutated.
+        if issued {
+            self.pending.remove(&(request.source_block, request.esi));
         }
-        self.pending.remove(&(request.source_block, request.esi));
-        Ok(())
+        self.open()?;
+        if issued {
+            Ok(())
+        } else {
+            Err(PullError::UnrequestedSymbol)
+        }
     }
 
     /// Authenticate before deduplication, accounting, or decoder admission.
