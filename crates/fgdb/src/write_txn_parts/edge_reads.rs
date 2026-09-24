@@ -16,59 +16,73 @@ impl WriteTxn {
     /// Point and bulk reads therefore overlay the same canonical net template
     /// that commit will publish, never a second interpretation of intentions.
     fn edge_over_basis(&self, eid: EId, mut overlay: Option<EdgeRecord>) -> Option<EdgeRecord> {
-        let mut observed_sources = std::collections::BTreeSet::new();
-        let mut deleted_vertices = std::collections::BTreeSet::new();
+        let mut observed_vertices = std::collections::BTreeSet::new();
         if let Some(record) = &overlay {
-            observed_sources.insert(record.entry.src);
+            observed_vertices.insert(record.entry.src);
         }
         if let Some(prepared) = &self.prepared {
             for coordinate in prepared.template.coordinate_entries() {
-                for row in &coordinate.rows {
-                    match row {
-                        fgdb_delta_types::DeltaRow::CreateEdge {
-                            eid: row_eid, src, relation, dst, props, ..
-                        } if *row_eid == eid => {
-                            observed_sources.insert(*src);
-                            overlay = Some(EdgeRecord {
-                                entry: AdjacencyEntry {
-                                    src: *src,
-                                    relation: *relation,
-                                    dst: *dst,
-                                    eid,
-                                    created_at: self.basis,
-                                    retired_at: None,
-                                },
-                                props: props.clone(),
-                            });
-                        }
-                        fgdb_delta_types::DeltaRow::DeleteEdge { eid: row_eid, .. }
-                            if *row_eid == eid =>
-                        {
-                            overlay = None;
-                        }
-                        fgdb_delta_types::DeltaRow::Property {
-                            elem: ElementId::Edge(row_eid), property, after, ..
-                        } if *row_eid == eid => {
-                            if let Some(record) = overlay.as_mut() {
-                                Self::overlay_property(&mut record.props, *property, after.as_ref());
-                            }
-                        }
-                        fgdb_delta_types::DeltaRow::DeleteVertex {
-                            vid, sorted_retired_incident_edges, ..
-                        } if sorted_retired_incident_edges.binary_search(&eid).is_ok() => {
-                            deleted_vertices.insert(*vid);
-                            overlay = None;
-                        }
-                        _ => {}
+                for effect in &coordinate.rows {
+                    if let Some(vertex) = self.apply_edge_effect(eid, &mut overlay, effect) {
+                        observed_vertices.insert(vertex);
                     }
                 }
             }
         }
         let mut read_set = self.read_set.borrow_mut();
         read_set.insert(ElementId::Edge(eid));
-        read_set.extend(observed_sources.into_iter().map(ElementId::Vertex));
-        read_set.extend(deleted_vertices.into_iter().map(ElementId::Vertex));
+        read_set.extend(observed_vertices.into_iter().map(ElementId::Vertex));
         overlay
+    }
+
+    /// Apply a canonical row and return its source/cascade vertex witness.
+    /// The witness is independent of whether the edge survives as an output.
+    /// Bulk reads dispatch single-edge effects here by identity; cascades walk
+    /// their explicit EIds once instead of testing every edge against each one.
+    fn apply_edge_effect(
+        &self,
+        eid: EId,
+        overlay: &mut Option<EdgeRecord>,
+        effect: &fgdb_delta_types::DeltaRow,
+    ) -> Option<VId> {
+        use fgdb_delta_types::DeltaRow;
+        match effect {
+            DeltaRow::CreateEdge {
+                eid: row_eid, src, relation, dst, props, ..
+            } if *row_eid == eid => {
+                *overlay = Some(EdgeRecord {
+                    entry: AdjacencyEntry {
+                        src: *src,
+                        relation: *relation,
+                        dst: *dst,
+                        eid,
+                        created_at: self.basis,
+                        retired_at: None,
+                    },
+                    props: props.clone(),
+                });
+                Some(*src)
+            }
+            DeltaRow::DeleteEdge { eid: row_eid, .. } if *row_eid == eid => {
+                *overlay = None;
+                None
+            }
+            DeltaRow::Property {
+                elem: ElementId::Edge(row_eid), property, after, ..
+            } if *row_eid == eid => {
+                if let Some(record) = overlay.as_mut() {
+                    Self::overlay_property(&mut record.props, *property, after.as_ref());
+                }
+                None
+            }
+            DeltaRow::DeleteVertex {
+                vid, sorted_retired_incident_edges, ..
+            } if sorted_retired_incident_edges.binary_search(&eid).is_ok() => {
+                *overlay = None;
+                Some(*vid)
+            }
+            _ => None,
+        }
     }
 
     /// Read all pinned edges with their prepared net effects. Empty scans
@@ -102,21 +116,54 @@ impl WriteTxn {
                 | PendingRow::CompareAndSet { .. } => {}
             }
         }
-        let mut rows = Vec::new();
-        for eid in eids {
-            if let Some(record) = self.edge_over_basis(eid, basis.remove(&eid)) {
-                rows.push(record);
+        {
+            let mut read_set = self.read_set.borrow_mut();
+            // Capture baseline sources before removing any rows. Sources of
+            // retired edges and negative identities remain read dependencies.
+            read_set.extend(eids.iter().copied().map(ElementId::Edge));
+            read_set.extend(basis.values().map(|record| ElementId::Vertex(record.entry.src)));
+            if let Some(prepared) = &self.prepared {
+                for coordinate in prepared.template.coordinate_entries() {
+                    for effect in &coordinate.rows {
+                        use fgdb_delta_types::DeltaRow;
+                        let eid = match effect {
+                            DeltaRow::CreateEdge { eid, .. }
+                            | DeltaRow::DeleteEdge { eid, .. }
+                            | DeltaRow::Property { elem: ElementId::Edge(eid), .. } => *eid,
+                            DeltaRow::DeleteVertex {
+                                vid, sorted_retired_incident_edges, ..
+                            } => {
+                                for eid in sorted_retired_incident_edges {
+                                    // A preceding delete must not erase the
+                                    // later cascade's observation of this ID.
+                                    if eids.contains(eid) {
+                                        read_set.insert(ElementId::Vertex(*vid));
+                                    }
+                                    basis.remove(eid);
+                                }
+                                continue;
+                            }
+                            _ => continue,
+                        };
+                        let mut overlay = basis.remove(&eid);
+                        if let Some(vertex) = self.apply_edge_effect(eid, &mut overlay, effect) {
+                            read_set.insert(ElementId::Vertex(vertex));
+                        }
+                        if let Some(record) = overlay {
+                            basis.insert(eid, record);
+                        }
+                    }
+                }
             }
+            read_set.extend(basis.keys().copied().map(ElementId::Edge));
+            read_set.extend(basis.values().map(|record| ElementId::Vertex(record.entry.src)));
         }
-        rows.sort_by_key(|record| record.entry.eid);
-        let mut read_set = self.read_set.borrow_mut();
-        read_set.extend(rows.iter().map(|record| ElementId::Edge(record.entry.eid)));
-        read_set.extend(rows.iter().map(|record| ElementId::Vertex(record.entry.src)));
-        drop(read_set);
         self.match_expansions.borrow_mut().extend(
-            rows.iter().map(|record| (record.entry.src, record.entry.relation)),
+            basis.values().map(|record| (record.entry.src, record.entry.relation)),
         );
-        Ok(rows)
+        // Identity order comes from the map. Neither effects nor cascade
+        // images are replayed per output row, and no second sort is needed.
+        Ok(basis.into_values().collect())
     }
 
     /// Read outgoing neighbours from the pinned basis plus prepared net
@@ -363,5 +410,220 @@ mod adjacency_overlay_tests {
                 assert!(report.lab_test_passed(), "{report:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod edge_bulk_overlay_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_delta_types::PropertyKeyId;
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+
+    fn keys() -> crate::DatabaseKeys {
+        crate::DatabaseKeys::new(
+            [0xb1; 32],
+            DatabaseSecurityNamespaceId([0xb2; 32]),
+            [0xb3; 32],
+        )
+    }
+
+    fn assert_contents(actual: &EdgeRecord, expected: &EdgeRecord) {
+        assert_eq!(actual.entry.eid, expected.entry.eid);
+        assert_eq!(actual.entry.src, expected.entry.src);
+        assert_eq!(actual.entry.dst, expected.entry.dst);
+        assert_eq!(actual.entry.relation, expected.entry.relation);
+        assert_eq!(actual.entry.retired_at, expected.entry.retired_at);
+        assert_eq!(actual.props, expected.props);
+    }
+
+    #[test]
+    fn bulk_edge_overlay_matches_point_reads_and_committed_contents() {
+        let ((), report) = run_async_under_lab(0xa91c_0021, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for vid in 1..=4 {
+                seed.create_vertex(VId(vid), vec![], vec![]);
+            }
+            for eid in (10..138).rev() {
+                seed.add_edge(EId(eid), VId(1), VId(2),
+                    vec![(PropertyKeyId(1), CanonicalScalar::Int(10))]);
+            }
+            seed.add_edge(EId(500), VId(3), VId(4), vec![]);
+            seed.add_edge(EId(501), VId(4), VId(3), vec![]);
+            seed.add_edge(EId(502), VId(3), VId(3), vec![]);
+            db.write(&commit, seed).await.unwrap();
+            let mut other = WriteBatch::new(RelationId(2));
+            other.add_edge(EId(900), VId(1), VId(4), vec![]);
+            db.write(&commit, other).await.unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut changes = WriteBatch::new(RelationId(1));
+            changes.ensure_edge_by_triple(EId(600), VId(1), VId(2), vec![]);
+            for eid in 10..138 {
+                match eid % 4 {
+                    0 => { changes.delete_edge(EId(eid)); }
+                    1 => {
+                        changes.set_edge_property(EId(eid), PropertyKeyId(1),
+                            Some(CanonicalScalar::Int(20)));
+                        changes.set_edge_property(EId(eid), PropertyKeyId(2),
+                            Some(CanonicalScalar::Int(30)));
+                    }
+                    2 => { changes.set_edge_property(EId(eid), PropertyKeyId(1), None); }
+                    _ => {}
+                }
+            }
+            for eid in (200..232).rev() {
+                changes.add_edge(EId(eid), VId(2), VId(1), vec![]);
+            }
+            changes.add_edge(EId(700), VId(1), VId(4), vec![]);
+            changes.delete_edge(EId(700));
+            changes.delete_edge(EId(500));
+            changes.delete_vertex(VId(3));
+            changes.delete_edge_if_present(EId(999));
+            txn.write(&mut db, changes).unwrap();
+            let rows = txn.edges(&db).unwrap();
+            let expected_ids: Vec<_> = (10..138).filter(|eid| eid % 4 != 0)
+                .chain(200..232).chain([900]).map(EId).collect();
+            assert_eq!(rows.iter().map(|row| row.entry.eid).collect::<Vec<_>>(), expected_ids);
+            for row in &rows {
+                let point = txn.edge(&db, row.entry.eid).unwrap().unwrap();
+                assert_contents(&point, row);
+                assert_eq!(point.entry.created_at, row.entry.created_at);
+                if row.entry.eid.0 < 138 {
+                    assert_eq!(row.entry.src, VId(1));
+                    assert_eq!(row.entry.dst, VId(2));
+                    assert_eq!(row.entry.relation, RelationId(1));
+                    match row.entry.eid.0 % 4 {
+                        1 => assert_eq!(row.props, vec![
+                            (PropertyKeyId(1), CanonicalScalar::Int(20)),
+                            (PropertyKeyId(2), CanonicalScalar::Int(30)),
+                        ]),
+                        2 => assert!(row.props.is_empty()),
+                        3 => assert_eq!(row.props,
+                            vec![(PropertyKeyId(1), CanonicalScalar::Int(10))]),
+                        _ => panic!("deleted edge was materialized"),
+                    }
+                } else if row.entry.eid != EId(900) {
+                    assert_eq!(row.entry.src, VId(2));
+                    assert_eq!(row.entry.dst, VId(1));
+                    assert_eq!(row.entry.created_at, txn.basis());
+                }
+            }
+            for eid in [500, 501, 502, 600, 700, 999] {
+                assert!(txn.read_set.borrow().contains(&ElementId::Edge(EId(eid))));
+                assert!(txn.edge(&db, EId(eid)).unwrap().is_none());
+            }
+            let committed_at = txn.commit(&mut db, &commit).await.unwrap();
+            let committed = db.edges_at(committed_at).unwrap();
+            assert_eq!(committed.len(), rows.len());
+            let committed: std::collections::BTreeMap<_, _> = committed.into_iter()
+                .map(|row| (row.entry.eid, row)).collect();
+            for row in rows {
+                assert_contents(committed.get(&row.entry.eid).unwrap(), &row);
+            }
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn bulk_edge_scan_retains_exact_point_dependencies_for_cascades_and_absences() {
+        let ((), report) = run_async_under_lab(0xa91c_0022, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for vid in 1..=3 {
+                seed.create_vertex(VId(vid), vec![], vec![]);
+            }
+            seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+            seed.add_edge(EId(11), VId(3), VId(2), vec![]);
+            db.write(&commit, seed).await.unwrap();
+            let mut bulk = db.begin(&txcx).unwrap();
+            let mut points = db.begin(&txcx).unwrap();
+            bulk.savepoint(&db, "before").unwrap();
+            let mut changes = WriteBatch::new(RelationId(1));
+            changes.delete_edge(EId(10));
+            changes.delete_vertex(VId(2));
+            changes.delete_edge_if_present(EId(999));
+            bulk.write(&mut db, changes.clone()).unwrap();
+            points.write(&mut db, changes).unwrap();
+            assert!(bulk.read_set.borrow().is_empty());
+            assert!(points.read_set.borrow().is_empty());
+            assert!(bulk.edges(&db).unwrap().is_empty());
+            for eid in [10, 11, 999] {
+                assert!(points.edge(&db, EId(eid)).unwrap().is_none());
+            }
+            let expected: std::collections::BTreeSet<_> = [
+                ElementId::Edge(EId(10)), ElementId::Edge(EId(11)),
+                ElementId::Edge(EId(999)), ElementId::Vertex(VId(1)),
+                ElementId::Vertex(VId(2)), ElementId::Vertex(VId(3)),
+            ].into_iter().collect();
+            assert_eq!(*bulk.read_set.borrow(), expected);
+            assert_eq!(*bulk.read_set.borrow(), *points.read_set.borrow());
+            assert!(bulk.scanned_edges.get());
+            assert!(!points.scanned_edges.get());
+            points.abort();
+            bulk.rollback_to_savepoint(&db, "before").unwrap();
+            assert_eq!(*bulk.read_set.borrow(), expected);
+            let mut winner = WriteBatch::new(RelationId(1));
+            // No edge insertion: only the cascade target's retained point
+            // witness can explain this read conflict after effects rewind.
+            winner.set_vertex_property(VId(2), PropertyKeyId(1),
+                Some(CanonicalScalar::Int(42)));
+            db.write(&commit, winner).await.unwrap();
+            assert!(matches!(bulk.finish(&mut db, &commit).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01", ..
+                }))));
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn bulk_edge_overlay_applies_every_atomic_relation_coordinate() {
+        let ((), report) = run_async_under_lab(0xa91c_0023, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for vid in 1..=4 {
+                seed.create_vertex(VId(vid), vec![], vec![]);
+            }
+            seed.add_edge(EId(10), VId(1), VId(2), vec![]);
+            db.write(&commit, seed).await.unwrap();
+            let mut second = WriteBatch::new(RelationId(2));
+            second.add_edge(EId(20), VId(3), VId(4), vec![]);
+            db.write(&commit, second).await.unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut first = WriteBatch::new(RelationId(1));
+            first.delete_edge(EId(10));
+            first.add_edge(EId(11), VId(2), VId(1),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))]);
+            let mut second = WriteBatch::new(RelationId(2));
+            second.delete_edge(EId(20));
+            second.add_edge(EId(21), VId(4), VId(3),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(2))]);
+            txn.write_atomic(&mut db, vec![second, first]).unwrap();
+            let rows = txn.edges(&db).unwrap();
+            assert_eq!(rows.iter().map(|row| (row.entry.eid, row.entry.relation))
+                .collect::<Vec<_>>(), vec![(EId(11), RelationId(1)), (EId(21), RelationId(2))]);
+            for row in &rows {
+                assert_contents(&txn.edge(&db, row.entry.eid).unwrap().unwrap(), row);
+                assert_eq!(row.entry.created_at, txn.basis());
+            }
+            let seq = txn.commit(&mut db, &commit).await.unwrap();
+            for row in rows {
+                let committed = db.edge_at(row.entry.eid, seq).unwrap().unwrap();
+                assert_contents(&committed, &row);
+            }
+            assert!(db.edge_at(EId(10), seq).unwrap().is_none());
+            assert!(db.edge_at(EId(20), seq).unwrap().is_none());
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
