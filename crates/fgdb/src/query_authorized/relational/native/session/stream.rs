@@ -55,6 +55,11 @@ impl Drop for PinGuard<'_> {
 /// its accumulation/support/collection storage is not bounded by the root-row
 /// profile above. See stream_aggregate for its first-pull and storage contract.
 ///
+/// Single-task by design: the cursor is `!Send`, because it shares its
+/// session's live permit through `Rc<RefCell<..>>`, and authorized sessions do
+/// not require a `Send` clock. Drive it on the task that opened it (a runtime's
+/// `block_on` accepts it; a `Send`-only spawner does not).
+///
 /// This borrows the session and QueryCx until dropped, not the database writer,
 /// token bytes or prepared template. Credential invalidation or a host callback
 /// unwind closes the session; ordinary cursor errors do not widen its policy.
@@ -582,8 +587,13 @@ fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata>(
     params: &GqlParameters,
     policy: GqlQueryPolicy,
     bind_plan: impl FnOnce(&PreparedNativeRead, &GqlParameters, CommitSeq) -> Result<Plan, QueryError>,
-    build: impl FnOnce(Plan, &EmbeddedReadView, &'q QueryCx, Shared<'q>, GqlQueryPolicy)
-        -> Opened<'q, Row, Metadata>,
+    build: impl FnOnce(
+        Plan,
+        &EmbeddedReadView,
+        &'q QueryCx,
+        Shared<'q>,
+        GqlQueryPolicy,
+    ) -> Opened<'q, Row, Metadata>,
 ) -> Opened<'q, Row, Metadata> {
     let now = clock();
     if now < *last_now_ms {
@@ -645,13 +655,16 @@ fn build_rows<'q>(
         let finished = cursor.state() != VertexScanState::Open;
         Ok((row, finished))
     });
-    Ok((AuthorizedRowCursor {
-        driver: Some(driver),
-        guard: None,
-        columns,
-        snapshot_seq: at,
-        state: VertexScanState::Open,
-    }, ()))
+    Ok((
+        AuthorizedRowCursor {
+            driver: Some(driver),
+            guard: None,
+            columns,
+            snapshot_seq: at,
+            state: VertexScanState::Open,
+        },
+        (),
+    ))
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
@@ -693,9 +706,18 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         cx: &'q QueryCx,
         prepared: &AuthorizedPreparedRead,
         params: &GqlParameters,
-        bind_plan: impl FnOnce(&PreparedNativeRead, &GqlParameters, CommitSeq) -> Result<Plan, QueryError>,
-        build: impl FnOnce(Plan, &EmbeddedReadView, &'q QueryCx, Shared<'q>, GqlQueryPolicy)
-            -> Opened<'q, Row, Metadata>,
+        bind_plan: impl FnOnce(
+            &PreparedNativeRead,
+            &GqlParameters,
+            CommitSeq,
+        ) -> Result<Plan, QueryError>,
+        build: impl FnOnce(
+            Plan,
+            &EmbeddedReadView,
+            &'q QueryCx,
+            Shared<'q>,
+            GqlQueryPolicy,
+        ) -> Opened<'q, Row, Metadata>,
     ) -> Opened<'q, Row, Metadata> {
         let owner = &self.owner;
         let state = self.state.as_mut().ok_or(QueryError::Authorization(

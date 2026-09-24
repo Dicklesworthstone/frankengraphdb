@@ -97,16 +97,15 @@ fn streamed_predicates_and_projection_see_masked_fields_with_exact_order_and_pag
     assert!(report.lab_test_passed(), "{report:?}");
 }
 
-// COMPILED OUT, not deleted: this test never compiled. It holds an
-// AuthorizedRowCursor across an .await inside the Send-requiring lab runner,
-// and the cursor is !Send (Rc<RefCell<Execution>>). Whether authorized
-// sessions are thread-mobile is a design decision owned by
-// fgdb-authorized-cursor-send-qbfn1. That bead's acceptance is re-enabling
-// this test unchanged, or restructuring it to assert the same pause law.
-#[cfg(any())]
+// Authorized sessions and cursors are single-task by design (!Send;
+// fgdb-authorized-cursor-send-qbfn1). This law holds a cursor across an
+// .await, so it runs on the real runtime's block_on, which accepts a non-Send
+// future, instead of the Send-only lab runner. The body is unchanged.
 #[test]
 fn opening_and_limit_one_do_not_admit_the_unread_graph_or_retain_the_template() {
-    let ((), report) = run_async_under_lab(0x5ec0_6002, |root| async move {
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    runtime.block_on(async {
         let c = PurposeContexts::narrow_runtime_root(&root);
         let cx = c.query();
         let commit = c.commit();
@@ -178,7 +177,6 @@ fn opening_and_limit_one_do_not_admit_the_unread_graph_or_retain_the_template() 
         );
         assert!(!session.is_closed());
     });
-    assert!(report.lab_test_passed(), "{report:?}");
 }
 
 #[test]

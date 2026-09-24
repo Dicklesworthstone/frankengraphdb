@@ -1,9 +1,13 @@
 //! Completed aggregates from the existing masked source and native reducer.
 //! No per-row query, input bag, alternate accumulator, or privileged fallback.
 use super::*;
-use fgdb_gql::stream::aggregate::{VertexAggregateCursor, VertexAggregateError, VertexAggregatePlan};
-use fgdb_gql::{GraphAggregateError, GraphAggregateRow, GraphAggregateTextSlot,
-    GraphSetExecutionError, PreparedGraphAggregate};
+use fgdb_gql::stream::aggregate::{
+    VertexAggregateCursor, VertexAggregateError, VertexAggregatePlan,
+};
+use fgdb_gql::{
+    GraphAggregateError, GraphAggregateRow, GraphAggregateTextSlot, GraphSetExecutionError,
+    PreparedGraphAggregate,
+};
 
 struct Layout {
     slots: Vec<GraphAggregateTextSlot>,
@@ -35,25 +39,44 @@ pub struct AuthorizedAggregateCursor<'q> {
     layout: Layout,
 }
 impl AuthorizedAggregateCursor<'_> {
-    pub fn columns(&self) -> &[String] { self.inner.columns() }
-    pub fn output_slots(&self) -> &[GraphAggregateTextSlot] { &self.layout.slots }
-    pub fn key_columns(&self) -> &[String] { &self.layout.keys }
-    pub fn aggregate_columns(&self) -> &[String] { &self.layout.values }
-    pub fn snapshot_seq(&self) -> CommitSeq { self.inner.snapshot_seq() }
-    pub fn state(&self) -> VertexScanState { self.inner.state() }
-    pub fn close(&mut self) { self.inner.close(); }
+    pub fn columns(&self) -> &[String] {
+        self.inner.columns()
+    }
+    pub fn output_slots(&self) -> &[GraphAggregateTextSlot] {
+        &self.layout.slots
+    }
+    pub fn key_columns(&self) -> &[String] {
+        &self.layout.keys
+    }
+    pub fn aggregate_columns(&self) -> &[String] {
+        &self.layout.values
+    }
+    pub fn snapshot_seq(&self) -> CommitSeq {
+        self.inner.snapshot_seq()
+    }
+    pub fn state(&self) -> VertexScanState {
+        self.inner.state()
+    }
+    pub fn close(&mut self) {
+        self.inner.close();
+    }
 }
 impl Iterator for AuthorizedAggregateCursor<'_> {
     type Item = Result<GraphAggregateRow, QueryError>;
-    fn next(&mut self) -> Option<Self::Item> { self.inner.next() }
-    fn size_hint(&self) -> (usize, Option<usize>) { self.inner.size_hint() }
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
 }
 impl FusedIterator for AuthorizedAggregateCursor<'_> {}
 impl core::fmt::Debug for AuthorizedAggregateCursor<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedAggregateCursor")
             .field("state", &self.state())
-            .field("authority_source_and_position", &"[REDACTED]").finish()
+            .field("authority_source_and_position", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -80,29 +103,62 @@ fn compiled(
         return Err(QueryError::StreamingUnsupported { facade });
     }
     let layout = Layout {
-        slots: slots.to_vec(), keys: plan.key_columns().to_vec(), values: plan.columns().to_vec(),
+        slots: slots.to_vec(),
+        keys: plan.key_columns().to_vec(),
+        values: plan.columns().to_vec(),
     };
-    Ok(Bound { plan, at, columns: columns.to_vec(), layout })
+    Ok(Bound {
+        plan,
+        at,
+        columns: columns.to_vec(),
+        layout,
+    })
 }
-fn bind_aggregate(prepared: &PreparedNativeRead, params: &GqlParameters, at: CommitSeq)
-    -> Result<Bound, QueryError>
-{
+fn bind_aggregate(
+    prepared: &PreparedNativeRead,
+    params: &GqlParameters,
+    at: CommitSeq,
+) -> Result<Bound, QueryError> {
     let facade = prepared.facade_class();
     match prepared {
         PreparedNativeRead::Aggregate(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::PatternText)?;
-            compiled(&query, at, prepared.columns(), prepared.output_slots(), facade)
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::PatternText)?;
+            compiled(
+                &query,
+                at,
+                prepared.columns(),
+                prepared.output_slots(),
+                facade,
+            )
         }
         PreparedNativeRead::TemporalAggregate(prepared) => {
-            let query = prepared.bind_parameters(params).map_err(QueryError::TemporalText)?;
-            compiled(query.aggregate(), query.as_of(), prepared.columns(), prepared.output_slots(), facade)
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::TemporalText)?;
+            compiled(
+                query.aggregate(),
+                query.as_of(),
+                prepared.columns(),
+                prepared.output_slots(),
+                facade,
+            )
         }
         PreparedNativeRead::PipelineAggregate(prepared) => {
             if prepared.is_source_free() {
                 return Err(QueryError::StreamingUnsupported { facade });
             }
-            let query = prepared.bind_parameters(params).map_err(QueryError::PipelineText)?;
-            compiled(&query, at, prepared.columns(), prepared.output_slots(), facade)
+            let query = prepared
+                .bind_parameters(params)
+                .map_err(QueryError::PipelineText)?;
+            compiled(
+                &query,
+                at,
+                prepared.columns(),
+                prepared.output_slots(),
+                facade,
+            )
         }
         _ => Err(QueryError::StreamingUnsupported { facade }),
     }
@@ -117,9 +173,9 @@ fn error(error: VertexAggregateError<QueryError, QueryError>) -> QueryError {
         GqlQueryError::Source(GraphAggregateError::Source(error)) => {
             scan_error(GqlQueryError::Source(error))
         }
-        GqlQueryError::Source(GraphAggregateError::InputRelation(GraphSetExecutionError::Source(error))) => {
-            scan_error(GqlQueryError::Source(error))
-        }
+        GqlQueryError::Source(GraphAggregateError::InputRelation(
+            GraphSetExecutionError::Source(error),
+        )) => scan_error(GqlQueryError::Source(error)),
         GqlQueryError::Source(GraphAggregateError::InputRelation(error)) => {
             QueryError::AggregateStream(GqlQueryError::Source(GraphAggregateError::InputRelation(
                 error.map_source(|_| unreachable!("source arm handled above")),
@@ -129,7 +185,9 @@ fn error(error: VertexAggregateError<QueryError, QueryError>) -> QueryError {
             error.map_source(|_| unreachable!("both source-bearing arms handled above")),
         )),
         GqlQueryError::Rows(error) => QueryError::AggregateStream(GqlQueryError::Rows(error)),
-        GqlQueryError::Evaluator(error) => QueryError::AggregateStream(GqlQueryError::Evaluator(error)),
+        GqlQueryError::Evaluator(error) => {
+            QueryError::AggregateStream(GqlQueryError::Evaluator(error))
+        }
         GqlQueryError::IdentifiedEdgesRequired => {
             QueryError::AggregateStream(GqlQueryError::IdentifiedEdgesRequired)
         }
@@ -137,14 +195,25 @@ fn error(error: VertexAggregateError<QueryError, QueryError>) -> QueryError {
 }
 
 fn build<'q>(
-    bound: Bound, view: &EmbeddedReadView, cx: &'q QueryCx,
-    execution: Shared<'q>, policy: GqlQueryPolicy,
+    bound: Bound,
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q>,
+    policy: GqlQueryPolicy,
 ) -> Opened<'q, GraphAggregateRow, Layout> {
-    let Bound { plan, at, columns, layout } = bound;
+    let Bound {
+        plan,
+        at,
+        columns,
+        layout,
+    } = bound;
     // Includes exact historical-cut admission even when LIMIT/HAVING returns
     // no rows. The source owns the existing immutable generation, not a copy.
     let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
-    let source = ScopedSource { inner, execution: Rc::clone(&execution) };
+    let source = ScopedSource {
+        inner,
+        execution: Rc::clone(&execution),
+    };
     let control = Rc::clone(&execution);
     let mut cursor = VertexAggregateCursor::new(source, plan, policy, move || {
         control.borrow_mut().checkpoint()
@@ -158,9 +227,16 @@ fn build<'q>(
         let finished = cursor.state() != VertexScanState::Open;
         Ok((row, finished))
     });
-    Ok((AuthorizedRowCursor {
-        driver: Some(driver), guard: None, columns, snapshot_seq: at, state: VertexScanState::Open,
-    }, layout))
+    Ok((
+        AuthorizedRowCursor {
+            driver: Some(driver),
+            guard: None,
+            columns,
+            snapshot_seq: at,
+            state: VertexScanState::Open,
+        },
+        layout,
+    ))
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
@@ -188,7 +264,10 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// session and QueryCx, not the writer or prepared template. It remains
     /// thread-local; no Send, external-memory or physical noninterference claim.
     pub fn stream_aggregate<'q>(
-        &'q mut self, cx: &'q QueryCx, prepared: &AuthorizedPreparedRead, params: &GqlParameters,
+        &'q mut self,
+        cx: &'q QueryCx,
+        prepared: &AuthorizedPreparedRead,
+        params: &GqlParameters,
     ) -> Result<AuthorizedAggregateCursor<'q>, QueryError> {
         let (inner, layout) = self.open_cursor(cx, prepared, params, bind_aggregate, build)?;
         Ok(AuthorizedAggregateCursor { inner, layout })
