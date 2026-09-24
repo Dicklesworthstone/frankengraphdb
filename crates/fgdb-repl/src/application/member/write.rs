@@ -12,6 +12,10 @@ use fgdb_order::{PersistentState, Role};
 
 use super::{AppliedReplica, Application, ApplicationProgress, ApplicationStateError, position_at};
 use super::proposal::{MemberProposalError, MemberProposalOutput};
+use super::proposal::batch::{
+    BatchProposalError, BatchProposalLimits, MemberBatchProposalOutput, PayloadBatchAuthority,
+    ProposalRange,
+};
 use crate::application::AppliedPosition;
 use crate::availability::{AvailabilityInput, AvailabilityLimits};
 use crate::availability::proposal::{PayloadProposalAuthority, ProposalPosition};
@@ -61,6 +65,27 @@ impl<A: core::fmt::Debug, I: core::fmt::Debug> core::error::Error for SubmitErro
 /// Dispatch the output before waiting. This is not a client commit receipt.
 #[derive(Debug)]
 pub struct WriteSubmission<C> { pub id: WriteId, pub output: MemberProposalOutput<C> }
+
+/// One invocation per command, in the same order as the locally published
+/// group. Use ordinary try_write/cancel_write for each ID; there is deliberately
+/// no aggregate success bit that could conceal partial quorum commitment.
+#[derive(Debug)]
+pub struct WriteBatchSubmission<C> {
+    pub ids: Vec<WriteId>,
+    pub output: MemberBatchProposalOutput<C>,
+}
+
+#[derive(Debug)]
+pub enum BatchSubmitError<A, I> {
+    Admission(WriteError),
+    Proposal(BatchProposalError<A, I>),
+}
+impl<A: core::fmt::Debug, I: core::fmt::Debug> core::fmt::Display for BatchSubmitError<A, I> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Aegis tracked batch: {self:?}")
+    }
+}
+impl<A: core::fmt::Debug, I: core::fmt::Debug> core::error::Error for BatchSubmitError<A, I> {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnknownReason { LeadershipLost, RecoveryRequired, HistoryUnavailable }
@@ -129,6 +154,46 @@ impl WriteTracker {
     }
     fn remove(&mut self, id: &WriteId) -> bool {
         if let Some(index) = self.find(id) { self.pending.remove(index); true } else { false }
+    }
+    fn reserve_group(&mut self, count: usize) -> Result<Vec<WriteId>, WriteError> {
+        if count == 0 { return Err(WriteError::InvalidLimit); }
+        if count > self.limit.saturating_sub(self.pending.len()) { return Err(WriteError::Backpressure); }
+        let count_u64 = u64::try_from(count).map_err(|_| WriteError::CounterExhausted)?;
+        let last = self.serial.checked_add(count_u64).ok_or(WriteError::CounterExhausted)?;
+        // Reserve BOTH output IDs and tracker slots before consuming a serial
+        // or installing any waiter. Nothing below allocates or calls user code.
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(count).map_err(|_| WriteError::AllocationFailed)?;
+        self.pending.try_reserve(count).map_err(|_| WriteError::AllocationFailed)?;
+        let previous = self.serial;
+        self.serial = last;
+        for offset in 1..=count_u64 {
+            let id = WriteId { incarnation: Arc::clone(&self.incarnation), serial: previous + offset };
+            self.pending.push(PendingWrite { id: id.clone(), position: None, committed: false, lost: false });
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+    // Only GroupAdmission's complete, ordered reserve_group result reaches
+    // this helper. Remove its exact contiguous serial interval in one pass.
+    fn remove_group(&mut self, ids: &[WriteId]) {
+        let (Some(first), Some(last)) = (ids.first(), ids.last()) else { return };
+        if !Arc::ptr_eq(&first.incarnation, &self.incarnation) { return; }
+        self.pending.retain(|write| write.id.serial < first.serial || write.id.serial > last.serial);
+    }
+    fn bind_group(&mut self, ids: &[WriteId], positions: ProposalRange) -> Result<(), WriteError> {
+        if ids.len() != positions.len() { return Err(WriteError::HistoryMismatch); }
+        let first = ids.first().ok_or(WriteError::HistoryMismatch)?;
+        let start = self.find(first).ok_or(WriteError::HistoryMismatch)?;
+        let end = start.checked_add(ids.len()).ok_or(WriteError::HistoryMismatch)?;
+        let slots = self.pending.get_mut(start..end).ok_or(WriteError::HistoryMismatch)?;
+        if slots.iter().zip(ids).any(|(slot, id)| slot.id != *id || slot.position.is_some()) {
+            return Err(WriteError::HistoryMismatch);
+        }
+        for (offset, slot) in slots.iter_mut().enumerate() {
+            slot.position = Some(positions.position(offset).ok_or(WriteError::HistoryMismatch)?);
+        }
+        Ok(())
     }
     pub(super) fn observe<C>(&mut self, state: &PersistentState<C>, role: Role) {
         for write in &mut self.pending {
@@ -249,6 +314,62 @@ impl<C, A> Drop for Admission<'_, C, A> {
     }
 }
 
+impl<C, A> AppliedReplica<C, A>
+where
+    C: Clone + Eq,
+    A: Application<C> + RaftPublisher<C> + PayloadBatchAuthority<C>,
+{
+    /// Reserve the entire set of invocation slots before assessment or group
+    /// authority acquisition. Scalar and grouped waits share ONE admission
+    /// limit, including committed/audit-hidden and unconsumed Unknown waiters.
+    ///
+    /// All entries are bound to their exact positions before returning output.
+    /// Failed/cancelled acquisition retires every reservation; uncertain append
+    /// retains the member's recovery fence. Spent serials are never refunded.
+    /// This neither aborts commands nor releases prepared payload ownership.
+    pub async fn submit_batch_available<I, F>(
+        &mut self,
+        commands: Vec<C>,
+        inputs: &[AvailabilityInput],
+        limits: BatchProposalLimits,
+        checkpoint: &mut F,
+    ) -> Result<WriteBatchSubmission<C>, BatchSubmitError<<A as PayloadBatchAuthority<C>>::Error, I>>
+    where F: FnMut() -> Result<(), I>,
+    {
+        self.available().map_err(|error| BatchSubmitError::Admission(WriteError::Member(error)))?;
+        self.replica.check_proposal_count(commands.len()).map_err(|error| {
+            BatchSubmitError::Admission(WriteError::Member(ApplicationStateError::Raft(error)))
+        })?;
+        let ids = self.writes.reserve_group(commands.len()).map_err(BatchSubmitError::Admission)?;
+        let mut admission = GroupAdmission { member: self, ids, armed: true };
+        let output = admission.member.propose_batch_available(commands, inputs, limits, checkpoint)
+            .await.map_err(BatchSubmitError::Proposal)?;
+        if let Err(error) = admission.member.writes.bind_group(&admission.ids, output.positions) {
+            // The append has already happened. An inconsistent output history
+            // cannot be retried as a known pre-publication refusal.
+            admission.member.application.poisoned = true;
+            return Err(BatchSubmitError::Admission(error));
+        }
+        let state = admission.member.replica.durable_state().map_err(|error| {
+            BatchSubmitError::Admission(WriteError::Member(ApplicationStateError::Raft(error)))
+        })?;
+        admission.member.writes.observe(state, output.member.consensus.role);
+        admission.armed = false;
+        Ok(WriteBatchSubmission { ids: std::mem::take(&mut admission.ids), output })
+    }
+}
+
+struct GroupAdmission<'a, C, A> {
+    member: &'a mut AppliedReplica<C, A>,
+    ids: Vec<WriteId>,
+    armed: bool,
+}
+impl<C, A> Drop for GroupAdmission<'_, C, A> {
+    fn drop(&mut self) {
+        if self.armed { self.member.writes.remove_group(&self.ids); }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +379,32 @@ mod tests {
         tracker.serial = u64::MAX;
         assert_eq!(tracker.reserve(), Err(WriteError::CounterExhausted));
         assert!(tracker.pending.is_empty());
+    }
+
+    #[test]
+    fn group_reservation_is_all_or_none_at_capacity_and_counter_boundaries() {
+        let mut tracker = WriteTracker::new();
+        tracker.limit = 3;
+        let existing = tracker.reserve().unwrap();
+        assert_eq!(tracker.reserve_group(3), Err(WriteError::Backpressure));
+        assert_eq!(tracker.serial, existing.serial);
+        assert_eq!(tracker.pending.len(), 1);
+        let group = tracker.reserve_group(2).unwrap();
+        tracker.remove_group(&group);
+        assert_eq!(tracker.pending.len(), 1);
+        assert_eq!(tracker.pending[0].id, existing);
+        let spent = tracker.serial;
+        assert_eq!(tracker.reserve().unwrap().serial, spent + 1);
+
+        let mut tracker = WriteTracker::new();
+        tracker.serial = u64::MAX - 1;
+        assert_eq!(tracker.reserve_group(2), Err(WriteError::CounterExhausted));
+        assert!(tracker.pending.is_empty());
+        assert_eq!(tracker.serial, u64::MAX - 1);
+        let last = tracker.reserve_group(1).unwrap();
+        assert_eq!(last[0].serial, u64::MAX);
+        tracker.remove_group(&last);
+        assert_eq!(tracker.reserve_group(1), Err(WriteError::CounterExhausted));
+        assert_eq!(tracker.reserve_group(0), Err(WriteError::InvalidLimit));
     }
 }
