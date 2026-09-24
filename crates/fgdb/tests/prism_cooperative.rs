@@ -876,7 +876,13 @@ fn cooperative_live_guards_span_every_checkpoint_without_changing_successful_res
             let db = small_database(&contexts.commit(), n, false).await;
             let opt = options(Directedness::Undirected);
             let graph = projection(&db, &cx, opt).await;
-            let mut calls = vec![FnxCallSpec::pagerank(PageRankOptions::default())];
+            // The stop loop below refuses at EVERY checkpoint, so its cost is
+            // quadratic in the checkpoint count. Default PageRank tolerance on
+            // this graph passes 9,313 checkpoints (~43M re-executed steps; the
+            // test ran >30 min). A loose tolerance still converges genuinely
+            // and exercises every checkpoint kind, over far fewer iterations.
+            let pagerank = PageRankOptions::new(0.85, 100, 0.5, true).unwrap();
+            let mut calls = vec![FnxCallSpec::pagerank(pagerank)];
             if n != 0 {
                 calls.push(FnxCallSpec::single_source_shortest_path_length(
                     VId(0),
