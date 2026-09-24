@@ -2,6 +2,8 @@
 //! Runtime receives only Project/Filter/page nodes in PreparedGraphSet. There
 //! are no graph-slot aliases, synthetic MATCH text, or source calls here.
 
+mod selection;
+
 use super::*;
 use crate::algebra::{GraphValueOrder, MAX_BOOLEAN_INSTRUCTIONS};
 use crate::set_text::{ReadFilterOp, ReadFilterOperand, ReadPageNumber};
@@ -109,21 +111,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.take_word("WHERE")? {
-                let mut code = Vec::new();
-                self.row_disjunction(&schema, 0, &mut code)?;
-                let types = schema.iter().map(|(_, kind)| *kind).collect::<Vec<_>>();
-                let shape = bind_filter(&code, None)?;
-                GraphSetPredicateOp::validate_schema(&types, &shape).map_err(|kind| {
-                    GraphSetTextError {
-                        offset: at,
-                        kind: GraphSetTextErrorKind::FilterBuild(kind),
-                    }
-                })?;
-                append_stage(
-                    &mut stages,
-                    ReadStageTemplate::Filter { at, code },
-                    &mut depth,
-                )?;
+                self.row_selection(&schema, &mut stages, &mut depth, at)?;
                 // A page written after WHERE applies to the filtered rows.
                 // Keep any earlier page on its input: moving either page across
                 // this filter changes which occurrences survive.
