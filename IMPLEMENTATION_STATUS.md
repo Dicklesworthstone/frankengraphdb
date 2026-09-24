@@ -105,7 +105,7 @@ This is not full SSI. Predicate/range conflict tracking, merge-ladder integratio
 
 ### 2026-09-08 — full verification green; repairs landed
 
-Full verification at commit `9adf484d`: **9/9 core gates and 40/40 registered gates green**. Repairs landed in the same window:
+Full verification at commit `9adf484d`: **9/9 core gates and 40/40 registered gates green**. *Correction 2026-09-24: `9adf484d` is not an ancestor of `main`, so this run proves no commit `main` contains; NE-0046 rejects it as proof.* Repairs landed in the same window:
 
 - identity-E2E pin fix;
 - cursor-policy export (`fgdb-w10-embedded-54r.1.1`);
@@ -115,7 +115,7 @@ Full verification at commit `9adf484d`: **9/9 core gates and 40/40 registered ga
 
 ### 2026-09-17 — robot CLI binary
 
-`crates/fgdb/src/bin/fgdb.rs` landed (commit `79548aca`): `create`/`write`/`query --stream`/`--certify-to`/`diff`/`transaction`/`replay`/`load`/`robot schema`, emitting the NDJSON `{"v":1,...}` envelope, with a frozen contract test (`tests/cli_robot.rs`) plus 33 process-level `cli_*` tests.
+`crates/fgdb/src/bin/fgdb.rs` landed (commit `79548aca`; *since moved into the `crates/fgdb-cli` crate by `4dc0b7fc`*): `create`/`write`/`query --stream`/`--certify-to`/`diff`/`transaction`/`replay`/`load`/`robot schema`, emitting the NDJSON `{"v":1,...}` envelope, with a frozen contract test (`tests/cli_robot.rs`) plus 33 process-level `cli_*` tests.
 
 ### 2026-09-2x — execution, algorithm, and kernel landings
 
@@ -127,7 +127,7 @@ Full verification at commit `9adf484d`: **9/9 core gates and 40/40 registered ga
 
 ### 2026-09-22 — milestone closures and seven new workspace crates
 
-Milestone beads closed: `fgdb-w4-g1-txn-core-qpmg` (W4/G1 transaction core) and `fgdb-boundplan-gla-lowering-seam-r2kd` (BoundPlan GLA lowering seam); `fgdb-w3-properties-gou.2` closed. Seven new workspace crates materialized 2026-09-21/22:
+Milestone beads closed: `fgdb-w4-g1-txn-core-qpmg` (W4/G1 transaction core; *reopened 2026-09-22 and still open 2026-09-24: its SSI, secure-view and merge-ladder blockers are open, and the tracker is authoritative*) and `fgdb-boundplan-gla-lowering-seam-r2kd` (BoundPlan GLA lowering seam); `fgdb-w3-properties-gou.2` closed. Seven new workspace crates materialized 2026-09-21/22:
 
 - `fgdb-cli`;
 - `fgdb-order` — Aegis deterministic Raft transition kernel;
@@ -421,9 +421,9 @@ The following remain incomplete or absent:
 - `97d09787` through `10871100` — strict application envelopes and replay audit.
 - `a3441930` through `f004bd1c` — pre-allocation evidence byte/row admission.
 - `901e4ef5` through `49adac5f` — result-bound stateless paging, audit adapters, progress metadata, and request-preflight laws.
-- `9adf484d` — 2026-09-08 full verification (9/9 core, 40/40 registered) with the same-window repair series.
+- `9adf484d` — 2026-09-08 full verification (9/9 core, 40/40 registered) with the same-window repair series. Not an ancestor of `main` (NE-0046); not proof of any `main` commit.
 - `79548aca` — 2026-09-17 robot CLI binary with frozen NDJSON robot contract.
 - `c0f0740f`, `f8c37559`, `ee4d964d`, `6ae9747f`, `b2d7761c`, `2f6abad0`/`d390c6bd` — FreeJoin relational circuits, six-kind checked joins, WHERE/equality-probe fusion, CSV incremental decode, Prism sealed-kernel shortest paths, Aegis payload-survival math.
-- 2026-09-21/22 — seven new workspace crates (`fgdb-cli`, `fgdb-order`, `fgdb-policy`, `fgdb-prism`, `fgdb-repl`, `fgdb-warden`, `fgdb-beacon`); milestone closures `fgdb-w4-g1-txn-core-qpmg` and `fgdb-boundplan-gla-lowering-seam-r2kd`.
+- 2026-09-21/22 — seven new workspace crates (`fgdb-cli`, `fgdb-order`, `fgdb-policy`, `fgdb-prism`, `fgdb-repl`, `fgdb-warden`, `fgdb-beacon`); milestone closures `fgdb-w4-g1-txn-core-qpmg` (reopened the same day; open) and `fgdb-boundplan-gla-lowering-seam-r2kd`.
 
 Keep this file synchronized whenever a capability crosses from plan or red-bar acceptance test into an inhabitable public path.

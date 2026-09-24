@@ -195,6 +195,8 @@ Honest framing. `frankengraphdb` is the only one of these that composes durabili
 | Deterministic simulation testing | ✓ lab runtime + DPOR | ✗ | ✗ | ✗ | ✗ |
 | Status of the project | Active, self-owned ecosystem asset | Commercial | **Archived 2025 (acquired by Apple)** | Commercial | Commercial |
 
+> **Target state.** The `frankengraphdb` column is the design target. Where today differs (checked 2026-09-24): **branches** are not implemented (`BranchManifest` is deliberately absent from `fgdb-chronicle`; every database has one fixed branch). **Vector search** is snapshot-consistent and honours `AS OF`, but each search builds its HNSW index in memory for that call (`crates/fgdb/src/query_beacon.rs`); there is no maintained index, freshness gate or branch scope yet. **Replayable results** cover the native read subset (`Database::replay` over native result certificates), not every statement. **Deterministic simulation** runs the lab runtime and DPOR over bounded, declared scenarios (`crates/fgdb-sim`: generated transaction schedules, crash-point differentials), not yet the whole database including server and replication.
+
 ## The `fgdb` CLI
 
 > The CLI mirrors the embedded surface. Robot mode emits line-oriented, versioned NDJSON so an agent can pipe and validate the stream against a frozen contract (`fgdb robot schema`); human output is the default.
@@ -256,7 +258,7 @@ A `fgdb` CLI binary is produced today (`cargo build -p fgdb-cli`; [The `fgdb` CL
 fgdb = { git = "https://github.com/Dicklesworthstone/frankengraphdb" }
 ```
 
-> **Target state.** The snippet below is the 1.0 embedded surface. Today's crate root exposes the spine subset — `Database::open`/`open_with_vfs`, `WriteBatch` commits through the real two-fsync path, and typed/temporal reads (see `crates/fgdb/src/lib.rs` and the `open_a_database` example); GQL sessions and prepared statements are not implemented yet.
+> **Target state.** The snippet below is the 1.0 embedded surface. Today's crate root differs in shape, not substance (checked 2026-09-24): `Database::create`/`open`/`open_memory`/`write`/`compact` are `async fn`s taking an asupersync capability context (`&CommitCx`), so the caller owns the runtime; GQL runs through `db.query(&cx, text, &params, symbols, policy)`, pinned read views (`db.read_session()`), reusable prepared statements (`PreparedNativeRead::prepare`, `prepare_gql_query`), ordered write transactions (`db.begin(&txn_cx)` → `WriteTxn`), and capability-scoped `AuthorizedReadSession`s. What does not exist yet is this synchronous `db.session().prepare()` shape. The `open_a_database` example and `crates/fgdb/examples/` show today's calls.
 
 ```rust
 use fgdb::Database;
@@ -378,6 +380,8 @@ Numbers below are the provisional CI **gates** (§17 `EmpiricalGate`s, activated
 
 Every gate has a bench binary, a committed baseline, a variance budget, and a flamegraph artifact on regression. **Complexity-witness regression locks** fail CI when an operator's observed op-count exceeds its declared bound; a regression is a build break, not a dashboard blip.
 
+> **Target state.** None of the gates above is measured yet (checked 2026-09-24). One bench binary (`crates/fgdb-bench`) runs its shapes and labels every event `empirical_gate_activated=false`; no baseline, variance budget or flamegraph is tracked. The numbers in the table are commitments, not results.
+
 ## Determinism, verification & governance
 
 - **Simulation-first.** The entire database (storage, transactions, compaction, Ripple, replication, server) runs under asupersync's lab runtime with virtual time, a fault-injecting virtual disk (torn writes, bit flips, ENOSPC, fsync lies), and DPOR schedule exploration. Every concurrency bug is a seed; failing runs auto-attach crashpacks with replay commands.
@@ -409,7 +413,7 @@ A few honest boundaries:
 
 **Is vector search actually transactional, or eventually-consistent like the plugins?** Transactional. The HNSW index uses the same delta→sealed→compaction lifecycle and MVCC visibility filtering as adjacency, so your ANN results respect your snapshot, `AS OF` applies, vectors are branch-scoped, and freshness is measured in commit-latency, not reindex-hours.
 
-**Can I embed it in my Rust or Python program?** Yes, that's a primary goal. The library API is synchronous and blocking; the engine owns its runtime internally, so there's no async plumbing to thread through your code. Python gets ABI3 wheels and a zero-copy fnx / NumPy bridge.
+**Can I embed it in my Rust or Python program?** Yes, that's a primary goal. The 1.0 library API is synchronous and blocking; the engine owns its runtime internally, so there's no async plumbing to thread through your code. Python gets ABI3 wheels and a zero-copy fnx / NumPy bridge. *Today* the Rust API is `async` and takes an asupersync capability context, so the caller drives the runtime, and there are no Python wheels yet (see [Installation](#installation)).
 
 **Will it connect to my existing Neo4j tooling?** For read/query workloads, yes, via the Bolt-compat subset (enough of Bolt v5 + Neo4j type mapping for standard drivers and visualization tools). Divergences are documented; it is an adoption wedge, not the native surface.
 

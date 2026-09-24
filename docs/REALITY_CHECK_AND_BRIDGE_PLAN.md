@@ -141,9 +141,10 @@ were **not** run:
 | `bash scripts/merge_train.sh audit --since b36d556a` | **exit 1**: proven=0, unproven=51, violations=45 |
 | GitHub `repos/…/events` | `staging` CreateEvent 2026-09-22T20:18:15Z; DeleteEvent 2026-09-23T01:15:26Z (actor `Dicklesworthstone`). `git ls-remote`: only `main` and `master`. |
 
-The census patches changed no assertion. The patch file, logs and scripts are
-under this session's scratchpad `census/`. The main worktree was never
-modified.
+The census patches changed no assertion. The patch file, logs and scripts were
+kept in this session's scratchpad `census/`, which was deleted externally on
+2026-09-24 while the disk was full. They are gone; the figures above are the
+record. The main worktree was never modified.
 
 Commit-stream provenance, `ec7be218..1a1cb2fe`: 80 commits (77 non-merge,
 3 merges).
@@ -732,8 +733,8 @@ be green.
 The second-pass census patched only the failing closure in the private clone
 (`Ok(Some(&*Box::leak(Box::new(CanonicalScalar::Int(..)))))`). The patch
 changes no assertion and lets the other targets run. The main worktree was
-never modified. Logs, the patch and both scripts are retained under this
-session's scratchpad `census/` directory.
+never modified. The logs, the patch and both scripts were kept in the same
+scratchpad `census/` directory and were lost with it on 2026-09-24.
 
 Commit-stream provenance was measured with `git log --since=2026-09-08`.
 Author identity separates the streams:
