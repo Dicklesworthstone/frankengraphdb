@@ -17,9 +17,9 @@ use super::{
     QueryCx, Result, ResultAdmission, SealedGraphView, SealedNeighborCursor, add, admit,
     checkpoint, directional_pass_work, finish_encoded, mul, reserve,
 };
-use crate::{DijkstraOptions, SealedProjectionError};
 use crate::sealed_control::Control;
 use crate::shortest_path::{Entry, IndexedHeap};
+use crate::{DijkstraOptions, SealedProjectionError};
 use fgdb_strata::tiered::sealed::{SealedScanBudget, SealedScanStep};
 use std::cell::RefCell;
 use std::future::Future;
@@ -346,7 +346,9 @@ where
             break;
         }
     }
-    let mut heap = initialization.finish().ok_or(ExecutionError::InvalidUpstreamResult)?;
+    let mut heap = initialization
+        .finish()
+        .ok_or(ExecutionError::InvalidUpstreamResult)?;
     for _ in 0..n {
         control.tick().await?;
         distances.push(None);
@@ -399,7 +401,10 @@ where
             if options.cutoff().is_some_and(|limit| candidate > limit) {
                 continue;
             }
-            if !heap.contains(target).ok_or(ExecutionError::InvalidUpstreamResult)? {
+            if !heap
+                .contains(target)
+                .ok_or(ExecutionError::InvalidUpstreamResult)?
+            {
                 let requested = add(discovered, 1)?;
                 admission.rows(requested)?;
                 discovered = requested;
@@ -531,8 +536,8 @@ where
     Yield: FnMut() -> YieldFuture,
     YieldFuture: Future<Output = ()>,
 {
-    use super::components::Frame;
     use super::SealedRow;
+    use super::components::Frame;
 
     let n = graph.node_count();
     let mut indices = reserve(n)?;
@@ -579,7 +584,9 @@ where
             match control.next(&mut frame.row.row).await? {
                 Some((target, _)) => {
                     control.tick().await?;
-                    let index = *indices.get(target).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                    let index = *indices
+                        .get(target)
+                        .ok_or(ExecutionError::InvalidUpstreamResult)?;
                     witness.edges_scanned = add(witness.edges_scanned, 1)?;
                     if index == usize::MAX {
                         let row = SealedRow {
@@ -591,7 +598,10 @@ where
                         next_index = add(next_index, 1)?;
                         on_stack[target] = true;
                         members.push(target);
-                        frames.push(Frame { vertex: target, row });
+                        frames.push(Frame {
+                            vertex: target,
+                            row,
+                        });
                         witness.nodes_touched = add(witness.nodes_touched, 1)?;
                         witness.queue_peak = witness.queue_peak.max(frames.len());
                     } else if on_stack[target] {
@@ -605,10 +615,14 @@ where
                         let mut minimum = source;
                         loop {
                             control.tick().await?;
-                            start = start.checked_sub(1).ok_or(ExecutionError::InvalidUpstreamResult)?;
+                            start = start
+                                .checked_sub(1)
+                                .ok_or(ExecutionError::InvalidUpstreamResult)?;
                             let member = members[start];
                             minimum = minimum.min(member);
-                            if member == source { break; }
+                            if member == source {
+                                break;
+                            }
                         }
                         // A single SCC can contain the entire graph. Never
                         // hide these walks in one unbounded "component step".

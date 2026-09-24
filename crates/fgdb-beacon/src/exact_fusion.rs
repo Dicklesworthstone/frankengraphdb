@@ -149,20 +149,19 @@ impl ExactRrfScore {
     /// overflow uses 18 exact long-division digits: remainder * 10 < 2^103,
     /// and the final coefficient fits the canonical decimal profile.
     pub fn decimal(self) -> Result<CanonicalDecimal, BeaconError> {
-        let (quotient, remainder) = if let Some(scaled) =
-            self.numerator.checked_mul(1_000_000_000_000_000_000_u128)
-        {
-            (scaled / self.denominator, scaled % self.denominator)
-        } else {
-            let mut quotient = self.numerator / self.denominator;
-            let mut remainder = self.numerator % self.denominator;
-            for _ in 0..18 {
-                remainder *= 10;
-                quotient = quotient * 10 + remainder / self.denominator;
-                remainder %= self.denominator;
-            }
-            (quotient, remainder)
-        };
+        let (quotient, remainder) =
+            if let Some(scaled) = self.numerator.checked_mul(1_000_000_000_000_000_000_u128) {
+                (scaled / self.denominator, scaled % self.denominator)
+            } else {
+                let mut quotient = self.numerator / self.denominator;
+                let mut remainder = self.numerator % self.denominator;
+                for _ in 0..18 {
+                    remainder *= 10;
+                    quotient = quotient * 10 + remainder / self.denominator;
+                    remainder %= self.denominator;
+                }
+                (quotient, remainder)
+            };
         let twice = remainder * 2;
         let round_up = twice > self.denominator || (twice == self.denominator && quotient % 2 != 0);
         let coefficient = i128::try_from(quotient + u128::from(round_up))

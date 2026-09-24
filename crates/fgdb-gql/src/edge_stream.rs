@@ -24,7 +24,9 @@ use fgdb_delta_types::{PropertyKeyId, RelationId};
 use fgdb_types::{CanonicalScalar, CommitSeq, EId, VId};
 use std::sync::Arc;
 
-pub use crate::stream::{VertexScanRecord, VertexScanRow, VertexScanSourceError as EdgeScanSourceError};
+pub use crate::stream::{
+    VertexScanRecord, VertexScanRow, VertexScanSourceError as EdgeScanSourceError,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EdgeScanBuildError {
@@ -532,9 +534,12 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             let (eid, second) = if let Some(eid) = self.reverse_pending.take() {
                 (eid, true)
             } else {
-                let Some(eid) = flatten(source.next_edge_for_relation(
-                    self.plan.relation, &mut |event| meter.event(event),
-                ))? else {
+                let Some(eid) = flatten(
+                    source.next_edge_for_relation(self.plan.relation, &mut |event| {
+                        meter.event(event)
+                    }),
+                )?
+                else {
                     return Ok(None);
                 };
                 meter.event(GlaExecutionEvent::Work)?;
@@ -548,7 +553,8 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
                 )?;
                 (eid, false)
             };
-            let Some(record) = flatten(source.edge_record(eid, &mut |event| meter.event(event)))? else {
+            let Some(record) = flatten(source.edge_record(eid, &mut |event| meter.event(event)))?
+            else {
                 continue;
             };
             let edge = record.as_row();
@@ -573,13 +579,18 @@ impl<S: EdgeScanSource, F> EdgeScanCursor<S, F> {
             let right = if from == to {
                 None
             } else {
-                Some(flatten(source.vertex_record(to, &mut |event| meter.event(event)))?
-                    .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))?)
+                Some(
+                    flatten(source.vertex_record(to, &mut |event| meter.event(event)))?
+                        .ok_or(GqlQueryError::Source(EdgeScanError::DanglingEndpoint))?,
+                )
             };
             let image = Binding {
                 eid,
                 ids: [from, to],
-                vertices: [left.as_row(), right.as_ref().map_or_else(|| left.as_row(), |r| r.as_row())],
+                vertices: [
+                    left.as_row(),
+                    right.as_ref().map_or_else(|| left.as_row(), |r| r.as_row()),
+                ],
                 edge: edge.properties,
             };
             let Some(paths) = self.plan.test(&image, &mut |event| meter.event(event))? else {

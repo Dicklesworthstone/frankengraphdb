@@ -105,7 +105,9 @@ impl<'a> Overlay<'a> {
                 }
                 self.labels.insert(*label, *after);
             }
-            DeltaRow::Property { property, after, .. } if !self.deleted => {
+            DeltaRow::Property {
+                property, after, ..
+            } if !self.deleted => {
                 if !self.properties.contains_key(property) {
                     work.borrow_mut().source(SourceEvent::ScratchEntry)?;
                 }
@@ -217,7 +219,8 @@ impl WriteTxn {
                                 | DeltaRow::DeleteVertex { vid, .. }
                                 | DeltaRow::LabelMembership { vid, .. }
                                 | DeltaRow::Property {
-                                    elem: ElementId::Vertex(vid), ..
+                                    elem: ElementId::Vertex(vid),
+                                    ..
                                 } => *vid,
                                 _ => continue,
                             };
@@ -248,7 +251,10 @@ impl WriteTxn {
                         };
                         work.borrow_mut().charge(labels.len())?;
                         if options.vertex_label.is_some_and(|label| {
-                            !overlay.labels.get(&label).copied()
+                            !overlay
+                                .labels
+                                .get(&label)
+                                .copied()
                                 .unwrap_or_else(|| labels.binary_search(&label).is_ok())
                         }) {
                             return Ok(None);
@@ -256,22 +262,29 @@ impl WriteTxn {
                         let limit = options.policy.max_staging_rows.min(config.max_documents);
                         if staged == limit {
                             return Err(BeaconError::ResourceLimit {
-                                resource: "staged vertices", limit,
+                                resource: "staged vertices",
+                                limit,
                             });
                         }
                         staged += 1;
-                        options.projection.project(
-                            vid,
-                            &config,
-                            |key| {
-                                overlay.properties.get(&key).copied().unwrap_or_else(|| {
-                                    props.binary_search_by_key(&key, |(key, _)| *key)
-                                        .ok().map(|slot| &props[slot].1)
-                                })
-                            },
-                            &mut Shared(&work),
-                        ).map(Some)
-                    })().transpose()
+                        options
+                            .projection
+                            .project(
+                                vid,
+                                &config,
+                                |key| {
+                                    overlay.properties.get(&key).copied().unwrap_or_else(|| {
+                                        props
+                                            .binary_search_by_key(&key, |(key, _)| *key)
+                                            .ok()
+                                            .map(|slot| &props[slot].1)
+                                    })
+                                },
+                                &mut Shared(&work),
+                            )
+                            .map(Some)
+                    })()
+                    .transpose()
                 });
                 let index = BeaconIndex::try_build(config.clone(), projected, &mut Shared(&work))?;
                 let result = query.execute(&index.snapshot(), &mut Shared(&work))?;
@@ -292,7 +305,9 @@ mod tests {
     use super::*;
     use crate::{DatabaseKeys, WriteBatch, WriteError};
     use asupersync::lab::run_async_under_lab;
-    use fgdb_beacon::{DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch};
+    use fgdb_beacon::{
+        DistanceMetric, ExactHybridQuery, ExactRrfProfile, HnswConfig, TextMatch, VectorSearch,
+    };
     use fgdb_delta_types::RelationId;
     use fgdb_types::{CanonicalText, CommitSeq, DatabaseSecurityNamespaceId, EId, PurposeContexts};
 
@@ -302,7 +317,11 @@ mod tests {
     const Y: PropertyKeyId = PropertyKeyId(3);
 
     fn keys() -> DatabaseKeys {
-        DatabaseKeys::new([0xc1; 32], DatabaseSecurityNamespaceId([0xc2; 32]), [0xc3; 32])
+        DatabaseKeys::new(
+            [0xc1; 32],
+            DatabaseSecurityNamespaceId([0xc2; 32]),
+            [0xc3; 32],
+        )
     }
 
     fn options() -> Options {
@@ -326,7 +345,11 @@ mod tests {
     }
 
     fn text(limit: usize) -> Search<'static> {
-        Search::Text { query: "rust", k: limit, mode: TextMatch::Any }
+        Search::Text {
+            query: "rust",
+            k: limit,
+            mode: TextMatch::Any,
+        }
     }
 
     #[test]
@@ -359,34 +382,58 @@ mod tests {
             changes.set_vertex_property(VId(7), TEXT, None);
             changes.set_vertex_property(VId(7), X, None);
             // Vertex and edge identity domains must never alias in projection.
-            changes.add_edge(EId(1), VId(1), VId(3), vec![(TEXT, CanonicalScalar::Int(999))]);
+            changes.add_edge(
+                EId(1),
+                VId(1),
+                VId(3),
+                vec![(TEXT, CanonicalScalar::Int(999))],
+            );
             let mut dependent = WriteBatch::new(RelationId(2));
             dependent.set_vertex_property(VId(5), X, Some(CanonicalScalar::Int(3)));
-            txn.write_ordered(&mut db, vec![changes, dependent]).unwrap();
+            txn.write_ordered(&mut db, vec![changes, dependent])
+                .unwrap();
             let opts = options();
             let queries = [
                 text(10),
-                Search::Vector { query: &[1.0, 0.0], k: 10, mode: VectorSearch::Exact },
-                Search::Vector { query: &[1.0, 0.0], k: 10, mode: VectorSearch::Approximate { ef_search: 32 } },
+                Search::Vector {
+                    query: &[1.0, 0.0],
+                    k: 10,
+                    mode: VectorSearch::Exact,
+                },
+                Search::Vector {
+                    query: &[1.0, 0.0],
+                    k: 10,
+                    mode: VectorSearch::Approximate { ef_search: 32 },
+                },
                 Search::Hybrid(ExactHybridQuery {
-                    vector: &[1.0, 0.0], text: "rust", k: 10,
-                    vector_candidates: 10, text_candidates: 10,
-                    vector_mode: VectorSearch::Exact, text_mode: TextMatch::Any,
+                    vector: &[1.0, 0.0],
+                    text: "rust",
+                    k: 10,
+                    vector_candidates: 10,
+                    text_candidates: 10,
+                    vector_mode: VectorSearch::Exact,
+                    text_mode: TextMatch::Any,
                     profile: ExactRrfProfile::default(),
                 }),
             ];
-            let staged: Vec<_> = queries.iter().map(|search| {
-                txn.beacon_search(&db, &query_cx, &opts, *search).unwrap()
-            }).collect();
+            let staged: Vec<_> = queries
+                .iter()
+                .map(|search| txn.beacon_search(&db, &query_cx, &opts, *search).unwrap())
+                .collect();
             assert!(matches!(&staged[0], Rows::Text(hits) if hits.len() == 3));
             assert_eq!(db.frontier().unwrap(), basis, "search must not publish");
             assert!(!txn.scanned_vertices.get());
             assert!(txn.read_set.borrow().contains(&ElementId::Vertex(VId(6))));
             txn.commit(&mut db, &commit).await.unwrap();
-            assert!(matches!(txn.beacon_search(&db, &query_cx, &opts, text(1)),
-                Err(ReadError::Read(WriteTxnError::Finished))));
+            assert!(matches!(
+                txn.beacon_search(&db, &query_cx, &opts, text(1)),
+                Err(ReadError::Read(WriteTxnError::Finished))
+            ));
             for (search, expected) in queries.into_iter().zip(staged) {
-                assert_eq!(db.beacon_search(&query_cx, &opts, search).unwrap(), expected);
+                assert_eq!(
+                    db.beacon_search(&query_cx, &opts, search).unwrap(),
+                    expected
+                );
             }
             assert_eq!(contexts.outstanding_obligations(), 0);
         });
@@ -412,9 +459,17 @@ mod tests {
             let mut winner = WriteBatch::new(RelationId(1));
             winner.set_vertex_property(VId(2), TEXT, Some(scalar_text("rust rust")));
             db.write(&commit, winner).await.unwrap();
-            assert_eq!(txn.beacon_search(&db, &query_cx, &opts, text(1)).unwrap(), before);
-            assert!(matches!(txn.finish(&mut db, &commit).await,
-                Err(WriteTxnError::Write(WriteError::FirstCommitterWins { law: "FG-LAW-FCW-READ-01", .. }))));
+            assert_eq!(
+                txn.beacon_search(&db, &query_cx, &opts, text(1)).unwrap(),
+                before
+            );
+            assert!(matches!(
+                txn.finish(&mut db, &commit).await,
+                Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                    law: "FG-LAW-FCW-READ-01",
+                    ..
+                }))
+            ));
             assert_eq!(contexts.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");
@@ -436,19 +491,32 @@ mod tests {
                     erased.delete_vertex(VId(9));
                     txn.write(&mut db, erased).unwrap();
                 }
-                assert!(matches!(txn.beacon_search(&db, &query_cx, &options(), text(0)).unwrap(),
-                    Rows::Text(hits) if hits.is_empty()));
+                assert!(
+                    matches!(txn.beacon_search(&db, &query_cx, &options(), text(0)).unwrap(),
+                    Rows::Text(hits) if hits.is_empty())
+                );
                 txn.rollback_to_savepoint(&db, "clean").unwrap();
                 let mut winner = WriteBatch::new(RelationId(1));
-                winner.create_vertex(VId(9), if case == 1 { vec![LABEL] } else { vec![] },
-                    props("rust", 1, 0));
+                winner.create_vertex(
+                    VId(9),
+                    if case == 1 { vec![LABEL] } else { vec![] },
+                    props("rust", 1, 0),
+                );
                 db.write(&commit, winner).await.unwrap();
                 let result = txn.finish(&mut db, &commit).await;
                 if case == 0 {
-                    assert!(result.is_ok(), "unrelated-label insertion is not a phantom: {result:?}");
+                    assert!(
+                        result.is_ok(),
+                        "unrelated-label insertion is not a phantom: {result:?}"
+                    );
                 } else {
-                    assert!(matches!(result,
-                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins { law: "FG-LAW-FCW-READ-01", .. }))));
+                    assert!(matches!(
+                        result,
+                        Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                            law: "FG-LAW-FCW-READ-01",
+                            ..
+                        }))
+                    ));
                 }
                 assert_eq!(contexts.outstanding_obligations(), 0);
             });
@@ -477,20 +545,32 @@ mod tests {
                 }
                 let result = txn.beacon_search(&db, &query_cx, &opts, text(1));
                 if case == 0 {
-                    assert!(matches!(result, Err(ReadError::Index(BeaconError::WorkBudgetExceeded))));
+                    assert!(matches!(
+                        result,
+                        Err(ReadError::Index(BeaconError::WorkBudgetExceeded))
+                    ));
                 } else {
-                    assert!(matches!(result, Err(ReadError::Index(BeaconError::ResourceLimit { .. }))));
+                    assert!(matches!(
+                        result,
+                        Err(ReadError::Index(BeaconError::ResourceLimit { .. }))
+                    ));
                 }
             }
             let mut historical = options();
             historical.as_of = Some(CommitSeq(txn.basis().0 + 1));
-            assert!(matches!(txn.beacon_search(&db, &query_cx, &historical, text(1)),
-                Err(ReadError::Index(BeaconError::InvalidQuery(_)))));
-            assert!(matches!(txn.beacon_search(&other, &query_cx, &options(), text(1)),
-                Err(ReadError::Read(WriteTxnError::WrongDatabase))));
+            assert!(matches!(
+                txn.beacon_search(&db, &query_cx, &historical, text(1)),
+                Err(ReadError::Index(BeaconError::InvalidQuery(_)))
+            ));
+            assert!(matches!(
+                txn.beacon_search(&other, &query_cx, &options(), text(1)),
+                Err(ReadError::Read(WriteTxnError::WrongDatabase))
+            ));
             assert_eq!(db.frontier().unwrap(), txn.basis());
-            assert!(matches!(txn.beacon_search(&db, &query_cx, &options(), text(1)).unwrap(),
-                Rows::Text(hits) if hits.len() == 1));
+            assert!(
+                matches!(txn.beacon_search(&db, &query_cx, &options(), text(1)).unwrap(),
+                Rows::Text(hits) if hits.len() == 1)
+            );
             txn.abort();
             assert_eq!(contexts.outstanding_obligations(), 0);
         });
@@ -518,18 +598,30 @@ mod tests {
             txn.write(&mut db, changes).unwrap();
             let mut opts = options();
             opts.index.max_text_bytes = 8;
-            assert!(matches!(txn.beacon_search(&db, &query_cx, &opts, text(1)).unwrap(),
-                Rows::Text(hits) if hits.len() == 1 && hits[0].id == VId(3)));
-            let vector = Search::Vector { query: &[1.0, 0.0], k: 1, mode: VectorSearch::Exact };
-            assert!(matches!(txn.beacon_search(&db, &query_cx, &opts, vector).unwrap(),
-                Rows::Vector(hits) if hits.len() == 1 && hits[0].id == VId(3)));
+            assert!(
+                matches!(txn.beacon_search(&db, &query_cx, &opts, text(1)).unwrap(),
+                Rows::Text(hits) if hits.len() == 1 && hits[0].id == VId(3))
+            );
+            let vector = Search::Vector {
+                query: &[1.0, 0.0],
+                k: 1,
+                mode: VectorSearch::Exact,
+            };
+            assert!(
+                matches!(txn.beacon_search(&db, &query_cx, &opts, vector).unwrap(),
+                Rows::Vector(hits) if hits.len() == 1 && hits[0].id == VId(3))
+            );
             // Removing the overlay restores the invalid/oversized base corpus.
             // Those projected values must then be refused, not coerced or skipped.
             txn.abort();
-            assert!(matches!(db.beacon_search(&query_cx, &opts, text(1)),
-                Err(ReadError::Index(BeaconError::ResourceLimit { .. }))));
-            assert!(matches!(db.beacon_search(&query_cx, &opts, vector),
-                Err(ReadError::Index(BeaconError::InvalidQuery(_)))));
+            assert!(matches!(
+                db.beacon_search(&query_cx, &opts, text(1)),
+                Err(ReadError::Index(BeaconError::ResourceLimit { .. }))
+            ));
+            assert!(matches!(
+                db.beacon_search(&query_cx, &opts, vector),
+                Err(ReadError::Index(BeaconError::InvalidQuery(_)))
+            ));
             assert_eq!(contexts.outstanding_obligations(), 0);
         });
         assert!(report.lab_test_passed(), "{report:?}");

@@ -19,8 +19,16 @@ impl EdgeScanRecord<'_> {
     pub fn as_row(&self) -> EdgeScanRow<'_> {
         match self {
             Self::Borrowed(row) => *row,
-            Self::Owned { source, target, relation, properties } => EdgeScanRow {
-                source: *source, target: *target, relation: *relation, properties,
+            Self::Owned {
+                source,
+                target,
+                relation,
+                properties,
+            } => EdgeScanRow {
+                source: *source,
+                target: *target,
+                relation: *relation,
+                properties,
             },
         }
     }
@@ -47,7 +55,10 @@ impl EdgeScanRecord<'_> {
             }
         }
         Ok(Self::Owned {
-            source: row.source, target: row.target, relation: row.relation, properties,
+            source: row.source,
+            target: row.target,
+            relation: row.relation,
+            properties,
         })
     }
 }

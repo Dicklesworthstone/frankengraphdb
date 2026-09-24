@@ -509,9 +509,13 @@ fn unsupported_shapes_and_foreign_prepared_handles_never_fall_back_to_privileged
         }
         // Independent probes are now admitted, but LIMIT 0 still opens no
         // candidate history under this session's zero-record native allowance.
-        let probe = session.prepare(
-            &cx, "MATCH (n) WHERE NOT EXISTS { MATCH (m) } RETURN n AS id LIMIT 0", &args,
-        ).unwrap();
+        let probe = session
+            .prepare(
+                &cx,
+                "MATCH (n) WHERE NOT EXISTS { MATCH (m) } RETURN n AS id LIMIT 0",
+                &args,
+            )
+            .unwrap();
         assert!(session.stream(&cx, &probe, &args).unwrap().next().is_none());
         let params = GqlParameters::new().with_text("route", "main").unwrap();
         let prepared = session

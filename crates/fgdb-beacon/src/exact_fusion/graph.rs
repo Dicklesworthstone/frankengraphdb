@@ -33,7 +33,10 @@ impl<'a> GraphHybridQuery<'a> {
     /// ceiling or truncate the base union before the graph contribution arrives.
     #[must_use]
     pub fn source_query(self) -> ExactHybridQuery<'a> {
-        ExactHybridQuery { k: 0, ..self.retrieval }
+        ExactHybridQuery {
+            k: 0,
+            ..self.retrieval
+        }
     }
 
     pub fn candidate_depths(self) -> Result<(usize, usize, usize), BeaconError> {
@@ -44,21 +47,29 @@ impl<'a> GraphHybridQuery<'a> {
             usize::try_from(self.graph_candidates)
                 .map_err(|_| BeaconError::InvalidQuery("graph candidate depth exceeds usize"))?
         };
-        let total = vector.checked_add(text).and_then(|n| n.checked_add(graph))
+        let total = vector
+            .checked_add(text)
+            .and_then(|n| n.checked_add(graph))
             .ok_or(BeaconError::InvalidQuery("RRF candidate sum exceeds usize"))?;
         if self.retrieval.k > total {
-            return Err(BeaconError::InvalidQuery("RRF k exceeds active candidate depths"));
+            return Err(BeaconError::InvalidQuery(
+                "RRF k exceeds active candidate depths",
+            ));
         }
         Ok((vector, text, graph))
     }
 }
 
 impl<K, L> ReadOptions<K, L> {
-    pub fn config_for_graph(&self, query: GraphHybridQuery<'_>) -> Result<IndexConfig, BeaconError> {
+    pub fn config_for_graph(
+        &self,
+        query: GraphHybridQuery<'_>,
+    ) -> Result<IndexConfig, BeaconError> {
         query.candidate_depths()?;
         if query.retrieval.k > self.policy.max_result_rows {
             return Err(BeaconError::ResourceLimit {
-                resource: "result rows", limit: self.policy.max_result_rows,
+                resource: "result rows",
+                limit: self.policy.max_result_rows,
             });
         }
         self.config_for(Search::Hybrid(query.source_query()))
@@ -105,16 +116,19 @@ impl IndexSnapshot {
         let mut graph_ranks = BTreeMap::new();
         if graph_depth != 0 {
             if graph.len() > graph_depth {
-                return Err(BeaconError::InvalidQuery("graph population exceeds candidate depth"));
+                return Err(BeaconError::InvalidQuery(
+                    "graph population exceeds candidate depth",
+                ));
             }
             let mut previous = None;
             for (offset, hit) in graph.iter().enumerate() {
                 work.charge(1 + graph_ranks.len().checked_ilog2().unwrap_or(0) as usize)?;
                 let key = (hit.hops, hit.id);
-                if previous.is_some_and(|before| before >= key)
-                    || graph_ranks.contains_key(&hit.id)
+                if previous.is_some_and(|before| before >= key) || graph_ranks.contains_key(&hit.id)
                 {
-                    return Err(BeaconError::InvalidQuery("graph ranks must be ordered and unique"));
+                    return Err(BeaconError::InvalidQuery(
+                        "graph ranks must be ordered and unique",
+                    ));
                 }
                 previous = Some(key);
                 graph_ranks.insert(hit.id, (rank(offset)?, hit.hops));
@@ -123,7 +137,11 @@ impl IndexSnapshot {
         // Same native source selection/rank assignment as two-lane RRF. It
         // searches each enabled modality ONCE and performs no premature top-k.
         let mut fused = self.fusion_candidates(
-            query.source_query(), vector_depth, text_depth, |_| true, work,
+            query.source_query(),
+            vector_depth,
+            text_depth,
+            |_| true,
+            work,
         )?;
         for &id in graph_ranks.keys() {
             work.charge(1 + fused.len().checked_ilog2().unwrap_or(0) as usize)?;
@@ -152,15 +170,22 @@ impl IndexSnapshot {
         let mut rows = Vec::new();
         while !best.is_empty() {
             work.charge(1 + best.len().checked_ilog2().unwrap_or(0) as usize)?;
-            let hit = best.pop().ok_or(BeaconError::Invariant("RRF heap disappeared"))?;
-            let evidence = fused.remove(&hit.id)
+            let hit = best
+                .pop()
+                .ok_or(BeaconError::Invariant("RRF heap disappeared"))?;
+            let evidence = fused
+                .remove(&hit.id)
                 .ok_or(BeaconError::Invariant("RRF evidence disappeared"))?;
             let graph = graph_ranks.get(&hit.id);
             rows.push(GraphHybridHit {
-                id: hit.id, score: hit.score, decimal_score: hit.score.decimal()?,
-                vector_rank: evidence.vector_rank, text_rank: evidence.text_rank,
+                id: hit.id,
+                score: hit.score,
+                decimal_score: hit.score.decimal()?,
+                vector_rank: evidence.vector_rank,
+                text_rank: evidence.text_rank,
                 graph_rank: graph.map(|(rank, _)| *rank),
-                vector_distance: evidence.vector_distance, text_score: evidence.text_score,
+                vector_distance: evidence.vector_distance,
+                text_score: evidence.text_score,
                 graph_hops: graph.map(|(_, hops)| *hops),
             });
         }

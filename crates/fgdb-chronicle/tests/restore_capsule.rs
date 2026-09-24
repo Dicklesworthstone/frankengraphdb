@@ -113,8 +113,15 @@ fn recovered_with(
         source_block_count: 1,
         symbol_auth_profile: 1,
     });
-    let records = encode_object(&encoding, protected.protected_bytes(), kind, 0, 8, &DONOR_DEK)
-        .unwrap();
+    let records = encode_object(
+        &encoding,
+        protected.protected_bytes(),
+        kind,
+        0,
+        8,
+        &DONOR_DEK,
+    )
+    .unwrap();
     let mut pull = BondedPull::new(
         &encoding,
         RecoveryTarget {
@@ -133,8 +140,12 @@ fn recovered_with(
     let mut donors = std::collections::BTreeSet::new();
     for request in requests.into_iter().rev() {
         donors.insert(request.donor);
-        pull.accept(request.donor, &records[request.esi as usize], &mut Vec::new())
-            .unwrap();
+        pull.accept(
+            request.donor,
+            &records[request.esi as usize],
+            &mut Vec::new(),
+        )
+        .unwrap();
     }
     if len > 1024 {
         assert_eq!(donors.len(), 3, "the fixture must actually combine donors");
@@ -156,7 +167,10 @@ fn bonded_bytes_restore_missing_and_locally_unrecoverable_committed_capsules() {
         let plaintext: Vec<_> = (0..4096).map(|i| (i % 251) as u8).collect();
         let object = recovered(&plaintext);
         let local = keys().seal(&plaintext).unwrap();
-        assert_ne!(object.encoding().encoding_id().0, local.descriptor.encoding_id);
+        assert_ne!(
+            object.encoding().encoding_id().0,
+            local.descriptor.encoding_id
+        );
         for missing in [false, true] {
             let dir = directory();
             let mut owner = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
@@ -173,22 +187,50 @@ fn bonded_bytes_restore_missing_and_locally_unrecoverable_committed_capsules() {
                 std::fs::write(&path, b"irrecoverable capsule").unwrap();
             }
             assert!(owner.read_capsule(&cx, oid, &mut Vec::new()).await.is_err());
-            assert_eq!(owner.scrub_capsules(&cx, CommitSeq(1), None, &mut Vec::new())
-                .await.unwrap().lost.len(), 1);
-            owner.restore_capsule(&cx, oid, &object, &mut Vec::new()).await.unwrap();
+            assert_eq!(
+                owner
+                    .scrub_capsules(&cx, CommitSeq(1), None, &mut Vec::new())
+                    .await
+                    .unwrap()
+                    .lost
+                    .len(),
+                1
+            );
+            owner
+                .restore_capsule(&cx, oid, &object, &mut Vec::new())
+                .await
+                .unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), encode_container(&local));
             assert_eq!(std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap(), before);
             assert_eq!(owner.chain().chain_value(), chain);
             assert_eq!(owner.next_commit_seq().unwrap(), CommitSeq(2));
             drop(owner);
             let mut reopened = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
-            assert_eq!(reopened.read_capsule(&cx, oid, &mut Vec::new()).await.unwrap(), plaintext);
+            assert_eq!(
+                reopened
+                    .read_capsule(&cx, oid, &mut Vec::new())
+                    .await
+                    .unwrap(),
+                plaintext
+            );
             // Identical retry closes durability again without a new staging file.
             let entries = std::fs::read_dir(dir.join(CAPSULE_DIR)).unwrap().count();
-            reopened.restore_capsule(&cx, oid, &object, &mut Vec::new()).await.unwrap();
-            assert_eq!(std::fs::read_dir(dir.join(CAPSULE_DIR)).unwrap().count(), entries);
-            assert_eq!(reopened.scrub_capsules(&cx, CommitSeq(1), None, &mut Vec::new())
-                .await.unwrap().clean, [oid]);
+            reopened
+                .restore_capsule(&cx, oid, &object, &mut Vec::new())
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::read_dir(dir.join(CAPSULE_DIR)).unwrap().count(),
+                entries
+            );
+            assert_eq!(
+                reopened
+                    .scrub_capsules(&cx, CommitSeq(1), None, &mut Vec::new())
+                    .await
+                    .unwrap()
+                    .clean,
+                [oid]
+            );
         }
     });
 }
@@ -210,13 +252,22 @@ fn invalid_objects_never_rewrite_a_capsule_or_acquire_publication_state() {
         let before = std::fs::read(&path).unwrap();
         let candidates = [
             recovered(b"unreferenced plaintext"),
-            recovered_with(&plaintext, &KEY, DatabaseSecurityNamespaceId([2; 32]), KIND, &[], 0),
+            recovered_with(
+                &plaintext,
+                &KEY,
+                DatabaseSecurityNamespaceId([2; 32]),
+                KIND,
+                &[],
+                0,
+            ),
             recovered_with(&plaintext, &KEY, NS, KIND + 1, &[], 0),
             recovered_with(&plaintext, &KEY, NS, KIND, &[], 1),
         ];
         for (index, candidate) in candidates.iter().enumerate() {
-            let error = owner.restore_capsule(&cx, candidate.object_id(), candidate, &mut Vec::new())
-                .await.unwrap_err();
+            let error = owner
+                .restore_capsule(&cx, candidate.object_id(), candidate, &mut Vec::new())
+                .await
+                .unwrap_err();
             assert!(match index {
                 0 => matches!(error, CapsuleRestoreError::UnreferencedObject(_)),
                 1 => matches!(error, CapsuleRestoreError::WrongNamespace),
@@ -225,8 +276,12 @@ fn invalid_objects_never_rewrite_a_capsule_or_acquire_publication_state() {
             assert_eq!(std::fs::read(&path).unwrap(), before);
             assert!(!owner.is_poisoned());
         }
-        assert!(matches!(owner.restore_capsule(&cx, ObjectId([0; 32]), &valid, &mut Vec::new()).await,
-            Err(CapsuleRestoreError::WrongObject)));
+        assert!(matches!(
+            owner
+                .restore_capsule(&cx, ObjectId([0; 32]), &valid, &mut Vec::new())
+                .await,
+            Err(CapsuleRestoreError::WrongObject)
+        ));
         assert_eq!(std::fs::read_dir(dir.join(CAPSULE_DIR)).unwrap().count(), 1);
         assert_eq!(owner.next_commit_seq().unwrap(), CommitSeq(2));
     });
@@ -249,8 +304,12 @@ fn an_authentic_object_from_another_identity_key_cannot_repair_local_history() {
         drop(owner);
         let wrong = CapsuleKeys::new([0xaa; 32], NS, LOCAL_DEK, KIND, CapsuleProfile::balanced());
         let mut owner = CommitCoordinator::open(&cx, &dir, wrong).await.unwrap();
-        assert!(matches!(owner.restore_capsule(&cx, object.object_id(), &object, &mut Vec::new()).await,
-            Err(CapsuleRestoreError::LocalIdentityMismatch)));
+        assert!(matches!(
+            owner
+                .restore_capsule(&cx, object.object_id(), &object, &mut Vec::new())
+                .await,
+            Err(CapsuleRestoreError::LocalIdentityMismatch)
+        ));
         assert_eq!(std::fs::read(&path).unwrap(), b"damaged");
         assert!(!owner.is_poisoned());
     });
@@ -267,9 +326,12 @@ fn every_scrub_publication_cut_is_old_or_exact_new_and_retry_uses_recovered_owne
         let object = recovered(&plaintext);
         let expected = encode_container(&keys().seal(&plaintext).unwrap());
         for point in [
-            ScrubCrashPoint::AfterTempCreate, ScrubCrashPoint::AfterTempWrite,
-            ScrubCrashPoint::AfterTempFlush, ScrubCrashPoint::AfterTempFileSync,
-            ScrubCrashPoint::AfterRename, ScrubCrashPoint::AfterDirectorySync,
+            ScrubCrashPoint::AfterTempCreate,
+            ScrubCrashPoint::AfterTempWrite,
+            ScrubCrashPoint::AfterTempFlush,
+            ScrubCrashPoint::AfterTempFileSync,
+            ScrubCrashPoint::AfterRename,
+            ScrubCrashPoint::AfterDirectorySync,
         ] {
             let dir = directory();
             let mut owner = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
@@ -277,13 +339,31 @@ fn every_scrub_publication_cut_is_old_or_exact_new_and_retry_uses_recovered_owne
             let log = std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap();
             let path = capsule_path(&dir, object.object_id());
             std::fs::write(&path, b"damaged").unwrap();
-            assert!(owner.restore_capsule_with_crash(&cx, object.object_id(), &object,
-                &mut Vec::new(), Some(point)).await.is_err(), "{point:?}");
+            assert!(
+                owner
+                    .restore_capsule_with_crash(
+                        &cx,
+                        object.object_id(),
+                        &object,
+                        &mut Vec::new(),
+                        Some(point)
+                    )
+                    .await
+                    .is_err(),
+                "{point:?}"
+            );
             assert!(owner.is_poisoned());
-            assert!(matches!(owner.restore_capsule(&cx, object.object_id(), &object, &mut Vec::new()).await,
-                Err(CapsuleRestoreError::RecoveryRequired)));
+            assert!(matches!(
+                owner
+                    .restore_capsule(&cx, object.object_id(), &object, &mut Vec::new())
+                    .await,
+                Err(CapsuleRestoreError::RecoveryRequired)
+            ));
             let after = std::fs::read(&path).unwrap();
-            if matches!(point, ScrubCrashPoint::AfterRename | ScrubCrashPoint::AfterDirectorySync) {
+            if matches!(
+                point,
+                ScrubCrashPoint::AfterRename | ScrubCrashPoint::AfterDirectorySync
+            ) {
                 assert_eq!(after, expected);
             } else {
                 assert_eq!(after, b"damaged");
@@ -291,10 +371,19 @@ fn every_scrub_publication_cut_is_old_or_exact_new_and_retry_uses_recovered_owne
             assert_eq!(std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap(), log);
             drop(owner);
             let mut owner = CommitCoordinator::open(&cx, &dir, keys()).await.unwrap();
-            owner.restore_capsule(&cx, object.object_id(), &object, &mut Vec::new()).await.unwrap();
+            owner
+                .restore_capsule(&cx, object.object_id(), &object, &mut Vec::new())
+                .await
+                .unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), expected);
             assert_eq!(std::fs::read(dir.join(COMMIT_LOG_NAME)).unwrap(), log);
-            assert_eq!(owner.read_capsule(&cx, object.object_id(), &mut Vec::new()).await.unwrap(), plaintext);
+            assert_eq!(
+                owner
+                    .read_capsule(&cx, object.object_id(), &mut Vec::new())
+                    .await
+                    .unwrap(),
+                plaintext
+            );
         }
     });
 }
@@ -314,14 +403,31 @@ fn nonregular_destinations_and_uncertain_commit_owners_refuse_repair() {
         let path = capsule_path(&dir, object.object_id());
         std::fs::rename(&path, path.with_extension("retained-fixture")).unwrap();
         std::fs::create_dir(&path).unwrap();
-        assert!(matches!(owner.restore_capsule(&cx, object.object_id(), &object, &mut Vec::new()).await,
-            Err(CapsuleRestoreError::NonRegularDestination)));
+        assert!(matches!(
+            owner
+                .restore_capsule(&cx, object.object_id(), &object, &mut Vec::new())
+                .await,
+            Err(CapsuleRestoreError::NonRegularDestination)
+        ));
         assert!(path.is_dir());
         assert!(!owner.is_poisoned());
-        assert!(owner.commit_with_crash(&cx, b"uncertain", marker, Some(CrashPoint::AfterMarkerBeforeD2))
-            .await.is_err());
-        assert!(matches!(owner.restore_capsule(&cx, object.object_id(), &object, &mut Vec::new()).await,
-            Err(CapsuleRestoreError::RecoveryRequired)));
+        assert!(
+            owner
+                .commit_with_crash(
+                    &cx,
+                    b"uncertain",
+                    marker,
+                    Some(CrashPoint::AfterMarkerBeforeD2)
+                )
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            owner
+                .restore_capsule(&cx, object.object_id(), &object, &mut Vec::new())
+                .await,
+            Err(CapsuleRestoreError::RecoveryRequired)
+        ));
     });
 }
 
@@ -329,7 +435,9 @@ fn nonregular_destinations_and_uncertain_commit_owners_refuse_repair() {
 fn final_verifier_unwind_fences_a_completed_replacement() {
     struct PanicSink;
     impl CryptoVerificationSink for PanicSink {
-        fn record(&mut self, _: CryptoVerificationEvent) { panic!("verification callback failure"); }
+        fn record(&mut self, _: CryptoVerificationEvent) {
+            panic!("verification callback failure");
+        }
     }
     let runtime = RuntimeBuilder::new().build().unwrap();
     let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
@@ -338,13 +446,27 @@ fn final_verifier_unwind_fences_a_completed_replacement() {
     let dir = directory();
     let plaintext = vec![5; 2048];
     let object = recovered(&plaintext);
-    let mut owner = runtime.block_on(CommitCoordinator::open(&cx, &dir, keys())).unwrap();
-    runtime.block_on(owner.commit(&cx, &plaintext, marker)).unwrap();
+    let mut owner = runtime
+        .block_on(CommitCoordinator::open(&cx, &dir, keys()))
+        .unwrap();
+    runtime
+        .block_on(owner.commit(&cx, &plaintext, marker))
+        .unwrap();
     std::fs::write(capsule_path(&dir, object.object_id()), b"damaged").unwrap();
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(owner.restore_capsule(&cx, object.object_id(), &object, &mut PanicSink))
-    })).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(owner.restore_capsule(
+                &cx,
+                object.object_id(),
+                &object,
+                &mut PanicSink,
+            ))
+        }))
+        .is_err()
+    );
     assert!(owner.is_poisoned());
-    assert_eq!(std::fs::read(capsule_path(&dir, object.object_id())).unwrap(),
-        encode_container(&keys().seal(&plaintext).unwrap()));
+    assert_eq!(
+        std::fs::read(capsule_path(&dir, object.object_id())).unwrap(),
+        encode_container(&keys().seal(&plaintext).unwrap())
+    );
 }

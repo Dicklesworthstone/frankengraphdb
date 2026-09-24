@@ -6,11 +6,26 @@ use fgdb_prism::FnxValue;
 
 fn modes() -> Vec<(FnxCallSpec, Directedness)> {
     vec![
-        (FnxCallSpec::connected_components(), Directedness::Undirected),
-        (FnxCallSpec::weakly_connected_components(), Directedness::Directed),
-        (FnxCallSpec::weakly_connected_components(), Directedness::Reversed),
-        (FnxCallSpec::strongly_connected_components(), Directedness::Directed),
-        (FnxCallSpec::strongly_connected_components(), Directedness::Reversed),
+        (
+            FnxCallSpec::connected_components(),
+            Directedness::Undirected,
+        ),
+        (
+            FnxCallSpec::weakly_connected_components(),
+            Directedness::Directed,
+        ),
+        (
+            FnxCallSpec::weakly_connected_components(),
+            Directedness::Reversed,
+        ),
+        (
+            FnxCallSpec::strongly_connected_components(),
+            Directedness::Directed,
+        ),
+        (
+            FnxCallSpec::strongly_connected_components(),
+            Directedness::Reversed,
+        ),
     ]
 }
 
@@ -19,17 +34,28 @@ fn identity(vertex: usize, n: usize) -> VId {
 }
 
 async fn stored(cx: &CommitCx, n: usize, edges: &[(usize, usize)]) -> Database<MemVfs> {
-    let mut db = Database::<MemVfs>::open_memory(cx, DatabaseKeys::new(
-        [0xa1; 32], DatabaseSecurityNamespaceId([0xa2; 32]), [0xa3; 32],
-    )).await.unwrap();
+    let mut db = Database::<MemVfs>::open_memory(
+        cx,
+        DatabaseKeys::new(
+            [0xa1; 32],
+            DatabaseSecurityNamespaceId([0xa2; 32]),
+            [0xa3; 32],
+        ),
+    )
+    .await
+    .unwrap();
     if n != 0 {
         let mut batch = WriteBatch::new(RelationId(1));
         for vertex in 0..n {
             batch.create_vertex(identity(vertex, n), vec![LabelId(1)], vec![]);
         }
         for (eid, &(source, target)) in edges.iter().enumerate() {
-            batch.add_edge(EId(eid as u128), identity(source, n), identity(target, n),
-                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))]);
+            batch.add_edge(
+                EId(eid as u128),
+                identity(source, n),
+                identity(target, n),
+                vec![(PropertyKeyId(1), CanonicalScalar::Int(1))],
+            );
         }
         db.write(cx, batch).await.unwrap();
     }
@@ -38,10 +64,14 @@ async fn stored(cx: &CommitCx, n: usize, edges: &[(usize, usize)]) -> Database<M
 
 fn reference(n: usize, edges: &[(usize, usize)], strong: bool) -> Vec<Vec<FnxValue>> {
     let mut reach = vec![vec![false; n]; n];
-    for (i, row) in reach.iter_mut().enumerate() { row[i] = true; }
+    for (i, row) in reach.iter_mut().enumerate() {
+        row[i] = true;
+    }
     for &(s, t) in edges {
         reach[s][t] = true;
-        if !strong { reach[t][s] = true; }
+        if !strong {
+            reach[t][s] = true;
+        }
     }
     for via in 0..n {
         for s in 0..n {
@@ -51,10 +81,17 @@ fn reference(n: usize, edges: &[(usize, usize)], strong: bool) -> Vec<Vec<FnxVal
             }
         }
     }
-    (0..n).map(|vertex| {
-        let label = (0..n).find(|&other| reach[vertex][other] && reach[other][vertex]).unwrap();
-        vec![FnxValue::Vertex(identity(vertex, n)), FnxValue::Vertex(identity(label, n))]
-    }).collect()
+    (0..n)
+        .map(|vertex| {
+            let label = (0..n)
+                .find(|&other| reach[vertex][other] && reach[other][vertex])
+                .unwrap();
+            vec![
+                FnxValue::Vertex(identity(vertex, n)),
+                FnxValue::Vertex(identity(label, n)),
+            ]
+        })
+        .collect()
 }
 
 #[test]
@@ -65,28 +102,48 @@ fn every_three_vertex_topology_has_identical_canonical_components_at_every_quant
     runtime.block_on(async {
         let cx = contexts.query();
         for mask in 0u16..512 {
-            let edges: Vec<_> = (0..9).filter(|bit| mask & (1 << bit) != 0)
-                .map(|bit| (bit / 3, bit % 3)).collect();
+            let edges: Vec<_> = (0..9)
+                .filter(|bit| mask & (1 << bit) != 0)
+                .map(|bit| (bit / 3, bit % 3))
+                .collect();
             let db = stored(&contexts.commit(), 3, &edges).await;
             for (call, direction) in modes() {
                 let opt = options(direction);
                 let graph = projection(&db, &cx, opt).await;
                 let strong = matches!(call.algorithm(), FnxAlgorithm::StronglyConnectedComponents);
                 let expected = reference(3, &edges, strong);
-                let sync = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
+                let sync = call
+                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                    .unwrap();
                 assert_eq!(sync.rows, expected);
                 let mut certificate = None;
                 for q in [1, 2, 7] {
                     let probe = Arc::new(SimulationCheckpointProbe::new(None));
                     let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
-                    let (actual, pending) = drive(call.execute_sealed_cooperative(
-                        &controlled, &graph, opt.execution_limits, memory(), quantum(q), yield_now,
-                    ), &probe, q);
+                    let (actual, pending) = drive(
+                        call.execute_sealed_cooperative(
+                            &controlled,
+                            &graph,
+                            opt.execution_limits,
+                            memory(),
+                            quantum(q),
+                            yield_now,
+                        ),
+                        &probe,
+                        q,
+                    );
                     let actual = actual.unwrap();
                     compare_execution(&actual, &sync);
-                    assert_eq!(actual.rows, expected, "mask={mask}, direction={direction:?}, q={q}");
-                    if q == 1 { assert!(pending >= 3 * 2); }
-                    if let Some(previous) = &certificate { assert_eq!(&actual.certificate, previous); }
+                    assert_eq!(
+                        actual.rows, expected,
+                        "mask={mask}, direction={direction:?}, q={q}"
+                    );
+                    if q == 1 {
+                        assert!(pending >= 3 * 2);
+                    }
+                    if let Some(previous) = &certificate {
+                        assert_eq!(&actual.certificate, previous);
+                    }
                     certificate = Some(actual.certificate);
                 }
             }
@@ -107,10 +164,25 @@ fn canonical_minima_are_not_union_roots_and_scalar_only_populations_still_yield(
         for (call, direction) in modes() {
             let opt = options(direction);
             let graph = projection(&db, &cx, opt).await;
-            let result = call.execute_sealed_cooperative(&cx, &graph, opt.execution_limits,
-                memory(), quantum(1), yield_now).await.unwrap();
-            assert_eq!(result.rows, reference(6, &edges,
-                matches!(call.algorithm(), FnxAlgorithm::StronglyConnectedComponents)));
+            let result = call
+                .execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(1),
+                    yield_now,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result.rows,
+                reference(
+                    6,
+                    &edges,
+                    matches!(call.algorithm(), FnxAlgorithm::StronglyConnectedComponents)
+                )
+            );
         }
         for n in [0, 512] {
             let db = stored(&contexts.commit(), n, &[]).await;
@@ -119,14 +191,27 @@ fn canonical_minima_are_not_union_roots_and_scalar_only_populations_still_yield(
                 let graph = projection(&db, &cx, opt).await;
                 let probe = Arc::new(SimulationCheckpointProbe::new(None));
                 let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
-                let (result, pending) = drive(call.execute_sealed_cooperative(&controlled, &graph,
-                    opt.execution_limits, memory(), quantum(1), yield_now), &probe, 1);
+                let (result, pending) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(1),
+                        yield_now,
+                    ),
+                    &probe,
+                    1,
+                );
                 let result = result.unwrap();
                 assert_eq!(result.rows.len(), n);
                 for (vertex, row) in result.rows.iter().enumerate() {
                     assert_eq!(row, &vec![FnxValue::Vertex(identity(vertex, n)); 2]);
                 }
-                assert!(pending >= n * 5, "no adjacency can supply these scheduling boundaries");
+                assert!(
+                    pending >= n * 5,
+                    "no adjacency can supply these scheduling boundaries"
+                );
             }
         }
     });
@@ -185,7 +270,12 @@ fn every_component_checkpoint_and_suspension_retains_live_refusals_and_drop_safe
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
         let cx = contexts.query();
-        let db = stored(&contexts.commit(), 5, &[(0, 3), (1, 2), (1, 4), (1, 3), (3, 1)]).await;
+        let db = stored(
+            &contexts.commit(),
+            5,
+            &[(0, 3), (1, 2), (1, 4), (1, 3), (3, 1)],
+        )
+        .await;
         let anchor = db.read_session().unwrap().partition_root();
         for (call, direction) in modes() {
             let opt = options(direction);
@@ -193,28 +283,63 @@ fn every_component_checkpoint_and_suspension_retains_live_refusals_and_drop_safe
             let probe = Arc::new(SimulationCheckpointProbe::new(None));
             let measured = cx.with_checkpoint_probe(Arc::clone(&probe));
             let mut guards = 0usize;
-            let (expected, pending) = drive(call.execute_sealed_cooperative_with_checkpoint(
-                &measured, &graph, opt.execution_limits, memory(), quantum(3), yield_now,
-                || { guards += 1; Ok(()) },
-            ), &probe, 3);
+            let (expected, pending) = drive(
+                call.execute_sealed_cooperative_with_checkpoint(
+                    &measured,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                    || {
+                        guards += 1;
+                        Ok(())
+                    },
+                ),
+                &probe,
+                3,
+            );
             let expected = expected.unwrap();
             let calls = probe.calls();
             for stop in 1..=calls {
                 let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
                 let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
-                let (actual, _) = drive(call.execute_sealed_cooperative(&controlled, &graph,
-                    opt.execution_limits, memory(), quantum(3), yield_now), &probe, 3);
+                let (actual, _) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                    ),
+                    &probe,
+                    3,
+                );
                 assert!(matches!(actual, Err(FnxSealedExecutionError::Cancelled(_))));
                 assert_eq!(probe.calls(), stop);
             }
             for stop in 1..=guards {
                 let mut seen = 0;
-                let error = call.execute_sealed_cooperative_with_checkpoint(&cx, &graph,
-                    opt.execution_limits, memory(), quantum(3), yield_now, || {
-                        seen += 1;
-                        if seen == stop { Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop)))) }
-                        else { Ok(()) }
-                    }).await.unwrap_err();
+                let error = call
+                    .execute_sealed_cooperative_with_checkpoint(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(3),
+                        yield_now,
+                        || {
+                            seen += 1;
+                            if seen == stop {
+                                Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap_err();
                 live_refusal(error, stop);
                 assert_eq!(seen, stop);
             }
@@ -226,13 +351,24 @@ fn every_component_checkpoint_and_suspension_retains_live_refusals_and_drop_safe
                 let probe = Arc::new(SimulationCheckpointProbe::new(None));
                 let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
                 let mut future = Box::pin(call.execute_sealed_cooperative_with_checkpoint(
-                    &controlled, &graph, opt.execution_limits, memory(), quantum(3), yield_now, || {
+                    &controlled,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                    || {
                         seen.set(seen.get() + 1);
-                        if revoked.get() { Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop)))) }
-                        else { Ok(()) }
+                        if revoked.get() {
+                            Err(SealedProjectionError::Guard(Box::new(LiveRefusal(stop))))
+                        } else {
+                            Ok(())
+                        }
                     },
                 ));
-                for _ in 0..stop { assert!(future.as_mut().poll(&mut task).is_pending()); }
+                for _ in 0..stop {
+                    assert!(future.as_mut().poll(&mut task).is_pending());
+                }
                 let before = probe.calls();
                 let before_guard = seen.get();
                 revoked.set(true);
@@ -243,15 +379,34 @@ fn every_component_checkpoint_and_suspension_retains_live_refusals_and_drop_safe
                 assert_eq!(probe.calls(), before + 1);
                 assert_eq!(seen.get(), before_guard + 1);
                 drop(future);
-                let mut abandoned = Box::pin(call.execute_sealed_cooperative(&cx, &graph,
-                    opt.execution_limits, memory(), quantum(3), yield_now));
-                for _ in 0..stop { assert!(abandoned.as_mut().poll(&mut task).is_pending()); }
+                let mut abandoned = Box::pin(call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(3),
+                    yield_now,
+                ));
+                for _ in 0..stop {
+                    assert!(abandoned.as_mut().poll(&mut task).is_pending());
+                }
                 drop(abandoned);
                 assert_eq!(contexts.outstanding_obligations(), 0);
                 assert_eq!(db.read_session().unwrap().partition_root(), anchor);
             }
-            assert_eq!(call.execute_sealed_cooperative(&cx, &graph, opt.execution_limits,
-                memory(), quantum(7), yield_now).await.unwrap(), expected);
+            assert_eq!(
+                call.execute_sealed_cooperative(
+                    &cx,
+                    &graph,
+                    opt.execution_limits,
+                    memory(),
+                    quantum(7),
+                    yield_now
+                )
+                .await
+                .unwrap(),
+                expected
+            );
         }
     });
 }
@@ -274,17 +429,39 @@ fn historical_hosted_connectivity_keeps_hidden_endpoints_and_aliases_out_of_the_
             let text = format!("CALL fnx.{name}() YIELD component AS group_id,vertex AS id");
             let call = FnxCallSpec::bind(&text, &FnxParameters::new()).unwrap();
             for at in [at, db.frontier().unwrap()] {
-                let mut opt = options(direction); opt.as_of = Some(at);
+                let mut opt = options(direction);
+                opt.as_of = Some(at);
                 let graph = projection(&db, &cx, opt).await;
-                let prepared = call.execute_sealed_cooperative(&cx, &graph, opt.execution_limits,
-                    memory(), quantum(1), yield_now).await.unwrap();
-                let hosted = db.call_fnx_sealed_cooperative(&cx, &text, &FnxParameters::new(), opt,
-                    memory(), SealedLimits::default(), quantum(7)).await.unwrap();
+                let prepared = call
+                    .execute_sealed_cooperative(
+                        &cx,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(1),
+                        yield_now,
+                    )
+                    .await
+                    .unwrap();
+                let hosted = db
+                    .call_fnx_sealed_cooperative(
+                        &cx,
+                        &text,
+                        &FnxParameters::new(),
+                        opt,
+                        memory(),
+                        SealedLimits::default(),
+                        quantum(7),
+                    )
+                    .await
+                    .unwrap();
                 assert_eq!(hosted.analytics, prepared);
                 assert_eq!(hosted.selection, opt.selection);
                 assert_eq!(prepared.rows.len(), 4);
                 assert_eq!(prepared.columns, vec!["group_id", "id"]);
-                for row in &prepared.rows { assert!(!row.contains(&FnxValue::Vertex(VId(99)))); }
+                for row in &prepared.rows {
+                    assert!(!row.contains(&FnxValue::Vertex(VId(99))));
+                }
             }
         }
         assert_eq!(contexts.outstanding_obligations(), 0);
@@ -301,17 +478,31 @@ fn deep_dfs_and_whole_graph_scc_labeling_preserve_frames_across_actual_pending_p
         let n = 512;
         for cycle in [false, true] {
             let mut edges: Vec<_> = (0..n - 1).map(|i| (i, i + 1)).collect();
-            if cycle { edges.push((n - 1, 0)); }
+            if cycle {
+                edges.push((n - 1, 0));
+            }
             let db = stored(&contexts.commit(), n, &edges).await;
             let call = FnxCallSpec::strongly_connected_components();
             for direction in [Directedness::Directed, Directedness::Reversed] {
                 let opt = options(direction);
                 let graph = projection(&db, &cx, opt).await;
-                let expected = call.execute_sealed(&cx, &graph, opt.execution_limits, memory()).unwrap();
+                let expected = call
+                    .execute_sealed(&cx, &graph, opt.execution_limits, memory())
+                    .unwrap();
                 let probe = Arc::new(SimulationCheckpointProbe::new(None));
                 let controlled = cx.with_checkpoint_probe(Arc::clone(&probe));
-                let (actual, pending) = drive(call.execute_sealed_cooperative(&controlled, &graph,
-                    opt.execution_limits, memory(), quantum(1), yield_now), &probe, 1);
+                let (actual, pending) = drive(
+                    call.execute_sealed_cooperative(
+                        &controlled,
+                        &graph,
+                        opt.execution_limits,
+                        memory(),
+                        quantum(1),
+                        yield_now,
+                    ),
+                    &probe,
+                    1,
+                );
                 let actual = actual.unwrap();
                 compare_execution(&actual, &expected);
                 assert!(pending >= 5 * n, "DFS and final-label scans must cooperate");
@@ -321,8 +512,13 @@ fn deep_dfs_and_whole_graph_scc_labeling_preserve_frames_across_actual_pending_p
                     assert_eq!(actual.certificate.witness.queue_peak, n);
                 }
                 for (vertex, row) in actual.rows.iter().enumerate() {
-                    assert_eq!(row, &vec![FnxValue::Vertex(identity(vertex, n)),
-                        FnxValue::Vertex(identity(if cycle { 0 } else { vertex }, n))]);
+                    assert_eq!(
+                        row,
+                        &vec![
+                            FnxValue::Vertex(identity(vertex, n)),
+                            FnxValue::Vertex(identity(if cycle { 0 } else { vertex }, n))
+                        ]
+                    );
                 }
             }
         }
@@ -332,9 +528,17 @@ fn deep_dfs_and_whole_graph_scc_labeling_preserve_frames_across_actual_pending_p
         let opt = options(Directedness::Directed);
         let graph = projection(&db, &cx, opt).await;
         drop(db);
-        let result = FnxCallSpec::strongly_connected_components().execute_sealed_cooperative(
-            &cx, &graph, opt.execution_limits, memory(), quantum(1), yield_now,
-        ).await.unwrap();
+        let result = FnxCallSpec::strongly_connected_components()
+            .execute_sealed_cooperative(
+                &cx,
+                &graph,
+                opt.execution_limits,
+                memory(),
+                quantum(1),
+                yield_now,
+            )
+            .await
+            .unwrap();
         assert_eq!(result.rows, reference(6, &edges, true));
         assert_eq!(contexts.outstanding_obligations(), 0);
     });

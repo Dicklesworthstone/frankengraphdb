@@ -292,9 +292,12 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
             let (eid, second) = if let Some(eid) = cursor.reverse_pending.take() {
                 (eid, true)
             } else {
-                let Some(eid) = flatten(source.next_edge_for_relation(
-                    cursor.plan.relation, &mut |event| meter.event(event),
-                ))? else {
+                let Some(eid) = flatten(
+                    source.next_edge_for_relation(cursor.plan.relation, &mut |event| {
+                        meter.event(event)
+                    }),
+                )?
+                else {
                     return Ok(None);
                 };
                 meter.event(GlaExecutionEvent::Work)?;

@@ -25,10 +25,16 @@ pub(crate) struct Meter<E, F> {
 }
 impl<E, F: FnMut(usize) -> Result<(), E>> Meter<E, F> {
     pub(crate) fn new(units: usize, gate: F) -> Self {
-        Self { budget: WorkBudget::new(units), gate, failure: None }
+        Self {
+            budget: WorkBudget::new(units),
+            gate,
+            failure: None,
+        }
     }
     pub(crate) fn refuse(&mut self, error: E) -> BeaconError {
-        if self.failure.is_none() { self.failure = Some(error); }
+        if self.failure.is_none() {
+            self.failure = Some(error);
+        }
         BeaconError::Cancelled
     }
     pub(crate) fn finish<R, T>(self, result: Result<T, BeaconError>) -> Result<T, Error<R, E>> {
@@ -40,15 +46,21 @@ impl<E, F: FnMut(usize) -> Result<(), E>> Meter<E, F> {
 }
 impl<E, F: FnMut(usize) -> Result<(), E>> WorkControl for Meter<E, F> {
     fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
-        if self.failure.is_some() { return Err(BeaconError::Cancelled); }
-        if let Err(error) = (self.gate)(units) { return Err(self.refuse(error)); }
+        if self.failure.is_some() {
+            return Err(BeaconError::Cancelled);
+        }
+        if let Err(error) = (self.gate)(units) {
+            return Err(self.refuse(error));
+        }
         self.budget.charge(units)
     }
 }
 
 pub(crate) struct SharedWork<'a, W>(pub(crate) &'a RefCell<W>);
 impl<W: WorkControl> WorkControl for SharedWork<'_, W> {
-    fn charge(&mut self, units: usize) -> Result<(), BeaconError> { self.0.borrow_mut().charge(units) }
+    fn charge(&mut self, units: usize) -> Result<(), BeaconError> {
+        self.0.borrow_mut().charge(units)
+    }
 }
 
 /// Private common preparation for privileged and Warden readers. Admitting a
@@ -70,7 +82,10 @@ pub(crate) fn build(
         work.borrow_mut().charge(1)?;
         if matches!(event, SourceEvent::ScratchEntry) {
             if scratch == options.policy.max_source_scratch {
-                return Err(BeaconError::ResourceLimit { resource: "source scratch entries", limit: options.policy.max_source_scratch });
+                return Err(BeaconError::ResourceLimit {
+                    resource: "source scratch entries",
+                    limit: options.policy.max_source_scratch,
+                });
             }
             scratch += 1;
         }
@@ -81,25 +96,46 @@ pub(crate) fn build(
         control(SourceEvent::Work)?;
         // Charge original-label examination, including authorization clauses.
         work.borrow_mut().charge(row.labels.len())?;
-        if !admit(row)? { return Ok(()); }
-        if options.vertex_label.is_some_and(|label| {
-            !label_allowed(label) || row.labels.binary_search(&label).is_err()
-        }) { return Ok(()); }
+        if !admit(row)? {
+            return Ok(());
+        }
+        if options
+            .vertex_label
+            .is_some_and(|label| !label_allowed(label) || row.labels.binary_search(&label).is_err())
+        {
+            return Ok(());
+        }
         let limit = options.policy.max_staging_rows.min(config.max_documents);
         if rows.len() == limit {
-            return Err(BeaconError::ResourceLimit { resource: "staged vertices", limit });
+            return Err(BeaconError::ResourceLimit {
+                resource: "staged vertices",
+                limit,
+            });
         }
-        rows.try_reserve(1).map_err(|_| BeaconError::ResourceLimit { resource: "vertex staging allocation", limit })?;
+        rows.try_reserve(1)
+            .map_err(|_| BeaconError::ResourceLimit {
+                resource: "vertex staging allocation",
+                limit,
+            })?;
         rows.push(row);
         Ok(())
     })?;
     let projected = rows.into_iter().map(|row| {
-        options.projection.project(row.vid, &config, |key| {
-            // Do not inspect an unauthorized property's value or its type.
-            if !property_allowed(key) { return None; }
-            row.props.binary_search_by_key(&key, |(key, _)| *key)
-                .ok().map(|slot| &row.props[slot].1)
-        }, &mut SharedWork(work))
+        options.projection.project(
+            row.vid,
+            &config,
+            |key| {
+                // Do not inspect an unauthorized property's value or its type.
+                if !property_allowed(key) {
+                    return None;
+                }
+                row.props
+                    .binary_search_by_key(&key, |(key, _)| *key)
+                    .ok()
+                    .map(|slot| &row.props[slot].1)
+            },
+            &mut SharedWork(work),
+        )
     });
     BeaconIndex::try_build(config.clone(), projected, &mut SharedWork(work))
 }
@@ -118,7 +154,16 @@ pub(crate) fn evaluate(
     work.borrow_mut().charge(1)?;
     let config = options.config_for(query)?;
     query.validate(&config, &mut SharedWork(work))?;
-    let index = build(snapshot, at, options, config, work, admit, label_allowed, property_allowed)?;
+    let index = build(
+        snapshot,
+        at,
+        options,
+        config,
+        work,
+        admit,
+        label_allowed,
+        property_allowed,
+    )?;
     let rows = query.execute(&index.snapshot(), &mut SharedWork(work))?;
     // Even empty and native zero-k paths cannot skip final live admission.
     work.borrow_mut().charge(1)?;
@@ -139,7 +184,9 @@ impl<V: Vfs + Clone> Database<V> {
     ) -> Result<Rows, Error<ReadError, Cancel>> {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
-            self.read_session().map_err(Error::Read)?.beacon_search(cx, options, query)
+            self.read_session()
+                .map_err(Error::Read)?
+                .beacon_search(cx, options, query)
         })
     }
 }
@@ -159,8 +206,19 @@ impl EmbeddedReadView {
             cx.checkpoint().map_err(Error::Interrupted)?;
             let at = options.as_of.unwrap_or(self.frontier());
             self.snapshot.check_frontier(at).map_err(Error::Read)?;
-            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| cx.checkpoint()));
-            let result = evaluate(&self.snapshot, at, options, query, &work, |_| Ok(true), |_| true, |_| true);
+            let work = RefCell::new(Meter::new(options.policy.max_work_units, |_| {
+                cx.checkpoint()
+            }));
+            let result = evaluate(
+                &self.snapshot,
+                at,
+                options,
+                query,
+                &work,
+                |_| Ok(true),
+                |_| true,
+                |_| true,
+            );
             work.into_inner().finish(result)
         })
     }

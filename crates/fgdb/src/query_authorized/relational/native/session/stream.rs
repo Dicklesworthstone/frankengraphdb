@@ -3,14 +3,14 @@
 //! the native physical operator. No source table or result set is collected.
 
 use super::*;
+use fgdb_gql::GlaExecutionEvent;
 use fgdb_gql::algebra::{GlaOperator, PreparedGraphPattern};
 use fgdb_gql::edge_stream::{EdgeExpansionSourceError, EdgeScanError, EdgeScanRow};
-use fgdb_gql::GlaExecutionEvent;
-use fgdb_types::EId;
 use fgdb_gql::stream::{
     VertexScanBuildError, VertexScanCursor, VertexScanError, VertexScanEvent, VertexScanPlan,
     VertexScanRecord, VertexScanRow, VertexScanSource, VertexScanSourceError, VertexScanState,
 };
+use fgdb_types::EId;
 use std::iter::FusedIterator;
 use std::rc::Rc;
 
@@ -155,7 +155,9 @@ fn expansion_error<C>(
 ) -> EdgeExpansionSourceError<QueryError, C> {
     match error {
         EdgeExpansionSourceError::Unavailable => EdgeExpansionSourceError::Unavailable,
-        EdgeExpansionSourceError::Read(error) => EdgeExpansionSourceError::Read(source_error(error)),
+        EdgeExpansionSourceError::Read(error) => {
+            EdgeExpansionSourceError::Read(source_error(error))
+        }
     }
 }
 fn edge_event(event: VertexScanEvent) -> GlaExecutionEvent {
@@ -181,11 +183,19 @@ impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
         for _ in row.labels {
             control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
         }
-        let admitted = self.execution.borrow().permit.predicates().allows_vertex(row.labels);
+        let admitted = self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_vertex(row.labels);
         if !admitted {
             return Ok(None);
         }
-        self.execution.borrow_mut().node().map_err(VertexScanSourceError::Source)?;
+        self.execution
+            .borrow_mut()
+            .node()
+            .map_err(VertexScanSourceError::Source)?;
         Ok(Some(row))
     }
 }
@@ -251,7 +261,13 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
             return Ok(None); // Missing vertex is NOT a present vertex with SQL NULL.
         };
         control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-        if !self.execution.borrow().permit.predicates().allows_property(key) {
+        if !self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_property(key)
+        {
             return Ok(Some(None)); // Do not inspect or copy a forbidden payload.
         }
         let (mut low, mut high) = (0, row.properties.len());
@@ -274,7 +290,9 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
     ) -> Result<Option<VId>, EdgeExpansionSourceError<QueryError, C>> {
         // Independent scopes get their own caller-owned position and the same
         // immutable generation. The subsequent record lookup filters scope.
-        self.inner.next_probe_vertex(after, control).map_err(expansion_error)
+        self.inner
+            .next_probe_vertex(after, control)
+            .map_err(expansion_error)
     }
 
     fn next_probe_edge_for_relation<C>(
@@ -289,17 +307,25 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
             .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
         // This check precedes both endpoint resolution and incidence access.
         // The outer control is the SAME live permit even for a denied relation.
-        if !self.execution.borrow().permit.predicates().allows_relation(relation) {
+        if !self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_relation(relation)
+        {
             return Ok(None);
         }
-        let vertex = self.admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
+        let vertex = self
+            .admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
             .map_err(EdgeExpansionSourceError::Read)?;
         if vertex.is_none() {
-            return Err(EdgeExpansionSourceError::Read(VertexScanSourceError::Source(
-                probe_error(EdgeScanError::DanglingEndpoint),
-            )));
+            return Err(EdgeExpansionSourceError::Read(
+                VertexScanSourceError::Source(probe_error(EdgeScanError::DanglingEndpoint)),
+            ));
         }
-        self.inner.next_probe_edge_for_relation(endpoint, relation, direction, after, control)
+        self.inner
+            .next_probe_edge_for_relation(endpoint, relation, direction, after, control)
             .map_err(expansion_error)
     }
 
@@ -308,19 +334,35 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeExpansionSourceError<QueryError, C>> {
-        let Some(edge) = self.inner.probe_edge(eid, control).map_err(expansion_error)? else {
+        let Some(edge) = self
+            .inner
+            .probe_edge(eid, control)
+            .map_err(expansion_error)?
+        else {
             return Ok(None);
         };
         control(GlaExecutionEvent::Work)
             .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
-        if !self.execution.borrow().permit.predicates().allows_relation(edge.relation) {
+        if !self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_relation(edge.relation)
+        {
             return Ok(None);
         }
-        for endpoint in [Some(edge.source), (edge.target != edge.source).then_some(edge.target)]
-            .into_iter().flatten()
+        for endpoint in [
+            Some(edge.source),
+            (edge.target != edge.source).then_some(edge.target),
+        ]
+        .into_iter()
+        .flatten()
         {
-            if self.admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
-                .map_err(EdgeExpansionSourceError::Read)?.is_none()
+            if self
+                .admitted_vertex(endpoint, &mut |event| control(edge_event(event)))
+                .map_err(EdgeExpansionSourceError::Read)?
+                .is_none()
             {
                 return Ok(None); // A hidden transit vertex removes the edge itself.
             }
@@ -561,5 +603,8 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     }
 }
 
+// This file is itself loaded through `#[path]`, so an undecorated child would
+// resolve beside it (session/probe_tests.rs), not under stream/.
 #[cfg(test)]
+#[path = "stream/probe_tests.rs"]
 mod probe_tests;

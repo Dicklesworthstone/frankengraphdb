@@ -100,7 +100,11 @@ impl ExpansionGraph {
         result
     }
 
-    pub fn insert_vertex(&mut self, id: VId, work: &mut dyn WorkControl) -> Result<(), BeaconError> {
+    pub fn insert_vertex(
+        &mut self,
+        id: VId,
+        work: &mut dyn WorkControl,
+    ) -> Result<(), BeaconError> {
         self.mutate(|graph| {
             work.charge(tree_work(graph.vertices.len()))?;
             if graph.vertices.contains(&id) {
@@ -108,7 +112,8 @@ impl ExpansionGraph {
             }
             if graph.vertices.len() >= graph.limits.max_vertices {
                 return Err(BeaconError::ResourceLimit {
-                    resource: "expansion vertices", limit: graph.limits.max_vertices,
+                    resource: "expansion vertices",
+                    limit: graph.limits.max_vertices,
                 });
             }
             graph.vertices.insert(id);
@@ -133,11 +138,14 @@ impl ExpansionGraph {
         self.mutate(|graph| {
             work.charge(2 * tree_work(graph.vertices.len()))?;
             if !graph.contains(source) || !graph.contains(target) {
-                return Err(BeaconError::InvalidQuery("expansion endpoint outside selected corpus"));
+                return Err(BeaconError::InvalidQuery(
+                    "expansion endpoint outside selected corpus",
+                ));
             }
             if graph.input_edges >= graph.limits.max_input_edges {
                 return Err(BeaconError::ResourceLimit {
-                    resource: "expansion input edges", limit: graph.limits.max_input_edges,
+                    resource: "expansion input edges",
+                    limit: graph.limits.max_input_edges,
                 });
             }
             graph.input_edges += 1;
@@ -174,7 +182,8 @@ impl ExpansionGraph {
         work.charge(1)?;
         if seeds.len() > self.limits.max_seed_ids {
             return Err(BeaconError::ResourceLimit {
-                resource: "expansion seed IDs", limit: self.limits.max_seed_ids,
+                resource: "expansion seed IDs",
+                limit: self.limits.max_seed_ids,
             });
         }
         let k = usize::try_from(candidates)
@@ -229,7 +238,9 @@ impl ExpansionGraph {
         let mut rows = Vec::new();
         while !best.is_empty() {
             work.charge(tree_work(best.len()))?;
-            let (hops, id) = best.pop().ok_or(BeaconError::Invariant("expansion heap disappeared"))?;
+            let (hops, id) = best
+                .pop()
+                .ok_or(BeaconError::Invariant("expansion heap disappeared"))?;
             rows.push(GraphHit { id, hops });
         }
         for i in 0..rows.len() / 2 {
@@ -244,7 +255,8 @@ impl ExpansionGraph {
     fn admit_visit(&self, count: usize) -> Result<(), BeaconError> {
         if count >= self.limits.max_visited_vertices {
             Err(BeaconError::ResourceLimit {
-                resource: "expansion visited vertices", limit: self.limits.max_visited_vertices,
+                resource: "expansion visited vertices",
+                limit: self.limits.max_visited_vertices,
             })
         } else {
             Ok(())

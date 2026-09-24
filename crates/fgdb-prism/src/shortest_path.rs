@@ -859,7 +859,10 @@ mod tests {
     fn check_inverse(heap: &IndexedHeap) {
         let mut present = vec![false; heap.positions.len()];
         for (position, entry) in heap.entries.iter().enumerate() {
-            assert!(!present[entry.node], "queue must not retain duplicate vertices");
+            assert!(
+                !present[entry.node],
+                "queue must not retain duplicate vertices"
+            );
             present[entry.node] = true;
             assert_eq!(heap.positions[entry.node], position);
         }
@@ -872,8 +875,8 @@ mod tests {
     fn incremental_heap_initialization_never_exposes_a_partial_directory() {
         for n in [0, 1, 2, 17, 256] {
             for stop in 0..=n {
-                let mut init = IndexedHeap::initialize::<()>(n, DijkstraComparison::Strict)
-                    .unwrap();
+                let mut init =
+                    IndexedHeap::initialize::<()>(n, DijkstraComparison::Strict).unwrap();
                 for completed in 1..=stop {
                     assert_eq!(init.step(), completed == n);
                     assert_eq!(init.heap.positions.len(), completed);
@@ -899,16 +902,20 @@ mod tests {
                 let mut init = IndexedHeap::initialize::<()>(n, comparison).unwrap();
                 while !init.step() {}
                 let mut stepped = init.finish().unwrap();
-                let mut synchronous = IndexedHeap::new(n, comparison, &mut || Ok::<_, ()>(()))
-                    .unwrap();
+                let mut synchronous =
+                    IndexedHeap::new(n, comparison, &mut || Ok::<_, ()>(())).unwrap();
                 // Independent O(n) minimum queue: no sift code or inverse map.
                 let mut dense: Vec<Option<(f64, u64)>> = vec![None; n];
                 let mut sequence = 0u64;
                 let mut state = 17u64;
                 for turn in 0..512 + n {
-                    state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1);
                     if turn % 4 == 3 || turn >= 512 {
-                        let expected = dense.iter().enumerate()
+                        let expected = dense
+                            .iter()
+                            .enumerate()
                             .filter_map(|(node, entry)| entry.map(|(cost, seq)| (node, cost, seq)))
                             .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)));
                         let actual = {
@@ -919,22 +926,34 @@ mod tests {
                                 let result = mutation.step();
                                 check_inverse(mutation.heap);
                                 assert!(steps <= usize::BITS as usize + 1);
-                                if let Some(result) = result { break result; }
+                                if let Some(result) = result {
+                                    break result;
+                                }
                             }
                         };
                         let sync = synchronous.pop(&mut || Ok::<_, ()>(())).unwrap();
-                        let tuple = |entry: Entry| (entry.node, entry.cost.to_bits(), entry.sequence);
-                        assert_eq!(actual.map(tuple), expected.map(|(v, c, s)| (v, c.to_bits(), s)));
+                        let tuple =
+                            |entry: Entry| (entry.node, entry.cost.to_bits(), entry.sequence);
+                        assert_eq!(
+                            actual.map(tuple),
+                            expected.map(|(v, c, s)| (v, c.to_bits(), s))
+                        );
                         assert_eq!(actual.map(tuple), sync.map(tuple));
-                        if let Some((node, _, _)) = expected { dense[node] = None; }
+                        if let Some((node, _, _)) = expected {
+                            dense[node] = None;
+                        }
                     } else {
                         let node = (state as usize) % n;
                         let cost = if turn % 7 == 0 {
                             dense[node].map_or(1.0, |(cost, _)| (cost - 5e-13).max(0.0))
-                        } else { ((state >> 32) % 40) as f64 / 4.0 };
-                        let accept = dense[node].is_none_or(|(previous, _)| cost < match comparison {
-                            DijkstraComparison::Strict => previous,
-                            DijkstraComparison::FnxEpsilon => previous - FNX_DIJKSTRA_EPSILON,
+                        } else {
+                            ((state >> 32) % 40) as f64 / 4.0
+                        };
+                        let accept = dense[node].is_none_or(|(previous, _)| {
+                            cost < match comparison {
+                                DijkstraComparison::Strict => previous,
+                                DijkstraComparison::FnxEpsilon => previous - FNX_DIJKSTRA_EPSILON,
+                            }
                         });
                         if accept {
                             sequence += 1;
@@ -954,12 +973,20 @@ mod tests {
                                 }
                             }
                         }
-                        synchronous.offer(node, cost, &mut || Ok::<_, ()>(())).unwrap();
+                        synchronous
+                            .offer(node, cost, &mut || Ok::<_, ()>(()))
+                            .unwrap();
                     }
-                    assert_eq!(stepped.len(), dense.iter().filter(|entry| entry.is_some()).count());
+                    assert_eq!(
+                        stepped.len(),
+                        dense.iter().filter(|entry| entry.is_some()).count()
+                    );
                     assert!(stepped.len() <= n);
                     for child in 1..stepped.len() {
-                        assert!(!IndexedHeap::before(stepped.entries[child], stepped.entries[(child - 1) / 2]));
+                        assert!(!IndexedHeap::before(
+                            stepped.entries[child],
+                            stepped.entries[(child - 1) / 2]
+                        ));
                     }
                 }
                 assert_eq!(stepped.len(), 0);
@@ -969,12 +996,18 @@ mod tests {
 
     #[test]
     fn stepped_queue_rejects_bad_ordinals_and_sequence_overflow_before_mutation() {
-        let mut heap = IndexedHeap::new(2, DijkstraComparison::Strict, &mut || Ok::<_, ()>(()))
-            .unwrap();
-        assert!(matches!(heap.offer_steps::<()>(2, 1.0), Err(HeapError::InvalidOrdinal)));
+        let mut heap =
+            IndexedHeap::new(2, DijkstraComparison::Strict, &mut || Ok::<_, ()>(())).unwrap();
+        assert!(matches!(
+            heap.offer_steps::<()>(2, 1.0),
+            Err(HeapError::InvalidOrdinal)
+        ));
         assert_eq!(heap.len(), 0);
         heap.sequence = u64::MAX;
-        assert!(matches!(heap.offer_steps::<()>(0, 1.0), Err(HeapError::SizeOverflow)));
+        assert!(matches!(
+            heap.offer_steps::<()>(0, 1.0),
+            Err(HeapError::SizeOverflow)
+        ));
         assert_eq!(heap.len(), 0);
         check_inverse(&heap);
     }

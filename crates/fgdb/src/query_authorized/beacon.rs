@@ -6,8 +6,8 @@ use super::authorized_with_errors;
 use crate::query::beacon::{self, Meter, Options};
 use crate::{Database, QueryError, ReadError};
 use asupersync::fs::Vfs;
-use fgdb_beacon::read::{ReadError as BeaconReadError, Rows, Search};
 use fgdb_beacon::BeaconError;
+use fgdb_beacon::read::{ReadError as BeaconReadError, Rows, Search};
 use fgdb_types::QueryCx;
 use fgdb_warden::{Authority, CapabilityToken, Error as WardenError, LimitDimension};
 use std::cell::RefCell;
@@ -66,26 +66,54 @@ impl<V: Vfs + Clone> Database<V> {
         // charges actual hit rows, not one enum wrapper or a duplicated copy.
         match query {
             Search::Text { .. } => search(
-                self, cx, authority, token, branch, options, query, clock,
+                self,
+                cx,
+                authority,
+                token,
+                branch,
+                options,
+                query,
+                clock,
                 |rows| match rows {
                     Rows::Text(rows) => Ok(rows),
                     _ => Err(BeaconError::Invariant("text search returned another lane")),
                 },
-            ).map(Rows::Text),
+            )
+            .map(Rows::Text),
             Search::Vector { .. } => search(
-                self, cx, authority, token, branch, options, query, clock,
+                self,
+                cx,
+                authority,
+                token,
+                branch,
+                options,
+                query,
+                clock,
                 |rows| match rows {
                     Rows::Vector(rows) => Ok(rows),
-                    _ => Err(BeaconError::Invariant("vector search returned another lane")),
+                    _ => Err(BeaconError::Invariant(
+                        "vector search returned another lane",
+                    )),
                 },
-            ).map(Rows::Vector),
+            )
+            .map(Rows::Vector),
             Search::Hybrid(_) => search(
-                self, cx, authority, token, branch, options, query, clock,
+                self,
+                cx,
+                authority,
+                token,
+                branch,
+                options,
+                query,
+                clock,
                 |rows| match rows {
                     Rows::Hybrid(rows) => Ok(rows),
-                    _ => Err(BeaconError::Invariant("hybrid search returned another lane")),
+                    _ => Err(BeaconError::Invariant(
+                        "hybrid search returned another lane",
+                    )),
                 },
-            ).map(Rows::Hybrid),
+            )
+            .map(Rows::Hybrid),
         }
     }
 }
@@ -103,29 +131,44 @@ fn search<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
     unpack: fn(Rows) -> Result<Vec<Row>, BeaconError>,
 ) -> Result<Vec<Row>, Error> {
     authorized_with_errors(
-        database, cx, authority, token, branch, options.as_of, clock, control_error,
+        database,
+        cx,
+        authority,
+        token,
+        branch,
+        options.as_of,
+        clock,
+        control_error,
         |snapshot, at, scope, execution| {
             if query.k() as u128 > u128::from(scope.limits().max_rows) {
-                return Err(control_error(execution.borrow_mut().refusal(
-                    WardenError::LimitExceeded(LimitDimension::Rows),
-                )));
+                return Err(control_error(
+                    execution
+                        .borrow_mut()
+                        .refusal(WardenError::LimitExceeded(LimitDimension::Rows)),
+                ));
             }
             let work = RefCell::new(Meter::new(options.policy.max_work_units, |units| {
                 let mut live = execution.borrow_mut();
                 live.checkpoint()?;
-                let units = u64::try_from(units)
-                    .map_err(|_| live.refusal(WardenError::TooLarge))?;
+                let units =
+                    u64::try_from(units).map_err(|_| live.refusal(WardenError::TooLarge))?;
                 let now = (live.clock)();
                 let charged = live.permit.charge_work_at(now, units);
                 charged.map_err(|error| live.refusal(error))
             }));
             let result = beacon::evaluate(
-                snapshot, at, options, query, &work,
+                snapshot,
+                at,
+                options,
+                query,
+                &work,
                 |row| {
                     if !scope.allows_vertex(&row.labels) {
                         return Ok(false);
                     }
-                    execution.borrow_mut().node()
+                    execution
+                        .borrow_mut()
+                        .node()
                         .map_err(|error| work.borrow_mut().refuse(error))?;
                     Ok(true)
                 },
