@@ -150,6 +150,55 @@ pub(crate) struct IndexedHeap {
     comparison: DijkstraComparison,
 }
 
+/// Population initialization owned by its driver. Each step writes at most
+/// one inverse-position slot; no partially initialized heap can escape.
+pub(crate) struct HeapInit {
+    heap: IndexedHeap,
+    population: usize,
+}
+
+impl HeapInit {
+    pub(crate) fn step(&mut self) -> bool {
+        if self.heap.positions.len() < self.population {
+            self.heap.positions.push(usize::MAX);
+        }
+        self.heap.positions.len() == self.population
+    }
+
+    pub(crate) fn finish(self) -> Option<IndexedHeap> {
+        (self.heap.positions.len() == self.population).then_some(self.heap)
+    }
+}
+
+/// Exclusive borrow spanning one heap repair. A step performs at most one
+/// sift comparison/swap. The popped entry is withheld until repair completes.
+/// As with a cancelled synchronous operation, abandoning a pending repair
+/// requires discarding the owning heap; the query future owns both together.
+pub(crate) struct HeapMutation<'a> {
+    heap: &'a mut IndexedHeap,
+    position: usize,
+    upwards: bool,
+    output: Option<Entry>,
+    complete: bool,
+}
+
+impl HeapMutation<'_> {
+    pub(crate) fn step(&mut self) -> Option<Option<Entry>> {
+        if !self.complete {
+            let next = if self.upwards {
+                self.heap.sift_up_step(self.position)
+            } else {
+                self.heap.sift_down_step(self.position)
+            };
+            match next {
+                Some(position) => self.position = position,
+                None => self.complete = true,
+            }
+        }
+        self.complete.then_some(self.output)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum HeapError<C> {
     Cancelled(C),
@@ -176,24 +225,37 @@ impl IndexedHeap {
         checkpoint: &mut impl FnMut() -> Result<(), C>,
     ) -> Result<Self, HeapError<C>> {
         checkpoint().map_err(HeapError::Cancelled)?;
+        let mut initialization = Self::initialize::<C>(n, comparison)?;
+        loop {
+            checkpoint().map_err(HeapError::Cancelled)?;
+            if initialization.step() {
+                return initialization.finish().ok_or(HeapError::InvalidOrdinal);
+            }
+        }
+    }
+
+    /// Reserve the unchanged two backing stores. Allocation is indivisible;
+    /// filling the inverse directory is driven separately, one slot at a time.
+    pub(crate) fn initialize<C>(
+        n: usize,
+        comparison: DijkstraComparison,
+    ) -> Result<HeapInit, HeapError<C>> {
         let mut entries = Vec::new();
         entries
             .try_reserve_exact(n)
             .map_err(|_| HeapError::AllocationFailed)?;
-        checkpoint().map_err(HeapError::Cancelled)?;
         let mut positions = Vec::new();
         positions
             .try_reserve_exact(n)
             .map_err(|_| HeapError::AllocationFailed)?;
-        for _ in 0..n {
-            checkpoint().map_err(HeapError::Cancelled)?;
-            positions.push(usize::MAX);
-        }
-        Ok(Self {
-            entries,
-            positions,
-            sequence: 0,
-            comparison,
+        Ok(HeapInit {
+            heap: Self {
+                entries,
+                positions,
+                sequence: 0,
+                comparison,
+            },
+            population: n,
         })
     }
 
@@ -227,6 +289,22 @@ impl IndexedHeap {
         checkpoint: &mut impl FnMut() -> Result<(), C>,
     ) -> Result<(), HeapError<C>> {
         checkpoint().map_err(HeapError::Cancelled)?;
+        let mut mutation = self.offer_steps::<C>(node, cost)?;
+        loop {
+            checkpoint().map_err(HeapError::Cancelled)?;
+            if mutation.step().is_some() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Begin the same strict/epsilon relaxation used by both scheduling modes.
+    /// The driver must checkpoint before this mutation and before EACH step.
+    pub(crate) fn offer_steps<C>(
+        &mut self,
+        node: usize,
+        cost: f64,
+    ) -> Result<HeapMutation<'_>, HeapError<C>> {
         let mut position = *self.positions.get(node).ok_or(HeapError::InvalidOrdinal)?;
         if position != usize::MAX {
             let previous = self.entries[position].cost;
@@ -235,7 +313,13 @@ impl IndexedHeap {
                 DijkstraComparison::FnxEpsilon => previous - FNX_DIJKSTRA_EPSILON,
             };
             if cost >= threshold {
-                return Ok(());
+                return Ok(HeapMutation {
+                    heap: self,
+                    position: 0,
+                    upwards: true,
+                    output: None,
+                    complete: true,
+                });
             }
         }
         self.sequence = self
@@ -254,16 +338,24 @@ impl IndexedHeap {
         } else {
             self.entries[position] = entry;
         }
-        while position > 0 {
-            checkpoint().map_err(HeapError::Cancelled)?;
+        Ok(HeapMutation {
+            heap: self,
+            position,
+            upwards: true,
+            output: None,
+            complete: false,
+        })
+    }
+
+    fn sift_up_step(&mut self, position: usize) -> Option<usize> {
+        if position > 0 {
             let parent = (position - 1) / 2;
-            if !Self::before(self.entries[position], self.entries[parent]) {
-                break;
+            if Self::before(self.entries[position], self.entries[parent]) {
+                self.swap(position, parent);
+                return Some(parent);
             }
-            self.swap(position, parent);
-            position = parent;
         }
-        Ok(())
+        None
     }
 
     pub(crate) fn pop<C>(
@@ -271,20 +363,50 @@ impl IndexedHeap {
         checkpoint: &mut impl FnMut() -> Result<(), C>,
     ) -> Result<Option<Entry>, HeapError<C>> {
         checkpoint().map_err(HeapError::Cancelled)?;
+        let mut mutation = self.pop_steps();
+        loop {
+            checkpoint().map_err(HeapError::Cancelled)?;
+            if let Some(output) = mutation.step() {
+                return Ok(output);
+            }
+        }
+    }
+
+    pub(crate) fn pop_steps(&mut self) -> HeapMutation<'_> {
         let Some(last) = self.entries.pop() else {
-            return Ok(None);
+            return HeapMutation {
+                heap: self,
+                position: 0,
+                upwards: false,
+                output: None,
+                complete: true,
+            };
         };
         if self.entries.is_empty() {
             self.positions[last.node] = usize::MAX;
-            return Ok(Some(last));
+            return HeapMutation {
+                heap: self,
+                position: 0,
+                upwards: false,
+                output: Some(last),
+                complete: true,
+            };
         }
         let first = std::mem::replace(&mut self.entries[0], last);
         self.positions[first.node] = usize::MAX;
         self.positions[last.node] = 0;
-        let mut position = 0;
+        HeapMutation {
+            heap: self,
+            position: 0,
+            upwards: false,
+            output: Some(first),
+            complete: false,
+        }
+    }
+
+    fn sift_down_step(&mut self, position: usize) -> Option<usize> {
         // A non-leaf has position < len / 2, so 2*position+1 cannot overflow.
-        while position < self.entries.len() / 2 {
-            checkpoint().map_err(HeapError::Cancelled)?;
+        if position < self.entries.len() / 2 {
             let left = 2 * position + 1;
             let right = left + 1;
             let child = if right < self.entries.len()
@@ -294,13 +416,12 @@ impl IndexedHeap {
             } else {
                 left
             };
-            if !Self::before(self.entries[child], self.entries[position]) {
-                break;
+            if Self::before(self.entries[child], self.entries[position]) {
+                self.swap(position, child);
+                return Some(child);
             }
-            self.swap(position, child);
-            position = child;
         }
-        Ok(Some(first))
+        None
     }
 }
 
@@ -733,5 +854,128 @@ mod tests {
             ));
             assert_eq!(count, stop);
         }
+    }
+
+    fn check_inverse(heap: &IndexedHeap) {
+        let mut present = vec![false; heap.positions.len()];
+        for (position, entry) in heap.entries.iter().enumerate() {
+            assert!(!present[entry.node], "queue must not retain duplicate vertices");
+            present[entry.node] = true;
+            assert_eq!(heap.positions[entry.node], position);
+        }
+        for (node, &present) in present.iter().enumerate() {
+            assert_eq!(heap.contains(node), Some(present));
+        }
+    }
+
+    #[test]
+    fn incremental_heap_initialization_never_exposes_a_partial_directory() {
+        for n in [0, 1, 2, 17, 256] {
+            for stop in 0..=n {
+                let mut init = IndexedHeap::initialize::<()>(n, DijkstraComparison::Strict)
+                    .unwrap();
+                for completed in 1..=stop {
+                    assert_eq!(init.step(), completed == n);
+                    assert_eq!(init.heap.positions.len(), completed);
+                }
+                let heap = init.finish();
+                assert_eq!(heap.is_some(), stop == n);
+                if let Some(heap) = heap {
+                    assert_eq!(heap.positions, vec![usize::MAX; n]);
+                    assert_eq!(heap.len(), 0);
+                }
+            }
+        }
+        assert!(matches!(
+            IndexedHeap::initialize::<()>(usize::MAX, DijkstraComparison::Strict),
+            Err(HeapError::AllocationFailed)
+        ));
+    }
+
+    #[test]
+    fn every_heap_step_preserves_inverse_positions_and_matches_a_dense_queue() {
+        for comparison in [DijkstraComparison::Strict, DijkstraComparison::FnxEpsilon] {
+            for n in [1, 2, 3, 17, 65] {
+                let mut init = IndexedHeap::initialize::<()>(n, comparison).unwrap();
+                while !init.step() {}
+                let mut stepped = init.finish().unwrap();
+                let mut synchronous = IndexedHeap::new(n, comparison, &mut || Ok::<_, ()>(()))
+                    .unwrap();
+                // Independent O(n) minimum queue: no sift code or inverse map.
+                let mut dense: Vec<Option<(f64, u64)>> = vec![None; n];
+                let mut sequence = 0u64;
+                let mut state = 17u64;
+                for turn in 0..512 + n {
+                    state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                    if turn % 4 == 3 || turn >= 512 {
+                        let expected = dense.iter().enumerate()
+                            .filter_map(|(node, entry)| entry.map(|(cost, seq)| (node, cost, seq)))
+                            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)));
+                        let actual = {
+                            let mut mutation = stepped.pop_steps();
+                            let mut steps = 0;
+                            loop {
+                                steps += 1;
+                                let result = mutation.step();
+                                check_inverse(mutation.heap);
+                                assert!(steps <= usize::BITS as usize + 1);
+                                if let Some(result) = result { break result; }
+                            }
+                        };
+                        let sync = synchronous.pop(&mut || Ok::<_, ()>(())).unwrap();
+                        let tuple = |entry: Entry| (entry.node, entry.cost.to_bits(), entry.sequence);
+                        assert_eq!(actual.map(tuple), expected.map(|(v, c, s)| (v, c.to_bits(), s)));
+                        assert_eq!(actual.map(tuple), sync.map(tuple));
+                        if let Some((node, _, _)) = expected { dense[node] = None; }
+                    } else {
+                        let node = (state as usize) % n;
+                        let cost = if turn % 7 == 0 {
+                            dense[node].map_or(1.0, |(cost, _)| (cost - 5e-13).max(0.0))
+                        } else { ((state >> 32) % 40) as f64 / 4.0 };
+                        let accept = dense[node].is_none_or(|(previous, _)| cost < match comparison {
+                            DijkstraComparison::Strict => previous,
+                            DijkstraComparison::FnxEpsilon => previous - FNX_DIJKSTRA_EPSILON,
+                        });
+                        if accept {
+                            sequence += 1;
+                            dense[node] = Some((cost, sequence));
+                        }
+                        {
+                            let mut mutation = stepped.offer_steps::<()>(node, cost).unwrap();
+                            let mut steps = 0;
+                            loop {
+                                steps += 1;
+                                let result = mutation.step();
+                                check_inverse(mutation.heap);
+                                assert!(steps <= usize::BITS as usize + 1);
+                                if let Some(result) = result {
+                                    assert!(result.is_none());
+                                    break;
+                                }
+                            }
+                        }
+                        synchronous.offer(node, cost, &mut || Ok::<_, ()>(())).unwrap();
+                    }
+                    assert_eq!(stepped.len(), dense.iter().filter(|entry| entry.is_some()).count());
+                    assert!(stepped.len() <= n);
+                    for child in 1..stepped.len() {
+                        assert!(!IndexedHeap::before(stepped.entries[child], stepped.entries[(child - 1) / 2]));
+                    }
+                }
+                assert_eq!(stepped.len(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn stepped_queue_rejects_bad_ordinals_and_sequence_overflow_before_mutation() {
+        let mut heap = IndexedHeap::new(2, DijkstraComparison::Strict, &mut || Ok::<_, ()>(()))
+            .unwrap();
+        assert!(matches!(heap.offer_steps::<()>(2, 1.0), Err(HeapError::InvalidOrdinal)));
+        assert_eq!(heap.len(), 0);
+        heap.sequence = u64::MAX;
+        assert!(matches!(heap.offer_steps::<()>(0, 1.0), Err(HeapError::SizeOverflow)));
+        assert_eq!(heap.len(), 0);
+        check_inverse(&heap);
     }
 }
