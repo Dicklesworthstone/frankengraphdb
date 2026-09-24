@@ -12,6 +12,16 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
     execution: &RefCell<Execution<'_, '_, Clock>>,
     policy: GqlQueryPolicy,
 ) -> Result<Vec<GraphAggregateRow>, QueryError> {
+    // Plain, uncaptured aggregate inputs consume binding VISIT order, not the
+    // sorted projected bag of a standalone pattern. COLLECT (including its
+    // first-occurrence DISTINCT form) exposes that distinction. Computed and
+    // relational inputs deliberately retain their own completed-row semantics.
+    if query.input_relation().is_none()
+        && query.input_projection().is_none()
+        && !query.input_pattern().plan().requires_identified_edges()
+    {
+        return visit_at(snapshot, at, query, scope, execution, policy);
+    }
     query
         .execute_with_source_governed(
             policy,
@@ -20,6 +30,43 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
         )
         .map(|result| result.value)
         .map_err(aggregate_error)
+}
+
+// Reuse the SAME source admission and masking as pattern_at, then the ordinary
+// native aggregate visitor. No projected input rows, second matcher or custom
+// collection ordering is introduced. Source and group phases share one policy.
+fn visit_at<Clock: FnMut() -> u64>(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    query: &PreparedGraphAggregate,
+    scope: &PlannerPredicates,
+    execution: &RefCell<Execution<'_, '_, Clock>>,
+    policy: GqlQueryPolicy,
+) -> Result<Vec<GraphAggregateRow>, QueryError> {
+    let mut usage = AdmissionUsage::default();
+    let tables = Tables::admit(
+        snapshot,
+        query.input_pattern().plan(),
+        at,
+        scope,
+        || execution.borrow_mut().node().map_err(GqlQueryError::Interrupted),
+        &mut |_| execution.borrow_mut().poll().map_err(GqlQueryError::Interrupted),
+        &mut |event| {
+            execution.borrow_mut().checkpoint().map_err(GqlQueryError::Interrupted)?;
+            usage.observe::<ReadError, QueryError>(policy, event)
+        },
+    )
+    .map_err(|error| aggregate_error(error.map_source(GraphAggregateError::Source)))?;
+    let result = query.execute_governed(
+        tables.records,
+        tables.vertices.keys().copied(),
+        tables.edges.values().map(|((_, from, relation, to), _)| (*from, *relation, *to)),
+        |vid, required| Ok(tables.matches(vid, required, scope)),
+        |vid, key| Ok(tables.property(vid, key, scope)),
+        usage.remaining(policy),
+        || execution.borrow_mut().checkpoint(),
+    );
+    usage.finish(policy, result).map(|result| result.value).map_err(aggregate_error)
 }
 
 impl<V: Vfs + Clone> Database<V> {
@@ -36,8 +83,10 @@ impl<V: Vfs + Clone> Database<V> {
     ///
     /// Like execute_graph_pattern_authorized, this requires host-owned issuer,
     /// branch mapping and clock. It does not secure privileged Database APIs or
-    /// establish physical side-channel isolation. Plain/computed source rows
-    /// are materialized under native work/scratch limits; this is not streaming.
+    /// establish physical side-channel isolation. Plain uncaptured definitions
+    /// feed the native binding visitor without a projected input bag. Computed,
+    /// relational and captured inputs retain their existing materialized path.
+    /// Admitted source tables and aggregate state still reside in memory.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_graph_aggregate_authorized(
         &self,
@@ -93,3 +142,7 @@ impl<V: Vfs + Clone> Database<V> {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "graph/visitor_tests.rs"]
+mod visitor_tests;
