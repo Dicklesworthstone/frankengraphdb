@@ -15,6 +15,8 @@ use std::sync::Arc;
 
 #[path = "session/batch.rs"]
 mod batch;
+#[path = "session/beacon.rs"]
+mod beacon;
 
 struct State<'a, Resolver, Clock> {
     view: Option<EmbeddedReadView>,
