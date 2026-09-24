@@ -27,6 +27,8 @@
 //! normal outcome of crashing, not corruption. A torn entry anywhere EARLIER
 //! is corruption, because entries before it were durable.
 
+pub mod restore;
+
 use crate::capsule::{
     CapsuleError, CapsuleKeys, MAX_CAPSULE_CONTAINER_BYTES_V1, decode_container, encode_container,
 };
