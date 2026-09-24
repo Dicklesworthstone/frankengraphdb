@@ -1,7 +1,8 @@
 //! Native snapshot -> bounded scalar projection -> Beacon search. Historical
 //! winners are selected by the SAME visitor as GLA, before any label/property
-//! projection. This is per-execution resident construction, not a maintained
-//! index, a new authority, a durable generation, or an external-memory claim.
+//! projection. One-shot searches build per execution; `resident` retains and
+//! explicitly refreshes generations. Neither is a new authority, a durable
+//! index descriptor, or an external-memory claim.
 
 use crate::gql_exec::source::{self, SourceEvent};
 use crate::{Database, EmbeddedReadView, ReadError, Snapshot, VertexRow};
@@ -11,6 +12,9 @@ use fgdb_beacon::{BeaconError, BeaconIndex, IndexConfig, WorkBudget, WorkControl
 use fgdb_delta_types::{LabelId, PropertyKeyId};
 use fgdb_types::{CommitSeq, QueryCx};
 use std::cell::RefCell;
+
+#[path = "query_beacon/resident.rs"]
+mod resident;
 
 pub(crate) type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
@@ -36,6 +40,11 @@ impl<E, F: FnMut(usize) -> Result<(), E>> Meter<E, F> {
             self.failure = Some(error);
         }
         BeaconError::Cancelled
+    }
+    /// Preserve an adapter's typed failure after off-side work completes.
+    /// Consuming the meter cannot resample the gate or revive its allowance.
+    pub(crate) fn into_failure(self) -> Option<E> {
+        self.failure
     }
     pub(crate) fn finish<R, T>(self, result: Result<T, BeaconError>) -> Result<T, Error<R, E>> {
         match self.failure {
