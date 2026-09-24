@@ -146,27 +146,31 @@ struct ScopedSource<'q, S> {
     inner: S,
     execution: Shared<'q>,
 }
-fn source_error<C>(
-    error: VertexScanSourceError<ReadError, C>,
+// Every history lookup here runs under a poll-only control (FG-INV-20), whose
+// own refusal/cancellation is carried as a source error because the executor's
+// control type is opaque at this seam (scan_error reports both alike).
+fn scoped_error<C>(
+    error: VertexScanSourceError<ReadError, QueryError>,
 ) -> VertexScanSourceError<QueryError, C> {
     match error {
         VertexScanSourceError::Source(error) => {
             VertexScanSourceError::Source(QueryError::Read(error))
         }
-        VertexScanSourceError::Control(error) => VertexScanSourceError::Control(error),
+        VertexScanSourceError::Control(error) => VertexScanSourceError::Source(error),
     }
 }
 
-fn expansion_error<C>(
-    error: EdgeExpansionSourceError<ReadError, C>,
+fn scoped_expansion_error<C>(
+    error: EdgeExpansionSourceError<ReadError, QueryError>,
 ) -> EdgeExpansionSourceError<QueryError, C> {
     match error {
         EdgeExpansionSourceError::Unavailable => EdgeExpansionSourceError::Unavailable,
         EdgeExpansionSourceError::Read(error) => {
-            EdgeExpansionSourceError::Read(source_error(error))
+            EdgeExpansionSourceError::Read(scoped_error(error))
         }
     }
 }
+
 fn edge_event(event: VertexScanEvent) -> GlaExecutionEvent {
     match event {
         VertexScanEvent::Work => GlaExecutionEvent::Work,
@@ -175,6 +179,22 @@ fn edge_event(event: VertexScanEvent) -> GlaExecutionEvent {
 }
 
 impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
+    /// Whether this capability may see `vid` at the cut, decided with a
+    /// poll-only lookup: skipping a candidate is never charged (FG-INV-20).
+    fn visible<C>(&self, vid: VId) -> Result<bool, VertexScanSourceError<QueryError, C>> {
+        let execution = Rc::clone(&self.execution);
+        let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
+        let Some(row) = self.inner.vertex(vid, &mut poll).map_err(scoped_error)? else {
+            return Ok(false);
+        };
+        Ok(self
+            .execution
+            .borrow()
+            .permit
+            .predicates()
+            .allows_vertex(row.labels))
+    }
+
     // This is private source admission, not a caller-visible raw record route.
     // Historical winner selection precedes scope on EVERY lookup. No per-probe
     // table, cache, permit or rescan from the first candidate is introduced.
@@ -183,13 +203,14 @@ impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
         vid: VId,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VertexScanRow<'a>>, VertexScanSourceError<QueryError, C>> {
-        let Some(row) = self.inner.vertex(vid, control).map_err(source_error)? else {
+        // FG-INV-20: the history lookup polls cancellation only, and nothing is
+        // charged until the vertex is admitted; then one unit plus one per label
+        // the capability may see. A forbidden or absent vertex costs nothing.
+        let execution = Rc::clone(&self.execution);
+        let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
+        let Some(row) = self.inner.vertex(vid, &mut poll).map_err(scoped_error)? else {
             return Ok(None);
         };
-        control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-        for _ in row.labels {
-            control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
-        }
         let admitted = self
             .execution
             .borrow()
@@ -198,6 +219,18 @@ impl<S: VertexScanSource<Error = ReadError>> ScopedSource<'_, S> {
             .allows_vertex(row.labels);
         if !admitted {
             return Ok(None);
+        }
+        control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+        for &label in row.labels {
+            let visible = self
+                .execution
+                .borrow()
+                .permit
+                .predicates()
+                .allows_label(label);
+            if visible {
+                control(VertexScanEvent::Work).map_err(VertexScanSourceError::Control)?;
+            }
         }
         self.execution
             .borrow_mut()
@@ -213,9 +246,23 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
     }
     fn next_vertex<C>(
         &mut self,
-        control: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
+        _: &mut impl FnMut(VertexScanEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, VertexScanSourceError<QueryError, C>> {
-        self.inner.next_vertex(control).map_err(source_error)
+        // FG-INV-20: candidates this capability cannot see (forbidden, or not
+        // live at the cut) are skipped HERE, walked with a poll-only control,
+        // so neither the cursor's native meter nor the signed allowance ever
+        // counts them. A refusal or cancellation seen while skipping surfaces
+        // as a source error, which the stream reports exactly as a control one.
+        let execution = Rc::clone(&self.execution);
+        let mut poll = |_: VertexScanEvent| execution.borrow_mut().poll();
+        loop {
+            let Some(vid) = self.inner.next_vertex(&mut poll).map_err(scoped_error)? else {
+                return Ok(None);
+            };
+            if self.visible(vid)? {
+                return Ok(Some(vid));
+            }
+        }
     }
     fn vertex<'a, C>(
         &'a self,
@@ -293,13 +340,27 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
     fn next_probe_vertex<C>(
         &self,
         after: Option<VId>,
-        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+        _: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<VId>, EdgeExpansionSourceError<QueryError, C>> {
         // Independent scopes get their own caller-owned position and the same
-        // immutable generation. The subsequent record lookup filters scope.
-        self.inner
-            .next_probe_vertex(after, control)
-            .map_err(expansion_error)
+        // immutable generation. Forbidden and absent candidates are skipped
+        // here, unmetered, exactly as next_vertex does (FG-INV-20).
+        let execution = Rc::clone(&self.execution);
+        let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
+        let mut after = after;
+        loop {
+            let Some(vid) = self
+                .inner
+                .next_probe_vertex(after, &mut poll)
+                .map_err(scoped_expansion_error)?
+            else {
+                return Ok(None);
+            };
+            if self.visible(vid).map_err(EdgeExpansionSourceError::Read)? {
+                return Ok(Some(vid));
+            }
+            after = Some(vid);
+        }
     }
 
     fn next_probe_edge_for_relation<C>(
@@ -331,9 +392,42 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
                 VertexScanSourceError::Source(probe_error(EdgeScanError::DanglingEndpoint)),
             ));
         }
-        self.inner
-            .next_probe_edge_for_relation(endpoint, relation, direction, after, control)
-            .map_err(expansion_error)
+        // The inner lookup may return a historical superset of incident edges
+        // of ANY relation. An edge of another relation, or one whose far
+        // endpoint this capability cannot see, is not part of its graph: skip
+        // it here, unmetered, so no count of such edges reaches a charge
+        // (FG-INV-20). probe_edge still re-admits every edge returned.
+        let execution = Rc::clone(&self.execution);
+        let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
+        let mut after = after;
+        loop {
+            let Some(eid) = self
+                .inner
+                .next_probe_edge_for_relation(endpoint, relation, direction, after, &mut poll)
+                .map_err(scoped_expansion_error)?
+            else {
+                return Ok(None);
+            };
+            after = Some(eid);
+            let Some(edge) = self
+                .inner
+                .probe_edge(eid, &mut poll)
+                .map_err(scoped_expansion_error)?
+            else {
+                continue;
+            };
+            if edge.relation != relation {
+                continue;
+            }
+            let far = if edge.source == endpoint {
+                edge.target
+            } else {
+                edge.source
+            };
+            if self.visible(far).map_err(EdgeExpansionSourceError::Read)? {
+                return Ok(Some(eid));
+            }
+        }
     }
 
     fn probe_edge<'a, C>(
@@ -341,15 +435,18 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         eid: EId,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
     ) -> Result<Option<EdgeScanRow<'a>>, EdgeExpansionSourceError<QueryError, C>> {
+        // The edge's history lookup costs more as history grows, including
+        // history this capability cannot see: resolve it unmetered, and charge
+        // one unit only once the relation is admitted (FG-INV-20).
+        let execution = Rc::clone(&self.execution);
+        let mut poll = |_: GlaExecutionEvent| execution.borrow_mut().poll();
         let Some(edge) = self
             .inner
-            .probe_edge(eid, control)
-            .map_err(expansion_error)?
+            .probe_edge(eid, &mut poll)
+            .map_err(scoped_expansion_error)?
         else {
             return Ok(None);
         };
-        control(GlaExecutionEvent::Work)
-            .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
         if !self
             .execution
             .borrow()
@@ -359,6 +456,8 @@ impl<S: VertexScanSource<Error = ReadError>> VertexScanSource for ScopedSource<'
         {
             return Ok(None);
         }
+        control(GlaExecutionEvent::Work)
+            .map_err(|e| EdgeExpansionSourceError::Read(VertexScanSourceError::Control(e)))?;
         for endpoint in [
             Some(edge.source),
             (edge.target != edge.source).then_some(edge.target),

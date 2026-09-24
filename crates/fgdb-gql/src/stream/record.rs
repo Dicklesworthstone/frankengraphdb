@@ -35,18 +35,20 @@ impl VertexScanRecord<'_> {
         mut allows_property: impl FnMut(PropertyKeyId) -> bool,
         control: &mut impl FnMut(VertexScanEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
+        // Masked labels and properties are skipped before any charge: how many
+        // a visible record carries is itself hidden data (FG-INV-20).
         let mut labels = Vec::new();
         for &label in row.labels {
-            control(VertexScanEvent::Work)?;
             if allows_label(label) {
+                control(VertexScanEvent::Work)?;
                 control(VertexScanEvent::ScratchEntry)?;
                 labels.push(label);
             }
         }
         let mut properties = Vec::new();
         for (key, value) in row.properties {
-            control(VertexScanEvent::Work)?;
             if allows_property(*key) {
+                control(VertexScanEvent::Work)?;
                 control(VertexScanEvent::ScratchEntry)?;
                 crate::algebra_exec::charge_payload(value, &mut |_| {
                     control(VertexScanEvent::Work)?;

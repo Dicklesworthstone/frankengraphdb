@@ -161,96 +161,93 @@ fn execute<Clock: FnMut() -> u64>(
         *counter = counter.checked_add(1).ok_or(Error::SizeOverflow)?;
         source_admit(resource, u128::from(*counter), u128::from(limit))
     };
+    // FG-INV-20: history the capability cannot see is walked through `scan`,
+    // which polls cancellation and charges nothing. Only records that pass the
+    // scope (and, for edges, whose endpoints were admitted) are charged, so no
+    // signed or source limit's refusal point depends on hidden data.
+    let mut scan = |_| execution.borrow_mut().poll().map_err(control_error);
     let mut vertices: Vec<VId> = Vec::new();
     let mut staged_bytes = 0;
-    source::visit_vertices(
-        &snapshot.patches,
-        binding.as_of,
-        &mut control,
-        |row, control| {
-            control(SourceEvent::Work)?;
-            for _ in &row.labels {
+    source::visit_vertices(&snapshot.patches, binding.as_of, &mut scan, |row, _| {
+        if !scope.allows_vertex(&row.labels) {
+            return Ok(());
+        }
+        control(SourceEvent::Work)?;
+        for &label in &row.labels {
+            if scope.allows_label(label) {
                 control(SourceEvent::Work)?;
             }
-            if !scope.allows_vertex(&row.labels) {
-                return Ok(());
-            }
-            execution.borrow_mut().node().map_err(control_error)?;
-            if options.selection.vertex_label.is_some_and(|label| {
-                !scope.allows_label(label) || row.labels.binary_search(&label).is_err()
-            }) {
-                return Ok(());
-            }
-            push_staged(
-                &mut vertices,
-                row.vid,
-                "vertices",
-                options.projection_limits.max_vertices,
-                &mut staged_bytes,
-                options.source_limits.max_staging_bytes,
-            )
-        },
-    )?;
+        }
+        execution.borrow_mut().node().map_err(control_error)?;
+        if options.selection.vertex_label.is_some_and(|label| {
+            !scope.allows_label(label) || row.labels.binary_search(&label).is_err()
+        }) {
+            return Ok(());
+        }
+        push_staged(
+            &mut vertices,
+            row.vid,
+            "vertices",
+            options.projection_limits.max_vertices,
+            &mut staged_bytes,
+            options.source_limits.max_staging_bytes,
+        )
+    })?;
     let mut edges = Vec::new();
-    source::visit_edges_with_properties(
-        snapshot,
-        binding.as_of,
-        &mut control,
-        |entry, props, control| {
-            control(SourceEvent::Work)?;
-            if !scope.allows_relation(entry.relation)
-                || options
-                    .selection
-                    .relation
-                    .is_some_and(|relation| relation != entry.relation)
-                || vertices.binary_search(&entry.src).is_err()
-                || vertices.binary_search(&entry.dst).is_err()
-            {
-                return Ok(());
-            }
-            if entry.src == entry.dst {
-                match options.projection.self_loops {
-                    SelfLoopPolicy::Drop => return Ok(()),
-                    SelfLoopPolicy::Reject => {
-                        return Err(Error::Projection(ProjectionError::SelfLoop(entry.eid)));
-                    }
-                    SelfLoopPolicy::Keep => {}
+    source::visit_edges_with_properties(snapshot, binding.as_of, &mut scan, |entry, props, _| {
+        if !scope.allows_relation(entry.relation)
+            || options
+                .selection
+                .relation
+                .is_some_and(|relation| relation != entry.relation)
+            || vertices.binary_search(&entry.src).is_err()
+            || vertices.binary_search(&entry.dst).is_err()
+        {
+            return Ok(());
+        }
+        control(SourceEvent::Work)?;
+        if entry.src == entry.dst {
+            match options.projection.self_loops {
+                SelfLoopPolicy::Drop => return Ok(()),
+                SelfLoopPolicy::Reject => {
+                    return Err(Error::Projection(ProjectionError::SelfLoop(entry.eid)));
                 }
+                SelfLoopPolicy::Keep => {}
             }
-            let weight = if options.projection.parallel_edges == ParallelEdgePolicy::CollapseUnit {
-                1.0
-            } else {
-                let value = options
-                    .selection
-                    .weight
-                    .property_key()
-                    .filter(|&key| scope.allows_property(key))
-                    .and_then(|key| props.binary_search_by_key(&key, |(key, _)| *key).ok())
-                    .map(|index| &props[index].1);
-                options
-                    .selection
-                    .weight
-                    .resolve(value)
-                    .map_err(|reason| Error::Weight {
-                        edge: entry.eid,
-                        reason,
-                    })?
-            };
-            push_staged(
-                &mut edges,
-                ProjectionEdge {
-                    eid: entry.eid,
-                    source: entry.src,
-                    target: entry.dst,
-                    weight,
-                },
-                "input edges",
-                options.projection_limits.max_input_edges,
-                &mut staged_bytes,
-                options.source_limits.max_staging_bytes,
-            )
-        },
-    )?;
+        }
+        let weight = if options.projection.parallel_edges == ParallelEdgePolicy::CollapseUnit {
+            1.0
+        } else {
+            let value = options
+                .selection
+                .weight
+                .property_key()
+                .filter(|&key| scope.allows_property(key))
+                .and_then(|key| props.binary_search_by_key(&key, |(key, _)| *key).ok())
+                .map(|index| &props[index].1);
+            options
+                .selection
+                .weight
+                .resolve(value)
+                .map_err(|reason| Error::Weight {
+                    edge: entry.eid,
+                    reason,
+                })?
+        };
+        push_staged(
+            &mut edges,
+            ProjectionEdge {
+                eid: entry.eid,
+                source: entry.src,
+                target: entry.dst,
+                weight,
+            },
+            "input edges",
+            options.projection_limits.max_input_edges,
+            &mut staged_bytes,
+            options.source_limits.max_staging_bytes,
+        )
+    })?;
     let graph = SnapshotGraphView::build_owned_with_checkpoint(
         binding,
         vertices,

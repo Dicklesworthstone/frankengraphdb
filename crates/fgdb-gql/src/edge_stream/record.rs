@@ -42,10 +42,12 @@ impl EdgeScanRecord<'_> {
         mut allows_property: impl FnMut(PropertyKeyId) -> bool,
         control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), E>,
     ) -> Result<Self, E> {
+        // A masked property is skipped before any charge: how many a visible
+        // edge carries is itself hidden data (FG-INV-20).
         let mut properties = Vec::new();
         for (key, value) in row.properties {
-            control(GlaExecutionEvent::Work)?;
             if allows_property(*key) {
+                control(GlaExecutionEvent::Work)?;
                 control(GlaExecutionEvent::ScratchEntry)?;
                 crate::algebra_exec::charge_payload(value, &mut |_| {
                     control(GlaExecutionEvent::Work)?;

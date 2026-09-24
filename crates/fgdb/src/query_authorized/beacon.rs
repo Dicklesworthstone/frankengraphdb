@@ -156,12 +156,19 @@ fn search<V: Vfs + Clone, Row, Clock: FnMut() -> u64>(
                 let charged = live.permit.charge_work_at(now, units);
                 charged.map_err(|error| live.refusal(error))
             }));
+            // FG-INV-20: the history walk polls cancellation only; admitted
+            // rows (and their visible labels) are the only source charges.
+            let mut poll = || {
+                let polled = execution.borrow_mut().poll();
+                polled.map_err(|error| work.borrow_mut().refuse(error))
+            };
             let result = beacon::evaluate(
                 snapshot,
                 at,
                 options,
                 query,
                 &work,
+                beacon::Scan::Unmetered(&mut poll),
                 |row| {
                     if !scope.allows_vertex(&row.labels) {
                         return Ok(false);

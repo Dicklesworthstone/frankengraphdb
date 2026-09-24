@@ -65,12 +65,18 @@ impl<'cx, 'permit, Clock: FnMut() -> u64> Execution<'cx, 'permit, Clock> {
         QueryError::Authorization(*self.failure.get_or_insert(error))
     }
     fn checkpoint(&mut self) -> Result<(), QueryError> {
+        self.poll()?;
+        let charged = self.permit.charge_work_at((self.clock)(), 1);
+        charged.map_err(|error| self.refusal(error))
+    }
+    /// Cancellation and a retained refusal only; no signed or native charge.
+    /// Scanning history the capability cannot see goes through here, so what
+    /// hidden records cost is never observable through a resource limit.
+    fn poll(&mut self) -> Result<(), QueryError> {
         if let Some(error) = self.failure {
             return Err(QueryError::Authorization(error));
         }
-        self.cx.checkpoint().map_err(interrupted)?;
-        let charged = self.permit.charge_work_at((self.clock)(), 1);
-        charged.map_err(|error| self.refusal(error))
+        self.cx.checkpoint().map_err(interrupted)
     }
     fn node(&mut self) -> Result<(), QueryError> {
         self.checkpoint()?;
@@ -202,12 +208,22 @@ struct Tables<'a> {
     records: u64,
 }
 impl<'a> Tables<'a> {
+    /// Only ADMITTED records are charged (FG-INV-20). The history visitors walk
+    /// mixed-scope blocks and patches through `scan`, which polls cancellation
+    /// and charges nothing; each admitted vertex then costs one unit of work
+    /// plus one per label the capability may see, and each admitted edge one.
+    /// Every signed and native charge is therefore a function of the visible
+    /// graph alone, so a holder who attenuates MaxWork, MaxNodes or MaxRows
+    /// cannot count hidden records by finding where a query starts to refuse.
+    /// Scanning hidden history still takes time: that timing channel is not
+    /// closed here, and the host bounds it with the query's own Cx budget.
     fn admit<Row: GlaOutput>(
         snapshot: &'a Snapshot,
         plan: &GlaPlan<Row>,
         at: CommitSeq,
         predicates: &PlannerPredicates,
         mut node: impl FnMut() -> Result<(), Fault>,
+        scan: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
         control: &mut impl FnMut(SourceEvent) -> Result<(), Fault>,
     ) -> Result<Self, Fault> {
         let mut tables = Self {
@@ -217,13 +233,15 @@ impl<'a> Tables<'a> {
             types: BTreeMap::new(),
             records: 0,
         };
-        source::visit_vertices(&snapshot.patches, at, control, |row, control| {
+        source::visit_vertices(&snapshot.patches, at, scan, |row, _| {
             // Authorization examines original labels; WHERE/labels() will not.
-            control(SourceEvent::Work)?;
-            for _ in &row.labels {
-                control(SourceEvent::Work)?;
-            }
             if predicates.allows_vertex(&row.labels) {
+                control(SourceEvent::Work)?;
+                for &label in &row.labels {
+                    if predicates.allows_label(label) {
+                        control(SourceEvent::Work)?;
+                    }
+                }
                 node()?;
                 control(SourceEvent::SnapshotRecord)?;
                 control(SourceEvent::ScratchEntry)?;
@@ -233,27 +251,22 @@ impl<'a> Tables<'a> {
             Ok(())
         })?;
         if plan.reads_edges() {
-            source::visit_edges_with_properties(
-                snapshot,
-                at,
-                control,
-                |edge, properties, control| {
+            source::visit_edges_with_properties(snapshot, at, scan, |edge, properties, _| {
+                if predicates.allows_relation(edge.relation)
+                    && tables.vertices.contains_key(&edge.src)
+                    && tables.vertices.contains_key(&edge.dst)
+                {
                     control(SourceEvent::Work)?;
-                    if predicates.allows_relation(edge.relation)
-                        && tables.vertices.contains_key(&edge.src)
-                        && tables.vertices.contains_key(&edge.dst)
-                    {
-                        control(SourceEvent::SnapshotRecord)?;
-                        control(SourceEvent::ScratchEntry)?;
-                        tables.records += 1;
-                        tables.edges.insert(
-                            edge.eid,
-                            ((edge.eid, edge.src, edge.relation, edge.dst), properties),
-                        );
-                    }
-                    Ok(())
-                },
-            )?;
+                    control(SourceEvent::SnapshotRecord)?;
+                    control(SourceEvent::ScratchEntry)?;
+                    tables.records += 1;
+                    tables.edges.insert(
+                        edge.eid,
+                        ((edge.eid, edge.src, edge.relation, edge.dst), properties),
+                    );
+                }
+                Ok(())
+            })?;
         }
         // Resolve names only after both topology and metadata scopes apply.
         // A forbidden unmapped label/type cannot cause a data-dependent error.
@@ -262,10 +275,12 @@ impl<'a> Tables<'a> {
                 control(SourceEvent::Work)?;
                 let mut labels = Vec::new();
                 for &label in &row.labels {
-                    control(SourceEvent::Work)?;
+                    // Masked labels are skipped before any charge: their count
+                    // on a visible vertex is hidden data too.
                     if !predicates.allows_label(label) {
                         continue;
                     }
+                    control(SourceEvent::Work)?;
                     let name = plan
                         .reverse_catalog
                         .as_deref()
@@ -378,6 +393,12 @@ fn pattern_at<Row: GlaOutput, Clock: FnMut() -> u64>(
             execution
                 .borrow_mut()
                 .node()
+                .map_err(GqlQueryError::Interrupted)
+        },
+        &mut |_| {
+            execution
+                .borrow_mut()
+                .poll()
                 .map_err(GqlQueryError::Interrupted)
         },
         &mut |event| {

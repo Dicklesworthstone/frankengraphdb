@@ -2,6 +2,7 @@
 use super::*;
 use fgdb_gql::algebra::GraphValueRow;
 use fgdb_gql::stream::VertexScanState;
+use fgdb_types::EId;
 
 fn rows_result(columns: &[String], rows: Vec<GraphValueRow>) -> QueryResult {
     QueryResult::Rows {
@@ -660,6 +661,183 @@ fn full_width_identities_and_opening_unwind_keep_source_position_and_lifetime_bo
             session.query(&cx, "RETURN 1 AS n", &args),
             Err(QueryError::Authorization(Error::ExecutionStopped))
         ));
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+/// Two visible vertices, optionally with everything the session grant hides:
+/// a hidden label and property on a visible vertex, hidden vertices, and a
+/// hidden update history.
+async fn stream_database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
+    let mut db = Database::open_memory(cx, DatabaseKeys::new([1; 32], NS, [2; 32]))
+        .await
+        .unwrap();
+    let int = CanonicalScalar::Int;
+    let mut batch = WriteBatch::new(RelationId(1));
+    for (id, p) in [(1_u128, 7), (3, 19)] {
+        let mut labels = vec![LabelId(1)];
+        let mut props = vec![(PropertyKeyId(1), int(p))];
+        if hidden {
+            labels.push(LabelId(99));
+            props.push((PropertyKeyId(2), int(55)));
+        }
+        batch.create_vertex(VId(id), labels, props);
+    }
+    if hidden {
+        for id in 100..130_u128 {
+            batch.create_vertex(VId(id), vec![LabelId(99)], vec![(PropertyKeyId(2), int(1))]);
+        }
+    }
+    for (eid, src, dst) in [(10_u128, 1_u128, 3_u128), (11, 3, 1)] {
+        batch.add_edge(EId(eid), VId(src), VId(dst), vec![]);
+    }
+    if hidden {
+        // Allowed relation, hidden far endpoint, in both directions.
+        for id in 100..130_u128 {
+            batch.add_edge(EId(1000 + id), VId(1), VId(id), vec![]);
+            batch.add_edge(EId(2000 + id), VId(id), VId(3), vec![]);
+        }
+    }
+    db.write(cx, batch).await.unwrap();
+    if hidden {
+        let mut other = WriteBatch::new(RelationId(2));
+        for eid in 0..20_u128 {
+            other.add_edge(
+                EId(3000 + eid),
+                VId(1 + 2 * (eid % 2)),
+                VId(3 - 2 * (eid % 2)),
+                vec![],
+            );
+        }
+        db.write(cx, other).await.unwrap();
+        for round in 0..5 {
+            let mut update = WriteBatch::new(RelationId(1));
+            for id in 100..130_u128 {
+                update.set_vertex_property(VId(id), PropertyKeyId(2), Some(int(round)));
+            }
+            db.write(cx, update).await.unwrap();
+        }
+    }
+    db
+}
+
+/// FG-INV-20 noninterference for the lazy session stream (fgdb-2qm4o). The
+/// rows and the refusal point of every signed limit a holder may attenuate,
+/// and of every native meter, must not move with hidden vertices: the stream
+/// once counted "candidate histories, including invisible/forbidden
+/// candidates", which let a holder count hidden vertices by bisecting a limit.
+#[test]
+fn streamed_limits_and_native_meters_cannot_count_hidden_vertices() {
+    use fgdb_warden::{CapabilityToken, Restriction};
+    let ((), report) = run_async_under_lab(0x5ec0_6101, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let visible_only = stream_database(&c.commit(), false).await;
+        let with_hidden = stream_database(&c.commit(), true).await;
+        let issuer = authority();
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let args = GqlParameters::new();
+        for text in [
+            "MATCH (n) RETURN n AS id, n.p AS p",
+            "MATCH (n:L) RETURN n AS id",
+            "MATCH (n) RETURN n AS id LIMIT 1",
+            "MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) } RETURN n AS id",
+            "MATCH (n) WHERE NOT EXISTS { MATCH (n)<-[:R]-(m:L) } RETURN n AS id",
+        ] {
+            fn stream_symbols(kind: GraphSymbolKind, name: &str) -> Option<GraphSymbol> {
+                match (kind, name) {
+                    (GraphSymbolKind::Relation, "R") => Some(GraphSymbol::Relation(RelationId(1))),
+                    (GraphSymbolKind::Relation, "S") => Some(GraphSymbol::Relation(RelationId(2))),
+                    _ => symbols(kind, name),
+                }
+            }
+            let run = |db: &Database<MemVfs>, token: &CapabilityToken, policy| {
+                let mut session = db
+                    .authorized_read_session(
+                        &cx,
+                        &issuer,
+                        token,
+                        "main",
+                        stream_symbols,
+                        policy,
+                        || 100,
+                    )
+                    .unwrap();
+                let prepared = session.prepare(&cx, text, &args).unwrap();
+                let cursor = session.stream(&cx, &prepared, &args);
+                cursor.and_then(|cursor| cursor.collect::<Result<Vec<_>, _>>())
+            };
+            assert_eq!(
+                run(&visible_only, &token, policy()).unwrap(),
+                run(&with_hidden, &token, policy()).unwrap(),
+                "{text}"
+            );
+            let threshold = |admits: &dyn Fn(u64) -> bool| {
+                let (mut low, mut high) = (0_u64, 1_000_000_u64);
+                assert!(admits(high));
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    if admits(middle) {
+                        high = middle;
+                    } else {
+                        low = middle + 1;
+                    }
+                }
+                low
+            };
+            let signed: [(fn(u64) -> Restriction, LimitDimension); 3] = [
+                (Restriction::MaxWork, LimitDimension::Work),
+                (Restriction::MaxNodes, LimitDimension::Nodes),
+                (Restriction::MaxRows, LimitDimension::Rows),
+            ];
+            for (limit, dimension) in signed {
+                let at = |db: &Database<MemVfs>| {
+                    threshold(
+                        &|k| match run(db, &token.attenuate(limit(k)).unwrap(), policy()) {
+                            Ok(_) => true,
+                            Err(QueryError::Authorization(Error::LimitExceeded(actual)))
+                                if actual == dimension =>
+                            {
+                                false
+                            }
+                            Err(other) => panic!("{text}: {dimension:?} {k}: {other:?}"),
+                        },
+                    )
+                };
+                assert_eq!(
+                    at(&visible_only),
+                    at(&with_hidden),
+                    "{text}: signed {dimension:?}"
+                );
+            }
+            let native: [(&str, fn(u64) -> GqlQueryPolicy); 3] = [
+                ("snapshot records", |k| {
+                    GqlQueryPolicy::new(k, 1000, 1_000_000, 1_000_000)
+                }),
+                ("work units", |k| {
+                    GqlQueryPolicy::new(1000, 1000, k, 1_000_000)
+                }),
+                ("scratch entries", |k| {
+                    GqlQueryPolicy::new(1000, 1000, 1_000_000, k)
+                }),
+            ];
+            for (meter, policy_at) in native {
+                let at = |db: &Database<MemVfs>| {
+                    threshold(&|k| match run(db, &token, policy_at(k)) {
+                        Ok(_) => true,
+                        Err(QueryError::Stream(
+                            GqlQueryError::Evaluator(_) | GqlQueryError::Rows(_),
+                        )) => false,
+                        Err(other) => panic!("{text}: {meter} {k}: {other:?}"),
+                    })
+                };
+                assert_eq!(
+                    at(&visible_only),
+                    at(&with_hidden),
+                    "{text}: native {meter}"
+                );
+            }
+        }
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }

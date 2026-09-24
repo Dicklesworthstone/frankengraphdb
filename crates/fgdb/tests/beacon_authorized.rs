@@ -679,3 +679,85 @@ fn authentication_precedes_bad_frontier_or_data_and_does_not_grant_read_rights()
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// The smallest `k` that `admits`, given admission is monotone in `k`.
+fn threshold(high: u64, admits: impl Fn(u64) -> bool) -> u64 {
+    assert!(admits(high), "the ceiling itself must admit");
+    let (mut low, mut high) = (0, high);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if admits(middle) {
+            high = middle
+        } else {
+            low = middle + 1
+        }
+    }
+    low
+}
+
+/// FG-INV-20 noninterference for authorized search (fgdb-2qm4o). Hidden
+/// documents already cannot enter statistics or results (above); they must
+/// not move any refusal point either. A holder can attenuate its signed
+/// limits and choose its own work budget, so each limit's exact threshold is
+/// an observation, and one that moved with hidden data would count it.
+#[test]
+fn hidden_documents_move_no_signed_or_work_budget_threshold() {
+    let ((), report) = run_async_under_lab(0xbeac_2101, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let full = database(&c.commit(), true).await;
+        let scrubbed = database(&c.commit(), false).await;
+        let issuer = authority(2101);
+        let token = issuer.issue_at(&grant(), NOW).unwrap();
+        for query in searches() {
+            let run =
+                |db: &Database<MemVfs>, token: &fgdb_warden::CapabilityToken, options: &Options| {
+                    db.beacon_search_authorized(
+                        &c.query(),
+                        &issuer,
+                        token,
+                        BRANCH,
+                        options,
+                        query,
+                        || NOW,
+                    )
+                };
+            assert_eq!(
+                run(&full, &token, &options()).unwrap(),
+                run(&scrubbed, &token, &options()).unwrap()
+            );
+            for (limit, dimension) in [
+                (
+                    Restriction::MaxWork as fn(u64) -> Restriction,
+                    LimitDimension::Work,
+                ),
+                (Restriction::MaxNodes, LimitDimension::Nodes),
+            ] {
+                let at = |db: &Database<MemVfs>| {
+                    threshold(1_000_000, |k| {
+                        match run(db, &token.attenuate(limit(k)).unwrap(), &options()) {
+                            Ok(_) => true,
+                            Err(ReadError::Interrupted(QueryError::Authorization(
+                                Error::LimitExceeded(actual),
+                            ))) if actual == dimension => false,
+                            Err(other) => panic!("{query:?}: {dimension:?} {k}: {other:?}"),
+                        }
+                    })
+                };
+                assert_eq!(at(&full), at(&scrubbed), "{query:?}: signed {dimension:?}");
+            }
+            let at = |db: &Database<MemVfs>| {
+                threshold(1_000_000, |k| {
+                    let mut limited = options();
+                    limited.policy.max_work_units = k as usize;
+                    match run(db, &token, &limited) {
+                        Ok(_) => true,
+                        Err(ReadError::Index(_)) => false,
+                        Err(other) => panic!("{query:?}: work budget {k}: {other:?}"),
+                    }
+                })
+            };
+            assert_eq!(at(&full), at(&scrubbed), "{query:?}: work budget");
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

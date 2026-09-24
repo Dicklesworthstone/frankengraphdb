@@ -995,3 +995,100 @@ fn signed_rows_admit_only_reachable_output_and_empty_sources_still_require_autho
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// The smallest `k` that `admits`, given admission is monotone in `k` and
+/// `admits(high)` holds. `admits` panics on anything but the expected refusal.
+fn threshold(high: u64, mut admits: impl FnMut(u64) -> bool) -> u64 {
+    assert!(admits(high), "the ceiling itself must admit");
+    let mut low = 0;
+    let mut high = high;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if admits(middle) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
+}
+
+/// FG-INV-20 noninterference over analytics (fgdb-2qm4o). The physically
+/// masked database is the oracle for the rows AND for the refusal point of
+/// every limit the caller controls: the signed MaxWork/MaxNodes/MaxRows a
+/// holder may attenuate, and the source limits it passes in its own options.
+/// A threshold that moved with hidden data would let a holder count it.
+#[test]
+fn hidden_records_move_no_signed_or_source_limit_threshold() {
+    let ((), report) = run_async_under_lab(0x5ec0_3101, |root| async move {
+        let c = PurposeContexts::narrow_runtime_root(&root);
+        let cx = c.query();
+        let db = database(&c.commit(), true).await;
+        let oracle = database(&c.commit(), false).await;
+        let issuer = authority(311, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        for (text, direction) in [
+            (BFS, Directedness::Directed),
+            (CC, Directedness::Undirected),
+            (TRIANGLES, Directedness::Undirected),
+        ] {
+            let run = |db: &Database<MemVfs>, token: &CapabilityToken, opt: FnxReadOptions| {
+                db.call_fnx_authorized(
+                    &cx,
+                    &issuer,
+                    token,
+                    BRANCH,
+                    text,
+                    &FnxParameters::new(),
+                    opt,
+                    || 100,
+                )
+            };
+            let opt = options(direction);
+            assert_eq!(
+                run(&db, &token, opt).unwrap(),
+                run(&oracle, &token, opt).unwrap(),
+                "{text}"
+            );
+            let signed: [(fn(u64) -> Restriction, LimitDimension); 3] = [
+                (Restriction::MaxWork, LimitDimension::Work),
+                (Restriction::MaxNodes, LimitDimension::Nodes),
+                (Restriction::MaxRows, LimitDimension::Rows),
+            ];
+            for (limit, dimension) in signed {
+                let at = |db: &Database<MemVfs>| {
+                    threshold(1_000_000, |k| {
+                        match run(db, &token.attenuate(limit(k)).unwrap(), opt) {
+                            Ok(_) => true,
+                            Err(FnxReadError::Cancelled(QueryError::Authorization(
+                                Error::LimitExceeded(actual),
+                            ))) if actual == dimension => false,
+                            Err(other) => panic!("{text}: {dimension:?} {k}: {other:?}"),
+                        }
+                    })
+                };
+                assert_eq!(at(&db), at(&oracle), "{text}: signed {dimension:?}");
+            }
+            for resource in ["work units", "scratch entries"] {
+                let at = |db: &Database<MemVfs>| {
+                    threshold(10_000, |k| {
+                        let mut limited = opt;
+                        match resource {
+                            "work units" => limited.source_limits.max_work_units = k,
+                            _ => limited.source_limits.max_scratch_entries = k,
+                        }
+                        match run(db, &token, limited) {
+                            Ok(_) => true,
+                            Err(FnxReadError::SourceLimit {
+                                resource: actual, ..
+                            }) if actual == resource => false,
+                            Err(other) => panic!("{text}: {resource} {k}: {other:?}"),
+                        }
+                    })
+                };
+                assert_eq!(at(&db), at(&oracle), "{text}: source {resource}");
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

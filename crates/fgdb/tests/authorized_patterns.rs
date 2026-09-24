@@ -1237,3 +1237,144 @@ fn compound_work_and_expiry_and_final_group_delivery_use_one_live_permit() {
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+/// The same visible graph, optionally surrounded by everything the grant
+/// hides: hidden vertices, a hidden label and property on visible vertices and
+/// edges, allowed-relation edges to hidden endpoints, hidden-relation edges
+/// between visible vertices, and a long hidden update history.
+async fn noninterference_database(cx: &CommitCx, hidden: bool) -> Database<MemVfs> {
+    let mut db = Database::open_memory(cx, DatabaseKeys::new([0x45; 32], NS, [0x73; 32]))
+        .await
+        .unwrap();
+    let int = CanonicalScalar::Int;
+    let mut first = WriteBatch::new(RelationId(1));
+    for vid in 1..=4_u128 {
+        let mut labels = vec![LabelId(1)];
+        let mut props = vec![(PropertyKeyId(1), int(vid as i64 * 10))];
+        if hidden {
+            labels.push(LabelId(99));
+            props.push((PropertyKeyId(2), int(777)));
+        }
+        first.create_vertex(VId(vid), labels, props);
+    }
+    let hidden_vertices = 100..140_u128;
+    if hidden {
+        for vid in hidden_vertices.clone() {
+            first.create_vertex(
+                VId(vid),
+                vec![LabelId(99)],
+                vec![(PropertyKeyId(2), int(1))],
+            );
+        }
+    }
+    for (eid, src, dst) in [(10, 1, 2), (11, 2, 3), (12, 3, 4), (13, 4, 1), (14, 1, 3)] {
+        let mut props = vec![(PropertyKeyId(1), int(5))];
+        if hidden {
+            props.push((PropertyKeyId(2), int(999)));
+        }
+        first.add_edge(EId(eid), VId(src), VId(dst), props);
+    }
+    if hidden {
+        for (offset, vid) in hidden_vertices.clone().enumerate() {
+            let offset = offset as u128;
+            first.add_edge(EId(1000 + offset), VId(1), VId(vid), vec![]);
+            first.add_edge(EId(2000 + offset), VId(vid), VId(2), vec![]);
+        }
+    }
+    db.write(cx, first).await.unwrap();
+    if hidden {
+        let mut other = WriteBatch::new(RelationId(2));
+        for offset in 0..30_u128 {
+            other.add_edge(
+                EId(3000 + offset),
+                VId(1 + offset % 4),
+                VId(1 + (offset + 1) % 4),
+                vec![],
+            );
+        }
+        db.write(cx, other).await.unwrap();
+        for round in 0..10 {
+            let mut update = WriteBatch::new(RelationId(1));
+            for vid in hidden_vertices.clone() {
+                update.set_vertex_property(VId(vid), PropertyKeyId(2), Some(int(round)));
+            }
+            db.write(cx, update).await.unwrap();
+        }
+    }
+    db
+}
+
+/// FG-INV-20 noninterference (fgdb-2qm4o): data a capability cannot see must
+/// not change anything it can observe, and that includes resource refusals.
+/// A holder can attenuate MaxWork/MaxNodes/MaxRows without the issuer key, so
+/// each limit's exact refusal threshold is an observation, and a threshold that
+/// moves with hidden data would count it. For every query, the rows and the
+/// smallest admitted value of every signed limit must match between the
+/// visible-only database and the one that also holds hidden data.
+#[test]
+fn hidden_records_change_neither_results_nor_any_limit_threshold() {
+    let ((), report) = run_async_under_lab(0x5ec0_2001, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.query();
+        let commit = contexts.commit();
+        let visible_only = noninterference_database(&commit, false).await;
+        let with_hidden = noninterference_database(&commit, true).await;
+        let issuer = authority(97, NS);
+        let token = issuer.issue_at(&grant(), 100).unwrap();
+        let limits: [(fn(u64) -> Restriction, LimitDimension); 3] = [
+            (Restriction::MaxWork, LimitDimension::Work),
+            (Restriction::MaxNodes, LimitDimension::Nodes),
+            (Restriction::MaxRows, LimitDimension::Rows),
+        ];
+        for text in [
+            "MATCH (n) RETURN n",
+            "MATCH (n) RETURN n, n.p AS p",
+            "MATCH (n:L) RETURN labels(n) AS labels",
+            "MATCH (a)-[:R]->(b) RETURN a, b",
+            "MATCH (a)-[:R]->(x)-[:R]->(b) RETURN a, b",
+        ] {
+            let p = pattern(text);
+            let run = |db: &Database<MemVfs>, token: &CapabilityToken| {
+                db.execute_graph_pattern_authorized(
+                    &cx,
+                    &issuer,
+                    token,
+                    BRANCH,
+                    &p,
+                    policy(),
+                    || 100,
+                )
+            };
+            assert_eq!(
+                run(&visible_only, &token).unwrap(),
+                run(&with_hidden, &token).unwrap(),
+                "{text}"
+            );
+            for (limit, dimension) in limits {
+                // The smallest admitted limit; admission is monotone in it.
+                let threshold = |db: &Database<MemVfs>| {
+                    let (mut low, mut high) = (0_u64, 1_000_000_u64);
+                    while low < high {
+                        let middle = low + (high - low) / 2;
+                        match run(db, &token.attenuate(limit(middle)).unwrap()) {
+                            Ok(_) => high = middle,
+                            Err(QueryError::Authorization(Error::LimitExceeded(actual)))
+                                if actual == dimension =>
+                            {
+                                low = middle + 1
+                            }
+                            Err(other) => panic!("{text}: {dimension:?} {middle}: {other:?}"),
+                        }
+                    }
+                    low
+                };
+                assert_eq!(
+                    threshold(&visible_only),
+                    threshold(&with_hidden),
+                    "{text}: {dimension:?} threshold moved with hidden data"
+                );
+            }
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

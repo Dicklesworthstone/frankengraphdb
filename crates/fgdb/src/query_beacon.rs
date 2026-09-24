@@ -72,6 +72,15 @@ impl<W: WorkControl> WorkControl for SharedWork<'_, W> {
     }
 }
 
+/// How the history walk is paid for. The privileged reader meters every
+/// visited record and source scratch entry against its own budget. A Warden
+/// reader walks unmetered, polling only cancellation and a retained refusal:
+/// history it cannot see must not move any limit it can observe (FG-INV-20).
+pub(crate) enum Scan<'a> {
+    Metered,
+    Unmetered(&'a mut dyn FnMut() -> Result<(), BeaconError>),
+}
+
 /// Private common preparation for privileged and Warden readers. Admitting a
 /// row and a property are separate operations; neither callback sees copied
 /// values. The iterator projects one borrowed winner per builder poll.
@@ -82,32 +91,42 @@ pub(crate) fn build(
     options: &Options,
     config: IndexConfig,
     work: &RefCell<impl WorkControl>,
+    mut scan: Scan<'_>,
     mut admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
     mut label_allowed: impl FnMut(LabelId) -> bool,
     mut property_allowed: impl FnMut(PropertyKeyId) -> bool,
 ) -> Result<BeaconIndex, BeaconError> {
     let mut scratch = 0usize;
-    let mut source_work = |event| {
-        work.borrow_mut().charge(1)?;
-        if matches!(event, SourceEvent::ScratchEntry) {
-            if scratch == options.policy.max_source_scratch {
-                return Err(BeaconError::ResourceLimit {
-                    resource: "source scratch entries",
-                    limit: options.policy.max_source_scratch,
-                });
+    let mut source_work = |event| match &mut scan {
+        Scan::Metered => {
+            work.borrow_mut().charge(1)?;
+            if matches!(event, SourceEvent::ScratchEntry) {
+                if scratch == options.policy.max_source_scratch {
+                    return Err(BeaconError::ResourceLimit {
+                        resource: "source scratch entries",
+                        limit: options.policy.max_source_scratch,
+                    });
+                }
+                scratch += 1;
             }
-            scratch += 1;
+            Ok(())
         }
-        Ok(())
+        Scan::Unmetered(poll) => poll(),
     };
     let mut rows = Vec::new();
-    source::visit_vertices(&snapshot.patches, at, &mut source_work, |row, control| {
-        control(SourceEvent::Work)?;
-        // Charge original-label examination, including authorization clauses.
-        work.borrow_mut().charge(row.labels.len())?;
+    source::visit_vertices(&snapshot.patches, at, &mut source_work, |row, _| {
         if !admit(row)? {
             return Ok(());
         }
+        // One unit for the admitted record plus one per label this reader may
+        // see. The privileged reader sees every label and admits every row, so
+        // its charge is unchanged; a Warden reader pays nothing for hidden ones.
+        let labels = row
+            .labels
+            .iter()
+            .filter(|&&label| label_allowed(label))
+            .count();
+        work.borrow_mut().charge(1 + labels)?;
         if options
             .vertex_label
             .is_some_and(|label| !label_allowed(label) || row.labels.binary_search(&label).is_err())
@@ -156,6 +175,7 @@ pub(crate) fn evaluate(
     options: &Options,
     query: Search<'_>,
     work: &RefCell<impl WorkControl>,
+    scan: Scan<'_>,
     admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
     label_allowed: impl FnMut(LabelId) -> bool,
     property_allowed: impl FnMut(PropertyKeyId) -> bool,
@@ -169,6 +189,7 @@ pub(crate) fn evaluate(
         options,
         config,
         work,
+        scan,
         admit,
         label_allowed,
         property_allowed,
@@ -224,6 +245,7 @@ impl EmbeddedReadView {
                 options,
                 query,
                 &work,
+                Scan::Metered,
                 |_| Ok(true),
                 |_| true,
                 |_| true,
