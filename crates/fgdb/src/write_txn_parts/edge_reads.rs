@@ -119,164 +119,249 @@ impl WriteTxn {
         Ok(rows)
     }
 
-    /// Read the pinned neighbours of one relation through staged edge
-    /// creates and deletes. Destinations retain the database API's sorted,
-    /// deduplicated result shape even when parallel edges exist.
+    /// Read outgoing neighbours from the pinned basis plus prepared net
+    /// effects. Parallel edges keep a neighbour live until its last edge is
+    /// removed; the returned vertex identities are sorted and deduplicated.
     pub fn neighbours<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         src: VId,
         relation: RelationId,
     ) -> Result<Vec<VId>, WriteTxnError> {
-        self.ensure_database(database)?;
-
-        let mut destinations: std::collections::BTreeSet<VId> = database
-            .neighbours_at(src, relation, self.basis)?
-            .into_iter()
-            .collect();
-        let mut matching_edges: std::collections::BTreeMap<EId, VId> = database
-            .edges_at(self.basis)?
-            .into_iter()
-            .filter_map(|record| {
-                (record.entry.src == src && record.entry.relation == relation)
-                    .then_some((record.entry.eid, record.entry.dst))
-            })
-            .collect();
-        let mut observed_edges: std::collections::BTreeSet<EId> =
-            matching_edges.keys().copied().collect();
-        let mut deleted_vertices = std::collections::BTreeSet::new();
-
-        for batch in &self.staged {
-            for pending in &batch.rows {
-                match pending {
-                    PendingRow::Edge {
-                        eid,
-                        src: edge_src,
-                        dst,
-                        ensure,
-                        ..
-                    } if *edge_src == src && batch.relation == relation => {
-                        if !ensure || !destinations.contains(dst) {
-                            matching_edges.insert(*eid, *dst);
-                            destinations.insert(*dst);
-                            observed_edges.insert(*eid);
-                        }
-                    }
-                    PendingRow::DeleteEdge { eid, .. } => {
-                        if let Some(dst) = matching_edges.remove(eid)
-                            && !matching_edges.values().any(|other| *other == dst)
-                        {
-                            destinations.remove(&dst);
-                        }
-                    }
-                    PendingRow::DeleteVertex { vid, .. } => {
-                        let affected = if *vid == src {
-                            matching_edges.clear();
-                            destinations.clear();
-                            true
-                        } else if matching_edges.values().any(|dst| *dst == *vid) {
-                            matching_edges.retain(|_, dst| *dst != *vid);
-                            destinations.remove(vid);
-                            true
-                        } else {
-                            false
-                        };
-                        if affected {
-                            deleted_vertices.insert(*vid);
-                        }
-                    }
-                    PendingRow::Vertex { .. }
-                    | PendingRow::Edge { .. }
-                    | PendingRow::SetLabel { .. }
-                    | PendingRow::SetEdgeProperty { .. }
-                    | PendingRow::SetProperty { .. }
-                    | PendingRow::CompareAndSet { .. } => {}
-                }
-            }
-        }
-
-        let mut read_set = self.read_set.borrow_mut();
-        read_set.insert(ElementId::Vertex(src));
-        read_set.extend(observed_edges.into_iter().map(ElementId::Edge));
-        read_set.extend(deleted_vertices.into_iter().map(ElementId::Vertex));
-        drop(read_set);
-        self.match_expansions.borrow_mut().insert((src, relation));
-        Ok(destinations.into_iter().collect())
+        self.adjacency_neighbours(database, src, relation, false)
     }
 
-    /// Read the pinned incoming neighbours of one relation through staged
-    /// edge creates, edge deletes, and vertex-delete cascades.
+    /// Read incoming neighbours through the same canonical overlay as outgoing
+    /// reads, including engine-derived vertex-delete cascades.
     pub fn in_neighbours<V: Vfs + Clone>(
         &self,
         database: &Database<V>,
         dst: VId,
         relation: RelationId,
     ) -> Result<Vec<VId>, WriteTxnError> {
+        self.adjacency_neighbours(database, dst, relation, true)
+    }
+
+    fn adjacency_neighbours<V: Vfs + Clone>(
+        &self,
+        database: &Database<V>,
+        vertex: VId,
+        relation: RelationId,
+        incoming: bool,
+    ) -> Result<Vec<VId>, WriteTxnError> {
         self.ensure_database(database)?;
-
-        let mut sources: std::collections::BTreeSet<VId> = database
-            .in_neighbours_at(dst, relation, self.basis)?
-            .into_iter()
-            .collect();
-        let mut matching_edges: std::collections::BTreeMap<EId, VId> = database
-            .edges_at(self.basis)?
-            .into_iter()
-            .filter_map(|record| {
-                (record.entry.dst == dst && record.entry.relation == relation)
-                    .then_some((record.entry.eid, record.entry.src))
-            })
-            .collect();
+        // Do not call edges(): that would turn a local expansion into a global
+        // edge-scan conflict witness. The endpoint read below also detects a
+        // previously empty incoming adjacency through adjacency_endpoints.
+        let mut matching = std::collections::BTreeMap::new();
+        for record in database.edges_at(self.basis)? {
+            let entry = record.entry;
+            let (anchor, neighbour) = if incoming {
+                (entry.dst, entry.src)
+            } else {
+                (entry.src, entry.dst)
+            };
+            if anchor == vertex && entry.relation == relation {
+                matching.insert(entry.eid, neighbour);
+            }
+        }
         let mut observed_edges: std::collections::BTreeSet<EId> =
-            matching_edges.keys().copied().collect();
-        let mut deleted_sources = std::collections::BTreeSet::new();
-
-        for batch in &self.staged {
-            for pending in &batch.rows {
-                match pending {
-                    PendingRow::Edge {
-                        eid,
-                        src,
-                        dst: edge_dst,
-                        ensure,
-                        ..
-                    } if *edge_dst == dst && batch.relation == relation => {
-                        if !ensure || !sources.contains(src) {
-                            matching_edges.insert(*eid, *src);
-                            sources.insert(*src);
-                            observed_edges.insert(*eid);
+            matching.keys().copied().collect();
+        let mut deleted_vertices = std::collections::BTreeSet::new();
+        if let Some(prepared) = &self.prepared {
+            for coordinate in prepared.template.coordinate_entries() {
+                for effect in &coordinate.rows {
+                    match effect {
+                        fgdb_delta_types::DeltaRow::CreateEdge {
+                            eid, src, relation: edge_relation, dst, ..
+                        } => {
+                            let (anchor, neighbour) = if incoming {
+                                (*dst, *src)
+                            } else {
+                                (*src, *dst)
+                            };
+                            if anchor == vertex && *edge_relation == relation {
+                                matching.insert(*eid, neighbour);
+                                observed_edges.insert(*eid);
+                            }
                         }
-                    }
-                    PendingRow::DeleteEdge { eid, .. } => {
-                        if let Some(src) = matching_edges.remove(eid)
-                            && !matching_edges.values().any(|other| *other == src)
-                        {
-                            sources.remove(&src);
+                        fgdb_delta_types::DeltaRow::DeleteEdge { eid, .. } => {
+                            matching.remove(eid);
                         }
-                    }
-                    PendingRow::DeleteVertex { vid, .. } => {
-                        if *vid == dst {
-                            matching_edges.clear();
-                            sources.clear();
-                        } else if matching_edges.values().any(|src| *src == *vid) {
-                            matching_edges.retain(|_, src| *src != *vid);
-                            sources.remove(vid);
-                            deleted_sources.insert(*vid);
+                        fgdb_delta_types::DeltaRow::DeleteVertex {
+                            vid, sorted_retired_incident_edges, ..
+                        } => {
+                            // Apply only the authoritative cascade image. Do
+                            // not rescan every surviving edge for each delete.
+                            for eid in sorted_retired_incident_edges {
+                                if matching.remove(eid).is_some() {
+                                    deleted_vertices.insert(*vid);
+                                }
+                            }
                         }
+                        _ => {}
                     }
-                    PendingRow::Vertex { .. }
-                    | PendingRow::Edge { .. }
-                    | PendingRow::SetLabel { .. }
-                    | PendingRow::SetEdgeProperty { .. }
-                    | PendingRow::SetProperty { .. }
-                    | PendingRow::CompareAndSet { .. } => {}
                 }
             }
         }
-
         let mut read_set = self.read_set.borrow_mut();
-        read_set.insert(ElementId::Vertex(dst));
+        read_set.insert(ElementId::Vertex(vertex));
         read_set.extend(observed_edges.into_iter().map(ElementId::Edge));
-        read_set.extend(deleted_sources.into_iter().map(ElementId::Vertex));
-        Ok(sources.into_iter().collect())
+        read_set.extend(deleted_vertices.into_iter().map(ElementId::Vertex));
+        drop(read_set);
+        if !incoming {
+            self.match_expansions.borrow_mut().insert((vertex, relation));
+        }
+        // Deduplicate once, after applying all edge identities. In particular,
+        // deletion of one parallel edge never removes a surviving neighbour.
+        Ok(matching.into_values().collect::<std::collections::BTreeSet<_>>()
+            .into_iter().collect())
+    }
+}
+
+#[cfg(test)]
+mod adjacency_overlay_tests {
+    use super::*;
+    use asupersync::lab::run_async_under_lab;
+    use fgdb_types::{DatabaseSecurityNamespaceId, PurposeContexts};
+
+    fn keys() -> crate::DatabaseKeys {
+        crate::DatabaseKeys::new(
+            [0x91; 32],
+            DatabaseSecurityNamespaceId([0x92; 32]),
+            [0x93; 32],
+        )
+    }
+
+    #[test]
+    fn both_directions_match_committed_net_effects_and_relation_scope() {
+        let ((), report) = run_async_under_lab(0xa91c_0001, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            for vid in 1..=4 {
+                seed.create_vertex(VId(vid), vec![], vec![]);
+            }
+            for (eid, src, dst) in [
+                (10, 1, 2), (11, 1, 2), (12, 2, 1),
+                (13, 1, 1), (14, 3, 1), (15, 1, 3),
+            ] {
+                seed.add_edge(EId(eid), VId(src), VId(dst), vec![]);
+            }
+            db.write(&commit, seed).await.unwrap();
+            let mut other_relation = WriteBatch::new(RelationId(2));
+            other_relation.add_edge(EId(90), VId(1), VId(4), vec![]);
+            db.write(&commit, other_relation).await.unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut changes = WriteBatch::new(RelationId(1));
+            changes.ensure_edge_by_triple(EId(100), VId(1), VId(2), vec![]);
+            changes.delete_edge(EId(10));
+            changes.delete_edge(EId(11));
+            changes.ensure_edge_by_triple(EId(101), VId(1), VId(2), vec![]);
+            changes.add_edge(EId(102), VId(1), VId(4), vec![]);
+            changes.delete_edge(EId(102));
+            changes.delete_vertex(VId(3));
+            changes.add_edge(EId(103), VId(4), VId(1), vec![]);
+            changes.delete_edge_if_present(EId(999));
+            txn.write(&mut db, changes).unwrap();
+            assert!(txn.edge(&db, EId(100)).unwrap().is_none());
+            assert!(txn.edge(&db, EId(102)).unwrap().is_none());
+            assert!(txn.edge(&db, EId(101)).unwrap().is_some());
+            let outgoing = txn.neighbours(&db, VId(1), RelationId(1)).unwrap();
+            let incoming = txn.in_neighbours(&db, VId(1), RelationId(1)).unwrap();
+            assert_eq!(outgoing, vec![VId(1), VId(2)]);
+            assert_eq!(incoming, vec![VId(1), VId(2), VId(4)]);
+            assert_eq!(txn.neighbours(&db, VId(1), RelationId(2)).unwrap(), vec![VId(4)]);
+            assert_eq!(txn.in_neighbours(&db, VId(4), RelationId(2)).unwrap(), vec![VId(1)]);
+            txn.commit(&mut db, &commit).await.unwrap();
+            assert_eq!(db.neighbours(VId(1), RelationId(1)).unwrap(), outgoing);
+            assert_eq!(db.in_neighbours(VId(1), RelationId(1)).unwrap(), incoming);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn parallel_edges_survive_partial_deletion_and_savepoint_rollback() {
+        let ((), report) = run_async_under_lab(0xa91c_0002, |root| async move {
+            let contexts = PurposeContexts::narrow_runtime_root(&root);
+            let commit = contexts.commit();
+            let txcx = contexts.txn();
+            let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+            let mut seed = WriteBatch::new(RelationId(1));
+            seed.create_vertex(VId(1), vec![], vec![]);
+            seed.create_vertex(VId(2), vec![], vec![]);
+            for eid in 10..266 {
+                seed.add_edge(EId(eid), VId(1), VId(2), vec![]);
+            }
+            db.write(&commit, seed).await.unwrap();
+            let mut txn = db.begin(&txcx).unwrap();
+            let mut partial = WriteBatch::new(RelationId(1));
+            for eid in 10..265 {
+                partial.delete_edge(EId(eid));
+            }
+            txn.write(&mut db, partial).unwrap();
+            txn.savepoint(&db, "last-edge").unwrap();
+            assert_eq!(txn.neighbours(&db, VId(1), RelationId(1)).unwrap(), vec![VId(2)]);
+            assert_eq!(txn.in_neighbours(&db, VId(2), RelationId(1)).unwrap(), vec![VId(1)]);
+            let mut last = WriteBatch::new(RelationId(1));
+            last.delete_edge(EId(265));
+            txn.write(&mut db, last).unwrap();
+            assert!(txn.neighbours(&db, VId(1), RelationId(1)).unwrap().is_empty());
+            assert!(txn.in_neighbours(&db, VId(2), RelationId(1)).unwrap().is_empty());
+            txn.rollback_to_savepoint(&db, "last-edge").unwrap();
+            assert_eq!(txn.neighbours(&db, VId(1), RelationId(1)).unwrap(), vec![VId(2)]);
+            assert_eq!(txn.in_neighbours(&db, VId(2), RelationId(1)).unwrap(), vec![VId(1)]);
+            txn.commit(&mut db, &commit).await.unwrap();
+            assert_eq!(db.neighbours(VId(1), RelationId(1)).unwrap(), vec![VId(2)]);
+        });
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn empty_adjacency_reads_detect_phantoms_without_global_scan_witnesses() {
+        for incoming in [false, true] {
+            for touches_anchor in [false, true] {
+                let ((), report) = run_async_under_lab(0xa91c_0003, |root| async move {
+                    let contexts = PurposeContexts::narrow_runtime_root(&root);
+                    let commit = contexts.commit();
+                    let txcx = contexts.txn();
+                    let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+                    let mut seed = WriteBatch::new(RelationId(1));
+                    for vid in 1..=4 {
+                        seed.create_vertex(VId(vid), vec![], vec![]);
+                    }
+                    db.write(&commit, seed).await.unwrap();
+                    let mut txn = db.begin(&txcx).unwrap();
+                    assert!(txn.adjacency_neighbours(&db, VId(1), RelationId(1), incoming)
+                        .unwrap().is_empty());
+                    assert!(!txn.scanned_edges.get());
+                    assert_eq!(*txn.read_set.borrow(),
+                        [ElementId::Vertex(VId(1))].into_iter().collect());
+                    let (src, dst) = if touches_anchor {
+                        if incoming { (2, 1) } else { (1, 2) }
+                    } else {
+                        (3, 4)
+                    };
+                    let mut winner = WriteBatch::new(RelationId(1));
+                    winner.add_edge(EId(20), VId(src), VId(dst), vec![]);
+                    db.write(&commit, winner).await.unwrap();
+                    // Reads still answer the pinned basis, not the winner.
+                    assert!(txn.adjacency_neighbours(&db, VId(1), RelationId(1), incoming)
+                        .unwrap().is_empty());
+                    let completion = txn.finish(&mut db, &commit).await;
+                    if touches_anchor {
+                        assert!(matches!(completion,
+                            Err(WriteTxnError::Write(WriteError::FirstCommitterWins {
+                                law: "FG-LAW-FCW-READ-01", ..
+                            }))));
+                    } else {
+                        assert!(matches!(completion, Ok(EmbeddedTxnCompletion::ReadClosed { .. })));
+                    }
+                });
+                assert!(report.lab_test_passed(), "{report:?}");
+            }
+        }
     }
 }
