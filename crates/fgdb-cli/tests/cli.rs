@@ -2,8 +2,17 @@
 //! create, write, query, compact and reopen each run in a fresh process
 //! against the real durable engine. Temporary artifacts are retained for
 //! diagnosis; no fixture deletes files.
+//!
+//! The retired binary's group-readable key refusal is not ported: the
+//! surviving key-file contract does not check permissions (fgdb-42wt4 restores
+//! it with its test).
 
-use std::path::PathBuf;
+use asupersync::{Budget, runtime::RuntimeBuilder};
+use fgdb::{Database, DatabaseKeys, WriteBatch};
+use fgdb_delta_types::{LabelId, RelationId};
+use fgdb_types::{EId, VId, context::PurposeContexts, ids::DatabaseSecurityNamespaceId};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -102,6 +111,47 @@ fn refused(output: &Output, code: i32, class: &str) {
     assert!(!String::from_utf8_lossy(&output.stdout).contains("\"event\":\"result\""));
 }
 
+/// Every file under `root` with its bytes, so any publication is visible.
+fn directory_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+/// The keys `Fixture` writes, for the embedded library.
+fn keys() -> DatabaseKeys {
+    DatabaseKeys::new(
+        [0x41; 32],
+        DatabaseSecurityNamespaceId([0x42; 32]),
+        [0x43; 32],
+    )
+}
+
+/// Commit through the embedded library, not the CLI.
+fn seed_through_the_library(path: &Path) {
+    let runtime = RuntimeBuilder::new().build().unwrap();
+    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    let cx = PurposeContexts::narrow_runtime_root(&root).commit();
+    runtime.block_on(async {
+        let mut db = Database::open(&cx, path, keys()).await.unwrap();
+        let mut batch = WriteBatch::new(RelationId(1));
+        batch.create_vertex(VId(1), vec![LabelId(17)], vec![]);
+        batch.create_vertex(VId(2), vec![], vec![]);
+        batch.add_edge(EId(10), VId(1), VId(2), vec![]);
+        db.write(&cx, batch).await.unwrap();
+    });
+}
+
 fn rows(output: &Output) -> Vec<String> {
     String::from_utf8(output.stdout.clone())
         .unwrap()
@@ -132,8 +182,17 @@ fn compact_preserves_every_query_result_across_process_reopens() {
     succeeded(&before, "rows");
     assert_eq!(rows(&before).len(), 5);
 
+    let published = directory_bytes(&fixture.db());
     let compacted = succeeded(&fixture.robot("compact", &[]), "compacted");
     assert!(compacted >= last, "compaction must not rewind the frontier");
+    // A real compaction publishes a successor slot generation; a dispatcher
+    // that reported success without compacting would leave the store as-is.
+    let after_compact = directory_bytes(&fixture.db());
+    assert!(
+        published != after_compact,
+        "compact must publish a new generation; files: {:?}",
+        after_compact.keys()
+    );
     let after = fixture.robot("query", &[read]);
     succeeded(&after, "rows");
     assert_eq!(
@@ -218,4 +277,142 @@ fn help_needs_neither_database_nor_keys() {
             "help omits {command}"
         );
     }
+}
+
+/// The catalog names a label the statement text never mentions, so
+/// `labels(a)` can only answer from the supplied bindings.
+const CATALOG: [&str; 4] = [
+    "--relation",
+    "KNOWS=1",
+    "--label",
+    "UnmentionedStoredLabel=17",
+];
+
+#[test]
+fn library_writes_are_read_by_cli_processes_with_catalog_reflection() {
+    let fixture = Fixture::new("library");
+    succeeded(&fixture.robot("create", &[]), "created");
+    seed_through_the_library(&fixture.db());
+    let query = |text: &str| {
+        let mut args = CATALOG.to_vec();
+        args.push(text);
+        fixture.robot("query", &args)
+    };
+    let edge = query("MATCH (a)-[:KNOWS]->(b) RETURN b");
+    succeeded(&edge, "rows");
+    assert_eq!(
+        rows(&edge),
+        [r#"{"v":1,"event":"row","cells":[{"type":"vertex","value":"2"}]}"#]
+    );
+    let labels = query("MATCH (a)-[:KNOWS]->(b) RETURN labels(a) AS l");
+    succeeded(&labels, "rows");
+    assert_eq!(
+        rows(&labels),
+        [
+            r#"{"v":1,"event":"row","cells":[{"type":"list","value":[{"type":"text","value":"UnmentionedStoredLabel"}]}]}"#
+        ]
+    );
+    let explain = query("EXPLAIN MATCH (a)-[:KNOWS]->(b) RETURN b");
+    assert!(
+        explain.status.success() && terminal(&explain).contains("\"event\":\"result\""),
+        "{}",
+        String::from_utf8_lossy(&explain.stdout)
+    );
+}
+
+#[test]
+fn invalid_key_files_are_refused_without_creating_a_database() {
+    let line = "ab".repeat(32);
+    let cases: [(&str, Vec<u8>); 6] = [
+        ("empty", Vec::new()),
+        ("two lines", format!("{line}\n{line}\n").into_bytes()),
+        (
+            "four lines",
+            format!("{line}\n{line}\n{line}\n{line}\n").into_bytes(),
+        ),
+        (
+            "short line",
+            format!("{line}\n{line}\n{}\n", &line[1..]).into_bytes(),
+        ),
+        (
+            "non-hex",
+            format!("{line}\n{line}\n{}zz\n", &line[2..]).into_bytes(),
+        ),
+        // The retired binary's raw 96-byte key file is not silently accepted.
+        ("legacy raw 96 bytes", vec![0x41; 96]),
+    ];
+    for (name, bytes) in cases {
+        let fixture = Fixture::new("bad-keys");
+        std::fs::write(fixture.dir.join("keys"), bytes).unwrap();
+        let output = fixture.robot("create", &[]);
+        assert_eq!(output.status.code(), Some(4), "{name}");
+        refused(&output, 4, "open");
+        assert!(!fixture.db().exists(), "{name}");
+        // Diagnostics never echo key material.
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!text.contains(&line[..16]), "{name}: {text}");
+    }
+    let fixture = Fixture::new("missing-keys");
+    let output = Command::new(env!("CARGO_BIN_EXE_fgdb"))
+        .current_dir(&fixture.dir)
+        .args(["--robot", "create", "--db"])
+        .arg(fixture.db())
+        .args(["--key-file", "no-such-keys"])
+        .output()
+        .unwrap();
+    refused(&output, 4, "open");
+    assert!(!fixture.db().exists());
+}
+
+#[test]
+fn diff_output_cap_refuses_rather_than_reporting_a_partial_diff() {
+    let fixture = Fixture::new("diff-cap");
+    // The cap is diff-only: offering it to create is a usage error that
+    // fires before any database exists.
+    refused(
+        &fixture.robot("create", &["--max-output-bytes", "1"]),
+        2,
+        "usage",
+    );
+    assert!(!fixture.db().exists());
+    let before = succeeded(&fixture.robot("create", &[]), "created").to_string();
+    let after = succeeded(
+        &fixture.robot("write", &["CREATE (n:Person {id:1})"]),
+        "written",
+    )
+    .to_string();
+    let diff = |cap: &str| {
+        fixture.robot(
+            "diff",
+            &[
+                "--before",
+                &before,
+                "--after",
+                &after,
+                "--max-output-bytes",
+                cap,
+                "MATCH (n:Person) RETURN n.id AS id",
+            ],
+        )
+    };
+    // Control: uncapped, the diff reports the added row and completes.
+    let whole = diff("16777216");
+    let stdout = String::from_utf8_lossy(&whole.stdout);
+    assert!(whole.status.success(), "{stdout}");
+    assert!(terminal(&whole).contains("\"kind\":\"diff\""), "{stdout}");
+    assert!(stdout.contains("\"event\":\"change\""), "{stdout}");
+    // One byte admits no frame: an error, never a complete or partial diff.
+    let capped = diff("1");
+    let stdout = String::from_utf8_lossy(&capped.stdout);
+    assert_ne!(capped.status.code(), Some(0), "{stdout}");
+    assert!(
+        terminal(&capped).contains("\"event\":\"error\""),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("\"event\":\"result\""), "{stdout}");
+    assert!(!stdout.contains("\"event\":\"change\""), "{stdout}");
 }
