@@ -7,6 +7,8 @@
 
 #[path = "write_txn_parts/authorized.rs"]
 mod authorized;
+#[path = "write_txn_parts/beacon.rs"]
+mod beacon;
 #[path = "write_txn_parts/native_query.rs"]
 mod native_query;
 
