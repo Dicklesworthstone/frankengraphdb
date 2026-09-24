@@ -14,8 +14,12 @@ use fgdb_types::EId;
 use std::iter::FusedIterator;
 use std::rc::Rc;
 
+#[path = "stream/aggregate.rs"]
+mod aggregate;
+
 type Shared<'q> = Rc<RefCell<Execution<'q, 'q, Box<dyn FnMut() -> u64 + 'q>>>>;
-type Pull<'q> = Box<dyn FnMut() -> Result<(Option<GraphValueRow>, bool), QueryError> + 'q>;
+type Pull<'q, Row> = Box<dyn FnMut() -> Result<(Option<Row>, bool), QueryError> + 'q>;
+type Opened<'q, Row, Metadata> = Result<(AuthorizedRowCursor<'q, Row>, Metadata), QueryError>;
 
 // The pin slot is disjoint from the borrowed capability/clock. Arming before
 // callbacks makes unwind close this session even if a caller catches the panic
@@ -47,19 +51,22 @@ impl Drop for PinGuard<'_> {
 /// root path, outside the resident immutable generation and caller-owned rows.
 /// Fixed probes add definition-bounded frames and temporary masked records;
 /// finite variable-length probes retain governed traversal/support state.
+/// The aggregate factory uses this same lifecycle with completed group rows;
+/// its accumulation/support/collection storage is not bounded by the root-row
+/// profile above. See stream_aggregate for its first-pull and storage contract.
 ///
 /// This borrows the session and QueryCx until dropped, not the database writer,
 /// token bytes or prepared template. Credential invalidation or a host callback
 /// unwind closes the session; ordinary cursor errors do not widen its policy.
 /// No restart token, durable lease, spill, or physical noninterference is claimed.
-pub struct AuthorizedRowCursor<'q> {
-    driver: Option<Pull<'q>>,
+pub struct AuthorizedRowCursor<'q, Row = GraphValueRow> {
+    driver: Option<Pull<'q, Row>>,
     guard: Option<PinGuard<'q>>,
     columns: Vec<String>,
     snapshot_seq: CommitSeq,
     state: VertexScanState,
 }
-impl AuthorizedRowCursor<'_> {
+impl<Row> AuthorizedRowCursor<'_, Row> {
     pub fn columns(&self) -> &[String] {
         &self.columns
     }
@@ -83,8 +90,8 @@ impl AuthorizedRowCursor<'_> {
         self.guard.take();
     }
 }
-impl Iterator for AuthorizedRowCursor<'_> {
-    type Item = Result<GraphValueRow, QueryError>;
+impl<Row> Iterator for AuthorizedRowCursor<'_, Row> {
+    type Item = Result<Row, QueryError>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.state != VertexScanState::Open {
             return None;
@@ -125,8 +132,8 @@ impl Iterator for AuthorizedRowCursor<'_> {
         (0, (self.state != VertexScanState::Open).then_some(0))
     }
 }
-impl FusedIterator for AuthorizedRowCursor<'_> {}
-impl core::fmt::Debug for AuthorizedRowCursor<'_> {
+impl<Row> FusedIterator for AuthorizedRowCursor<'_, Row> {}
+impl<Row> core::fmt::Debug for AuthorizedRowCursor<'_, Row> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AuthorizedRowCursor")
             .field("state", &self.state)
@@ -385,6 +392,11 @@ fn plan_error(error: VertexScanBuildError) -> QueryError {
 fn compile(
     pattern: &PreparedGraphPattern<GraphValueRow>,
 ) -> Result<VertexScanPlan<GraphValueRow>, QueryError> {
+    admit_source_profile(pattern)?;
+    VertexScanPlan::compile(pattern.plan()).map_err(plan_error)
+}
+
+fn admit_source_profile(pattern: &PreparedGraphPattern<GraphValueRow>) -> Result<(), QueryError> {
     // This source exposes admitted probe topology, not edge payloads. Captured
     // edge/path operands remain outside its profile even if the native probe
     // compiler later grows them. Other admission belongs to that compiler.
@@ -396,7 +408,7 @@ fn compile(
     {
         return Err(plan_error(VertexScanBuildError { operator }));
     }
-    VertexScanPlan::compile(pattern.plan()).map_err(plan_error)
+    Ok(())
 }
 fn bind(
     prepared: &PreparedNativeRead,
@@ -459,7 +471,7 @@ fn probe_error(error: EdgeScanError<QueryError>) -> QueryError {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn open<'q, C: FnMut() -> u64>(
+fn open<'q, C: FnMut() -> u64, Plan, Row: 'q, Metadata>(
     view: &EmbeddedReadView,
     capability: &'q VerifiedCapability<'_>,
     clock: &'q mut C,
@@ -470,7 +482,10 @@ fn open<'q, C: FnMut() -> u64>(
     prepared: &AuthorizedPreparedRead,
     params: &GqlParameters,
     policy: GqlQueryPolicy,
-) -> Result<AuthorizedRowCursor<'q>, QueryError> {
+    bind_plan: impl FnOnce(&PreparedNativeRead, &GqlParameters, CommitSeq) -> Result<Plan, QueryError>,
+    build: impl FnOnce(Plan, &EmbeddedReadView, &'q QueryCx, Shared<'q>, GqlQueryPolicy)
+        -> Opened<'q, Row, Metadata>,
+) -> Opened<'q, Row, Metadata> {
     let now = clock();
     if now < *last_now_ms {
         return Err(QueryError::Authorization(
@@ -499,10 +514,20 @@ fn open<'q, C: FnMut() -> u64>(
             .bind_parameters(params)
             .map_err(selector_error)?;
         check_branch(&selected, branch)?;
-        bind(&prepared.native, selected.parameters(), view.frontier())
+        bind_plan(&prepared.native, selected.parameters(), view.frontier())
     })();
     execution.borrow_mut().checkpoint()?;
-    let (plan, at, columns) = selected?;
+    build(selected?, view, cx, execution, policy)
+}
+
+fn build_rows<'q>(
+    selected: (VertexScanPlan<GraphValueRow>, CommitSeq, Vec<String>),
+    view: &EmbeddedReadView,
+    cx: &'q QueryCx,
+    execution: Shared<'q>,
+    policy: GqlQueryPolicy,
+) -> Opened<'q, GraphValueRow, ()> {
+    let (plan, at, columns) = selected;
     let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
     let source = ScopedSource {
         inner,
@@ -521,13 +546,13 @@ fn open<'q, C: FnMut() -> u64>(
         let finished = cursor.state() != VertexScanState::Open;
         Ok((row, finished))
     });
-    Ok(AuthorizedRowCursor {
+    Ok((AuthorizedRowCursor {
         driver: Some(driver),
         guard: None,
         columns,
         snapshot_seq: at,
         state: VertexScanState::Open,
-    })
+    }, ()))
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
@@ -557,6 +582,22 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
         prepared: &AuthorizedPreparedRead,
         params: &GqlParameters,
     ) -> Result<AuthorizedRowCursor<'q>, QueryError> {
+        self.open_cursor(cx, prepared, params, bind, build_rows)
+            .map(|(cursor, ())| cursor)
+    }
+
+    // The same authenticated open/pin guard serves rows and aggregates. Each
+    // factory receives only the fixed view and live permit; none can obtain a
+    // Database, refresh a generation or independently authorize a source.
+    fn open_cursor<'q, Plan, Row: 'q, Metadata>(
+        &'q mut self,
+        cx: &'q QueryCx,
+        prepared: &AuthorizedPreparedRead,
+        params: &GqlParameters,
+        bind_plan: impl FnOnce(&PreparedNativeRead, &GqlParameters, CommitSeq) -> Result<Plan, QueryError>,
+        build: impl FnOnce(Plan, &EmbeddedReadView, &'q QueryCx, Shared<'q>, GqlQueryPolicy)
+            -> Opened<'q, Row, Metadata>,
+    ) -> Opened<'q, Row, Metadata> {
         let owner = &self.owner;
         let state = self.state.as_mut().ok_or(QueryError::Authorization(
             AuthorizationError::ExecutionStopped,
@@ -587,12 +628,14 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
             prepared,
             params,
             *policy,
+            bind_plan,
+            build,
         );
         match result {
-            Ok(mut cursor) => {
+            Ok((mut cursor, metadata)) => {
                 guard.armed = false;
                 cursor.guard = Some(guard);
-                Ok(cursor)
+                Ok((cursor, metadata))
             }
             Err(error) => {
                 let result = Err(error);
