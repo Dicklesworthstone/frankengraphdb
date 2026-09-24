@@ -604,3 +604,130 @@ fn final_rows_and_cumulative_allowances_still_refuse_at_inclusive_boundaries() {
         ));
     }
 }
+
+/// Prepare against the one-property catalog (`p` = key 1) the tests above use.
+fn prepare_p(text: &str) -> Result<PreparedGraphSet, crate::GraphSetTextError> {
+    PreparedGraphSetText::prepare(text, |kind, name| {
+        (kind == crate::GraphSymbolKind::Property && name == "p").then_some(
+            crate::GraphSymbol::Property(fgdb_delta_types::PropertyKeyId(1)),
+        )
+    })
+    .map(|prepared| prepared.bind_parameters(&GqlParameters::new()).unwrap())
+}
+
+/// Execute over two vertices with p(1) = 1 and p(2) = 2; the rows as a bag.
+fn over_two_vertices(prepared: &PreparedGraphSet) -> Vec<GraphValueRow> {
+    let (s1, s2) = (CanonicalScalar::Int(1), CanonicalScalar::Int(2));
+    let mut rows = prepared
+        .execute_governed(
+            policy(),
+            |pattern, remaining| {
+                pattern.plan().execute_governed_with_properties(
+                    2,
+                    [VId(1), VId(2)],
+                    [],
+                    |_, _| Ok::<_, usize>(true),
+                    |id, _| {
+                        Ok(match id.0 {
+                            1 => Some(&s1),
+                            2 => Some(&s2),
+                            _ => None,
+                        })
+                    },
+                    remaining,
+                    || Ok::<_, usize>(()),
+                )
+            },
+            || Ok::<_, usize>(()),
+        )
+        .unwrap()
+        .value;
+    rows.sort();
+    rows
+}
+
+#[test]
+fn leading_unwind_match_with_reads_graph_properties_beside_row_columns() {
+    // The first WITH after UNWIND..MATCH is the graph-to-row boundary: `n.p`
+    // reads a graph property there, `x` the leading row column.
+    let product = prepare_p("UNWIND [1, 2] AS x MATCH (n) WITH x, n.p AS p RETURN x, p").unwrap();
+    assert_eq!(
+        over_two_vertices(&product),
+        vec![
+            row(&[Some(1), Some(1)]),
+            row(&[Some(1), Some(2)]),
+            row(&[Some(2), Some(1)]),
+            row(&[Some(2), Some(2)]),
+        ]
+    );
+    // Differential: the WITH..WHERE form and the correlated MATCH form, which
+    // was already supported, describe the same bag.
+    let with_where = prepare_p(
+        "UNWIND [2, 1, 2] AS wanted MATCH (n) WITH wanted, n.p AS value WHERE wanted = value RETURN value, wanted",
+    )
+    .unwrap();
+    let correlated = prepare_p(
+        "UNWIND [2, 1, 2] AS wanted MATCH (n { p: wanted }) RETURN wanted AS value, wanted",
+    )
+    .unwrap();
+    let expected = over_two_vertices(&correlated);
+    assert_eq!(expected.len(), 3);
+    assert_eq!(over_two_vertices(&with_where), expected);
+    // Unaliased items take the column's own name, as at a MATCH-first WITH.
+    let named = prepare_p("UNWIND [1] AS x MATCH (n) WITH x, n.p RETURN x, p").unwrap();
+    assert_eq!(over_two_vertices(&named).len(), 2);
+}
+
+#[test]
+fn leading_unwind_match_with_distinct_deduplicates_the_projected_rows() {
+    let all = prepare_p("UNWIND [1, 1] AS x MATCH (n) WITH x, n.p AS p RETURN x, p").unwrap();
+    assert_eq!(
+        over_two_vertices(&all).len(),
+        4,
+        "control: two copies of each pair"
+    );
+    let distinct =
+        prepare_p("UNWIND [1, 1] AS x MATCH (n) WITH DISTINCT x, n.p AS p RETURN x, p").unwrap();
+    assert_eq!(
+        over_two_vertices(&distinct),
+        vec![row(&[Some(1), Some(1)]), row(&[Some(1), Some(2)])]
+    );
+}
+
+#[test]
+fn leading_unwind_match_with_refuses_malformed_neighbours() {
+    for (text, why) in [
+        (
+            "UNWIND [1] AS x MATCH (n) WITH n.p + 1 RETURN x",
+            "a computed item needs an alias",
+        ),
+        (
+            "UNWIND [1] AS x MATCH (n) WITH missing RETURN missing",
+            "an unknown name is not a column",
+        ),
+        (
+            "UNWIND [1] AS x MATCH (n) WITH x, n.p AS x RETURN x",
+            "two items cannot share an alias",
+        ),
+        (
+            "UNWIND [1] AS x MATCH (n) WITH x, n RETURN n.p",
+            "past the boundary only the projected row exists",
+        ),
+    ] {
+        assert!(prepare_p(text).is_err(), "{why}: {text}");
+    }
+}
+
+#[test]
+fn leading_unwind_match_with_star_carries_leading_columns_and_named_bindings() {
+    let star = prepare_p("UNWIND [1, 2] AS x MATCH (n) WITH * RETURN x").unwrap();
+    assert_eq!(
+        over_two_vertices(&star),
+        vec![
+            row(&[Some(1)]),
+            row(&[Some(1)]),
+            row(&[Some(2)]),
+            row(&[Some(2)]),
+        ]
+    );
+}

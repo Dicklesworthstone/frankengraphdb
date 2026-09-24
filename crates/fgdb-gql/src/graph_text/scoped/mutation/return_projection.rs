@@ -120,7 +120,64 @@ impl<'a> Parser<'a> {
                 let index = self.mutation_projection(&mut inputs, variable, Some(key))?;
                 bound_correlations.push((row, index));
             }
-            let pipeline = self.row_pipeline(schema)?;
+            // The first WITH is the graph-to-row boundary, exactly as it is
+            // for a statement that starts at MATCH: `n.p` there reads a graph
+            // property. Later stages see only the projected row.
+            let (projection, pipeline) = if self.is_word("WITH") {
+                let (outputs, distinct, at) =
+                    self.leading_with_head(&schema, width, &mut inputs)?;
+                let mut types: Vec<_> = schema[..width].iter().map(|(_, kind)| *kind).collect();
+                types.extend(inputs.iter().map(|input| {
+                    if input.property.is_none() {
+                        GraphSetColumnType::Vertex
+                    } else {
+                        GraphSetColumnType::Scalar
+                    }
+                }));
+                let next: pipeline::RowSchema<'a> = outputs
+                    .iter()
+                    .map(|(name, value)| {
+                        (*name, value.column_type(&types, &self.syntax.parameters))
+                    })
+                    .collect();
+                let mut pipeline = Vec::new();
+                if distinct {
+                    // Deduplicate the projected rows, not the graph child's.
+                    pipeline.push(ReadStageTemplate::Project {
+                        at,
+                        projection: next
+                            .iter()
+                            .enumerate()
+                            .map(|(index, (name, _))| ReadProjectionTemplate {
+                                name: name.text.to_owned(),
+                                value: ReadValueTemplate::Column(index),
+                            })
+                            .collect(),
+                        quantifier: crate::GraphSetQuantifier::Distinct,
+                    });
+                }
+                pipeline.extend(self.row_pipeline(next)?);
+                let projection = outputs
+                    .into_iter()
+                    .map(|(name, value)| ReadProjectionTemplate {
+                        name: name.text.to_owned(),
+                        value,
+                    })
+                    .collect();
+                (projection, pipeline)
+            } else {
+                let projection = (0..width + self.syntax.variables.len())
+                    .map(|index| ReadProjectionTemplate {
+                        name: if index < width {
+                            self.read_row_bindings[index].text.to_owned()
+                        } else {
+                            self.syntax.variables[index - width].text.to_owned()
+                        },
+                        value: ReadValueTemplate::Column(index),
+                    })
+                    .collect();
+                (projection, self.row_pipeline(schema)?)
+            };
             self.end()?;
             self.syntax.columns = inputs
                 .into_iter()
@@ -131,18 +188,7 @@ impl<'a> Parser<'a> {
                     alias: source.variable,
                 })
                 .collect();
-            let projection = Some(
-                (0..width + self.syntax.variables.len())
-                    .map(|index| ReadProjectionTemplate {
-                        name: if index < width {
-                            self.read_row_bindings[index].text.to_owned()
-                        } else {
-                            self.syntax.variables[index - width].text.to_owned()
-                        },
-                        value: ReadValueTemplate::Column(index),
-                    })
-                    .collect(),
-            );
+            let projection = Some(projection);
             return Ok(UnresolvedGraphText {
                 statement,
                 syntax: self.syntax,
@@ -178,6 +224,111 @@ impl<'a> Parser<'a> {
             .filter(|name| !name.text.starts_with(Self::ANONYMOUS_PREFIX))
             .chain(self.syntax.path)
             .chain(self.syntax.edges.iter().filter_map(|edge| edge.variable))
+    }
+
+    /// The first WITH after `UNWIND ... MATCH`: each item may read a leading
+    /// UNWIND column by name, or a MATCH variable or `variable.property`,
+    /// which becomes a hidden graph input column (the same
+    /// `mutation_projection` the correlations and the MATCH-first head use).
+    /// Column indices address the combined row: leading columns, then graph
+    /// inputs. Returns the named items, whether DISTINCT was requested, and
+    /// the WITH offset.
+    #[allow(clippy::type_complexity)]
+    fn leading_with_head(
+        &mut self,
+        schema: &[(Name<'a>, GraphSetColumnType)],
+        width: usize,
+        inputs: &mut Vec<Projection<'a>>,
+    ) -> Result<(Vec<(Name<'a>, ReadValueTemplate)>, bool, usize), GraphSetTextError> {
+        let at = self.current.at;
+        self.word("WITH")?;
+        let distinct = self.take_word("DISTINCT")?;
+        if !distinct {
+            self.take_word("ALL")?;
+        }
+        let leading: Vec<Name<'a>> = schema[..width].iter().map(|(name, _)| *name).collect();
+        let mut outputs = Vec::<(Name<'a>, ReadValueTemplate)>::new();
+        if self.take(b'*')? {
+            // Leading columns, then the same visible graph bindings as a
+            // MATCH-first `WITH *`; anonymous compiler slots stay private.
+            for (index, name) in leading.iter().enumerate() {
+                outputs.push((*name, ReadValueTemplate::Column(index)));
+            }
+            let visible: Vec<_> = self.visible_graph_bindings().collect();
+            for variable in visible {
+                let index = self.mutation_projection(inputs, variable, None)?;
+                outputs.push((variable, ReadValueTemplate::Column(width + index)));
+            }
+            return Ok((outputs, distinct, at));
+        }
+        loop {
+            self.capacity(
+                outputs.len(),
+                MAX_PATTERN_VERTICES,
+                crate::algebra::PatternLimitDimension::Columns,
+            )?;
+            let item_at = self.current.at;
+            let value = self.read_resolved_value(
+                &mut |parser| {
+                    let TokenKind::Word(word) = parser.current.kind else {
+                        return Ok(None);
+                    };
+                    if matches!(parser.lexer.clone().next()?.kind, TokenKind::Punct(b'(')) {
+                        return Ok(None);
+                    }
+                    let graph = parser.syntax.variables.iter().any(|v| v.text == word)
+                        || parser.syntax.path.is_some_and(|path| path.text == word)
+                        || parser
+                            .syntax
+                            .edges
+                            .iter()
+                            .any(|edge| edge.variable.is_some_and(|v| v.text == word));
+                    if graph {
+                        let variable = parser.any_variable()?;
+                        let property = if parser.take(b'.')? {
+                            Some(parser.name()?)
+                        } else {
+                            None
+                        };
+                        let index = parser.mutation_projection(inputs, variable, property)?;
+                        return Ok(Some(width + index));
+                    }
+                    if let Some(index) = leading.iter().position(|name| name.text == word) {
+                        parser.advance()?;
+                        return Ok(Some(index));
+                    }
+                    Ok(None)
+                },
+                0,
+            )?;
+            let alias = if self.take_word("AS")? {
+                self.name()?
+            } else if let ReadValueTemplate::Column(index) = &value {
+                if *index < width {
+                    leading[*index]
+                } else {
+                    let input = inputs[*index - width];
+                    input.property.unwrap_or(input.variable)
+                }
+            } else {
+                return Err(GraphSetTextError {
+                    offset: item_at,
+                    kind: GraphSetTextErrorKind::Expected("AS alias for a computed WITH value"),
+                });
+            };
+            if outputs.iter().any(|(name, _)| name.text == alias.text) {
+                return Err(error(
+                    alias.at,
+                    GraphPatternTextErrorKind::Build(PatternBuildError::DuplicateProjection),
+                )
+                .into());
+            }
+            outputs.push((alias, value));
+            if !self.take(b',')? {
+                break;
+            }
+        }
+        Ok((outputs, distinct, at))
     }
 
     /// Shared graph-to-row boundary. Exact grouped RETURN uses this same first
@@ -741,11 +892,8 @@ mod graph_scope_tests {
             "MATCH p = (a)-[:R]->{1,2}(b) UNWIND [1] AS value RETURN p, value",
             &[GraphSetColumnType::Path, GraphSetColumnType::Any],
         );
-        let prepared = PreparedGraphSetText::prepare(
-            "MATCH ()-[e:R]->() WITH * RETURN *",
-            symbols,
-        )
-        .unwrap();
+        let prepared =
+            PreparedGraphSetText::prepare("MATCH ()-[e:R]->() WITH * RETURN *", symbols).unwrap();
         assert_eq!(prepared.columns(), &["e".to_owned()]);
         assert_eq!(prepared.column_types(), &[GraphSetColumnType::Edge]);
         assert!(prepared.bind_parameters(&GqlParameters::new()).is_ok());
