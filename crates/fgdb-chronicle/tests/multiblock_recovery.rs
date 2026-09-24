@@ -3,7 +3,7 @@
 #[path = "support/multiblock.rs"]
 mod support;
 
-use fgdb_chronicle::symbol::SymbolRecord;
+use fgdb_chronicle::symbol::{SymbolError, SymbolRecord};
 use fgdb_chronicle::symbolize::{RecoveryTarget, SymbolizeError, decode_object, encode_object};
 use support::{DEK, Fixture, HEADER, KEY, KIND, namespace};
 
@@ -113,10 +113,14 @@ fn authenticated_conflicting_equations_and_foreign_blocks_fail_closed() {
         recover(&fixture, &records),
         Err(SymbolizeError::DecodeFailed)
     );
+    // A correctly MACed record naming a block past the object's partition is
+    // refused while it is authenticated: SymbolRecord::verify checks
+    // source_block against the descriptor's block count before anything else
+    // consumes it, so decode never reaches its own block lookup.
     record.source_block = 3;
     assert_eq!(
         recover(&fixture, &[record.serialize(&key)]),
-        Err(SymbolizeError::InvalidParameters)
+        Err(SymbolizeError::Symbol(SymbolError::InconsistentLengths))
     );
 }
 
