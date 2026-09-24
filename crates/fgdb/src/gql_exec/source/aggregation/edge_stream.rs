@@ -268,6 +268,23 @@ impl<V: Vfs + Clone> Database<V> {
     }
 }
 impl EmbeddedReadView {
+    /// Internal source authority for an already admitted immutable generation.
+    /// No index is traversed here. Restricted adapters must still enforce
+    /// their own capability on every root, incidence, endpoint and field read.
+    pub(crate) fn edge_scan_source<'q>(
+        &self,
+        cx: &'q QueryCx,
+        as_of: CommitSeq,
+    ) -> Result<SnapshotEdgeSource<'q>, ReadError> {
+        self.snapshot.check_frontier(as_of)?;
+        Ok(SnapshotEdgeSource {
+            view: self.clone(),
+            cx,
+            as_of,
+            after: None,
+        })
+    }
+
     pub fn stream_graph_edges_governed<'q>(
         &self,
         cx: &'q QueryCx,

@@ -1,6 +1,7 @@
 //! Completed aggregates from the existing masked source and native reducer.
 //! No per-row query, input bag, alternate accumulator, or privileged fallback.
 use super::*;
+use fgdb_gql::edge_stream::aggregate::EdgeAggregatePlan;
 use fgdb_gql::stream::aggregate::{
     VertexAggregateCursor, VertexAggregateError, VertexAggregatePlan,
 };
@@ -9,13 +10,34 @@ use fgdb_gql::{
     PreparedGraphAggregate,
 };
 
+#[path = "aggregate/edge.rs"]
+mod edge;
+
 struct Layout {
     slots: Vec<GraphAggregateTextSlot>,
     keys: Vec<String>,
     values: Vec<String>,
 }
+enum Plan {
+    Vertex(VertexAggregatePlan),
+    Edge(EdgeAggregatePlan),
+}
+impl Plan {
+    fn columns(&self) -> &[String] {
+        match self {
+            Self::Vertex(plan) => plan.columns(),
+            Self::Edge(plan) => plan.columns(),
+        }
+    }
+    fn key_columns(&self) -> &[String] {
+        match self {
+            Self::Vertex(plan) => plan.key_columns(),
+            Self::Edge(plan) => plan.key_columns(),
+        }
+    }
+}
 struct Bound {
-    plan: VertexAggregatePlan,
+    plan: Plan,
     at: CommitSeq,
     columns: Vec<String>,
     layout: Layout,
@@ -87,10 +109,21 @@ fn compiled(
     slots: &[GraphAggregateTextSlot],
     facade: crate::NativeReadClass,
 ) -> Result<Bound, QueryError> {
-    // The physical compiler retains every input and output clause. In
-    // particular it refuses relational/edge roots; no first-leaf extraction.
-    let plan = VertexAggregatePlan::compile(query).map_err(QueryError::AggregateStreamPlan)?;
-    admit_source_profile(query.input_pattern())?;
+    // Choose the source from the compiler-owned root, never by trial execution
+    // or a failed compilation. Each physical compiler retains every clause and
+    // rejects unsupported relational inputs rather than extracting a first leaf.
+    let plan = if matches!(
+        query.input_pattern().plan().operators().first(),
+        Some(GlaOperator::ScanEdges { .. })
+    ) {
+        Plan::Edge(
+            EdgeAggregatePlan::compile(query).map_err(QueryError::EdgeAggregateStreamPlan)?,
+        )
+    } else {
+        let plan = VertexAggregatePlan::compile(query).map_err(QueryError::AggregateStreamPlan)?;
+        admit_source_profile(query.input_pattern())?;
+        Plan::Vertex(plan)
+    };
     // Preserve compiler-owned RETURN ordinals without an extra value encoder.
     // Check the complete layout before any source can be opened.
     if columns.len() != slots.len()
@@ -207,6 +240,12 @@ fn build<'q>(
         columns,
         layout,
     } = bound;
+    let plan = match plan {
+        Plan::Edge(plan) => {
+            return edge::build(plan, at, columns, layout, view, cx, execution, policy);
+        }
+        Plan::Vertex(plan) => plan,
+    };
     // Includes exact historical-cut admission even when LIMIT/HAVING returns
     // no rows. The source owns the existing immutable generation, not a copy.
     let inner = view.vertex_scan_source(cx, at).map_err(QueryError::Read)?;
@@ -240,12 +279,16 @@ fn build<'q>(
 }
 
 impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> {
-    /// Open a vertex-rooted aggregate under this session's fixed capability.
+    /// Open a vertex- or fixed-edge-rooted aggregate under this session's capability.
     /// Plain, temporal and supported computed-input native definitions retain
     /// grouping, argument DISTINCT, collections, HAVING, output expressions,
     /// DISTINCT, order and pages through the existing physical aggregate plan.
-    /// Its predicates can use the same scoped anonymous existence probes as
-    /// stream(). Masking precedes expressions and grouping, not final delivery.
+    /// Predicates can use scoped anonymous existence probes. Edge roots and
+    /// connected fixed-edge joins additionally admit captured path/edge values
+    /// and masked edge properties through the native physical plan. Every
+    /// transit endpoint is scoped before traversal. The kernel's canonical
+    /// child-order proof is still required for COLLECT. Masking precedes
+    /// expressions and grouping, not final delivery.
     ///
     /// Authentication/owner/branch/profile admission happens before source reads.
     /// No candidates are read until next(). The first pull completes the source
@@ -259,8 +302,9 @@ impl<R: GraphSymbolResolver, C: FnMut() -> u64> AuthorizedReadSession<'_, R, C> 
     /// delivery/credential failure can follow earlier complete rows. Expiry,
     /// retirement or host-clock unwind closes the same session as stream().
     ///
-    /// Unsupported edge/relational/source-free roots and unsafe probe payload
-    /// shapes refuse with no eager fallback, including LIMIT 0. This borrows the
+    /// Unsupported relational/source-free roots, variable-length outer joins,
+    /// optional/nested scopes and unsafe probe payload shapes refuse with no
+    /// eager fallback, including LIMIT 0. This borrows the
     /// session and QueryCx, not the writer or prepared template. It remains
     /// thread-local; no Send, external-memory or physical noninterference claim.
     pub fn stream_aggregate<'q>(

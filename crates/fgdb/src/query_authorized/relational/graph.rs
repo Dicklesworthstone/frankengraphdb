@@ -3,6 +3,7 @@
 
 use super::*;
 use fgdb_gql::PreparedGraphAggregate;
+use fgdb_gql::algebra::ValueProjection;
 
 pub(super) fn graph_at<Clock: FnMut() -> u64>(
     snapshot: &Snapshot,
@@ -19,6 +20,9 @@ pub(super) fn graph_at<Clock: FnMut() -> u64>(
     if query.input_relation().is_none()
         && query.input_projection().is_none()
         && !query.input_pattern().plan().requires_identified_edges()
+        && query.input_pattern().value_columns().iter().all(|column| {
+            matches!(column, ValueProjection::Vertex { .. } | ValueProjection::Property { .. })
+        })
     {
         return visit_at(snapshot, at, query, scope, execution, policy);
     }
