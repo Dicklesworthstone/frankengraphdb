@@ -652,12 +652,21 @@ impl PreparedNativeRead {
                 Ok(values(prepared.columns().to_vec(), result.value))
             }
             Self::PipelineAggregate(prepared) => {
-                let query = prepared
-                    .bind_parameters(params)
-                    .map_err(QueryError::PipelineText)?;
-                let result = db
-                    .execute_graph_aggregate_governed_at(cx, &query, as_of, budget)
-                    .map_err(QueryError::Aggregate)?;
+                // Same lane selection as the read-view and transaction hosts:
+                // from the admitted definition, never from a failed execution.
+                let result = if prepared.is_source_free() {
+                    let query = prepared
+                        .bind_relation_parameters(params)
+                        .map_err(QueryError::PipelineText)?;
+                    db.execute_graph_set_aggregate_governed_at(cx, &query, as_of, budget)
+                        .map_err(QueryError::Aggregate)?
+                } else {
+                    let query = prepared
+                        .bind_parameters(params)
+                        .map_err(QueryError::PipelineText)?;
+                    db.execute_graph_aggregate_governed_at(cx, &query, as_of, budget)
+                        .map_err(QueryError::Aggregate)?
+                };
                 Ok(aggregates(
                     prepared.columns().to_vec(),
                     prepared.output_slots(),
