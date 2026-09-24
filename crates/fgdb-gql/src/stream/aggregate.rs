@@ -255,11 +255,17 @@ impl<S: VertexScanSource, F> VertexAggregateCursor<S, F> {
                 }
                 last = Some(vid);
                 meter.record().map_err(lift)?;
-                let row =
-                    flatten(source.vertex(vid, &mut |event| meter.event(event))).map_err(lift)?;
-                let Some(row) = row else {
+                let record = flatten(source.vertex_record(vid, &mut |event| meter.event(event)))
+                    .map_err(lift)?;
+                let Some(record) = record else {
                     continue;
                 };
+                // One source-admitted image lives through this occurrence's
+                // predicates, computed columns and aggregate updates. A scoped
+                // source may own masked fields and refuse raw vertex(); never
+                // bypass that boundary for grouping, DISTINCT or collections.
+                // The borrowed default adds no events and copies no payload.
+                let row = record.as_row();
                 let accepted = {
                     let metered = std::cell::RefCell::new(&mut *meter);
                     self.plan
@@ -983,3 +989,6 @@ mod computed_tests;
 
 #[cfg(test)]
 mod output_tests;
+
+#[cfg(test)]
+mod record_tests;
