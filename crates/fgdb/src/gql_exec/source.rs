@@ -318,6 +318,25 @@ mod persistent_index_tests {
 type History = IndexMap<(CommitSeq, usize, usize), ()>;
 type Incidence = IndexMap<EId, ()>;
 
+/// The `(block, row)` of the latest statement in `history` created at or
+/// before `as_of`. Keys order `(created_at, block, row)`, so among one
+/// statement's restatements the later block wins, as in the merge.
+fn latest_statement(history: &History, as_of: CommitSeq) -> Option<(usize, usize)> {
+    let mut low = 0;
+    let mut high = history.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if history.at(middle).expect("history rank").0.0 <= as_of {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low.checked_sub(1)
+        .and_then(|at| history.at(at))
+        .map(|(&(_, block, row), _)| (block, row))
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct AdjacencyIndex {
     histories: IndexMap<EId, History>,
@@ -391,6 +410,56 @@ impl AdjacencyIndex {
         self.work
     }
 
+    /// The distinct live neighbours of `endpoint` over `relation` at `as_of`,
+    /// ascending: destinations for `Forward`, sources for `Reverse`.
+    ///
+    /// Every block in an admitted generation already passed the whole-history
+    /// validator at publication or reopen, so this resolves each incident
+    /// identity by the same rule the merge applies (latest statement at or
+    /// before `as_of`, later block wins) without re-collapsing the history:
+    /// O(incident identities · log versions) instead of O(history).
+    pub(crate) fn neighbours_at(
+        &self,
+        blocks: &[Vec<AdjacencyEntry>],
+        endpoint: VId,
+        relation: RelationId,
+        direction: fgdb_gql::algebra::GlaDirection,
+        as_of: CommitSeq,
+    ) -> Vec<VId> {
+        use fgdb_gql::algebra::GlaDirection;
+        let mut found = std::collections::BTreeSet::new();
+        let mut control = |_: SourceEvent| Ok::<(), core::convert::Infallible>(());
+        let Ok(()) = self.visit(
+            blocks,
+            endpoint,
+            direction,
+            as_of,
+            &mut control,
+            |entry, _, _, _| {
+                if entry.relation == relation {
+                    found.insert(match direction {
+                        GlaDirection::Reverse => entry.src,
+                        _ => entry.dst,
+                    });
+                }
+                Ok(())
+            },
+        );
+        found.into_iter().collect()
+    }
+
+    /// The `(block, row)` of `eid`'s statement visible at `as_of`, if any —
+    /// the point-lookup face of the same resolution rule.
+    pub(crate) fn statement_at(
+        &self,
+        blocks: &[Vec<AdjacencyEntry>],
+        eid: EId,
+        as_of: CommitSeq,
+    ) -> Option<(usize, usize)> {
+        let (block, row) = latest_statement(self.histories.get(&eid)?, as_of)?;
+        blocks[block][row].visible_at(as_of).then_some((block, row))
+    }
+
     /// Visit the surviving versions of every incident identity at `as_of`,
     /// merging both faces in EId order; self loops appear once.
     fn visit<'a, E, C>(
@@ -440,18 +509,7 @@ impl AdjacencyIndex {
                 b.next();
             }
             let history = self.histories.get(id).expect("incidence has a history");
-            let mut low = 0;
-            let mut high = history.len();
-            while low < high {
-                let middle = low + (high - low) / 2;
-                if history.at(middle).expect("history rank").0.0 <= as_of {
-                    low = middle + 1;
-                } else {
-                    high = middle;
-                }
-            }
-            let Some((&(_, block, row), _)) = low.checked_sub(1).and_then(|at| history.at(at))
-            else {
+            let Some((block, row)) = latest_statement(history, as_of) else {
                 continue;
             };
             let entry = &blocks[block][row];

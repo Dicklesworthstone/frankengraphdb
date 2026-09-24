@@ -190,10 +190,7 @@ use fgdb_delta_types::{
 };
 use fgdb_strata::edge_props::BlockProps;
 use fgdb_strata::manifest::{ManifestRecord, ManifestVersion, encode_manifest, records_of};
-use fgdb_strata::root::{
-    BlockRef, PatchRef, RootError, merge_all_edges_with_props, merge_edge_with_props,
-    merge_in_neighbours, merge_neighbours,
-};
+use fgdb_strata::root::{BlockRef, PatchRef, RootError, merge_all_edges_with_props};
 use fgdb_strata::store::{BlockStore, PublishReceipts, StoreError};
 use fgdb_strata::vertex::{VertexPatchRows, merge_all_vertices, merge_vertex};
 use fgdb_strata::writer::{BlockWriter, WriteError as BlockWriteError};
@@ -1537,8 +1534,17 @@ impl Snapshot {
         relation: RelationId,
         as_of: CommitSeq,
     ) -> Result<Vec<VId>, ReadError> {
+        // The generation's blocks passed the whole-history validator when they
+        // were published or reopened; the maintained index answers from that
+        // admitted state instead of re-collapsing every block per read.
         self.check_frontier(as_of)?;
-        Ok(merge_neighbours(&self.blocks, src, relation, as_of)?)
+        Ok(self.adjacency_index.neighbours_at(
+            &self.blocks,
+            src,
+            relation,
+            fgdb_gql::algebra::GlaDirection::Forward,
+            as_of,
+        ))
     }
 
     fn in_neighbours_at(
@@ -1548,15 +1554,29 @@ impl Snapshot {
         as_of: CommitSeq,
     ) -> Result<Vec<VId>, ReadError> {
         self.check_frontier(as_of)?;
-        Ok(merge_in_neighbours(&self.blocks, dst, relation, as_of)?)
+        Ok(self.adjacency_index.neighbours_at(
+            &self.blocks,
+            dst,
+            relation,
+            fgdb_gql::algebra::GlaDirection::Reverse,
+            as_of,
+        ))
     }
 
     fn edge_at(&self, eid: EId, as_of: CommitSeq) -> Result<Option<EdgeRecord>, ReadError> {
         self.check_frontier(as_of)?;
-        Ok(
-            merge_edge_with_props(&self.blocks, &self.block_props, eid, as_of)?
-                .map(|(entry, props)| EdgeRecord { entry, props }),
-        )
+        Ok(self
+            .adjacency_index
+            .statement_at(&self.blocks, eid, as_of)
+            .map(|(block, row)| EdgeRecord {
+                entry: self.blocks[block][row],
+                props: self
+                    .block_props
+                    .get(block)
+                    .and_then(Option::as_ref)
+                    .map(|props| props.props_of(row))
+                    .unwrap_or_default(),
+            }))
     }
 
     fn vertex_at(&self, vid: VId, as_of: CommitSeq) -> Result<Option<VertexRow>, ReadError> {
@@ -5300,6 +5320,140 @@ mod version_transcript_laws {
                     .expect("encodes")
             ),
         );
+    }
+}
+
+/// Point reads answer from the maintained adjacency index. These laws hold it
+/// to the whole-history merge — the reference semantics — for every vertex,
+/// relation, direction, EId and sequence of a randomized history with
+/// parallel edges, tombstones, content-version successors and compaction.
+#[cfg(test)]
+mod point_read_index_laws {
+    use super::*;
+    use fgdb_strata::root::{merge_edge_with_props, merge_in_neighbours, merge_neighbours};
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 >> 33) as usize) % bound.max(1)
+        }
+    }
+
+    fn assert_index_matches_merge(db: &Database<MemVfs>, vids: &[VId], eids: &[EId], label: &str) {
+        let snapshot = &db.snapshot;
+        let relations = [RelationId(1), RelationId(2), RelationId(3)];
+        for as_of in 0..=snapshot.frontier.0 {
+            let as_of = CommitSeq(as_of);
+            for &vid in vids {
+                for relation in relations {
+                    assert_eq!(
+                        snapshot.neighbours_at(vid, relation, as_of).unwrap(),
+                        merge_neighbours(&snapshot.blocks, vid, relation, as_of).unwrap(),
+                        "{label}: neighbours({vid:?}, {relation:?}) at {as_of:?}"
+                    );
+                    assert_eq!(
+                        snapshot.in_neighbours_at(vid, relation, as_of).unwrap(),
+                        merge_in_neighbours(&snapshot.blocks, vid, relation, as_of).unwrap(),
+                        "{label}: in_neighbours({vid:?}, {relation:?}) at {as_of:?}"
+                    );
+                }
+            }
+            for &eid in eids {
+                let expected =
+                    merge_edge_with_props(&snapshot.blocks, &snapshot.block_props, eid, as_of)
+                        .unwrap()
+                        .map(|(entry, props)| EdgeRecord { entry, props });
+                assert_eq!(
+                    snapshot.edge_at(eid, as_of).unwrap(),
+                    expected,
+                    "{label}: edge({eid:?}) at {as_of:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn index_point_reads_equal_the_whole_history_merge_at_every_sequence() {
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().unwrap();
+        let root = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let contexts = fgdb_types::context::PurposeContexts::narrow_runtime_root(&root);
+        let cx = contexts.commit();
+        for seed in [1_u64, 0x5eed, 0xfeed_beef] {
+            let keys = DatabaseKeys::new(
+                [0x5a; 32],
+                DatabaseSecurityNamespaceId([0x77; 32]),
+                [0x3c; 32],
+            );
+            let mut db = runtime.block_on(Database::open_memory(&cx, keys)).unwrap();
+            let mut random = Lcg(seed);
+            let mut vids: Vec<VId> = (1..=12).map(VId).collect();
+            let mut initial = WriteBatch::new(RelationId(1));
+            for &vid in &vids {
+                initial.create_vertex(vid, vec![], vec![]);
+            }
+            runtime.block_on(db.write(&cx, initial)).unwrap();
+            // (eid, relation) of every live edge; every EId ever created.
+            let mut live: Vec<(EId, RelationId)> = Vec::new();
+            let mut eids: Vec<EId> = Vec::new();
+            let mut next_eid = 1_u128;
+            for commit in 1..=60_u64 {
+                let relation = RelationId(1 + commit % 3);
+                let mut batch = WriteBatch::new(relation);
+                let vid = VId(100 + u128::from(commit));
+                batch.create_vertex(vid, vec![], vec![]);
+                for _ in 0..3 {
+                    // Endpoints may repeat, so parallel edges and self loops occur.
+                    let src = vids[random.below(vids.len())];
+                    let dst = vids[random.below(vids.len())];
+                    let eid = EId(next_eid);
+                    next_eid += 1;
+                    batch.add_edge(
+                        eid,
+                        src,
+                        dst,
+                        vec![(PropertyKeyId(1), CanonicalScalar::Int(commit as i64))],
+                    );
+                    live.push((eid, relation));
+                    eids.push(eid);
+                }
+                let same: Vec<usize> = (0..live.len())
+                    .filter(|&at| live[at].1 == relation && live[at].0.0 < next_eid - 3)
+                    .collect();
+                if same.len() >= 2 {
+                    let doomed = same[random.below(same.len())];
+                    batch.delete_edge(live[doomed].0);
+                    let kept: Vec<usize> =
+                        same.iter().copied().filter(|&at| at != doomed).collect();
+                    let touched = live[kept[random.below(kept.len())]].0;
+                    batch.set_edge_property(
+                        touched,
+                        PropertyKeyId(2),
+                        Some(CanonicalScalar::Int(-(commit as i64))),
+                    );
+                    live.remove(doomed);
+                }
+                runtime.block_on(db.write(&cx, batch)).unwrap();
+                vids.push(vid);
+                if commit == 30 {
+                    runtime.block_on(db.compact(&cx)).unwrap();
+                    assert_index_matches_merge(
+                        &db,
+                        &vids,
+                        &eids,
+                        &format!("seed {seed:#x} after compaction"),
+                    );
+                }
+            }
+            assert_index_matches_merge(&db, &vids, &eids, &format!("seed {seed:#x} final"));
+            assert!(
+                db.verify_snapshot_indexes().unwrap(),
+                "maintained index drifted from a rebuild"
+            );
+        }
     }
 }
 
