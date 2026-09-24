@@ -15,6 +15,8 @@ use std::cell::RefCell;
 
 #[path = "query_beacon/resident.rs"]
 mod resident;
+#[path = "query_beacon/graph.rs"]
+pub(crate) mod graph;
 
 pub(crate) type Options = ReadOptions<PropertyKeyId, LabelId>;
 type Cancel = Box<asupersync::error::Error>;
@@ -91,10 +93,32 @@ pub(crate) fn build(
     options: &Options,
     config: IndexConfig,
     work: &RefCell<impl WorkControl>,
+    scan: Scan<'_>,
+    admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
+    label_allowed: impl FnMut(LabelId) -> bool,
+    property_allowed: impl FnMut(PropertyKeyId) -> bool,
+) -> Result<BeaconIndex, BeaconError> {
+    build_selected(
+        snapshot, at, options, config, work, scan, admit, label_allowed,
+        property_allowed, |_| Ok(()),
+    )
+}
+
+/// Observe the exact selected corpus after historical, authorization, label
+/// and staging admission. Graph retrieval uses this seam to admit transit
+/// vertices without a second scan or a differently filtered source domain.
+#[allow(clippy::too_many_arguments)]
+fn build_selected(
+    snapshot: &Snapshot,
+    at: CommitSeq,
+    options: &Options,
+    config: IndexConfig,
+    work: &RefCell<impl WorkControl>,
     mut scan: Scan<'_>,
     mut admit: impl FnMut(&VertexRow) -> Result<bool, BeaconError>,
     mut label_allowed: impl FnMut(LabelId) -> bool,
     mut property_allowed: impl FnMut(PropertyKeyId) -> bool,
+    mut selected: impl FnMut(&VertexRow) -> Result<(), BeaconError>,
 ) -> Result<BeaconIndex, BeaconError> {
     let mut scratch = 0usize;
     let mut source_work = |event| match &mut scan {
@@ -145,6 +169,7 @@ pub(crate) fn build(
                 resource: "vertex staging allocation",
                 limit,
             })?;
+        selected(row)?;
         rows.push(row);
         Ok(())
     })?;
