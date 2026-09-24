@@ -124,6 +124,18 @@ impl<'a> Parser<'a> {
                     ReadStageTemplate::Filter { at, code },
                     &mut depth,
                 )?;
+                // A page written after WHERE applies to the filtered rows.
+                // Keep any earlier page on its input: moving either page across
+                // this filter changes which occurrences survive.
+                if let Some(page) = self.row_page(&schema)? {
+                    append_stage(&mut stages, page, &mut depth)?;
+                }
+                // UNWIND starts a new row stage, just as WITH does. Let the
+                // next iteration consume it without accepting a second WHERE
+                // or page on this same completed stage.
+                if self.is_word("UNWIND") {
+                    continue;
+                }
             }
             let at = self.current.at;
             if !self.take_word("WITH")? {
@@ -475,4 +487,108 @@ pub(super) fn bind_filter(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::algebra::{GraphValue, GraphValueRow};
+    use crate::{
+        GqlParameterType, GqlParameters, GqlQueryError, GqlQueryPolicy, PreparedGraphSetText,
+    };
+    use fgdb_types::CanonicalScalar;
+
+    fn execute(statement: &str) -> Vec<GraphValueRow> {
+        PreparedGraphSetText::prepare(statement, |_, _| None)
+            .unwrap()
+            .bind_parameters(&GqlParameters::new())
+            .unwrap()
+            .execute_governed(
+                GqlQueryPolicy::new(10_000, 10_000, 1_000_000, 1_000_000),
+                |_, _| Err::<_, GqlQueryError<usize, usize>>(GqlQueryError::Source(1)),
+                || Ok::<_, usize>(()),
+            )
+            .unwrap()
+            .value
+    }
+
+    fn row(value: i64) -> GraphValueRow {
+        GraphValueRow::from_owned_values(vec![GraphValue::Scalar(CanonicalScalar::Int(value))])
+    }
+
+    #[test]
+    fn with_where_pages_preserve_written_filter_boundaries() {
+        assert_eq!(
+            execute(
+                "UNWIND [5, 1, 4, 2, 3] AS n WITH n WHERE n > 2 \
+                 ORDER BY n DESC SKIP 1 LIMIT 1 RETURN n"
+            ),
+            vec![row(4)]
+        );
+        assert_eq!(
+            execute(
+                "UNWIND [3, 1, 2] AS n WITH n ORDER BY n LIMIT 1 \
+                 WHERE n > 1 ORDER BY n DESC LIMIT 1 RETURN n"
+            ),
+            Vec::<GraphValueRow>::new()
+        );
+        assert_eq!(
+            execute(
+                "UNWIND [3, 1, 2] AS n WITH n WHERE n > 1 \
+                 ORDER BY n LIMIT 1 RETURN n"
+            ),
+            vec![row(2)]
+        );
+    }
+
+    #[test]
+    fn filtered_pages_continue_into_unwind_and_renamed_with_stages() {
+        assert_eq!(
+            execute(
+                "UNWIND [1, 2, 3] AS n WITH n WHERE n >= 2 ORDER BY n DESC LIMIT 1 \
+                 UNWIND [n, n + 10] AS m WITH m AS value WHERE value > 3 \
+                 ORDER BY value LIMIT 1 RETURN value"
+            ),
+            vec![row(13)]
+        );
+        assert_eq!(
+            execute(
+                "UNWIND [1, 2] AS n WITH n WHERE n > 1 \
+                 UNWIND [n] AS value RETURN value"
+            ),
+            vec![row(2)]
+        );
+    }
+
+    #[test]
+    fn post_filter_pages_use_only_current_aliases_and_typed_parameters() {
+        let prepared = PreparedGraphSetText::prepare(
+            "UNWIND [3, 1] AS n WITH n AS kept WHERE kept > 0 \
+             ORDER BY kept SKIP $skip LIMIT $count RETURN kept",
+            |_, _| None,
+        )
+        .unwrap();
+        let parameters = prepared.parameter_schema();
+        assert_eq!(parameters.len(), 2);
+        assert_eq!(parameters[0].name, "skip");
+        assert_eq!(parameters[1].name, "count");
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter.parameter_type == GqlParameterType::UInt64)
+        );
+        let statement = "UNWIND [1] AS n WITH n AS kept WHERE kept > 0 ORDER BY n RETURN kept";
+        let error = PreparedGraphSetText::prepare(statement, |_, _| None).unwrap_err();
+        assert_eq!(error.offset, statement.find("n RETURN").unwrap());
+    }
+
+    #[test]
+    fn duplicate_filters_and_pages_require_a_new_stage() {
+        for statement in [
+            "UNWIND [1] AS n WITH n WHERE n > 0 WHERE n < 2 RETURN n",
+            "UNWIND [1] AS n WITH n WHERE n > 0 ORDER BY n ORDER BY n RETURN n",
+            "UNWIND [1] AS n WITH n WHERE n > 0 LIMIT 1 LIMIT 1 RETURN n",
+        ] {
+            assert!(PreparedGraphSetText::prepare(statement, |_, _| None).is_err());
+        }
+    }
 }
