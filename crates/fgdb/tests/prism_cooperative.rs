@@ -868,7 +868,13 @@ fn live_refusal(error: FnxSealedExecutionError, expected: usize) {
 #[test]
 fn cooperative_live_guards_span_every_checkpoint_without_changing_successful_results() {
     let runtime = RuntimeBuilder::new().build().unwrap();
-    let root = runtime.request_cx_with_budget(Budget::INFINITE);
+    // A stall guard, not a performance bound. This test once looped through
+    // ~9,300 refusing checkpoints for over 30 minutes and stalled a whole test
+    // census. Under a deadline, a runaway loop fails at its next checkpoint.
+    let clock = runtime.request_cx_with_budget(Budget::INFINITE);
+    let root = runtime.request_cx_with_budget(
+        Budget::INFINITE.with_timeout(clock.now(), std::time::Duration::from_secs(600)),
+    );
     let contexts = PurposeContexts::narrow_runtime_root(&root);
     runtime.block_on(async {
         let cx = contexts.query();
