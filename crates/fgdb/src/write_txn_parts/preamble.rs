@@ -23,6 +23,12 @@ pub(crate) struct IdentityAllocation {
 /// Failure to prepare an atomic write or stage/finish a bounded transaction.
 #[derive(Debug)]
 pub enum WriteTxnError {
+    /// Capability admission, target/field scope, or a live execution fence.
+    Authorization(fgdb_warden::Error),
+    /// A scoped mutation refused before publication. Native preparation/source
+    /// diagnostics can contain protected identities or CAS values and do not
+    /// escape this boundary. Never used for an admitted commit's outcome.
+    AuthorizedMutationRefused,
     NoPreparedWrite,
     Finished,
     /// The supplied database is not the opened handle that began this txn.
@@ -63,6 +69,8 @@ pub enum WriteTxnError {
 impl core::fmt::Display for WriteTxnError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Authorization(source) => write!(formatter, "write authorization refused: {source}"),
+            Self::AuthorizedMutationRefused => formatter.write_str("authorized mutation refused"),
             Self::NoPreparedWrite => formatter.write_str("write transaction has no batch"),
             Self::Finished => formatter.write_str("write transaction is already finished"),
             Self::WrongDatabase => {
@@ -100,18 +108,20 @@ impl core::fmt::Display for WriteTxnError {
 impl core::error::Error for WriteTxnError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            Self::Authorization(source) => Some(source),
             Self::Interrupted(source) => Some(source.as_ref()),
             Self::Read(source) => Some(source),
             Self::Gql(source) => Some(source),
             Self::Write(source) => Some(source),
-            Self::NoPreparedWrite
+            Self::AuthorizedMutationRefused
+            | Self::NoPreparedWrite
             | Self::Finished
             | Self::WrongDatabase
             | Self::UnknownSavepoint
             | Self::SavepointLimit { .. }
-            | Self::RelationMismatch { .. }
             | Self::SnapshotAdvanced { .. }
             | Self::AtomicRelationConflict { .. }
+            | Self::RelationMismatch { .. }
             | Self::AtomicOrdinalOverflow
             | Self::IdentityExhausted
             | Self::UnsupportedAtomicMutation => None,
