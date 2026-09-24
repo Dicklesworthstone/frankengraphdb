@@ -16,12 +16,17 @@ use fgdb_warden::{
 };
 use std::collections::BTreeSet;
 
+// This file is loaded through #[path] from write_txn.rs, so its children resolve
+// like mod.rs children (in write_txn_parts/). Name the real location.
+#[path = "authorized/graph.rs"]
 mod graph;
 
 struct Workspace(Option<WriteTxn>);
 impl Workspace {
     fn transaction(&mut self) -> &mut WriteTxn {
-        self.0.as_mut().expect("workspace owns its transaction until drop")
+        self.0
+            .as_mut()
+            .expect("workspace owns its transaction until drop")
     }
 }
 impl Drop for Workspace {
@@ -117,7 +122,11 @@ impl Fields {
     }
 }
 fn vertex_image(row: &VertexRow) -> VertexWriteImage<'_> {
-    VertexWriteImage { id: row.vid, labels: &row.labels, properties: &row.props }
+    VertexWriteImage {
+        id: row.vid,
+        labels: &row.labels,
+        properties: &row.props,
+    }
 }
 fn denied() -> WriteTxnError {
     WriteTxnError::Authorization(Error::ScopeDenied)
@@ -136,18 +145,20 @@ fn stage_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
     execution: &mut Execution<'_, '_, Clock>,
 ) -> Result<(), WriteTxnError> {
     let (vid, creates, fields) = match &row {
-        PendingRow::Vertex { vid, labels, props, .. } => (
+        PendingRow::Vertex {
+            vid, labels, props, ..
+        } => (
             *vid,
             true,
             execution.fields(labels.iter().copied(), props.iter().map(|(key, _)| *key))?,
         ),
-        PendingRow::SetLabel { vid, label, .. } => (
-            *vid, false, execution.fields([*label], [])?,
-        ),
+        PendingRow::SetLabel { vid, label, .. } => (*vid, false, execution.fields([*label], [])?),
         PendingRow::SetProperty { vid, key, .. }
-        | PendingRow::CompareAndSet { elem: ElementId::Vertex(vid), key, .. } => (
-            *vid, false, execution.fields([], [*key])?,
-        ),
+        | PendingRow::CompareAndSet {
+            elem: ElementId::Vertex(vid),
+            key,
+            ..
+        } => (*vid, false, execution.fields([], [*key])?),
         _ => return Err(WriteTxnError::AuthorizedMutationRefused),
     };
     let before = execution.vertex(transaction, database, vid)?;
@@ -160,7 +171,9 @@ fn stage_vertex<V: Vfs + Clone, Clock: FnMut() -> u64>(
         return Err(denied());
     } else if let PendingRow::Vertex { labels, .. } = &row {
         execution.checkpoint()?;
-        execution.permit.charge_nodes_at((execution.clock)(), 1)
+        execution
+            .permit
+            .charge_nodes_at((execution.clock)(), 1)
             .map_err(WriteTxnError::Authorization)?;
         if !execution.permit.predicates().allows_vertex(labels) {
             return Err(denied());
@@ -181,10 +194,19 @@ fn stage_native<V: Vfs + Clone, Clock: FnMut() -> u64>(
     // Native staging replays the entire intent prefix. Charge that logical
     // input work, not merely one unit for a growing quadratic preparation.
     let prefix = u64::try_from(transaction.staged.len())
-        .ok().and_then(|len| len.checked_add(1))
+        .ok()
+        .and_then(|len| len.checked_add(1))
         .ok_or(WriteTxnError::Authorization(Error::TooLarge))?;
     execution.work(prefix)?;
-    transaction.write(database, WriteBatch { relation, rows: vec![row] }).map_err(redacted)
+    transaction
+        .write(
+            database,
+            WriteBatch {
+                relation,
+                rows: vec![row],
+            },
+        )
+        .map_err(redacted)
 }
 
 fn stage<V: Vfs + Clone, Clock: FnMut() -> u64>(
@@ -199,15 +221,17 @@ fn stage<V: Vfs + Clone, Clock: FnMut() -> u64>(
         PendingRow::Vertex { .. }
         | PendingRow::SetLabel { .. }
         | PendingRow::SetProperty { .. }
-        | PendingRow::CompareAndSet { elem: ElementId::Vertex(_), .. } => {
-            stage_vertex(transaction, database, relation, row, execution)
-        }
+        | PendingRow::CompareAndSet {
+            elem: ElementId::Vertex(_),
+            ..
+        } => stage_vertex(transaction, database, relation, row, execution),
         PendingRow::Edge { .. }
         | PendingRow::DeleteEdge { .. }
         | PendingRow::SetEdgeProperty { .. }
-        | PendingRow::CompareAndSet { elem: ElementId::Edge(_), .. } => {
-            graph::stage_edge(transaction, database, relation, row, execution)
-        }
+        | PendingRow::CompareAndSet {
+            elem: ElementId::Edge(_),
+            ..
+        } => graph::stage_edge(transaction, database, relation, row, execution),
         PendingRow::DeleteVertex { .. } => {
             graph::delete_vertex(transaction, database, relation, row, execution)
         }
@@ -257,30 +281,45 @@ impl<V: Vfs + Clone> Database<V> {
             return Err(WriteTxnError::Authorization(Error::WrongAuthority));
         }
         let now = clock();
-        let verified = authority.verify_at(token, branch, now)
+        let verified = authority
+            .verify_at(token, branch, now)
             .map_err(WriteTxnError::Authorization)?;
-        let permit = verified.begin_write_at(branch, now)
+        let permit = verified
+            .begin_write_at(branch, now)
             .map_err(WriteTxnError::Authorization)?;
-        commit_cx.with_restriction_async(async {
-            let mut execution = Execution { cx: commit_cx, permit, clock };
-            execution.checkpoint()?;
-            if batch.is_empty() {
-                return Err(WriteError::EmptyBatch.into());
-            }
-            let mut workspace = Workspace(Some(self.begin(txn_cx)?));
-            for row in batch.rows {
+        commit_cx
+            .with_restriction_async(async {
+                let mut execution = Execution {
+                    cx: commit_cx,
+                    permit,
+                    clock,
+                };
                 execution.checkpoint()?;
-                stage(workspace.transaction(), self, batch.relation, row, &mut execution)?;
-            }
-            let completion = workspace.transaction().complete_controlled(
-                self, commit_cx, None, true, || execution.checkpoint(),
-            ).await?;
-            match completion {
-                EmbeddedTxnCompletion::WriteCommitted { commit_seq } => Ok(commit_seq),
-                EmbeddedTxnCompletion::ReadClosed { .. } => {
-                    unreachable!("write-only completion refuses before read close")
+                if batch.is_empty() {
+                    return Err(WriteError::EmptyBatch.into());
                 }
-            }
-        }).await
+                let mut workspace = Workspace(Some(self.begin(txn_cx)?));
+                for row in batch.rows {
+                    execution.checkpoint()?;
+                    stage(
+                        workspace.transaction(),
+                        self,
+                        batch.relation,
+                        row,
+                        &mut execution,
+                    )?;
+                }
+                let completion = workspace
+                    .transaction()
+                    .complete_controlled(self, commit_cx, None, true, || execution.checkpoint())
+                    .await?;
+                match completion {
+                    EmbeddedTxnCompletion::WriteCommitted { commit_seq } => Ok(commit_seq),
+                    EmbeddedTxnCompletion::ReadClosed { .. } => {
+                        unreachable!("write-only completion refuses before read close")
+                    }
+                }
+            })
+            .await
     }
 }
