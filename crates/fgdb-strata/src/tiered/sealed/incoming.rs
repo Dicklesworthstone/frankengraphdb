@@ -162,6 +162,55 @@ impl SealedPartition {
             checkpoint()
         })
     }
+
+    /// Build the same source-bound incoming index with cooperative scheduling.
+    /// The quantum bounds checkpointed steps (collection, comparisons, sift
+    /// levels, group walks and chunks), not CPU time or allocator latency.
+    /// Each indivisible EF construction contains at most 256 locators. The
+    /// caller supplies its runtime yield; an immediately ready future opts out
+    /// of scheduling fairness. No detached task or new source authority exists.
+    pub async fn incoming_index_cooperative<Y, F>(
+        &self,
+        cx: &QueryCx,
+        limits: IncomingIndexLimits,
+        quantum: std::num::NonZeroUsize,
+        yield_now: Y,
+    ) -> Result<SealedIncomingIndex, SealedError>
+    where
+        Y: FnMut() -> F,
+        F: std::future::Future<Output = ()>,
+    {
+        self.incoming_index_cooperative_with_checkpoint(
+            cx, limits, quantum, yield_now, || Ok::<(), SealedError>(()),
+        ).await
+    }
+
+    /// Keep QueryCx-first typed live checks across every build stage and both
+    /// sides of each suspension. The future exclusively owns temporary refs,
+    /// heap-sort progress and unexposed output; cancel/refusal/drop releases it
+    /// without changing the original image or publishing a partial index.
+    pub async fn incoming_index_cooperative_with_checkpoint<E, Y, F>(
+        &self,
+        cx: &QueryCx,
+        limits: IncomingIndexLimits,
+        quantum: std::num::NonZeroUsize,
+        yield_now: Y,
+        checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<SealedIncomingIndex, E>
+    where
+        E: From<SealedError>,
+        Y: FnMut() -> F,
+        F: std::future::Future<Output = ()>,
+    {
+        cx.with_restriction_async(async {
+            let mut control = construction::Cooperative {
+                cx, fuel: SealedScanBudget::new(quantum.get()), quantum,
+                yield_now, guard: checkpoint,
+            };
+            construction::build(self, limits, &mut control).await
+        }).await
+    }
+
 }
 
 impl SealedIncomingIndex {
@@ -178,117 +227,7 @@ impl SealedIncomingIndex {
         limits: IncomingIndexLimits,
         checkpoint: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Self, E> {
-        checkpoint()?;
-        let count = source.image.incidences;
-        check_limit("incoming incidences", count, limits.max_incidences)?;
-        let scratch = mul(count, size_of::<IncidenceRef>())?;
-        check_limit(
-            "incoming workspace bytes",
-            scratch,
-            limits.max_workspace_bytes,
-        )?;
-        let mut refs = reserved(count)?;
-        let mut position = 0u64;
-        for row in &source.image.rows {
-            checkpoint()?;
-            for at in 0..row.len() {
-                checkpoint()?;
-                let (entry, _) = row
-                    .incidence(&source.image, at)
-                    .ok_or(SealedError::NonCanonical)?;
-                refs.push(IncidenceRef {
-                    destination: entry.dst,
-                    relation: entry.relation,
-                    position,
-                });
-                position = position.checked_add(1).ok_or(SealedError::SizeOverflow)?;
-            }
-        }
-        if refs.len() != count {
-            return Err(SealedError::NonCanonical.into());
-        }
-        sort_controlled(&mut refs, checkpoint)?;
-
-        // Preflight every requested output allocation before retaining any
-        // directory or compressed chunk. Scratch remains live through encoding.
-        let mut row_count = 0usize;
-        let mut chunk_count = 0usize;
-        let mut payload_bytes = 0usize;
-        let mut start = 0;
-        while start < refs.len() {
-            checkpoint()?;
-            let end = group_end(&refs, start, checkpoint)?;
-            row_count = add(row_count, 1)?;
-            check_limit("incoming rows", row_count, limits.max_rows)?;
-            for values in refs[start..end].chunks(CHUNK_ENTRIES) {
-                checkpoint()?;
-                chunk_count = add(chunk_count, 1)?;
-                payload_bytes = add(
-                    payload_bytes,
-                    ef_bytes(
-                        values.len(),
-                        values.last().ok_or(SealedError::NonCanonical)?.position,
-                    )?,
-                )?;
-            }
-            start = end;
-        }
-        let resident = add(
-            payload_bytes,
-            add(
-                mul(row_count, size_of::<IncomingRow>())?,
-                mul(chunk_count, size_of::<EliasFano>())?,
-            )?,
-        )?;
-        let workspace = add(scratch, resident)?;
-        check_limit(
-            "incoming workspace bytes",
-            workspace,
-            limits.max_workspace_bytes,
-        )?;
-        let mut rows = reserved(row_count)?;
-        let mut chunks = reserved(chunk_count)?;
-        let mut values = [0u64; CHUNK_ENTRIES];
-        start = 0;
-        while start < refs.len() {
-            checkpoint()?;
-            let end = group_end(&refs, start, checkpoint)?;
-            let first_chunk = chunks.len();
-            for entries in refs[start..end].chunks(CHUNK_ENTRIES) {
-                checkpoint()?;
-                for (at, entry) in entries.iter().enumerate() {
-                    values[at] = entry.position;
-                }
-                chunks.push(
-                    EliasFano::try_new(&values[..entries.len()], EntryLimit::new(CHUNK_ENTRIES))
-                        .map_err(SealedError::EliasFano)?,
-                );
-                checkpoint()?;
-            }
-            rows.push(IncomingRow {
-                destination: refs[start].destination,
-                relation: refs[start].relation,
-                first_chunk,
-                end_chunk: chunks.len(),
-                incidences: end - start,
-            });
-            start = end;
-        }
-        checkpoint()?;
-        Ok(Self {
-            source: source.clone(),
-            index: Arc::new(Index {
-                rows,
-                chunks,
-                stats: IncomingIndexStats {
-                    rows: row_count,
-                    incidences: count,
-                    chunks: chunk_count,
-                    charged_resident_bytes: resident,
-                    charged_workspace_bytes: workspace,
-                },
-            }),
-        })
+        construction::build_sync(source, limits, checkpoint)
     }
 
     pub fn source(&self) -> &SealedPartition {
@@ -387,78 +326,12 @@ impl SealedIncomingIndex {
     }
 }
 
-fn group_end<E>(
-    refs: &[IncidenceRef],
-    start: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), E>,
-) -> Result<usize, E> {
-    let key = (refs[start].destination, refs[start].relation);
-    let mut end = start + 1;
-    while end < refs.len() && (refs[end].destination, refs[end].relation) == key {
-        if (end - start) % CHUNK_ENTRIES == 0 {
-            checkpoint()?;
-        }
-        end += 1;
-    }
-    Ok(end)
-}
-
-// Constant-scratch heapsort. No allocation or uninterruptible whole-population
-// sort hides between the surrounding checkpoints. Input keys are total/unique.
-fn sort_controlled<T: Ord, E>(
-    values: &mut [T],
-    checkpoint: &mut impl FnMut() -> Result<(), E>,
-) -> Result<(), E> {
-    let mut ordered = true;
-    for pair in values.windows(2) {
-        checkpoint()?;
-        if pair[0] > pair[1] {
-            ordered = false;
-        }
-    }
-    if ordered {
-        return Ok(());
-    }
-    for root in (0..values.len() / 2).rev() {
-        sift(values, root, checkpoint)?;
-    }
-    for end in (1..values.len()).rev() {
-        checkpoint()?;
-        values.swap(0, end);
-        sift(&mut values[..end], 0, checkpoint)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 fn sort<T: Ord>(
     values: &mut [T],
     checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
 ) -> Result<(), SealedError> {
-    sort_controlled(values, checkpoint)
-}
-
-fn sift<T: Ord, E>(
-    values: &mut [T],
-    mut root: usize,
-    checkpoint: &mut impl FnMut() -> Result<(), E>,
-) -> Result<(), E> {
-    while root < values.len() / 2 {
-        checkpoint()?;
-        let left = 2 * root + 1;
-        let right = left + 1;
-        let child = if right < values.len() && values[right] > values[left] {
-            right
-        } else {
-            left
-        };
-        if values[root] >= values[child] {
-            break;
-        }
-        values.swap(root, child);
-        root = child;
-    }
-    Ok(())
+    construction::sort_sync(values, checkpoint)
 }
 
 /// Allocation-free incoming cursor. Errors are terminal and cannot be confused
@@ -619,3 +492,274 @@ mod tests;
 #[cfg(test)]
 #[path = "checkpoint_tests.rs"]
 mod checkpoint_tests;
+
+// One construction algorithm, two scheduling policies. Rust's future retains
+// the exact loop/sift/group/chunk positions; no handwritten restart or rescans.
+// Keep this executing source inside incoming.rs so the existing Prism source
+// certificate includes BOTH drivers, not just an include/module declaration.
+mod construction {
+    use super::*;
+    use std::future::Future;
+    use std::num::NonZeroUsize;
+    use std::task::{Context, Poll, Waker};
+
+    pub(super) trait Checkpoint {
+        type Error: From<SealedError>;
+        async fn check(&mut self) -> Result<(), Self::Error>;
+    }
+
+    struct Immediate<G>(G);
+    impl<E, G> Checkpoint for Immediate<G>
+    where
+        E: From<SealedError>,
+        G: FnMut() -> Result<(), E>,
+    {
+        type Error = E;
+        async fn check(&mut self) -> Result<(), E> { (self.0)() }
+    }
+
+    pub(super) struct Cooperative<'a, Y, G> {
+        pub(super) cx: &'a QueryCx,
+        pub(super) fuel: SealedScanBudget,
+        pub(super) quantum: NonZeroUsize,
+        pub(super) yield_now: Y,
+        pub(super) guard: G,
+    }
+    impl<E, Y, F, G> Checkpoint for Cooperative<'_, Y, G>
+    where
+        E: From<SealedError>,
+        Y: FnMut() -> F,
+        F: Future<Output = ()>,
+        G: FnMut() -> Result<(), E>,
+    {
+        type Error = E;
+        async fn check(&mut self) -> Result<(), E> {
+            self.cx.checkpoint().map_err(SealedError::Interrupted)?;
+            (self.guard)()?;
+            if !self.fuel.spend() {
+                (self.yield_now)().await;
+                // Reauthorize BEFORE refuelling or touching any source/output.
+                self.cx.checkpoint().map_err(SealedError::Interrupted)?;
+                (self.guard)()?;
+                self.fuel = SealedScanBudget::new(self.quantum.get());
+                self.fuel.spend();
+            }
+            Ok(())
+        }
+    }
+
+    // Only called on the closed Immediate-control algorithm. There is no
+    // executor, blocking wait, retry loop or external future on this path.
+    // An accidental new suspension fails closed and drops all temporary state.
+    fn immediate<T, E: From<SealedError>>(
+        future: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, E> {
+        let mut future = std::pin::pin!(future);
+        match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err(SealedError::NonCanonical.into()),
+        }
+    }
+
+    pub(super) fn build_sync<E: From<SealedError>>(
+        source: &SealedPartition,
+        limits: IncomingIndexLimits,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<SealedIncomingIndex, E> {
+        immediate(build(source, limits, &mut Immediate(checkpoint)))
+    }
+
+    #[cfg(test)]
+    pub(super) fn sort_sync<T: Ord>(
+        values: &mut [T],
+        checkpoint: &mut impl FnMut() -> Result<(), SealedError>,
+    ) -> Result<(), SealedError> {
+        immediate(sort(values, &mut Immediate(checkpoint)))
+    }
+
+    pub(super) async fn build<C: Checkpoint>(
+        source: &SealedPartition,
+        limits: IncomingIndexLimits,
+        control: &mut C,
+    ) -> Result<SealedIncomingIndex, C::Error> {
+        control.check().await?;
+        let count = source.image.incidences;
+        check_limit("incoming incidences", count, limits.max_incidences)?;
+        let scratch = mul(count, size_of::<IncidenceRef>())?;
+        check_limit(
+            "incoming workspace bytes",
+            scratch,
+            limits.max_workspace_bytes,
+        )?;
+        let mut refs = reserved(count)?;
+        let mut position = 0u64;
+        for row in &source.image.rows {
+            control.check().await?;
+            for at in 0..row.len() {
+                control.check().await?;
+                let (entry, _) = row
+                    .incidence(&source.image, at)
+                    .ok_or(SealedError::NonCanonical)?;
+                refs.push(IncidenceRef {
+                    destination: entry.dst,
+                    relation: entry.relation,
+                    position,
+                });
+                position = position.checked_add(1).ok_or(SealedError::SizeOverflow)?;
+            }
+        }
+        if refs.len() != count {
+            return Err(SealedError::NonCanonical.into());
+        }
+        sort(&mut refs, control).await?;
+
+        // Preflight every requested output allocation before retaining any
+        // directory or compressed chunk. Scratch remains live through encoding.
+        let mut row_count = 0usize;
+        let mut chunk_count = 0usize;
+        let mut payload_bytes = 0usize;
+        let mut start = 0;
+        while start < refs.len() {
+            control.check().await?;
+            let end = group_end(&refs, start, control).await?;
+            row_count = add(row_count, 1)?;
+            check_limit("incoming rows", row_count, limits.max_rows)?;
+            for values in refs[start..end].chunks(CHUNK_ENTRIES) {
+                control.check().await?;
+                chunk_count = add(chunk_count, 1)?;
+                payload_bytes = add(
+                    payload_bytes,
+                    ef_bytes(
+                        values.len(),
+                        values.last().ok_or(SealedError::NonCanonical)?.position,
+                    )?,
+                )?;
+            }
+            start = end;
+        }
+        let resident = add(
+            payload_bytes,
+            add(
+                mul(row_count, size_of::<IncomingRow>())?,
+                mul(chunk_count, size_of::<EliasFano>())?,
+            )?,
+        )?;
+        let workspace = add(scratch, resident)?;
+        check_limit(
+            "incoming workspace bytes",
+            workspace,
+            limits.max_workspace_bytes,
+        )?;
+        let mut rows = reserved(row_count)?;
+        let mut chunks = reserved(chunk_count)?;
+        let mut values = [0u64; CHUNK_ENTRIES];
+        start = 0;
+        while start < refs.len() {
+            control.check().await?;
+            let end = group_end(&refs, start, control).await?;
+            let first_chunk = chunks.len();
+            for entries in refs[start..end].chunks(CHUNK_ENTRIES) {
+                control.check().await?;
+                for (at, entry) in entries.iter().enumerate() {
+                    values[at] = entry.position;
+                }
+                chunks.push(
+                    EliasFano::try_new(&values[..entries.len()], EntryLimit::new(CHUNK_ENTRIES))
+                        .map_err(SealedError::EliasFano)?,
+                );
+                control.check().await?;
+            }
+            rows.push(IncomingRow {
+                destination: refs[start].destination,
+                relation: refs[start].relation,
+                first_chunk,
+                end_chunk: chunks.len(),
+                incidences: end - start,
+            });
+            start = end;
+        }
+        control.check().await?;
+        Ok(SealedIncomingIndex {
+            source: source.clone(),
+            index: Arc::new(Index {
+                rows,
+                chunks,
+                stats: IncomingIndexStats {
+                    rows: row_count,
+                    incidences: count,
+                    chunks: chunk_count,
+                    charged_resident_bytes: resident,
+                    charged_workspace_bytes: workspace,
+                },
+            }),
+        })
+    }
+
+    async fn group_end<C: Checkpoint>(
+        refs: &[IncidenceRef],
+        start: usize,
+        control: &mut C,
+    ) -> Result<usize, C::Error> {
+        let key = (refs[start].destination, refs[start].relation);
+        let mut end = start + 1;
+        while end < refs.len() && (refs[end].destination, refs[end].relation) == key {
+            control.check().await?;
+            end += 1;
+        }
+        Ok(end)
+    }
+
+    // Constant-scratch heapsort. No allocation or uninterruptible whole-population
+    // sort hides between the surrounding checkpoints. Input keys are total/unique.
+    async fn sort<T: Ord, C: Checkpoint>(
+        values: &mut [T],
+        control: &mut C,
+    ) -> Result<(), C::Error> {
+        let mut ordered = true;
+        for pair in values.windows(2) {
+            control.check().await?;
+            if pair[0] > pair[1] {
+                ordered = false;
+            }
+        }
+        if ordered {
+            return Ok(());
+        }
+        for root in (0..values.len() / 2).rev() {
+            sift(values, root, control).await?;
+        }
+        for end in (1..values.len()).rev() {
+            control.check().await?;
+            values.swap(0, end);
+            sift(&mut values[..end], 0, control).await?;
+        }
+        Ok(())
+    }
+
+    async fn sift<T: Ord, C: Checkpoint>(
+        values: &mut [T],
+        mut root: usize,
+        control: &mut C,
+    ) -> Result<(), C::Error> {
+        while root < values.len() / 2 {
+            control.check().await?;
+            let left = 2 * root + 1;
+            let right = left + 1;
+            let child = if right < values.len() && values[right] > values[left] {
+                right
+            } else {
+                left
+            };
+            if values[root] >= values[child] {
+                break;
+            }
+            values.swap(root, child);
+            root = child;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "incoming_cooperative_tests.rs"]
+mod cooperative_tests;
