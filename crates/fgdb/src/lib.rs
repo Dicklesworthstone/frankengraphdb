@@ -3403,9 +3403,12 @@ impl<V: Vfs + Clone> Database<V> {
         // FG-INV-09's recompute-from-registered-bytes check is a re-READ law
         // and still runs on every path that reads capsules back (open,
         // recovery, the replica probe); this path never re-reads, it folds the
-        // bytes it just made durable. Fold-then-swap: a failure leaves
-        // `self.writer` at the pre-commit fold exactly as a rebuild failure
-        // leaves the snapshot stale — reopen rebuilds from the stream.
+        // bytes it just made durable. The retained writer is MOVED into the
+        // fold, not cloned (a clone copies every sealed block and live row, so
+        // it grew with history): the handle is fenced below before the first
+        // fold operation, every reader of `self.writer` requires a Healthy
+        // handle, and recovery reopens from the stream, so a failure never
+        // exposes the partially folded writer.
         let frontier = marker_ref.commit_seq;
         let mut recovery = RecoveryRequired {
             durable_frontier: frontier,
@@ -3427,7 +3430,14 @@ impl<V: Vfs + Clone> Database<V> {
             capsule.template_digest.0,
             CommittedMarker::attest(marker_ref, cx),
         );
-        let mut next_delta_index = self.snapshot.delta_index.clone();
+        // The delta index and statement versions are TAKEN from the fenced
+        // snapshot, not cloned (a clone copied every retained batch and version
+        // on every commit). The handle has been fenced since before this fold,
+        // and `make_mut` copies only a snapshot a pinned read view still
+        // shares, so that view keeps its own unchanged generation.
+        let previous = Arc::make_mut(&mut self.snapshot);
+        let mut next_delta_index = std::mem::take(&mut previous.delta_index);
+        let mut new_versions = std::mem::take(&mut previous.versions);
         next_delta_index
             .insert(batch)
             .map_err(|error| WriteError::CommittedNeedsRecovery {
@@ -3438,9 +3448,9 @@ impl<V: Vfs + Clone> Database<V> {
                 }),
             })?;
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        let mut folded = self.writer.clone();
+        let mut folded =
+            std::mem::replace(&mut self.writer, BlockWriter::new(GRAPH, BRANCH, PARTITION));
         let mut next_birth_ordinal = self.snapshot.next_birth_ordinal;
-        let mut new_versions = self.snapshot.versions.clone();
         let mut touched: std::collections::BTreeSet<ElementId> = std::collections::BTreeSet::new();
         for coordinate in template.coordinate_entries() {
             if (coordinate.graph, coordinate.branch) != (GRAPH, BRANCH) {
@@ -3497,9 +3507,8 @@ impl<V: Vfs + Clone> Database<V> {
                     error,
                 }),
             })?;
-        let (root, blocks, patches) = folded
-            .clone()
-            .publish(self.keys.block_keys(), frontier)
+        let root = folded
+            .publish_in_place(self.keys.block_keys(), frontier)
             .map_err(|error| WriteError::CommittedNeedsRecovery {
                 recovery,
                 source: Box::new(RebuildError::Fold {
@@ -3507,9 +3516,30 @@ impl<V: Vfs + Clone> Database<V> {
                     error,
                 }),
             })?;
+        let (blocks, patches) = (folded.sealed(), folded.sealed_patches());
         // The immutable prefix remains memoized. New block, hosted-property,
         // and vertex objects share publication authority and one directory
         // barrier; no receipt escapes before the entire data batch completes.
+        // An object these receipts already hold was verified and admitted
+        // under its identity, so it is not re-hashed here; every other sealed
+        // object, including any an earlier publish left behind, still takes
+        // the full verified path.
+        let unpublished_blocks: Vec<&fgdb_strata::writer::SealedBlock> = blocks
+            .iter()
+            .filter(|block| {
+                !self
+                    .receipts
+                    .holds(fgdb_strata::DeltaBlockVersion(block.block_id))
+            })
+            .collect();
+        let unpublished_patches: Vec<&fgdb_strata::writer::SealedPatch> = patches
+            .iter()
+            .filter(|patch| {
+                !self
+                    .receipts
+                    .holds_patch(fgdb_strata::vertex::VertexPatchVersion(patch.patch_id))
+            })
+            .collect();
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::PublishEdgeBlocks);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
         let mut publication = self
@@ -3519,7 +3549,7 @@ impl<V: Vfs + Clone> Database<V> {
                 recovery,
                 source: Box::new(RebuildError::from(error)),
             })?;
-        for block in &blocks {
+        for block in unpublished_blocks {
             publication
                 .put_verified(
                     cx,
@@ -3538,7 +3568,7 @@ impl<V: Vfs + Clone> Database<V> {
         recovery.failed_stage = DerivedPublicationStage::PublishVertexPatches;
         self.state = DatabaseState::NeedsAuthoritativeRecovery(recovery);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        for patch in &patches {
+        for patch in unpublished_patches {
             publication
                 .put_patch_verified(cx, &patch.bytes)
                 .await
@@ -3608,24 +3638,33 @@ impl<V: Vfs + Clone> Database<V> {
         // fsynced. The encode→address→fsync→decode round trip rebuild's doc
         // demands still happens — over the in-memory bytes the disk now holds —
         // and `incremental_snapshot.rs` pins that a from-scratch reopen derives
-        // this same root and adjacency. Decode failures refuse here, before the
-        // old snapshot is disturbed (fold-then-swap, as above).
+        // this same root and adjacency. The handle stays fenced until the swap.
+        //
+        // The retained writer carries every sealed object as an unchanged
+        // prefix. Replacement writers (compaction and recovery) rebuild from
+        // their replacement objects instead; coordinates never cross writers.
+        // So the previous decoded blocks and patches are kept in place and only
+        // this publication's suffix is decoded, and the root's references pair
+        // with the writer's sealed objects by position. Nothing here rebuilds
+        // an identity map over every object of the partition.
+        assert!(root.blocks.starts_with(&self.snapshot.refs));
+        assert!(root.vertex_patches.starts_with(&self.snapshot.patch_refs));
+        assert_eq!(root.blocks.len(), blocks.len());
+        assert_eq!(root.vertex_patches.len(), patches.len());
+        let (block_prefix, patch_prefix) =
+            (self.snapshot.refs.len(), self.snapshot.patch_refs.len());
         self.mark_recovery_stage(&mut recovery, DerivedPublicationStage::RefreshEdgeSnapshot);
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        let mut fresh: std::collections::BTreeMap<
-            ObjectId,
-            (Vec<AdjacencyEntry>, Option<BlockProps>),
-        > = std::collections::BTreeMap::new();
-        let carried: std::collections::BTreeSet<ObjectId> =
-            self.snapshot.refs.iter().map(|r| r.block_id).collect();
-        for reference in &root.blocks {
-            if carried.contains(&reference.block_id) || fresh.contains_key(&reference.block_id) {
-                continue;
-            }
-            let sealed = blocks
-                .iter()
-                .find(|block| block.block_id == reference.block_id)
-                .expect("every reference in a publish's root names a block that publish returned");
+        let mut fresh: Vec<(Vec<AdjacencyEntry>, Option<BlockProps>)> =
+            Vec::with_capacity(root.blocks.len() - block_prefix);
+        for (reference, sealed) in root.blocks[block_prefix..]
+            .iter()
+            .zip(&blocks[block_prefix..])
+        {
+            assert_eq!(
+                reference.block_id, sealed.block_id,
+                "a publish's root names its sealed blocks in order"
+            );
             let (entries, hosted) = fgdb_strata::decode_block_with_properties(&sealed.bytes)
                 .map_err(|error| WriteError::CommittedNeedsRecovery {
                     recovery,
@@ -3657,38 +3696,20 @@ impl<V: Vfs + Clone> Database<V> {
                 }
                 None => None,
             };
-            fresh.insert(reference.block_id, (entries, props));
+            fresh.push((entries, props));
         }
         // A pinned read view may still own the previous Arc. `make_mut`
         // preserves it through copy-on-write; without a live view the Arc is
         // unique and this remains the old zero-copy move-forward path.
         let previous = Arc::make_mut(&mut self.snapshot);
-        let mut carried: std::collections::BTreeMap<
-            ObjectId,
-            (Vec<AdjacencyEntry>, Option<BlockProps>),
-        > = previous
-            .refs
-            .iter()
-            .map(|r| r.block_id)
-            .zip(
-                std::mem::take(&mut previous.blocks)
-                    .into_iter()
-                    .zip(std::mem::take(&mut previous.block_props)),
-            )
-            .collect();
-        let (decoded, decoded_props): (Vec<Vec<AdjacencyEntry>>, Vec<Option<BlockProps>>) = root
-            .blocks
-            .iter()
-            .map(|reference| {
-                carried
-                    .remove(&reference.block_id)
-                    .or_else(|| fresh.remove(&reference.block_id))
-                    .expect(
-                        "every root reference resolves: EIds are spend-once, so one \
-                         publication cannot name the same block identity twice",
-                    )
-            })
-            .unzip();
+        let mut decoded = std::mem::take(&mut previous.blocks);
+        let mut decoded_props = std::mem::take(&mut previous.block_props);
+        assert_eq!(decoded.len(), block_prefix);
+        assert_eq!(decoded_props.len(), block_prefix);
+        for (entries, props) in fresh {
+            decoded.push(entries);
+            decoded_props.push(props);
+        }
         // The identical carry-forward rule for the vertex half: an unchanged
         // patch reference means an unchanged decoded patch, and new patches
         // decode from the exact bytes `put_patch_verified` just fsynced.
@@ -3697,26 +3718,17 @@ impl<V: Vfs + Clone> Database<V> {
             DerivedPublicationStage::RefreshVertexSnapshot,
         );
         Self::fail_publication_if_requested(recovery, publication_failure)?;
-        let mut fresh_patches: std::collections::BTreeMap<ObjectId, VertexPatchRows> =
-            std::collections::BTreeMap::new();
-        let carried_patch_ids: std::collections::BTreeSet<ObjectId> = self
-            .snapshot
-            .patch_refs
+        let mut fresh_patches: Vec<VertexPatchRows> =
+            Vec::with_capacity(root.vertex_patches.len() - patch_prefix);
+        for (reference, sealed) in root.vertex_patches[patch_prefix..]
             .iter()
-            .map(|r| r.patch_id)
-            .collect();
-        for reference in &root.vertex_patches {
-            if carried_patch_ids.contains(&reference.patch_id)
-                || fresh_patches.contains_key(&reference.patch_id)
-            {
-                continue;
-            }
-            let sealed = patches
-                .iter()
-                .find(|patch| patch.patch_id == reference.patch_id)
-                .expect("every reference in a publish's root names a patch that publish returned");
-            fresh_patches.insert(
-                reference.patch_id,
+            .zip(&patches[patch_prefix..])
+        {
+            assert_eq!(
+                reference.patch_id, sealed.patch_id,
+                "a publish's root names its sealed patches in order"
+            );
+            fresh_patches.push(
                 match self.keys.scalar_resolver.as_deref() {
                     Some(resolver) => {
                         fgdb_strata::vertex::decode_patch_with_resolver(&sealed.bytes, resolver)
@@ -3730,30 +3742,9 @@ impl<V: Vfs + Clone> Database<V> {
             );
         }
         let previous = Arc::make_mut(&mut self.snapshot);
-        let mut carried_patches: std::collections::BTreeMap<ObjectId, VertexPatchRows> = previous
-            .patch_refs
-            .iter()
-            .map(|r| r.patch_id)
-            .zip(std::mem::take(&mut previous.patches))
-            .collect();
-        let decoded_patches = root
-            .vertex_patches
-            .iter()
-            .map(|reference| {
-                carried_patches
-                    .remove(&reference.patch_id)
-                    .or_else(|| fresh_patches.remove(&reference.patch_id))
-                    .expect(
-                        "every root patch reference resolves: VIds are spend-once, so one \
-                         publication cannot name the same patch identity twice",
-                    )
-            })
-            .collect::<Vec<VertexPatchRows>>();
-        // The retained writer carries every sealed object as an unchanged
-        // prefix. Replacement writers (compaction and recovery) rebuild from
-        // their replacement objects instead; coordinates never cross writers.
-        assert!(root.blocks.starts_with(&self.snapshot.refs));
-        assert!(root.vertex_patches.starts_with(&self.snapshot.patch_refs));
+        let mut decoded_patches = std::mem::take(&mut previous.patches);
+        assert_eq!(decoded_patches.len(), patch_prefix);
+        decoded_patches.extend(fresh_patches);
         self.writer = folded;
         self.snapshot = Arc::new(Snapshot {
             adjacency_index: Arc::new(

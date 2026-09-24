@@ -1994,6 +1994,11 @@ impl PublishReceipts {
     pub fn holds(&self, id: DeltaBlockVersion) -> bool {
         self.spans.contains_key(&id.0)
     }
+
+    /// The vertex-patch counterpart of [`Self::holds`].
+    pub fn holds_patch(&self, id: VertexPatchVersion) -> bool {
+        self.patch_spans.contains_key(&id.0)
+    }
 }
 
 enum PendingAdmission {

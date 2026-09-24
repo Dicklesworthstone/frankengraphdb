@@ -1477,6 +1477,20 @@ impl BlockWriter {
         keys: (&[u8; 32], DatabaseSecurityNamespaceId),
         published_at: CommitSeq,
     ) -> Result<(PartitionRoot, Vec<SealedBlock>, Vec<SealedPatch>), WriteError> {
+        let root = self.publish_in_place(keys, published_at)?;
+        Ok((root, self.sealed, self.sealed_patches))
+    }
+
+    /// [`Self::publish`] for a retained writer: seal whatever remains and
+    /// return the root, leaving the blocks and patches readable through
+    /// [`Self::sealed`] and [`Self::sealed_patches`]. Both only ever append,
+    /// so a caller can tell this publication's new objects from their
+    /// positions. A failed seal leaves the staged rows exactly as they were.
+    pub fn publish_in_place(
+        &mut self,
+        keys: (&[u8; 32], DatabaseSecurityNamespaceId),
+        published_at: CommitSeq,
+    ) -> Result<PartitionRoot, WriteError> {
         self.seal(keys)?;
         self.seal_vertices(keys)?;
         let root = PartitionRoot {
@@ -1492,7 +1506,7 @@ impl BlockWriter {
                 .collect(),
         };
         validate_root(&root).map_err(WriteError::Root)?;
-        Ok((root, self.sealed, self.sealed_patches))
+        Ok(root)
     }
 }
 
