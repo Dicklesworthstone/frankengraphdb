@@ -377,6 +377,23 @@ pub trait VertexScanSource {
         Err(crate::edge_stream::EdgeExpansionSourceError::Unavailable)
     }
 
+    /// Relation-aware incidence admission for the checked probe expansion.
+    /// The source may refuse a denied relation before opening any incidence
+    /// directory. The default preserves the original lookup and event order;
+    /// candidate edges are still rechecked for their actual relation/visibility.
+    /// A missing allowed index must remain Unavailable, never an empty domain.
+    /// This does not authorize vertex(), vertex_record(), or probe_edge().
+    fn next_probe_edge_for_relation<C>(
+        &self,
+        endpoint: VId,
+        _relation: fgdb_delta_types::RelationId,
+        direction: crate::algebra::GlaDirection,
+        after: Option<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, crate::edge_stream::EdgeExpansionSourceError<Self::Error, C>> {
+        self.next_probe_edge(endpoint, direction, after, control)
+    }
+
     /// Resolve one probe candidate using the same admitted generation. This
     /// second optional seam also refuses by default: implementing incidence
     /// alone cannot turn an unavailable edge reader into NOT EXISTS success.

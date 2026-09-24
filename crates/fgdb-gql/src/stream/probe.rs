@@ -147,6 +147,24 @@ impl<S: VertexScanSource> EdgeScanSource for Lookup<'_, S> {
                 }
             })
     }
+
+    fn next_incident_edge_for_relation<C>(
+        &self,
+        endpoint: VId,
+        relation: fgdb_delta_types::RelationId,
+        direction: crate::algebra::GlaDirection,
+        after: Option<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
+        self.0
+            .next_probe_edge_for_relation(endpoint, relation, direction, after, control)
+            .map_err(|error| match error {
+                EdgeExpansionSourceError::Unavailable => EdgeExpansionSourceError::Unavailable,
+                EdgeExpansionSourceError::Read(error) => {
+                    EdgeExpansionSourceError::Read(source_error(error))
+                }
+            })
+    }
 }
 
 // Real source failures and outer controls keep their exact original variants.
@@ -168,3 +186,6 @@ mod tests;
 
 #[cfg(test)]
 mod record_tests;
+
+#[cfg(test)]
+mod relation_tests;

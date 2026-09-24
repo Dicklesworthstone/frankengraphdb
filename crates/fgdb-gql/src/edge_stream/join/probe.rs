@@ -293,7 +293,9 @@ impl Probe {
                     let Position::Edge(after) = frames[depth] else {
                         unreachable!("edge position");
                     };
-                    let next = source.next_incident_edge(from, expansion.direction, after, control);
+                    let next = source.next_incident_edge_for_relation(
+                        from, expansion.relation, expansion.direction, after, control,
+                    );
                     let next = match next {
                         Ok(next) => next,
                         Err(EdgeExpansionSourceError::Unavailable) => {

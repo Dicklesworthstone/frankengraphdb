@@ -290,6 +290,22 @@ pub trait EdgeScanSource {
     ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
         Err(EdgeExpansionSourceError::Unavailable)
     }
+
+    /// Admit the requested relation before seeking a joined/probe incidence.
+    /// Defaults retain the existing index and controls, with ordinary candidate
+    /// relation/visibility rechecks afterward. A scoped source can reject the
+    /// relation without opening the underlying directory. Unavailable allowed
+    /// indexes must still refuse. The root edge scan has its own admission.
+    fn next_incident_edge_for_relation<C>(
+        &self,
+        endpoint: VId,
+        _relation: RelationId,
+        direction: GlaDirection,
+        after: Option<EId>,
+        control: &mut impl FnMut(GlaExecutionEvent) -> Result<(), C>,
+    ) -> Result<Option<EId>, EdgeExpansionSourceError<Self::Error, C>> {
+        self.next_incident_edge(endpoint, direction, after, control)
+    }
 }
 
 /// An optional indexed lookup cannot silently become an empty search domain.

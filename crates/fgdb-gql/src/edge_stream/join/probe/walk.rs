@@ -140,7 +140,9 @@ impl Endpoints {
                 continue;
             }
             let after = frame.after;
-            let next = match source.next_incident_edge(from, expansion.direction, after, control) {
+            let next = match source.next_incident_edge_for_relation(
+                from, expansion.relation, expansion.direction, after, control,
+            ) {
                 Ok(next) => next,
                 Err(EdgeExpansionSourceError::Unavailable) => {
                     return Err(GqlQueryError::Source(EdgeScanError::ExpansionUnavailable));

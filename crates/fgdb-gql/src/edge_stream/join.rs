@@ -328,8 +328,9 @@ pub(super) fn advance<S: EdgeScanSource, F: FnMut() -> Result<(), C>, C>(
         } else {
             let expansion = plan.expansions[depth - 1];
             let from = traversal.bindings[expansion.source].expect("positive bound endpoint");
-            let next = source.next_incident_edge(
+            let next = source.next_incident_edge_for_relation(
                 from,
+                expansion.relation,
                 expansion.direction,
                 traversal.after[depth],
                 &mut |event| meter.event(event),
