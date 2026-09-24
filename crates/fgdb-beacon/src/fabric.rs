@@ -589,17 +589,44 @@ impl BeaconIndex {
         mutations: impl IntoIterator<Item = IndexMutation>,
         work: &mut dyn WorkControl,
     ) -> Result<ApplyReport, BeaconError> {
+        self.try_apply_batch(mutations.into_iter().map(Ok::<_, BeaconError>), work)
+    }
+
+    /// Atomically ingest a fallible stream of already-authorized, committed
+    /// document projections. Source errors retain their original type and
+    /// value; neither a failed prefix nor one index lane is ever published.
+    ///
+    /// Every source poll, including the terminal poll, follows a work and
+    /// cancellation checkpoint. Batch/staging limits are checked as input is
+    /// consumed, without collecting a second copy of the stream. Last-write
+    /// wins normalization still validates every operation before superseding it.
+    /// The iterator must bound its own I/O and allocations within each poll.
+    ///
+    /// Failure rolls back this derived index, NOT the source iterator or the
+    /// authoritative graph. A feed consumer must retain its retry position and
+    /// acknowledge/advance its external cursor only after successful return.
+    pub fn try_apply_batch<E: From<BeaconError>>(
+        &mut self,
+        mutations: impl IntoIterator<Item = Result<IndexMutation, E>>,
+        work: &mut dyn WorkControl,
+    ) -> Result<ApplyReport, E> {
         work.charge(1)?;
         let mut normalized: BTreeMap<VId, Option<Arc<StoredDocument>>> = BTreeMap::new();
         let mut staged = StagedSize::default();
         let mut operations = 0;
-        for mutation in mutations {
+        let mut mutations = mutations.into_iter();
+        loop {
             work.charge(1)?;
+            let Some(mutation) = mutations.next() else {
+                break;
+            };
+            let mutation = mutation?;
             if operations == self.current.config.max_batch_operations {
                 return Err(BeaconError::ResourceLimit {
                     resource: "batch operations",
                     limit: self.current.config.max_batch_operations,
-                });
+                }
+                .into());
             }
             operations += 1;
             match mutation {
@@ -623,6 +650,7 @@ impl BeaconIndex {
         }
         let distinct_vertices = normalized.len();
         if distinct_vertices == 0 {
+            work.charge(1)?;
             return Ok(ApplyReport {
                 operations,
                 distinct_vertices,
@@ -670,6 +698,9 @@ impl BeaconIndex {
             compacted,
             segments: next.segments.len(),
         };
+        // Publication is independently cancellable after both lanes and
+        // statistics have been completely prepared off-side.
+        work.charge(1)?;
         self.current = Arc::new(next);
         Ok(report)
     }
@@ -677,6 +708,7 @@ impl BeaconIndex {
     pub fn compact(&mut self, work: &mut dyn WorkControl) -> Result<(), BeaconError> {
         let mut next = self.current.successor(work)?;
         next.compact(work)?;
+        work.charge(1)?;
         self.current = Arc::new(next);
         Ok(())
     }
