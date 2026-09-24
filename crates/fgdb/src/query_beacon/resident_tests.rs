@@ -403,3 +403,129 @@ fn transient_vertex_history_and_multi_relation_changes_are_coalesced_at_the_fina
     });
     assert!(report.lab_test_passed(), "{report:?}");
 }
+
+#[test]
+fn indexed_refresh_uses_only_affected_histories_under_a_two_entry_source_budget() {
+    let ((), report) = run_async_under_lab(0xbeac_1010, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        let mut seed = document(0, "graph", 1, 0);
+        seed.create_vertex(VId(u128::MAX), vec![LabelId(1)], vec![
+            (PropertyKeyId(1), text("storage")),
+            (PropertyKeyId(2), CanonicalScalar::Int(2)),
+            (PropertyKeyId(3), CanonicalScalar::Int(0)),
+        ]);
+        // Unselected histories include wrong-typed values. A point refresh
+        // must neither project them nor allocate a full-table winner set.
+        for id in 1..=2048 {
+            seed.create_vertex(VId(id), vec![LabelId(2)], vec![
+                (PropertyKeyId(1), CanonicalScalar::Int(99)),
+                (PropertyKeyId(2), text("not a coordinate")),
+            ]);
+        }
+        db.write(&commit, seed).await.unwrap();
+        let definition = options();
+        let mut resident = db.prepare_beacon_index(&query, &definition).unwrap();
+        let old = resident.snapshot();
+        let before = old.search(&query, vector_query(), ReadPolicy::default()).unwrap();
+        let mut changes = WriteBatch::new(RelationId(3));
+        changes.set_vertex_property(VId(0), PropertyKeyId(2), Some(CanonicalScalar::Int(3)));
+        changes.set_vertex_property(VId(u128::MAX), PropertyKeyId(1), Some(text("graph storage")));
+        let target = db.write(&commit, changes).await.unwrap();
+        let mut future = WriteBatch::new(RelationId(4));
+        future.set_vertex_property(VId(0), PropertyKeyId(2), Some(text("future invalid")));
+        db.write(&commit, future).await.unwrap();
+        let policy = ReadPolicy {
+            max_staging_rows: 2,
+            max_source_scratch: 2,
+            ..ReadPolicy::default()
+        };
+        // These two entries admit the affected-ID set exactly. A heap/table
+        // scan, or a separately staged winner per ID, exhausts this allowance.
+        let progress = resident.refresh(&query, &db, Some(target), policy).unwrap();
+        assert_eq!(progress.touched_vertices, 2);
+        assert_eq!(resident.snapshot().stats().documents, 2);
+        let mut historical = definition.clone();
+        historical.as_of = Some(target);
+        for search in [text_query(), vector_query()] {
+            assert_eq!(resident.search(&query, search, policy).unwrap(),
+                db.beacon_search(&query, &historical, search).unwrap());
+        }
+        assert!(matches!(resident.refresh(&query, &db, None, policy),
+            Err(Error::Index(BeaconError::InvalidQuery(_)))));
+        assert_eq!(resident.source_sequence(), target);
+        assert_eq!(old.search(&query, vector_query(), policy).unwrap(), before);
+
+        // Final visibility precedes projection even when earlier tail versions
+        // were malformed for this index. Both absence and label exits delete.
+        let mut remove = WriteBatch::new(RelationId(5));
+        remove.set_vertex_label(VId(0), LabelId(1), false);
+        remove.delete_vertex(VId(u128::MAX));
+        let end = db.write(&commit, remove).await.unwrap();
+        let progress = resident.refresh(&query, &db, None, policy).unwrap();
+        assert_eq!(progress.through, end);
+        assert_eq!(progress.touched_vertices, 2);
+        assert_eq!(resident.snapshot().stats().documents, 0);
+        for search in [text_query(), vector_query()] {
+            assert!(resident.search(&query, search, policy).unwrap().is_empty());
+        }
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}
+
+#[test]
+fn every_public_refresh_checkpoint_preserves_typed_interruption_and_retry() {
+    use fgdb_types::context::SimulationCheckpointProbe;
+    use std::sync::Arc;
+
+    let ((), report) = run_async_under_lab(0xbeac_1011, |root| async move {
+        let contexts = PurposeContexts::narrow_runtime_root(&root);
+        let commit = contexts.commit();
+        let query = contexts.query();
+        let mut db = Database::open_memory(&commit, keys()).await.unwrap();
+        db.write(&commit, document(1, "graph", 1, 0)).await.unwrap();
+        let mut definition = options();
+        definition.index.max_segments = 1;
+        let original = db.prepare_beacon_index(&query, &definition).unwrap();
+        let old = original.snapshot();
+        let before = [text_query(), vector_query()].map(|search| {
+            old.search(&query, search, ReadPolicy::default()).unwrap()
+        });
+        let mut changes = document(2, "storage", 2, 0);
+        changes.set_vertex_property(VId(1), PropertyKeyId(2), Some(CanonicalScalar::Int(3)));
+        let target = db.write(&commit, changes).await.unwrap();
+        let trace = Arc::new(SimulationCheckpointProbe::new(None));
+        let observed = query.with_checkpoint_probe(Arc::clone(&trace));
+        let mut successful = original.clone();
+        successful.refresh(&observed, &db, None, ReadPolicy::default()).unwrap();
+        let calls = trace.calls();
+        assert!(calls > 2);
+        let after = [text_query(), vector_query()].map(|search| {
+            successful.search(&query, search, ReadPolicy::default()).unwrap()
+        });
+        for stop in 1..=calls {
+            let probe = Arc::new(SimulationCheckpointProbe::new(Some(stop)));
+            let interrupted = query.with_checkpoint_probe(Arc::clone(&probe));
+            let mut candidate = original.clone();
+            assert!(matches!(candidate.refresh(&interrupted, &db, None, ReadPolicy::default()),
+                Err(Error::Interrupted(_))), "checkpoint {stop}");
+            assert_eq!(probe.calls(), stop, "do not resample after interruption");
+            assert_eq!(candidate.source_sequence(), old.source_sequence());
+            assert_eq!(candidate.snapshot().stats(), old.stats());
+            for (search, expected) in [text_query(), vector_query()].into_iter().zip(&before) {
+                assert_eq!(candidate.search(&query, search, ReadPolicy::default()).unwrap(), *expected);
+            }
+            // The simulation probe interrupts exactly once. The SAME context
+            // and index must be reusable; no poisoned generation/cursor remains.
+            candidate.refresh(&interrupted, &db, None, ReadPolicy::default()).unwrap();
+            assert_eq!(candidate.source_sequence(), target);
+            for (search, expected) in [text_query(), vector_query()].into_iter().zip(&after) {
+                assert_eq!(candidate.search(&query, search, ReadPolicy::default()).unwrap(), *expected);
+            }
+        }
+        assert_eq!(contexts.outstanding_obligations(), 0);
+    });
+    assert!(report.lab_test_passed(), "{report:?}");
+}

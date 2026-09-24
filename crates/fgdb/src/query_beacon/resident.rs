@@ -10,16 +10,16 @@
 //! IndexDefinition/DerivedIdentity records nor an AnswerContract certificate,
 //! and they do not provide disk spill or an independently writable graph.
 
-use super::{Meter, SharedWork, build};
-use crate::gql_exec::source::{self, SourceEvent};
+use super::{Meter, Scan, SharedWork, build};
 use crate::{Database, ReadError};
 use asupersync::fs::Vfs;
 use fgdb_beacon::read::{Projection, ReadOptions, ReadPolicy, Rows, Search};
 use fgdb_beacon::{BeaconError, BeaconIndex, IndexMutation, IndexSnapshot, IndexStats, WorkControl};
 use fgdb_delta_types::{DeltaRow, ElementId, LabelId, PropertyKeyId};
+use fgdb_gql::stream::{VertexScanEvent, VertexScanSource, VertexScanSourceError};
 use fgdb_types::{CommitSeq, QueryCx};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 type Cancel = Box<asupersync::error::Error>;
@@ -240,8 +240,8 @@ impl ResidentIndex {
 
     /// Catch up through one explicitly selected native sequence (None = live).
     /// The complete retained Chronicle delta window identifies affected VIds;
-    /// the SAME native historical-winner visitor as one-shot GQL/Beacon supplies
-    /// their final rows. Repeated changes coalesce at the target cut, not at the
+    /// the existing pinned vertex-stream source resolves only those histories
+    /// to their final rows. Repeated changes coalesce at the target cut, not at the
     /// writer's newer frontier. No intermediate search generation is claimed.
     ///
     /// Changed documents enter Beacon's existing segmented atomic apply path.
@@ -252,10 +252,11 @@ impl ResidentIndex {
     /// rebuild or truncated tail is substituted. Explicit prepare rebuilds.
     ///
     /// This is synchronous, caller-driven resident maintenance, not a durable
-    /// subscription or a commit hook. Changed IDs and borrowed winners are
-    /// bounded; source winner selection can still visit the native patch table,
-    /// and Beacon copies live metadata while sharing index segments. No O(delta)
-    /// total-work, spill, full index-descriptor or ANN-equivalence claim is made.
+    /// subscription or a commit hook. Changed IDs are bounded, and only one
+    /// borrowed winner is projected per source poll; unrelated vertex histories
+    /// are not scanned. Beacon still copies live metadata while sharing index
+    /// segments. No O(delta) total-work, spill, full index-descriptor or
+    /// ANN-equivalence claim is made.
     pub fn refresh<V: Vfs + Clone>(
         &mut self,
         cx: &QueryCx,
@@ -266,7 +267,7 @@ impl ResidentIndex {
         cx.with_restriction(|| {
             cx.checkpoint().map_err(Error::Interrupted)?;
             let work = RefCell::new(Meter::new(policy.max_work_units, |_| cx.checkpoint()));
-            let result = self.refresh_with_work(database, through, policy, &work);
+            let result = self.refresh_with_work(cx, database, through, policy, &work);
             complete(work.into_inner(), result)
         })
     }
@@ -275,6 +276,7 @@ impl ResidentIndex {
     // assignments belong to local candidates, never to the retained index.
     fn refresh_with_work<V: Vfs + Clone>(
         &mut self,
+        cx: &QueryCx,
         database: &Database<V>,
         through: Option<CommitSeq>,
         policy: ReadPolicy,
@@ -344,39 +346,41 @@ impl ResidentIndex {
         };
         let mut next = self.index.clone();
         if !affected.is_empty() {
-            let mut winners = BTreeMap::new();
-            let mut control = |event| -> Result<(), BeaconError> {
+            // The native source owns one admitted immutable view. It exposes
+            // per-VId history resolution independently of its scan position;
+            // never advance next_vertex() or collect all historical winners.
+            let source = database
+                .read_session()
+                .map_err(Error::Source)?
+                .vertex_scan_source(cx, through)
+                .map_err(Error::Source)?;
+            let mutations = affected.into_iter().map(|vid| -> Result<IndexMutation, Error> {
                 work.borrow_mut().charge(1)?;
-                if matches!(event, SourceEvent::ScratchEntry) {
-                    reserve_scratch(&mut scratch, policy)?;
-                }
-                Ok(())
-            };
-            source::visit_vertices(&database.snapshot.patches, through, &mut control, |row, control| {
-                control(SourceEvent::Work)?;
-                if affected.contains(&row.vid) {
-                    work.borrow_mut().charge(row.labels.len())?;
-                    if self.definition.vertex_label.is_none_or(|label| row.labels.binary_search(&label).is_ok()) {
-                        control(SourceEvent::ScratchEntry)?;
-                        winners.insert(row.vid, row);
+                let row = source.vertex(vid, &mut |event| {
+                    work.borrow_mut().charge(1)?;
+                    if matches!(event, VertexScanEvent::ScratchEntry) {
+                        reserve_scratch(&mut scratch, policy)?;
                     }
+                    Ok::<(), BeaconError>(())
+                }).map_err(|error| match error {
+                    VertexScanSourceError::Source(error) => Error::Source(error),
+                    VertexScanSourceError::Control(error) => Error::Index(error),
+                })?;
+                let Some(row) = row else {
+                    return Ok(IndexMutation::Delete(vid));
+                };
+                work.borrow_mut().charge(row.labels.len())?;
+                if self.definition.vertex_label.is_some_and(|label| row.labels.binary_search(&label).is_err()) {
+                    // A label exit removes BOTH lanes before projecting values.
+                    return Ok(IndexMutation::Delete(vid));
                 }
-                Ok(())
-            })?;
-            let mutations = affected.into_iter().map(|vid| {
-                work.borrow_mut().charge(1)?;
-                match winners.get(&vid) {
-                    Some(row) => self.definition.projection.project(
-                        vid,
-                        &self.definition.index,
-                        |key| row.props.binary_search_by_key(&key, |(key, _)| *key)
-                            .ok().map(|slot| &row.props[slot].1),
-                        &mut SharedWork(work),
-                    ).map(IndexMutation::Upsert),
-                    // A retired row or a label exit removes BOTH lanes, even
-                    // when another affected vertex also enters the corpus.
-                    None => Ok(IndexMutation::Delete(vid)),
-                }
+                self.definition.projection.project(
+                    vid,
+                    &self.definition.index,
+                    |key| row.properties.binary_search_by_key(&key, |(key, _)| *key)
+                        .ok().map(|slot| &row.properties[slot].1),
+                    &mut SharedWork(work),
+                ).map(IndexMutation::Upsert).map_err(Error::Index)
             });
             next.try_apply_batch(mutations, &mut SharedWork(work))?;
         }
@@ -437,7 +441,7 @@ impl<V: Vfs + Clone> Database<V> {
                 self.snapshot.check_frontier(at).map_err(Error::Source)?;
                 let index = build(
                     &self.snapshot, at, &definition, definition.index.clone(), &work,
-                    |_| Ok(true), |_| true, |_| true,
+                    Scan::Metered, |_| Ok(true), |_| true, |_| true,
                 )?;
                 let prepared = ResidentIndex {
                     owner: Arc::clone(&self.handle_owner),
@@ -546,7 +550,7 @@ mod tests {
             });
             let trace = RefCell::new(Cut::default());
             let mut success = original.clone();
-            success.refresh_with_work(&db, None, ReadPolicy::default(), &trace).unwrap();
+            success.refresh_with_work(&query, &db, None, ReadPolicy::default(), &trace).unwrap();
             let calls = trace.into_inner().calls;
             assert!(calls > 2, "must reach index construction and publication");
             assert_eq!(success.source_sequence(), target);
@@ -562,7 +566,7 @@ mod tests {
                 let mut candidate = original.clone();
                 let work = RefCell::new(Cut { stop_at: Some(stop_at), ..Cut::default() });
                 assert!(matches!(
-                    candidate.refresh_with_work(&db, None, ReadPolicy::default(), &work),
+                    candidate.refresh_with_work(&query, &db, None, ReadPolicy::default(), &work),
                     Err(Error::Index(BeaconError::Cancelled))
                 ), "cut {stop_at}");
                 assert_eq!(work.borrow().calls, stop_at);
@@ -582,7 +586,7 @@ mod tests {
                 let mut candidate = original.clone();
                 let work = RefCell::new(Cut { stop_at: Some(stop_at), unwind: true, calls: 0 });
                 let panic = catch_unwind(AssertUnwindSafe(|| {
-                    candidate.refresh_with_work(&db, None, ReadPolicy::default(), &work)
+                    candidate.refresh_with_work(&query, &db, None, ReadPolicy::default(), &work)
                 }));
                 assert!(panic.is_err(), "unwind cut {stop_at}");
                 assert_eq!(candidate.source_sequence(), old.source_sequence());
